@@ -24,7 +24,11 @@ export interface ResolvedCoupon {
   value: number; // percentage: 0-100 · fixed_amount: cents
   recurring_cycle_limit: number | null; // 1 | N | null (forever)
   source: "internal" | "shopify";
-  coupon_id?: string; // internal row id (source = internal)
+  coupon_id?: string; // internal row id — the MASTER row for derived codes
+  /** Derived from a master ("WELCOME-GSXN")? Redemption → ledger, not used_at. */
+  is_derived?: boolean;
+  /** The customer the derived code resolves to (its rightful owner). */
+  customer_id?: string;
 }
 
 /** An entry stored in subscriptions.applied_discounts. */
@@ -48,15 +52,17 @@ export async function resolveCoupon(
 ): Promise<ResolvedCoupon | null> {
   const admin = createAdminClient();
 
-  // 1. Internal table (internal wins).
+  // 1. Internal table exact match (internal wins). A MASTER row is never
+  //    directly usable on its own — it's only redeemed via a derived
+  //    "{PREFIX}-{short_code}" code (handled in step 2), so skip masters here.
   const { data: rows } = await admin
     .from("coupons")
-    .select("id, code, type, value, recurring_cycle_limit, customer_id, single_use, used_at")
+    .select("id, code, type, value, recurring_cycle_limit, customer_id, single_use, used_at, is_master")
     .eq("workspace_id", workspaceId)
     .ilike("code", code)
     .limit(1);
   const row = rows?.[0];
-  if (row) {
+  if (row && !row.is_master) {
     // Customer-scoped coupons only resolve for that customer, and only once.
     if (row.customer_id && (!customerId || String(row.customer_id) !== String(customerId))) return null;
     if (row.single_use && row.used_at) return null;
@@ -70,8 +76,89 @@ export async function resolveCoupon(
     };
   }
 
-  // 2. Real-time Shopify lookup (transitional — legacy codes).
+  // 2. Derived master code — "{PREFIX}-{short_code}" (e.g. WELCOME-GSXN).
+  const derived = await resolveDerivedCoupon(admin, workspaceId, code, customerId);
+  if (derived) return derived;
+
+  // 3. Real-time Shopify lookup (transitional — legacy codes).
   return resolveShopifyCoupon(admin, workspaceId, code);
+}
+
+/**
+ * Resolve a derived master code — "{PREFIX}-{short_code}" (e.g. WELCOME-GSXN).
+ * The master holds the terms; the suffix is a customer's permanent short_code.
+ * No coupon row exists per customer — the code is virtual until redeemed, and
+ * single-use is enforced by the coupon_redemptions ledger.
+ *
+ * Returns null (silently falls through) when: the format doesn't split, no
+ * master matches the prefix, the master is expired, the suffix doesn't resolve
+ * to a customer, the redeeming customer isn't the code's owner, or the
+ * per-customer redemption limit for the current cycle is already reached.
+ */
+async function resolveDerivedCoupon(
+  admin: Admin,
+  workspaceId: string,
+  code: string,
+  customerId?: string | null,
+): Promise<ResolvedCoupon | null> {
+  // Split on the LAST hyphen so master prefixes may themselves contain hyphens.
+  const idx = code.lastIndexOf("-");
+  if (idx <= 0 || idx === code.length - 1) return null;
+  const prefix = code.slice(0, idx);
+  const suffix = code.slice(idx + 1).toUpperCase();
+
+  // Master by prefix (case-insensitive).
+  const { data: masters } = await admin
+    .from("coupons")
+    .select("id, code, type, value, recurring_cycle_limit, per_customer_limit, redemption_cycle_started_at, valid_until")
+    .eq("workspace_id", workspaceId)
+    .eq("is_master", true)
+    .ilike("code", prefix)
+    .limit(1);
+  const master = masters?.[0];
+  if (!master) return null;
+
+  // Offer expiry.
+  if (master.valid_until && new Date(master.valid_until as string) < new Date()) return null;
+
+  // Suffix → the owning customer (short_code is unique per workspace).
+  const { data: owner } = await admin
+    .from("customers")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("short_code", suffix)
+    .maybeSingle();
+  if (!owner) return null;
+
+  // Bind: only the rightful owner may redeem their own derived code. The suffix
+  // is a guessable 5-char code, so this check is what prevents abuse — we never
+  // apply WELCOME-GSXN to anyone but the customer GSXN resolves to.
+  if (!customerId || String(owner.id) !== String(customerId)) return null;
+
+  // Per-customer redemption limit within the CURRENT cycle. WELCOME's cycle
+  // starts at the epoch (counts forever → one use). A reissuable campaign bumps
+  // redemption_cycle_started_at on each launch, so prior redemptions stop
+  // counting and the customer is eligible again.
+  const limit = (master.per_customer_limit as number | null) ?? 1;
+  const cycleStart = (master.redemption_cycle_started_at as string | null) || "1970-01-01T00:00:00Z";
+  const { count } = await admin
+    .from("coupon_redemptions")
+    .select("id", { count: "exact", head: true })
+    .eq("coupon_id", master.id)
+    .eq("customer_id", owner.id)
+    .gte("redeemed_at", cycleStart);
+  if ((count || 0) >= limit) return null;
+
+  return {
+    code: `${master.code}-${suffix}`,
+    type: master.type as CouponType,
+    value: master.value,
+    recurring_cycle_limit: master.recurring_cycle_limit,
+    source: "internal",
+    coupon_id: master.id,
+    is_derived: true,
+    customer_id: owner.id,
+  };
 }
 
 async function resolveShopifyCoupon(admin: Admin, workspaceId: string, code: string): Promise<ResolvedCoupon | null> {
@@ -149,7 +236,47 @@ export async function applyCouponToSub(
     .update({ applied_discounts: [...kept, entry], updated_at: new Date().toISOString() })
     .eq("id", sub.id);
 
-  // Burn a single-use internal coupon.
+  // Record the redemption (derived → ledger row; legacy one-off → burn used_at).
+  await recordCouponRedemption(workspaceId, resolved, customerId, { subscriptionId: sub.id });
+  return { success: true };
+}
+
+/**
+ * Record a coupon redemption at the moment it's actually consumed.
+ *
+ * - Derived master codes (WELCOME-GSXN): append a coupon_redemptions row. This
+ *   is the only place a row is written for the master flow — so we never
+ *   pre-generate per-customer coupon rows, only per-redemption ledger rows.
+ * - Legacy explicit single-use coupons: burn the row's used_at (unchanged).
+ *
+ * Idempotency is best-effort: callers should invoke this once per successful
+ * application. The ledger is also the redemption-analytics source.
+ */
+export async function recordCouponRedemption(
+  workspaceId: string,
+  resolved: ResolvedCoupon,
+  customerId?: string | null,
+  ctx?: { subscriptionId?: string | null; orderId?: string | null },
+): Promise<void> {
+  const admin = createAdminClient();
+  if (resolved.is_derived && resolved.coupon_id) {
+    const cid = customerId || resolved.customer_id;
+    if (!cid) return;
+    await admin
+      .from("coupon_redemptions")
+      .insert({
+        workspace_id: workspaceId,
+        coupon_id: resolved.coupon_id,
+        customer_id: cid,
+        derived_code: resolved.code,
+        order_id: ctx?.orderId || null,
+        subscription_id: ctx?.subscriptionId || null,
+      })
+      .then(() => undefined, (e) => {
+        console.warn("[coupons] redemption ledger insert failed:", e?.message || e);
+      });
+    return;
+  }
   if (resolved.source === "internal" && resolved.coupon_id) {
     await admin
       .from("coupons")
@@ -157,7 +284,37 @@ export async function applyCouponToSub(
       .eq("id", resolved.coupon_id)
       .is("used_at", null);
   }
-  return { success: true };
+}
+
+/**
+ * Derive a customer's code for a master coupon ("WELCOME-GSXN"). No row is
+ * written — the coupon is virtual until redeemed (see recordCouponRedemption).
+ * Returns null if the master doesn't exist or the customer has no short_code
+ * (the BEFORE-INSERT trigger assigns one to every new customer, so this is
+ * effectively always present).
+ */
+export async function deriveCustomerCoupon(
+  workspaceId: string,
+  customerId: string,
+  masterCode: string,
+): Promise<{ code: string } | null> {
+  const admin = createAdminClient();
+  const { data: master } = await admin
+    .from("coupons")
+    .select("code")
+    .eq("workspace_id", workspaceId)
+    .eq("is_master", true)
+    .ilike("code", masterCode)
+    .maybeSingle();
+  if (!master?.code) return null;
+  const { data: cust } = await admin
+    .from("customers")
+    .select("short_code")
+    .eq("id", customerId)
+    .maybeSingle();
+  const sc = (cust?.short_code as string) || null;
+  if (!sc) return null;
+  return { code: `${master.code}-${sc}` };
 }
 
 /** Remove a coupon from an internal sub's applied_discounts. */

@@ -361,6 +361,9 @@ function PopupShell({
           email_consent: true,
           source: variant === "quiz" ? "popup_quiz" : "popup_discount",
           anonymous_id: getAnonymousId(),
+          // Derive WELCOME-{short_code} from the master coupon (no row minted).
+          // mint_coupon stays as a legacy fallback if the master is absent.
+          coupon_master: "WELCOME",
           mint_coupon: { type: "percentage", value: offer.coupon_pct || 15 },
           quiz_answers: variant === "quiz" ? { cups_per_day: cupsPerDay, health_goal: healthGoal } : undefined,
         }),

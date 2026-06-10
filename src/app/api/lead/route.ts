@@ -49,8 +49,15 @@ interface Body {
    * Popup email step: mint a customer-scoped single-use coupon now (never
    * returned to the client — delivered only by SMS at the phone step, or by
    * the 5-min email fallback). When set, also arms the abandonment fallback.
+   * Legacy path — `coupon_master` is preferred.
    */
   mint_coupon?: { type: "percentage" | "fixed_amount"; value: number } | null;
+  /**
+   * Preferred: derive a virtual code "{MASTER}-{short_code}" from a master
+   * coupon (e.g. "WELCOME") instead of minting a per-customer row. Terms live
+   * on the master; single-use is the coupon_redemptions ledger. No row written.
+   */
+  coupon_master?: string | null;
   /** Quiz answers to persist on the lead (cups/day + health goal). */
   quiz_answers?: Record<string, unknown> | null;
 }
@@ -137,7 +144,19 @@ export async function POST(request: Request) {
   // or the 5-min email fallback. Stored on the lead so both deliveries +
   // the fallback job can read it.
   let mintedCoupon: string | null = body.coupon_code || null;
-  if (body.mint_coupon && !mintedCoupon) {
+  // Preferred: derive a virtual "{MASTER}-{short_code}" code — no row written,
+  // single-use enforced by the redemption ledger.
+  if (!mintedCoupon && body.coupon_master) {
+    try {
+      const { deriveCustomerCoupon } = await import("@/lib/coupons");
+      const d = await deriveCustomerCoupon(body.workspace_id, customer.id, body.coupon_master);
+      mintedCoupon = d?.code || null;
+    } catch (e) {
+      console.warn("[lead] coupon derive failed:", e instanceof Error ? e.message : e);
+    }
+  }
+  // Legacy fallback: mint a per-customer coupon row (only if no master resolved).
+  if (!mintedCoupon && body.mint_coupon) {
     try {
       const { mintCustomerCoupon } = await import("@/lib/coupons");
       const res = await mintCustomerCoupon(body.workspace_id, customer.id, {
@@ -201,7 +220,7 @@ export async function POST(request: Request) {
   // Arm the abandonment fallback: if this lead minted a coupon (popup email
   // step) but never completes the phone step, an Inngest delayed job emails
   // the code after 5 min. Fired only when a coupon was minted.
-  if (mintedCoupon && body.mint_coupon) {
+  if (mintedCoupon && (body.mint_coupon || body.coupon_master)) {
     void import("@/lib/inngest/client").then(({ inngest }) =>
       inngest.send({
         name: "popup/email-lead-captured",
