@@ -171,7 +171,8 @@ async function exhaustInternalDunning(
   await sendInternalRecoveryEmail(workspaceId, customerId, cycleId);
 }
 
-/** Email the recovery magic-link + record it on the cycle. Attaches to the most-recent ticket. */
+/** Email the recovery magic-link + record it on the cycle. Uses the shared
+ * helper (magic link + tagged closed ticket + inbound Reply-To). */
 async function sendInternalRecoveryEmail(workspaceId: string, customerId: string | null, cycleId: string): Promise<void> {
   if (!customerId) return;
   const admin = createAdminClient();
@@ -179,51 +180,32 @@ async function sendInternalRecoveryEmail(workspaceId: string, customerId: string
   const { data: cyc } = await admin.from("dunning_cycles").select("payment_update_sent").eq("id", cycleId).maybeSingle();
   if (cyc?.payment_update_sent) return;
 
-  const { data: customer } = await admin.from("customers").select("email, first_name, shopify_customer_id").eq("id", customerId).single();
-  const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspaceId).single();
-  if (!customer?.email || !ws?.name) return;
-
-  const { generatePaymentRecoveryLink } = await import("@/lib/magic-link");
-  const link = await generatePaymentRecoveryLink(customerId, customer.shopify_customer_id || "", customer.email, workspaceId);
-  const btn = `<a href="${link}" style="display:inline-block;padding:13px 26px;background:#1f5e3a;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Update my payment method</a>`;
-  const body = `<p>Hi ${customer.first_name || "there"}, we tried to process your subscription renewal but your card was declined.</p>
-<p>It's an easy fix — just tap the button below to update your payment method, and we'll take care of the rest.</p>
-<p>${btn}</p>
-<p>The ${ws.name} Team</p>`;
-
-  try {
-    const { sendTicketReply } = await import("@/lib/email");
-    // Attach to the most-recent open/pending ticket so a reply threads in.
-    const { data: ticket } = await admin.from("tickets")
-      .select("id, subject, email_message_id")
-      .eq("workspace_id", workspaceId).eq("customer_id", customerId)
-      .in("status", ["open", "pending"]).order("created_at", { ascending: false }).limit(1).maybeSingle();
-    if (ticket) {
-      await admin.from("ticket_messages").insert({ ticket_id: ticket.id, direction: "outbound", visibility: "external", author_type: "ai", body, sent_at: new Date().toISOString() });
-    }
-    await sendTicketReply({
-      workspaceId, toEmail: customer.email,
-      subject: ticket?.subject ? `Re: ${ticket.subject}` : `Action needed: update your payment method`,
-      body, inReplyTo: ticket?.email_message_id || null, agentName: ws.name, workspaceName: ws.name,
-    });
+  const { sendPaymentRecoveryEmail } = await import("@/lib/payment-recovery-email");
+  const res = await sendPaymentRecoveryEmail(workspaceId, customerId);
+  if (res.sent) {
     await updateDunningCycle(cycleId, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
-    await logCustomerEvent({
-      workspaceId, customerId, eventType: "dunning.recovery_email_sent", source: "internal_dunning",
-      summary: "Sent a payment-recovery link.", properties: { cycle_id: cycleId },
-    });
-  } catch (e) {
-    console.error("[internal-dunning] recovery email failed:", e instanceof Error ? e.message : e);
   }
 }
 
 /**
  * Close the dunning cycle when an internal renewal succeeds. Called from the
- * renewal success path. Marks recovered + writes a timeline event.
+ * renewal success path. Looks the cycle up by SUBSCRIPTION_ID (not contract
+ * id) so a cycle opened on the old Appstle contract — before a recovery flip
+ * to internal — still closes after the recovery charge succeeds.
  */
 export async function closeInternalDunningOnSuccess(workspaceId: string, subscriptionId: string, internalContractId: string, customerId: string | null): Promise<void> {
-  const cycle = await getActiveDunningCycle(workspaceId, internalContractId);
+  const admin = createAdminClient();
+  const { data: cycle } = await admin
+    .from("dunning_cycles")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("subscription_id", subscriptionId)
+    .in("status", ["active", "retrying", "open"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
   if (!cycle) return;
-  await updateDunningCycle(cycle.id, { status: "recovered", recovered_at: new Date().toISOString() });
+  await updateDunningCycle(cycle.id as string, { status: "recovered", recovered_at: new Date().toISOString() });
   await tagOpenTickets(workspaceId, customerId, "dunning:recovered");
   await logCustomerEvent({
     workspaceId, customerId, eventType: "payment.recovered", source: "internal_dunning",
@@ -234,17 +216,18 @@ export async function closeInternalDunningOnSuccess(workspaceId: string, subscri
 /**
  * Reactivate subs cancelled BY DUNNING for a customer's link group (called from
  * the payment-recovery flow). A sub is "cancelled by dunning" if it's cancelled
- * AND has an exhausted dunning cycle — NOT a voluntary cancel. Returns the count.
+ * AND has an exhausted dunning cycle — NOT a voluntary cancel. Returns the ids
+ * of the subs it reactivated (so the caller can charge them immediately).
  */
-export async function reactivateDunningCancelledSubs(workspaceId: string, customerIds: string[]): Promise<number> {
+export async function reactivateDunningCancelledSubs(workspaceId: string, customerIds: string[]): Promise<string[]> {
   const admin = createAdminClient();
   const { data: subs } = await admin.from("subscriptions")
     .select("id, shopify_contract_id, billing_interval, billing_interval_count")
     .eq("workspace_id", workspaceId).in("customer_id", customerIds)
     .eq("is_internal", true).eq("status", "cancelled");
-  if (!subs?.length) return 0;
+  if (!subs?.length) return [];
 
-  let reactivated = 0;
+  const reactivatedIds: string[] = [];
   for (const sub of subs) {
     const { data: cyc } = await admin.from("dunning_cycles")
       .select("id").eq("workspace_id", workspaceId).eq("subscription_id", sub.id as string)
@@ -268,7 +251,7 @@ export async function reactivateDunningCancelledSubs(workspaceId: string, custom
       workspaceId, customerId: customerIds[0], eventType: "subscription.reactivated", source: "internal_dunning",
       summary: "Subscription reactivated after the customer updated their card.", properties: { subscription_id: sub.id },
     });
-    reactivated++;
+    reactivatedIds.push(sub.id as string);
   }
-  return reactivated;
+  return reactivatedIds;
 }

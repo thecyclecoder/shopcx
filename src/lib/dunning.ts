@@ -549,24 +549,14 @@ export async function cancelForTerminalNoBackup(params: {
     console.error("[Dunning terminal-cancel] appstle cancel failed:", e);
   }
 
-  // Send our own payment-update email — Appstle's default isn't great.
+  // Magic-link recovery email + tagged closed ticket (replaces Appstle's
+  // default + the old static portal URL).
   if (customerId) {
-    const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", customerId).single();
-    const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspaceId).single();
-    const portalGeneral = (ws?.portal_config as Record<string, unknown> | undefined)?.general as Record<string, unknown> | undefined;
-    const updateUrl = (portalGeneral?.payment_update_url as string) || "";
-    if (cust?.email && ws?.name && updateUrl) {
-      try {
-        const { sendDunningPausedEmail } = await import("@/lib/email");
-        await sendDunningPausedEmail({
-          workspaceId, toEmail: cust.email,
-          customerName: cust.first_name,
-          workspaceName: ws.name,
-          updateUrl,
-        });
-      } catch (e) {
-        console.error("[Dunning terminal-cancel] notification email failed:", e);
-      }
+    try {
+      const { sendPaymentRecoveryEmail } = await import("@/lib/payment-recovery-email");
+      await sendPaymentRecoveryEmail(workspaceId, customerId);
+    } catch (e) {
+      console.error("[Dunning terminal-cancel] recovery email failed:", e);
     }
   }
 

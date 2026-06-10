@@ -170,11 +170,24 @@ The machinery above is **Appstle-only** — card rotation, Shopify billing-attem
 - **Entry:** `internal-subscription-renewals.ts` decline fires a **complete** `dunning/payment-failed` (`source: "internal_subscription_renewal"`, `shopify_contract_id` = the `internal-*` id, Braintree `error_code`) **and** logs a `customer_events` `subscription.payment_failed` immediately (timeline + AI see it regardless of dunning's outcome).
 - **Router:** `dunning.ts` `dunningPaymentFailed` branches on `source === "internal_subscription_renewal"` at the very top → `handleInternalDunningFailure` (skips all Appstle/Shopify logic).
 - **Retry engine = the daily renewal cron.** On failure the handler moves the sub's `next_billing_date` to the next payday (`getNextPaydayDates`); `internalSubscriptionRenewalCron` re-attempts then. No Appstle billing-attempt. Cycle status → `retrying`, `next_retry_at` set.
-- **Email timing:** recovery magic-link (`generatePaymentRecoveryLink`, 7-day) sent **immediately on the first *terminal* Braintree decline** (`BRAINTREE_TERMINAL` set — expired/closed/invalid card); soft declines (insufficient funds) wait until retries exhaust (`MAX_PAYDAY_RETRIES = 4`), then email. Email attaches to the most-recent open ticket (tag `dunning:active`) so a reply threads in.
+- **Email timing:** recovery magic-link sent **immediately on the first *terminal* Braintree decline** (`BRAINTREE_TERMINAL` set — expired/closed/invalid card); soft declines (insufficient funds) wait until retries exhaust (`MAX_PAYDAY_RETRIES = 4`), then email.
 - **Exhaustion:** sub **cancelled** (`subscription.cancelled` event, reason `dunning_exhausted`) + recovery email. Cancelled-by-dunning ≠ voluntary cancel: it has an `exhausted` dunning cycle.
 - **Recovery:** `payment-method-update.ts` recover flow calls `reactivateDunningCancelledSubs` (keyed on an exhausted/cancelled cycle, never voluntary cancels) → sub back to `active`, cycle → `recovered`, new card pinned in the same pass.
 - **Cycle close:** a **successful** internal renewal calls `closeInternalDunningOnSuccess` (no webhook to do it) → cycle `recovered` + `payment.recovered` event.
 - **AI visibility:** `getDunningStatus` (`get_dunning_status` tool) now surfaces `(internal)`, recovery-link-sent status, and `next_retry_at` so the agent can say "I've already sent you a link to update your card."
+
+## Recovery email + post-update charge (all dunning paths)
+
+Both the legacy Appstle dunning and the internal path now send **one shared** recovery email via `src/lib/payment-recovery-email.ts` `sendPaymentRecoveryEmail(workspaceId, customerId)` — replacing the old static `portal_config.general.payment_update_url`:
+
+- **Magic link** (`generatePaymentRecoveryLink`, 7-day) → auto-login → `/payment-methods?recover=1`. No static account page.
+- **Creates a tagged, CLOSED ticket** (tag `payment-recovery`, channel `email`) + an outbound `ticket_message`, with the email's **Message-ID stored as the ticket `email_message_id`**.
+- **Reply-To = `inbound@updates.superfoodscompany.com`** (override `DUNNING_INBOUND_REPLY_TO`) so a customer reply threads back onto that ticket (via the Message-ID, or the inbound webhook's subject + same-customer fallback). The closed ticket re-opens on reply.
+- Writes a `dunning.recovery_email_sent` customer_event.
+
+**On card update (`payment-method-update.ts` recover flow):** vault → **migrate the link group's Appstle subs to internal** (`migrateCustomerAppstleSubsToInternal`, which cancels each Appstle contract *before* flipping — see below) → pin the new card → **reactivate** dunning-cancelled subs (`reactivateDunningCancelledSubs`, returns the ids) → **charge now**: fire `internal-subscription/renewal-attempt` for every sub that was failing (open dunning cycle) or just reactivated, so the missed payment is collected immediately instead of waiting for the next scheduled renewal. Healthy subs (no dunning cycle) are never charged. A successful renewal closes the cycle via `closeInternalDunningOnSuccess`, which now looks the cycle up by **`subscription_id`** (not contract id) so a cycle opened on the *old Appstle* contract still closes after the recovery flip.
+
+**Never double-billed:** migration cancels the Appstle contract **first**; if the cancel fails the sub is NOT flipped (stays Appstle-only), so a sub is never live on both Appstle and internal. The flip also drops the Appstle contract id and the Appstle webhook ignores `is_internal` subs. The migration writes a `subscription.migrated` customer_event to the timeline.
 
 ## Status / open work
 

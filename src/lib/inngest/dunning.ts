@@ -28,10 +28,9 @@ import {
   appstleSubscriptionAction,
 } from "@/lib/appstle";
 import {
-  sendDunningPaymentUpdateEmail,
   sendDunningRecoveryEmail,
-  sendDunningPausedEmail,
 } from "@/lib/email";
+import { sendPaymentRecoveryEmail } from "@/lib/payment-recovery-email";
 import { addTicketTag } from "@/lib/ticket-tags";
 
 // ── dunning/payment-failed ──
@@ -207,20 +206,9 @@ export const dunningPaymentFailed = inngest.createFunction(
           `Cancelled by ShopCX — terminal billing error: ${error_code} (${error_message || "no details"}), no other payment methods available`
         );
 
-        const admin = createAdminClient();
-        const { data: customer } = await admin.from("customers").select("email, first_name").eq("id", customer_id).single();
-        const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspace_id).single();
-        const portalGeneral = (ws?.portal_config as Record<string, unknown>)?.general as Record<string, unknown> | undefined;
-        const updateUrl = (portalGeneral?.payment_update_url as string) || "";
-        if (customer?.email && ws?.name && updateUrl) {
-          await sendDunningPausedEmail({
-            workspaceId: workspace_id,
-            toEmail: customer.email,
-            customerName: customer.first_name,
-            workspaceName: ws.name,
-            updateUrl,
-          });
-        }
+        // Magic-link recovery email + tagged closed ticket (replaces the
+        // static portal URL). On click → update card → migrate + reactivate + charge.
+        if (customer_id) await sendPaymentRecoveryEmail(workspace_id, customer_id);
 
         await postDunningNote(workspace_id, customer_id, dunningInternalNote(
           `Terminal billing error: ${error_code}. Customer has only ${paymentMethods.length} payment method(s). Subscription cancelled — will auto-reactivate if customer adds a new payment method.`
@@ -358,20 +346,7 @@ export const dunningPaymentFailed = inngest.createFunction(
           `Cancelled by ShopCX — all ${paymentMethods.length} payment methods returned terminal errors`
         );
 
-        const admin = createAdminClient();
-        const { data: customer } = await admin.from("customers").select("email, first_name").eq("id", customer_id).single();
-        const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspace_id).single();
-        const portalGeneral = (ws?.portal_config as Record<string, unknown>)?.general as Record<string, unknown> | undefined;
-        const updateUrl = (portalGeneral?.payment_update_url as string) || "";
-        if (customer?.email && ws?.name && updateUrl) {
-          await sendDunningPausedEmail({
-            workspaceId: workspace_id,
-            toEmail: customer.email,
-            customerName: customer.first_name,
-            workspaceName: ws.name,
-            updateUrl,
-          });
-        }
+        if (customer_id) await sendPaymentRecoveryEmail(workspace_id, customer_id);
 
         await postDunningNote(workspace_id, customer_id, dunningInternalNote(
           `All ${paymentMethods.length} payment methods returned terminal errors (${finalTerminalCards.join(", ")}). Subscription cancelled — will auto-reactivate if customer adds a new payment method.`
@@ -700,34 +675,10 @@ async function handleAllCardsExhausted(
 
   await updateDunningCycle(cycle.id, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
 
-  // Get customer + workspace info for our own email
+  // Magic-link recovery email + tagged closed ticket (replaces the static
+  // portal URL for both the paused/cancelled and skip cases).
   if (customerId) {
-    const { data: customer } = await admin.from("customers").select("email, first_name, shopify_customer_id").eq("id", customerId).single();
-    const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspaceId).single();
-    const portalGeneral = (ws?.portal_config as Record<string, any>)?.general || {};
-    const updateUrl = portalGeneral.payment_update_url || "";
-
-    if (customer?.email && ws?.name && updateUrl) {
-
-      if (action === "pause" || action === "cancel") {
-        // Subscription cancelled due to payment failure — send update email
-        await sendDunningPausedEmail({
-          workspaceId,
-          toEmail: customer.email,
-          customerName: customer.first_name,
-          workspaceName: ws.name,
-          updateUrl,
-        });
-      } else {
-        await sendDunningPaymentUpdateEmail({
-          workspaceId,
-          toEmail: customer.email,
-          customerName: customer.first_name,
-          workspaceName: ws.name,
-          updateUrl,
-        });
-      }
-    }
+    await sendPaymentRecoveryEmail(workspaceId, customerId);
   }
 
   // Post internal note
@@ -1021,21 +972,8 @@ export const dunningPaydayRetryCron = inngest.createFunction(
 
         // Send payment update email
         if (cycle.customer_id) {
-          const { data: cust } = await admin.from("customers")
-            .select("email, first_name").eq("id", cycle.customer_id).single();
-          const { data: ws } = await admin.from("workspaces")
-            .select("name, portal_config").eq("id", cycle.workspace_id).single();
-          const portalGeneral = (ws?.portal_config as Record<string, unknown>)?.general as Record<string, string> | undefined;
-          const updateUrl = portalGeneral?.payment_update_url || "";
-
-          if (cust?.email && ws?.name && updateUrl) {
-            await sendDunningPaymentUpdateEmail({
-              workspaceId: cycle.workspace_id,
-              toEmail: cust.email,
-              customerName: cust.first_name,
-              workspaceName: ws.name,
-              updateUrl,
-            });
+          if (cycle.customer_id) {
+            await sendPaymentRecoveryEmail(cycle.workspace_id, cycle.customer_id);
           }
 
           await postDunningNote(cycle.workspace_id, cycle.customer_id, dunningInternalNote(

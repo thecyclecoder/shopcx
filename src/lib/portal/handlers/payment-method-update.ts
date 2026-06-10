@@ -103,6 +103,7 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   // cancels + duplicates), so the recovery itself only touches active/paused subs.
   let pinnedCount = 0;
   let reactivatedCount = 0;
+  let chargedCount = 0;
   if (recover) {
     try {
       const { linkGroupIds } = await import("@/lib/customer-links");
@@ -110,9 +111,11 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
       // Reactivate subs that DUNNING cancelled (keyed on an exhausted dunning cycle
       // — never voluntary cancels). Done before the pin query so revived subs are
       // active and get the new card pinned in the same pass.
+      let reactivatedIds: string[] = [];
       try {
         const { reactivateDunningCancelledSubs } = await import("@/lib/inngest/internal-dunning");
-        reactivatedCount = await reactivateDunningCancelledSubs(auth.workspaceId, groupIds);
+        reactivatedIds = await reactivateDunningCancelledSubs(auth.workspaceId, groupIds);
+        reactivatedCount = reactivatedIds.length;
       } catch (e) {
         console.error("[portal/payment] dunning reactivate failed (non-fatal):", e instanceof Error ? e.message : e);
       }
@@ -129,6 +132,41 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
           .update({ payment_method_id: saved.id, updated_at: new Date().toISOString() })
           .in("id", subIds);
         pinnedCount = subIds.length;
+      }
+
+      // Recover the missed payment NOW: charge the new card immediately for any
+      // sub that was failing (an open dunning cycle) or that we just reactivated,
+      // instead of waiting for the next scheduled renewal. The internal renewal
+      // pipeline charges → creates the order → closes the dunning cycle on success
+      // (closeInternalDunningOnSuccess). Healthy subs (no dunning cycle) are NOT
+      // charged — we only collect what was actually owed.
+      try {
+        const { data: openCycles } = await admin
+          .from("dunning_cycles")
+          .select("subscription_id")
+          .eq("workspace_id", auth.workspaceId)
+          .in("customer_id", groupIds)
+          .in("status", ["active", "retrying", "open"]);
+        const chargeSet = new Set<string>([
+          ...reactivatedIds,
+          ...(openCycles || []).map((c) => c.subscription_id as string).filter(Boolean),
+        ]);
+        // Only charge subs that are now internal + active (migrated + reactivated).
+        const chargeIds = subIds.filter((id) => chargeSet.has(id)).concat(
+          reactivatedIds.filter((id) => !subIds.includes(id)),
+        );
+        if (chargeIds.length) {
+          const { inngest } = await import("@/lib/inngest/client");
+          for (const subscription_id of [...new Set(chargeIds)]) {
+            await inngest.send({
+              name: "internal-subscription/renewal-attempt",
+              data: { workspace_id: auth.workspaceId, subscription_id },
+            });
+          }
+          chargedCount = new Set(chargeIds).size;
+        }
+      } catch (e) {
+        console.error("[portal/payment] recover immediate-charge failed (non-fatal):", e instanceof Error ? e.message : e);
       }
     } catch (e) {
       console.error("[portal/payment] recover pin failed (non-fatal):", e instanceof Error ? e.message : e);
@@ -153,8 +191,8 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     workspaceId: auth.workspaceId,
     customerId: customer.id,
     eventType: recover ? "portal.payment_method.recovered" : "portal.payment_method.updated",
-    summary: `Customer ${recover ? "recovered" : "updated"} payment method via portal${migratedCount ? ` (migrated ${migratedCount} sub(s) to internal)` : ""}${pinnedCount ? ` (pinned to ${pinnedCount} sub(s))` : ""}${reactivatedCount ? ` (reactivated ${reactivatedCount} dunning-cancelled sub(s))` : ""}`,
-    properties: { last4: vaulted.last4, card_brand: vaulted.cardBrand, migrated_count: migratedCount, pinned_count: pinnedCount, reactivated_count: reactivatedCount, recover },
+    summary: `Customer ${recover ? "recovered" : "updated"} payment method via portal${migratedCount ? ` (migrated ${migratedCount} sub(s) to internal)` : ""}${pinnedCount ? ` (pinned to ${pinnedCount} sub(s))` : ""}${reactivatedCount ? ` (reactivated ${reactivatedCount} dunning-cancelled sub(s))` : ""}${chargedCount ? ` (charged ${chargedCount} sub(s) now)` : ""}`,
+    properties: { last4: vaulted.last4, card_brand: vaulted.cardBrand, migrated_count: migratedCount, pinned_count: pinnedCount, reactivated_count: reactivatedCount, charged_count: chargedCount, recover },
     createNote: false,
   });
 

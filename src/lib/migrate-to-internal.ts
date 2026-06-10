@@ -248,6 +248,22 @@ export async function migrateCustomerAppstleSubsToInternal(
 
       result.migrated.push({ contractId, subId: String(sub.id), billableCustomerId });
 
+      // Timeline event so a human agent sees the migration on the customer's
+      // timeline (Appstle contract cancelled → now billed internally on Braintree).
+      try {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId,
+          customerId: billableCustomerId,
+          eventType: "subscription.migrated",
+          source: opts.isRecovery ? "payment_recovery" : "migration",
+          summary: `Subscription migrated to internal billing — Appstle contract ${contractId} cancelled, now billed on Braintree (${internalContractId}).`,
+          properties: { subscription_id: String(sub.id), appstle_contract_id: contractId, internal_contract_id: internalContractId, status: sub.status, is_recovery: !!opts.isRecovery },
+        });
+      } catch (e) {
+        console.error(`[migrate] timeline event failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
+      }
+
       // Monitor: record + verify this migration. Pre-migration charge = sum of
       // the live Appstle per-line charge (products only). Non-fatal.
       try {
