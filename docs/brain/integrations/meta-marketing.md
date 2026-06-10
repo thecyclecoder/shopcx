@@ -53,8 +53,13 @@ System User token (long-lived, no expiry) preferred over admin user token for CA
 - **Ad account ids are prefixed `act_`** (`act_1234567890`). The bare numeric id is not a valid path segment.
 - **`adcreatives` per-account list can be huge** (10k+). Paginate via `paging.next`, don't bulk-fetch.
 
+## Ad publishing (WRITE — 2026-06-10)
+
+No longer read-only: the ad tool **publishes ads to Meta** via `src/lib/meta-ads.ts` (Graph v21.0, form-encoded POSTs, `ads_management` token from `meta_connections`). Flow: `act_{id}/advideos` (upload video by `file_url`) → poll `GET /{video_id}?fields=status` → `act_{id}/adcreatives` (`asset_feed_spec` copy variants + `object_story_spec`) → `act_{id}/ads` (default **PAUSED**). Targets listed via `/me/adaccounts`, `act_{id}/campaigns`, `act_{id}/adsets`, `/me/accounts` (pages). See [[../lifecycles/ad-publish]] + [[../libraries/meta-ads]] + [[../tables/ad_publish_jobs]].
+
 ## Files
 
+- `src/lib/meta-ads.ts` — **ad publishing** (advideos → adcreatives → ads) + listing
 - `src/lib/inngest/sinks/meta-capi.ts` — CAPI dispatcher (server-side event sink)
 - `src/lib/meta.ts` — Token + permission helpers shared with [[meta-graph]]
 - Ads spend rollup: `src/lib/inngest/...` (in flight — see [[../tables/sms_campaigns]] ROAS roadmap)

@@ -1,0 +1,90 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { inngest } from "@/lib/inngest/client";
+import { META_CTA_TYPES } from "@/lib/ad-meta-copy";
+
+async function authorize(workspaceId: string | null) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
+  if (!workspaceId) return { error: NextResponse.json({ error: "workspaceId required" }, { status: 400 }) };
+  const admin = createAdminClient();
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+  if (!member || !["owner", "admin"].includes(member.role as string))
+    return { error: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
+  return { user, admin };
+}
+
+const arr = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
+
+/** Publish a campaign's video as a Meta ad — creates a job + fires the publisher. */
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const body = await req.json().catch(() => ({}));
+  const workspaceId: string | null = body.workspaceId ?? null;
+  const auth = await authorize(workspaceId);
+  if (auth.error) return auth.error;
+
+  // Validate the campaign + the chosen video belong to the workspace.
+  const { data: campaign } = await auth.admin
+    .from("ad_campaigns")
+    .select("id, name")
+    .eq("id", id)
+    .eq("workspace_id", workspaceId as string)
+    .single();
+  if (!campaign) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+  const videoId = typeof body.video_id === "string" ? body.video_id : null;
+  const { data: video } = await auth.admin
+    .from("ad_videos")
+    .select("id, final_mp4_url, status")
+    .eq("campaign_id", id)
+    .eq("media_kind", "video")
+    .eq("status", "ready")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const useVideoId = videoId || video?.id || null;
+  if (!useVideoId) return NextResponse.json({ error: "no_ready_video" }, { status: 400 });
+
+  const headlines = arr(body.headlines), primaryTexts = arr(body.primary_texts);
+  const ctaType = META_CTA_TYPES.includes(body.cta_type) ? body.cta_type : "SHOP_NOW";
+  const destinationUrl = typeof body.destination_url === "string" ? body.destination_url.trim() : "";
+  const required: Record<string, unknown> = { meta_account_id: body.meta_account_id, meta_adset_id: body.meta_adset_id, meta_page_id: body.meta_page_id };
+  for (const [k, v] of Object.entries(required)) if (!v) return NextResponse.json({ error: `${k} required` }, { status: 400 });
+  if (!headlines.length || !primaryTexts.length) return NextResponse.json({ error: "headlines + primary_texts required" }, { status: 400 });
+  if (!destinationUrl) return NextResponse.json({ error: "destination_url required" }, { status: 400 });
+
+  const { data: job, error } = await auth.admin
+    .from("ad_publish_jobs")
+    .insert({
+      workspace_id: workspaceId,
+      campaign_id: id,
+      video_id: useVideoId,
+      meta_account_id: String(body.meta_account_id),
+      meta_campaign_id: body.meta_campaign_id ? String(body.meta_campaign_id) : null,
+      meta_adset_id: String(body.meta_adset_id),
+      meta_page_id: String(body.meta_page_id),
+      meta_instagram_user_id: body.meta_instagram_user_id ? String(body.meta_instagram_user_id) : null,
+      headlines,
+      primary_texts: primaryTexts,
+      description: typeof body.description === "string" ? body.description.trim() || null : null,
+      cta_type: ctaType,
+      destination_url: destinationUrl,
+      publish_active: body.publish_active === true,
+      publish_status: "queued",
+      created_by: auth.user.id,
+    })
+    .select("id")
+    .single();
+  if (error || !job) return NextResponse.json({ error: error?.message || "insert_failed" }, { status: 500 });
+
+  await inngest.send({ name: "ad-tool/publish-to-meta", data: { workspace_id: workspaceId as string, job_id: job.id } });
+  return NextResponse.json({ ok: true, job_id: job.id });
+}

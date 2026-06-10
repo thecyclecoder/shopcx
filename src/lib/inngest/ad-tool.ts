@@ -39,6 +39,7 @@ import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
+import { getMetaUserToken, uploadAdVideo, waitForVideoReady, createAdCreative, createAd } from "@/lib/meta-ads";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -714,6 +715,75 @@ export const adToolStaticRequested = inngest.createFunction(
   },
 );
 
+// ── 8. Publish to Meta (Facebook/Instagram ads) ─────────────────────────────
+// Upload the campaign's video → wait for Meta processing → ad creative (copy
+// variants in asset_feed_spec) → ad in the chosen ad set (PAUSED by default).
+// See docs/brain/lifecycles/ad-publish.md + src/lib/meta-ads.ts.
+export const adToolPublishToMeta = inngest.createFunction(
+  { id: "ad-tool-publish-to-meta", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/publish-to-meta" }] },
+  async ({ event, step }) => {
+    const { workspace_id, job_id } = event.data as { workspace_id: string; job_id: string };
+    const admin = createAdminClient();
+    const setStatus = (status: string, extra: Record<string, unknown> = {}) =>
+      admin.from("ad_publish_jobs").update({ publish_status: status, updated_at: new Date().toISOString(), ...extra }).eq("id", job_id);
+
+    const ctx = await step.run("load", async () => {
+      const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
+      if (!job) throw new Error("job_not_found");
+      const { data: campaign } = await admin.from("ad_campaigns").select("name").eq("id", job.campaign_id).single();
+      const { data: video } = await admin.from("ad_videos").select("meta, final_mp4_url").eq("id", job.video_id).single();
+      const storagePath = (video?.meta as any)?.storage_path as string | undefined;
+      // Fresh signed URL so Meta can download the video (stored URL may be stale).
+      const fileUrl = storagePath ? await signedUrl(storagePath, 60 * 60 * 6) : video?.final_mp4_url;
+      const token = await getMetaUserToken(workspace_id);
+      return { job, adName: campaign?.name || "ShopCX Ad", fileUrl, token };
+    });
+
+    if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
+    if (!ctx.fileUrl) { await setStatus("failed", { error: "no_video_url" }); return { ok: false, reason: "no_video_url" }; }
+    const j = ctx.job as any;
+
+    const result = await step.run("publish", async () => {
+      try {
+        await setStatus("uploading");
+        const videoId = await uploadAdVideo(ctx.token!, j.meta_account_id, ctx.fileUrl!, ctx.adName);
+        await admin.from("ad_publish_jobs").update({ meta_video_id: videoId }).eq("id", job_id);
+        await waitForVideoReady(ctx.token!, videoId, { timeoutMs: 300000 });
+
+        await setStatus("creating");
+        const creativeId = await createAdCreative(ctx.token!, {
+          accountId: j.meta_account_id,
+          name: ctx.adName,
+          pageId: j.meta_page_id,
+          instagramUserId: j.meta_instagram_user_id,
+          videoId,
+          headlines: j.headlines || [],
+          primaryTexts: j.primary_texts || [],
+          description: j.description,
+          ctaType: j.cta_type,
+          destinationUrl: j.destination_url,
+          urlTags: `utm_source=meta&utm_medium=paid_social&utm_campaign=${encodeURIComponent(ctx.adName)}`,
+        });
+        await admin.from("ad_publish_jobs").update({ meta_creative_id: creativeId }).eq("id", job_id);
+
+        const adId = await createAd(ctx.token!, j.meta_account_id, {
+          name: ctx.adName,
+          adsetId: j.meta_adset_id,
+          creativeId,
+          status: j.publish_active ? "ACTIVE" : "PAUSED",
+        });
+        await setStatus("published", { meta_video_id: videoId, meta_creative_id: creativeId, meta_ad_id: adId, error: null });
+        return { ok: true, adId };
+      } catch (err: any) {
+        await setStatus("failed", { error: String(err?.message || err).slice(0, 300) });
+        throw err;
+      }
+    });
+
+    return result;
+  },
+);
+
 export const adToolFunctions = [
   adToolFaceRequested,
   adToolHeroRequested,
@@ -723,6 +793,7 @@ export const adToolFunctions = [
   adToolRenderRequested,
   adToolSegmentRegenerate,
   adToolStaticRequested,
+  adToolPublishToMeta,
 ];
 
 // keep imports used even if tree-shaken in some builds

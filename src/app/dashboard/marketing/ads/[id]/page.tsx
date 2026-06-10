@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { PublishToMeta } from "./PublishToMeta";
 
 interface Campaign {
   id: string;
@@ -65,6 +66,7 @@ export default function AdDetailPage() {
   const [videos, setVideos] = useState<Video[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [brollSources, setBrollSources] = useState<BrollSource[]>([]);
+  const [publishJobs, setPublishJobs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyStage, setBusyStage] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -78,6 +80,7 @@ export default function AdDetailPage() {
       setVideos(d.videos || []);
       setSegments(d.segments || []);
       setBrollSources(d.brollSources || []);
+      setPublishJobs(d.publishJobs || []);
     }
     setLoading(false);
   }, [id, workspace.id]);
@@ -359,6 +362,9 @@ export default function AdDetailPage() {
           ))}
         </div>
       )}
+
+      {/* Publish the rendered video to Meta (Facebook/Instagram) ads. */}
+      <PublishToMeta workspaceId={workspace.id} campaignId={id} videoReady={videoReady} publishJobs={publishJobs} onChange={load} />
 
       {/* Static ads — a separate, design-led process (not video frames). */}
       <div className="mt-8 flex items-center justify-between">

@@ -93,7 +93,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     .filter((m) => m.slot !== "hero" && (m.webp_1080_url || m.url))
     .map((m) => ({ slot: m.slot, alt_text: m.alt_text, url: (m.webp_1080_url || m.url) as string }));
 
-  return NextResponse.json({ campaign, videos: videos || [], segments, brollSources });
+  const { data: publishJobs } = await auth.admin
+    .from("ad_publish_jobs")
+    .select("id, publish_status, meta_ad_id, meta_account_id, error, created_at")
+    .eq("campaign_id", id)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  return NextResponse.json({ campaign, videos: videos || [], segments, brollSources, publishJobs: publishJobs || [] });
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {

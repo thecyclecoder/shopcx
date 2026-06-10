@@ -55,6 +55,10 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 - **Trigger:** event `ad-tool/static-requested` (`{ workspace_id, campaign_id, archetype, copy? }`) · **Retries:** 1
 - A **distinct** pipeline from video (no talking head/b-roll/music/timeline). `loadStaticInputs` (reviews, endorsement, benefits, product image) → PURE `build{Review,Offer,BenefitAuthority}Props` → renders the matching designed still (`StaticReview`/`StaticOffer`/`StaticBenefitAuthority`) via `renderStillCompositionTo` across **3 formats** (`feed_1x1`/`feed_4x5`/`stories_9x16`) → `ad_videos` rows (`media_kind='static'`, `meta.archetype`). Route: `POST /api/ads/campaigns/[id]/static`. See [[../lifecycles/ad-static]].
 
+### `ad-tool-publish-to-meta` (publish ad to Meta)
+- **Trigger:** event `ad-tool/publish-to-meta` (`{ workspace_id, job_id }`) · **Retries:** 1
+- Loads the [[../tables/ad_publish_jobs]] row → `uploadAdVideo` (re-signed video `file_url`) → `waitForVideoReady` (poll) → `createAdCreative` (asset_feed_spec copy variants) → `createAd` (**PAUSED** unless `publish_active`) → writes `meta_video_id`/`meta_creative_id`/`meta_ad_id` + `publish_status`. Graph v21.0 via [[../libraries/meta-ads]]. Routes: `POST /api/ads/campaigns/[id]/publish` (+ `/meta-copy`, `GET /api/ads/meta`). See [[../lifecycles/ad-publish]].
+
 ## Staging / UI control
 
 Stages are **manual + staged** (no auto-orchestrator), each fired by its own route from the campaign page's **Production** panel (`/dashboard/marketing/ads/[id]`): `POST /hero`, `/talking-head`, `/broll`, `/music`, `/render` (+ `/segments/regenerate`). The panel shows each stage's state (done/running/ready/blocked) from the DB and lights up the next. Generate in order: hero → talking head → b-roll (optional) → render. An ad rendered before a talking head exists is left in `draft` (recoverable), not `failed`, so it can be resumed and finished.
