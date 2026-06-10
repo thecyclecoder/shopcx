@@ -15,8 +15,9 @@ Rendered media outputs for an [[ad_campaigns|ad campaign]]. One ad = 4 sibling r
 | `media_kind` | `text` | — | default: `'video'` · `video` \| `static` |
 | `format_variant_of_id` | `uuid` | ✓ | → [[ad_videos]].id (SELF) — siblings link to canonical row |
 | `final_mp4_url` | `text` | ✓ |  |
-| `static_jpg_url` | `text` | ✓ | frame extract, thumbnail only |
-| `static_variants` | `jsonb` | — | default: `'[]'` · `[{template_slug, image_url, format}]` |
+| `static_jpg_url` | `text` | ✓ | **designed static-ad creative** (for `media_kind='static'` rows from the static-ad process) — signed URL; re-sign `meta.storage_path` (`finals/{ws}/{video_id}.jpg`) for a fresh link |
+| `static_variants` | `jsonb` | — | default: `'[]'` · legacy `[{template_slug, image_url, format}]` (unused by the new static process) |
+| `meta` | `jsonb` | — | static rows carry `{ archetype, storage_path }` — `archetype` ∈ `review` (testimonial) \| `offer` \| `benefit_authority` |
 | `talking_head_url` | `text` | ✓ |  |
 | `talking_head_segments_url` | `text[]` | ✓ | 30s ads = 2 clips |
 | `audio_url` | `text` | ✓ |  |
@@ -67,7 +68,7 @@ const { count } = await admin.from("ad_videos")
 
 - Enum values are **lowercase** (`format`, `media_kind`, `status`).
 - `format_variant_of_id` is **self-referential**: the canonical row has it `NULL`, the 3 format siblings point back at the canonical row. One ad = 4 rows.
-- `static_jpg_url` is a frame extract for thumbnails only — real static creatives live in `static_variants[]`.
+- **Finding static ads by archetype** (review = testimonial, offer, benefit_authority): query `ad_videos` where `media_kind='static'` AND `meta->>'archetype'='review'` (filter by `workspace_id`/`campaign_id`); the image is `static_jpg_url` or re-sign `meta.storage_path` → `finals/{ws}/{video_id}.jpg`. See [[../lifecycles/ad-static]]. (Legacy `media_kind='static'` rows from old video renders may have a null archetype + be frame extracts — filter on `meta->>'archetype'`.)
 - 30s ads split talking-head footage into two clips in `talking_head_segments_url[]`.
 
 ---
