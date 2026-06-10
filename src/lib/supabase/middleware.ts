@@ -6,7 +6,7 @@ const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula"
   // the pixel/cart/lead/checkout APIs they call. Auth-gating these
   // would silent-fail the funnel for every anonymous visitor.
   "/api/pixel", "/api/cart", "/api/lead", "/api/checkout", "/api/popup",
-  "/customize", "/checkout", "/thank-you",
+  "/customize", "/checkout", "/thank-you", "/policies",
   // Shortlink redirector — sprfd.co/ABC123 hits this via middleware
   // rewrite; the handler returns a 302 to the campaign target URL.
   "/api/sl/"];
