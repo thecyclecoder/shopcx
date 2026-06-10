@@ -1,4 +1,6 @@
-# Blog → Posts + Product Resources ⏳
+# Blog → Posts + Product Resources ✅ (MVP shipped 2026-06-10)
+
+> **Shipped:** all 36 Superfood Scoop articles imported → `posts` (35 resources, 1 blog-only), images migrated off Shopify (0 Shopify-hosted remaining), AI-classified (is_resource + product(s) + grouping), auto-published. Portal Resources UI live (search + product→grouping + reader). Import ran as a 36-agent workflow in ~78s. Remaining = the **Future** section below (storefront rendering, RAG embedding, periodic re-sync).
 
 **Goal:** import the 36 Shopify "Superfood Scoop" blog articles into our own `posts` object, migrate their images off Shopify onto our storage, and — during import — use AI to decide which posts are **product resources**, **which product(s)** they belong to (they're untagged, so infer from title + content), and which **grouping** they are (Recipes / How it works / How to use / …). Then surface the relevant ones in the portal **Resources** section with a search bar + product→grouping navigation. Storefront rendering of posts is a later phase.
 
@@ -63,9 +65,9 @@ The per-article work (classify + migrate images + write) is independent across 3
 - Periodic re-sync (cron) to pick up new/edited Shopify articles.
 
 ## Completion criteria
-- ⏳ `posts` + `post_products` tables; all 36 articles imported as posts, images on our storage (zero Shopify-hosted), HTML rewritten.
-- ⏳ Each post classified: is_resource + product_ids + grouping (auto-published).
-- ⏳ Portal Resources: search + product→grouping navigation + post detail renders.
+- ✅ `posts` + `post_products` tables; all 36 articles imported as posts, images on our storage (**0 Shopify-hosted remaining**), HTML rewritten.
+- ✅ Each post classified: is_resource (35 yes / 1 blog-only) + product_ids (43 links, multi-product) + grouping (recipes 22 · how_it_works 7 · how_to_use 5 · science 1), auto-published.
+- ✅ Portal Resources: search + product→grouping navigation + post detail renders.
 
 ## Related
 [[../lifecycles/customer-portal]] · [[../integrations/shopify]] · [[../tables/products]] · [[../tables/knowledge_base]] · [[README]]
