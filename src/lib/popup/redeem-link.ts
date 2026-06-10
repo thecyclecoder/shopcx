@@ -67,7 +67,29 @@ export async function buildPopupRedeemUrl(
     return `https://${domain}/api/popup/land?t=${encodeURIComponent(token)}`;
   }
   // Admin-preview fallback — the land route redirects under /store/{slug}/{handle}.
-  const slug = (ws?.storefront_slug as string | null) || "";
-  const base = `https://shopcx.ai/api/popup/land?t=${encodeURIComponent(token)}`;
-  return slug ? base : base;
+  return `https://shopcx.ai/api/popup/land?t=${encodeURIComponent(token)}`;
+}
+
+/**
+ * Same as buildPopupRedeemUrl, but shortened to a sprfd.co/AB12CD link so SMS
+ * stays under the 160-char single-segment limit. Falls back to the full URL
+ * when the workspace has no shortlink domain (or shortening fails).
+ */
+export async function buildPopupRedeemShortUrl(
+  workspaceId: string,
+  customerId: string,
+  code: string,
+  handle: string,
+): Promise<string> {
+  const longUrl = await buildPopupRedeemUrl(workspaceId, customerId, code, handle);
+  try {
+    const { createShortlink } = await import("@/lib/shortlink-create");
+    // 7-day shelf life, matching the coupon link's TTL.
+    const expiresAt = new Date(Date.now() + DEFAULT_TTL_MS).toISOString();
+    const short = await createShortlink(workspaceId, longUrl, { expiresAt });
+    if (short) return short;
+  } catch {
+    /* fall back to the long URL */
+  }
+  return longUrl;
 }

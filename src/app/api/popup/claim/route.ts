@@ -67,23 +67,25 @@ export async function POST(request: Request) {
 
   // Cross-device redeem link — drops them back on the PDP with the code
   // auto-applied (works even if they open the text on another device).
+  // Shortened (sprfd.co/…) so the SMS stays under one 160-char segment.
   let redeemUrl: string | null = null;
   if (body.product_handle) {
     try {
-      const { buildPopupRedeemUrl } = await import("@/lib/popup/redeem-link");
-      redeemUrl = await buildPopupRedeemUrl(body.workspace_id, body.customer_id, couponCode, body.product_handle);
+      const { buildPopupRedeemShortUrl } = await import("@/lib/popup/redeem-link");
+      redeemUrl = await buildPopupRedeemShortUrl(body.workspace_id, body.customer_id, couponCode, body.product_handle);
     } catch (e) {
       console.warn("[popup/claim] redeem link build failed:", e instanceof Error ? e.message : e);
     }
   }
 
-  // Deliver the code by SMS.
+  // Deliver the code by SMS. The disclaimer matters: the code binds to this
+  // customer, so a shared link won't work for anyone else.
   try {
     const { sendSMS } = await import("@/lib/twilio");
     const first = (customer?.first_name as string) || "there";
     const msg = redeemUrl
-      ? `Hi ${first}! Here's your exclusive code ${couponCode} — tap to shop with it already applied: ${redeemUrl}`
-      : `Hi ${first}! Here's your exclusive discount code: ${couponCode}. It's already applied to your order — just complete checkout to claim it.`;
+      ? `Hi ${first}! Your code ${couponCode} is auto-applied here: ${redeemUrl} — it's just for you and won't work for anyone else.`
+      : `Hi ${first}! Here's your exclusive discount code: ${couponCode}. It's already applied to your order — just complete checkout to claim it. Just for you — don't share.`;
     await sendSMS(body.workspace_id, e164, msg);
   } catch (e) {
     console.warn("[popup/claim] SMS send failed:", e instanceof Error ? e.message : e);

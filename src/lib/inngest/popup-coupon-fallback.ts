@@ -64,8 +64,8 @@ export const popupCouponFallback = inngest.createFunction(
 
       const cta = redeemUrl
         ? `<p><a href="${redeemUrl}" style="display:inline-block;background:#1f5e3a;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;">Shop with my discount applied →</a></p>
-<p style="font-size:12px;color:#888;">The discount is already applied — just complete checkout.</p>`
-        : `<p>Enter it at checkout to claim your savings — it's reserved just for you.</p>`;
+<p style="font-size:12px;color:#888;">The discount is already applied — just complete checkout. This code is reserved for you and won't work for anyone else, so please don't share it.</p>`
+        : `<p>Enter it at checkout to claim your savings — it's reserved just for you and won't work for anyone else, so please don't share it.</p>`;
 
       const body = `<p>Hi ${first}, here's the discount code you unlocked:</p>
 <p style="font-size:22px;font-weight:700;letter-spacing:1px;">${code}</p>
