@@ -88,34 +88,38 @@ export async function POST(request: Request) {
     if (computed) offer = computed as unknown as Record<string, unknown>;
   }
 
-  // Resolve the session id for the log (best-effort).
-  const { data: sess } = await admin
-    .from("storefront_sessions")
-    .select("id, customer_id")
-    .eq("workspace_id", body.workspace_id)
-    .eq("anonymous_id", body.anonymous_id)
-    .maybeSingle();
-
-  // Log the decision (seed the outcome funnel). Idempotent on the unique
-  // (workspace_id, anonymous_id) key — ignore a race-duplicate.
-  await admin
-    .from("popup_decisions")
-    .upsert(
-      {
-        workspace_id: body.workspace_id,
-        anonymous_id: body.anonymous_id,
-        session_id: (sess?.id as string) || null,
-        customer_id: (sess?.customer_id as string) || null,
-        variant: decision.variant,
-        reason: decision.reason,
-        decided_by: decision.decided_by,
-        offer,
-        shown: decision.show,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "workspace_id,anonymous_id", ignoreDuplicates: true },
-    )
-    .then(() => undefined, () => undefined);
+  // Only PERSIST (and thus cache) a decision that's final for the session: it
+  // SHOWED, or it's a hard disqualifier (bot / already-selecting / already-shown
+  // / returning-subscriber). A soft "no hesitation yet" must NOT cache — else a
+  // borderline first check locks the session and the popup can never appear as
+  // the visitor's hesitation builds.
+  const hardNo = ["bot", "already_selecting", "already_shown", "returning_subscriber"].includes(decision.reason);
+  if (decision.show || hardNo) {
+    const { data: sess } = await admin
+      .from("storefront_sessions")
+      .select("id, customer_id")
+      .eq("workspace_id", body.workspace_id)
+      .eq("anonymous_id", body.anonymous_id)
+      .maybeSingle();
+    await admin
+      .from("popup_decisions")
+      .upsert(
+        {
+          workspace_id: body.workspace_id,
+          anonymous_id: body.anonymous_id,
+          session_id: (sess?.id as string) || null,
+          customer_id: (sess?.customer_id as string) || null,
+          variant: decision.variant,
+          reason: decision.reason,
+          decided_by: decision.decided_by,
+          offer,
+          shown: decision.show,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "workspace_id,anonymous_id", ignoreDuplicates: true },
+      )
+      .then(() => undefined, () => undefined);
+  }
 
   return NextResponse.json({
     show: decision.show,

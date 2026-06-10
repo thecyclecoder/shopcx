@@ -48,6 +48,7 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
   const [offer, setOffer] = useState<Offer>({});
   const [open, setOpen] = useState(false);
   const decidedRef = useRef(false);
+  const lastDecideAtRef = useRef(0);
 
   // ── Behavioral timeline (local counters) ──────────────────────────
   const timeline = useRef({
@@ -207,7 +208,7 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
     // client-side so we don't spam the endpoint, then the server makes the
     // real call (and caches it per session).
     async function maybeDecide() {
-      if (decidedRef.current) return;
+      if (decidedRef.current) return; // already shown this session
       const t = buildTimeline();
       if (t.is_bot || t.pack_selected || t.already_shown) return;
       if (t.dwell_ms < 20_000) return;
@@ -220,7 +221,12 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
         t.scroll_reversals >= 4;
       if (!hesitation) return;
 
-      decidedRef.current = true;
+      // Throttle re-checks (the server doesn't cache a soft "not yet", so we
+      // keep re-evaluating as hesitation builds — but no more than every 8s).
+      const now = perfNow();
+      if (now - lastDecideAtRef.current < 8000) return;
+      lastDecideAtRef.current = now;
+
       try {
         const res = await fetch("/api/popup/decide", {
           method: "POST",
@@ -229,6 +235,7 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
         });
         const data = (await res.json()) as { show?: boolean; variant?: "discount" | "quiz" | "none"; offer?: Offer };
         if (data.show && (data.variant === "discount" || data.variant === "quiz")) {
+          decidedRef.current = true; // lock only once it actually shows
           sessionStorage.setItem(SESSION_FLAG, "1");
           setVariant(data.variant);
           setOffer(data.offer || {});
@@ -240,9 +247,8 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
             body: JSON.stringify({ workspace_id: workspaceId, anonymous_id: getAnonymousId(), shown: true }),
           });
         }
-      } catch {
-        decidedRef.current = false; // allow a retry on the next signal
-      }
+        // soft "no" → don't lock; the periodic tick will re-evaluate.
+      } catch { /* transient — retry on the next tick */ }
     }
 
     // Periodic re-check for the pure-dwell triggers (no event to hook).

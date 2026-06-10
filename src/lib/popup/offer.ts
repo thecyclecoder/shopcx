@@ -47,46 +47,57 @@ export interface PopupOffer {
 export async function computePopupOffer(workspaceId: string, productId: string): Promise<PopupOffer | null> {
   const admin = createAdminClient();
 
-  const { data: tiers } = await admin
-    .from("product_pricing_tiers")
-    .select("quantity, price_cents, per_unit_cents, subscribe_discount_pct, variant_id")
+  // Pricing lives in pricing_rules (via the product_pricing_rule join), NOT the
+  // unused product_pricing_tiers table. quantity_breaks carry the multi-pack %.
+  const { data: assign } = await admin
+    .from("product_pricing_rule")
+    .select("pricing_rule_id")
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
-    .order("quantity", { ascending: false });
-  if (!tiers || tiers.length === 0) return null;
+    .maybeSingle();
+  type RuleShape = { quantity_breaks?: Array<{ quantity: number; discount_pct: number }>; subscribe_discount_pct?: number; free_shipping?: boolean; free_gift_variant_id?: string | null; free_gift_product_title?: string | null };
+  let rule: RuleShape | null = null;
+  if (assign?.pricing_rule_id) {
+    const { data } = await admin
+      .from("pricing_rules")
+      .select("quantity_breaks, subscribe_discount_pct, free_shipping, free_gift_variant_id, free_gift_product_title")
+      .eq("id", assign.pricing_rule_id)
+      .maybeSingle();
+    rule = (data as RuleShape) || null;
+  }
 
-  // Headline pack = the largest configured pack (best quantity break).
-  const pack = tiers[0] as { quantity: number; price_cents: number; per_unit_cents: number | null; subscribe_discount_pct: number | null };
-  const single = (tiers.find((t) => (t.quantity as number) === 1) || tiers[tiers.length - 1]) as { price_cents: number; per_unit_cents: number | null };
+  // Base unit MSRP = the product's variant price (anchor at compare_at when higher).
+  const { data: v } = await admin
+    .from("product_variants")
+    .select("price_cents, compare_at_price_cents")
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
+    .order("price_cents", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  const unitMsrpCents = Math.max(Number(v?.price_cents) || 0, Number((v as { compare_at_price_cents?: number } | null)?.compare_at_price_cents) || 0);
+  if (!unitMsrpCents) return null;
 
-  const qty = Math.max(1, pack.quantity || 1);
-  const unitMsrpCents = (single.per_unit_cents as number) || (single.price_cents as number) || 0;
-  const packMsrpCents = unitMsrpCents * qty;
-
-  // Quantity-break % is the gap between buying the pack vs. qty × single MSRP.
-  const packListCents = (pack.price_cents as number) || packMsrpCents;
-  const qtyPct = packMsrpCents > 0 ? Math.max(0, Math.round((1 - packListCents / packMsrpCents) * 100)) : 0;
-  const snsPct = pack.subscribe_discount_pct ?? 25;
+  // Headline pack = the biggest quantity break (e.g. the 3-pack, 12% off).
+  const breaks = (rule?.quantity_breaks || []).filter((b) => Number(b.quantity) >= 1).sort((a, b) => b.quantity - a.quantity);
+  const pack = breaks[0] || { quantity: 1, discount_pct: 0 };
+  const qty = Math.max(1, Number(pack.quantity) || 1);
+  const qtyPct = Math.max(0, Number(pack.discount_pct) || 0);
+  const snsPct = Number(rule?.subscribe_discount_pct ?? 25);
   const couponPct = POPUP_COUPON_PCT;
 
+  const packMsrpCents = unitMsrpCents * qty;
   // Multiplicative stack off the PACK MSRP.
   const multiplier = (1 - qtyPct / 100) * (1 - snsPct / 100) * (1 - couponPct / 100);
   const productPriceCents = Math.round(packMsrpCents * multiplier);
   const productDiscountCents = packMsrpCents - productPriceCents;
 
-  // Free shipping + free gift values.
-  const { data: rule } = await admin
-    .from("pricing_rules")
-    .select("free_gift_variant_id, free_gift_product_title")
-    .eq("workspace_id", workspaceId)
-    .eq("product_id", productId)
-    .maybeSingle();
-
+  // Free gift value (when the rule grants one).
   let giftValueCents = 0;
   let giftTitle: string | null = null;
-  const giftVariantId = (rule as { free_gift_variant_id?: string } | null)?.free_gift_variant_id || null;
+  const giftVariantId = rule?.free_gift_variant_id || null;
   if (giftVariantId) {
-    giftTitle = (rule as { free_gift_product_title?: string } | null)?.free_gift_product_title || "Free gift";
+    giftTitle = rule?.free_gift_product_title || "Free gift";
     const { data: gv } = await admin
       .from("product_variants")
       .select("price_cents")
@@ -95,7 +106,8 @@ export async function computePopupOffer(workspaceId: string, productId: string):
     giftValueCents = (gv?.price_cents as number) || 0;
   }
 
-  const shippingValueCents = DEFAULT_SHIPPING_VALUE_CENTS;
+  // Free shipping is only a stack value when the rule actually grants it.
+  const shippingValueCents = rule?.free_shipping ? DEFAULT_SHIPPING_VALUE_CENTS : 0;
   const bundleMsrpCents = packMsrpCents + shippingValueCents + giftValueCents;
   const totalSavingsCents = productDiscountCents + shippingValueCents + giftValueCents;
   const effectivePct = bundleMsrpCents > 0 ? Math.round((totalSavingsCents / bundleMsrpCents) * 100) : 0;
