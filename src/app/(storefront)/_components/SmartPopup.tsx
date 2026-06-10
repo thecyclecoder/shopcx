@@ -287,6 +287,20 @@ function perfNow(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
+/**
+ * Live US phone mask. The user types digits only (tel keypad), and we
+ * reformat to (AAA) BBB-CCCC as they go. Strips a leading country "1",
+ * caps at 10 digits, and stays partial-friendly mid-type.
+ */
+function formatUsPhone(raw: string): string {
+  let d = raw.replace(/\D/g, "");
+  if (d.length > 10 && d.startsWith("1")) d = d.slice(1);
+  d = d.slice(0, 10);
+  if (d.length <= 3) return d;
+  if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
 // ── The popup UI ────────────────────────────────────────────────────
 
 function PopupShell({
@@ -378,7 +392,7 @@ function PopupShell({
       const res = await fetch("/api/popup/claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace_id: workspaceId, customer_id: customerId, phone, anonymous_id: getAnonymousId(), sms_consent: true }),
+        body: JSON.stringify({ workspace_id: workspaceId, customer_id: customerId, phone: phone.replace(/\D/g, ""), anonymous_id: getAnonymousId(), sms_consent: true }),
       });
       const data = (await res.json()) as { ok?: boolean; mobile?: boolean; reason?: string };
       if (data.ok) {
@@ -455,7 +469,7 @@ function PopupShell({
           {step === "email" && (
             <div>
               <label className="mb-1 block text-sm font-semibold text-zinc-800">Enter your email to unlock your code</label>
-              <input type="email" inputMode="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@email.com" className="mb-3 w-full rounded-lg border border-zinc-300 px-3 py-3 text-base outline-none focus:border-zinc-900" />
+              <input type="email" inputMode="email" name="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@email.com" className="mb-3 w-full rounded-lg border border-zinc-300 px-3 py-3 text-base outline-none focus:border-zinc-900" />
               <button disabled={busy} onClick={submitEmail} className="w-full rounded-xl py-3.5 text-base font-bold text-white disabled:opacity-60" style={{ backgroundColor: "var(--storefront-primary,#1f5e3a)" }}>
                 {busy ? "…" : "Continue →"}
               </button>
@@ -466,7 +480,7 @@ function PopupShell({
             <div>
               <label className="mb-1 block text-sm font-semibold text-zinc-800">Get your coupon delivered right now</label>
               <p className="mb-2 text-xs text-zinc-500">We'll text your code to your phone and apply it to your order automatically.</p>
-              <input type="tel" inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="(555) 123-4567" className="mb-3 w-full rounded-lg border border-zinc-300 px-3 py-3 text-base outline-none focus:border-zinc-900" />
+              <input type="tel" inputMode="tel" name="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(formatUsPhone(e.target.value))} placeholder="(555) 123-4567" className="mb-3 w-full rounded-lg border border-zinc-300 px-3 py-3 text-base outline-none focus:border-zinc-900" />
               <button disabled={busy} onClick={submitPhone} className="w-full rounded-xl py-3.5 text-base font-bold text-white disabled:opacity-60" style={{ backgroundColor: "var(--storefront-primary,#1f5e3a)" }}>
                 {busy ? "Verifying…" : "Text me my code →"}
               </button>
