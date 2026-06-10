@@ -119,6 +119,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
     items: [
       { href: "/dashboard/marketing/text", label: "Text", icon: ICONS.marketing },
       { href: "/dashboard/marketing/ads", label: "Ads", icon: ICONS.marketing },
+      { href: "/dashboard/marketing/social", label: "Social", icon: ICONS.marketing },
       { href: "#", label: "Email", icon: ICONS.marketing, comingSoon: true },
     ],
   },
