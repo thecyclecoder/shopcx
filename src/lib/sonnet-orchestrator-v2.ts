@@ -1135,9 +1135,9 @@ async function getDunningStatus(admin: Admin, wsId: string, custId: string): Pro
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(3),
     admin.from("payment_failures")
-      .select("id, attempt_type, result, card_last4, created_at")
+      .select("id, attempt_type, error_code, error_message, succeeded, payment_method_last4, created_at")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
-      .order("created_at", { ascending: false }).limit(5),
+      .order("created_at", { ascending: false }).limit(8),
   ]);
 
   if (!cycles?.length && !failures?.length) return "No dunning or payment failure data for this customer.";
@@ -1154,10 +1154,15 @@ async function getDunningStatus(admin: Admin, wsId: string, custId: string): Pro
       parts.push(`- Subscription ${c.subscription_id}${isInternal ? " (internal)" : ""} | Cycle #${c.cycle_number} | Status: ${c.status}${linkSent}${nextRetry} | ${new Date(c.created_at).toLocaleDateString()}`);
     }
   }
-  if (failures?.length) {
-    parts.push("\nPAYMENT FAILURES:");
-    for (const f of failures) {
-      parts.push(`- ${new Date(f.created_at).toLocaleDateString()} | ${f.attempt_type} | ${f.result} | Card: *${f.card_last4 || "?"}`);
+  // Real declines only — a row with succeeded=false AND no error_code is just a
+  // submitted-and-accepted Appstle attempt (result pending via webhook), NOT a
+  // decline; counting those would overstate "your card failed N times".
+  const realDeclines = (failures || []).filter((f) => f.succeeded === false && f.error_code);
+  if (realDeclines.length) {
+    parts.push("\nPAYMENT FAILURES (declines):");
+    for (const f of realDeclines) {
+      const reason = f.error_message || f.error_code || "declined";
+      parts.push(`- ${new Date(f.created_at).toLocaleDateString()} | ${f.attempt_type} | ${reason} | Card: *${f.payment_method_last4 || "?"}`);
     }
   }
   return parts.join("\n");
