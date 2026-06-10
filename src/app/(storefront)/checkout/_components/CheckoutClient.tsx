@@ -229,7 +229,11 @@ export function CheckoutClient({
       }
     })();
     return () => { cancelled = true; };
-  }, [cart.token]);
+    // Re-fetch when auth changes: OTP verify sets authedCustomerId and clears
+    // the token (setClientToken(null)) to force Drop-in to re-mount bound to the
+    // customer's Braintree vault. Without authedCustomerId in the deps the token
+    // was cleared and NEVER refetched — "Loading secure payment…" stuck forever.
+  }, [cart.token, authedCustomerId]);
 
   // ── Identify (debounced) ─────────────────────────────────────────
   // Fires when email is valid, debounced 700ms so we don't slam the
@@ -776,25 +780,6 @@ export function CheckoutClient({
           {/* min-w-0 so long content (e.g. subscription item summaries) wraps/
               truncates inside the 1fr track instead of overflowing the page. */}
           <div className="min-w-0 space-y-5">
-            {/* Subscription renewal info — only when cart has subscribe
-                items. Mirrors Shopify's "auto-deliver" reassurance
-                strip so the customer knows the recurring portion +
-                cadence before they confirm. */}
-            {subscribing && recurringCents > 0 && cart.subscription_frequency_days && (
-              <div className="flex items-start gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                <svg className="h-5 w-5 flex-shrink-0 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                </svg>
-                <div className="text-sm text-zinc-700">
-                  This order has items that will renew{" "}
-                  <span className="font-semibold">{frequencyToLabel(cart.subscription_frequency_days)}</span>
-                  {" "}for{" "}
-                  <span className="font-semibold">{fmt(recurringCents)}</span>.
-                  {" "}You can cancel or change frequency anytime in your account.
-                </div>
-              </div>
-            )}
-
             {/* Three-way subscription choice card — only when the
                 customer is logged in AND has at least one existing
                 internal sub AND the cart contains subscribe items. */}
@@ -1240,6 +1225,24 @@ export function CheckoutClient({
             {submitError && (
               <div className="rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">{submitError}</div>
             )}
+
+            {/* Subscription renewal reassurance — moved to the bottom so it's
+                the last card (below the order details), not the first thing
+                the customer sees. */}
+            {subscribing && recurringCents > 0 && cart.subscription_frequency_days && (
+              <div className="flex items-start gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                <svg className="h-5 w-5 flex-shrink-0 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                </svg>
+                <div className="text-sm text-zinc-700">
+                  This order has items that will renew{" "}
+                  <span className="font-semibold">{frequencyToLabel(cart.subscription_frequency_days)}</span>
+                  {" "}for{" "}
+                  <span className="font-semibold">{fmt(recurringCents)}</span>.
+                  {" "}You can cancel or change frequency anytime in your account.
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ── Right sidebar: cart + reviews ────────────────────── */}
@@ -1633,15 +1636,26 @@ function fmt(cents: number): string {
 }
 
 function frequencyToLabel(days: number): string {
+  if (!days || days <= 0) return "";
   if (days === 7) return "weekly";
   if (days === 14) return "every 2 weeks";
-  if (days === 30) return "monthly";
-  if (days === 45) return "every 6 weeks";
-  if (days === 60) return "every 2 months";
-  if (days === 90) return "every 3 months";
-  if (days === 120) return "every 4 months";
-  if (days === 180) return "every 6 months";
+  if (days === 21) return "every 3 weeks";
   if (days === 365) return "yearly";
+  // Week multiples: a 4-week multiple reads as months (28→monthly,
+  // 56→every 2 months, 84→every 3 months — Appstle's 4-week cadences).
+  if (days % 7 === 0) {
+    const weeks = days / 7;
+    if (weeks % 4 === 0) {
+      const months = weeks / 4;
+      return months === 1 ? "monthly" : `every ${months} months`;
+    }
+    return `every ${weeks} weeks`;
+  }
+  // Calendar-month multiples (30/60/90/…).
+  if (days % 30 === 0) {
+    const months = days / 30;
+    return months === 1 ? "monthly" : months === 12 ? "yearly" : `every ${months} months`;
+  }
   return `every ${days} days`;
 }
 
