@@ -1,6 +1,8 @@
-# Automated Organic Social Scheduler ⏳
+# Automated Organic Social Scheduler ✅ (built — pending live config)
 
 **Goal:** an always-on content engine that auto-plans and publishes organic **posts, reels, and stories** to the brand's Facebook + Instagram, on a rolling schedule, for **enhanced customer engagement** — plus a dashboard to see what's posted and what's queued.
+
+**Status (2026-06-10):** all five phases shipped + the season/promo layer. Trace: [[../lifecycles/social-scheduler]]. The engine is OFF until an operator opens **Marketing › Social**, picks target pages, and toggles it on (safe by default — `enabled=false`, no `target_meta_page_ids`). Remaining = validate Meta Insights response shapes against live posted data (Phase 5 parsing is defensive but unverified end-to-end).
 
 **Why now:** we already ingest + reply to social comments via the Meta Graph API. A live test (2026-06-10) proved our existing page tokens can **publish** organic content on both platforms (FB page photo + IG feed/reel/story) — no new OAuth scopes needed (the tokens already carry `pages_manage_posts` + `instagram_content_publish`, even though the [[../integrations/meta-graph]] scope list didn't document them). Sample posts of every type were published and approved by Dylan with no copy changes.
 
@@ -94,13 +96,19 @@ Plus a lightweight `last_posted_at` signal per resource (column on the source ro
 - **"Plan next week" / pause toggle**, cadence config (counts + time slots per platform).
 - Later: **engagement metrics** per posted item (likes/comments/reach via Graph insights) — the actual "enhanced engagement" scoreboard.
 
-## Phases
+## Operator guardrails (added during build)
 
-- **⏳ Phase 1 — publish library:** `src/lib/social/publish.ts` — `publishFacebookPhoto`, `publishInstagramImage`, `publishInstagramReel` (with status-poll), `publishInstagramStory`; media re-signing helper. Plus `scheduled_social_posts` migration. (Mechanics already proven in the test.)
-- **⏳ Phase 2 — copy generation:** `src/lib/social/generate-caption.ts` — PI-grounded captions per source kind.
-- **⏳ Phase 3 — planner + publisher:** daily `social-scheduler/plan` cron + `social-publish` Inngest fn (rolling 7-day window, resource rotation, cadence config on the workspace).
-- **⏳ Phase 4 — dashboard:** calendar/list + edit/cancel/post-now + cadence settings.
-- **⏳ Phase 5 — engagement insights + optimizer:** pull per-post metrics + audience-online data from Meta Insights; surface an engagement scoreboard; feed the timing/frequency optimizer (best slot per type, auto-tuned frequency) AND resource selection (favor what performs). This is what makes the engine data-driven instead of best-practice-default.
+- **Per-platform daily cap** (`config.max_posts_per_platform_per_day`, default **3** — "start conservative, optimize from there"). Enforced in the planner per page/day; a promo's `boost_per_platform_per_day` can lift it for its window.
+- **Season/holiday awareness** (`src/lib/social/seasonality.ts`): off-season resources (a fall chai recipe in June, a July-4th post in October) are skipped by the resource picker; captions get a date/season context so copy never references the wrong season. Holiday windows include lead time (July-4th content posts from ~June 20).
+- **Promos** (`social_campaigns`): how an operator declares a holiday/seasonal campaign — name + date window + brief (+ optional product / cap boost). The planner reads the active promo per scheduled date and themes the captions around its brief.
+
+## Phases — all shipped 2026-06-10
+
+- **✅ Phase 1 — publish library:** `src/lib/social/publish.ts` + `scheduled_social_posts` migration.
+- **✅ Phase 2 — copy generation:** `src/lib/social/generate-caption.ts` (PI-grounded, season-aware, promo-aware).
+- **✅ Phase 3 — planner + publisher:** `src/lib/inngest/social-scheduler.ts` — `socialSchedulerPlan` daily cron (rolling 7-day window, weekday cadence, resource rotation, daily cap, promo theming) + `socialPublish` per-post fn. Resource rotation reads `scheduled_social_posts` history (no separate usage table).
+- **✅ Phase 4 — dashboard:** `/dashboard/marketing/social` (Marketing › Social) — calendar/list, on/off, target pages, cadence + cap + approval, "Plan next 7 days", promos, per-post edit/approve/post-now/cancel.
+- **✅ Phase 5 — engagement insights + optimizer:** `src/lib/social/insights.ts` + `src/lib/social/optimizer.ts` + `socialInsightsSync` daily cron. Per-post metrics + audience-online heatmap (`social_audience_hours`); planner picks each slot via `pickBestSlot` (audience × historical engagement, neutral fallback before data); `frequencyHint` surfaces the reach trend. Frequency stays operator-set (hint only) for now; resource-performance weighting is a future refinement.
 
 ## Open questions
 
