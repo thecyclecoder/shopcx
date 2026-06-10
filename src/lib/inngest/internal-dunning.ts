@@ -85,13 +85,14 @@ export async function handleInternalDunningFailure(input: InternalDunningInput):
     ? existing.id
     : (await createDunningCycle(workspace_id, internal_contract_id, subscription_id, customer_id, null)).id;
 
-  // Count prior failed attempts on this cycle to decide retry vs exhaust.
+  // Count prior FAILED attempts on this cycle to decide retry vs exhaust
+  // (result='failed' — exclude pending/submitted + succeeded).
   const { count: priorFails } = await admin
     .from("payment_failures")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspace_id)
     .eq("subscription_id", subscription_id)
-    .eq("succeeded", false)
+    .eq("result", "failed")
     .gte("created_at", new Date(Date.now() - 90 * 86400000).toISOString());
   const attemptNumber = (priorFails || 0) + 1;
 

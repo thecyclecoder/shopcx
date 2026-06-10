@@ -298,7 +298,11 @@ export const dunningPaymentFailed = inngest.createFunction(
           errorMessage: billingRes.success ? "Billing attempt accepted by Appstle" : `Appstle rejected billing attempt: ${billingRes.error}`,
           attemptNumber,
           attemptType: "card_rotation",
-          succeeded: false, // Actual result comes via webhook — this is just "attempt submitted"
+          succeeded: false,
+          // Appstle ACCEPTED the attempt → the real charge result lands later via
+          // the billing-failure/success webhook, which resolves this row. A
+          // rejected submission IS a failure. Only 'failed' rows count as declines.
+          result: billingRes.success ? "pending" : "failed",
         });
 
         console.log(`[Dunning] Billing attempt ${attemptId} for ${shopify_contract_id} card ${card.last4}: ${billingRes.success ? "accepted" : "rejected"} by Appstle${billingRes.error ? ` (${billingRes.error})` : ""}`);

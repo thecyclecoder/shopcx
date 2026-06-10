@@ -28,10 +28,13 @@ export async function GET(
       .select("status, terminal_error_code")
       .eq("workspace_id", workspaceId),
 
-    // All payment failures for error code distribution (last 90 days)
+    // All payment failures for error code distribution (last 90 days).
+    // result='failed' only — exclude pending (submitted, awaiting webhook) +
+    // succeeded attempts so the distribution reflects real declines.
     admin.from("payment_failures")
       .select("error_code, error_message, attempt_type, succeeded, created_at")
       .eq("workspace_id", workspaceId)
+      .eq("result", "failed")
       .gte("created_at", new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString())
       .order("created_at", { ascending: false })
       .limit(2000),
@@ -55,6 +58,7 @@ export async function GET(
       .select("id, shopify_contract_id, error_code, error_message, attempt_type, succeeded, payment_method_last4, created_at")
       .eq("workspace_id", workspaceId)
       .eq("attempt_type", "initial")
+      .eq("result", "failed")
       .gte("created_at", new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
       .order("created_at", { ascending: false })
       .limit(200),

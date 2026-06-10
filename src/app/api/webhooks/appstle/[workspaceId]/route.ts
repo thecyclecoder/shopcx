@@ -611,20 +611,30 @@ async function handleBillingEvent(
       .maybeSingle();
 
     if (existingCycle) {
-      // This is a result from a card rotation or payday retry — log with billing_attempt_id
-      // so we can match it to the optimistic log entry
-      await logPaymentFailure({
-        workspaceId,
-        customerId: sub.customer_id,
-        subscriptionId: sub.id,
-        shopifyContractId: contractId,
-        billingAttemptId,
-        errorCode,
-        errorMessage: errorMsg,
-        attemptNumber: 0, // follow-up — exact number unknown here
-        attemptType: "card_rotation",
-        succeeded: false,
-      });
+      // This is the real result of a card rotation / payday retry. RESOLVE the
+      // pending row we logged when the attempt was submitted (matched by
+      // billing_attempt_id) → 'failed' with the real error code, instead of
+      // inserting a duplicate. Fall back to a fresh 'failed' row if there's no
+      // pending entry to resolve.
+      const { resolvePendingAttempt } = await import("@/lib/dunning");
+      const resolved = billingAttemptId
+        ? await resolvePendingAttempt(workspaceId, billingAttemptId, { result: "failed", errorCode, errorMessage: errorMsg })
+        : false;
+      if (!resolved) {
+        await logPaymentFailure({
+          workspaceId,
+          customerId: sub.customer_id,
+          subscriptionId: sub.id,
+          shopifyContractId: contractId,
+          billingAttemptId,
+          errorCode,
+          errorMessage: errorMsg,
+          attemptNumber: 0, // follow-up — exact number unknown here
+          attemptType: "card_rotation",
+          succeeded: false,
+          result: "failed",
+        });
+      }
 
       // If terminal error, mark the card we just attempted as terminal on the cycle.
       // Appstle's webhook payload never contains last4, so we read it from the cycle row
@@ -794,6 +804,14 @@ async function handleBillingEvent(
       .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .in("status", ["rotating", "retrying", "skipped", "active"]);
+
+    // Resolve the optimistic pending attempt (logged when the retry was
+    // submitted) → succeeded, so it stops looking like an open failure.
+    const successAttemptId = data.billingAttemptId ? String(data.billingAttemptId) : null;
+    if (successAttemptId) {
+      const { resolvePendingAttempt } = await import("@/lib/dunning");
+      await resolvePendingAttempt(workspaceId, successAttemptId, { result: "succeeded" });
+    }
 
     // Also fire Inngest for post-recovery actions (tags, notes, email)
     try {

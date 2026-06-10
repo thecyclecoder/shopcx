@@ -31,6 +31,7 @@ export const dunningStatus: RouteHandler = async ({ auth, route, url }) => {
     .select("payment_method_last4, attempt_type, succeeded, created_at")
     .eq("workspace_id", auth.workspaceId)
     .eq("shopify_contract_id", contractId)
+    .eq("result", "failed") // real declines only — not pending/submitted attempts
     .order("created_at", { ascending: false })
     .limit(10);
 

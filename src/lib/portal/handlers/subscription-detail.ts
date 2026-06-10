@@ -96,11 +96,12 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     .eq("shopify_contract_id", contractId)
     .order("cycle_number", { ascending: false });
 
-  // Payment failures
+  // Payment failures — real declines only (exclude pending/submitted attempts).
   const { data: paymentFailures } = await admin.from("payment_failures")
     .select("payment_method_last4, attempt_type, succeeded, created_at")
     .eq("workspace_id", auth.workspaceId)
     .eq("shopify_contract_id", contractId)
+    .eq("result", "failed")
     .order("created_at", { ascending: false })
     .limit(10);
 

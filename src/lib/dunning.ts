@@ -376,6 +376,10 @@ export async function logPaymentFailure(params: {
   attemptNumber: number;
   attemptType: "initial" | "card_rotation" | "payday_retry" | "new_card_retry";
   succeeded: boolean;
+  // Lifecycle status: 'pending' = attempt submitted, real outcome pending via
+  // webhook; 'failed' = declined; 'succeeded' = charged. Defaults from
+  // `succeeded` when omitted. Only count 'failed' rows as real declines.
+  result?: "pending" | "failed" | "succeeded";
 }): Promise<void> {
   const admin = createAdminClient();
   await admin.from("payment_failures").insert({
@@ -391,7 +395,35 @@ export async function logPaymentFailure(params: {
     attempt_number: params.attemptNumber,
     attempt_type: params.attemptType,
     succeeded: params.succeeded,
+    result: params.result ?? (params.succeeded ? "succeeded" : "failed"),
   });
+}
+
+/**
+ * Resolve a previously-logged PENDING billing attempt (Appstle accepts the
+ * attempt, the real result lands later via webhook) to its final state, instead
+ * of inserting a duplicate row. Returns true if a pending row was updated.
+ */
+export async function resolvePendingAttempt(
+  workspaceId: string,
+  billingAttemptId: string,
+  outcome: { result: "failed" | "succeeded"; errorCode?: string | null; errorMessage?: string | null },
+): Promise<boolean> {
+  if (!billingAttemptId) return false;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("payment_failures")
+    .update({
+      result: outcome.result,
+      succeeded: outcome.result === "succeeded",
+      error_code: outcome.errorCode ?? null,
+      error_message: outcome.errorMessage ?? null,
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("billing_attempt_id", billingAttemptId)
+    .eq("result", "pending")
+    .select("id");
+  return !!data?.length;
 }
 
 export async function getLastSuccessfulCard(
