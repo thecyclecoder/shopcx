@@ -10,6 +10,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
+## Active project — Automated Organic Social Scheduler ⏳
+
+**Spec:** [[automated-social-scheduler]]
+
+**Why this matters:** always-on organic posts/reels/stories to FB + IG for customer engagement, sourced from existing assets (campaign avatar-holding-product images, finished ad videos, blog resources) with PI-grounded copy. Live test 2026-06-10 proved our current page tokens can publish on both platforms — no new scopes. Rolling 7-day window: daily planner cron tops up the calendar, Inngest publishes each post at its time. Dashboard shows posted + scheduled.
+
 ## Active project 1 — Storefront 🚧
 
 **Lifecycle:** [[../lifecycles/storefront-checkout]]

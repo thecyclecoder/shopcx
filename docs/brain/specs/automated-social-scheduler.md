@@ -1,0 +1,112 @@
+# Automated Organic Social Scheduler ⏳
+
+**Goal:** an always-on content engine that auto-plans and publishes organic **posts, reels, and stories** to the brand's Facebook + Instagram, on a rolling schedule, for **enhanced customer engagement** — plus a dashboard to see what's posted and what's queued.
+
+**Why now:** we already ingest + reply to social comments via the Meta Graph API. A live test (2026-06-10) proved our existing page tokens can **publish** organic content on both platforms (FB page photo + IG feed/reel/story) — no new OAuth scopes needed (the tokens already carry `pages_manage_posts` + `instagram_content_publish`, even though the [[../integrations/meta-graph]] scope list didn't document them). Sample posts of every type were published and approved by Dylan with no copy changes.
+
+## Proven mechanics (from the test — reuse these)
+
+| Type | Graph call | Notes |
+|---|---|---|
+| FB feed (image) | `POST /{page-id}/photos` `{url, caption}` | returns `{id, post_id}` |
+| IG feed (image) | `POST /{ig-user}/media` `{image_url, caption}` → `POST /{ig-user}/media_publish` `{creation_id}` | two-step |
+| IG reel (video) | `POST /{ig-user}/media` `{media_type:REELS, video_url, caption, share_to_feed:true}` → **poll** `GET /{creation_id}?fields=status_code` until `FINISHED` → publish | video processing takes ~10-30s; MUST poll |
+| IG story | `POST /{ig-user}/media` `{media_type:STORIES, image_url|video_url}` → publish | **media-only** — Graph API can't add text/stickers/link overlays; any "copy" must be baked into the asset |
+
+- **Tokens:** page access tokens in [[../tables/meta_pages]]`.access_token_encrypted` (decrypt via `src/lib/crypto`). FB page `104094194369069`, IG user `17841409041235543` (Superfoods Company); Ashwavana pages also present.
+- **Media lives in a private bucket** (`ad-tool`) → signed URLs expire. **Re-sign a fresh 1-hour URL at publish time** for Meta to fetch. Resource (`posts`) images are in the public `product-media` bucket — use directly.
+- **IG rate limit:** 25 published posts / 24h per IG account. Stay well under.
+
+## Resources → post types → copy
+
+Three content sources (all already in the DB):
+
+1. **Avatar holding product** — `ad_campaigns.hero_image_url` (UGC-style image of an avatar holding the product). → **feed post** (and **story**).
+2. **Finished ad videos** — [[../tables/ad_videos]] `final_mp4_url` where `status='ready'`, `format='reels_9x16'`. → **reel** (and **story**).
+3. **Resources** — [[../tables/posts]] (`is_resource`, e.g. recipes like the chai cookies) with `featured_image_url`. → **feed post**.
+
+**Copy generation:** for the ad sources (avatar images + ad videos), generate the caption from the **real product intelligence** — `product_ingredients` + the PI engine (research/benefits) for the campaign/video's `product_id`. (Amazing Coffee → "12 superfoods + adaptogenic mushrooms — Chaga, Cordyceps… time-release caffeine, no 2pm crash.") Resource posts caption from the post's own excerpt/summary. Generation via Anthropic with the PI as grounding; **never invent claims not in the PI**.
+
+## Cadence (best-practice default, configurable)
+
+Engagement-weighted toward reels + stories:
+- **Reels: 3–4 / week** (highest reach/discovery on both platforms).
+- **Stories: ~daily (5–7 / week)** (top-of-feed with existing customers; retention).
+- **Feed posts: 3–4 / week** (evergreen: resources/recipes, avatar product shots).
+- Skew reels mid-week; post mid-morning + early evening (store the time slots in workspace config).
+
+## Timing + frequency optimization (how the planner maximizes engagement)
+
+The cadence above is the **bootstrap default**. Once we have our own data, the planner stops guessing and optimizes from real audience behavior — same post → measure → bias-future-scheduling loop as the prompt-learning system.
+
+**Time of day** — blend two signals, per post type:
+1. **Audience-online heatmap** (Meta Insights): IG `GET /{ig-user}/insights?metric=online_followers&period=lifetime` (followers online by hour) + FB `page_fans_online_per_day`. When are *our* followers actually on?
+2. **Our own historical performance**: every posted item logs its hour/day + engagement (reach, likes, comments, saves, shares) from `GET /{media-id}/insights` (IG) / `/{post-id}/insights` (FB). Aggregate → best-performing slots **per type** (reels, stories, feed peak at different times).
+3. Planner scores each candidate slot ≈ `audience_online(hour) × historical_engagement(hour, type)` and assigns each post the highest-scoring **open** slot for its type, enforcing a min-spacing rule so posts don't clump. Before any data exists, fall back to the best-practice slots.
+
+**Frequency** — start at the cadence config, then auto-tune within operator-set min/max:
+- Bounded by IG's 25-posts/24h limit + a min-spacing rule.
+- Watch the **per-post reach / engagement-rate trend**: if posting more keeps *total* engagement climbing without per-post reach collapsing → room to increase; if per-post reach falls as frequency rises (audience fatigue) → back off. Never exceeds the operator's ceiling.
+
+This needs the per-post metrics pipeline (Phase 5) before it's fully data-driven; Phases 1–4 run on the best-practice defaults, then the optimizer takes over.
+
+## Scheduling architecture — rolling 7-day window
+
+- **7-day horizon.** The calendar is always filled 7 days out — enough to review/edit in the dashboard before anything publishes, not so far it goes stale.
+- **Daily planner cron** (`social-scheduler/plan`, ~5am workspace TZ): tops the calendar up to 7 days ahead. Each run effectively adds the new "day 7," so the window rolls forward one day at a time (Dylan's "push it another day out"). The planner:
+  1. Reads the cadence config → how many of each type the week needs.
+  2. Picks resources round-robin, **avoiding recent re-use** (track `last_posted_at` per resource so we don't repeat an asset within N days).
+  3. Generates copy from PI (for ad sources) or the post summary (resources).
+  4. Inserts `scheduled_social_posts` rows with `scheduled_at` set to the cadence time slots, `status='scheduled'`.
+  5. Fires a `social/publish` Inngest event per row.
+- **Per-post publisher** (`social-publish` Inngest fn): `step.sleepUntil(scheduled_at)` → re-sign media URL → publish via the Graph calls above (poll for reels) → write `published_platform_id` + `status='posted'` (or `failed` + error). Durable + retryable; publishes at the right time of day. (Don't use a polling cron — Inngest sleepUntil is cleaner and already in the stack.)
+- **Edit window:** because the dashboard shows the whole 7-day buffer, an operator can edit caption / swap media / reschedule / cancel any `scheduled` row before its Inngest job fires (the publisher re-reads the row at fire time, so edits stick).
+
+## Data model
+
+**`scheduled_social_posts`**:
+```
+id, workspace_id
+meta_page_id        → meta_pages.id           (which FB page / IG account)
+platform            facebook | instagram
+post_type           feed | reel | story
+source_kind         avatar | ad_video | resource
+source_ref_id       campaign_id | ad_video_id | post_id
+product_id          → products.id             (for PI copy + attribution; null for non-product resources)
+media_bucket, media_path                       (re-signed at publish; null if using a public URL)
+media_url           public URL when applicable (resource images)
+caption             generated copy
+scheduled_at        timestamptz
+status              draft | scheduled | publishing | posted | failed | skipped
+published_platform_id   FB post_id / IG media id
+published_at, error
+created_by          system | <user_id>
+created_at, updated_at
+```
+Plus a lightweight `last_posted_at` signal per resource (column on the source row or a small `social_resource_usage` table) so the planner rotates assets.
+
+## Dashboard
+
+`/dashboard/social` (or under Marketing):
+- **Calendar + list view** of `scheduled_social_posts`: past (posted, with the live permalink) and upcoming (scheduled), filterable by platform / type / status.
+- Inline **edit** of a scheduled item (caption, media, time) + **cancel** / **post-now** / **regenerate copy**.
+- **"Plan next week" / pause toggle**, cadence config (counts + time slots per platform).
+- Later: **engagement metrics** per posted item (likes/comments/reach via Graph insights) — the actual "enhanced engagement" scoreboard.
+
+## Phases
+
+- **⏳ Phase 1 — publish library:** `src/lib/social/publish.ts` — `publishFacebookPhoto`, `publishInstagramImage`, `publishInstagramReel` (with status-poll), `publishInstagramStory`; media re-signing helper. Plus `scheduled_social_posts` migration. (Mechanics already proven in the test.)
+- **⏳ Phase 2 — copy generation:** `src/lib/social/generate-caption.ts` — PI-grounded captions per source kind.
+- **⏳ Phase 3 — planner + publisher:** daily `social-scheduler/plan` cron + `social-publish` Inngest fn (rolling 7-day window, resource rotation, cadence config on the workspace).
+- **⏳ Phase 4 — dashboard:** calendar/list + edit/cancel/post-now + cadence settings.
+- **⏳ Phase 5 — engagement insights + optimizer:** pull per-post metrics + audience-online data from Meta Insights; surface an engagement scoreboard; feed the timing/frequency optimizer (best slot per type, auto-tuned frequency) AND resource selection (favor what performs). This is what makes the engine data-driven instead of best-practice-default.
+
+## Open questions
+
+- **Approval gate or auto-publish?** Default to auto-publish with the 7-day editable buffer as the review window (matches the blog-resources "edit after the fact" stance). Add a per-workspace "require approval" toggle if Dylan wants a hard gate.
+- **Multi-brand:** Phase 1 = Superfoods Company (FB + IG). Ashwavana pages exist — fold in once the engine is proven.
+- **Stories text:** Graph can't overlay text on stories. Either accept media-only stories, or (later) compose a story-formatted image with baked-in copy via the existing ad-render static pipeline.
+
+## Related
+
+[[../integrations/meta-graph]] · [[../tables/meta_pages]] · [[../tables/posts]] · [[../tables/ad_videos]] · [[../lifecycles/ad-render]] · [[../tables/product_ingredients]]
