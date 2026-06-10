@@ -195,6 +195,9 @@ export function CheckoutClient({
   // which owns the visual mockup + iframe lifecycle.
   const hostedFieldsRef = useRef<HostedFieldsCardHandle | null>(null);
   const [clientToken, setClientToken] = useState<string | null>(null);
+  // Declared up here (not with the OTP state below) because the client-token
+  // effect depends on it to refetch the token after auth.
+  const [authedCustomerId, setAuthedCustomerId] = useState<string | null>(null);
   const [cardReady, setCardReady] = useState(false);
   const [cardError, setCardError] = useState<string | null>(null);
 
@@ -342,7 +345,6 @@ export function CheckoutClient({
     hasSms: false, hasEmail: false, code: "", busy: false, error: null,
     resendCountdown: 0, statusMsg: null,
   });
-  const [authedCustomerId, setAuthedCustomerId] = useState<string | null>(null);
 
   // Saved payment methods (only when authenticated via OTP or
   // existing sx_session cookie). Used to render the "Pay with •••4242"
