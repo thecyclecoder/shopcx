@@ -103,7 +103,7 @@ export async function pickTestimonial(admin: Admin, workspaceId: string, exclude
 export async function pickResource(admin: Admin, workspaceId: string, exclude: Set<string>, now: Date = new Date()): Promise<PickedAsset | null> {
   const { data } = await admin
     .from("posts")
-    .select("id, title, tags, excerpt, content_text, featured_image_url")
+    .select("id, title, tags, excerpt, content_text, featured_image_url, social_image_url")
     .eq("workspace_id", workspaceId)
     .eq("is_resource", true)
     .eq("published", true)
@@ -121,7 +121,9 @@ export async function pickResource(admin: Admin, workspaceId: string, exclude: S
   return {
     sourceRefId: pick.id,
     productId,
-    mediaUrl: pick.featured_image_url,
+    // Prefer the post's purpose-built 4:5 portrait (auto-blog generates one for
+    // IG/FB feed); fall back to the landscape hero for older posts that lack one.
+    mediaUrl: (pick as { social_image_url?: string | null }).social_image_url || pick.featured_image_url,
     resourceSummary: (pick.excerpt || pick.content_text || "").slice(0, 1500),
   };
 }

@@ -14,6 +14,14 @@ import { BlogHeader } from "../../../../_components/BlogHeader";
 import { BlogPostCard } from "../../../../_components/BlogPostCard";
 import { BlogPostJsonLd } from "../../../../_components/BlogJsonLd";
 import { StorefrontFooter } from "../../../../_components/StorefrontFooter";
+import { getAuthor } from "@/lib/blog/authors";
+
+/** Defer below-the-fold article images so a slow connection isn't blocked on
+ *  ~1MB of imagery up front. The featured/hero image stays eager (it's the LCP).
+ *  Adds loading=lazy + decoding=async to every <img> in the post body. */
+function lazyifyHtml(html: string): string {
+  return (html || "").replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy" decoding="async" ');
+}
 
 /**
  * Storefront blog post — /blog/{handle}.
@@ -115,6 +123,7 @@ export default async function BlogPostPage({
   const { blogUrl, postUrl } = postUrls(ws.storefront_domain, workspace, handle);
   const label = groupingLabel(post.grouping);
   const dateLabel = formatDate(post.published_at);
+  const author = getAuthor(post.author_slug);
 
   return (
     <div className={font.className} style={themeStyle}>
@@ -124,6 +133,7 @@ export default async function BlogPostPage({
         blogUrl={blogUrl}
         postUrl={postUrl}
         post={post}
+        author={author}
       />
 
       <BlogHeader
@@ -159,10 +169,32 @@ export default async function BlogPostPage({
             <h1 className="mt-4 text-3xl font-bold leading-tight tracking-tight text-zinc-900 md:text-4xl">
               {post.title}
             </h1>
-            {dateLabel && (
-              <p className="mt-4 text-sm text-zinc-500">
-                <time dateTime={post.published_at || undefined}>{dateLabel}</time>
-              </p>
+            {/* Byline — named author with photo + bio (E-E-A-T human signal). */}
+            {author ? (
+              <div className="mt-6 flex items-center gap-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={author.avatarUrl}
+                  alt={author.name}
+                  width={44}
+                  height={44}
+                  loading="lazy"
+                  className="h-11 w-11 rounded-full object-cover"
+                />
+                <div className="text-sm leading-tight">
+                  <div className="font-semibold text-zinc-900">{author.name}</div>
+                  <div className="text-zinc-500">
+                    {author.role}
+                    {dateLabel && <> · <time dateTime={post.published_at || undefined}>{dateLabel}</time></>}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              dateLabel && (
+                <p className="mt-4 text-sm text-zinc-500">
+                  <time dateTime={post.published_at || undefined}>{dateLabel}</time>
+                </p>
+              )
             )}
           </header>
 
@@ -172,17 +204,40 @@ export default async function BlogPostPage({
               <img
                 src={post.featured_image_url}
                 alt={post.title}
+                // The hero is the LCP element — load it eagerly + high priority,
+                // unlike the lazy in-body images below.
+                fetchPriority="high"
                 className="h-auto w-full object-cover"
               />
             </div>
           )}
 
-          {/* Article body — imported HTML (images already on our storage). */}
+          {/* Article body — stored HTML; in-body images deferred (lazyifyHtml). */}
           <div
             className="prose prose-zinc max-w-none prose-headings:font-semibold prose-headings:tracking-tight prose-a:font-medium prose-a:text-emerald-700 prose-a:no-underline hover:prose-a:underline prose-img:rounded-xl prose-img:mx-auto"
             style={{ ["--tw-prose-links" as string]: "var(--storefront-accent)" }}
-            dangerouslySetInnerHTML={{ __html: post.content_html || "" }}
+            dangerouslySetInnerHTML={{ __html: lazyifyHtml(post.content_html || "") }}
           />
+
+          {/* Author bio card — reinforces real human authorship. */}
+          {author && (
+            <div className="mt-12 flex items-start gap-4 rounded-2xl border border-zinc-200 bg-white p-5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={author.avatarUrl}
+                alt={author.name}
+                width={56}
+                height={56}
+                loading="lazy"
+                className="h-14 w-14 shrink-0 rounded-full object-cover"
+              />
+              <div>
+                <div className="text-sm font-semibold text-zinc-900">{author.name}</div>
+                <div className="text-xs font-medium uppercase tracking-wide text-zinc-400">{author.role}</div>
+                <p className="mt-1.5 text-sm leading-relaxed text-zinc-600">{author.bio}</p>
+              </div>
+            </div>
+          )}
 
           {/* Shop CTA — convert content readers into the funnel. */}
           <div className="mt-12 rounded-2xl border border-zinc-200 bg-zinc-50 p-6 text-center">

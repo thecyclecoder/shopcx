@@ -66,6 +66,7 @@ export interface BlogPostFull extends BlogPostCard {
   seo_description: string | null;
   tags: string[];
   updated_at: string | null;
+  author_slug: string | null;
 }
 
 const WORKSPACE_COLS =
@@ -146,7 +147,7 @@ export async function getBlogPost(
   const { data } = await admin
     .from("posts")
     .select(
-      "id, handle, title, excerpt, featured_image_url, grouping, published_at, content_html, content_text, seo_title, seo_description, tags, updated_at",
+      "id, handle, title, excerpt, featured_image_url, grouping, published_at, content_html, content_text, seo_title, seo_description, tags, updated_at, author_slug",
     )
     .eq("workspace_id", workspaceId)
     .eq("handle", handle)
