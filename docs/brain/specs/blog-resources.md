@@ -1,6 +1,6 @@
-# Blog → Posts + Product Resources ✅ (MVP shipped 2026-06-10)
+# Blog → Posts + Product Resources ✅ (MVP shipped 2026-06-10) · Storefront blog ✅ (2026-06-10)
 
-> **Shipped:** all 36 Superfood Scoop articles imported → `posts` (35 resources, 1 blog-only), images migrated off Shopify (0 Shopify-hosted remaining), AI-classified (is_resource + product(s) + grouping), auto-published. Portal Resources UI live (search + product→grouping + reader). Import ran as a 36-agent workflow in ~78s. Remaining = the **Future** section below (storefront rendering, RAG embedding, periodic re-sync).
+> **Shipped:** all 36 Superfood Scoop articles imported → `posts` (35 resources, 1 blog-only), images migrated off Shopify (0 Shopify-hosted remaining), AI-classified (is_resource + product(s) + grouping), auto-published. Portal Resources UI live (search + product→grouping + reader). Import ran as a 36-agent workflow in ~78s. **Public storefront blog now live** (see § Storefront rendering). Remaining = RAG embedding + periodic re-sync (Future).
 
 **Goal:** import the 36 Shopify "Superfood Scoop" blog articles into our own `posts` object, migrate their images off Shopify onto our storage, and — during import — use AI to decide which posts are **product resources**, **which product(s)** they belong to (they're untagged, so infer from title + content), and which **grouping** they are (Recipes / How it works / How to use / …). Then surface the relevant ones in the portal **Resources** section with a search bar + product→grouping navigation. Storefront rendering of posts is a later phase.
 
@@ -59,15 +59,43 @@ The per-article work (classify + migrate images + write) is independent across 3
 - **Post detail** — render `content_html` (our hosted images), featured image, title.
 - A post in multiple products appears under each.
 
+## Storefront rendering ✅ (2026-06-10)
+
+The public blog lives on the storefront, SSG'd + edge-served exactly like the PDP (no `headers()`/`cookies()`), with the **workspace-logo header + blog nav** instead of the product wordmark. Two URL shapes per page, same as PDPs:
+
+- Public: `{custom-domain}/blog` and `/blog/{handle}` (e.g. `shop.superfoodscompany.com/blog`).
+- Preview: `shopcx.ai/store/{ws}/blog[/handle]` — `x-robots-tag: noindex` via middleware so it never competes with the canonical.
+
+**Routes** (under `src/app/(storefront)/store/[workspace]/`):
+- `blog/page.tsx` — index. Renders **every** published post into the initial HTML (crawler + LLM friendly); header topic tabs filter client-side via `?topic=` (read from `window.location`, no `useSearchParams` → page stays static). Branded hero band ("The Superfood Scoop") + 3-col card grid.
+- `blog/[handle]/page.tsx` — article. Breadcrumb → grouping pill → `<h1>` → `<time>` → featured image → `content_html` in a Tailwind `prose` container → "Shop" CTA → related-posts strip (same grouping first). `content_html` images already point at our storage, so it renders directly.
+- Static segment `blog` sits beside the dynamic `[slug]` PDP route; Next gives the static segment precedence (a product handle of "blog" would be shadowed — fine).
+
+**Shared building blocks** (`src/app/(storefront)/`):
+- `_lib/blog-data.ts` — `getBlogWorkspaceBySlug`, `listBlogPosts`, `getBlogPost`, `listRelatedPosts`, `listBlogWorkspaceParams`/`listBlogPostParams` (generateStaticParams + sitemap), `BLOG_GROUPINGS` (grouping→label nav vocab). Admin client (storefront is anonymous; `posts` RLS is service-role/authenticated only).
+- `_lib/storefront-theme.ts` — `storefrontThemeStyle()` + `SYSTEM_BODY_STACK`, the per-workspace CSS-var theming the PDP applies inline (headings = workspace font, body = system stack).
+- `_components/BlogHeader.tsx` — fixed header, transparent→white on scroll (mirrors PDP `StorefrontHeader`). Workspace **logo → `/blog`**, topic tabs (only groupings with posts), **"Shop" button → main brand site** (`superfoodscompany.com`), mobile dropdown.
+- `_components/BlogIndexGrid.tsx`, `BlogPostCard.tsx`, `BlogJsonLd.tsx`. Footer reuses `StorefrontFooter`.
+
+**Dashboard view:** `src/app/dashboard/storefront/blog/page.tsx` (sidebar **Storefront › Blog**) — read-only server-component table of every post (thumb, grouping, product-link count, published state, date) with "View" → the preview article URL, plus a "View live blog" link. Lists off the active workspace via `getActiveWorkspaceId()` + admin client.
+
+**SEO + LLM:**
+- `generateMetadata` per page: title/description from `seo_title`/`seo_description`/`excerpt`, **canonical → custom domain**, OG `article` (publishedTime/modifiedTime/tags/image), Twitter card, workspace favicon, keywords from `tags`.
+- JSON-LD: index emits `Blog` + `blogPost[]`; post emits `BlogPosting` (headline, image, dates, author/publisher Organization+logo, `articleBody` from `content_text`) + `BreadcrumbList`.
+- Semantic markup: `<article>`, `<time datetime>`, `<nav>` breadcrumb, real `<h1>`/headings via `prose`.
+- `src/app/sitemap.ts` now emits the blog index + every post alongside products.
+- Middleware (`src/lib/supabase/middleware.ts`): custom-domain `/blog/{handle}` (2-seg) rewrites to `/store/{ws}/blog/{handle}`; `/blog` rides the existing single-seg rewrite; preview noindex widened from `=== 3` to `>= 3` segments to cover post URLs.
+
 ## Future (out of scope now)
-- Storefront rendering of posts (public `/blog/{handle}` on our storefront).
 - Embed `content_text` into [[../tables/kb_chunks]] so the AI agent can cite a study/recipe in a ticket reply (reuse the `kb/document.updated` pipeline).
 - Periodic re-sync (cron) to pick up new/edited Shopify articles.
+- Per-post author/byline (no author column on `posts` yet — JSON-LD uses the workspace Organization).
 
 ## Completion criteria
 - ✅ `posts` + `post_products` tables; all 36 articles imported as posts, images on our storage (**0 Shopify-hosted remaining**), HTML rewritten.
 - ✅ Each post classified: is_resource (35 yes / 1 blog-only) + product_ids (43 links, multi-product) + grouping (recipes 22 · how_it_works 7 · how_to_use 5 · science 1), auto-published.
 - ✅ Portal Resources: search + product→grouping navigation + post detail renders.
+- ✅ Public storefront blog: `/blog` index + `/blog/{handle}` articles, PDP-style chrome with workspace-logo header + topic nav + Shop CTA, SSG + custom-domain rewrite, full SEO/LLM metadata + JSON-LD + sitemap.
 
 ## Related
 [[../lifecycles/customer-portal]] · [[../integrations/shopify]] · [[../tables/products]] · [[../tables/knowledge_base]] · [[README]]

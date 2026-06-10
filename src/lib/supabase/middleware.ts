@@ -146,10 +146,13 @@ export async function updateSession(request: NextRequest) {
         PRIMARY_DOMAINS.some((d) => hostname === d || hostname.endsWith(`.${d}`));
 
       // 1) Admin preview on primary domain — pass through, but tell
-      //    Googlebot not to index it.
+      //    Googlebot not to index it. Covers the product PDP
+      //    (/store/{ws}/{slug}, 3 segs), the blog index
+      //    (/store/{ws}/blog, 3 segs) AND a blog post
+      //    (/store/{ws}/blog/{handle}, 4 segs) — anything under /store/.
       if (isPrimaryDomain && pathname.startsWith("/store/")) {
         const segs = pathname.split("/").filter(Boolean);
-        if (segs.length === 3) {
+        if (segs.length >= 3) {
           const res = NextResponse.next({ request });
           res.headers.set("x-robots-tag", "noindex, nofollow");
           return res;
@@ -172,6 +175,8 @@ export async function updateSession(request: NextRequest) {
         if (storefrontSlug) {
           const segs = pathname.split("/").filter(Boolean);
           const STOREFRONT_APP_ROUTES = new Set(["customize", "checkout", "thank-you"]);
+          // Single-segment paths → product PDP (/{slug}) or the blog
+          // index (/blog, which resolves to the /store/{ws}/blog route).
           if (
             segs.length === 1
             && segs[0] !== "favicon.ico"
@@ -179,6 +184,14 @@ export async function updateSession(request: NextRequest) {
           ) {
             const url = request.nextUrl.clone();
             url.pathname = `/store/${storefrontSlug}/${segs[0]}`;
+            return NextResponse.rewrite(url);
+          }
+          // Blog post detail — /blog/{handle} → /store/{ws}/blog/{handle}.
+          // Only the blog namespace is rewritten as a two-segment path so
+          // we don't shadow other root routes.
+          if (segs.length === 2 && segs[0] === "blog") {
+            const url = request.nextUrl.clone();
+            url.pathname = `/store/${storefrontSlug}/blog/${segs[1]}`;
             return NextResponse.rewrite(url);
           }
         }
