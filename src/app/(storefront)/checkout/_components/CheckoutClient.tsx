@@ -401,9 +401,12 @@ export function CheckoutClient({
         const subs = data.subscriptions || [];
         setExistingSubs(subs);
         if (subs.length > 0) {
-          // Default to "Order now + add to existing" — prevents
-          // accidental parallel subs, matches Dylan's preference.
-          setSubMode("add_to_sub");
+          // Default to "Create a new subscription" — the customer adding
+          // a fresh subscribe item usually wants a separate sub, not to
+          // fold it into an existing one.
+          setSubMode("new_sub");
+          // Pre-select the first sub so the "Which subscription?" picker has a
+          // sensible default IF they switch to add_to_sub / renewal_only.
           setChosenSubId(subs[0].id);
         }
       } catch { /* non-fatal */ }
@@ -770,7 +773,9 @@ export function CheckoutClient({
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_360px]">
           {/* ── Left column: forms ──────────────────────────────── */}
-          <div className="space-y-5">
+          {/* min-w-0 so long content (e.g. subscription item summaries) wraps/
+              truncates inside the 1fr track instead of overflowing the page. */}
+          <div className="min-w-0 space-y-5">
             {/* Subscription renewal info — only when cart has subscribe
                 items. Mirrors Shopify's "auto-deliver" reassurance
                 strip so the customer knows the recurring portion +
@@ -809,7 +814,7 @@ export function CheckoutClient({
                       onChange={() => setSubMode("add_to_sub")}
                       className="mt-0.5 h-4 w-4"
                     />
-                    <div className="text-sm">
+                    <div className="min-w-0 flex-1 text-sm">
                       <div className="font-semibold text-zinc-900">Order now + add to my subscription</div>
                       <div className="mt-0.5 text-xs text-zinc-500">Charge today and include these items on every future renewal.</div>
                     </div>
@@ -823,7 +828,7 @@ export function CheckoutClient({
                       onChange={() => setSubMode("renewal_only")}
                       className="mt-0.5 h-4 w-4"
                     />
-                    <div className="text-sm">
+                    <div className="min-w-0 flex-1 text-sm">
                       <div className="font-semibold text-zinc-900">Add to my next renewal only</div>
                       <div className="mt-0.5 text-xs text-zinc-500">Ship with your next scheduled order — no charge today.</div>
                     </div>
@@ -837,7 +842,7 @@ export function CheckoutClient({
                       onChange={() => setSubMode("new_sub")}
                       className="mt-0.5 h-4 w-4"
                     />
-                    <div className="text-sm">
+                    <div className="min-w-0 flex-1 text-sm">
                       <div className="font-semibold text-zinc-900">Create a new subscription</div>
                       <div className="mt-0.5 text-xs text-zinc-500">Keep your current subscription as-is and start a separate one.</div>
                     </div>
