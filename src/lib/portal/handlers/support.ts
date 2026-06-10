@@ -5,13 +5,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 /**
  * Portal route: list the customer's support tickets.
  *
- * Excludes merged tickets (merged_into IS NOT NULL — those are
- * confusing, the canonical thread lives elsewhere) and archived /
- * do_not_reply tickets (the AI explicitly decided to stop engaging
- * those; surfacing them invites duplicate reply threads).
- *
- * Spans linked customer profiles so a customer who's emailed us
- * from a sibling email sees those tickets here too.
+ * Shows the customer their full history INCLUDING archived /
+ * do_not_reply tickets — those come back flagged `read_only` (display,
+ * no reply box). Only merged stubs are hidden (the canonical thread
+ * lives at the merge target). Spans linked customer profiles so a
+ * customer who emailed from a sibling address sees those tickets too.
  */
 export const supportList: RouteHandler = async ({ auth, route }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -40,16 +38,20 @@ export const supportList: RouteHandler = async ({ auth, route }) => {
 
   const { data: tickets } = await admin
     .from("tickets")
-    .select("id, subject, status, channel, created_at, updated_at, last_message_at, merged_into, do_not_reply")
+    .select("id, subject, status, channel, created_at, updated_at, last_customer_reply_at, merged_into, do_not_reply")
     .eq("workspace_id", auth.workspaceId)
     .in("customer_id", ids)
-    .is("merged_into", null)
-    .neq("status", "archived")
-    .eq("do_not_reply", false)
+    .is("merged_into", null) // hide merge stubs only
     .order("created_at", { ascending: false })
     .limit(50);
 
-  return jsonOk({ ok: true, route, tickets: tickets || [] });
+  // Archived / do_not_reply tickets are shown but read-only (no reply box).
+  const shaped = (tickets || []).map((t) => ({
+    ...t,
+    read_only: t.status === "archived" || !!t.do_not_reply,
+  }));
+
+  return jsonOk({ ok: true, route, tickets: shaped });
 };
 
 /**
@@ -92,9 +94,12 @@ export const supportTicket: RouteHandler = async ({ auth, route, url }) => {
     .in("customer_id", ids)
     .maybeSingle();
 
-  if (!ticket || ticket.merged_into || ticket.do_not_reply) {
+  // Merge stubs redirect elsewhere — not viewable. Archived / do_not_reply
+  // ARE viewable, just read-only (flagged so the UI hides the reply box).
+  if (!ticket || ticket.merged_into) {
     return jsonErr({ error: "ticket_not_available" }, 404);
   }
+  const readOnly = ticket.status === "archived" || !!ticket.do_not_reply;
 
   const { data: messages } = await admin
     .from("ticket_messages")
@@ -103,7 +108,7 @@ export const supportTicket: RouteHandler = async ({ auth, route, url }) => {
     .eq("visibility", "external")
     .order("created_at", { ascending: true });
 
-  return jsonOk({ ok: true, route, ticket, messages: messages || [] });
+  return jsonOk({ ok: true, route, ticket: { ...ticket, read_only: readOnly }, messages: messages || [] });
 };
 
 /**
@@ -150,8 +155,13 @@ export const supportReply: RouteHandler = async ({ auth, route, req }) => {
     .eq("workspace_id", auth.workspaceId)
     .in("customer_id", ids)
     .maybeSingle();
-  if (!ticket || ticket.merged_into || ticket.do_not_reply) {
+  if (!ticket || ticket.merged_into) {
     return jsonErr({ error: "ticket_not_available" }, 404);
+  }
+  // Read-only tickets can't be replied to (archived = resolved history,
+  // do_not_reply = we deliberately stopped engaging).
+  if (ticket.status === "archived" || ticket.do_not_reply) {
+    return jsonErr({ error: "ticket_read_only", message: "This conversation is closed. Start a new request instead." }, 403);
   }
 
   const body = payload.body.trim().slice(0, 5000);
@@ -180,12 +190,12 @@ export const supportReply: RouteHandler = async ({ auth, route, req }) => {
   if (ticket.status === "closed" || ticket.status === "pending") {
     await admin
       .from("tickets")
-      .update({ status: "open", updated_at: new Date().toISOString(), last_message_at: new Date().toISOString() })
+      .update({ status: "open", updated_at: new Date().toISOString(), last_customer_reply_at: new Date().toISOString() })
       .eq("id", payload.ticketId);
   } else {
     await admin
       .from("tickets")
-      .update({ updated_at: new Date().toISOString(), last_message_at: new Date().toISOString() })
+      .update({ updated_at: new Date().toISOString(), last_customer_reply_at: new Date().toISOString() })
       .eq("id", payload.ticketId);
   }
 
@@ -227,7 +237,7 @@ export const supportCreate: RouteHandler = async ({ auth, route, req }) => {
       subject,
       channel: "help_center",  // Portal-originated; treated the same as help-center widget
       status: "open",
-      last_message_at: new Date().toISOString(),
+      last_customer_reply_at: new Date().toISOString(),
     })
     .select("id")
     .single();

@@ -3,12 +3,13 @@
 /**
  * Support section — list tickets + view + reply.
  *
- * Lazy-loaded on first mount via /api/portal?route=supportList. The
- * server-side handler filters out merged/archived/do_not_reply
- * tickets so the customer only sees their canonical, actionable
- * conversations. Reply submission routes through supportReply which
- * inserts a regular inbound message — the unified ticket handler
- * picks up routing (AI orchestrator / agent assignment) from there.
+ * Lazy-loaded on first mount via /api/portal?route=supportList, which
+ * spans the customer's linked accounts and returns their full history
+ * (merge stubs hidden). Archived / do_not_reply tickets come back
+ * flagged read_only — shown for reference but with no reply box. Reply
+ * submission routes through supportReply which inserts a regular inbound
+ * message — the unified ticket handler picks up routing (AI orchestrator
+ * / agent assignment) from there.
  */
 
 import { useEffect, useState } from "react";
@@ -19,7 +20,8 @@ interface Ticket {
   status: string;
   channel: string;
   created_at: string;
-  last_message_at: string | null;
+  last_customer_reply_at?: string | null;
+  read_only?: boolean;
 }
 
 interface Message {
@@ -120,7 +122,7 @@ export function SupportSection({ primaryColor }: Props) {
                 </span>
               </div>
               <p className="mt-1 text-xs text-zinc-500">
-                {new Date(t.last_message_at || t.created_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+                {new Date(t.last_customer_reply_at || t.created_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
                 {" · "}
                 {humanChannel(t.channel)}
               </p>
@@ -223,29 +225,35 @@ function TicketDetail({ ticketId, onBack, primaryColor }: { ticketId: string; on
             )}
           </div>
 
-          <div className="rounded-2xl border border-zinc-200 bg-white p-4 sm:p-5">
-            <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-500">
-              Reply
-            </label>
-            <textarea
-              value={reply}
-              onChange={(e) => setReply(e.target.value)}
-              rows={4}
-              placeholder="Type your message…"
-              className="mt-2 w-full resize-none rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
-            />
-            <div className="mt-3 flex justify-end">
-              <button
-                type="button"
-                onClick={send}
-                disabled={!reply.trim() || sending}
-                className="rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm disabled:opacity-50"
-                style={{ backgroundColor: primaryColor }}
-              >
-                {sending ? "Sending…" : "Send"}
-              </button>
+          {ticket.read_only ? (
+            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-center text-sm text-zinc-500 sm:p-5">
+              This conversation is closed. If you need more help, start a new request from the Support page.
             </div>
-          </div>
+          ) : (
+            <div className="rounded-2xl border border-zinc-200 bg-white p-4 sm:p-5">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                Reply
+              </label>
+              <textarea
+                value={reply}
+                onChange={(e) => setReply(e.target.value)}
+                rows={4}
+                placeholder="Type your message…"
+                className="mt-2 w-full resize-none rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+              />
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  onClick={send}
+                  disabled={!reply.trim() || sending}
+                  className="rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm disabled:opacity-50"
+                  style={{ backgroundColor: primaryColor }}
+                >
+                  {sending ? "Sending…" : "Send"}
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -356,6 +364,7 @@ function humanStatus(s: string): string {
   if (s === "open") return "Active";
   if (s === "pending") return "Waiting";
   if (s === "closed") return "Resolved";
+  if (s === "archived") return "Closed";
   return s;
 }
 function humanChannel(c: string): string {
