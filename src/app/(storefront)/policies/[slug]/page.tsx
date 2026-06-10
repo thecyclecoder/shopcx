@@ -16,7 +16,7 @@ import { renderPolicyMarkdown } from "../_lib/markdown";
 
 // Allowlist + nice display title fallback. We deliberately keep this fixed
 // rather than rendering arbitrary slugs — these are the canonical 5 policies.
-const VALID_SLUGS = ["returns", "refunds", "subscriptions", "exchanges", "crisis"] as const;
+const VALID_SLUGS = ["returns", "refunds", "subscriptions", "exchanges", "crisis", "privacy", "terms"] as const;
 type PolicySlug = typeof VALID_SLUGS[number];
 
 // Display titles for cross-links. Names match what's in the policies table
@@ -27,6 +27,8 @@ const POLICY_LINKS: { slug: PolicySlug; label: string }[] = [
   { slug: "refunds", label: "Refunds" },
   { slug: "exchanges", label: "Exchanges & Replacements" },
   { slug: "crisis", label: "Out-of-Stock Substitutions" },
+  { slug: "privacy", label: "Privacy Policy" },
+  { slug: "terms", label: "Terms & Conditions" },
 ];
 
 interface PageProps {

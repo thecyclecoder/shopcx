@@ -2,19 +2,18 @@
  * Storefront footer — policies + copyright, on every PDP (added in render-page).
  * Trust/legitimacy signal: clear legal links + contact + copyright line.
  *
- * Policies we own render on this storefront (/policies/{slug}); the standard
- * legal pages (Privacy, Terms) live on the main brand site.
+ * Every policy now renders on this storefront (/policies/{slug}) from our own
+ * `policies` table — including Privacy + Terms, migrated off Shopify so the
+ * footer survives the Shopify sunset.
  */
 interface Props {
   workspaceName: string;
   supportEmail: string | null;
 }
 
-const MAIN_SITE = "https://superfoodscompany.com";
-
 const POLICY_LINKS: { label: string; href: string }[] = [
-  { label: "Privacy Policy", href: `${MAIN_SITE}/policies/privacy-policy` },
-  { label: "Terms & Conditions", href: `${MAIN_SITE}/policies/terms-of-service` },
+  { label: "Privacy Policy", href: "/policies/privacy" },
+  { label: "Terms & Conditions", href: "/policies/terms" },
   { label: "Subscriptions Policy", href: "/policies/subscriptions" },
   { label: "Shipping & Returns", href: "/policies/returns" },
   { label: "Refunds", href: "/policies/refunds" },
