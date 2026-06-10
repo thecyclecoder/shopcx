@@ -278,39 +278,62 @@ const NUMWORDS: Record<string, string> = {
   eighteen: "18", nineteen: "19", twenty: "20", thirty: "30", forty: "40", fifty: "50", sixty: "60", seventy: "70",
   eighty: "80", ninety: "90", hundred: "100",
 };
+const TENS: Record<string, number> = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const ONES: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
 const normWord = (s: string): string => {
   let n = (s || "").toLowerCase().replace(/[^a-z0-9%]/g, "");
-  if (NUMWORDS[n] !== undefined) n = NUMWORDS[n];
+  if (NUMWORDS[n] !== undefined) return NUMWORDS[n];
+  // Compound tens-ones (hyphen already stripped): "sixty-two" → "sixtytwo" → "62".
+  for (const t in TENS) {
+    if (n.startsWith(t)) {
+      const rest = n.slice(t.length);
+      if (rest === "") return String(TENS[t]);
+      if (ONES[rest] !== undefined) return String(TENS[t] + ONES[rest]);
+    }
+  }
   return n;
 };
 
 /**
- * Align Whisper words to the intended script: keep only words that match the
- * script sequence (drop Veo's filler), and when the script says a number then
- * "percent", render "N%" on the number's beat even if Whisper emitted an empty
- * word for "percent". Returns the kept words (with their original timings).
+ * Align Whisper words to the script, then display the SCRIPT word (timed by
+ * Whisper) — never Whisper's own text. This is the key correctness rule: Whisper
+ * garbles/splits words ("superfoods"→"super"+"foods", drops/halves words), so
+ * keeping its text loses content. Displaying the script word guarantees captions
+ * show your actual copy: full "superfoods", numbers as digits ("twelve"→"12"),
+ * "forty percent"→"40%". Veo filler (words not in the script) is dropped.
  */
 export function proofreadWords(scriptText: string, words: TranscriptWord[]): TranscriptWord[] {
-  const tokens = (scriptText || "").split(/\s+/).map(normWord).filter(Boolean);
-  if (!tokens.length) return words;
+  // Parallel arrays: norm token (for matching) + display form (what shows).
+  const parts = (scriptText || "")
+    .split(/\s+/)
+    .map((raw) => ({ raw, n: normWord(raw) }))
+    .filter((p) => p.n);
+  if (!parts.length) return words;
+  const tokens = parts.map((p) => p.n);
+  // Numbers display as digits (from NUMWORDS); other words keep their script form.
+  const display = parts.map((p) => (/^\d+$/.test(p.n) ? p.n : p.raw.replace(/[",.;:!?()]/g, "")));
+
   const out: TranscriptWord[] = [];
   let ti = 0;
-  const attachPercent = (pushed: TranscriptWord) => {
+  const push = (w: TranscriptWord, k: number) => {
+    const p: TranscriptWord = { ...w, word: display[k] };
+    ti = k + 1;
+    // "forty percent" → "40%": attach % to the number's beat, consume "percent".
     if (ti < tokens.length && (tokens[ti] === "percent" || tokens[ti] === "%")) {
-      const digits = (pushed.word.match(/\d+/) || [])[0];
-      if (digits) { pushed.word = digits + "%"; ti++; }
+      const digits = (p.word.match(/\d+/) || [])[0];
+      if (digits) { p.word = digits + "%"; ti++; }
     }
+    out.push(p);
   };
+  const matches = (nw: string, k: number) => nw === tokens[k] || tokens[k].includes(nw) || nw.includes(tokens[k]);
   for (const w of words) {
     const nw = normWord(w.word);
     if (!nw) continue;
     if (ti >= tokens.length) break;
-    if (nw === tokens[ti] || tokens[ti].includes(nw) || nw.includes(tokens[ti])) {
-      const p = { ...w }; ti++; attachPercent(p); out.push(p); continue;
-    }
+    if (matches(nw, ti)) { push(w, ti); continue; }
     let found = -1;
-    for (let k = ti + 1; k < Math.min(ti + 3, tokens.length); k++) if (nw === tokens[k]) { found = k; break; }
-    if (found >= 0) { const p = { ...w }; ti = found + 1; attachPercent(p); out.push(p); }
+    for (let k = ti + 1; k < Math.min(ti + 3, tokens.length); k++) if (matches(nw, k)) { found = k; break; }
+    if (found >= 0) push(w, found);
   }
   return out;
 }

@@ -53,39 +53,35 @@ export interface Composition {
 // ── PURE: split a full script into per-Veo-segment scripts ──────────────────
 
 /**
- * Veo clips top out around ~8s, so a 15s ad needs ~2 talking segments and a 30s
- * ad ~4. Split the campaign script into that many chunks on sentence boundaries,
- * balancing word counts so each clip lands near (but under) the cap. Each chunk
+ * Veo clips top out around ~8s — roughly 24 spoken words before the delivery
+ * gets rushed. Split the script into segments by packing whole sentences up to a
+ * per-clip WORD BUDGET, so no clip is overloaded (the failure mode: leftover
+ * sentences dumped into one segment → the avatar talks way too fast). Each chunk
  * becomes one talking-head segment with its own "say ONLY these words" prompt.
  */
-export function splitScriptIntoSegments(script: string, lengthSec: number): string[] {
+const MAX_WORDS_PER_CLIP = 24; // ~8s at a natural UGC pace
+
+export function splitScriptIntoSegments(script: string, _lengthSec?: number): string[] {
   const clean = (script || "").replace(/\s+/g, " ").trim();
   if (!clean) return [];
   const sentences = clean.match(/[^.!?]+[.!?]*/g)?.map((s) => s.trim()).filter(Boolean) || [clean];
-  const target = lengthSec >= 30 ? 4 : lengthSec >= 22 ? 3 : 2;
-  if (sentences.length <= target) return sentences;
-
-  const totalWords = sentences.reduce((n, s) => n + s.split(" ").length, 0);
-  const ideal = totalWords / target;
-  const buckets: string[][] = [];
+  const segs: string[] = [];
   let cur: string[] = [];
   let curWords = 0;
   for (const s of sentences) {
-    const w = s.split(" ").length;
-    // close the current bucket once it's full enough AND we still need to leave
-    // at least one sentence for each remaining bucket.
-    const remainingSentencesAfter = sentences.length - (buckets.flat().length + cur.length + 1);
-    const bucketsLeftToOpen = target - buckets.length - 1;
-    if (cur.length && curWords + w > ideal * 1.15 && remainingSentencesAfter >= bucketsLeftToOpen && bucketsLeftToOpen > 0) {
-      buckets.push(cur);
+    const w = s.split(/\s+/).length;
+    // Start a new clip when adding this sentence would blow the budget (but never
+    // emit an empty clip — a single over-budget sentence becomes its own clip).
+    if (cur.length && curWords + w > MAX_WORDS_PER_CLIP) {
+      segs.push(cur.join(" "));
       cur = [];
       curWords = 0;
     }
     cur.push(s);
     curWords += w;
   }
-  if (cur.length) buckets.push(cur);
-  return buckets.map((b) => b.join(" "));
+  if (cur.length) segs.push(cur.join(" "));
+  return segs;
 }
 
 // ── PURE: assemble the composition from active segments ─────────────────────

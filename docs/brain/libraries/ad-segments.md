@@ -6,7 +6,7 @@ PURE planning (script→segments, segments→composition; testable) + DB helpers
 
 | Export | Notes |
 |---|---|
-| `splitScriptIntoSegments(script, lengthSec)` | Split the campaign script into per-Veo-clip beats on sentence boundaries, balancing word counts. Target: 2 beats (≤22s), 3 (≤30s), 4 (≥30s) — Veo clips cap ~8s. Each beat becomes one talking-head segment. |
+| `splitScriptIntoSegments(script)` | Split the campaign script into per-Veo-clip beats by packing whole sentences up to a **word budget** (`MAX_WORDS_PER_CLIP = 24` ≈ 8s). Caps each clip's length so no segment is overloaded (the failure mode: leftover sentences dumped into one clip → the avatar talks way too fast). Each beat → one talking-head segment. (`lengthSec` arg is now ignored.) |
 | `buildComposition(talking, broll, music, fps=30)` | Assemble the stitch recipe: talking segments back-to-back (each cut at `trim_sec`) = the VO spine; b-roll laid over the tail of successive talking segments as ducked cutaways (skips beat 1 / the CTA tail); music spans all. Returns `Composition`. |
 
 ## `Composition` (stored on `ad_campaigns.composition`)
