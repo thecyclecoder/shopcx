@@ -322,6 +322,13 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
+  // First-delivery mutation gate (anti-gaming): block content/schedule/discount
+  // changes until the first order is delivered. Surfaced so both portals can
+  // disable the options + show why. Cheap for delivered subs (stored flag);
+  // a live EasyPost lookup only happens for an undelivered internal sub.
+  const { canMutateSubscription } = await import("@/lib/portal/mutation-guard");
+  const mutationGate = await canMutateSubscription(auth.workspaceId, sub as { id: string; is_internal?: boolean | null });
+
   return jsonOk({
     ok: true,
     shop: auth.shop,
@@ -348,6 +355,10 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
         recoveryStatus,
         paymentUpdateUrl,
         isLocked,
+        // First-delivery gate — true until the first order is delivered.
+        mutationsLocked: !mutationGate.allowed,
+        mutationsLockReason: mutationGate.reason || null,
+        deliveryState: mutationGate.state || null,
       },
     },
     dunning_cycles: dunningCycles || [],

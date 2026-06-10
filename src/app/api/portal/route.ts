@@ -8,7 +8,21 @@ import { requireAppProxy, type PortalAuthResult } from "@/lib/portal/auth";
 import { routeMap } from "@/lib/portal/handlers";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
-import { findCustomer } from "@/lib/portal/helpers";
+import { findCustomer, resolveSub } from "@/lib/portal/helpers";
+import { createAdminClient } from "@/lib/supabase/admin";
+
+// Content/schedule/discount mutations blocked until the first order is
+// delivered (route keys are lowercased by the dispatcher). NOT gated: cancel,
+// pause/resume, reactivate, payment, address (legit pre-ship fix), order-now.
+const MUTATION_GATED_ROUTES = new Set([
+  "replacevariants", "replace_variants",
+  "removelineitem", "remove_line_item",
+  "coupon",
+  "frequency",
+  "changedate", "change_date",
+  "shippingprotection", "shipping_protection",
+  "loyaltyapplytosubscription", "loyalty_apply_to_subscription",
+]);
 
 function jsonErr(body: Record<string, unknown>, status = 400) {
   return NextResponse.json({ ok: false, ...body }, { status });
@@ -101,11 +115,28 @@ async function handle(req: NextRequest) {
       try { requestPayload = await req.clone().json(); } catch { /* not JSON */ }
     }
 
+    // First-delivery gate: content/schedule/discount mutations are blocked
+    // until the subscription's first order has been delivered (anti-gaming).
+    // Centralized here so it covers both the in-house + Shopify portals. Cancel,
+    // pause/resume, payment, address (legit pre-ship fix), and order-now are NOT
+    // gated. See [[mutation-guard]].
+    if (MUTATION_GATED_ROUTES.has(route) && auth.workspaceId && auth.loggedInCustomerId) {
+      const payloadObj = (requestPayload || {}) as Record<string, unknown>;
+      const sub = await resolveSub(createAdminClient(), auth.workspaceId, payloadObj.contractId, auth.loggedInCustomerId);
+      if (sub?.id) {
+        const { canMutateSubscription } = await import("@/lib/portal/mutation-guard");
+        const gate = await canMutateSubscription(auth.workspaceId, sub as { id: string; is_internal?: boolean | null });
+        if (!gate.allowed) {
+          return jsonErr({ error: "first_order_not_delivered", message: gate.reason, state: gate.state }, 403);
+        }
+      }
+    }
+
     const response = await handler({ req, url, auth, route });
 
     // Log error responses for portal analytics visibility
     // Skip validation errors (expected user input issues, not real errors)
-    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in"]);
+    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered"]);
     if (response.status >= 400 && auth.workspaceId && auth.loggedInCustomerId) {
       try {
         const body = await response.clone().json();
