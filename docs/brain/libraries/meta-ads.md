@@ -15,7 +15,7 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 | `waitForVideoReady(token, videoId)` | poll `GET /{video_id}?fields=status` until `video_status='ready'` |
 | `uploadAdImage(token, accountId, bytes)` | `act_{id}/adimages` (multipart) → image hash (thumbnails) |
 | `getVideoThumbnail(token, videoId)` | `GET /{video_id}/thumbnails` → preferred auto-thumbnail URI |
-| `createAdCreative(token, args)` | `act_{id}/adcreatives` — **non-dynamic multi-text** creative: `asset_feed_spec` with `titles[]`/`bodies[]`/`link_urls` (NO `ad_formats`/`optimization_type`/`asset_customization_rules`) + `object_story_spec.page_id`/`instagram_user_id` + `videos[].thumbnail_hash` + top-level `url_tags` → creative_id |
+| `createAdCreative(token, args)` | `act_{id}/adcreatives` — **non-dynamic multi-text** creative: video+link+CTA in `object_story_spec.video_data` (`video_id`,`image_hash`,`call_to_action.value.link`) + variations in `asset_feed_spec` (`titles[]`/`bodies[]`, `optimization_type:DEGREES_OF_FREEDOM`, NO `videos`/`ad_formats`/`link_urls`) + `degrees_of_freedom_spec` text-opt OPT_OUT + top-level `url_tags` → creative_id |
 | `createAd(token, accountId, {name,adsetId,creativeId,status})` | `act_{id}/ads` (default PAUSED) → ad_id |
 
 `META_CTA_TYPES` + `generateMetaCopy` live in `src/lib/ad-meta-copy.ts` (Opus copy gen). Errors throw `meta_{status}: {graph message}`.

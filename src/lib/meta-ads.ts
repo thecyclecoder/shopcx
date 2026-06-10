@@ -150,38 +150,46 @@ export async function getVideoThumbnail(token: string, videoId: string): Promise
 
 /**
  * Create a **non-dynamic, multi-text** video ad creative — one video, multiple
- * headline + primary-text options ("Add text option / Add headline option"),
- * publishable into a **regular** (non-Dynamic-Creative) ad set that holds many ads.
+ * headline + primary-text options ("Add text option / Add headline option",
+ * with text optimization disabled), publishable into a **regular**
+ * (non-Dynamic-Creative) ad set that holds many ads.
  *
- * The shape (confirmed from shopgrowth's working publisher — see
- * docs/brain/lifecycles/ad-publish.md):
- *   - `asset_feed_spec` carries the variations: `titles[]`, `bodies[]`,
- *     `descriptions[]`, `call_to_action_types`, and the link in `link_urls`.
- *   - **NO `ad_formats`, NO `optimization_type`, NO `asset_customization_rules`** —
- *     those three are what force Dynamic-Creative semantics and trigger "Dynamic
- *     Creative ads can only be created under Dynamic Creative Ad Sets". Omitting
- *     them keeps the creative a plain multi-text ad.
- *   - `object_story_spec: { page_id, instagram_user_id }` — required for accounts
- *     without a default promotable page (ours). Adding it does NOT make it dynamic.
- *   - The **link** goes in `asset_feed_spec.link_urls = [{ website_url }]`, NOT a
- *     top-level `link` and NOT in `call_to_action` (else "link field is required").
- *   - Video ads need a **thumbnail** — `thumbnail_hash` on the video asset.
- *   - UTM tracking stays in the top-level `url_tags` (link_urls can't carry it).
- *   - `degrees_of_freedom_spec.text_optimizations = OPT_OUT` — don't let Meta
- *     auto-rewrite the copy.
+ * Shape confirmed by a live test publish into our account (the shopgrowth shape —
+ * a `videos[]` asset feed with no `ad_formats` — works on accounts that auto-infer
+ * the format, but ours rejects it: "an asset feed can have exactly one ad format",
+ * and pinning `ad_formats:[SINGLE_VIDEO]` then makes the AD dynamic-rejected). The
+ * shape that publishes cleanly here:
+ *   - **Video + link + CTA live in `object_story_spec.video_data`** — the video,
+ *     its `image_hash` thumbnail, and `call_to_action.value.link`. The link here
+ *     satisfies Meta's "link field is required" (subcode 2061015); do NOT use a
+ *     top-level `link` or `asset_feed_spec.link_urls`.
+ *   - **The text variations live in `asset_feed_spec`** as `titles[]`/`bodies[]`
+ *     with **`optimization_type: "DEGREES_OF_FREEDOM"`** — Meta's "multiple text
+ *     options" mode. NO `videos[]`, NO `ad_formats`, NO `link_urls`,
+ *     NO `asset_customization_rules` in the feed (any of those flips it to Dynamic
+ *     Creative → "can only be created under Dynamic Creative Ad Sets").
+ *   - `object_story_spec.instagram_user_id` for the IG placement.
+ *   - `degrees_of_freedom_spec.text_optimizations = OPT_OUT` ("Optimize text per
+ *     person: Disabled") — don't let Meta personalize/rewrite the copy.
+ *   - UTM tracking stays in the top-level `url_tags` (the asset feed can't carry it).
  */
 export async function createAdCreative(token: string, a: CreativeArgs): Promise<string> {
   const body: Record<string, unknown> = {
     name: a.name,
-    object_story_spec: { page_id: a.pageId, ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}) },
+    object_story_spec: {
+      page_id: a.pageId,
+      ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}),
+      video_data: {
+        video_id: a.videoId,
+        ...(a.thumbnailHash ? { image_hash: a.thumbnailHash } : {}),
+        ...(a.description ? { link_description: a.description } : {}),
+        call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
+      },
+    },
     asset_feed_spec: {
-      videos: [{ video_id: a.videoId, ...(a.thumbnailHash ? { thumbnail_hash: a.thumbnailHash } : {}) }],
       titles: a.headlines.filter(Boolean).map((text) => ({ text })),
       bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
-      ...(a.description ? { descriptions: [{ text: a.description }] } : {}),
-      call_to_action_types: [a.ctaType],
-      link_urls: [{ website_url: a.destinationUrl }],
-      // intentionally NO ad_formats / optimization_type / asset_customization_rules
+      optimization_type: "DEGREES_OF_FREEDOM",
     },
     degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
     ...(a.urlTags ? { url_tags: a.urlTags } : {}),
