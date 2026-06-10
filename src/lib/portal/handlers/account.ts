@@ -26,6 +26,12 @@ export const updateAccount: RouteHandler = async ({ auth, route, req }) => {
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (!customer) return jsonErr({ error: "customer_not_found" }, 404);
 
+  // Email is NOT customer-editable via self-service — changing it risks
+  // identity collisions (two customers, same email) + lockout (no verification).
+  // The support / AI path (update_customer_info via a ticket) still can. Drop
+  // any email field defensively even if a client sends one.
+  if ("email" in payload) delete (payload as Record<string, unknown>).email;
+
   const handler = directActionHandlers.update_customer_info;
   if (!handler) return jsonErr({ error: "handler_not_registered" }, 500);
 

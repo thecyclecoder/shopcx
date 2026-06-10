@@ -16,13 +16,13 @@ interface Props {
     email: string;
     phone: string;
   };
+  linkedAccounts: Array<{ id: string; name: string; email: string; isPrimary: boolean }>;
   primaryColor: string;
 }
 
-export function AccountSection({ customer, primaryColor }: Props) {
+export function AccountSection({ customer, linkedAccounts, primaryColor }: Props) {
   const [firstName, setFirstName] = useState(customer.firstName);
   const [lastName, setLastName] = useState(customer.lastName);
-  const [email, setEmail] = useState(customer.email);
   const [phone, setPhone] = useState(formatPhoneDisplay(customer.phone));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -30,7 +30,6 @@ export function AccountSection({ customer, primaryColor }: Props) {
   const isDirty =
     firstName !== customer.firstName ||
     lastName !== customer.lastName ||
-    email !== customer.email ||
     formatPhoneDisplay(customer.phone) !== phone;
 
   async function save() {
@@ -40,7 +39,8 @@ export function AccountSection({ customer, primaryColor }: Props) {
       const body: Record<string, string> = {};
       if (firstName !== customer.firstName) body.first_name = firstName;
       if (lastName !== customer.lastName) body.last_name = lastName;
-      if (email !== customer.email) body.email = email;
+      // Email is intentionally NOT editable here — changing it risks identity
+      // collisions + lockout (no verification). Customers change it via support.
       if (formatPhoneDisplay(customer.phone) !== phone) body.phone_number = phone;
       const res = await fetch("/api/portal?route=updateAccount", {
         method: "POST",
@@ -62,36 +62,69 @@ export function AccountSection({ customer, primaryColor }: Props) {
   }
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-6">
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="First name" value={firstName} onChange={setFirstName} autoComplete="given-name" />
-        <Field label="Last name" value={lastName} onChange={setLastName} autoComplete="family-name" />
-        <Field label="Email" value={email} onChange={setEmail} type="email" inputMode="email" autoComplete="email" />
-        <Field
-          label="Phone"
-          value={phone}
-          onChange={(v) => setPhone(formatPhoneDisplay(v))}
-          type="tel"
-          inputMode="numeric"
-          autoComplete="tel-national"
-        />
+    <div className="space-y-5">
+      <div className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-6">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="First name" value={firstName} onChange={setFirstName} autoComplete="given-name" />
+          <Field label="Last name" value={lastName} onChange={setLastName} autoComplete="family-name" />
+          {/* Email is read-only — changing it risks identity collisions +
+              lockout. Customers update it through support. */}
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-zinc-500">Email</span>
+            <div className="flex w-full items-center rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-500">
+              {customer.email || "—"}
+            </div>
+            <span className="mt-1 block text-xs text-zinc-400">Contact support to change your email.</span>
+          </label>
+          <Field
+            label="Phone"
+            value={phone}
+            onChange={(v) => setPhone(formatPhoneDisplay(v))}
+            type="tel"
+            inputMode="numeric"
+            autoComplete="tel-national"
+          />
+        </div>
+        <div className="mt-5 flex items-center gap-3">
+          <button
+            type="button"
+            disabled={!isDirty || saving}
+            onClick={save}
+            className="rounded-lg px-5 py-2.5 text-sm font-semibold text-white shadow-sm disabled:opacity-50"
+            style={{ backgroundColor: primaryColor }}
+          >
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+          {message && (
+            <span className={`text-sm ${message.kind === "ok" ? "text-emerald-600" : "text-rose-600"}`}>
+              {message.text}
+            </span>
+          )}
+        </div>
       </div>
-      <div className="mt-5 flex items-center gap-3">
-        <button
-          type="button"
-          disabled={!isDirty || saving}
-          onClick={save}
-          className="rounded-lg px-5 py-2.5 text-sm font-semibold text-white shadow-sm disabled:opacity-50"
-          style={{ backgroundColor: primaryColor }}
-        >
-          {saving ? "Saving…" : "Save changes"}
-        </button>
-        {message && (
-          <span className={`text-sm ${message.kind === "ok" ? "text-emerald-600" : "text-rose-600"}`}>
-            {message.text}
-          </span>
-        )}
-      </div>
+
+      {/* Linked accounts — other profiles in this customer's link group. */}
+      {linkedAccounts.length > 0 && (
+        <div className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-6">
+          <h3 className="text-sm font-semibold text-zinc-900">Linked accounts</h3>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            These profiles share your subscriptions, orders, and rewards.
+          </p>
+          <ul className="mt-3 divide-y divide-zinc-100">
+            {linkedAccounts.map((a) => (
+              <li key={a.id} className="flex items-center justify-between py-2.5">
+                <div>
+                  <div className="text-sm font-medium text-zinc-900">{a.name}</div>
+                  <div className="text-xs text-zinc-500">{a.email || "—"}</div>
+                </div>
+                {a.isPrimary && (
+                  <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-600">Primary</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

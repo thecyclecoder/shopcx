@@ -58,6 +58,7 @@ interface Props {
     email: string;
     phone: string;
     linkedIds: string[];
+    linkedAccounts?: Array<{ id: string; name: string; email: string; isPrimary: boolean }>;
   };
   subscriptions: PortalSubscription[];
   orders: PortalOrder[];
@@ -277,6 +278,7 @@ export default function PortalClient(props: Props) {
                 email: props.customer.email,
                 phone: props.customer.phone,
               }}
+              linkedAccounts={props.customer.linkedAccounts ?? []}
               primaryColor={props.workspace.primaryColor}
             />
           )}

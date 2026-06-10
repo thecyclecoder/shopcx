@@ -86,13 +86,27 @@ export default async function PortalHome({
     .eq("customer_id", customerId)
     .maybeSingle();
   let linkedIds = [customerId];
+  // Linked-account list for the Account section (name + email + which is
+  // primary). Only the OTHER accounts in the group are shown to the customer.
+  let linkedAccounts: Array<{ id: string; name: string; email: string; isPrimary: boolean }> = [];
   if (link?.group_id) {
     const { data: g } = await admin
       .from("customer_links")
-      .select("customer_id")
+      .select("customer_id, is_primary, customers(id, first_name, last_name, email)")
       .eq("group_id", link.group_id);
     linkedIds = (g || []).map((r) => r.customer_id as string);
     if (!linkedIds.includes(customerId)) linkedIds.push(customerId);
+    linkedAccounts = (g || [])
+      .filter((r) => r.customer_id !== customerId)
+      .map((r) => {
+        const c = r.customers as unknown as { id: string; first_name: string | null; last_name: string | null; email: string | null };
+        return {
+          id: c.id,
+          name: [c.first_name, c.last_name].filter(Boolean).join(" ") || "(no name)",
+          email: c.email || "",
+          isPrimary: !!r.is_primary,
+        };
+      });
   }
 
   // ── Workspace branding ──
@@ -184,6 +198,7 @@ export default async function PortalHome({
         email: (customer.email as string | null) || "",
         phone: (customer.phone as string | null) || "",
         linkedIds,
+        linkedAccounts,
       }}
       subscriptions={enrichedSubs as unknown as PortalSubscription[]}
       orders={enrichedOrders as unknown as PortalOrder[]}
