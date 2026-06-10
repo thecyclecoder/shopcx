@@ -13,6 +13,7 @@ interface Post {
   id: string; platform: string; post_type: string; source_kind: string;
   caption: string | null; scheduled_at: string; status: string;
   published_permalink: string | null; error: string | null; media_url: string | null;
+  preview_url: string | null; is_video: boolean;
   reach: number | null; likes: number | null; comments: number | null; saves: number | null; shares: number | null; engagement: number | null;
 }
 interface Page { id: string; platform: string; meta_page_name: string | null; meta_instagram_id: string | null; }
@@ -94,7 +95,15 @@ export default function SocialPublisherPage() {
 
   const PostRow = ({ p, showActions }: { p: Post; showActions: boolean }) => (
     <div className="flex items-start gap-3 border-b border-zinc-200 py-3 last:border-0 dark:border-zinc-800">
-      <div className="w-28 shrink-0 text-xs text-zinc-500">{fmt(p.scheduled_at)}</div>
+      <div className="w-24 shrink-0 text-xs text-zinc-500">{fmt(p.scheduled_at)}</div>
+      <a href={p.preview_url || undefined} target="_blank" rel="noreferrer" className="relative block h-24 w-[72px] shrink-0 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800" title="Open full size">
+        {p.preview_url ? (
+          p.is_video
+            ? <video src={p.preview_url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+            : <img src={p.preview_url} alt="" className="h-full w-full object-cover" />
+        ) : <div className="flex h-full w-full items-center justify-center text-[9px] text-zinc-400">no media</div>}
+        {p.is_video && <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1 text-[9px] text-white">▶ reel</span>}
+      </a>
       <div className="flex shrink-0 flex-col gap-1">
         {badge(p.platform, platformColor(p.platform))}
         {badge(p.post_type, "bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300")}

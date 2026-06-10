@@ -35,6 +35,23 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     admin.from("social_campaigns").select("*").eq("workspace_id", workspaceId).order("starts_on", { ascending: false }),
   ]);
 
+  // Attach a previewable URL to each post: private-bucket assets get a fresh
+  // signed URL; public resource images pass through. Marks videos (reels).
+  type Row = { media_bucket: string | null; media_path: string | null; media_url: string | null; post_type: string; preview_url?: string | null; is_video?: boolean };
+  const enrich = async (rows: Row[]) => {
+    await Promise.all(rows.map(async (r) => {
+      r.is_video = r.post_type === "reel" || !!r.media_path?.endsWith(".mp4");
+      if (r.media_bucket && r.media_path) {
+        const { data } = await admin.storage.from(r.media_bucket).createSignedUrl(r.media_path, 3600);
+        r.preview_url = data?.signedUrl || null;
+      } else {
+        r.preview_url = r.media_url || null;
+      }
+    }));
+    return rows;
+  };
+  await Promise.all([enrich((upcoming.data || []) as Row[]), enrich((recent.data || []) as Row[])]);
+
   const config = { ...DEFAULT_CONFIG, ...(ws.data?.social_scheduler_config || {}) };
   const freqHint = await frequencyHint(admin, workspaceId);
   return NextResponse.json({ config, pages: pages.data || [], upcoming: upcoming.data || [], recent: recent.data || [], promos: promos.data || [], freqHint });
