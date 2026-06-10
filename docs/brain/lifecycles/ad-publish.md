@@ -25,7 +25,8 @@ User token with `ads_management` from `meta_connections.access_token_encrypted` 
 
 - **PAUSED by default** — the ad is created in the ad set but `publish_active=false` → `status=PAUSED`; flip it on in Ads Manager (or check "publish active").
 - **Pick the page** — `page_id` is operator-selected (`listPages`), NOT the org page (`workspaces.meta_page_id` = *Ashwavana*); ads may run under a different page.
-- **Copy variations** ride in `asset_feed_spec.titles[]`/`bodies[]` so Meta optimizes — matches "headline + 3 variations".
+- **Copy variations require a Dynamic Creative ad set.** `asset_feed_spec` with >1 title/body = a dynamic creative; Meta **rejects** it in a regular ad set ("Dynamic Creative ads can only be created under Dynamic Creative Ad Sets"). So `createAdCreative` branches on `isDynamicAdSet(adsetId)`: **dynamic** → `asset_feed_spec` (all variations, `ad_formats:[AUTOMATIC_FORMAT]`); **regular** → single `object_story_spec.video_data` (the FIRST headline + first primary text). To A/B all 4 variations, publish into a Dynamic Creative ad set.
+- **Video ads require a thumbnail** — `object_story_spec.video_data` must include `image_url`/`image_hash` or Meta errors "Your ad needs a video thumbnail". We use `getVideoThumbnail` (Meta's own auto-generated preferred thumbnail) after the video is ready.
 - **Video** = the campaign's ready `reels_9x16` `final_mp4_url` (re-signed fresh, 6h, for the Meta download). Multi-format (PAC) is deferred.
 - **Token expiry** — the connected token expires periodically; reconnect Meta when Graph returns an auth error.
 - New Inngest function → needs an **Inngest sync** after deploy (`PUT /api/inngest`) before the first publish, like other new functions.

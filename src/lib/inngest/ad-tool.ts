@@ -39,7 +39,7 @@ import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
-import { getMetaUserToken, uploadAdVideo, waitForVideoReady, createAdCreative, createAd } from "@/lib/meta-ads";
+import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, isDynamicAdSet, createAdCreative, createAd } from "@/lib/meta-ads";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -751,6 +751,11 @@ export const adToolPublishToMeta = inngest.createFunction(
         await waitForVideoReady(ctx.token!, videoId, { timeoutMs: 300000 });
 
         await setStatus("creating");
+        // Video ads need a thumbnail; copy variations only work in dynamic ad sets.
+        const [thumbnailUrl, dynamic] = await Promise.all([
+          getVideoThumbnail(ctx.token!, videoId),
+          isDynamicAdSet(ctx.token!, j.meta_adset_id),
+        ]);
         const creativeId = await createAdCreative(ctx.token!, {
           accountId: j.meta_account_id,
           name: ctx.adName,
@@ -763,7 +768,7 @@ export const adToolPublishToMeta = inngest.createFunction(
           ctaType: j.cta_type,
           destinationUrl: j.destination_url,
           urlTags: `utm_source=meta&utm_medium=paid_social&utm_campaign=${encodeURIComponent(ctx.adName)}`,
-        });
+        }, { dynamic, thumbnailUrl });
         await admin.from("ad_publish_jobs").update({ meta_creative_id: creativeId }).eq("id", job_id);
 
         const adId = await createAd(ctx.token!, j.meta_account_id, {

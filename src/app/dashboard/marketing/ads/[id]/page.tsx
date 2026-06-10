@@ -179,7 +179,8 @@ export default function AdDetailPage() {
   const inFlight =
     (campaign?.status === "rendering") ||
     segments.some((s) => s.status === "generating") ||
-    videos.some((v) => v.status === "rendering");
+    videos.some((v) => v.status === "rendering") ||
+    publishJobs.some((j: any) => ["queued", "uploading", "creating"].includes(j.publish_status));
   useEffect(() => {
     if (!inFlight) return;
     const t = setInterval(load, 5000);

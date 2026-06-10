@@ -46,6 +46,12 @@ async function metaGet(path: string, token: string): Promise<any> {
   return json;
 }
 
+function metaErr(status: number, error: any): Error {
+  // Meta's useful detail is in error_user_title/msg, not the terse `message`.
+  const detail = error?.error_user_title ? `${error.error_user_title}: ${error.error_user_msg || ""}` : error?.message || "graph_error";
+  return new Error(`meta_${status}: ${detail}`.trim());
+}
+
 async function metaPost(path: string, body: Record<string, unknown>, token: string): Promise<any> {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(body)) {
@@ -55,8 +61,18 @@ async function metaPost(path: string, body: Record<string, unknown>, token: stri
   params.append("access_token", token);
   const res = await fetch(`${GRAPH_BASE}/${path}`, { method: "POST", body: params });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.error) throw new Error(`meta_${res.status}: ${json.error?.message || "graph_error"}`);
+  if (!res.ok || json.error) throw metaErr(res.status, json.error);
   return json;
+}
+
+/** Whether an ad set is flagged Dynamic Creative (asset_feed_spec creatives only work in these). */
+export async function isDynamicAdSet(token: string, adsetId: string): Promise<boolean> {
+  try {
+    const j = await metaGet(`${adsetId}?fields=is_dynamic_creative`, token);
+    return j.is_dynamic_creative === true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Listing (for the publish selectors) ─────────────────────────────────────
@@ -129,26 +145,65 @@ export interface CreativeArgs {
   urlTags?: string | null; // UTM query string
 }
 
+/** Meta's auto-generated thumbnail URL for a processed video (required by video ads). */
+export async function getVideoThumbnail(token: string, videoId: string): Promise<string | null> {
+  try {
+    const j = await metaGet(`${videoId}/thumbnails?fields=uri,is_preferred`, token);
+    const arr = j.data || [];
+    const pref = arr.find((t: any) => t.is_preferred) || arr[0];
+    return pref?.uri || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Create an ad creative. Copy variations ride in `asset_feed_spec` so Meta
- * optimizes across the headlines × bodies (dynamic creative).
+ * Create an ad creative. Two shapes (Meta is strict here):
+ *   - **dynamic ad set** → `asset_feed_spec` with `ad_formats:[AUTOMATIC_FORMAT]`,
+ *     so the headline × body variations become a dynamic creative. ONLY works in
+ *     ad sets flagged `is_dynamic_creative` (else "Dynamic Creative ads can only
+ *     be created under Dynamic Creative Ad Sets").
+ *   - **regular ad set** → single `object_story_spec.video_data` (first headline +
+ *     first primary text). Video ads REQUIRE a thumbnail (`image_url`/`image_hash`).
  */
-export async function createAdCreative(token: string, a: CreativeArgs): Promise<string> {
-  const body: Record<string, unknown> = {
-    name: a.name,
-    object_story_spec: { page_id: a.pageId, ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}) },
-    asset_feed_spec: {
-      videos: [{ video_id: a.videoId, ...(a.thumbnailHash ? { thumbnail_hash: a.thumbnailHash } : {}) }],
-      titles: a.headlines.filter(Boolean).map((text) => ({ text })),
-      bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
-      ...(a.description ? { descriptions: [{ text: a.description }] } : {}),
-      call_to_action_types: [a.ctaType],
-      link_urls: [{ website_url: a.destinationUrl }],
-      ad_formats: ["AUTOMATIC_FORMAT"],
-    },
-    degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
-    ...(a.urlTags ? { url_tags: a.urlTags } : {}),
-  };
+export async function createAdCreative(token: string, a: CreativeArgs, opts: { dynamic: boolean; thumbnailUrl?: string | null }): Promise<string> {
+  const ig = a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {};
+  let body: Record<string, unknown>;
+  if (opts.dynamic) {
+    body = {
+      name: a.name,
+      object_story_spec: { page_id: a.pageId, ...ig },
+      asset_feed_spec: {
+        videos: [{ video_id: a.videoId, ...(a.thumbnailHash ? { thumbnail_hash: a.thumbnailHash } : {}) }],
+        titles: a.headlines.filter(Boolean).map((text) => ({ text })),
+        bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
+        ...(a.description ? { descriptions: [{ text: a.description }] } : {}),
+        call_to_action_types: [a.ctaType],
+        link_urls: [{ website_url: a.destinationUrl }],
+        ad_formats: ["AUTOMATIC_FORMAT"],
+      },
+      degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
+      ...(a.urlTags ? { url_tags: a.urlTags } : {}),
+    };
+  } else {
+    const thumb = opts.thumbnailUrl ? { image_url: opts.thumbnailUrl } : a.thumbnailHash ? { image_hash: a.thumbnailHash } : {};
+    body = {
+      name: a.name,
+      object_story_spec: {
+        page_id: a.pageId,
+        ...ig,
+        video_data: {
+          video_id: a.videoId,
+          title: a.headlines.find(Boolean) || "",
+          message: a.primaryTexts.find(Boolean) || "",
+          ...(a.description ? { link_description: a.description } : {}),
+          ...thumb,
+          call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
+        },
+      },
+      ...(a.urlTags ? { url_tags: a.urlTags } : {}),
+    };
+  }
   const j = await metaPost(`${actId(a.accountId)}/adcreatives`, body, token);
   if (!j.id) throw new Error("meta_creative_no_id");
   return j.id;
