@@ -16,6 +16,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { pickBySourceKind, type SourceKind } from "@/lib/social/resources";
 import { generateCaption, type PostType } from "@/lib/social/generate-caption";
 import { publishScheduledPost, type ScheduledPostRow } from "@/lib/social/publish";
+import { loadSlotSignals, pickBestSlot } from "@/lib/social/optimizer";
+
+function localHourOf(iso: string, tz: string): number {
+  const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false }).format(new Date(iso)));
+  return h === 24 ? 0 : h;
+}
 
 interface SchedulerConfig {
   enabled: boolean;
@@ -66,6 +72,9 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
   const fbPages = (pages || []).filter((p) => p.platform === "facebook");
   if (!igPages.length && !fbPages.length) return 0;
 
+  // Timing optimizer signals (audience-online × our own engagement-by-hour).
+  const signals = await loadSlotSignals(admin, workspaceId, tz);
+
   let created = 0;
   for (let d = 1; d <= HORIZON_DAYS; d++) {
     const date = new Date(Date.now() + d * 86_400_000);
@@ -77,12 +86,18 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
     const dayStartIso = `${dateStr}T00:00:00Z`, dayEndIso = `${dateStr}T23:59:59Z`;
     const { data: dayRows } = await admin
       .from("scheduled_social_posts")
-      .select("platform")
+      .select("platform, meta_page_id, scheduled_at")
       .eq("workspace_id", workspaceId)
       .gte("scheduled_at", dayStartIso).lte("scheduled_at", dayEndIso)
       .neq("status", "cancelled");
     const dayCount: Record<string, number> = { facebook: 0, instagram: 0 };
-    for (const r of dayRows || []) dayCount[r.platform] = (dayCount[r.platform] || 0) + 1;
+    const takenByPage = new Map<string, Set<number>>();
+    for (const r of dayRows || []) {
+      dayCount[r.platform] = (dayCount[r.platform] || 0) + 1;
+      const set = takenByPage.get(r.meta_page_id) || new Set<number>();
+      set.add(localHourOf(r.scheduled_at as string, tz));
+      takenByPage.set(r.meta_page_id, set);
+    }
 
     // Active promo covering this date — themes the captions and may lift the cap.
     const { data: promos } = await admin
@@ -124,12 +139,16 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
         productId: asset.productId, resourceSummary: asset.resourceSummary,
         now: date, campaignBrief: promo?.brief || undefined,
       });
-      const slot = (config.time_slots[type] || ["12:00"])[0];
-      const scheduledAt = zonedToUtc(dateStr, slot, tz).toISOString();
+      const candidateSlots = config.time_slots[type] || ["12:00"];
       const status = config.require_approval ? "draft" : "scheduled";
 
       for (const page of targets) {
         if ((dayCount[page.platform] || 0) >= capForDay) continue;  // per-platform daily cap (promo may lift it)
+        // Optimizer picks the best open slot for this page/type (falls back to
+        // the configured order before any insights data exists).
+        const taken = takenByPage.get(page.id) || new Set<number>();
+        const slot = pickBestSlot(signals, page.id, page.platform, type, candidateSlots, taken);
+        const scheduledAt = zonedToUtc(dateStr, slot, tz).toISOString();
         const { data: row } = await admin.from("scheduled_social_posts").insert({
           workspace_id: workspaceId,
           meta_page_id: page.id,
@@ -148,6 +167,7 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
         }).select("id").single();
         if (!row) continue;
         dayCount[page.platform] = (dayCount[page.platform] || 0) + 1;
+        taken.add(Number(slot.split(":")[0])); takenByPage.set(page.id, taken);
         created++;
         if (status === "scheduled") {
           await inngest.send({ name: "social/publish", data: { post_id: row.id } });

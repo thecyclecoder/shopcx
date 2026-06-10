@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
+import { frequencyHint } from "@/lib/social/optimizer";
 
 const DEFAULT_CONFIG = {
   enabled: false,
@@ -35,7 +36,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   ]);
 
   const config = { ...DEFAULT_CONFIG, ...(ws.data?.social_scheduler_config || {}) };
-  return NextResponse.json({ config, pages: pages.data || [], upcoming: upcoming.data || [], recent: recent.data || [], promos: promos.data || [] });
+  const freqHint = await frequencyHint(admin, workspaceId);
+  return NextResponse.json({ config, pages: pages.data || [], upcoming: upcoming.data || [], recent: recent.data || [], promos: promos.data || [], freqHint });
 }
 
 // PATCH — update the scheduler config.

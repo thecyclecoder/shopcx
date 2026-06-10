@@ -13,6 +13,7 @@ interface Post {
   id: string; platform: string; post_type: string; source_kind: string;
   caption: string | null; scheduled_at: string; status: string;
   published_permalink: string | null; error: string | null; media_url: string | null;
+  reach: number | null; likes: number | null; comments: number | null; saves: number | null; shares: number | null; engagement: number | null;
 }
 interface Page { id: string; platform: string; meta_page_name: string | null; meta_instagram_id: string | null; }
 interface Promo { id: string; name: string; starts_on: string; ends_on: string; brief: string; active: boolean; boost_per_platform_per_day: number | null; }
@@ -40,6 +41,7 @@ export default function SocialPublisherPage() {
   const [upcoming, setUpcoming] = useState<Post[]>([]);
   const [recent, setRecent] = useState<Post[]>([]);
   const [promos, setPromos] = useState<Promo[]>([]);
+  const [freqHint, setFreqHint] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
@@ -49,7 +51,7 @@ export default function SocialPublisherPage() {
   const load = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/social`);
     const d = await res.json();
-    setConfig(d.config); setPages(d.pages); setUpcoming(d.upcoming); setRecent(d.recent); setPromos(d.promos);
+    setConfig(d.config); setPages(d.pages); setUpcoming(d.upcoming); setRecent(d.recent); setPromos(d.promos); setFreqHint(d.freqHint || "");
     setLoading(false);
   }, [workspace.id]);
   useEffect(() => { load(); }, [load]);
@@ -105,6 +107,9 @@ export default function SocialPublisherPage() {
         <div className="mt-1 flex items-center gap-2 text-[11px] text-zinc-500">
           <span>{p.source_kind}</span>
           {badge(p.status, statusColor(p.status))}
+          {p.status === "posted" && p.engagement != null && (
+            <span className="text-zinc-400">{p.reach != null ? `${p.reach} reach · ` : ""}♥ {p.likes ?? 0} · 💬 {p.comments ?? 0}{p.saves != null ? ` · 🔖 ${p.saves}` : ""}{p.shares != null ? ` · ↗ ${p.shares}` : ""}</span>
+          )}
           {p.error && <span className="text-red-400">{p.error}</span>}
           {p.published_permalink && <a href={p.published_permalink} target="_blank" rel="noreferrer" className="text-indigo-400 hover:underline">view ↗</a>}
         </div>
@@ -194,7 +199,14 @@ export default function SocialPublisherPage() {
       </div>
 
       {/* Recent */}
-      <h2 className="mb-2 text-sm font-semibold text-zinc-300">Recently posted</h2>
+      <div className="mb-2 flex items-center gap-2">
+        <h2 className="text-sm font-semibold text-zinc-300">Recently posted</h2>
+        {freqHint && freqHint !== "no_data" && (
+          <span className="text-xs text-zinc-500">
+            · engagement trend: {freqHint === "increase" ? "📈 strong — room to post more" : freqHint === "decrease" ? "📉 easing — consider posting less" : "steady"}
+          </span>
+        )}
+      </div>
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 px-4">
         {recent.length ? recent.map((p) => <PostRow key={p.id} p={p} showActions={false} />) : <p className="py-6 text-center text-sm text-zinc-500">No posts yet.</p>}
       </div>
