@@ -5,7 +5,7 @@ const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula"
   // Post-Shopify storefront platform — public storefront routes +
   // the pixel/cart/lead/checkout APIs they call. Auth-gating these
   // would silent-fail the funnel for every anonymous visitor.
-  "/api/pixel", "/api/cart", "/api/lead", "/api/checkout",
+  "/api/pixel", "/api/cart", "/api/lead", "/api/checkout", "/api/popup",
   "/customize", "/checkout", "/thank-you",
   // Shortlink redirector — sprfd.co/ABC123 hits this via middleware
   // rewrite; the handler returns a 302 to the campaign target URL.
