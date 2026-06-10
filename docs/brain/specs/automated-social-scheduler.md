@@ -19,13 +19,14 @@
 
 ## Resources → post types → copy
 
-Three content sources (all already in the DB):
+Four content sources (all already in the DB):
 
 1. **Avatar holding product** — `ad_campaigns.hero_image_url` (UGC-style image of an avatar holding the product). → **feed post** (and **story**).
 2. **Finished ad videos** — [[../tables/ad_videos]] `final_mp4_url` where `status='ready'`, `format='reels_9x16'`. → **reel** (and **story**).
-3. **Resources** — [[../tables/posts]] (`is_resource`, e.g. recipes like the chai cookies) with `featured_image_url`. → **feed post**.
+3. **Testimonial / review statics** — [[../tables/ad_videos]] where `media_kind='static'` AND `meta->>'archetype'='review'` (a 5★ testimonial card: real reviewer name + rating + quote + product, e.g. *Tamara L. ★★★★★ "I couldn't wake up without my mushroom coffee" — Verified Purchase*). Image = `static_jpg_url` or re-sign `meta.storage_path`. → **feed post** (and **story**). **Only the `review` archetype** — `offer` statics carry discount CTAs (promo, not engagement) and `benefit_authority` can fold in later.
+4. **Resources** — [[../tables/posts]] (`is_resource`, e.g. recipes like the chai cookies) with `featured_image_url`. → **feed post**.
 
-**Copy generation:** for the ad sources (avatar images + ad videos), generate the caption from the **real product intelligence** — `product_ingredients` + the PI engine (research/benefits) for the campaign/video's `product_id`. (Amazing Coffee → "12 superfoods + adaptogenic mushrooms — Chaga, Cordyceps… time-release caffeine, no 2pm crash.") Resource posts caption from the post's own excerpt/summary. Generation via Anthropic with the PI as grounding; **never invent claims not in the PI**.
+**Copy generation:** for the ad sources (avatar images + ad videos), generate the caption from the **real product intelligence** — `product_ingredients` + the PI engine (research/benefits) for the campaign/video's `product_id`. (Amazing Coffee → "12 superfoods + adaptogenic mushrooms — Chaga, Cordyceps… time-release caffeine, no 2pm crash.") **Testimonial statics:** the review is already baked into the image, so the caption *complements* it — brief social-proof framing + the PI-grounded benefit, never repeating the quote verbatim and never inventing claims. Resource posts caption from the post's own excerpt/summary. Generation via Anthropic with the PI as grounding; **never invent claims not in the PI**.
 
 ## Cadence (best-practice default, configurable)
 
@@ -70,8 +71,8 @@ id, workspace_id
 meta_page_id        → meta_pages.id           (which FB page / IG account)
 platform            facebook | instagram
 post_type           feed | reel | story
-source_kind         avatar | ad_video | resource
-source_ref_id       campaign_id | ad_video_id | post_id
+source_kind         avatar | ad_video | testimonial | resource
+source_ref_id       campaign_id | ad_video_id | ad_video_id (review static) | post_id
 product_id          → products.id             (for PI copy + attribution; null for non-product resources)
 media_bucket, media_path                       (re-signed at publish; null if using a public URL)
 media_url           public URL when applicable (resource images)
