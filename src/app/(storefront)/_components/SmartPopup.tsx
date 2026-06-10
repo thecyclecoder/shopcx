@@ -93,6 +93,13 @@ export function SmartPopup({ workspaceId, productId, productHandle, hasActiveSub
 
     if (hasActiveSub) return; // never interrupt a returning subscriber
 
+    // Already converted: a popup_coupon cookie (they finished the form) or an
+    // arrival via the coupon redeem link (?applied=1) means we must NOT show the
+    // lead-capture popup again — they've already given us their email/phone.
+    const hasCoupon = /(?:^|;\s*)popup_coupon=/.test(document.cookie);
+    const fromCouponLink = new URLSearchParams(window.location.search).get("applied") === "1";
+    if (hasCoupon || fromCouponLink) return;
+
     timeline.current.startedAt = perfNow();
 
     // Bot signals — cheap, no AI. webdriver / headless / no real UA.
