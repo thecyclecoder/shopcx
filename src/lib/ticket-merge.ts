@@ -212,7 +212,13 @@ export async function mergeTickets(
     if (!t.agent_intervened && s.agent_intervened) {
       updates.agent_intervened = true; t.agent_intervened = true;
     }
-    if (!t.assigned_to && s.assigned_to) {
+    // Only carry forward an assignment when a HUMAN actually worked the source
+    // (agent_intervened). A bare routine/auto-assignment (e.g. assigned to the
+    // agent-todo routine with agent_intervened=false) must NOT propagate — it
+    // flips the merged ticket into "agent-handled / defer" mode and blocks the
+    // standard playbooks (cancel/refund) even though no human is on it. (Ida
+    // McDonald 2026-06-10: a merged routine-assignment killed her refund flow.)
+    if (!t.assigned_to && s.assigned_to && s.agent_intervened) {
       updates.assigned_to = s.assigned_to; t.assigned_to = s.assigned_to;
     }
     if (!t.do_not_reply && s.do_not_reply) {
