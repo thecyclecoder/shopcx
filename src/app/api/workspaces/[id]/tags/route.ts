@@ -16,20 +16,29 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  // Get all tickets with non-empty tags
+  // Distinct tags across ALL tickets, computed in the DB. A plain
+  // select("tags") is capped at 1000 rows by Supabase, so in a workspace with
+  // >1000 tickets any tag living only on older tickets was invisible — which
+  // made it impossible to build a view for a newly-introduced tag. The RPC
+  // unnests + distinct's the whole table.
+  const { data, error } = await admin.rpc("distinct_ticket_tags", { p_workspace_id: workspaceId });
+  if (!error) {
+    const tags = ((data as Array<{ tag: string }> | null) || []).map((r) => r.tag).filter(Boolean);
+    return NextResponse.json(tags);
+  }
+
+  // Fallback to the (capped) client-side dedupe if the RPC isn't present yet.
   const { data: tickets } = await admin
     .from("tickets")
     .select("tags")
     .eq("workspace_id", workspaceId)
     .not("tags", "eq", "{}");
-
   const tagSet = new Set<string>();
   for (const t of tickets || []) {
     for (const tag of (t.tags as string[]) || []) {
       tagSet.add(tag);
     }
   }
-
   return NextResponse.json([...tagSet].sort());
 }
 
