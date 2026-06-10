@@ -68,6 +68,8 @@ import { subscriptionTax } from "./subscription-tax";
 export { subscriptionTax } from "./subscription-tax";
 import { shippingProtection } from "./shipping-protection";
 export { shippingProtection } from "./shipping-protection";
+import { resources, resourcePost } from "./resources";
+export { resources, resourcePost } from "./resources";
 import { braintreeClientToken } from "./braintree-client-token";
 export { braintreeClientToken } from "./braintree-client-token";
 import { setSubscriptionPaymentMethod } from "./set-subscription-payment-method";
@@ -152,6 +154,9 @@ export const routeMap: Record<string, RouteHandler> = {
   shippingProtection,
   shippingprotection: shippingProtection,
   shipping_protection: shippingProtection,
+  resources,
+  resourcePost,
+  resourcepost: resourcePost,
   braintreeClientToken,
   braintreeclienttoken: braintreeClientToken,
   braintree_client_token: braintreeClientToken,

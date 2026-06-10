@@ -268,7 +268,7 @@ export default function PortalClient(props: Props) {
             <SupportSection primaryColor={props.workspace.primaryColor} />
           )}
           {section === "resources" && (
-            <ResourcesSection subscriptions={props.subscriptions} />
+            <ResourcesSection primaryColor={props.workspace.primaryColor} />
           )}
           {section === "account" && (
             <AccountSection
