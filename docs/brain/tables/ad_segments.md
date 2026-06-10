@@ -35,6 +35,21 @@ The active row at each `(campaign_id, kind, seq)` is the one in the current cut 
 
 The assembly lives on **`ad_campaigns.composition`** (jsonb), NOT here — see [[ad_campaigns]] and [[../lifecycles/ad-render]]. `ad_segments` holds the pieces; `composition` holds how they're arranged. Render reads both.
 
+## Full artifact map — where every piece of an ad lives
+
+`ad_segments` is only PART of the creative library. The face + holding-product hero are **not** segment rows. To find any artifact of an ad (all in the private **`ad-tool`** storage bucket; DB columns hold signed URLs — re-sign the path for a fresh link):
+
+| Artifact | DB pointer | Storage path |
+|---|---|---|
+| **Avatar face** (no product) | `ad_avatar_candidates.storage_path`; also `ad_avatars.reference_image_urls[0]` | `avatars/{workspace_id}/library/{candidate_id}.png` |
+| **Avatar holding the product** (hero) | `ad_campaigns.hero_image_url` | `avatars/{workspace_id}/heroes/{campaign_id}.png` |
+| **Talking-head clip** (+ its script) | `ad_segments` (`kind=talking_head`, `script_text`, `transcript_json`) | `talking-head/{workspace_id}/{segment_id}.mp4` |
+| **B-roll clip** | `ad_segments` (`kind=broll`, `source_url`) | `broll/{workspace_id}/{segment_id}.mp4` |
+| **Music bed** | `ad_segments` (`kind=music`) | `audio/{workspace_id}/{segment_id}.{mp3,wav}` |
+| **Final video / static** | `ad_videos.final_mp4_url` / `static_jpg_url` (+ `meta.storage_path`) | `finals/{workspace_id}/{video_id}.{mp4,jpg}` |
+
+So: **holding-product images** = query `ad_campaigns` (filter by `workspace_id`/`product_id`) → `hero_image_url`, or re-sign `avatars/{workspace_id}/heroes/{campaign_id}.png` from the campaign id.
+
 ## Gotchas
 
 - **Active + ready only** for assembly: `loadActiveSegments` filters `is_active AND status='ready'`. A `generating`/`failed` segment is excluded from the cut.
