@@ -1048,7 +1048,11 @@ export default function SubscriptionDetail() {
   const b = getBucket(contract);
   const isCancelled = b === 'cancelled';
   const isLocked = !!contract?.portalState?.isLocked;
-  const isReadOnly = isCancelled || isLocked;
+  // First-delivery gate: content/schedule/discount edits are locked until the
+  // first order is delivered (backend enforces; this drives the UI).
+  const mutationsLocked = !!contract?.portalState?.mutationsLocked;
+  const deliveryState = contract?.portalState?.deliveryState;
+  const isReadOnly = isCancelled || isLocked || mutationsLocked;
   const { lines, shipLine } = splitLines(contract);
   const appliedDiscount = contract?.appliedDiscount || contract?.discount || null;
   const appliedCouponCode = appliedDiscount?.code || appliedDiscount?.title || '';
@@ -1118,7 +1122,12 @@ export default function SubscriptionDetail() {
 
       {dunning && <DunningBanner dunning={dunning} />}
 
-      {isLocked && (
+      {mutationsLocked ? (
+        <div class="sp-alert">
+          <div class="sp-alert__title">{deliveryState === 'in_transit' ? 'Your first order is on its way!' : 'Your first order is being prepared'}</div>
+          <div class="sp-alert__body sp-muted">Once it's delivered, you'll be able to fully manage your subscription here — swap products, change quantities, adjust your schedule, and more. You can still cancel or update your payment method anytime.</div>
+        </div>
+      ) : isLocked && (
         <div class="sp-alert">
           <div class="sp-alert__title">Heads up</div>
           <div class="sp-alert__body sp-muted">Your subscription is being set up. Once you receive your first order, you can make edits here.</div>
@@ -1143,7 +1152,7 @@ export default function SubscriptionDetail() {
           {!isReadOnly && <AddressCard contract={contract} startAction={startAction} completeAction={completeAction} failAction={failAction} onUpdate={handleUpdate} />}
           {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}
           {!isCancelled && productIds.length > 0 && <ReviewsCard productIds={productIds} />}
-          {!isReadOnly && <CancelCard router={router} contractId={shortId(contract.id)} />}
+          {!isCancelled && !isLocked && <CancelCard router={router} contractId={shortId(contract.id)} />}
         </div>
       </div>
     </div>
