@@ -18,6 +18,9 @@ export async function GET(request: NextRequest) {
   // (or the storefront root) without the auto-apply cookies.
   const handle = payload?.h && /^[a-z0-9-]+$/i.test(payload.h) ? payload.h : "";
   const dest = new URL(handle ? `/${handle}` : "/", request.nextUrl.origin);
+  // Tag the landing so the PDP shows the "coupon applied — pick your pack"
+  // confetti modal exactly once (the param only exists on this redirect).
+  if (payload) dest.searchParams.set("applied", "1");
   const res = NextResponse.redirect(dest, 302);
 
   if (payload) {

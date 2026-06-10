@@ -30,6 +30,7 @@ import { StorefrontFooter } from "../_components/StorefrontFooter";
 import { ActiveMemberProvider } from "./active-member-context";
 import { PricingModeProvider } from "./pricing-mode-context";
 import { AutoCouponProvider } from "../_components/AutoCouponProvider";
+import { AutoCouponWelcome } from "../_components/AutoCouponWelcome";
 import { UpsellChapter } from "../_sections/UpsellChapter";
 
 // PriceTable is mid-page but interactive on first scroll — load its
@@ -159,6 +160,7 @@ export function StorefrontPage({
       />
 
       <AutoCouponProvider workspaceId={data.workspace.id}>
+      <AutoCouponWelcome />
       <ActiveMemberProvider
         initialMemberId={
           data.link_group?.members.find((m) => m.is_current)?.member_id ?? null
