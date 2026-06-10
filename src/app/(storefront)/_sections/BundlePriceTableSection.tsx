@@ -30,6 +30,7 @@ import { PackageStack } from "../_components/PackageStack";
 import { ShopCTA } from "../_components/ShopCTA";
 import { useAutoCoupon, applyAutoCoupon } from "../_components/AutoCouponProvider";
 import { AutoCouponBanner } from "../_components/AutoCouponBanner";
+import { cdnUrl } from "../_lib/image-urls";
 
 /** Representative free-shipping value folded into the headline savings — matches
  *  the single-product price table + the smart popup's stacked offer. */
@@ -401,7 +402,7 @@ function BundleCard({
           {freeGiftImageUrl && (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={freeGiftImageUrl}
+              src={cdnUrl(freeGiftImageUrl) || freeGiftImageUrl}
               alt=""
               loading="lazy"
               decoding="async"

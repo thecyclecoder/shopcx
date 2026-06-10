@@ -9,6 +9,7 @@ import { ShopCTA } from "../_components/ShopCTA";
 import { PackageStack } from "../_components/PackageStack";
 import { useAutoCoupon, applyAutoCoupon } from "../_components/AutoCouponProvider";
 import { AutoCouponBanner } from "../_components/AutoCouponBanner";
+import { cdnUrl } from "../_lib/image-urls";
 
 /** Representative shipping value folded into the headline savings when a tier
  *  gets free shipping (no address at browse time). Matches the smart popup's
@@ -506,7 +507,7 @@ function PriceCard({
           {rule.free_gift_image_url && (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={rule.free_gift_image_url}
+              src={cdnUrl(rule.free_gift_image_url) || rule.free_gift_image_url}
               alt=""
               loading="lazy"
               decoding="async"
