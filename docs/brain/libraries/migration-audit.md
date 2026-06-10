@@ -15,6 +15,8 @@ See [[../specs/appstle-pricing-heal-and-migration-monitor]] § Phase 3.
 
 1. `is_internal` true · 2. `internal_contract_id` is `internal-*` (no Shopify contract id lingering) · 3. `items_on_uuids` (zero Shopify variant ids, excluding the shipping-protection line) · 4. `appstle_cancelled` — **re-fetches** the old Appstle contract and confirms `status === CANCELLED` (404 = gone = ok; `ACTIVE` = FAIL, double-bill risk) · 5. `cancel_reason` = "migrated to shopcx" (best-effort; passes if Appstle doesn't return the field) · 6. `pricing_preserved` — internal engine `product_subtotal_cents` ≈ `pre_migration_charge_cents` (±2¢/line) · 7. recovery only: `card_pinned` (`payment_method_id` set) + `immediate_charge` (last renewal txn `succeeded`) · 8. `no_double_bill` — NOT (internal live AND Appstle not cancelled).
 
+**Cancelled subs (`status` not in active/paused):** the billing-protection checks (`items_on_uuids`, `card_pinned`, `immediate_charge`) are recorded but **don't fail** the audit — a cancelled sub never bills, so a superseded duplicate / voluntary cancel / test sub with a non-catalog item shouldn't false-flag forever. Only the core migration facts (1, 2, 4, 8) gate a cancelled sub. (Fixed 2026-06-10 after two correctly-cancelled subs — Mary Carter's superseded 3-pack and a Dylan test sub with an unsynced ACV-Gummies variant — sat `failed` on the dashboard.)
+
 ## Flow
 
 - [[migrate-to-internal]] calls `recordMigrationAudit` (capturing the live Appstle pre-migration charge) then `verifyMigration` inline after each flip; `isRecovery` threads from the payment-recovery flow.

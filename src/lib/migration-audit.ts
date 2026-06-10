@@ -71,6 +71,15 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
   const checks: AuditCheck[] = [];
   const push = (key: string, ok: boolean, detail?: string) => checks.push({ key, ok, detail });
 
+  // A cancelled migrated sub never bills, so the billing-protection checks
+  // (items on UUIDs, card pinned, immediate charge) are moot for it — only
+  // the core migration facts (is_internal, internal contract id, Appstle
+  // cancelled, no double-bill) matter. Without this, a correctly-cancelled
+  // sub (a superseded duplicate, a voluntary cancel, a test sub) false-flags
+  // on the dashboard forever. We still RECORD the billing checks for
+  // visibility, but they don't fail the audit when the sub is cancelled.
+  const isLive = ["active", "paused"].includes(String(sub.status));
+
   push("is_internal", sub.is_internal === true);
   const cid = String(sub.shopify_contract_id || "");
   push("internal_contract_id", cid.startsWith("internal-"), cid);
@@ -79,7 +88,11 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     const isProt = String(i.title || "").toLowerCase().includes("shipping protection");
     return !isProt && !UUID_RE.test(String(i.variant_id || ""));
   });
-  push("items_on_uuids", badItems.length === 0, badItems.length ? `${badItems.length} item(s) not UUID` : undefined);
+  push(
+    "items_on_uuids",
+    badItems.length === 0 || !isLive,
+    badItems.length ? `${badItems.length} item(s) not UUID${!isLive ? " (cancelled — won't bill)" : ""}` : undefined,
+  );
 
   await verifyAppstleCancelled(admin, audit.workspace_id as string, String(audit.appstle_contract_id || ""), push);
 
@@ -94,7 +107,9 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     push("pricing_preserved", false, e instanceof Error ? e.message : "pricing engine threw");
   }
 
-  if (audit.is_recovery) {
+  // Recovery checks only apply to a LIVE sub — a recovery that ended
+  // cancelled (e.g. a superseded duplicate) has no card or renewal by design.
+  if (audit.is_recovery && isLive) {
     push("card_pinned", !!sub.payment_method_id, sub.payment_method_id ? undefined : "no pinned card");
     const { data: txn } = await admin
       .from("transactions").select("id, status").eq("subscription_id", sub.id as string)
