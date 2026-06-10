@@ -12,6 +12,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
+import { currentDateContext } from "@/lib/social/seasonality";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -88,12 +89,19 @@ export interface GenerateCaptionArgs {
   postType: PostType;
   productId?: string | null;
   resourceSummary?: string;     // for source_kind='resource'
+  now?: Date;                   // the post's scheduled date (for season-correct copy)
+  campaignBrief?: string;       // active promo theme — caption should lean into it
 }
 
 /** Generate one caption. Returns null on failure (caller can retry or skip). */
 export async function generateCaption(args: GenerateCaptionArgs): Promise<string | null> {
   if (!ANTHROPIC_API_KEY) return null;
   const pi = args.productId ? await loadProductPI(args.productId) : null;
+
+  const dateLine = currentDateContext(args.now || new Date());
+  const promoLine = args.campaignBrief
+    ? `\n\nACTIVE PROMO — lean the caption into this (work it in naturally, don't just tack it on): ${args.campaignBrief}`
+    : "";
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -102,7 +110,7 @@ export async function generateCaption(args: GenerateCaptionArgs): Promise<string
       model: SONNET_MODEL,
       max_tokens: 500,
       system: SYSTEM,
-      messages: [{ role: "user", content: userPrompt(args.sourceKind, args.postType, pi, args.resourceSummary) }],
+      messages: [{ role: "user", content: `${dateLine}${promoLine}\n\n${userPrompt(args.sourceKind, args.postType, pi, args.resourceSummary)}` }],
     }),
   });
   if (!res.ok) return null;

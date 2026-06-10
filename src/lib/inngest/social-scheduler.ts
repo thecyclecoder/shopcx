@@ -25,6 +25,7 @@ interface SchedulerConfig {
   time_slots: { feed: string[]; reel: string[]; story: string[] };
   min_resource_reuse_days: number;
   target_meta_page_ids?: string[];
+  max_posts_per_platform_per_day?: number;  // hard guardrail; start conservative
 }
 
 const HORIZON_DAYS = 7;
@@ -54,6 +55,7 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
   const admin = createAdminClient();
   const tz = config.timezone || "America/Chicago";
   const reuseDays = config.min_resource_reuse_days ?? 21;
+  const dailyCap = config.max_posts_per_platform_per_day ?? 3;  // start at ≤3/platform/day
 
   const { data: pages } = await admin
     .from("meta_pages")
@@ -70,6 +72,29 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
     const dateStr = date.toISOString().slice(0, 10);
     const dow = date.getUTCDay();             // 0 Sun … 6 Sat
     const dayNum = Math.floor(date.getTime() / 86_400_000);
+
+    // Per-platform daily cap — seed from anything already on the calendar that day.
+    const dayStartIso = `${dateStr}T00:00:00Z`, dayEndIso = `${dateStr}T23:59:59Z`;
+    const { data: dayRows } = await admin
+      .from("scheduled_social_posts")
+      .select("platform")
+      .eq("workspace_id", workspaceId)
+      .gte("scheduled_at", dayStartIso).lte("scheduled_at", dayEndIso)
+      .neq("status", "cancelled");
+    const dayCount: Record<string, number> = { facebook: 0, instagram: 0 };
+    for (const r of dayRows || []) dayCount[r.platform] = (dayCount[r.platform] || 0) + 1;
+
+    // Active promo covering this date — themes the captions and may lift the cap.
+    const { data: promos } = await admin
+      .from("social_campaigns")
+      .select("brief, boost_per_platform_per_day")
+      .eq("workspace_id", workspaceId)
+      .eq("active", true)
+      .lte("starts_on", dateStr).gte("ends_on", dateStr)
+      .order("starts_on", { ascending: false })
+      .limit(1);
+    const promo = promos?.[0] || null;
+    const capForDay = promo?.boost_per_platform_per_day ? Math.max(dailyCap, promo.boost_per_platform_per_day) : dailyCap;
 
     // Cadence by weekday: story daily, feed Mon/Wed/Fri/Sun, reel Tue/Thu/Sat.
     const plan: { type: PostType; pages: typeof igPages }[] = [];
@@ -92,17 +117,19 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
 
       // Pick ONE asset + caption, cross-post to every target platform.
       const kind = kindForType(type, dayNum);
-      const asset = await pickBySourceKind(admin, workspaceId, kind, reuseDays);
+      const asset = await pickBySourceKind(admin, workspaceId, kind, reuseDays, date);
       if (!asset) continue;
       const caption = await generateCaption({
         workspaceId, sourceKind: kind, postType: type,
         productId: asset.productId, resourceSummary: asset.resourceSummary,
+        now: date, campaignBrief: promo?.brief || undefined,
       });
       const slot = (config.time_slots[type] || ["12:00"])[0];
       const scheduledAt = zonedToUtc(dateStr, slot, tz).toISOString();
       const status = config.require_approval ? "draft" : "scheduled";
 
       for (const page of targets) {
+        if ((dayCount[page.platform] || 0) >= capForDay) continue;  // per-platform daily cap (promo may lift it)
         const { data: row } = await admin.from("scheduled_social_posts").insert({
           workspace_id: workspaceId,
           meta_page_id: page.id,
@@ -119,8 +146,10 @@ async function planWorkspace(workspaceId: string, config: SchedulerConfig): Prom
           status,
           created_by: "system",
         }).select("id").single();
+        if (!row) continue;
+        dayCount[page.platform] = (dayCount[page.platform] || 0) + 1;
         created++;
-        if (row && status === "scheduled") {
+        if (status === "scheduled") {
           await inngest.send({ name: "social/publish", data: { post_id: row.id } });
         }
       }

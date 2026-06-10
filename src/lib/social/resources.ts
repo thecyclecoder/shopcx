@@ -8,6 +8,7 @@
  * media_url + a summary for caption grounding.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { isSeasonallyAppropriate } from "@/lib/social/seasonality";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -99,15 +100,19 @@ export async function pickTestimonial(admin: Admin, workspaceId: string, exclude
 }
 
 /** Blog resource (recipe / guide). Public image URL + summary for the caption. */
-export async function pickResource(admin: Admin, workspaceId: string, exclude: Set<string>): Promise<PickedAsset | null> {
+export async function pickResource(admin: Admin, workspaceId: string, exclude: Set<string>, now: Date = new Date()): Promise<PickedAsset | null> {
   const { data } = await admin
     .from("posts")
-    .select("id, excerpt, content_text, featured_image_url")
+    .select("id, title, tags, excerpt, content_text, featured_image_url")
     .eq("workspace_id", workspaceId)
     .eq("is_resource", true)
     .eq("published", true)
     .not("featured_image_url", "is", null);
-  const eligible = (data || []).filter((p) => !exclude.has(p.id));
+  // Skip resources that read as off-season for `now` (e.g. a fall chai recipe in
+  // June, a July-4th post in October). Evergreen resources always pass.
+  const eligible = (data || []).filter((p) =>
+    !exclude.has(p.id) &&
+    isSeasonallyAppropriate(`${p.title || ""} ${(p.tags || []).join(" ")} ${(p.excerpt || p.content_text || "").slice(0, 800)}`, now));
   const pick = pickRandom(eligible);
   if (!pick) return null;
   let productId: string | null = null;
@@ -123,12 +128,12 @@ export async function pickResource(admin: Admin, workspaceId: string, exclude: S
 
 export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource";
 
-export async function pickBySourceKind(admin: Admin, workspaceId: string, kind: SourceKind, reuseDays: number): Promise<PickedAsset | null> {
+export async function pickBySourceKind(admin: Admin, workspaceId: string, kind: SourceKind, reuseDays: number, now: Date = new Date()): Promise<PickedAsset | null> {
   const exclude = await recentlyUsedRefIds(admin, workspaceId, kind, reuseDays);
   switch (kind) {
     case "avatar": return pickAvatar(admin, workspaceId, exclude);
     case "ad_video": return pickAdVideo(admin, workspaceId, exclude);
     case "testimonial": return pickTestimonial(admin, workspaceId, exclude);
-    case "resource": return pickResource(admin, workspaceId, exclude);
+    case "resource": return pickResource(admin, workspaceId, exclude, now);
   }
 }
