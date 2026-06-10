@@ -30,6 +30,10 @@ import { PackageStack } from "../_components/PackageStack";
 import { ShopCTA } from "../_components/ShopCTA";
 import { useAutoCoupon, applyAutoCoupon } from "../_components/AutoCouponProvider";
 import { AutoCouponBanner } from "../_components/AutoCouponBanner";
+
+/** Representative free-shipping value folded into the headline savings — matches
+ *  the single-product price table + the smart popup's stacked offer. */
+const FREE_SHIP_VALUE_CENTS = 695;
 import {
   FormatToggle,
   SubscribeToggle,
@@ -83,9 +87,16 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
       : afterQty;
     // Auto-applied popup coupon stacks on top (percentage), reflected in-table.
     const finalPrice = applyAutoCoupon(afterSub, autoCoupon);
-    const savingsCents = msrp - finalPrice;
-    const savingsPct = msrp > 0 ? Math.round((savingsCents / msrp) * 100) : 0;
-    return { n, totalUnits, msrp, qtyDiscount, finalPrice, savingsCents, savingsPct };
+    // Fold the perk value (free shipping + free gift) into the headline savings
+    // so the % matches the popup's stacked offer instead of under-counting.
+    const shipValueCents = rule.free_shipping && (!rule.free_shipping_subscription_only || showSubscribe) ? FREE_SHIP_VALUE_CENTS : 0;
+    const giftQtyOk = totalUnits >= (rule.free_gift_min_quantity || 1);
+    const giftSubOk = !rule.free_gift_subscription_only || showSubscribe;
+    const giftValueCents = rule.free_gift_variant_id && giftQtyOk && giftSubOk ? (rule.free_gift_price_cents || 0) : 0;
+    const anchor = msrp + shipValueCents + giftValueCents;
+    const savingsCents = (msrp - finalPrice) + shipValueCents + giftValueCents;
+    const savingsPct = anchor > 0 ? Math.round((savingsCents / anchor) * 100) : 0;
+    return { n, totalUnits, msrp: anchor, qtyDiscount, finalPrice, savingsCents, savingsPct };
   });
 
   // No real savings on either card? Don't bother rendering the table —

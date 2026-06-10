@@ -10,6 +10,11 @@ import { PackageStack } from "../_components/PackageStack";
 import { useAutoCoupon, applyAutoCoupon } from "../_components/AutoCouponProvider";
 import { AutoCouponBanner } from "../_components/AutoCouponBanner";
 
+/** Representative shipping value folded into the headline savings when a tier
+ *  gets free shipping (no address at browse time). Matches the smart popup's
+ *  stacked-offer shipping value so on-site % == the popup/SMS % the customer saw. */
+const FREE_SHIP_VALUE_CENTS = 695;
+
 /**
  * Price table — rule-driven.
  *
@@ -300,17 +305,10 @@ function PriceCard({
     ? Math.round(tier.subscribe_price_cents / Math.max(1, tier.quantity))
     : tier.per_unit_cents;
 
-  // Total savings vs MSRP: combines the quantity-break discount AND
-  // (when subscribing) the subscribe-save discount. We compare the
-  // current displayed price against MSRP (base × quantity) so a
-  // 3-pack subscribe shows the real ~36% off, not just the bare 25%
-  // subscribe discount.
+  // MSRP for the product (base × quantity). The full headline savings —
+  // including the perk value (free shipping + gift) — is computed below, once
+  // we know which perks this tier actually unlocks.
   const msrp = tier.msrp_total_cents;
-  const savingsCents = msrp != null ? msrp - price : 0;
-  const savingsPct = msrp != null && msrp > 0
-    ? Math.round(((msrp - price) / msrp) * 100)
-    : 0;
-  const showSavings = msrp != null && savingsCents > 0;
 
   // Perk visibility — the rule decides whether free shipping / free
   // gift apply only when subscribing, and the gift further requires
@@ -352,6 +350,22 @@ function PriceCard({
     return null;
   })();
 
+  // Headline savings = the price cut PLUS the value of the perks THIS tier
+  // unlocks (free shipping + free gift). Without folding those in, the % is
+  // under-counted (e.g. 44% instead of the popup's 50%). Anchor the
+  // strikethrough on that same total value so price − strikethrough stays
+  // internally consistent. Perks only count when they actually apply to the
+  // tier (qty gate + subscribe gate already resolved above).
+  const shipValueCents = freeShipApplies ? FREE_SHIP_VALUE_CENTS : 0;
+  const giftValueCents = giftApplies ? (rule?.free_gift_price_cents || 0) : 0;
+  // Only fold perks in when we have a real product MSRP to anchor on (legacy
+  // tiers carry none → keep their original no-savings behavior).
+  const stackValueCents = msrp != null ? shipValueCents + giftValueCents : 0;
+  const anchorCents = (msrp ?? 0) + stackValueCents;
+  const savingsCents = (msrp != null ? msrp - price : 0) + stackValueCents;
+  const savingsPct = anchorCents > 0 ? Math.round((savingsCents / anchorCents) * 100) : 0;
+  const showSavings = savingsCents > 0 && anchorCents > 0;
+
   return (
     <div
       style={tier.is_highlighted ? { borderColor: "var(--storefront-primary)" } : undefined}
@@ -382,9 +396,9 @@ function PriceCard({
         <span className="text-4xl font-bold text-zinc-900">
           ${(price / 100).toFixed(2)}
         </span>
-        {showSavings && msrp != null && (
+        {showSavings && anchorCents > 0 && (
           <span className="text-sm font-semibold text-red-500 line-through">
-            ${(msrp / 100).toFixed(2)}
+            ${(anchorCents / 100).toFixed(2)}
           </span>
         )}
       </div>
