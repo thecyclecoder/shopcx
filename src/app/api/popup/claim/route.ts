@@ -78,14 +78,21 @@ export async function POST(request: Request) {
     }
   }
 
-  // Deliver the code by SMS. The disclaimer matters: the code binds to this
-  // customer, so a shared link won't work for anyone else.
+  // Deliver by SMS. Deliberate choices:
+  //  - NO coupon code in the link version: the link auto-applies it, so there's
+  //    nothing to type — and a hyphenated code (WELCOME-XXXX) makes iMessage
+  //    offer a "copy code" affordance that grabs only the suffix (a broken code).
+  //  - Plain ASCII only (no emoji / em-dash / curly quotes): those force UCS-2
+  //    encoding, which cuts the segment size from 160 to 70 chars. \n\n is free
+  //    in GSM-7, so paragraph breaks cost nothing.
+  //  - Disclaimer: the code binds to this customer, so a shared link is useless
+  //    to anyone else.
   try {
     const { sendSMS } = await import("@/lib/twilio");
     const first = (customer?.first_name as string) || "there";
     const msg = redeemUrl
-      ? `Hi ${first}! Your code ${couponCode} is auto-applied here: ${redeemUrl} — it's just for you and won't work for anyone else.`
-      : `Hi ${first}! Here's your exclusive discount code: ${couponCode}. It's already applied to your order — just complete checkout to claim it. Just for you — don't share.`;
+      ? `Hi ${first}! Your discount is activated.\n\nTap to shop with it auto-applied:\n${redeemUrl}\n\nJust for you, please don't share.`
+      : `Hi ${first}! Your discount is activated. Enter code ${couponCode} at checkout. Just for you - please don't share.`;
     await sendSMS(body.workspace_id, e164, msg);
   } catch (e) {
     console.warn("[popup/claim] SMS send failed:", e instanceof Error ? e.message : e);
