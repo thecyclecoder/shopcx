@@ -128,6 +128,57 @@ async function handle(req: NextRequest) {
               request_payload: requestPayload,
             },
           });
+
+          // The portal UI promises "we're submitting a ticket on your behalf"
+          // when an action fails — so actually create one (tagged, so a view
+          // can collect them) and the agent gets the full context. Light
+          // dedupe: reuse an open `portal-action-failed` ticket from the last
+          // hour instead of spawning a new one per retry.
+          try {
+            const { createAdminClient } = await import("@/lib/supabase/admin");
+            const adminDb = createAdminClient();
+            const hourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+            const { data: existing } = await adminDb
+              .from("tickets")
+              .select("id")
+              .eq("workspace_id", auth.workspaceId)
+              .eq("customer_id", customer.id)
+              .contains("tags", ["portal-action-failed"])
+              .neq("status", "closed")
+              .gte("created_at", hourAgo)
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            const note = `[System] Customer's portal action failed and could not self-serve.\nAction: ${route}\nError: ${body?.error || response.status}${body?.message ? ` — ${body.message}` : ""}\nDetails: ${JSON.stringify(requestPayload || {})}`;
+            let ticketId = existing?.id as string | undefined;
+            if (!ticketId) {
+              const { data: ticket } = await adminDb
+                .from("tickets")
+                .insert({
+                  workspace_id: auth.workspaceId,
+                  customer_id: customer.id,
+                  channel: "portal",
+                  status: "open",
+                  subject: `Portal action needs help: ${route}`,
+                  tags: ["portal-action-failed"],
+                  last_customer_reply_at: new Date().toISOString(),
+                })
+                .select("id")
+                .single();
+              ticketId = ticket?.id as string | undefined;
+            }
+            if (ticketId) {
+              await adminDb.from("ticket_messages").insert({
+                ticket_id: ticketId,
+                direction: "inbound",
+                visibility: "internal",
+                author_type: "system",
+                body: note,
+              });
+            }
+          } catch (e) {
+            console.error("[portal] error-ticket create failed (non-fatal):", e instanceof Error ? e.message : e);
+          }
         }
         } // end else (not validation error)
       } catch { /* non-fatal */ }

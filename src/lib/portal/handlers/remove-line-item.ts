@@ -39,8 +39,10 @@ export const removeLineItem: RouteHandler = async ({ auth, route, req }) => {
   const isShipProt = (i: { title?: string }) => (i.title || "").toLowerCase().includes("shipping protection");
   const items = (resolved.items as { variant_id?: string; line_id?: string; title?: string }[]) || [];
   const rawLineId = lineId && lineId.includes("/") ? lineId.split("/").pop() : lineId;
+  // For internal subs the portal sends the line's `id` (= variant_id) as lineId,
+  // so match it against variant_id too — not just line_id (Appstle).
   const target = items.find(i =>
-    (lineId && (i.line_id === lineId || i.line_id === rawLineId)) ||
+    (lineId && (i.line_id === lineId || i.line_id === rawLineId || String(i.variant_id) === lineId || String(i.variant_id) === rawLineId)) ||
     (variantId && String(i.variant_id) === variantId),
   );
   const removingRealItem = target ? !isShipProt(target) : true; // unknown target → conservative

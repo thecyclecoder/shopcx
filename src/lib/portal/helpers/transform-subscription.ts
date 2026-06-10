@@ -76,7 +76,13 @@ export function transformSubscription(
     const imageUrl = resolveLineImage(product, item);
 
     return {
-      id: item.line_id || "",
+      // Appstle items carry a Shopify line_id; internal items don't (they key
+      // on the catalog variant_id UUID). Falling back to variant_id gives every
+      // line a stable identifier the portal can send back for swap/remove/qty —
+      // the backend handlers resolve internal subs by matching this against
+      // variant_id. Without this, internal lines had id="" and the portal
+      // couldn't identify which line to mutate.
+      id: item.line_id || String(item.variant_id || "") || "",
       title: item.title || "Item",
       variantTitle: item.variant_title || "",
       quantity: item.quantity || 1,

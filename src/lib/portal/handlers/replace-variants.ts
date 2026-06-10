@@ -7,27 +7,36 @@ import { isInternalSubscription } from "@/lib/internal-subscription";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
-function extractNumericId(val: unknown): number {
-  const s = String(val || "");
-  // Strip GID prefix: "gid://shopify/ProductVariant/123" → "123"
-  const numeric = s.includes("/") ? s.split("/").pop() || s : s;
-  return Number(numeric);
+/**
+ * Resolve a variant reference to a STRING id, preserving BOTH shapes:
+ *   - Appstle subs use numeric Shopify variant ids ("123", or a
+ *     "gid://shopify/ProductVariant/123" we strip to "123").
+ *   - Internal subs use catalog UUIDs ("01eab80d-…").
+ * The old `extractNumericId` ran everything through Number(), turning a
+ * UUID into NaN → the item was silently dropped → every internal-sub
+ * modify failed with `no_changes`. We keep the ref as-is.
+ */
+function extractVariantRef(val: unknown): string {
+  const str = String(val ?? "").trim();
+  if (!str) return "";
+  // Strip a GID prefix: "gid://shopify/ProductVariant/123" → "123".
+  return str.includes("/") ? (str.split("/").pop() || str) : str;
 }
 
-function asIntArray(v: unknown): number[] {
+function asRefArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.map((item) => {
-    // Support both number format [123] and object format [{ variantId: "123" }]
+    // Support both ["123"] and [{ variantId: "123" }] shapes.
     if (typeof item === "object" && item !== null) {
-      const id = (item as Record<string, unknown>).variantId ?? (item as Record<string, unknown>).id;
-      return extractNumericId(id);
+      const o = item as Record<string, unknown>;
+      return extractVariantRef(o.variantId ?? o.id);
     }
-    return extractNumericId(item);
-  }).filter(n => Number.isFinite(n) && n > 0).map(Math.trunc);
+    return extractVariantRef(item);
+  }).filter(Boolean);
 }
 
 function asQtyMap(v: unknown): Record<string, number> | null {
-  // Support both object format { "123": 2 } and array format [{ variantId: "123", quantity: 2 }]
+  // Support both { "123": 2 } and [{ variantId: "123", quantity: 2 }] shapes.
   if (!v) return null;
 
   const out: Record<string, number> = {};
@@ -36,16 +45,16 @@ function asQtyMap(v: unknown): Record<string, number> | null {
     for (const item of v) {
       if (typeof item === "object" && item !== null) {
         const obj = item as Record<string, unknown>;
-        const id = extractNumericId(obj.variantId ?? obj.id);
+        const id = extractVariantRef(obj.variantId ?? obj.id);
         const qty = clampInt(obj.quantity ?? 1, 0);
-        if (id > 0 && qty > 0) out[String(Math.trunc(id))] = qty;
+        if (id && qty > 0) out[id] = qty;
       }
     }
   } else if (typeof v === "object") {
     for (const k of Object.keys(v as Record<string, unknown>)) {
-      const id = extractNumericId(k);
+      const id = extractVariantRef(k);
       const qty = clampInt((v as Record<string, unknown>)[k], 0);
-      if (id > 0 && qty > 0) out[String(Math.trunc(id))] = qty;
+      if (id && qty > 0) out[id] = qty;
     }
   }
 
@@ -97,8 +106,8 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   if (!sub?.shopify_contract_id) return jsonErr({ error: "missing_contractId" }, 400);
   const contractId = sub.shopify_contract_id;
 
-  const oldVariants = asIntArray(payload?.oldVariants);
-  const oldOneTimeVariants = asIntArray(payload?.oldOneTimeVariants);
+  const oldVariants = asRefArray(payload?.oldVariants);
+  const oldOneTimeVariants = asRefArray(payload?.oldOneTimeVariants);
   const newVariants = asQtyMap(payload?.newVariants);
   const newOneTimeVariants = asQtyMap(payload?.newOneTimeVariants);
   const oldLineId = s(payload?.oldLineId);
@@ -130,8 +139,11 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     }, 400);
   }
 
-  if (oldVariants.length) body.oldVariants = oldVariants;
-  if (oldOneTimeVariants.length) body.oldOneTimeVariants = oldOneTimeVariants;
+  // The Appstle body wants NUMERIC variant ids (Appstle subs are always
+  // numeric). Internal subs (UUID refs) never use this body — they take the
+  // internal branch below — so coercing to Number here is safe (UUIDs drop out).
+  if (oldVariants.length) body.oldVariants = oldVariants.map(Number).filter(Number.isFinite);
+  if (oldOneTimeVariants.length) body.oldOneTimeVariants = oldOneTimeVariants.map(Number).filter(Number.isFinite);
   if (newVariants) body.newVariants = newVariants;
   if (newOneTimeVariants) body.newOneTimeVariants = newOneTimeVariants;
 
@@ -192,11 +204,15 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     // scheduler bills from). Covers the portal UI's swap / quantity / add.
     let oldVarIds = oldVariants.map(String);
     if (!oldVarIds.length && oldLineId) {
+      // The portal sends the line's `id` as oldLineId. For internal subs that
+      // id IS the variant_id (transform-subscription), so match on EITHER
+      // line_id or variant_id. (Appstle items match line_id; internal match
+      // variant_id.)
       const adminDb = createAdminClient();
       const { data: subData } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
       const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
       const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
-      const li = items.find((i) => i.line_id === rawLineId || i.line_id === oldLineId);
+      const li = items.find((i) => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
       if (li?.variant_id) oldVarIds = [String(li.variant_id)];
     }
     const newEntries: Array<[string, number]> = newVariants ? Object.entries(newVariants).map(([k, v]) => [String(k), Number(v)]) : [];
