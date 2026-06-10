@@ -27,13 +27,18 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const admin = await auth(workspaceId);
   if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const [ws, pages, upcoming, recent, promos] = await Promise.all([
+  const [ws, pages, upcoming, recent, promos, prods] = await Promise.all([
     admin.from("workspaces").select("social_scheduler_config").eq("id", workspaceId).single(),
     admin.from("meta_pages").select("id, platform, meta_page_name, meta_instagram_id, is_active").eq("workspace_id", workspaceId).eq("is_active", true),
     admin.from("scheduled_social_posts").select("*").eq("workspace_id", workspaceId).in("status", ["draft", "scheduled", "publishing"]).order("scheduled_at", { ascending: true }).limit(200),
     admin.from("scheduled_social_posts").select("*").eq("workspace_id", workspaceId).in("status", ["posted", "failed", "cancelled"]).order("scheduled_at", { ascending: false }).limit(60),
     admin.from("social_campaigns").select("*").eq("workspace_id", workspaceId).order("starts_on", { ascending: false }),
+    admin.from("products").select("id, title").eq("workspace_id", workspaceId).order("title"),
   ]);
+  // Only products with an isolated image can get AI promo graphics.
+  const { data: isoVariants } = await admin.from("product_variants").select("product_id").not("isolated_image_url", "is", null);
+  const isoSet = new Set((isoVariants || []).map((v) => v.product_id));
+  const products = (prods.data || []).map((p) => ({ id: p.id, title: p.title, has_isolated: isoSet.has(p.id) }));
 
   // Attach a previewable URL to each post: private-bucket assets get a fresh
   // signed URL; public resource images pass through. Marks videos (reels).
@@ -54,7 +59,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const config = { ...DEFAULT_CONFIG, ...(ws.data?.social_scheduler_config || {}) };
   const freqHint = await frequencyHint(admin, workspaceId);
-  return NextResponse.json({ config, pages: pages.data || [], upcoming: upcoming.data || [], recent: recent.data || [], promos: promos.data || [], freqHint });
+  return NextResponse.json({ config, pages: pages.data || [], upcoming: upcoming.data || [], recent: recent.data || [], promos: promos.data || [], products, freqHint });
 }
 
 // PATCH — update the scheduler config.

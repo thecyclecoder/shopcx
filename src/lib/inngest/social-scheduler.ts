@@ -102,13 +102,14 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
     // Active promo covering this date — themes the captions and may lift the cap.
     const { data: promos } = await admin
       .from("social_campaigns")
-      .select("brief, boost_per_platform_per_day")
+      .select("id, brief, boost_per_platform_per_day, emphasis_product_id, generated_media")
       .eq("workspace_id", workspaceId)
       .eq("active", true)
       .lte("starts_on", dateStr).gte("ends_on", dateStr)
       .order("starts_on", { ascending: false })
       .limit(1);
     const promo = promos?.[0] || null;
+    const promoMedia = (promo?.generated_media || []) as { post_type: string; url: string }[];
     const capForDay = promo?.boost_per_platform_per_day ? Math.max(dailyCap, promo.boost_per_platform_per_day) : dailyCap;
 
     // Cadence by weekday: story daily, feed Mon/Wed/Fri/Sun, reel Tue/Thu/Sat.
@@ -131,8 +132,19 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
       if (existing?.length) continue;
 
       // Pick ONE asset + caption, cross-post to every target platform.
-      const kind = kindForType(type, dayNum);
-      const asset = await pickBySourceKind(admin, workspaceId, kind, reuseDays, date);
+      // During a promo with generated graphics, the feed/story uses the promo
+      // graphic; reels (video) still come from the ad-video library.
+      let kind: SourceKind | "promo";
+      let asset: Awaited<ReturnType<typeof pickBySourceKind>> = null;
+      const promoGraphic = (type === "feed" || type === "story") ? promoMedia.find((g) => g.post_type === type) : undefined;
+      if (promoGraphic) {
+        kind = "promo";
+        asset = { sourceRefId: promo!.id, productId: promo!.emphasis_product_id || null, mediaUrl: promoGraphic.url };
+      } else {
+        const k = kindForType(type, dayNum);
+        kind = k;
+        asset = await pickBySourceKind(admin, workspaceId, k, reuseDays, date);
+      }
       if (!asset) continue;
       const caption = await generateCaption({
         workspaceId, sourceKind: kind, postType: type,

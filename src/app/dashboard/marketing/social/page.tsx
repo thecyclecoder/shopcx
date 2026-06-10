@@ -17,7 +17,8 @@ interface Post {
   reach: number | null; likes: number | null; comments: number | null; saves: number | null; shares: number | null; engagement: number | null;
 }
 interface Page { id: string; platform: string; meta_page_name: string | null; meta_instagram_id: string | null; }
-interface Promo { id: string; name: string; starts_on: string; ends_on: string; brief: string; active: boolean; boost_per_platform_per_day: number | null; }
+interface Promo { id: string; name: string; starts_on: string; ends_on: string; brief: string; active: boolean; boost_per_platform_per_day: number | null; emphasis_product_id: string | null; generated_media: { post_type: string; url: string }[]; graphics_status: string; }
+interface Product { id: string; title: string; has_isolated: boolean; }
 interface Config {
   enabled: boolean; require_approval: boolean; timezone: string;
   cadence: { reel: number; feed: number; story: number };
@@ -49,17 +50,18 @@ export default function SocialPublisherPage() {
   const [upcoming, setUpcoming] = useState<Post[]>([]);
   const [recent, setRecent] = useState<Post[]>([]);
   const [promos, setPromos] = useState<Promo[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [freqHint, setFreqHint] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
-  const [newPromo, setNewPromo] = useState({ name: "", starts_on: "", ends_on: "", brief: "", boost: "" });
+  const [newPromo, setNewPromo] = useState({ name: "", starts_on: "", ends_on: "", brief: "", boost: "", emphasis_product_id: "" });
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/social`);
     const d = await res.json();
-    setConfig(d.config); setPages(d.pages); setUpcoming(d.upcoming); setRecent(d.recent); setPromos(d.promos); setFreqHint(d.freqHint || "");
+    setConfig(d.config); setPages(d.pages); setUpcoming(d.upcoming); setRecent(d.recent); setPromos(d.promos); setProducts(d.products || []); setFreqHint(d.freqHint || "");
     setLoading(false);
   }, [workspace.id]);
   useEffect(() => { load(); }, [load]);
@@ -77,11 +79,15 @@ export default function SocialPublisherPage() {
   };
   const addPromo = async () => {
     if (!newPromo.name || !newPromo.starts_on || !newPromo.ends_on || !newPromo.brief) return;
-    await fetch(`/api/workspaces/${workspace.id}/social/promos`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...newPromo, boost_per_platform_per_day: newPromo.boost ? Number(newPromo.boost) : null }) });
-    setNewPromo({ name: "", starts_on: "", ends_on: "", brief: "", boost: "" }); load();
+    await fetch(`/api/workspaces/${workspace.id}/social/promos`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...newPromo, emphasis_product_id: newPromo.emphasis_product_id || null, boost_per_platform_per_day: newPromo.boost ? Number(newPromo.boost) : null }) });
+    setNewPromo({ name: "", starts_on: "", ends_on: "", brief: "", boost: "", emphasis_product_id: "" }); load();
   };
   const togglePromo = async (p: Promo, del = false) => {
     await fetch(`/api/workspaces/${workspace.id}/social/promos`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ promo_id: p.id, active: !p.active, delete: del }) });
+    load();
+  };
+  const regenGraphics = async (p: Promo) => {
+    await fetch(`/api/workspaces/${workspace.id}/social/promos`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ promo_id: p.id, regenerate: true }) });
     load();
   };
 
@@ -190,22 +196,41 @@ export default function SocialPublisherPage() {
       <div className={`mb-6 ${card}`}>
         <h2 className="mb-3 text-sm font-semibold">Promos &amp; seasonal campaigns</h2>
         {promos.map((p) => (
-          <div key={p.id} className="mb-2 flex items-center gap-3 text-sm">
-            <span className="font-medium">{p.name}</span>
-            <span className="text-xs text-zinc-500">{p.starts_on} → {p.ends_on}</span>
-            <span className="min-w-0 flex-1 truncate text-xs text-zinc-500">{p.brief}</span>
-            {badge(p.active ? "active" : "off", p.active ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-zinc-200 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400")}
-            <button className="text-xs text-zinc-500 hover:underline" onClick={() => togglePromo(p)}>{p.active ? "disable" : "enable"}</button>
-            <button className="text-xs text-red-500 hover:underline" onClick={() => togglePromo(p, true)}>delete</button>
+          <div key={p.id} className="mb-3 border-b border-zinc-100 pb-3 last:border-0 dark:border-zinc-800">
+            <div className="flex items-center gap-3 text-sm">
+              <span className="font-medium">{p.name}</span>
+              <span className="text-xs text-zinc-500">{p.starts_on} → {p.ends_on}</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-zinc-500">{p.brief}</span>
+              {badge(p.active ? "active" : "off", p.active ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-zinc-200 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400")}
+              <button className="text-xs text-zinc-500 hover:underline" onClick={() => togglePromo(p)}>{p.active ? "disable" : "enable"}</button>
+              <button className="text-xs text-red-500 hover:underline" onClick={() => togglePromo(p, true)}>delete</button>
+            </div>
+            {p.emphasis_product_id && (
+              <div className="mt-2 flex items-center gap-2">
+                {p.graphics_status === "generating" && <span className="text-xs text-zinc-500">⏳ generating promo graphics…</span>}
+                {p.graphics_status === "failed" && <span className="text-xs text-red-500">graphics failed (product needs an isolated image)</span>}
+                {(p.generated_media || []).map((g) => (
+                  <a key={g.post_type} href={g.url} target="_blank" rel="noreferrer" className="block h-20 w-16 overflow-hidden rounded border border-zinc-200 dark:border-zinc-700" title={g.post_type}>
+                    <img src={g.url} alt={g.post_type} className="h-full w-full object-cover" />
+                  </a>
+                ))}
+                {p.graphics_status === "ready" && <button className="text-xs text-indigo-600 hover:underline dark:text-indigo-400" onClick={() => regenGraphics(p)}>regenerate</button>}
+              </div>
+            )}
           </div>
         ))}
-        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-6">
           <input placeholder="Name (e.g. July 4th)" value={newPromo.name} onChange={(e) => setNewPromo({ ...newPromo, name: e.target.value })} className={`px-2 py-1 ${input}`} />
           <input type="date" value={newPromo.starts_on} onChange={(e) => setNewPromo({ ...newPromo, starts_on: e.target.value })} className={`px-2 py-1 ${input}`} />
           <input type="date" value={newPromo.ends_on} onChange={(e) => setNewPromo({ ...newPromo, ends_on: e.target.value })} className={`px-2 py-1 ${input}`} />
-          <input placeholder="Brief (offer/angle/CTA)" value={newPromo.brief} onChange={(e) => setNewPromo({ ...newPromo, brief: e.target.value })} className={`col-span-2 px-2 py-1 sm:col-span-1 ${input}`} />
-          <button onClick={addPromo} className="rounded bg-indigo-600 px-3 py-1 text-sm text-white sm:col-span-1">Add promo</button>
+          <input placeholder="Brief (e.g. up to 60% off)" value={newPromo.brief} onChange={(e) => setNewPromo({ ...newPromo, brief: e.target.value })} className={`px-2 py-1 ${input}`} />
+          <select value={newPromo.emphasis_product_id} onChange={(e) => setNewPromo({ ...newPromo, emphasis_product_id: e.target.value })} className={`px-2 py-1 ${input}`}>
+            <option value="">No graphic</option>
+            {products.filter((pr) => pr.has_isolated).map((pr) => <option key={pr.id} value={pr.id}>🎨 {pr.title}</option>)}
+          </select>
+          <button onClick={addPromo} className="rounded bg-indigo-600 px-3 py-1 text-sm text-white">Add promo</button>
         </div>
+        <p className="mt-1 text-[11px] text-zinc-400">Pick a product (🎨 = has an isolated image) and we’ll auto-generate a 4:5 + story promo graphic for the sale.</p>
       </div>
 
       {/* Upcoming */}

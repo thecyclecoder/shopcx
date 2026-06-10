@@ -16,7 +16,7 @@ import { currentDateContext } from "@/lib/social/seasonality";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource";
+export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource" | "promo";
 export type PostType = "feed" | "reel" | "story";
 
 export interface ProductPI {
@@ -71,6 +71,8 @@ function userPrompt(kind: SourceKind, postType: PostType, pi: ProductPI | null, 
     : postType === "reel" ? "Reel caption: a strong hook in the first line, then 1-2 short lines. ~250-400 chars."
     : "Feed caption: hook line + 2-3 short lines of benefit. ~300-500 chars.";
   switch (kind) {
+    case "promo":
+      return `Write a caption for a SALE / PROMO graphic (the offer + discount are already ON the image). Don't repeat the exact discount text; add urgency + a real product benefit and nudge them to shop (Instagram → "link in bio"). ${len}\n\nPRODUCT INTELLIGENCE:\n${pi ? piBlock(pi) : "(none)"}`;
     case "testimonial":
       return `Write a caption to accompany a 5-star customer TESTIMONIAL card image (the review text, reviewer name, rating, and product are already ON the image). Do NOT repeat the review quote. Add brief social-proof framing plus a real benefit from the PI. ${len}\n\nPRODUCT INTELLIGENCE:\n${pi ? piBlock(pi) : "(none)"}`;
     case "resource":

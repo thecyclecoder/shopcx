@@ -82,6 +82,7 @@ import { marketingCouponAutoDisable } from "@/lib/inngest/marketing-coupon-cron"
 import { abandonedCartReminder } from "@/lib/inngest/abandoned-cart";
 import { socialSchedulerPlan, socialPublish } from "@/lib/inngest/social-scheduler";
 import { socialInsightsSync } from "@/lib/inngest/social-insights";
+import { socialPromoGraphics } from "@/lib/inngest/social-promo-graphics";
 import { klaviyoSmsImport } from "@/lib/inngest/klaviyo-sms-import";
 import { klaviyoEventsImport } from "@/lib/inngest/klaviyo-events-import";
 import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-compute";
@@ -180,6 +181,7 @@ export const { GET, POST, PUT } = serve({
     socialSchedulerPlan,
     socialPublish,
     socialInsightsSync,
+    socialPromoGraphics,
     klaviyoSmsImport,
     klaviyoEventsImport,
     klaviyoAttributionCompute,
