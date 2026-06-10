@@ -82,7 +82,7 @@ export function BlogHeader({
               <img
                 src={logoUrl}
                 alt={`${workspaceName} logo`}
-                className="h-7 w-auto md:h-8"
+                className="h-9 w-auto md:h-11"
               />
             ) : (
               <span className="text-base text-zinc-900 md:text-lg" style={wordmarkStyle}>
