@@ -25,6 +25,8 @@ import { ProductJsonLd } from "../_components/ProductJsonLd";
 import { StorefrontPixelInit } from "../_components/StorefrontPixelInit";
 import { StorefrontChapterTracker } from "../_components/StorefrontChapterTracker";
 import { SmartPopup } from "../_components/SmartPopup";
+import { BrandTrustSection } from "../_sections/BrandTrustSection";
+import { StorefrontFooter } from "../_components/StorefrontFooter";
 import { ActiveMemberProvider } from "./active-member-context";
 import { PricingModeProvider } from "./pricing-mode-context";
 import { UpsellChapter } from "../_sections/UpsellChapter";
@@ -200,7 +202,14 @@ export function StorefrontPage({
             <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
             <FAQSection data={data} />
             <FinalCTASection data={data} />
+            {/* Brand-trust chapter + policies footer — on every PDP for
+                legitimacy/trust. */}
+            <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
           </main>
+          <StorefrontFooter
+            workspaceName={data.workspace.name || "Superfoods Company"}
+            supportEmail={data.workspace.support_email}
+          />
         </PricingModeProvider>
       </ActiveMemberProvider>
 

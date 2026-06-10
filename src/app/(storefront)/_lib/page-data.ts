@@ -420,6 +420,7 @@ export interface PageData {
   benefit_angle: BenefitAngleOverride | null;
   workspace: {
     id: string;
+    name: string;
     storefront_slug: string | null;
     storefront_domain: string | null;
     shopify_myshopify_domain: string | null;
@@ -444,7 +445,7 @@ export async function getWorkspaceBySlug(slug: string) {
   const { data } = await admin
     .from("workspaces")
     .select(
-      "id, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url, storefront_off_platform_review_count",
+      "id, name, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url, storefront_off_platform_review_count",
     )
     .eq("storefront_slug", slug)
     .maybeSingle();
@@ -944,6 +945,7 @@ export async function getPageData(
     benefit_angle: (benefitAngleRes.data as BenefitAngleOverride | null) || null,
     workspace: {
       id: workspace.id,
+      name: (workspace.name as string) || "",
       storefront_slug: workspace.storefront_slug,
       storefront_domain: workspace.storefront_domain,
       shopify_myshopify_domain: workspace.shopify_myshopify_domain,
