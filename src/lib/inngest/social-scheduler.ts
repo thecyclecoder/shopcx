@@ -56,7 +56,7 @@ function kindForType(postType: PostType, dayNum: number): SourceKind {
   return (["avatar", "testimonial"] as SourceKind[])[dayNum % 2]; // story (image)
 }
 
-async function planWorkspace(workspaceId: string, config: SchedulerConfig): Promise<number> {
+export async function planWorkspace(workspaceId: string, config: SchedulerConfig): Promise<number> {
   if (!config.enabled || !config.target_meta_page_ids?.length) return 0;
   const admin = createAdminClient();
   const tz = config.timezone || "America/Chicago";
