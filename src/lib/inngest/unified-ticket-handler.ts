@@ -1203,8 +1203,16 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
       });
 
       if (pbActive) {
+        // Internal sentinels ("playbook-apply" from an agent applying a playbook,
+        // "items_selected"/"address_confirmed" from journey completion) ARE the
+        // signal to run the active playbook — never route them through the
+        // new-topic classifier. Haiku would see the literal sentinel string,
+        // call it NEW_TOPIC, and bounce to the orchestrator, so a freshly-applied
+        // playbook would never execute (Ida McDonald 2026-06-10: applied Refund
+        // playbook just sat at step 0 and never explained the ineligibility).
+        const isSentinel = ["address_confirmed", "items_selected", "playbook-apply"].includes(msg.trim().toLowerCase());
         // Ask Haiku: is this message about the active playbook or something new?
-        const isPlaybookRelated = await step.run("classify-playbook-msg", async () => {
+        const isPlaybookRelated = isSentinel ? true : await step.run("classify-playbook-msg", async () => {
           const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
           const pbName = pb?.name || "active issue";
           const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
