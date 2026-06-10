@@ -25,11 +25,21 @@ export async function POST(request: Request) {
     product_id?: string;
     anonymous_id?: string;
     timeline?: Partial<PopupTimeline>;
+    preview?: boolean;
+    variant?: "discount" | "quiz";
   };
   if (!body.workspace_id || !body.anonymous_id) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
   const admin = createAdminClient();
+
+  // Preview/QA (?popup=...): force-show the requested variant with the real
+  // computed offer, skipping the candidacy gate, the rules, the per-session
+  // cache, and the outcome logging (so previews don't pollute analytics).
+  if (body.preview && body.product_id) {
+    const offer = await computePopupOffer(body.workspace_id, body.product_id);
+    return NextResponse.json({ show: true, variant: body.variant || "discount", reason: "preview", offer: offer || {} });
+  }
 
   // One decision per session — return the cached one if present.
   const { data: existing } = await admin

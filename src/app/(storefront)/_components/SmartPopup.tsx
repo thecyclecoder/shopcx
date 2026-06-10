@@ -68,6 +68,28 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+
+    // Preview/QA: ?popup=discount or ?popup=quiz force-opens the form with the
+    // real computed offer, bypassing the behavioral gate. For testing only.
+    const previewVariant = new URLSearchParams(window.location.search).get("popup");
+    if (previewVariant === "discount" || previewVariant === "quiz") {
+      decidedRef.current = true;
+      (async () => {
+        try {
+          const res = await fetch("/api/popup/decide", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workspace_id: workspaceId, product_id: productId, anonymous_id: getAnonymousId(), preview: true, variant: previewVariant }),
+          });
+          const data = (await res.json()) as { variant?: "discount" | "quiz"; offer?: Offer };
+          setVariant((data.variant as "discount" | "quiz") || previewVariant);
+          setOffer(data.offer || {});
+          setOpen(true);
+        } catch { /* ignore */ }
+      })();
+      return;
+    }
+
     if (hasActiveSub) return; // never interrupt a returning subscriber
 
     timeline.current.startedAt = perfNow();
