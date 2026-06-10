@@ -28,6 +28,8 @@ import { useActiveProductData } from "../_lib/active-member-context";
 import { usePricingMode } from "../_lib/pricing-mode-context";
 import { PackageStack } from "../_components/PackageStack";
 import { ShopCTA } from "../_components/ShopCTA";
+import { useAutoCoupon, applyAutoCoupon } from "../_components/AutoCouponProvider";
+import { AutoCouponBanner } from "../_components/AutoCouponBanner";
 import {
   FormatToggle,
   SubscribeToggle,
@@ -38,6 +40,7 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
   const { pricingRule: rule, baseVariant } = useActiveProductData(data);
   const upsell = data.upsell;
   const shared = usePricingMode();
+  const autoCoupon = useAutoCoupon();
 
   if (!upsell) return null;
   if (!rule || !baseVariant) return null;
@@ -75,9 +78,11 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
     const msrp = primaryPrice * n + upsellPrice * n;
     const qtyDiscount = discountForTotal(totalUnits);
     const afterQty = Math.round(msrp * (1 - qtyDiscount / 100));
-    const finalPrice = showSubscribe
+    const afterSub = showSubscribe
       ? Math.round(afterQty * (1 - subDiscount / 100))
       : afterQty;
+    // Auto-applied popup coupon stacks on top (percentage), reflected in-table.
+    const finalPrice = applyAutoCoupon(afterSub, autoCoupon);
     const savingsCents = msrp - finalPrice;
     const savingsPct = msrp > 0 ? Math.round((savingsCents / msrp) * 100) : 0;
     return { n, totalUnits, msrp, qtyDiscount, finalPrice, savingsCents, savingsPct };
@@ -120,6 +125,8 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
             </div>
           );
         })()}
+
+        <AutoCouponBanner coupon={autoCoupon} className="mb-6" />
 
         {/* Same controls as the primary price table — kept in sync via
             the shared pricing-mode + active-member contexts. Customer

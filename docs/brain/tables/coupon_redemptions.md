@@ -34,7 +34,7 @@ count(*) from coupon_redemptions
 - **`WELCOME`** — `redemption_cycle_started_at` = epoch, `per_customer_limit` = 1 → counts all-time → **one per customer forever**.
 - **Reissuable campaign** (`VIPSALE`/`WEEKEND`) — re-running the campaign bumps the master's `redemption_cycle_started_at` to `now()`, so prior redemptions drop out of the count and the customer is eligible again.
 
-Rows are written by [[../libraries/coupons]].`recordCouponRedemption` at the consumption point (today: `applyCouponToSub`; storefront-checkout application is a documented open item).
+Rows are written by [[../libraries/coupons]].`recordCouponRedemption` at the consumption points: **storefront checkout** (`/api/checkout` — applies the discount to the Braintree charge, taxes the discounted base, records the redemption with `order_id` + `subscription_id`) and `applyCouponToSub` (portal / orchestrator / renewal). The coupon is a **first-charge** offer — checkout discounts the initial order but does **not** stamp `applied_discounts`, so subscription renewals bill full price.
 
 ## Gotchas
 

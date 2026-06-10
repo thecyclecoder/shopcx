@@ -29,6 +29,7 @@ import { BrandTrustSection } from "../_sections/BrandTrustSection";
 import { StorefrontFooter } from "../_components/StorefrontFooter";
 import { ActiveMemberProvider } from "./active-member-context";
 import { PricingModeProvider } from "./pricing-mode-context";
+import { AutoCouponProvider } from "../_components/AutoCouponProvider";
 import { UpsellChapter } from "../_sections/UpsellChapter";
 
 // PriceTable is mid-page but interactive on first scroll — load its
@@ -142,6 +143,7 @@ export function StorefrontPage({
       <SmartPopup
         workspaceId={data.workspace.id}
         productId={data.product.id}
+        productHandle={data.product.handle}
         hasActiveSub={false}
         benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
       />
@@ -156,6 +158,7 @@ export function StorefrontPage({
         headerWeight={data.product.header_text_weight}
       />
 
+      <AutoCouponProvider workspaceId={data.workspace.id}>
       <ActiveMemberProvider
         initialMemberId={
           data.link_group?.members.find((m) => m.is_current)?.member_id ?? null
@@ -212,6 +215,7 @@ export function StorefrontPage({
           />
         </PricingModeProvider>
       </ActiveMemberProvider>
+      </AutoCouponProvider>
 
       <RecentOrdersToast orders={data.recent_orders_for_proof} />
     </div>

@@ -58,6 +58,8 @@ interface Body {
    * on the master; single-use is the coupon_redemptions ledger. No row written.
    */
   coupon_master?: string | null;
+  /** PDP handle the popup fired on — threaded to the fallback email's redeem link. */
+  product_handle?: string | null;
   /** Quiz answers to persist on the lead (cups/day + health goal). */
   quiz_answers?: Record<string, unknown> | null;
 }
@@ -224,7 +226,7 @@ export async function POST(request: Request) {
     void import("@/lib/inngest/client").then(({ inngest }) =>
       inngest.send({
         name: "popup/email-lead-captured",
-        data: { workspace_id: body.workspace_id, customer_id: customer.id, email },
+        data: { workspace_id: body.workspace_id, customer_id: customer.id, email, product_handle: body.product_handle || null, coupon_code: mintedCoupon },
       }).catch(() => undefined),
     );
   }

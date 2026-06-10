@@ -198,7 +198,22 @@ export async function POST(request: NextRequest) {
   const linesWithGifts = await ensureFreeGifts(body.workspace_id, resolvedLines);
 
   const subtotalCents = linesWithGifts.reduce((sum, l) => sum + l.line_total_cents, 0);
-  const discountCents = 0;        // TODO when discount_code is applied
+
+  // Resolve the auto-applied popup coupon so the live cart total + the
+  // customize page reflect it. The code rides the popup_coupon cookie; the
+  // owner rides the httpOnly sx_customer cookie (set at claim / land), and
+  // derived codes only resolve for their owner. /api/checkout re-resolves
+  // authoritatively at charge time — this is the display number.
+  const couponCode = body.discount_code || request.cookies.get("popup_coupon")?.value || null;
+  const couponCustomerId = request.cookies.get("sx_customer")?.value || null;
+  let discountCents = 0;
+  if (couponCode) {
+    try {
+      const { resolveCoupon, couponDiscountCents } = await import("@/lib/coupons");
+      const resolved = await resolveCoupon(body.workspace_id, couponCode, couponCustomerId);
+      if (resolved) discountCents = couponDiscountCents(resolved, subtotalCents);
+    } catch { /* display-only — never block the cart on coupon resolution */ }
+  }
   const shippingCents = 0;        // computed at /api/checkout
   const taxCents = 0;             // computed at /api/checkout
   const totalCents = subtotalCents - discountCents + shippingCents + taxCents;

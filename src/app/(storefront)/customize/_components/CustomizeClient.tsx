@@ -589,6 +589,11 @@ export function CustomizeClient({
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
           <div>
             <div className="text-2xl font-bold leading-tight text-zinc-900">{fmt(cart.total_cents)}</div>
+            {cart.discount_cents > 0 && (
+              <div className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-700">
+                🎉 Coupon applied · −{fmt(cart.discount_cents)}
+              </div>
+            )}
             {orderSavingsCents > 0 && (() => {
               // Savings % is against the would-have-paid amount
               // (current paying total + savings). Matches the

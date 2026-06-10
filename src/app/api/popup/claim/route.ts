@@ -21,6 +21,7 @@ export async function POST(request: Request) {
     phone?: string;
     anonymous_id?: string | null;
     sms_consent?: boolean;
+    product_handle?: string | null;
   };
   if (!body.workspace_id || !body.customer_id || !body.phone) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
@@ -64,15 +65,26 @@ export async function POST(request: Request) {
     updated_at: nowIso,
   }).eq("workspace_id", body.workspace_id).eq("customer_id", body.customer_id);
 
+  // Cross-device redeem link — drops them back on the PDP with the code
+  // auto-applied (works even if they open the text on another device).
+  let redeemUrl: string | null = null;
+  if (body.product_handle) {
+    try {
+      const { buildPopupRedeemUrl } = await import("@/lib/popup/redeem-link");
+      redeemUrl = await buildPopupRedeemUrl(body.workspace_id, body.customer_id, couponCode, body.product_handle);
+    } catch (e) {
+      console.warn("[popup/claim] redeem link build failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
   // Deliver the code by SMS.
   try {
     const { sendSMS } = await import("@/lib/twilio");
     const first = (customer?.first_name as string) || "there";
-    await sendSMS(
-      body.workspace_id,
-      e164,
-      `Hi ${first}! Here's your exclusive discount code: ${couponCode}. It's already applied to your order — just complete checkout to claim it.`,
-    );
+    const msg = redeemUrl
+      ? `Hi ${first}! Here's your exclusive code ${couponCode} — tap to shop with it already applied: ${redeemUrl}`
+      : `Hi ${first}! Here's your exclusive discount code: ${couponCode}. It's already applied to your order — just complete checkout to claim it.`;
+    await sendSMS(body.workspace_id, e164, msg);
   } catch (e) {
     console.warn("[popup/claim] SMS send failed:", e instanceof Error ? e.message : e);
   }
@@ -99,6 +111,15 @@ export async function POST(request: Request) {
     maxAge: 60 * 60 * 24 * 7,
     sameSite: "lax",
     httpOnly: false, // checkout client reads it to pre-apply
+  });
+  // Bind the coupon's owner so derived codes resolve for them (cart + checkout
+  // read sx_customer; httpOnly — server only).
+  res.cookies.set("sx_customer", body.customer_id, {
+    path: "/",
+    maxAge: 60 * 60 * 24 * 60,
+    sameSite: "lax",
+    httpOnly: true,
+    secure: true,
   });
   return res;
 }

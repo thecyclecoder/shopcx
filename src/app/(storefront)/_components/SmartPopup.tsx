@@ -24,6 +24,7 @@ import { track, identify, getAnonymousId } from "@/lib/storefront-pixel";
 interface Props {
   workspaceId: string;
   productId: string;
+  productHandle: string; // PDP handle — threaded into the cross-device redeem link
   hasActiveSub: boolean; // returning subscriber → never interrupt
   benefitOptions: string[]; // quiz Q2 options (product_benefit_selections)
 }
@@ -43,7 +44,7 @@ type Step = "hook" | "survey" | "email" | "phone" | "done";
 const SESSION_FLAG = "shopcx_popup_seen";
 const COUNTDOWN_SECONDS = 600; // 10-minute "reserved" window
 
-export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOptions }: Props) {
+export function SmartPopup({ workspaceId, productId, productHandle, hasActiveSub, benefitOptions }: Props) {
   const [variant, setVariant] = useState<"discount" | "quiz" | null>(null);
   const [offer, setOffer] = useState<Offer>({});
   const [open, setOpen] = useState(false);
@@ -275,6 +276,7 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
     <PopupShell
       workspaceId={workspaceId}
       productId={productId}
+      productHandle={productHandle}
       variant={variant}
       offer={offer}
       benefitOptions={benefitOptions}
@@ -306,6 +308,7 @@ function formatUsPhone(raw: string): string {
 function PopupShell({
   workspaceId,
   productId,
+  productHandle,
   variant,
   offer,
   benefitOptions,
@@ -313,6 +316,7 @@ function PopupShell({
 }: {
   workspaceId: string;
   productId: string;
+  productHandle: string;
   variant: "discount" | "quiz";
   offer: Offer;
   benefitOptions: string[];
@@ -365,6 +369,7 @@ function PopupShell({
           // mint_coupon stays as a legacy fallback if the master is absent.
           coupon_master: "WELCOME",
           mint_coupon: { type: "percentage", value: offer.coupon_pct || 15 },
+          product_handle: productHandle,
           quiz_answers: variant === "quiz" ? { cups_per_day: cupsPerDay, health_goal: healthGoal } : undefined,
         }),
       });
@@ -395,7 +400,7 @@ function PopupShell({
       const res = await fetch("/api/popup/claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace_id: workspaceId, customer_id: customerId, phone: phone.replace(/\D/g, ""), anonymous_id: getAnonymousId(), sms_consent: true }),
+        body: JSON.stringify({ workspace_id: workspaceId, customer_id: customerId, phone: phone.replace(/\D/g, ""), anonymous_id: getAnonymousId(), sms_consent: true, product_handle: productHandle }),
       });
       const data = (await res.json()) as { ok?: boolean; mobile?: boolean; reason?: string };
       if (data.ok) {

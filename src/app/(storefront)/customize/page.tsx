@@ -81,15 +81,21 @@ export default async function CustomizePage({ searchParams }: PageProps) {
     const currentLines = (cart.line_items as any[]) || [];
     const fixedLines = await ensureFreeGifts(cart.workspace_id as string, currentLines);
     const fixedSubtotal = fixedLines.reduce((s, l) => s + (l.line_total_cents || 0), 0);
-    const fixedTotal = fixedSubtotal; // shipping/tax computed at checkout
+    // Preserve the auto-applied coupon: keep the same effective discount RATE
+    // when the subtotal shifts (the percentage coupon should track the new
+    // subtotal, not vanish). /api/cart re-resolves authoritatively on edits.
+    const priorDiscountRatio = cart.subtotal_cents > 0 ? (cart.discount_cents || 0) / cart.subtotal_cents : 0;
+    const fixedDiscount = Math.round(fixedSubtotal * priorDiscountRatio);
+    const fixedTotal = fixedSubtotal - fixedDiscount; // shipping/tax computed at checkout
     const linesChanged = JSON.stringify(fixedLines) !== JSON.stringify(currentLines);
-    const totalsChanged = cart.subtotal_cents !== fixedSubtotal || cart.total_cents !== fixedTotal;
+    const totalsChanged = cart.subtotal_cents !== fixedSubtotal || cart.total_cents !== fixedTotal || cart.discount_cents !== fixedDiscount;
     if (linesChanged || totalsChanged) {
       await admin
         .from("cart_drafts")
         .update({
           line_items: fixedLines,
           subtotal_cents: fixedSubtotal,
+          discount_cents: fixedDiscount,
           total_cents: fixedTotal,
           updated_at: new Date().toISOString(),
         })
@@ -97,6 +103,7 @@ export default async function CustomizePage({ searchParams }: PageProps) {
       // Reflect the heal in the cart we pass downstream
       cart.line_items = fixedLines;
       cart.subtotal_cents = fixedSubtotal;
+      cart.discount_cents = fixedDiscount;
       cart.total_cents = fixedTotal;
     }
   }

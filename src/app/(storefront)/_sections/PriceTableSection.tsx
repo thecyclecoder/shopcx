@@ -7,6 +7,8 @@ import { usePricingMode } from "../_lib/pricing-mode-context";
 import { TrustChipRow } from "../_components/TrustChipRow";
 import { ShopCTA } from "../_components/ShopCTA";
 import { PackageStack } from "../_components/PackageStack";
+import { useAutoCoupon, applyAutoCoupon } from "../_components/AutoCouponProvider";
+import { AutoCouponBanner } from "../_components/AutoCouponBanner";
 
 /**
  * Price table — rule-driven.
@@ -40,14 +42,26 @@ export function PriceTableSection({ data }: { data: PageData }) {
   // Build tiers either from the rule (preferred) or from the legacy
   // product_pricing_tiers payload. Both code paths produce the same
   // shape so the renderer below doesn't need to branch.
+  // Auto-applied popup coupon → tables render POST-coupon pricing. We reduce the
+  // effective price_cents / subscribe_price_cents / per_unit while KEEPING
+  // msrp_total_cents, so the existing strikethrough + "Save N%" badge naturally
+  // reflect the deeper stacked discount.
+  const autoCoupon = useAutoCoupon();
   const tiers = useMemo<DisplayTier[]>(() => {
-    if (rule && baseVariant && (rule.quantity_breaks || []).length > 0) {
-      return buildTiersFromRule(rule, baseVariant.price_cents, baseVariant.shopify_variant_id);
-    }
-    return [...data.pricing_tiers]
-      .sort((a, b) => a.display_order - b.display_order)
-      .map(legacyToDisplay);
-  }, [rule, baseVariant, data.pricing_tiers]);
+    const base = (rule && baseVariant && (rule.quantity_breaks || []).length > 0)
+      ? buildTiersFromRule(rule, baseVariant.price_cents, baseVariant.shopify_variant_id)
+      : [...data.pricing_tiers].sort((a, b) => a.display_order - b.display_order).map(legacyToDisplay);
+    if (!autoCoupon || autoCoupon.type !== "percentage") return base;
+    return base.map((t) => ({
+      ...t,
+      price_cents: applyAutoCoupon(t.price_cents, autoCoupon),
+      subscribe_price_cents: t.subscribe_price_cents != null ? applyAutoCoupon(t.subscribe_price_cents, autoCoupon) : null,
+      per_unit_cents: applyAutoCoupon(t.per_unit_cents, autoCoupon),
+      // Keep the pre-coupon price as MSRP so the strikethrough/save badge shows
+      // the deeper discount (legacy tiers carry no msrp — fall back to list price).
+      msrp_total_cents: t.msrp_total_cents ?? t.price_cents,
+    }));
+  }, [rule, baseVariant, data.pricing_tiers, autoCoupon]);
 
   const hasAnySubscribe = tiers.some((t) => t.subscribe_price_cents != null);
 
@@ -83,6 +97,8 @@ export function PriceTableSection({ data }: { data: PageData }) {
         <h2 className="mb-4 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
           Choose your pack
         </h2>
+
+        <AutoCouponBanner coupon={autoCoupon} className="mb-6" />
 
         {data.link_group && data.link_group.members.length > 1 && (
           <FormatToggle linkGroup={data.link_group} data={data} />

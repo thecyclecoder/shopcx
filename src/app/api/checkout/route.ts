@@ -176,6 +176,35 @@ export async function POST(request: NextRequest) {
   const protectionCents = protectionAdded ? (wsProtection?.shipping_protection_price_cents || 0) : 0;
   const protectionTitle = (wsProtection?.shipping_protection_title as string | null) || "Shipping Protection";
 
+  // ── Coupon discount ──────────────────────────────────────────────
+  // Resolve the cart's auto-applied code authoritatively at charge time. Derived
+  // master codes (WELCOME-{short_code}) bind to their owner, so we need the
+  // customer id — look it up by email (the popup created the row at the email
+  // step). The discount comes off the PRODUCT subtotal; tax is then quoted on the
+  // discounted base; the subscription's RENEWALS bill full price (the coupon is a
+  // first-charge offer, so we don't stamp applied_discounts).
+  const couponCode = (cart.discount_code as string | null) || null;
+  const checkoutEmail = body.email.trim().toLowerCase();
+  let discountCents = 0;
+  let resolvedCoupon: import("@/lib/coupons").ResolvedCoupon | null = null;
+  if (couponCode) {
+    const { data: cpCust } = await admin
+      .from("customers")
+      .select("id")
+      .eq("workspace_id", cart.workspace_id)
+      .ilike("email", checkoutEmail)
+      .maybeSingle();
+    const { resolveCoupon, couponDiscountCents } = await import("@/lib/coupons");
+    resolvedCoupon = await resolveCoupon(cart.workspace_id, couponCode, (cpCust?.id as string) || null);
+    if (resolvedCoupon) discountCents = couponDiscountCents(resolvedCoupon, subtotalCents);
+  }
+  // Distribute the discount across taxable product lines (proportionally) so
+  // Avalara taxes the discounted base. Shipping/protection are taxed in full.
+  const discountRatio = discountCents > 0 && subtotalCents > 0 ? discountCents / subtotalCents : 0;
+  const taxableLines = discountRatio > 0
+    ? lines.map((l) => (l.is_gift ? l : { ...l, line_total_cents: Math.round(l.line_total_cents * (1 - discountRatio)) }))
+    : lines;
+
   // ── Tax (Avalara) ────────────────────────────────────────────────
   // Compute the authoritative tax BEFORE charging Braintree, using
   // the order_number we're about to assign as the AvaTax document
@@ -199,7 +228,7 @@ export async function POST(request: NextRequest) {
       const avalaraLines = await buildAvalaraLines({
         admin,
         workspaceId: cart.workspace_id,
-        lines,
+        lines: taxableLines,
         shippingCents,
         shippingMethodLabel: resolved.rate.name || resolved.rate.code || "Shipping",
         protectionCents,
@@ -258,7 +287,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const totalCents = subtotalCents + shippingCents + taxCents + protectionCents;
+  const totalCents = subtotalCents - discountCents + shippingCents + taxCents + protectionCents;
 
   if (totalCents <= 0) {
     return NextResponse.json({ error: "invalid_total" }, { status: 400 });
@@ -683,6 +712,8 @@ export async function POST(request: NextRequest) {
       subscription_id: primarySubscriptionId,
       payment_details: {
         subtotal_cents: subtotalCents,
+        discount_cents: discountCents,
+        discount_code: discountCents > 0 ? couponCode : null,
         shipping_cents: shippingCents,
         tax_cents: taxCents,
         protection_cents: protectionCents,
@@ -741,6 +772,17 @@ export async function POST(request: NextRequest) {
   // Patch the transactions row with the resulting order_id.
   if (transactionRecordId) {
     await admin.from("transactions").update({ order_id: order.id }).eq("id", transactionRecordId);
+  }
+
+  // Record the coupon redemption now that the order is real. Derived master
+  // codes append a coupon_redemptions row (the single-use guard); legacy
+  // explicit coupons burn used_at. Non-fatal — the charge already succeeded.
+  if (resolvedCoupon && discountCents > 0) {
+    const { recordCouponRedemption } = await import("@/lib/coupons");
+    await recordCouponRedemption(cart.workspace_id, resolvedCoupon, customer.id, {
+      orderId: order.id as string,
+      subscriptionId: primarySubscriptionId,
+    }).catch((e) => console.warn("[checkout] coupon redemption record failed:", e instanceof Error ? e.message : e));
   }
 
   // ── 7b. Strangler migration: sweep this customer's Appstle subs onto our

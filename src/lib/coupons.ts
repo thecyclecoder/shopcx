@@ -340,6 +340,21 @@ export async function removeCouponFromSub(
   return { success: true };
 }
 
+/**
+ * The discount (cents) a single resolved coupon takes off a subtotal.
+ * Percentage off the subtotal, or a fixed cents amount (capped at the subtotal).
+ */
+export function couponDiscountCents(
+  resolved: Pick<ResolvedCoupon, "type" | "value">,
+  subtotalCents: number,
+): number {
+  if (subtotalCents <= 0) return 0;
+  const d = resolved.type === "percentage"
+    ? Math.round(subtotalCents * (Math.max(0, Math.min(100, resolved.value)) / 100))
+    : Math.max(0, resolved.value);
+  return Math.max(0, Math.min(d, subtotalCents));
+}
+
 /** Mint a customer-scoped, single-use coupon (used by the smart popup). */
 export async function mintCustomerCoupon(
   workspaceId: string,

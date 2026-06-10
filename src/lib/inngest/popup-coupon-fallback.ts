@@ -20,10 +20,11 @@ export const popupCouponFallback = inngest.createFunction(
     triggers: [{ event: "popup/email-lead-captured" }],
   },
   async ({ event, step }) => {
-    const { workspace_id, customer_id, email } = event.data as {
+    const { workspace_id, customer_id, email, product_handle } = event.data as {
       workspace_id: string;
       customer_id: string;
       email: string;
+      product_handle?: string | null;
     };
 
     // Give the customer 5 minutes to finish the phone step.
@@ -49,9 +50,26 @@ export const popupCouponFallback = inngest.createFunction(
       const { data: customer } = await admin.from("customers").select("first_name").eq("id", customer_id).maybeSingle();
       const first = (customer?.first_name as string) || "there";
 
+      // Cross-device redeem link — drops them back on the PDP with the code
+      // auto-applied (and the price tables reflecting it), no typing required.
+      let redeemUrl: string | null = null;
+      if (product_handle) {
+        try {
+          const { buildPopupRedeemUrl } = await import("@/lib/popup/redeem-link");
+          redeemUrl = await buildPopupRedeemUrl(workspace_id, customer_id, code, product_handle);
+        } catch (e) {
+          console.warn("[popup-coupon-fallback] redeem link build failed:", e instanceof Error ? e.message : e);
+        }
+      }
+
+      const cta = redeemUrl
+        ? `<p><a href="${redeemUrl}" style="display:inline-block;background:#1f5e3a;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;">Shop with my discount applied →</a></p>
+<p style="font-size:12px;color:#888;">The discount is already applied — just complete checkout.</p>`
+        : `<p>Enter it at checkout to claim your savings — it's reserved just for you.</p>`;
+
       const body = `<p>Hi ${first}, here's the discount code you unlocked:</p>
 <p style="font-size:22px;font-weight:700;letter-spacing:1px;">${code}</p>
-<p>Enter it at checkout to claim your savings — it's reserved just for you.</p>
+${cta}
 <p>The ${ws?.name || "Superfoods"} Team</p>`;
 
       try {
