@@ -10,6 +10,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
+## Active project — Auto-generated blog posts (scheduled) ⏳
+
+**Spec:** [[auto-blog-generation]]
+
+**Why this matters:** a daily engine that turns [[../lifecycles/product-intelligence|product intelligence]] (ingredients, benefits, SEO keywords, real citations) + web research into genuinely useful, human-voiced blog posts with original branded imagery (Nano Banana Pro hero composites the real product pouch). Goals: rank on target keywords, give value to buyers, reinforce value for considerers. A working end-to-end prototype already renders live (`why-people-add-mushrooms-to-their-coffee`). Big design pillar: posts must read human (E-E-A-T: real authors, proprietary data, original imagery, anti-AI voice rules) so search engines don't dismiss them as scaled AI content. Open questions in the spec.
+
 ## Active project — Automated Organic Social Scheduler ⏳
 
 **Spec:** [[automated-social-scheduler]]

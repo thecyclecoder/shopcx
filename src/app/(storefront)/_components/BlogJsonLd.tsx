@@ -60,12 +60,15 @@ export function BlogPostJsonLd({
   blogUrl,
   postUrl,
   post,
+  author,
 }: {
   brand: string;
   logoUrl: string | null;
   blogUrl: string;
   postUrl: string;
   post: BlogPostFull;
+  /** Named persona, for the Person `author` (E-E-A-T). Null → org byline. */
+  author?: { name: string; role?: string; bio?: string; avatarUrl?: string } | null;
 }) {
   const article: Record<string, unknown> = {
     "@context": "https://schema.org",
@@ -73,7 +76,15 @@ export function BlogPostJsonLd({
     headline: post.title,
     mainEntityOfPage: { "@type": "WebPage", "@id": postUrl },
     url: postUrl,
-    author: { "@type": "Organization", name: brand },
+    author: author
+      ? {
+          "@type": "Person",
+          name: author.name,
+          ...(author.role ? { jobTitle: author.role } : {}),
+          ...(author.bio ? { description: author.bio } : {}),
+          ...(author.avatarUrl ? { image: author.avatarUrl } : {}),
+        }
+      : { "@type": "Organization", name: brand },
     publisher: publisherLd(brand, logoUrl),
   };
   if (post.seo_description || post.excerpt) {
