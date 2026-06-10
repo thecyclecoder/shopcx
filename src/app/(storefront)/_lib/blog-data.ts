@@ -34,6 +34,26 @@ export function groupingLabel(key: string | null | undefined): string | null {
   return BLOG_GROUPINGS.find((g) => g.key === key)?.label ?? null;
 }
 
+/**
+ * The topic tabs for the blog nav — only groupings that actually have
+ * published posts, in vocab order. Shared by the index and the post page so
+ * the header menu is identical everywhere (a post page must NOT collapse the
+ * menu to just "All").
+ */
+export async function listBlogTopics(
+  workspaceId: string,
+): Promise<{ key: string; label: string }[]> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("posts")
+    .select("grouping")
+    .eq("workspace_id", workspaceId)
+    .eq("published", true)
+    .not("grouping", "is", null);
+  const present = new Set((data || []).map((r) => r.grouping as string));
+  return BLOG_GROUPINGS.filter((g) => present.has(g.key)).map((g) => ({ key: g.key, label: g.label }));
+}
+
 export interface BlogWorkspace {
   id: string;
   name: string;

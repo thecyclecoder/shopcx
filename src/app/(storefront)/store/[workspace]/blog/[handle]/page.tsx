@@ -6,6 +6,7 @@ import {
   getBlogPost,
   listRelatedPosts,
   listBlogPostParams,
+  listBlogTopics,
   groupingLabel,
 } from "../../../../_lib/blog-data";
 import { storefrontFont } from "../../../../_lib/fonts";
@@ -117,6 +118,7 @@ export default async function BlogPostPage({
   if (!post) notFound();
 
   const related = await listRelatedPosts(ws.id, post, 3);
+  const topics = await listBlogTopics(ws.id);
 
   const font = storefrontFont(ws.design.font_key);
   const themeStyle = storefrontThemeStyle(ws.design, font.stack);
@@ -139,7 +141,7 @@ export default async function BlogPostPage({
       <BlogHeader
         workspaceName={ws.name}
         logoUrl={ws.design.logo_url}
-        topics={[]}
+        topics={topics}
         shopUrl={MAIN_SITE}
       />
 

@@ -84,11 +84,14 @@ Built (2026-06-10):
 - ✅ `posts.author_slug` + `posts.social_image_url` migration; byline/Person rendering; `pickResource` social-image preference.
 - ✅ `scripts/_gen-blog-post.ts` / `_gen-blog-post-2.ts` — the working generators (content authored in-script; the LLM writer extracts from these).
 
-Planned (the actual scheduler):
-- `src/lib/inngest/auto-blog.ts` — daily Inngest cron running the pipeline. Idempotent per (product, topic).
-- `src/lib/blog/select-topic.ts` — product + topic + archetype selection (dedup vs existing posts, keyword weighting, rotation).
-- `src/lib/blog/write-post.ts` — the LLM author (voice rules, persona by archetype, citation grounding) → `{title, html, excerpt, seo_*, tags, author_slug}`.
-- Dashboard: extend **Storefront → Blog** with a "Generate now" button (+ optional review toggle).
+The scheduled cron ✅ (2026-06-10):
+- ✅ `src/lib/inngest/auto-blog.ts` — daily Inngest cron (`0 13 * * *`, + `auto-blog/tick` event). Per eligible workspace: select → write → images → insert + post_products, auto-published. Per-workspace try/catch (one failure doesn't block others); handle de-dup so it never clobbers an existing post. Registered in `api/inngest/route.ts`.
+- ✅ `src/lib/blog/select-topic.ts` — picks a published-intelligence product (round-robin by fewest AI posts), the least-covered archetype (recipes/science/how_it_works/how_to_use), an uncovered SEO keyword, the matching persona, the isolated variant image, and bundles the proprietary intelligence (ingredients, research + citations, review phrases).
+- ✅ `src/lib/blog/write-post.ts` — **Opus 4.8 + the Anthropic `web_search_20260209` server tool**: researches live, grounds in the intelligence, writes in-persona under the anti-AI voice rules, emits a delimited block (title/handle/seo/tags/HTML + hero & social image prompts + `{{IMAGE:…}}` in-body placeholders). Resumes through `pause_turn`.
+- **Eligibility:** any workspace with a published-intelligence product that has an isolated (our-storage) variant image — today that's Superfoods. A per-workspace enable flag + a dashboard "Generate now" button are the follow-ups.
+
+Remaining:
+- Dashboard: "Generate now" button + per-workspace enable/cadence config.
 - Full AVIF/WebP multi-width image pipeline (reuse [[../libraries/image-transcode]]).
 
 ## Open questions — settled / remaining
