@@ -419,7 +419,8 @@ function PopupShell({
           {(savings || pct) && (
             <div className="mb-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-center">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Your stacked savings</p>
-              {savings && <p className="mt-1 text-3xl font-extrabold text-zinc-900">{savings} off</p>}
+              {pct && <p className="mt-1 text-4xl font-extrabold leading-none text-zinc-900">{pct} off</p>}
+              {savings && <p className="mt-1 text-sm font-medium text-zinc-500">up to {savings} value</p>}
               <ul className="mt-2 space-y-0.5 text-xs text-zinc-600">
                 {offer.coupon_pct ? <li>✓ {offer.coupon_pct}% signup discount (on top of subscribe &amp; save)</li> : null}
                 {offer.shipping_value_cents ? <li>✓ Free shipping</li> : null}
