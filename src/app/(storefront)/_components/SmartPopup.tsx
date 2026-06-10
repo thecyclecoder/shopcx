@@ -58,7 +58,6 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
     chapterViews: 0,
     priceViewed: false,
     priceDwellMs: 0,
-    priceEnteredAt: 0,
     scrollToPriceClicks: 0,
     tabAwayReturn: 0,
     rageClicks: 0,
@@ -118,28 +117,32 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
       if (dir && lastDir && dir !== lastDir) timeline.current.scrollReversals++;
       if (dir) lastDir = dir;
       lastScrollY = y;
+      samplePriceDwell();
     };
 
-    // Price-section dwell via IntersectionObserver on #pricing.
-    const priceEl = document.querySelector("#pricing, [data-section='pricing']");
-    let priceObserver: IntersectionObserver | null = null;
-    if (priceEl) {
-      priceObserver = new IntersectionObserver(
-        (entries) => {
-          for (const e of entries) {
-            if (e.intersectionRatio >= 0.5) {
-              timeline.current.priceViewed = true;
-              if (!timeline.current.priceEnteredAt) timeline.current.priceEnteredAt = perfNow();
-            } else if (timeline.current.priceEnteredAt) {
-              timeline.current.priceDwellMs += perfNow() - timeline.current.priceEnteredAt;
-              timeline.current.priceEnteredAt = 0;
-            }
-          }
-          maybeDecide();
-        },
-        { threshold: [0, 0.5, 1] },
-      );
-      priceObserver.observe(priceEl);
+    // Price-section dwell — SAMPLED, not IntersectionObserver-ratio. A price
+    // table taller than the viewport can never be 50%-visible by element ratio,
+    // so the old ratio test never fired and price_dwell stayed 0. Instead we
+    // sample the section's position: the customer is "on pricing" whenever it
+    // overlaps the viewport's middle band, and we accumulate the time they
+    // linger there (sampled on scroll + on the periodic tick).
+    const priceEl = document.querySelector(
+      "#pricing, [data-section='pricing'], [data-section='bundle-pricing']",
+    );
+    let lastPriceSampleAt = perfNow();
+    function samplePriceDwell() {
+      if (!priceEl) return;
+      const r = priceEl.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+      if (!vh) return;
+      // Overlaps the middle 20%–80% band of the viewport → they're looking at it.
+      const onPrice = r.top < vh * 0.8 && r.bottom > vh * 0.2;
+      const now = perfNow();
+      if (onPrice) {
+        timeline.current.priceViewed = true;
+        timeline.current.priceDwellMs += now - lastPriceSampleAt;
+      }
+      lastPriceSampleAt = now;
     }
 
     const onClick = (e: MouseEvent) => {
@@ -183,15 +186,13 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
 
     function buildTimeline() {
       const t = timeline.current;
-      let priceDwell = t.priceDwellMs;
-      if (t.priceEnteredAt) priceDwell += perfNow() - t.priceEnteredAt;
       return {
         dwell_ms: perfNow() - t.startedAt,
         max_scroll_pct: t.maxScrollPct,
         scroll_reversals: t.scrollReversals,
         chapter_views: t.chapterViews,
         price_viewed: t.priceViewed,
-        price_dwell_ms: priceDwell,
+        price_dwell_ms: t.priceDwellMs,
         scroll_to_price_clicks: t.scrollToPriceClicks,
         customize_visited: cameFromCustomize,
         returned_to_pdp_from_customize: cameFromCustomize,
@@ -209,6 +210,7 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
     // real call (and caches it per session).
     async function maybeDecide() {
       if (decidedRef.current) return; // already shown this session
+      samplePriceDwell(); // refresh price dwell for the pure-sitting case
       const t = buildTimeline();
       if (t.is_bot || t.pack_selected || t.already_shown) return;
       if (t.dwell_ms < 20_000) return;
@@ -262,7 +264,6 @@ export function SmartPopup({ workspaceId, productId, hasActiveSub, benefitOption
       window.removeEventListener("scroll", onScroll);
       document.removeEventListener("click", onClick, { capture: true });
       document.removeEventListener("visibilitychange", onVisibility);
-      priceObserver?.disconnect();
       chapterObserver.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
