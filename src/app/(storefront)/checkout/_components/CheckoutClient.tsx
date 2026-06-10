@@ -40,6 +40,18 @@ import type { Review } from "../../_lib/page-data";
 import type { CartDraft, StoredLineItem } from "../../customize/_components/CustomizeClient";
 import { HostedFieldsCard, type HostedFieldsCardHandle } from "./HostedFieldsCard";
 
+interface SavedAddress {
+  first_name?: string | null;
+  last_name?: string | null;
+  address1?: string | null;
+  address2?: string | null;
+  city?: string | null;
+  province_code?: string | null;
+  zip?: string | null;
+  country_code?: string | null;
+  phone?: string | null;
+}
+
 interface Workspace {
   id: string;
   name: string;
@@ -160,6 +172,11 @@ export function CheckoutClient({
   const [city, setCity] = useState("");
   const [state, setState] = useState("");
   const [zip, setZip] = useState("");
+  // Saved shipping addresses (across linked accounts), loaded on mount via
+  // /api/checkout/me once authenticated. chosenAddrIdx === null means "use a
+  // new address" (the manual fields below).
+  const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([]);
+  const [chosenAddrIdx, setChosenAddrIdx] = useState<number | null>(null);
   const [billingSameAsShipping, setBillingSameAsShipping] = useState(true);
   // Shipping protection — default on when workspace has it enabled.
   // Customer can uncheck to opt out. Adds price_cents to the total.
@@ -237,6 +254,50 @@ export function CheckoutClient({
     // customer's Braintree vault. Without authedCustomerId in the deps the token
     // was cleared and NEVER refetched — "Loading secure payment…" stuck forever.
   }, [cart.token, authedCustomerId]);
+
+  // Apply a saved address to the shipping fields.
+  function applyAddress(a: SavedAddress) {
+    if (a.first_name) setShipFirst(a.first_name);
+    if (a.last_name) setShipLast(a.last_name);
+    setAddress1(a.address1 || "");
+    setAddress2(a.address2 || "");
+    setCity(a.city || "");
+    setState(a.province_code || "");
+    setZip(a.zip || "");
+  }
+
+  // ── Hydrate auth + saved addresses on mount ──────────────────────
+  // A refresh after OTP keeps the session cookie, so the server still knows the
+  // customer — but the client lost authedCustomerId (and with it the sub-mode
+  // chooser). Re-hydrate it here, and load saved addresses for the picker.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/checkout/me?cart_token=${encodeURIComponent(cart.token)}`);
+        const data = (await res.json()) as {
+          authed?: boolean;
+          customer?: { id: string; first_name?: string | null; last_name?: string | null; phone?: string | null };
+          addresses?: SavedAddress[];
+        };
+        if (cancelled || !data.authed || !data.customer) return;
+        setAuthedCustomerId(data.customer.id);
+        setFirstName((v) => v || data.customer!.first_name || "");
+        setLastName((v) => v || data.customer!.last_name || "");
+        if (data.customer.phone) setPhone((v) => v || formatPhoneDisplay(data.customer!.phone as string));
+        const addrs = data.addresses || [];
+        setSavedAddresses(addrs);
+        // Default to the most recent saved address (mount-time shipping fields
+        // are empty — this is the refresh-after-OTP case).
+        if (addrs.length > 0) {
+          setChosenAddrIdx(0);
+          applyAddress(addrs[0]);
+        }
+      } catch { /* anon or transient — fall back to manual entry */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cart.token]);
 
   // ── Identify (debounced) ─────────────────────────────────────────
   // Fires when email is valid, debounced 700ms so we don't slam the
@@ -948,6 +1009,51 @@ export function CheckoutClient({
             {/* Shipping card */}
             <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Shipping address</p>
+
+              {/* Saved-address picker — shown once authenticated (loaded across
+                  linked accounts). Choosing one fills the fields; "Use a new
+                  address" reveals the empty form. */}
+              {savedAddresses.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {savedAddresses.map((a, i) => (
+                    <label
+                      key={i}
+                      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition ${chosenAddrIdx === i ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                    >
+                      <input
+                        type="radio"
+                        name="ship-addr"
+                        checked={chosenAddrIdx === i}
+                        onChange={() => { setChosenAddrIdx(i); applyAddress(a); }}
+                        className="mt-0.5 h-4 w-4"
+                      />
+                      <div className="min-w-0 flex-1 text-sm">
+                        <div className="truncate font-medium text-zinc-900">
+                          {[a.first_name, a.last_name].filter(Boolean).join(" ") || "Saved address"}
+                        </div>
+                        <div className="truncate text-xs text-zinc-500">
+                          {a.address1}{a.address2 ? `, ${a.address2}` : ""} · {a.city}, {a.province_code} {a.zip}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                  <label
+                    className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 text-sm font-medium transition ${chosenAddrIdx === null ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                  >
+                    <input
+                      type="radio"
+                      name="ship-addr"
+                      checked={chosenAddrIdx === null}
+                      onChange={() => { setChosenAddrIdx(null); setAddress1(""); setAddress2(""); setCity(""); setState(""); setZip(""); }}
+                      className="h-4 w-4"
+                    />
+                    <span className="text-zinc-900">Use a new address</span>
+                  </label>
+                </div>
+              )}
+
+              {(savedAddresses.length === 0 || chosenAddrIdx === null) && (
+              <>
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
                 <input
                   value={shipFirst}
@@ -1007,6 +1113,8 @@ export function CheckoutClient({
                 name="ship-zip"
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
+              </>
+              )}
 
               {workspace.shipping_protection && (
                 <label className="mt-4 flex items-start gap-2 text-xs text-zinc-600">
