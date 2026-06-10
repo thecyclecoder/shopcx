@@ -90,6 +90,9 @@ export interface Contract {
     bucket?: string;
     needsAttention?: boolean;
     recoveryStatus?: string | null;
+    mutationsLocked?: boolean;
+    mutationsLockReason?: string | null;
+    deliveryState?: string | null;
   };
   crisisBanner?: { type?: string; message?: string } | null;
   pricing?: {
@@ -292,6 +295,19 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         </div>
       )}
 
+      {/* Pre-delivery gate — changes unlock once the first order is delivered. */}
+      {contract.portalState?.mutationsLocked && (
+        <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
+          <p className="flex items-center gap-2 text-sm font-semibold text-sky-900">
+            <span aria-hidden>🚚</span>
+            {contract.portalState.deliveryState === "in_transit" ? "Your first order is on its way!" : "Your first order is being prepared"}
+          </p>
+          <p className="mt-1 text-xs text-sky-800">
+            Once it&apos;s delivered, you&apos;ll be able to fully manage your subscription here — swap products, change quantities, adjust your schedule, and more. You can still cancel or update your payment method anytime.
+          </p>
+        </div>
+      )}
+
       {/* Header */}
       <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
         <header className="flex flex-col gap-2 border-b border-zinc-100 p-5 sm:flex-row sm:items-baseline sm:justify-between">
@@ -340,7 +356,8 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       )}
 
       {/* Items + per-line actions — shipping protection has its own
-          dedicated toggle card below, so hide it from the items list. */}
+          dedicated toggle card below, so hide it from the items list. When the
+          first-delivery gate is on, items show read-only (no swap/qty/add/remove). */}
       <ItemsActionsCard
         contract={contract}
         catalog={catalog}
@@ -349,14 +366,16 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         onMutate={loadContract}
         action={action}
         excludeVariantIds={shipProtVariantIds}
+        locked={!!contract.portalState?.mutationsLocked}
       />
 
       {/* Order summary — full breakdown of what they'll be charged. */}
       {!isCancelled && <OrderSummaryCard pricing={contract.pricing} taxCents={taxCents} showTax={!!contract.is_internal} />}
 
       {/* Manage cadence — order now / change date / frequency (active only).
-          Pause/Resume/Reactivate render above the items. */}
-      {status === "active" && (
+          Hidden until the first order is delivered (schedule mutations gated).
+          Pause/Resume/Reactivate render above the items + stay available. */}
+      {status === "active" && !contract.portalState?.mutationsLocked && (
         <>
           <OrderActionsCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           <FrequencyCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
@@ -366,7 +385,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       {/* Account-level cards — only on live subs */}
       {!isCancelled && (
         <>
-          {shipProtVariantIds.length > 0 && (
+          {shipProtVariantIds.length > 0 && !contract.portalState?.mutationsLocked && (
             <ShippingProtectionCard
               contract={contract}
               shipLine={shipLine}
@@ -376,7 +395,9 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
             />
           )}
           <AddressCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
-          <CouponCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          {!contract.portalState?.mutationsLocked && (
+            <CouponCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          )}
           <PaymentMethodCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           <RewardsCard contract={contract} primaryColor={workspace.primaryColor} action={action} />
           {productIdsForReviews.length > 0 && <ReviewsCard productIds={productIdsForReviews} />}
@@ -396,7 +417,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
 // ──────────────────────────── items card ────────────────────────────
 
 function ItemsActionsCard({
-  contract, catalog, isCancelled, primaryColor, onMutate, action, excludeVariantIds,
+  contract, catalog, isCancelled, primaryColor, onMutate, action, excludeVariantIds, locked,
 }: {
   contract: Contract;
   catalog: CatalogProduct[];
@@ -405,6 +426,8 @@ function ItemsActionsCard({
   onMutate: () => Promise<void>;
   action: ActionApi;
   excludeVariantIds?: string[];
+  /** First-delivery gate — show items read-only (no swap/qty/add/remove). */
+  locked?: boolean;
 }) {
   const [modal, setModal] = useState<
     | { type: "addSwap"; mode: "add" | "swap"; line?: ContractLine }
@@ -415,7 +438,8 @@ function ItemsActionsCard({
   const lines = (contract.lines || []).filter(
     (l) => !l.is_gift && !excluded.has(String(l.variantId || "")),
   );
-  const canRemove = lines.length > 1;
+  const canRemove = !locked && lines.length > 1;
+  const readonly = isCancelled || !!locked;
 
   return (
     <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
@@ -427,7 +451,7 @@ function ItemsActionsCard({
       <ul className="divide-y divide-zinc-100">
         {lines.map((ln) => (
           <li key={ln.id} className="p-4 sm:p-5">
-            {isCancelled ? (
+            {readonly ? (
               <LineRow ln={ln} />
             ) : (
               <LineDisclosure
@@ -446,7 +470,7 @@ function ItemsActionsCard({
         ))}
       </ul>
 
-      {!isCancelled && catalog.length > 0 && (
+      {!readonly && catalog.length > 0 && (
         <div className="border-t border-zinc-100 bg-zinc-50 p-4">
           <button
             type="button"

@@ -8,17 +8,24 @@
  * schedule before the first box even ships."
  *
  * Delivery signal differs by sub type:
- *   - internal (Amplifier-fulfilled): the order's EasyPost tracking. If stored
- *     status is stale we do a LIVE lookup on the tracking number; no tracking
+ *   - internal (Amplifier-fulfilled): we DON'T buy the EasyPost label, so we
+ *     never get a delivered webhook from EasyPost, and Amplifier only ever
+ *     sends us the tracking number — never a delivered event. So a LIVE
+ *     EasyPost lookup on portal visit is the ONLY delivery signal. We cache the
+ *     result back onto the order (so once delivered it's a cheap read forever,
+ *     and repeat visits are throttled to avoid hammering EasyPost). No tracking
  *     number yet = not shipped = locked.
- *   - Appstle/Shopify: the order's `fulfillment_status` (Shopify doesn't track
- *     delivery, so "fulfilled" = shipped is the bar we have).
+ *   - Appstle/Shopify: the order's `fulfillment_status` (Shopify orders get
+ *     fulfillment via Shopify; NO EasyPost lookup). "fulfilled" = shipped.
  *
  * Fails OPEN (allows the mutation) on an EasyPost error — this is an
  * anti-gaming gate, not a security control, and we never want an API hiccup to
  * trap a legitimate customer whose order really did arrive.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+
+/** Don't re-hit EasyPost more than once per this window per order. */
+const LOOKUP_THROTTLE_MS = 30 * 60 * 1000;
 
 export interface MutationGate {
   allowed: boolean;
@@ -38,7 +45,7 @@ export async function canMutateSubscription(
   // First (oldest) order for this subscription.
   const { data: orders } = await admin
     .from("orders")
-    .select("id, created_at, fulfillment_status, delivered_at, easypost_status, amplifier_tracking_number, amplifier_carrier")
+    .select("id, created_at, fulfillment_status, delivered_at, easypost_status, easypost_checked_at, amplifier_tracking_number, amplifier_carrier")
     .eq("workspace_id", workspaceId)
     .eq("subscription_id", sub.id)
     .order("created_at", { ascending: true })
@@ -62,7 +69,13 @@ export async function canMutateSubscription(
     if (!tracking) {
       return { allowed: false, state: "not_shipped", reason: "Your first order hasn't shipped yet. " + DELIVERED_MESSAGE };
     }
-    // Live EasyPost lookup to refresh a stale status.
+    // Throttle: if we looked it up recently and it wasn't delivered, trust the
+    // stored status rather than hitting EasyPost again this visit.
+    const checkedAt = first.easypost_checked_at ? new Date(first.easypost_checked_at as string).getTime() : 0;
+    if (checkedAt && Date.now() - checkedAt < LOOKUP_THROTTLE_MS) {
+      return { allowed: false, state: "in_transit", reason: "Your first order is on its way. " + DELIVERED_MESSAGE };
+    }
+    // Live EasyPost lookup — the only delivery signal we get for Amplifier orders.
     try {
       const { lookupTracking } = await import("@/lib/easypost");
       const t = await lookupTracking(workspaceId, tracking, (first.amplifier_carrier as string | null) || undefined);
