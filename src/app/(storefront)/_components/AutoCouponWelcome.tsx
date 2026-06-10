@@ -10,7 +10,7 @@
  * doesn't re-trigger it. Renders nothing until the bound offer resolves
  * (useAutoCoupon), so the headline can name the exact discount.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAutoCoupon } from "./AutoCouponProvider";
 
 const SESSION_FLAG = "shopcx_coupon_welcomed";
@@ -20,6 +20,11 @@ export function AutoCouponWelcome() {
   const [armed, setArmed] = useState(false);
   const [open, setOpen] = useState(false);
   const [closing, setClosing] = useState(false);
+  // Guard: open EXACTLY once per mount. Without this, dismissing flips `open`
+  // back to false, the open-effect re-fires, and it remounts while `closing` is
+  // still true — an invisible full-screen overlay that swallows every click
+  // (the CTA buttons stop working until a refresh).
+  const openedRef = useRef(false);
 
   // Fade out, then unmount — lets the pricing chapter be revealed behind it as
   // it scrolls. `scrollFirst` kicks the smooth-scroll the instant the fade
@@ -48,16 +53,18 @@ export function AutoCouponWelcome() {
     setArmed(true);
   }, []);
 
-  // Open once the bound offer has resolved (so we can name the discount).
+  // Open once the bound offer has resolved (so we can name the discount). The
+  // openedRef guard ensures this fires a single time — dismissing never reopens.
   useEffect(() => {
-    if (!armed || !coupon || open) return;
+    if (openedRef.current || !armed || !coupon) return;
+    openedRef.current = true;
     setOpen(true);
     sessionStorage.setItem(SESSION_FLAG, "1");
     const params = new URLSearchParams(window.location.search);
     params.delete("applied");
     const qs = params.toString();
     window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
-  }, [armed, coupon, open]);
+  }, [armed, coupon]);
 
   if (!open || !coupon) return null;
 
@@ -68,7 +75,7 @@ export function AutoCouponWelcome() {
 
   return (
     <div
-      className={`fixed inset-0 z-[9999] flex items-end justify-center p-0 transition-opacity duration-300 ease-out sm:items-center sm:p-4 ${closing ? "bg-black/0 opacity-0" : "bg-black/50 opacity-100"}`}
+      className={`fixed inset-0 z-[9999] flex items-end justify-center p-0 transition-opacity duration-300 ease-out sm:items-center sm:p-4 ${closing ? "pointer-events-none bg-black/0 opacity-0" : "bg-black/50 opacity-100"}`}
       onClick={() => dismiss(false)}
     >
       <div
