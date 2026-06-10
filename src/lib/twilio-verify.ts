@@ -96,20 +96,19 @@ export async function startVerification(
   serviceSid: string,
   to: string,
   channel: "sms" | "email",
-  customFriendlyName?: string,
 ): Promise<{ success: boolean; verifySid?: string; status?: string; error?: string; errorCode?: number }> {
   const creds = getCreds();
   if ("error" in creds) return { success: false, error: creds.error };
 
+  // NOTE: we deliberately do NOT send CustomFriendlyName. The per-call override
+  // requires a Twilio feature that isn't enabled on this account (Verify returns
+  // "Custom friendly name not allowed"), which 502'd the OTP send. Branding
+  // comes from the Verify Service's own FriendlyName, set to the workspace name
+  // at provisioning in createVerifyService.
   const params = new URLSearchParams({
     To: to,
     Channel: channel,
   });
-  if (customFriendlyName) {
-    // Verify lets us override the sender name shown in the message
-    // ("Your verification code from <name>") on a per-call basis.
-    params.append("CustomFriendlyName", customFriendlyName);
-  }
 
   const res = await fetch(`${TWILIO_VERIFY_HOST}/v2/Services/${serviceSid}/Verifications`, {
     method: "POST",

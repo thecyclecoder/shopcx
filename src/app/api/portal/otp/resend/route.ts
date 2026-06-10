@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
   const destination = channel === "sms" ? profilePhone! : (customer.email as string);
   const maskedDestination = channel === "sms" ? maskPhone(destination) : maskEmail(destination);
 
-  const verifyRes = await startVerification(serviceSid, destination, channel, ws?.name as string | undefined);
+  const verifyRes = await startVerification(serviceSid, destination, channel);
   if (!verifyRes.success) {
     return NextResponse.json({ error: "verify_send_failed", details: verifyRes.error }, { status: 502 });
   }
