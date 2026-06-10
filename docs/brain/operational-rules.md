@@ -64,10 +64,10 @@ Critical for the `amazon_reseller` fraud rule which compares ship vs bill — ne
 
 After editing files under `shopify-extension/portal-src/`:
 
-1. Run `node scripts/build-all-portals.js` — builds both the Shopify extension portal AND the mini-site portal from the same source.
-2. Run `shopify app deploy` for the extension itself.
+1. Run `node scripts/build-all-portals.js` — builds both the Shopify extension portal AND the mini-site portal from the same source. Commit the built bundles (`public/portal-assets/subscription-portal.js` ships with Vercel; the extension theme bundle ships via step 2).
+2. From **inside `shopify-extension/`**, run `shopify app deploy --force` (the `--force` skips the interactive release-confirm prompt). The Shopify CLI auth is cached on this machine, so it runs non-interactively. (First-time auth uses a device-code browser flow that a sandboxed shell can't complete — if it ever re-prompts, the user runs the deploy via `!` in their own terminal.)
 
-Skip either step and the customer-facing portal will be out of sync with what's in source.
+Skip either step and the customer-facing portal will be out of sync with what's in source. Note: the mini-site bundle (`public/`) only needs the Vercel deploy; only the **theme extension** needs `shopify app deploy`.
 
 ## Remotion site deploy
 
