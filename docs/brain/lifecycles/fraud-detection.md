@@ -108,6 +108,19 @@ When an admin marks a case `confirmed_fraud` (or our auto-classifier does), thre
 
 See feedback_orchestrator_fraud_gate.
 
+## Repeat-offender matching (confirmed-fraud similarity)
+
+After the rules + AI screen, `checkOrderForFraud` compares each new order against every `confirmed_fraud` order for overlap — this is what catches a known fraudster reordering under a tweaked identity. Match types (any one → hold + `confirmed_fraud_match` case):
+
+- exact email · gmail-alias (same base, different `+tag`)
+- shipping/billing address (street + zip), incl. ship↔bill cross-match
+- same last name + same address
+- exact same first+last name
+- **same custom email DOMAIN** (non-freemail, e.g. `@safelywater.com`) — a ring spins up fresh local parts on a throwaway domain to beat exact-email matching; `FREEMAIL_DOMAINS` excludes gmail/yahoo/etc. so coincidental same-provider orders don't trip it.
+- **fuzzy name** — same last name + first-name containment (≥4 chars), catching padding like `stephen` → `benstephen`/`estephen`.
+
+> The last two were added 2026-06-11 after the **Stephen Reinard ring** (29 customers, `@safelywater.com`/`@chadscaler.com`/`@bowlingdog.com`) landed an order (`SC132418`, "benstephen reinard") that beat every rule at once: fresh address (no shared-address / distance — he made ship=bill), padded first name (beat exact-name), and a fresh local part on the ring's domain (beat exact-email). Domain + fuzzy-name matching now catches that class.
+
 ## Address fallback chain
 
 Order ingestion runs through this chain (per feedback_address_mirror_rule):
