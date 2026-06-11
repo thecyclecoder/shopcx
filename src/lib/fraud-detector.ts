@@ -885,7 +885,15 @@ Respond with EXACTLY "FRAUD" or "OK".`;
 // refunds to head off chargebacks) and tags the ring's orders "suspicious".
 const VELOCITY_WINDOW_DAYS = 30;
 const BIN_MIN_ORDERS = 4; // ≥4 orders on one BIN in the window…
-const BIN_MIN_CUSTOMERS = 2; // …across ≥2 distinct accounts
+const BIN_MIN_CUSTOMERS = 2; // …across ≥2 distinct accounts…
+// …AND a concentration corroborator. A shared BIN alone is NOT fraud — popular
+// consumer banks (e.g. Visa 414720) issue to millions, so many unrelated legit
+// customers share one BIN with fully diverse names/addresses/cards. Real card-
+// testing rings collapse on at least one axis: one card swiped repeatedly, or
+// the cluster narrowing to a couple of surnames or shipping zips.
+const BIN_MIN_CARD_REUSE = 3; // one card (BIN+last4) on ≥3 orders, OR…
+const BIN_MAX_SURNAMES = 2; // ≤2 distinct cardholder surnames, OR…
+const BIN_MAX_ZIPS = 2; // ≤2 distinct shipping zips
 const DOMAIN_MIN_CUSTOMERS = 4; // ≥4 distinct accounts on one custom domain
 const SURNAME_MIN_CUSTOMERS = 4; // ≥4 new accounts sharing a surname…
 const SURNAME_MIN_CUSTOM_DOMAIN = 2; // …with ≥2 on non-freemail domains
@@ -957,13 +965,16 @@ async function checkVelocitySignals(
     fired = true;
   };
 
-  // 1) BIN velocity — same card issuer-batch across many orders + buyers.
+  // 1) BIN velocity — same card issuer-batch run through different identities.
+  // A shared BIN alone is a popular-bank false positive; require a concentration
+  // corroborator (card reuse, or few surnames / zips) to separate a ring from a
+  // crowd of unrelated customers who simply bank with the same issuer.
   const pd = (order.payment_details && typeof order.payment_details === "object") ? (order.payment_details as Record<string, unknown>) : null;
   const bin = pd?.card_bin ? String(pd.card_bin) : "";
   if (/^\d{6,}$/.test(bin)) {
     const { data: binOrders } = await admin
       .from("orders")
-      .select("shopify_order_id, customer_id, email")
+      .select("shopify_order_id, customer_id, email, shipping_address, payment_details")
       .eq("workspace_id", workspaceId)
       .gte("created_at", since)
       .filter("payment_details->>card_bin", "eq", bin)
@@ -971,13 +982,39 @@ async function checkVelocitySignals(
     const rows = binOrders || [];
     const custs = new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[]);
     const shopIds = rows.map((r) => r.shopify_order_id).filter(Boolean) as string[];
-    if (rows.length >= BIN_MIN_ORDERS && custs.size >= BIN_MIN_CUSTOMERS) {
+
+    // Concentration metrics over the BIN cluster.
+    const cardCounts = new Map<string, number>();
+    const surnames = new Set<string>();
+    const zips = new Set<string>();
+    for (const r of rows) {
+      const rpd = (r.payment_details && typeof r.payment_details === "object") ? (r.payment_details as Record<string, unknown>) : null;
+      const last4 = rpd?.card_last4 ? String(rpd.card_last4) : "";
+      if (last4) cardCounts.set(last4, (cardCounts.get(last4) || 0) + 1);
+      const name = rpd?.card_name ? String(rpd.card_name) : "";
+      const surname = name.trim().toLowerCase().split(/\s+/).pop()?.replace(/[^a-z]/g, "") || "";
+      if (surname) surnames.add(surname);
+      const sa = (r.shipping_address && typeof r.shipping_address === "object") ? (r.shipping_address as Record<string, unknown>) : null;
+      const zip = sa?.zip ? String(sa.zip).slice(0, 5) : "";
+      if (zip) zips.add(zip);
+    }
+    const maxCardReuse = Math.max(0, ...cardCounts.values());
+    const concentrated =
+      maxCardReuse >= BIN_MIN_CARD_REUSE ||
+      (surnames.size > 0 && surnames.size <= BIN_MAX_SURNAMES) ||
+      (zips.size > 0 && zips.size <= BIN_MAX_ZIPS);
+
+    if (rows.length >= BIN_MIN_ORDERS && custs.size >= BIN_MIN_CUSTOMERS && concentrated) {
+      const reason =
+        maxCardReuse >= BIN_MIN_CARD_REUSE ? `one card reused on ${maxCardReuse} orders`
+        : surnames.size <= BIN_MAX_SURNAMES ? `only ${surnames.size} distinct cardholder surname(s)`
+        : `only ${zips.size} distinct shipping zip(s)`;
       await openCase(
         "bin_velocity",
         `bin:${bin}`,
-        `Card BIN ${bin} on ${rows.length} orders across ${custs.size} accounts (30d)`,
-        `${rows.length} orders in the last 30 days share card BIN ${bin} across ${custs.size} distinct customers — the fingerprint of a stolen-card batch being run through different identities.`,
-        { card_bin: bin, order_count: rows.length, customer_count: custs.size, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
+        `Card BIN ${bin} on ${rows.length} orders across ${custs.size} accounts — ${reason} (30d)`,
+        `${rows.length} orders in the last 30 days share card BIN ${bin} across ${custs.size} distinct customers, and the cluster is concentrated (${reason}) — the fingerprint of a stolen-card batch being run through different identities rather than unrelated customers who happen to bank with the same issuer.`,
+        { card_bin: bin, order_count: rows.length, customer_count: custs.size, distinct_cards: cardCounts.size, max_card_reuse: maxCardReuse, distinct_surnames: surnames.size, distinct_zips: zips.size, concentration_reason: reason, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
         [...custs],
         shopIds,
       );
