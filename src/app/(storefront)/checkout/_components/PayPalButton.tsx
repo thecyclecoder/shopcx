@@ -73,6 +73,10 @@ export function PayPalButton({ clientToken, validate, onApprove, onError }: Prop
         await paypal.Buttons({
           fundingSource: paypal.FUNDING.PAYPAL,
           style: { layout: "horizontal", color: "gold", shape: "pill", label: "paypal", height: 48, tagline: false },
+          // Fires once the button is actually rendered — the render() promise
+          // doesn't resolve reliably across PayPal SDK versions, so this is the
+          // signal we use to clear the "Loading PayPal…" state.
+          onInit: () => { if (!cancelled) setLoading(false); },
           onClick: (_data: any, actions: any) => {
             if (validateRef.current && !validateRef.current()) return actions?.reject?.();
             return actions?.resolve?.();
