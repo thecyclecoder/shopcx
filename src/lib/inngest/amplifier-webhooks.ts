@@ -105,7 +105,7 @@ export const amplifierWebhookProcess = inngest.createFunction(
       await step.run("email-customer-shipped", async () => {
         const sel = await admin.from("orders")
           .select(
-            "id, order_number, email, total_cents, line_items, shipping_address, " +
+            "id, order_number, email, total_cents, line_items, shipping_address, payment_details, " +
             "shipping_protection_added, shipping_protection_amount_cents, " +
             "amplifier_tracking_number, amplifier_carrier, subscription_id",
           )
@@ -117,8 +117,9 @@ export const amplifierWebhookProcess = inngest.createFunction(
           order_number: string;
           email: string | null;
           total_cents: number;
-          line_items: Array<{ title: string; variant_title?: string | null; quantity: number; unit_price_cents?: number; line_total_cents?: number; is_gift?: boolean; image_url?: string | null; sku?: string | null }> | null;
+          line_items: Array<{ title: string; variant_title?: string | null; quantity: number; unit_price_cents?: number; price_cents?: number; unit_msrp_cents?: number; line_total_cents?: number; is_gift?: boolean; image_url?: string | null; sku?: string | null }> | null;
           shipping_address: { first_name?: string; last_name?: string; address1?: string; address2?: string | null; city?: string; province_code?: string; zip?: string } | null;
+          payment_details: { subtotal_cents?: number; shipping_cents?: number; tax_cents?: number; protection_cents?: number } | null;
           shipping_protection_added: boolean | null;
           shipping_protection_amount_cents: number | null;
           amplifier_tracking_number: string | null;
@@ -137,6 +138,7 @@ export const amplifierWebhookProcess = inngest.createFunction(
             total_cents: order.total_cents,
             line_items: order.line_items || [],
             shipping_address: order.shipping_address,
+            payment_details: order.payment_details,
             shipping_protection_added: !!order.shipping_protection_added,
             shipping_protection_amount_cents: order.shipping_protection_amount_cents,
             amplifier_tracking_number: order.amplifier_tracking_number,

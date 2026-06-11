@@ -57,6 +57,8 @@ interface OrderLineLike {
   variant_title?: string | null;
   quantity: number;
   unit_price_cents?: number;
+  /** Subscription/renewal line items carry the unit price as `price_cents`. */
+  price_cents?: number;
   unit_msrp_cents?: number;
   line_total_cents?: number;
   is_gift?: boolean;
@@ -219,8 +221,12 @@ function renderLineItemsRows(lines: OrderLineLike[]): string {
       const giftBadge = l.is_gift
         ? ` <span style="display:inline-block;padding:2px 6px;background:#dcfce7;color:#166534;font-size:11px;border-radius:4px;font-weight:600;margin-left:4px;">FREE GIFT</span>`
         : "";
-      const paidLine = (l.line_total_cents ?? (l.unit_price_cents || 0) * l.quantity) || 0;
-      const msrpLine = (l.unit_msrp_cents || l.unit_price_cents || 0) * l.quantity;
+      // Use || (not ??) so a stored line_total_cents of 0 — common on
+      // renewal/Amplifier orders — falls back to unit × qty instead of
+      // rendering $0.00. Renewal items carry the unit as price_cents.
+      const unitCents = l.unit_price_cents || l.price_cents || 0;
+      const paidLine = l.line_total_cents || unitCents * l.quantity;
+      const msrpLine = (l.unit_msrp_cents || unitCents) * l.quantity;
       // Strikethrough MSRP whenever the customer paid less than MSRP
       // — same treatment as the storefront cart so the savings are
       // visible at every step (cart → checkout → email).
@@ -243,6 +249,42 @@ function renderLineItemsRows(lines: OrderLineLike[]): string {
         </tr>`;
     })
     .join("");
+}
+
+/**
+ * Totals + savings block — subtotal (at MSRP) → discount → shipping (free /
+ * strikethrough) → tax → total, plus the green "You saved $X" badge. Shared by
+ * the order-confirmation AND shipping emails so both reiterate the savings.
+ */
+function renderTotalsBlock(order: OrderForEmail, shippingValueCents = 0): string {
+  const lineUnit = (l: OrderLineLike) => l.unit_price_cents || l.price_cents || 0;
+  const subtotalCents = order.payment_details?.subtotal_cents
+    ?? order.line_items.reduce((s, l) => s + (l.line_total_cents || lineUnit(l) * l.quantity), 0);
+  const shippingCents = order.payment_details?.shipping_cents ?? 0;
+  const taxCents = order.payment_details?.tax_cents ?? 0;
+  const msrpSubtotalCents = order.line_items.reduce((s, l) => s + (l.unit_msrp_cents || lineUnit(l)) * l.quantity, 0);
+  const discountCents = Math.max(0, msrpSubtotalCents - subtotalCents);
+  const shippingSavedCents = Math.max(0, shippingValueCents - shippingCents);
+  const youSaveCents = discountCents + shippingSavedCents;
+  return `
+    <tr><td class="sx-pad" style="padding:16px 32px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="sx-totals" style="font-size:14px;color:#52525b;">
+        <tr><td style="padding:4px 0;">Subtotal</td><td style="padding:4px 0;text-align:right;color:#18181b;">${fmtCents(msrpSubtotalCents)}</td></tr>
+        ${discountCents > 0 ? `<tr><td style="padding:4px 0;color:#15803d;">Discount</td><td style="padding:4px 0;text-align:right;color:#15803d;">-${fmtCents(discountCents)}</td></tr>` : ""}
+        <tr><td style="padding:4px 0;">Shipping</td><td style="padding:4px 0;text-align:right;color:#18181b;">${
+          shippingCents === 0 && shippingValueCents > 0
+            ? `<span style="color:#a1a1aa;text-decoration:line-through;margin-right:6px;">${fmtCents(shippingValueCents)}</span><span style="color:#16a34a;font-weight:600;">Free</span>`
+            : shippingCents === 0
+              ? '<span style="color:#16a34a;font-weight:600;">Free</span>'
+              : fmtCents(shippingCents)
+        }</td></tr>
+        ${taxCents > 0 ? `<tr><td style="padding:4px 0;">Tax</td><td style="padding:4px 0;text-align:right;color:#18181b;">${fmtCents(taxCents)}</td></tr>` : ""}
+        <tr><td style="padding:8px 0 4px 0;border-top:1px solid #e4e4e7;font-weight:700;color:#18181b;">Total</td><td style="padding:8px 0 4px 0;border-top:1px solid #e4e4e7;text-align:right;font-weight:700;color:#18181b;">${fmtCents(order.total_cents)}</td></tr>
+        ${youSaveCents > 0 ? `<tr><td colspan="2" style="padding:10px 0 0 0;text-align:right;">
+          <span style="display:inline-block;background:#dcfce7;color:#166534;padding:6px 12px;border-radius:999px;font-size:13px;font-weight:700;">You saved ${fmtCents(youSaveCents)}</span>
+        </td></tr>` : ""}
+      </table>
+    </td></tr>`;
 }
 
 /**
@@ -578,6 +620,9 @@ export async function sendOrderConfirmationEmail(opts: {
 export async function sendShippingNotificationEmail(opts: {
   workspaceId: string;
   order: OrderForEmail;
+  /** What one-time shipping would have cost — drives the strikethrough → Free
+   *  treatment + the shipping-saved portion of "You saved". */
+  shippingValueCents?: number | null;
 }): Promise<{ success: boolean; error?: string }> {
   try {
     const { order } = opts;
@@ -645,6 +690,8 @@ export async function sendShippingNotificationEmail(opts: {
       </td></tr>
 
       ${reviewBlock}
+
+      ${renderTotalsBlock(order, opts.shippingValueCents ?? 0)}
 
       ${protectionBadge}
 
