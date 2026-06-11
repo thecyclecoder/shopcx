@@ -80,6 +80,9 @@ interface PostBody {
   device_data?: string;
   email?: string;
   phone?: string;
+  // Marketing consent from the checkout checkbox — authoritative at order time.
+  email_marketing_consent?: boolean;
+  sms_marketing_consent?: boolean;
   shipping_address?: AddressInput;
   billing_address?: AddressInput;
   shipping_protection_added?: boolean;
@@ -297,6 +300,14 @@ export async function POST(request: NextRequest) {
   // 2. Resolve / create the customer record. Match by email within
   //    the workspace; create a fresh row if no match.
   const email = body.email.trim().toLowerCase();
+  // Authoritative marketing consent at order time (the checkout checkbox).
+  // Checked + email → email subscribed; checked + phone → SMS subscribed;
+  // unchecked → unsubscribed. (No phone → can't SMS, leave not_subscribed.)
+  const phonePresent = !!(body.phone || ship.phone);
+  const emailMarketingStatus = body.email_marketing_consent === false ? "unsubscribed" : "subscribed";
+  const smsMarketingStatus = body.sms_marketing_consent === false
+    ? "unsubscribed"
+    : phonePresent ? "subscribed" : "not_subscribed";
   let { data: customer } = await admin
     .from("customers")
     .select("id, shopify_customer_id, first_name, last_name")
@@ -314,6 +325,8 @@ export async function POST(request: NextRequest) {
         last_name: ship.last_name || null,
         phone: body.phone || ship.phone || null,
         subscription_status: subscribing ? "active" : "never",
+        email_marketing_status: emailMarketingStatus,
+        sms_marketing_status: smsMarketingStatus,
       })
       .select("id, shopify_customer_id, first_name, last_name")
       .single();
@@ -321,6 +334,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "customer_create_failed", details: createErr?.message }, { status: 500 });
     }
     customer = created;
+  } else {
+    // Existing customer — reaffirm consent from the checkbox. Persist the
+    // phone too so a freshly-entered number can receive SMS marketing.
+    await admin
+      .from("customers")
+      .update({
+        email_marketing_status: emailMarketingStatus,
+        sms_marketing_status: smsMarketingStatus,
+        ...(phonePresent ? { phone: body.phone || ship.phone } : {}),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", customer.id);
   }
 
   // ── 2b. Short-circuit: renewal_only mode ─────────────────────────

@@ -724,6 +724,10 @@ export function CheckoutClient({
             : { payment_method_nonce: nonce, device_data: deviceData }),
           email,
           phone: phoneE164 || undefined,
+          // Final, authoritative marketing consent at order time (the checkbox
+          // may have been toggled after the last identify call).
+          email_marketing_consent: emailMarketingConsent,
+          sms_marketing_consent: smsMarketingConsent,
           shipping_address: shipping,
           billing_address: billing,
           shipping_protection_added: shippingProtection && !!workspace.shipping_protection,
