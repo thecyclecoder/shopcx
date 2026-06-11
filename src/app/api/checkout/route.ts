@@ -400,19 +400,37 @@ export async function POST(request: NextRequest) {
   let savedPm: { id: string };
   let chargeToken: string;
   if (body.payment_method_token) {
+    // The token may be saved on a LINKED account (the picker lists cards across
+    // the whole link group), so validate against the group — not just this
+    // customer — or a linked card 404s with "saved card not found".
+    const { linkGroupIds } = await import("@/lib/customer-links");
+    const groupIds = await linkGroupIds(admin, cart.workspace_id as string, customer.id as string);
     const { data: existing } = await admin
       .from("customer_payment_methods")
-      .select("id, braintree_payment_method_token")
+      .select("id, braintree_payment_method_token, braintree_customer_id")
       .eq("workspace_id", cart.workspace_id)
-      .eq("customer_id", customer.id)
+      .in("customer_id", groupIds)
       .eq("status", "active")
       .eq("braintree_payment_method_token", body.payment_method_token)
       .maybeSingle();
     if (!existing) {
+      await logCheckoutError({
+        workspaceId: cart.workspace_id as string,
+        stage: "submit",
+        cartToken: cart.token as string,
+        customerId: customer.id as string,
+        errorCode: "saved_card_not_found",
+        errorMessage: "Saved payment-method token not found for the customer's link group",
+        context: { token_suffix: String(body.payment_method_token).slice(-6) },
+      });
       return NextResponse.json({ error: "saved_card_not_found" }, { status: 400 });
     }
     savedPm = { id: existing.id };
     chargeToken = existing.braintree_payment_method_token;
+    // Charge against the token's OWN Braintree customer (it may live on a linked
+    // account's BT customer); passing a mismatched customerId makes Braintree
+    // reject the sale.
+    if (existing.braintree_customer_id) braintreeCustomerId = existing.braintree_customer_id as string;
   } else {
     let vaulted;
     try {
@@ -440,6 +458,7 @@ export async function POST(request: NextRequest) {
       last4: vaulted.last4,
       expirationMonth: vaulted.expirationMonth,
       expirationYear: vaulted.expirationYear,
+      paypalEmail: vaulted.paypalEmail,
       cartToken: cart.token,
       makeDefault: true,
     });

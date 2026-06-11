@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
   const groupIds = await linkGroupIds(admin, session.w, session.c);
   const { data: pms } = await admin
     .from("customer_payment_methods")
-    .select("id, braintree_payment_method_token, card_brand, last4, expiration_month, expiration_year, is_default, payment_type")
+    .select("id, braintree_payment_method_token, card_brand, last4, expiration_month, expiration_year, is_default, payment_type, paypal_email")
     .eq("workspace_id", session.w)
     .in("customer_id", groupIds)
     .eq("status", "active")
@@ -73,6 +73,7 @@ export async function GET(request: NextRequest) {
       exp_year: m.expiration_year,
       is_default: m.is_default,
       payment_type: m.payment_type,
+      paypal_email: m.paypal_email,
     }));
 
   return NextResponse.json({ methods });

@@ -126,6 +126,7 @@ export interface PaymentMethodSaveInput {
   last4?: string | null;
   expirationMonth?: string | null;
   expirationYear?: string | null;
+  paypalEmail?: string | null;
   cartToken?: string | null;
   makeDefault?: boolean;
 }
@@ -166,6 +167,7 @@ export async function savePaymentMethod(input: PaymentMethodSaveInput): Promise<
         last4: input.last4 || null,
         expiration_month: input.expirationMonth || null,
         expiration_year: input.expirationYear || null,
+        paypal_email: input.paypalEmail || null,
         is_default: input.makeDefault ?? true,
         status: "active",
         created_from_cart_token: input.cartToken || null,
@@ -192,6 +194,7 @@ export interface VaultResult {
   last4: string | null;
   expirationMonth: string | null;
   expirationYear: string | null;
+  paypalEmail: string | null;
 }
 
 export async function vaultPaymentMethod(
@@ -237,6 +240,11 @@ export async function vaultPaymentMethod(
   else if (typeRaw.includes("us_bank")) paymentType = "us_bank_account";
   else if (pm.cardType || pm.last4) paymentType = "credit_card";
 
+  // PayPal accounts carry the payer email instead of card details.
+  const paypalEmail = paymentType === "paypal_account"
+    ? ((pm as { email?: string; payerEmail?: string }).email || (pm as { payerEmail?: string }).payerEmail || null)
+    : null;
+
   return {
     token: pm.token,
     paymentType,
@@ -244,5 +252,6 @@ export async function vaultPaymentMethod(
     last4: pm.last4 || null,
     expirationMonth: pm.expirationMonth || null,
     expirationYear: pm.expirationYear || null,
+    paypalEmail,
   };
 }
