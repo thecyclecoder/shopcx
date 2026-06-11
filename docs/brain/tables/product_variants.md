@@ -12,6 +12,7 @@ First-class variant rows (UUID PK). Source of truth for variants; `products.vari
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
 | `product_id` | `uuid` | — | → [[products]].id |
 | `shopify_variant_id` | `text` | ✓ |  |
+| `meta_id` | `text` | ✓ | Meta catalog content_id (variant-level). Copied from `shopify_variant_id`; the CAPI egress resolves UUID→meta_id so Shopify ids never enter the event stream and survive a Shopify sunset. See [[meta-capi]] `resolveMetaContent`. |
 | `sku` | `text` | ✓ |  |
 | `title` | `text` | ✓ |  |
 | `option1` | `text` | ✓ |  |

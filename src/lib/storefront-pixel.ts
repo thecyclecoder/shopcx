@@ -192,10 +192,11 @@ function fireMetaPixel(eventType: string, eventId: string, meta?: EventMeta) {
     customData.value = Math.round(cents) / 100;
     customData.currency = (m.currency as string) || "USD";
   }
-  if (m.product_id) customData.content_ids = [m.product_id];
-  if (m.variant_id || m.primary_variant_id) {
-    customData.content_type = "product";
-  }
+  // content_ids are deliberately NOT set here. Our event meta carries internal
+  // UUIDs, which are NOT catalog ids — sending them would log unmatched content
+  // against the pixel. The server CAPI event (same eventID, deduped) supplies
+  // catalog content_ids by resolving UUID → meta_id at the egress. See
+  // resolveMetaContent in meta-capi.ts and inngest/meta-capi-dispatch.ts.
   w.fbq("track", metaEvent, customData, { eventID: eventId });
 }
 

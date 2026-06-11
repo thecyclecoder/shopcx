@@ -11,6 +11,7 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
 | `shopify_product_id` | `text` | — |  |
+| `meta_id` | `text` | ✓ | Meta catalog product-group id. Copied from `shopify_product_id`. Variant-level catalog matching uses [[product_variants]].meta_id; this is the group fallback. See [[meta-capi]]. |
 | `title` | `text` | — |  |
 | `handle` | `text` | ✓ |  |
 | `product_type` | `text` | ✓ |  |

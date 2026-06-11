@@ -20,6 +20,7 @@ import {
   getActiveMetaSink,
   metaEventName,
   sendCapiEvents,
+  resolveMetaContent,
   deriveFbc,
   type CapiEvent,
   type MetaSink,
@@ -131,6 +132,19 @@ export const metaCapiDispatchCron = inngest.createFunction(
           : { data: [] };
         const custById = new Map((customers || []).map((c) => [c.id as string, c]));
 
+        // Resolve catalog content_ids for the whole batch in one pass. Our
+        // events carry UUIDs; this translates UUID → meta_id (the Shopify-
+        // derived catalog id) only here, at the Meta egress.
+        const contentByEvent = await resolveMetaContent(
+          sinkRow.workspace_id,
+          (events || []).map((e) => ({
+            id: e.id as string,
+            event_type: e.event_type as string,
+            product_id: (e.product_id as string) || null,
+            meta: (e.meta || {}) as Record<string, unknown>,
+          })),
+        );
+
         // Build CapiEvents (skip any that don't map — defensive).
         const capiEvents: CapiEvent[] = [];
         const dispatchByEventId = new Map<string, { id: string; attempts: number }>();
@@ -152,7 +166,14 @@ export const metaCapiDispatchCron = inngest.createFunction(
             customData.value = Math.round(cents) / 100;
             customData.currency = (meta.currency as string) || "USD";
           }
-          if (ev.product_id || meta.product_id) customData.content_ids = [ev.product_id || meta.product_id];
+          // Catalog content — meta_id values resolved from our UUIDs. The
+          // catalog is variant-level, so content_type is always "product".
+          const content = contentByEvent.get(ev.id as string);
+          if (content && content.contentIds.length) {
+            customData.content_ids = content.contentIds;
+            customData.content_type = "product";
+            if (content.numItems != null) customData.num_items = content.numItems;
+          }
           if (meta.order_id) customData.order_id = meta.order_id;
 
           capiEvents.push({

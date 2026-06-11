@@ -19,6 +19,7 @@ Live in [[../tables/event_sinks]]`.config` for the `meta_capi` sink: `{ pixel_id
 | `META_EVENT_MAP` / `metaEventName(type)` | Our event type → Meta standard event. **Must mirror `META_EVENT_MAP` in [[storefront-pixel]]** so browser + server fire the same name under the same id. |
 | `deriveFbc(fbc, fbclid, eventTimeMs)` | Build `_fbc` (`fb.1.<ms>.<fbclid>`) when the cookie wasn't captured. |
 | `sendCapiEvents(sink, events[])` | POST a batch to `graph.facebook.com/v21.0/{pixel_id}/events`. Hashes PII (SHA-256 of normalized em/ph/fn/ln/ct/st/zp/country + external_id), passes fbp/fbc/ip/ua unhashed. Never throws — returns `{ ok, status, body }` for the dispatcher to record. |
+| `resolveMetaContent(workspaceId, events[])` | Batch-resolve catalog `content_ids` for events → `Map<eventId, { contentIds, numItems? }>`. **UUID→meta_id translation happens HERE only** — our event stream is all-UUID; this is the single egress where Shopify-derived catalog ids appear. Refs resolve tolerantly (our UUID OR `shopify_variant_id` OR `sku` → `meta_id`). Sources per type: `pdp_view`→product's variants; `add_to_cart`→meta variant/primary/upsell; `checkout_view`→[[../tables/cart_drafts]].line_items; `order_placed`→[[../tables/orders]].line_items. content_type is always `product` (catalog is variant-level). |
 
 ## Event map (browser ⇄ server, same `event_id`)
 
@@ -34,7 +35,11 @@ Events not in the map (chapter_view/dwell/scroll_depth/cta_click) are internal t
 
 ## Fan-out
 
-The cron [[../inngest/meta-capi-dispatch]] seeds [[../tables/event_dispatches]] from recent events and calls `sendCapiEvents`. This module is the pure sender; it does no DB writes beyond the read-only sink/pixel lookups.
+The cron [[../inngest/meta-capi-dispatch]] seeds [[../tables/event_dispatches]] from recent events, calls `resolveMetaContent` once per batch to attach `content_ids`/`content_type`/`num_items`, then `sendCapiEvents`. This module is the pure sender + resolver; it does no DB writes beyond read-only lookups.
+
+## content_ids — catalog matching
+
+The Meta catalog (fed from Shopify) keys items by raw numeric Shopify variant id. Our app/events never carry Shopify ids — only UUIDs. The bridge is [[../tables/product_variants]].`meta_id` (copied from `shopify_variant_id`). `resolveMetaContent` does the UUID→meta_id lookup at send time, so the catalog keeps matching even after Shopify ids are dropped. The **browser pixel deliberately sends NO content_ids** ([[storefront-pixel]] `fireMetaPixel`) — it would only have UUIDs, which aren't catalog ids; the deduped server event supplies them.
 
 ---
 
