@@ -33,6 +33,8 @@ export async function sendCartRecovery(opts: {
   lineItems: RecoveryLine[];
   subtotalCents: number;
   storefrontDomain?: string | null;
+  /** Second touch (24 h) — more urgent "last chance" copy. */
+  followUp?: boolean;
 }): Promise<{ channel: "sms" | "email" | "basic_email"; success: boolean; error?: string }> {
   const admin = createAdminClient();
 
@@ -84,7 +86,9 @@ export async function sendCartRecovery(opts: {
   if (phone) {
     try {
       const { sendSMS } = await import("@/lib/twilio");
-      const sms = `Hi ${firstName || "there"}! Your cart items are low in stock.\n\nFinish now & take an extra ${RECOVERY_PCT}% off:\n${ctaUrl}\n\nTap to complete checkout - discount applied.`;
+      const sms = opts.followUp
+        ? `Hi ${firstName || "there"}! Last chance - your ${RECOVERY_PCT}% off is about to expire.\n\nComplete your order now:\n${ctaUrl}\n\nTap to finish before it's gone.`
+        : `Hi ${firstName || "there"}! Your cart items are low in stock.\n\nFinish now & take an extra ${RECOVERY_PCT}% off:\n${ctaUrl}\n\nTap to complete checkout - discount applied.`;
       const r = await sendSMS(opts.workspaceId, phone, sms);
       if (r.success) return { channel: "sms", success: true };
     } catch { /* fall through to email */ }
@@ -118,7 +122,7 @@ export async function sendCartRecovery(opts: {
   const r = await sendCartRecoveryEmail({
     workspaceId: opts.workspaceId, to: opts.email, firstName,
     lineItems: opts.lineItems, subtotalCents: opts.subtotalCents,
-    savingsCents, couponPct: RECOVERY_PCT, ctaUrl, reviews,
+    savingsCents, couponPct: RECOVERY_PCT, ctaUrl, reviews, followUp: opts.followUp,
   });
   return { channel: "email", success: r.success, error: r.error };
 }

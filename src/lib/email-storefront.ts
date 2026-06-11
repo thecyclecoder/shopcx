@@ -774,6 +774,8 @@ export async function sendCartRecoveryEmail(opts: {
   ctaUrl: string;
   reviews: RecoveryReview[];
   nutritionistNote?: string | null;
+  /** Second touch (24 h) — "last chance" framing. */
+  followUp?: boolean;
 }): Promise<{ success: boolean; error?: string }> {
   try {
     const client = await getResendClient(opts.workspaceId, opts.to);
@@ -807,12 +809,17 @@ export async function sendCartRecoveryEmail(opts: {
         </table>
       </td></tr>` : "";
 
+    const eyebrow = opts.followUp ? "Last chance" : "Your cart is waiting";
+    const heading = opts.followUp ? "Your discount is about to expire" : "Still thinking it over?";
+    const intro = opts.followUp
+      ? `${greeting}this is a final reminder — your cart and the <strong style="color:#15803d;">extra ${opts.couponPct}% off</strong> won't be held much longer. It's still applied; tap below before it's gone.`
+      : `${greeting}we saved your cart — and we've added an <strong style="color:#15803d;">extra ${opts.couponPct}% off</strong> to help you finish. It's already applied; just tap below.`;
     const bodyHtml = `
       <tr><td class="sx-pad" style="padding:32px 32px 8px 32px;">
-        <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">Your cart is waiting</div>
-        <h1 class="sx-h1" style="margin:8px 0 12px 0;font-size:24px;color:#18181b;font-weight:700;">Still thinking it over?</h1>
+        <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">${eyebrow}</div>
+        <h1 class="sx-h1" style="margin:8px 0 12px 0;font-size:24px;color:#18181b;font-weight:700;">${heading}</h1>
         <p class="sx-body" style="margin:0;color:#52525b;font-size:15px;line-height:1.55;">
-          ${greeting}we saved your cart — and we've added an <strong style="color:#15803d;">extra ${opts.couponPct}% off</strong> to help you finish. It's already applied; just tap below.
+          ${intro}
         </p>
       </td></tr>
 
@@ -858,7 +865,9 @@ export async function sendCartRecoveryEmail(opts: {
       from: `${brand.brandName} <${brand.fromEmail}>`,
       to: opts.to,
       replyTo: brand.replyToEmail,
-      subject: `${opts.firstName ? `${opts.firstName}, ` : ""}your cart + an extra ${opts.couponPct}% off`,
+      subject: opts.followUp
+        ? `${opts.firstName ? `${opts.firstName}, ` : ""}last chance — your ${opts.couponPct}% off expires soon`
+        : `${opts.firstName ? `${opts.firstName}, ` : ""}your cart + an extra ${opts.couponPct}% off`,
       html,
     });
     if (error) return { success: false, error: error.message };

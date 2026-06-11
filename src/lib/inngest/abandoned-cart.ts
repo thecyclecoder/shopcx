@@ -16,7 +16,8 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendCartRecovery } from "@/lib/cart-recovery";
 
-const IDLE_MINUTES = 30;
+const IDLE_MINUTES = 30;       // first touch: 30 min after the cart goes idle
+const FOLLOWUP_HOURS = 24;     // second touch: 24 h after the first touch
 const BATCH_SIZE = 50;
 
 interface CartDraftRow {
@@ -34,9 +35,12 @@ interface CartDraftRow {
     line_total_cents?: number;
     image_url?: string | null;
     is_gift?: boolean;
+    product_id?: string;
   }>;
   subtotal_cents: number;
   updated_at: string;
+  /** True for the second-touch (24 h) follow-up; false for the first touch. */
+  followUp: boolean;
 }
 
 export const abandonedCartReminder = inngest.createFunction(
@@ -52,24 +56,42 @@ export const abandonedCartReminder = inngest.createFunction(
   async ({ step }) => {
     const due = await step.run("find-idle-carts", async () => {
       const admin = createAdminClient();
-      const cutoffIso = new Date(Date.now() - IDLE_MINUTES * 60_000).toISOString();
-      const { data, error } = await admin
+      const SEL = "id, workspace_id, token, email, customer_id, line_items, subtotal_cents, updated_at";
+      const nonEmpty = (rows: unknown[] | null) =>
+        (rows || []).filter((d) => Array.isArray((d as CartDraftRow).line_items) && (d as CartDraftRow).line_items.length > 0) as CartDraftRow[];
+
+      // First touch — open carts with an email, idle 30+ min, never messaged.
+      const firstCutoff = new Date(Date.now() - IDLE_MINUTES * 60_000).toISOString();
+      const { data: first, error: e1 } = await admin
         .from("cart_drafts")
-        .select("id, workspace_id, token, email, customer_id, line_items, subtotal_cents, updated_at")
+        .select(SEL)
         .eq("status", "open")
         .not("email", "is", null)
         .is("abandoned_email_sent_at", null)
-        .lte("updated_at", cutoffIso)
+        .lte("updated_at", firstCutoff)
         .order("updated_at", { ascending: true })
         .limit(BATCH_SIZE);
-      if (error) {
-        console.error("[abandoned-cart] find error:", error.message);
-        return [] as CartDraftRow[];
-      }
-      // Defensive filter: drafts whose line_items array is empty are
-      // skipped — could happen if the customer added then removed all
-      // items, leaving an empty token-bound row.
-      return (data || []).filter((d) => Array.isArray(d.line_items) && d.line_items.length > 0) as CartDraftRow[];
+      if (e1) console.error("[abandoned-cart] first-touch find error:", e1.message);
+
+      // Second touch — got the first message ≥24 h ago, still open, no follow-up
+      // yet. (Still gated on status='open' so a converted cart never gets one.)
+      const followCutoff = new Date(Date.now() - FOLLOWUP_HOURS * 3_600_000).toISOString();
+      const { data: follow, error: e2 } = await admin
+        .from("cart_drafts")
+        .select(SEL)
+        .eq("status", "open")
+        .not("email", "is", null)
+        .not("abandoned_email_sent_at", "is", null)
+        .is("abandoned_followup_sent_at", null)
+        .lte("abandoned_email_sent_at", followCutoff)
+        .order("abandoned_email_sent_at", { ascending: true })
+        .limit(BATCH_SIZE);
+      if (e2) console.error("[abandoned-cart] follow-up find error:", e2.message);
+
+      return [
+        ...nonEmpty(first).map((d) => ({ ...d, followUp: false })),
+        ...nonEmpty(follow).map((d) => ({ ...d, followUp: true })),
+      ];
     });
 
     if (due.length === 0) return { sent: 0, scanned: 0 };
@@ -126,15 +148,16 @@ export const abandonedCartReminder = inngest.createFunction(
           lineItems,
           subtotalCents: cart.subtotal_cents,
           storefrontDomain: storefrontDomains[cart.workspace_id] || null,
+          followUp: cart.followUp,
         });
-        // Stamp abandoned_email_sent_at even on failure to avoid retry
-        // storms — better to lose one reminder than spam a customer
-        // because of a transient Resend hiccup. The error reason is
-        // logged for ops to triage.
+        // Stamp the appropriate timestamp even on failure to avoid retry storms
+        // — better to lose one reminder than spam a customer over a transient
+        // Resend/Twilio hiccup. The follow-up stamps its own column so it never
+        // re-sends; the first touch stamps abandoned_email_sent_at.
         const admin = createAdminClient();
         await admin
           .from("cart_drafts")
-          .update({ abandoned_email_sent_at: new Date().toISOString() })
+          .update({ [cart.followUp ? "abandoned_followup_sent_at" : "abandoned_email_sent_at"]: new Date().toISOString() })
           .eq("id", cart.id);
         if (!res.success) {
           console.error(`[abandoned-cart] send failed for cart ${cart.id}: ${res.error}`);
