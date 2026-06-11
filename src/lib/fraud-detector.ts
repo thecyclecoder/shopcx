@@ -5,6 +5,23 @@ import { zipDistance, extractZip } from "@/lib/geo-distance";
 import { normalizeReseller } from "@/lib/known-resellers";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 
+// Mainstream consumer email providers. A *custom* domain (anything not here)
+// reused against a confirmed-fraud order is a strong signal — rings spin up
+// fresh local parts on a throwaway domain (e.g. @safelywater.com) to beat
+// exact-email matching.
+const FREEMAIL_DOMAINS = new Set<string>([
+  "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com", "hotmail.com",
+  "live.com", "msn.com", "icloud.com", "me.com", "mac.com", "aol.com", "protonmail.com",
+  "proton.me", "gmx.com", "gmx.us", "zoho.com", "yandex.com", "mail.com", "comcast.net",
+  "verizon.net", "att.net", "sbcglobal.net", "cox.net", "charter.net", "bellsouth.net",
+]);
+
+/** Two names overlap if one's first-name token contains the other's (≥4 chars),
+ *  catching padding like "stephen" → "benstephen"/"estephen". */
+function firstNameOverlap(a: string, b: string): boolean {
+  return !!a && !!b && (a === b || (a.length >= 4 && b.includes(a)) || (b.length >= 4 && a.includes(b)));
+}
+
 // ── Types ──
 
 interface FraudRule {
@@ -741,6 +758,26 @@ Respond with EXACTLY "FRAUD" or "OK".`;
             // 7. Same first+last name (different middle or different address = repeat offender)
             if (shipFirst && shipLast && foShipFirst && foShipLast && shipFirst === foShipFirst && shipLast === foShipLast) {
               matches.push({ type: "same_name", this_value: `${shipFirst} ${shipLast}`, fraud_value: `${foShipFirst} ${foShipLast}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 8. Same custom (non-freemail) email DOMAIN — the ring reuses a
+            // throwaway domain (e.g. @safelywater.com) with fresh local parts to
+            // beat exact-email matching. Different local part, same custom domain
+            // as a confirmed-fraud order ⇒ flag.
+            const dom = email.split("@")[1] || "";
+            const foDom = foEmail.split("@")[1] || "";
+            if (dom && dom === foDom && email !== foEmail && !FREEMAIL_DOMAINS.has(dom)) {
+              matches.push({ type: "same_email_domain", this_value: email, fraud_value: foEmail, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 9. Fuzzy name — same last name + overlapping first name catches name
+            // padding ("stephen" → "benstephen"/"estephen") that beats exact match
+            // even when the address is fresh.
+            if (shipLast && foShipLast && shipLast === foShipLast && firstNameOverlap(shipFirst, foShipFirst)) {
+              matches.push({ type: "fuzzy_name", this_value: `${shipFirst} ${shipLast}`, fraud_value: `${foShipFirst} ${foShipLast}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+            if (billLast && foBillLast && billLast === foBillLast && firstNameOverlap(billFirst, foBillFirst)) {
+              matches.push({ type: "fuzzy_name", this_value: `${billFirst} ${billLast}`, fraud_value: `${foBillFirst} ${foBillLast}`, fraud_order: fo.order_number, fraud_case_id: caseId });
             }
           }
 
