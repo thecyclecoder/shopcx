@@ -55,7 +55,7 @@ export function PriceTableSection({ data }: { data: PageData }) {
   const autoCoupon = useAutoCoupon();
   const tiers = useMemo<DisplayTier[]>(() => {
     const base = (rule && baseVariant && (rule.quantity_breaks || []).length > 0)
-      ? buildTiersFromRule(rule, baseVariant.price_cents, baseVariant.shopify_variant_id)
+      ? buildTiersFromRule(rule, baseVariant.price_cents, baseVariant.id)
       : [...data.pricing_tiers].sort((a, b) => a.display_order - b.display_order).map(legacyToDisplay);
     if (!autoCoupon || autoCoupon.type !== "percentage") return base;
     return base.map((t) => ({
@@ -233,7 +233,7 @@ interface DisplayTier {
 function buildTiersFromRule(
   rule: PricingRule,
   basePriceCents: number,
-  shopifyVariantId: string | null,
+  variantId: string | null, // internal variant UUID — flows to the cart + event stream
 ): DisplayTier[] {
   const subDiscount = rule.subscribe_discount_pct || 0;
   // Highlight the middle break by default; if there's a label like
@@ -249,7 +249,7 @@ function buildTiersFromRule(
     const perUnit = Math.round(tierTotal / b.quantity);
     return {
       id: `rule-${rule.id}-${i}`,
-      variant_id: shopifyVariantId,
+      variant_id: variantId,
       tier_name: b.label || `${b.quantity}-pack`,
       quantity: b.quantity,
       price_cents: tierTotal,

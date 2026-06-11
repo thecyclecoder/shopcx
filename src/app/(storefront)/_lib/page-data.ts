@@ -75,6 +75,7 @@ export interface UpsellPartner {
     header_text_color: string | null;
   };
   base_variant: {
+    id: string | null;
     shopify_variant_id: string | null;
     price_cents: number;
     image_url: string | null;
@@ -263,6 +264,8 @@ export interface LinkMember {
   hero_width: number | null;
   hero_height: number | null;
   primary_variant_shopify_id: string | null;
+  /** Internal variant UUID — what the cart + event stream use (Shopify id is sunset-bound). */
+  primary_variant_id: string | null;
   primary_variant_servings: number | null;
   primary_variant_servings_unit: string | null;
   // Additional primary-variant fields needed when the price table
@@ -374,6 +377,7 @@ export interface PageData {
   // to visualize each tier's quantity. Future flavor selection will
   // swap the active variant client-side.
   base_variant: {
+    id: string | null;
     shopify_variant_id: string | null;
     price_cents: number;
     image_url: string | null;
@@ -583,7 +587,7 @@ export async function getPageData(
     // variant of this product.
     admin
       .from("product_variants")
-      .select("shopify_variant_id, price_cents, image_url, servings, servings_unit")
+      .select("id, shopify_variant_id, price_cents, image_url, servings, servings_unit")
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)
       .order("position", { ascending: true })
@@ -844,7 +848,7 @@ export async function getPageData(
         .maybeSingle(),
       admin
         .from("product_variants")
-        .select("shopify_variant_id, price_cents, image_url, servings, servings_unit, position")
+        .select("id, shopify_variant_id, price_cents, image_url, servings, servings_unit, position")
         .eq("product_id", productRow.upsell_product_id)
         .order("position", { ascending: true })
         .limit(1),
@@ -890,6 +894,7 @@ export async function getPageData(
         },
         base_variant: baseVariant
           ? {
+              id: baseVariant.id,
               shopify_variant_id: baseVariant.shopify_variant_id,
               price_cents: baseVariant.price_cents,
               image_url: baseVariant.image_url,
@@ -924,6 +929,7 @@ export async function getPageData(
     pricing_rule: pricingRule,
     base_variant: baseVariantRes.data
       ? {
+          id: baseVariantRes.data.id,
           shopify_variant_id: baseVariantRes.data.shopify_variant_id,
           price_cents: baseVariantRes.data.price_cents,
           image_url: baseVariantRes.data.image_url,
@@ -1051,7 +1057,7 @@ async function loadLinkGroup(
       .eq("slot", "hero")
       .order("display_order"),
     admin.from("product_variants")
-      .select("product_id, shopify_variant_id, servings, servings_unit, price_cents, image_url, position")
+      .select("id, product_id, shopify_variant_id, servings, servings_unit, price_cents, image_url, position")
       .in("product_id", memberProductIds)
       .order("position"),
     admin.from("product_pricing_rule")
@@ -1136,6 +1142,7 @@ async function loadLinkGroup(
   const variantsByProduct = new Map<
     string,
     {
+      id: string | null;
       shopify_variant_id: string | null;
       servings: number | null;
       servings_unit: string | null;
@@ -1146,6 +1153,7 @@ async function loadLinkGroup(
   for (const v of variants || []) {
     if (!variantsByProduct.has(v.product_id)) {
       variantsByProduct.set(v.product_id, {
+        id: v.id,
         shopify_variant_id: v.shopify_variant_id,
         servings: v.servings,
         servings_unit: v.servings_unit,
@@ -1174,6 +1182,7 @@ async function loadLinkGroup(
       hero_width: heroRow?.width ?? null,
       hero_height: heroRow?.height ?? null,
       primary_variant_shopify_id: variant?.shopify_variant_id || null,
+      primary_variant_id: variant?.id || null,
       primary_variant_servings: variant?.servings ?? null,
       primary_variant_servings_unit: variant?.servings_unit ?? null,
       primary_variant_price_cents: variant?.price_cents ?? null,

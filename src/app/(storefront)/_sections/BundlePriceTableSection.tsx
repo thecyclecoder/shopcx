@@ -172,10 +172,10 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
               subDiscountPct={showSubscribe ? subDiscount : 0}
               primaryImageUrl={baseVariant.image_url}
               primaryTitle={data.product.title}
-              primaryVariantId={baseVariant.shopify_variant_id}
+              primaryVariantId={baseVariant.id}
               upsellImageUrl={upsell.base_variant!.image_url}
               upsellTitle={upsell.product.title}
-              upsellVariantId={upsell.base_variant!.shopify_variant_id}
+              upsellVariantId={upsell.base_variant!.id}
               isHighlighted={card.n === 2}
               freqDays={shared?.mode === "subscribe" ? (shared?.freqDays ?? null) : null}
               mode={shared?.mode === "subscribe" ? "subscribe" : "onetime"}

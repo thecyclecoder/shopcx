@@ -96,6 +96,7 @@ export function useActiveProductData(data: PageData): {
     return {
       baseVariant: activeMember.primary_variant_price_cents != null
         ? {
+            id: activeMember.primary_variant_id,
             shopify_variant_id: activeMember.primary_variant_shopify_id,
             price_cents: activeMember.primary_variant_price_cents,
             image_url: activeMember.primary_variant_image_url,

@@ -32,7 +32,7 @@ interface CtaPayload {
   bundle: boolean;
   mode: "subscribe" | "onetime";
   frequency_days: number | null;
-  line_items: Array<{ shopify_variant_id: string; quantity: number }>;
+  line_items: Array<{ variant_id: string; quantity: number }>;
 }
 
 export function StorefrontPixelInit({
@@ -122,13 +122,13 @@ export function StorefrontPixelInit({
       if (isBundle) {
         if (ds.primaryVariantId && ds.primaryQuantity) {
           cta.line_items.push({
-            shopify_variant_id: ds.primaryVariantId,
+            variant_id: ds.primaryVariantId,
             quantity: Number(ds.primaryQuantity) || 1,
           });
         }
         if (ds.upsellVariantId && ds.upsellQuantity) {
           cta.line_items.push({
-            shopify_variant_id: ds.upsellVariantId,
+            variant_id: ds.upsellVariantId,
             quantity: Number(ds.upsellQuantity) || 1,
           });
         }
@@ -141,7 +141,7 @@ export function StorefrontPixelInit({
         // qty straight from the click.
         if (ds.variantId) {
           cta.line_items.push({
-            shopify_variant_id: ds.variantId,
+            variant_id: ds.variantId,
             quantity: Number(ds.tierQuantity) || 1,
           });
         }
