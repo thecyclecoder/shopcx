@@ -90,20 +90,29 @@ export async function sendCartRecovery(opts: {
     } catch { /* fall through to email */ }
   }
 
-  // Fallback: elaborate recovery email.
+  // Fallback: elaborate recovery email. Show 3 FEATURED reviews with the FULL
+  // body (not the smart-quote summary) — the full text usually mentions the
+  // weight-loss result, which is the conversion driver.
   const productIds = Array.from(new Set(opts.lineItems.map((l) => l.product_id).filter((id): id is string => !!id)));
   let reviews: Array<{ reviewer_name: string | null; rating: number; title: string | null; body: string | null; product_title?: string | null }> = [];
   if (productIds.length > 0) {
+    const { data: prods } = await admin.from("products").select("id, title").in("id", productIds);
+    const titleById = new Map((prods || []).map((p) => [p.id as string, p.title as string]));
     const { data: revs } = await admin
-      .from("reviews")
-      .select("reviewer_name, rating, title, body, smart_quote")
+      .from("product_reviews")
+      .select("reviewer_name, rating, title, body, product_id")
       .eq("workspace_id", opts.workspaceId)
       .in("product_id", productIds)
-      .in("status", ["published", "featured"])
-      .gte("rating", 4)
-      .order("featured", { ascending: false })
+      .eq("featured", true)
+      .not("body", "is", null)
       .limit(3);
-    reviews = (revs || []).map((r) => ({ reviewer_name: r.reviewer_name as string | null, rating: r.rating as number, title: r.title as string | null, body: ((r.smart_quote as string | null) || (r.body as string | null)) }));
+    reviews = (revs || []).map((r) => ({
+      reviewer_name: r.reviewer_name as string | null,
+      rating: r.rating as number,
+      title: r.title as string | null,
+      body: r.body as string | null, // full review body
+      product_title: titleById.get(r.product_id as string) || null,
+    }));
   }
   const { sendCartRecoveryEmail } = await import("@/lib/email-storefront");
   const r = await sendCartRecoveryEmail({

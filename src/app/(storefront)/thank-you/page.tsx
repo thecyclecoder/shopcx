@@ -71,16 +71,15 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
   let review: { reviewer_name: string | null; rating: number; body: string | null } | null = null;
   if (productIds.length > 0) {
     const { data: rev } = await admin
-      .from("reviews")
-      .select("reviewer_name, rating, body, smart_quote, featured")
+      .from("product_reviews")
+      .select("reviewer_name, rating, body")
       .eq("workspace_id", order.workspace_id)
       .in("product_id", productIds)
-      .in("status", ["published", "featured"])
-      .gte("rating", 4)
-      .order("featured", { ascending: false })
+      .eq("featured", true)
+      .not("body", "is", null)
       .limit(1)
       .maybeSingle();
-    if (rev) review = { reviewer_name: (rev.reviewer_name as string | null), rating: (rev.rating as number), body: ((rev.smart_quote as string | null) || (rev.body as string | null)) };
+    if (rev) review = { reviewer_name: (rev.reviewer_name as string | null), rating: (rev.rating as number), body: (rev.body as string | null) };
   }
 
   return (
