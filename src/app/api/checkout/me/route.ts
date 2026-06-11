@@ -78,21 +78,35 @@ export async function GET(request: NextRequest) {
       .limit(25),
   ]);
 
+  // Split a full "name" into first/last as a fallback.
+  const splitName = (name?: string | null): { first: string | null; last: string | null } => {
+    const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return { first: null, last: null };
+    if (parts.length === 1) return { first: parts[0], last: null };
+    return { first: parts.slice(0, -1).join(" "), last: parts[parts.length - 1] };
+  };
+
   const seen = new Set<string>();
   const addresses: Addr[] = [];
+  // Only surface addresses complete enough to pass checkout validation
+  // (street + city + state + zip). Name falls back to the customer's name so
+  // the shipping form never ends up missing it.
   for (const row of [...(orders || []), ...(subs || [])]) {
-    const a = (row.shipping_address as Addr) || null;
-    if (!a || !a.address1 || !a.zip) continue;
-    const key = addrKey(a);
+    const a = (row.shipping_address as (Addr & { name?: string | null; province?: string | null })) || null;
+    if (!a || !a.address1 || !a.zip || !a.city) continue;
+    const province = a.province_code || (a.province && a.province.length === 2 ? a.province : null);
+    if (!province) continue;
+    const key = addrKey({ ...a, province_code: province });
     if (seen.has(key)) continue;
     seen.add(key);
+    const nameFb = splitName(a.name);
     addresses.push({
-      first_name: a.first_name || null,
-      last_name: a.last_name || null,
+      first_name: a.first_name || nameFb.first || (customer.first_name as string | null) || null,
+      last_name: a.last_name || nameFb.last || (customer.last_name as string | null) || null,
       address1: a.address1 || null,
       address2: a.address2 || null,
       city: a.city || null,
-      province_code: a.province_code || null,
+      province_code: province,
       zip: a.zip || null,
       country_code: a.country_code || "US",
       phone: a.phone || null,

@@ -36,13 +36,28 @@ export async function GET(request: NextRequest) {
     .eq("workspace_id", session.w)
     .in("customer_id", groupIds)
     .eq("status", "active")
+    // Braintree-vaulted only — exclude Shopify-sourced methods (no BT token,
+    // not chargeable through our gateway).
+    .not("braintree_payment_method_token", "is", null)
     .order("is_default", { ascending: false })
     .order("created_at", { ascending: false });
+
+  // Drop expired cards — Braintree would reject them at charge time, so don't
+  // even offer them. A card is valid through the END of its expiration month.
+  const now = new Date();
+  const curYear = now.getFullYear();
+  const curMonth = now.getMonth() + 1;
+  const notExpired = (m: { expiration_year: number | null; expiration_month: number | null }) => {
+    const ey = Number(m.expiration_year), em = Number(m.expiration_month);
+    if (!ey || !em) return true; // unknown expiry — keep (charge-time will catch it)
+    return ey > curYear || (ey === curYear && em >= curMonth);
+  };
 
   // De-dupe by Braintree token (the same card can be vaulted on >1 linked
   // profile) so we don't render it twice.
   const seen = new Set<string>();
   const methods = (pms || [])
+    .filter(notExpired)
     .filter((m) => {
       const key = (m.braintree_payment_method_token as string) || `${m.card_brand}-${m.last4}`;
       if (seen.has(key)) return false;

@@ -48,10 +48,10 @@ export async function GET(request: NextRequest) {
     subscriptions: (subs || []).map((s) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const items = (s.items as any[]) || [];
-      const itemSummary = items
+      const itemLines = items
         .filter((i) => !i.is_gift && !i.one_time_next_renewal)
-        .map((i) => `${i.quantity || 1}× ${i.title}${i.variant_title ? ` (${i.variant_title})` : ""}`)
-        .join(", ");
+        .map((i) => `${i.quantity || 1}× ${i.title}${i.variant_title ? ` (${i.variant_title})` : ""}`);
+      const itemSummary = itemLines.join(", ");
       const frequencyDays = s.billing_interval === "day"
         ? (s.billing_interval_count as number)
         : s.billing_interval === "week"
@@ -62,6 +62,7 @@ export async function GET(request: NextRequest) {
       return {
         id: s.id,
         items_summary: itemSummary,
+        item_lines: itemLines,
         frequency_days: frequencyDays,
         next_billing_date: s.next_billing_date,
       };

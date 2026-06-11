@@ -296,8 +296,10 @@ export function CheckoutClient({
       } catch { /* anon or transient — fall back to manual entry */ }
     })();
     return () => { cancelled = true; };
+    // Re-run after OTP (authedCustomerId flips null→id) so the saved-address
+    // picker populates without needing a refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cart.token]);
+  }, [cart.token, authedCustomerId]);
 
   // ── Identify (debounced) ─────────────────────────────────────────
   // Fires when email is valid, debounced 700ms so we don't slam the
@@ -416,7 +418,7 @@ export function CheckoutClient({
 
   // Existing internal subs (only when authenticated). Drives the
   // three-way "what should we do with these items?" choice card.
-  type ExistingSub = { id: string; items_summary: string; frequency_days: number; next_billing_date: string | null };
+  type ExistingSub = { id: string; items_summary: string; item_lines?: string[]; frequency_days: number; next_billing_date: string | null };
   const [existingSubs, setExistingSubs] = useState<ExistingSub[]>([]);
   // Three modes:
   //   "new_sub"      → current behavior, create a new sub from cart
@@ -904,18 +906,28 @@ export function CheckoutClient({
                       {existingSubs.map((s) => (
                         <label
                           key={s.id}
-                          className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-sm transition ${chosenSubId === s.id ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                          className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 text-sm transition ${chosenSubId === s.id ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
                         >
                           <input
                             type="radio"
                             name="chosen-sub"
                             checked={chosenSubId === s.id}
                             onChange={() => setChosenSubId(s.id)}
-                            className="h-4 w-4"
+                            className="mt-0.5 h-4 w-4 flex-shrink-0"
                           />
                           <div className="min-w-0 flex-1">
-                            <div className="truncate font-medium text-zinc-900">{s.items_summary || "Subscription"}</div>
-                            <div className="text-xs text-zinc-500">
+                            {/* Every item on its own line — never an ellipsis,
+                                so the customer sees exactly what's in the sub. */}
+                            {s.item_lines && s.item_lines.length > 0 ? (
+                              <ul className="space-y-0.5 font-medium text-zinc-900">
+                                {s.item_lines.map((line, i) => (
+                                  <li key={i} className="break-words">{line}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="font-medium text-zinc-900">{s.items_summary || "Subscription"}</div>
+                            )}
+                            <div className="mt-1 text-xs text-zinc-500">
                               {frequencyToLabel(s.frequency_days)}
                               {s.next_billing_date && <> · next ships {new Date(s.next_billing_date).toLocaleDateString()}</>}
                             </div>
