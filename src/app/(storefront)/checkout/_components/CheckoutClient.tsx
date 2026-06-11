@@ -245,7 +245,9 @@ export function CheckoutClient({
         if (cancelled) return;
         setClientToken(client_token);
       } catch (err) {
-        setCardError(err instanceof Error ? err.message : String(err));
+        const msg = err instanceof Error ? err.message : String(err);
+        setCardError(msg);
+        logBlock("client_token", "client_token_failed", msg);
       }
     })();
     return () => { cancelled = true; };
@@ -429,6 +431,7 @@ export function CheckoutClient({
   type SubMode = "new_sub" | "add_to_sub" | "renewal_only";
   const [subMode, setSubMode] = useState<SubMode>("new_sub");
   const [chosenSubId, setChosenSubId] = useState<string | null>(null);
+  const [expandedSubId, setExpandedSubId] = useState<string | null>(null);
 
   useEffect(() => {
     // Refresh saved methods on page load + every time the client
@@ -645,17 +648,29 @@ export function CheckoutClient({
     }
   }
 
+  // Log anything that blocks the customer (fire-and-forget) so we can diagnose
+  // missing checkouts at go-live — see checkout_errors / /api/checkout/log-error.
+  function logBlock(stage: string, code: string, message: string, context?: Record<string, unknown>) {
+    void fetch("/api/checkout/log-error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cart_token: cart.token, stage, error_code: code, error_message: message, context: context || {} }),
+    }).catch(() => {});
+  }
+
   async function onSubmit() {
     // Two paths: saved-card (use vaulted token directly) OR new card
     // (tokenize via Hosted Fields → nonce).
     const usingSavedCard = !!selectedSavedToken;
     if (!usingSavedCard && (!hostedFieldsRef.current || !cardReady)) {
       setSubmitError("Payment isn't ready yet — please wait a moment and try again.");
+      logBlock("submit", "payment_not_ready", "Hosted Fields not ready when customer hit Pay");
       return;
     }
     const validity = isFormValid();
     if (!validity.ok) {
       setSubmitError(validity.reason);
+      logBlock("validation", "invalid_form", validity.reason);
       return;
     }
     setSubmitting(true);
@@ -717,6 +732,9 @@ export function CheckoutClient({
       const data = (await res.json()) as { ok?: boolean; order_id?: string; order_number?: string; error?: string; details?: string };
       if (!res.ok || !data.ok || !data.order_id) {
         setSubmitError(data.details || data.error || "Something went wrong with the payment.");
+        // Server already logged its own detail; log the client-visible outcome
+        // too so the funnel view shows the customer actually got blocked here.
+        logBlock("submit", data.error || "submit_failed", data.details || data.error || "submit returned non-ok", { http_status: res.status });
         setSubmitting(false);
         return;
       }
@@ -728,7 +746,9 @@ export function CheckoutClient({
       });
       window.location.href = `/thank-you?order=${data.order_id}`;
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setSubmitError(msg);
+      logBlock("submit", "submit_exception", msg);
       setSubmitting(false);
     }
   }
@@ -904,35 +924,46 @@ export function CheckoutClient({
                     <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Which subscription?</p>
                     <div className="space-y-2">
                       {existingSubs.map((s) => (
-                        <label
+                        <div
                           key={s.id}
-                          className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 text-sm transition ${chosenSubId === s.id ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                          className={`rounded-lg border text-sm transition ${chosenSubId === s.id ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
                         >
-                          <input
-                            type="radio"
-                            name="chosen-sub"
-                            checked={chosenSubId === s.id}
-                            onChange={() => setChosenSubId(s.id)}
-                            className="mt-0.5 h-4 w-4 flex-shrink-0"
-                          />
-                          <div className="min-w-0 flex-1">
-                            {/* Every item on its own line — never an ellipsis,
-                                so the customer sees exactly what's in the sub. */}
-                            {s.item_lines && s.item_lines.length > 0 ? (
-                              <ul className="space-y-0.5 font-medium text-zinc-900">
-                                {s.item_lines.map((line, i) => (
-                                  <li key={i} className="break-words">{line}</li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <div className="font-medium text-zinc-900">{s.items_summary || "Subscription"}</div>
-                            )}
-                            <div className="mt-1 text-xs text-zinc-500">
-                              {frequencyToLabel(s.frequency_days)}
-                              {s.next_billing_date && <> · next ships {new Date(s.next_billing_date).toLocaleDateString()}</>}
+                          <label className="flex cursor-pointer items-start gap-3 px-3 py-2.5">
+                            <input
+                              type="radio"
+                              name="chosen-sub"
+                              checked={chosenSubId === s.id}
+                              onChange={() => setChosenSubId(s.id)}
+                              className="mt-0.5 h-4 w-4 flex-shrink-0"
+                            />
+                            <div className="min-w-0 flex-1">
+                              {/* Compact summary; full item list on demand below. */}
+                              <div className="truncate font-medium text-zinc-900">{s.items_summary || "Subscription"}</div>
+                              <div className="mt-0.5 text-xs text-zinc-500">
+                                {frequencyToLabel(s.frequency_days)}
+                                {s.next_billing_date && <> · next ships {new Date(s.next_billing_date).toLocaleDateString()}</>}
+                              </div>
                             </div>
-                          </div>
-                        </label>
+                          </label>
+                          {s.item_lines && s.item_lines.length > 1 && (
+                            <div className="px-3 pb-2 pl-10">
+                              <button
+                                type="button"
+                                onClick={() => setExpandedSubId((id) => (id === s.id ? null : s.id))}
+                                className="text-xs font-medium text-zinc-600 underline-offset-2 hover:underline"
+                              >
+                                {expandedSubId === s.id ? "Hide items" : `View all ${s.item_lines.length} items`}
+                              </button>
+                              {expandedSubId === s.id && (
+                                <ul className="mt-1.5 space-y-0.5 text-xs text-zinc-600">
+                                  {s.item_lines.map((line, i) => (
+                                    <li key={i} className="break-words">• {line}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       ))}
                     </div>
                   </div>

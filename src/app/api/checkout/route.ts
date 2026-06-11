@@ -49,6 +49,7 @@ import {
 } from "@/lib/integrations/braintree-customer";
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
+import { logCheckoutError } from "@/lib/checkout-error-log";
 import { resolveRateForCart } from "@/lib/shipping-rates";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 import { checkOrderForFraud } from "@/lib/fraud-detector";
@@ -538,6 +539,19 @@ export async function POST(request: NextRequest) {
         console.warn(`[checkout] Avalara void after Braintree fail threw for ${orderNumber}:`, err);
       }
     }
+    await logCheckoutError({
+      workspaceId: cart.workspace_id as string,
+      stage: "braintree_charge",
+      cartToken: cart.token as string,
+      customerId: customer.id as string,
+      errorCode: "transaction_failed",
+      errorMessage: message,
+      context: {
+        total_cents: totalCents,
+        processor_response_code: (txnResult as { transaction?: { processorResponseCode?: string } }).transaction?.processorResponseCode || null,
+        order_number: orderNumber,
+      },
+    });
     return NextResponse.json({
       error: "transaction_failed",
       details: message,
@@ -763,6 +777,15 @@ export async function POST(request: NextRequest) {
         console.warn(`[checkout] Avalara void after order_insert_failed threw for ${orderNumber}:`, voidErr);
       }
     }
+    await logCheckoutError({
+      workspaceId: cart.workspace_id as string,
+      stage: "order_insert",
+      cartToken: cart.token as string,
+      customerId: customer.id as string,
+      errorCode: "order_insert_failed",
+      errorMessage: orderErr?.message || "order insert failed after successful charge",
+      context: { braintree_transaction_id: transaction.id, order_number: orderNumber, total_cents: totalCents, refunded: true },
+    });
     return NextResponse.json(
       { error: "order_insert_failed", details: orderErr?.message, braintree_transaction_id: transaction.id },
       { status: 500 },
