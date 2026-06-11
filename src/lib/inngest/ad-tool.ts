@@ -84,6 +84,15 @@ function buildAvatarBrollStill(action: { still: string; usesProduct: boolean }, 
   return `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image ${still}. Keep her face and identity IDENTICAL to the first image.${productClause} Realistic hands with exactly five fingers, natural daylight, authentic non-stock expression. No on-screen text, no watermark.`;
 }
 
+// Resolve a stored image reference to a fetchable URL. Avatar `reference_image_urls`
+// (and some product images) are stored as bucket PATHS since the avatar-library
+// refactor; the Gemini combine fetches the URL directly, so sign paths first.
+// Already-absolute http(s) URLs pass through unchanged.
+async function toFetchableUrl(ref: string | null | undefined): Promise<string | null> {
+  if (!ref) return null;
+  return /^https?:\/\//i.test(ref) ? ref : signedUrl(ref);
+}
+
 const CONCURRENCY: [{ limit: number; key: string }] = [{ limit: 3, key: "event.data.workspace_id" }];
 
 type EventData = { workspace_id: string; campaign_id: string; video_id?: string };
@@ -176,7 +185,10 @@ export const adToolHeroRequested = inngest.createFunction(
         const { data: p } = await admin.from("products").select("physical_dimensions").eq("id", c?.product_id).single();
         dims = p?.physical_dimensions || null;
       }
-      return { campaign: c, faceUrl: (avatar?.reference_image_urls as string[] | null)?.[0] || null, isoUrl, dims };
+      // Sign storage paths → fetchable URLs for the Gemini combine.
+      const faceUrl = await toFetchableUrl((avatar?.reference_image_urls as string[] | null)?.[0] || null);
+      isoUrl = await toFetchableUrl(isoUrl);
+      return { campaign: c, faceUrl, isoUrl, dims };
     });
 
     if (!ctx.faceUrl) {
@@ -321,6 +333,9 @@ export const adToolBrollRequested = inngest.createFunction(
           const { data: pv } = await admin.from("product_variants").select("isolated_image_url").eq("product_id", (c as any)?.product_id).not("isolated_image_url", "is", null).limit(1).maybeSingle();
           isoUrl = pv?.isolated_image_url || null;
         }
+        // Sign storage paths → fetchable URLs for the Gemini combine.
+        faceUrl = await toFetchableUrl(faceUrl);
+        isoUrl = await toFetchableUrl(isoUrl);
       }
       return { productTitle: (c as any)?.products?.title || "the product", nextSeq: (existing?.seq ?? -1) + 1, faceUrl, isoUrl };
     });
