@@ -136,11 +136,17 @@ async function handle(req: NextRequest) {
 
     // Log error responses for portal analytics visibility
     // Skip validation errors (expected user input issues, not real errors)
-    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered"]);
+    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points"]);
+    // Some validation errors carry a dynamic message instead of a stable code
+    // (e.g. loyalty redeem returns "Insufficient points. Need 1500, have 297").
+    // These are UI-gating issues — the portal should never offer the action —
+    // so they must NOT spawn a "needs help" ticket. Match by pattern too.
+    const isValidationError = (err: string) =>
+      VALIDATION_ERRORS.has(err) || /^insufficient points/i.test(err || "");
     if (response.status >= 400 && auth.workspaceId && auth.loggedInCustomerId) {
       try {
         const body = await response.clone().json();
-        if (VALIDATION_ERRORS.has(body?.error)) { /* skip logging validation errors */ }
+        if (isValidationError(body?.error)) { /* skip logging validation errors */ }
         else {
         const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
         if (customer) {

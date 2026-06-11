@@ -95,6 +95,7 @@ import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-commen
 import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/ticket-research";
 import { adToolFunctions } from "@/lib/inngest/ad-tool";
 import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
+import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 
 export const maxDuration = 300;
 
@@ -196,5 +197,6 @@ export const { GET, POST, PUT } = serve({
     ticketResearchRequested,
     ticketHealRequested,
     agentTodoExecute,
+    portalActionHealer,
   ],
 });
