@@ -18,6 +18,7 @@ import { sendCartRecovery } from "@/lib/cart-recovery";
 
 const IDLE_MINUTES = 30;       // first touch: 30 min after the cart goes idle
 const FOLLOWUP_HOURS = 24;     // second touch: 24 h after the first touch
+const REENTRY_COOLDOWN_DAYS = 3; // a customer can't re-enter the flow (new cart → first touch) within this window of a prior first touch
 const BATCH_SIZE = 50;
 
 interface CartDraftRow {
@@ -88,8 +89,39 @@ export const abandonedCartReminder = inngest.createFunction(
         .limit(BATCH_SIZE);
       if (e2) console.error("[abandoned-cart] follow-up find error:", e2.message);
 
+      // Re-entry cooldown — a customer who already got a FIRST touch in the last
+      // 3 days must not be put back into the flow for a different cart. They
+      // still complete the two touches of the cart they're already in (the
+      // `follow` query is intentionally NOT filtered here). Dedupe by both
+      // email and customer_id (per workspace) so it holds whether the cart was
+      // anonymous-with-email or stitched to an account.
+      const firstCarts = nonEmpty(first);
+      let allowedFirst = firstCarts;
+      if (firstCarts.length > 0) {
+        const cooldownCutoff = new Date(Date.now() - REENTRY_COOLDOWN_DAYS * 86_400_000).toISOString();
+        const { data: recentTouches } = await admin
+          .from("cart_drafts")
+          .select("workspace_id, email, customer_id")
+          .not("abandoned_email_sent_at", "is", null)
+          .gte("abandoned_email_sent_at", cooldownCutoff);
+        const emailKey = (ws: string, email: string | null) => `${ws}|${(email || "").toLowerCase()}`;
+        const recentEmails = new Set<string>();
+        const recentCustomers = new Set<string>();
+        for (const r of recentTouches || []) {
+          if (r.email) recentEmails.add(emailKey(r.workspace_id as string, r.email as string));
+          if (r.customer_id) recentCustomers.add(r.customer_id as string);
+        }
+        allowedFirst = firstCarts.filter(
+          (c) =>
+            !recentEmails.has(emailKey(c.workspace_id, c.email)) &&
+            !(c.customer_id && recentCustomers.has(c.customer_id)),
+        );
+        const skipped = firstCarts.length - allowedFirst.length;
+        if (skipped > 0) console.log(`[abandoned-cart] cooldown skipped ${skipped} first-touch cart(s) (re-entry within ${REENTRY_COOLDOWN_DAYS}d)`);
+      }
+
       return [
-        ...nonEmpty(first).map((d) => ({ ...d, followUp: false })),
+        ...allowedFirst.map((d) => ({ ...d, followUp: false })),
         ...nonEmpty(follow).map((d) => ({ ...d, followUp: true })),
       ];
     });
