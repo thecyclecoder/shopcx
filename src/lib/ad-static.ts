@@ -36,10 +36,17 @@ export interface ReviewProps {
   brand: Brand;
   reviewerName: string;
   rating: number; // 1-5
-  quote: string;
+  /** Summarized headline (the smart_quote). */
+  headline: string;
+  /** Full review body, shown below the headline (truncated to fit). */
+  body?: string | null;
+  /** @deprecated kept for back-compat — the template falls back to it as the headline. */
+  quote?: string;
   verified: boolean;
   productTitle: string;
   productImageUrl?: string | null;
+  /** Storefront font key (workspaces.storefront_font); defaults to montserrat. */
+  fontKey?: string | null;
 }
 export interface OfferProps {
   brand: Brand;
@@ -126,16 +133,20 @@ const trimQuote = (s: string, max = 180) => {
   return t.length > max ? t.slice(0, max - 1).replace(/[,;:\s]+\S*$/, "") + "…" : t;
 };
 
-export function buildReviewProps(inp: StaticInputs, brand = DEFAULT_BRAND, index = 0): ReviewProps {
+export function buildReviewProps(inp: StaticInputs, brand = DEFAULT_BRAND, index = 0, fontKey?: string | null): ReviewProps {
   const r = inp.reviews[index] || inp.reviews[0];
+  const headline = trimQuote(r?.smart_quote || r?.body || "This is the best I've ever tried.", 140);
   return {
     brand,
     reviewerName: r?.reviewer_name || "Verified Customer",
     rating: Math.min(5, Math.max(1, Math.round(r?.rating ?? 5))),
-    quote: trimQuote(r?.smart_quote || r?.body || "This is the best coffee I've ever had."),
+    headline,
+    body: r?.body || null,
+    quote: headline,
     verified: !!r?.verified_purchase,
     productTitle: inp.productTitle,
     productImageUrl: inp.productImageUrl,
+    fontKey: fontKey || null,
   };
 }
 

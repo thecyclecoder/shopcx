@@ -99,15 +99,19 @@ async function productImage(admin: ReturnType<typeof createAdminClient>, product
   return (v?.isolated_image_url as string | null) || (v?.image_url as string | null) || null;
 }
 
-function reviewProps(r: ReviewRow, productTitle: string, productImageUrl: string | null): ReviewProps {
+function reviewProps(r: ReviewRow, productTitle: string, productImageUrl: string | null, fontKey: string): ReviewProps {
+  const headline = trimQuote(r.smart_quote || r.body || "", 140);
   return {
     brand: DEFAULT_BRAND,
     reviewerName: r.reviewer_name?.trim() || "Verified Customer",
     rating: Math.min(5, Math.max(1, Math.round(r.rating ?? 5))),
-    quote: trimQuote(r.smart_quote || r.body || ""),
+    headline,
+    body: r.body || null, // shown below the headline (template truncates to fit)
+    quote: headline,
     verified: !!r.verified_purchase,
     productTitle,
     productImageUrl,
+    fontKey,
   };
 }
 
@@ -117,10 +121,11 @@ async function makeCard(
   workspaceId: string,
   review: ReviewRow,
   productTitle: string,
+  fontKey: string,
 ): Promise<{ reviewId: string; canonicalId: string }> {
   const campaignId = await reviewsCampaignId(admin, workspaceId, review.product_id, productTitle);
   const imageUrl = await productImage(admin, review.product_id);
-  const props = reviewProps(review, productTitle, imageUrl) as unknown as Record<string, unknown>;
+  const props = reviewProps(review, productTitle, imageUrl, fontKey) as unknown as Record<string, unknown>;
 
   let canonicalId: string | null = null;
   for (const dim of DIMS) {
@@ -166,6 +171,9 @@ export async function generateFeaturedReviewCards(
   opts: { productId?: string } = {},
 ): Promise<ReviewCardResult> {
   const admin = createAdminClient();
+  // Brand font from Storefront settings (default montserrat).
+  const { data: ws } = await admin.from("workspaces").select("storefront_font").eq("id", workspaceId).maybeSingle();
+  const fontKey = (ws?.storefront_font as string | null) || "montserrat";
   const carded = await cardedReviewIds(admin, workspaceId);
 
   let q = admin
@@ -202,7 +210,7 @@ export async function generateFeaturedReviewCards(
   for (const review of ordered.slice(0, max)) {
     const title = titleById.get(review.product_id) || "Our Product";
     try {
-      await makeCard(admin, workspaceId, review, title);
+      await makeCard(admin, workspaceId, review, title, fontKey);
       cards.push({ reviewId: review.id, product: title });
     } catch (e) {
       console.error(`[featured-review-cards] ${review.id} failed:`, e instanceof Error ? e.message : e);

@@ -1,10 +1,32 @@
 import React, { useState } from "react";
 import { AbsoluteFill, Img } from "remotion";
-import { loadFont as loadAnton } from "@remotion/google-fonts/Anton";
-import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
+import { loadFont as fMontserrat } from "@remotion/google-fonts/Montserrat";
+import { loadFont as fInter } from "@remotion/google-fonts/Inter";
+import { loadFont as fPoppins } from "@remotion/google-fonts/Poppins";
+import { loadFont as fLato } from "@remotion/google-fonts/Lato";
+import { loadFont as fOpenSans } from "@remotion/google-fonts/OpenSans";
+import { loadFont as fWorkSans } from "@remotion/google-fonts/WorkSans";
+import { loadFont as fNunitoSans } from "@remotion/google-fonts/NunitoSans";
+import { loadFont as fPlayfair } from "@remotion/google-fonts/PlayfairDisplay";
 
-const anton = loadAnton().fontFamily;
-const inter = loadInter("normal", { weights: ["600", "700", "800"], subsets: ["latin"], ignoreTooManyRequestsWarning: true }).fontFamily;
+// Brand fonts — mirror the storefront font allowlist (src/.../_lib/fonts.ts) so
+// graphics render in the workspace's chosen Storefront font (default Montserrat).
+// Each card passes a `fontKey` resolved from workspaces.storefront_font.
+const O = { subsets: ["latin"] as const, ignoreTooManyRequestsWarning: true as const };
+const FONTS: Record<string, string> = {
+  montserrat: fMontserrat("normal", { weights: ["500", "600", "700", "800"], ...O }).fontFamily,
+  inter: fInter("normal", { weights: ["400", "500", "600", "700"], ...O }).fontFamily,
+  poppins: fPoppins("normal", { weights: ["400", "600", "700"], ...O }).fontFamily,
+  lato: fLato("normal", { weights: ["400", "700"], ...O }).fontFamily,
+  "open-sans": fOpenSans("normal", { weights: ["400", "600", "700"], ...O }).fontFamily,
+  "work-sans": fWorkSans("normal", { weights: ["400", "600", "700"], ...O }).fontFamily,
+  "nunito-sans": fNunitoSans("normal", { weights: ["400", "600", "700"], ...O }).fontFamily,
+  playfair: fPlayfair("normal", { weights: ["400", "600", "700"], ...O }).fontFamily,
+};
+const fontFamilyFor = (key?: string | null): string => FONTS[(key || "montserrat")] || FONTS.montserrat;
+// The offer/benefit cards still reference these names — now both the brand font.
+const anton = FONTS.montserrat;
+const inter = FONTS.montserrat;
 
 // ── shared ───────────────────────────────────────────────────────────────────
 export interface Brand { bg: string; fg: string; accent: string; accentFg: string; muted: string; }
@@ -25,35 +47,57 @@ const Stars: React.FC<{ n: number; size: number; color: string }> = ({ n, size, 
   </div>
 );
 
-const VerifiedChip: React.FC<{ s: number }> = ({ s }) => (
-  <div style={{ display: "inline-flex", alignItems: "center", gap: s * 0.4, background: "#E7F6EC", color: "#1B8A4B", fontFamily: inter, fontWeight: 700, fontSize: s, padding: `${s * 0.35}px ${s * 0.7}px`, borderRadius: 999 }}>
-    <span>✔</span> Verified Purchase
+const Verified: React.FC<{ s: number }> = ({ s }) => (
+  <div style={{ display: "inline-flex", alignItems: "center", gap: s * 0.45, color: "#1B8A4B", fontFamily: inter, fontWeight: 700, fontSize: s }}>
+    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: s * 1.4, height: s * 1.4, borderRadius: 999, background: "#1B8A4B", color: "#fff", fontSize: s * 0.85 }}>✓</span>
+    Verified
   </div>
 );
 
-// ── 1. Review screenshot — a premium 5★ testimonial card ─────────────────────
-export interface StaticReviewProps { width: number; height: number; brand: Brand; reviewerName: string; rating: number; quote: string; verified: boolean; productTitle: string; productImageUrl?: string | null; }
+/** Sentence-aware truncation so long reviews fit the fixed card. */
+function truncateBody(text: string, maxChars: number): string {
+  const t = (text || "").replace(/\s+/g, " ").trim();
+  if (t.length <= maxChars) return t;
+  const slice = t.slice(0, maxChars);
+  const lastEnd = Math.max(slice.lastIndexOf(". "), slice.lastIndexOf("! "), slice.lastIndexOf("? "));
+  if (lastEnd > maxChars * 0.55) return t.slice(0, lastEnd + 1).trim() + " …";
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > 0 ? slice.slice(0, lastSpace) : slice).trim() + " …";
+}
+
+// ── 1. Review card — summarized headline + full review below (storefront style) ──
+export interface StaticReviewProps { width: number; height: number; brand: Brand; reviewerName: string; rating: number; headline: string; body?: string | null; verified: boolean; productTitle: string; productImageUrl?: string | null; fontKey?: string | null; quote?: string; }
 export const StaticReview: React.FC<StaticReviewProps> = (p) => {
   const u = p.width / 1080; // scale unit
-  const initial = (p.reviewerName || "?").trim().charAt(0).toUpperCase();
+  const ff = fontFamilyFor(p.fontKey);
+  const headline = (p.headline || p.quote || "").trim();
+  const fullBody = (p.body || "").replace(/\s+/g, " ").trim();
+  // Body budget scales with card height so a 9:16 shows more than a 4:5.
+  const body = truncateBody(fullBody, Math.round((p.height / 1080) * 230));
+  const truncated = body.length < fullBody.length;
   return (
-    <AbsoluteFill style={{ background: `linear-gradient(160deg, ${p.brand.bg} 0%, #F1E7DA 100%)`, display: "flex", alignItems: "center", justifyContent: "center", padding: 90 * u }}>
-      <div style={{ width: "100%", background: "#fff", borderRadius: 48 * u, padding: 70 * u, boxShadow: `0 ${40 * u}px ${90 * u}px rgba(43,26,18,0.18)` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 28 * u, marginBottom: 40 * u }}>
-          <div style={{ width: 110 * u, height: 110 * u, borderRadius: 999, background: p.brand.accent, color: p.brand.accentFg, fontFamily: anton, fontSize: 56 * u, display: "flex", alignItems: "center", justifyContent: "center" }}>{initial}</div>
-          <div>
-            <div style={{ fontFamily: inter, fontWeight: 800, fontSize: 46 * u, color: p.brand.fg }}>{p.reviewerName}</div>
-            <div style={{ marginTop: 10 * u }}><Stars n={p.rating} size={44 * u} color="#FFB400" /></div>
+    <AbsoluteFill style={{ background: `linear-gradient(160deg, ${p.brand.bg} 0%, #F1E7DA 100%)`, display: "flex", alignItems: "center", justifyContent: "center", padding: 84 * u }}>
+      <div style={{ width: "100%", background: "#fff", borderRadius: 48 * u, padding: 72 * u, boxShadow: `0 ${40 * u}px ${90 * u}px rgba(43,26,18,0.18)` }}>
+        <Stars n={p.rating} size={54 * u} color="#FFB400" />
+        <div style={{ fontFamily: ff, fontWeight: 800, fontSize: 60 * u, lineHeight: 1.18, color: p.brand.fg, letterSpacing: -0.5, marginTop: 34 * u }}>
+          “{headline}”
+        </div>
+        {fullBody && (
+          <div style={{ fontFamily: ff, fontWeight: 500, fontSize: 37 * u, lineHeight: 1.45, color: p.brand.muted, marginTop: 30 * u }}>
+            “{body}”
           </div>
-        </div>
-        <div style={{ fontFamily: inter, fontWeight: 600, fontSize: 60 * u, lineHeight: 1.28, color: p.brand.fg, letterSpacing: -0.5 }}>
-          “{p.quote}”
-        </div>
+        )}
+        {truncated && (
+          <div style={{ fontFamily: ff, fontWeight: 700, fontSize: 28 * u, color: "#1B8A4B", textTransform: "uppercase", letterSpacing: 1, marginTop: 22 * u }}>Read full review</div>
+        )}
         <div style={{ marginTop: 50 * u, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          {p.verified ? <VerifiedChip s={30 * u} /> : <span />}
-          <div style={{ display: "flex", alignItems: "center", gap: 20 * u }}>
-            <SafeImg src={p.productImageUrl} style={{ height: 130 * u, width: 130 * u, objectFit: "contain" }} />
-            <div style={{ fontFamily: anton, fontSize: 38 * u, color: p.brand.accent, textTransform: "uppercase", maxWidth: 360 * u, lineHeight: 1 }}>{p.productTitle}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 22 * u }}>
+            <div style={{ fontFamily: ff, fontWeight: 800, fontSize: 40 * u, color: p.brand.fg }}>{p.reviewerName}</div>
+            {p.verified && <Verified s={32 * u} />}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 18 * u }}>
+            <SafeImg src={p.productImageUrl} style={{ height: 104 * u, width: 104 * u, objectFit: "contain" }} />
+            <div style={{ fontFamily: ff, fontWeight: 800, fontSize: 28 * u, color: p.brand.accent, textTransform: "uppercase", maxWidth: 280 * u, lineHeight: 1.05 }}>{p.productTitle}</div>
           </div>
         </div>
       </div>
