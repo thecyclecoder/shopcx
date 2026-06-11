@@ -28,6 +28,21 @@ export type LinkEntry =
 interface PostedRow { source_kind: string; source_ref_id: string | null; product_id: string | null; published_at: string | null; media_bucket: string | null; media_path: string | null; media_url: string | null }
 
 const SIGN_TTL = 60 * 60; // 1h; the page revalidates well within this
+const IMG_TRANSFORM = { width: 800, quality: 62 } as const; // feed thumbnails
+
+/** Downscale a public Supabase storage URL via the image transform endpoint. */
+function thumbPublic(admin: ReturnType<typeof createAdminClient>, url: string): string {
+  const m = url.match(/\/object\/public\/([^/]+)\/([^?]+)/);
+  if (!m) return url;
+  return admin.storage.from(m[1]).getPublicUrl(decodeURIComponent(m[2]), { transform: IMG_TRANSFORM }).data.publicUrl;
+}
+
+/** Downscale any image URL: Supabase via transform, Shopify CDN via its width param. */
+function thumbAny(admin: ReturnType<typeof createAdminClient>, url: string): string {
+  if (/\/object\/public\//.test(url)) return thumbPublic(admin, url);
+  if (/cdn\.shopify\.com/.test(url)) return `${url}${url.includes("?") ? "&" : "?"}width=${IMG_TRANSFORM.width}`;
+  return url;
+}
 
 export async function listLinkInBioEntries(workspaceId: string, max = 12): Promise<LinkEntry[]> {
   const admin = createAdminClient();
@@ -72,19 +87,32 @@ export async function listLinkInBioEntries(workspaceId: string, max = 12): Promi
     ...Array.from(campById.values()).map((c) => c.emphasis_product_id),
   ]);
   const productById = new Map<string, LinkProduct>();
+  const productImg = new Map<string, string>(); // a still product image (reels have no still)
   if (productIds.length) {
-    const { data: prods } = await admin.from("products").select("id, handle, title").in("id", productIds);
-    for (const p of prods || []) if (p.handle) productById.set(p.id, { handle: p.handle, title: p.title });
+    const [{ data: prods }, { data: vars }] = await Promise.all([
+      admin.from("products").select("id, handle, title, image_url").in("id", productIds),
+      admin.from("product_variants").select("product_id, isolated_image_url, image_url").in("product_id", productIds).order("position"),
+    ]);
+    for (const p of prods || []) {
+      if (p.handle) productById.set(p.id, { handle: p.handle, title: p.title });
+      if (p.image_url) productImg.set(p.id, p.image_url as string);
+    }
+    for (const v of vars || []) {
+      const img = (v.isolated_image_url as string | null) || (v.image_url as string | null);
+      if (img) productImg.set(v.product_id, img); // prefer the variant shot
+    }
   }
   const prod = (id: string | null | undefined) => (id ? productById.get(id) || null : null);
 
-  // The exact image the post used (re-sign private-bucket assets).
+  // The exact image the post used, downscaled for the feed (Supabase image
+  // transform — the cards are full-res 1080px JPEGs, far too heavy otherwise).
   const imageFor = async (r: PostedRow): Promise<string | null> => {
     if (r.media_bucket && r.media_path) {
-      const { data } = await admin.storage.from(r.media_bucket).createSignedUrl(r.media_path, SIGN_TTL);
+      const { data } = await admin.storage.from(r.media_bucket).createSignedUrl(r.media_path, SIGN_TTL, { transform: IMG_TRANSFORM });
       return data?.signedUrl || null;
     }
-    return r.media_url || null;
+    if (r.media_url) return thumbPublic(admin, r.media_url);
+    return null;
   };
 
   // ── Build deduped, newest-first entries ──
@@ -109,7 +137,14 @@ export async function listLinkInBioEntries(workspaceId: string, max = 12): Promi
     }
     if (!e || seen.has(e.key)) continue;
     seen.add(e.key);
-    e.image = await imageFor(r);
+    // Reels post a video (no still) — use the product image; everything else
+    // posts the actual image we put out.
+    if (e.kind === "shop" && r.source_kind === "ad_video" && r.product_id) {
+      const pi = productImg.get(r.product_id);
+      e.image = pi ? thumbAny(admin, pi) : null;
+    } else {
+      e.image = await imageFor(r);
+    }
     entries.push(e);
   }
 
@@ -124,7 +159,7 @@ export async function listLinkInBioEntries(workspaceId: string, max = 12): Promi
       const key = `post:${p.handle}`;
       if (!p.handle || seen.has(key)) continue;
       seen.add(key);
-      entries.push({ kind: "post", key, title: p.title, handle: p.handle, product: null, image: p.featured_image_url });
+      entries.push({ kind: "post", key, title: p.title, handle: p.handle, product: null, image: p.featured_image_url ? thumbPublic(admin, p.featured_image_url) : null });
     }
   }
 
