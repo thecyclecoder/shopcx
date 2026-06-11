@@ -186,6 +186,71 @@ export async function healPortalAction(
   }
 }
 
+/**
+ * Did the customer already get what the failed date-change was trying to do —
+ * without us? Two signals, both scoped to the exact subscription:
+ *   (a) they successfully changed the date themselves after the error
+ *       (`portal.date.changed` event for this contract), or
+ *   (b) they wanted the order *sooner* (requested date earlier than the current
+ *       scheduled date) and an order has since landed on this subscription —
+ *       e.g. they found the "Order now" button. (Real case: SC132357, placed
+ *       ~40s after the date error, 2026-06-10.)
+ *
+ * We require the "sooner" direction for (b) so we never auto-dismiss a *delay*
+ * request just because the cycle billed anyway — that's the opposite of resolved.
+ */
+async function changedateSelfResolved(
+  admin: SupabaseClient,
+  workspaceId: string,
+  ctx: FailureContext,
+  ticket: TicketRow,
+): Promise<{ resolved: boolean; reason?: string }> {
+  const contractId = String(ctx.payload?.contractId || "");
+  if (!contractId || !ticket.customer_id) return { resolved: false };
+  const failTime = ticket.created_at;
+
+  // (a) Customer re-did the date change successfully.
+  const { data: changed } = await admin
+    .from("customer_events")
+    .select("created_at, properties")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", ticket.customer_id)
+    .eq("event_type", "portal.date.changed")
+    .gte("created_at", failTime)
+    .limit(20);
+  const reDid = (changed || []).find(
+    (e) => String((e.properties as Record<string, unknown>)?.shopify_contract_id || "") === contractId,
+  );
+  if (reDid) {
+    return { resolved: true, reason: `customer successfully changed the next order date herself after the error (${String(reDid.created_at).slice(0, 10)})` };
+  }
+
+  // (b) Wanted it sooner + an order has since landed on this subscription.
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, next_billing_date")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub?.id) return { resolved: false };
+  const requested = new Date(String(ctx.payload?.nextBillingDate || "").slice(0, 10) + "T00:00:00Z");
+  const current = sub.next_billing_date ? new Date(sub.next_billing_date as string) : null;
+  const wantedSooner = current && !isNaN(requested.getTime()) && requested < current;
+  if (wantedSooner) {
+    const { data: orders } = await admin
+      .from("orders")
+      .select("created_at")
+      .eq("subscription_id", sub.id)
+      .gte("created_at", failTime)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (orders && orders.length) {
+      return { resolved: true, reason: `customer wanted her next order sooner and an order landed on this subscription right after the error (${String(orders[0].created_at).slice(0, 10)}) — the date change is moot` };
+    }
+  }
+  return { resolved: false };
+}
+
 async function sysNote(admin: SupabaseClient, ticketId: string, body: string) {
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
@@ -259,6 +324,19 @@ export async function remediatePortalTicket(
   }
 
   // ── retry ──
+  // Before re-applying a date change, make sure the customer hasn't already
+  // resolved it themselves (re-did the date, or grabbed an order via "Order
+  // now"). Re-applying a stale date they no longer need would be wrong.
+  if (ctx.route === "changedate" || ctx.route === "change_date") {
+    const sr = await changedateSelfResolved(admin, ticket.workspace_id, ctx, ticket);
+    if (sr.resolved) {
+      await sysNote(admin, ticket.id, `[Auto-resolve] Self-resolved — ${sr.reason}. Closing without re-running the action.`);
+      await addTag(admin, ticket, "auto-dismissed");
+      await closeTicket(admin, ticket.id);
+      return { action: "dismissed", reason: sr.reason || "self-resolved" };
+    }
+  }
+
   // Count prior auto-heal attempts from our own notes (no extra column needed).
   const { data: priorNotes } = await admin
     .from("ticket_messages")
