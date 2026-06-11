@@ -55,22 +55,24 @@ export async function GET(
   const startIso = centralBoundary(start, false);
   const endIso = centralBoundary(end, true);
 
-  // ── Internal-traffic exclusion ──────────────────────────────────
-  // A session is "ours" (team/testing) if it's cookie-flagged (is_internal)
-  // OR stitches to an internal customer (customers.is_internal). We drop those
-  // sessions + their events from every metric so the funnel = real visitors.
+  // ── Non-real-traffic exclusion ──────────────────────────────────
+  // Drop a session (and its events) from every metric when it's:
+  //   - is_internal  — team/testing device (sx_internal cookie), OR
+  //   - is_bot       — datacenter/crawler IP (Meta ad-review bots), OR
+  //   - stitched to an internal customer (customers.is_internal).
+  // So the funnel reflects real shoppers only.
   const { data: internalCustomerRows } = await admin
     .from("customers").select("id")
     .eq("workspace_id", workspaceId).eq("is_internal", true);
   const internalCustomerIds = (internalCustomerRows || []).map((c) => c.id as string);
 
-  let internalSessionQuery = admin
+  const orClauses = ["is_internal.eq.true", "is_bot.eq.true"];
+  if (internalCustomerIds.length > 0) orClauses.push(`customer_id.in.(${internalCustomerIds.join(",")})`);
+  const { data: internalSessionRows } = await admin
     .from("storefront_sessions").select("id")
-    .eq("workspace_id", workspaceId);
-  internalSessionQuery = internalCustomerIds.length > 0
-    ? internalSessionQuery.or(`is_internal.eq.true,customer_id.in.(${internalCustomerIds.join(",")})`)
-    : internalSessionQuery.eq("is_internal", true);
-  const { data: internalSessionRows } = await internalSessionQuery;
+    .eq("workspace_id", workspaceId)
+    .or(orClauses.join(","));
+  // Name kept generic — this is the full "exclude from funnel" set.
   const internalSessions = new Set((internalSessionRows || []).map((s) => s.id as string));
 
   // ── Funnel: distinct sessions per step ──────────────────────────

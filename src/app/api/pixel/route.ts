@@ -24,6 +24,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { isDatacenterIp, clientIpFromHeaders } from "@/lib/datacenter-ip";
 
 // 1×1 transparent GIF (43 bytes). Pre-encoded so we don't recompute
 // on every pixel hit.
@@ -228,6 +229,11 @@ async function persistEvents({
   // POST/beacon. Once true on a session it sticks.
   const isInternal = request.cookies.get("sx_internal")?.value === "1";
 
+  // Bot/crawler traffic: classify the request IP as datacenter/Meta-network
+  // (the ad-review crawlers) vs residential/mobile (real shoppers). We store
+  // ONLY this boolean — the raw IP is never persisted. See datacenter-ip.ts.
+  const isBot = isDatacenterIp(clientIpFromHeaders(request.headers));
+
   // Upsert session. ON CONFLICT (workspace_id, anonymous_id) updates
   // last_seen_at + customer_id (if newly known); first-touch
   // attribution fields are only set on INSERT, never overwritten.
@@ -237,7 +243,7 @@ async function persistEvents({
   // unique index.
   const { data: existingSession } = await admin
     .from("storefront_sessions")
-    .select("id, customer_id, is_internal")
+    .select("id, customer_id, is_internal, is_bot")
     .eq("workspace_id", workspaceId)
     .eq("anonymous_id", anonymousId)
     .maybeSingle();
@@ -255,6 +261,10 @@ async function persistEvents({
     if (isInternal && !existingSession.is_internal) {
       updates.is_internal = true;
     }
+    // Same for bot: once a datacenter hit is seen on the session, it sticks.
+    if (isBot && !existingSession.is_bot) {
+      updates.is_bot = true;
+    }
     await admin
       .from("storefront_sessions")
       .update(updates)
@@ -267,6 +277,7 @@ async function persistEvents({
         anonymous_id: anonymousId,
         customer_id: customerId,
         is_internal: isInternal,
+        is_bot: isBot,
         user_agent: ua || null,
         device_type: deviceType,
         os,

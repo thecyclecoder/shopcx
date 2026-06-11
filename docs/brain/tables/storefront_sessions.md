@@ -13,6 +13,7 @@ One row per anonymous_id. Device fingerprint, UTMs, click IDs, _fbp/_fbc cookies
 | `anonymous_id` | `text` | — |  |
 | `customer_id` | `uuid` | ✓ | → [[customers]].id |
 | `is_internal` | `bool` | — | default: `false`. Team/testing traffic — excluded from the storefront funnel. Set by `/api/pixel` when the `sx_internal` cookie is present (visit any storefront page with `?sx_internal=1` to flag a device, `?sx_internal=0` to clear). The funnel also treats a session as internal if its `customer_id` is an internal [[customers]] row. |
+| `is_bot` | `bool` | — | default: `false`. Datacenter/crawler traffic (Meta ad-review bots) — excluded from the funnel. Set by `/api/pixel` when the request IP is a datacenter/Meta network ([[../libraries/datacenter-ip]]); only the boolean is stored, never the IP. |
 | `first_seen_at` | `timestamptz` | — | default: `now()` |
 | `last_seen_at` | `timestamptz` | — | default: `now()` |
 | `user_agent` | `text` | ✓ |  |
