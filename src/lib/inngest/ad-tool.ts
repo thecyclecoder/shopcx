@@ -34,7 +34,7 @@ import {
   saveComposition,
   regenerateSegment,
 } from "@/lib/ad-segments";
-import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, getSceneStyle, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
+import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, getSceneStyle, getAvatarBrollAction, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
@@ -71,6 +71,17 @@ function buildBrollPrompt(productTitle: string, slot = "", alt = ""): string {
   }
   // Fallback: gentle, safe motion.
   return `Cinematic b-roll cutaway for ${productTitle}: bring this photo to life with a subtle, believable gentle camera drift and shallow depth of field. Photorealistic, keep everything intact — NO morphing or warping. ${NO_AUDIO_TEXT}`;
+}
+
+// Avatar b-roll STILL prompt: the action frame the avatar (identity-locked) is
+// shown doing, fed to the Nano Banana combine. `usesProduct` adds the product
+// bag as the SECOND image; otherwise it's the avatar face alone.
+function buildAvatarBrollStill(action: { still: string; usesProduct: boolean }, productTitle: string): string {
+  const still = action.still.replace(/\{product\}/g, productTitle);
+  const productClause = action.usesProduct
+    ? " Reproduce the product packaging artwork and ALL text exactly and sharply from the second image."
+    : "";
+  return `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image ${still}. Keep her face and identity IDENTICAL to the first image.${productClause} Realistic hands with exactly five fingers, natural daylight, authentic non-stock expression. No on-screen text, no watermark.`;
 }
 
 const CONCURRENCY: [{ limit: number; key: string }] = [{ limit: 3, key: "event.data.workspace_id" }];
@@ -264,10 +275,11 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
 interface BrollEventData {
   workspace_id: string;
   campaign_id: string;
-  mode: "text" | "image";
+  mode: "text" | "image" | "avatar";
   prompt?: string;
   source_url?: string;
   model?: "fast" | "full";
+  avatar_action?: string; // mode="avatar": which AVATAR_BROLL_ACTIONS preset
 }
 
 export const adToolBrollRequested = inngest.createFunction(
@@ -275,12 +287,17 @@ export const adToolBrollRequested = inngest.createFunction(
   async ({ event, step }) => {
     const d = event.data as BrollEventData;
     const { workspace_id, campaign_id } = d;
-    const mode = d.mode === "text" ? "text" : "image";
+    const mode = d.mode === "text" ? "text" : d.mode === "avatar" ? "avatar" : "image";
     const veoModel = d.model === "full" ? VEO_MODEL : VEO_FAST_MODEL;
     const admin = createAdminClient();
 
     const ctx = await step.run("load", async () => {
-      const { data: c } = await admin.from("ad_campaigns").select("products(title)").eq("id", campaign_id).single();
+      // Avatar mode also needs the avatar face + product image to build the still.
+      const { data: c } = await admin
+        .from("ad_campaigns")
+        .select("avatar_id, product_id, variant_id, products(title)")
+        .eq("id", campaign_id)
+        .single();
       // Append after the highest existing active b-roll seq.
       const { data: existing } = await admin
         .from("ad_segments")
@@ -291,12 +308,44 @@ export const adToolBrollRequested = inngest.createFunction(
         .order("seq", { ascending: false })
         .limit(1)
         .maybeSingle();
-      return { productTitle: (c as any)?.products?.title || "the product", nextSeq: (existing?.seq ?? -1) + 1 };
+      let faceUrl: string | null = null;
+      let isoUrl: string | null = null;
+      if (mode === "avatar") {
+        const { data: avatar } = await admin.from("ad_avatars").select("reference_image_urls").eq("id", (c as any)?.avatar_id).single();
+        faceUrl = (avatar?.reference_image_urls as string[] | null)?.[0] || null;
+        if ((c as any)?.variant_id) {
+          const { data: v } = await admin.from("product_variants").select("isolated_image_url").eq("id", (c as any).variant_id).single();
+          isoUrl = v?.isolated_image_url || null;
+        }
+        if (!isoUrl) {
+          const { data: pv } = await admin.from("product_variants").select("isolated_image_url").eq("product_id", (c as any)?.product_id).not("isolated_image_url", "is", null).limit(1).maybeSingle();
+          isoUrl = pv?.isolated_image_url || null;
+        }
+      }
+      return { productTitle: (c as any)?.products?.title || "the product", nextSeq: (existing?.seq ?? -1) + 1, faceUrl, isoUrl };
     });
 
-    const sourceUrl = mode === "image" ? d.source_url || null : null;
-    if (mode === "image" && !sourceUrl) return { ok: false, reason: "image_mode_needs_source" };
-    const prompt = (d.prompt || "").trim() || buildBrollPrompt(ctx.productTitle);
+    // Avatar mode: generate the action STILL (Nano Banana combine), then animate
+    // it like image mode. The still is identity-locked to the avatar's face.
+    let sourceUrl = mode === "image" ? d.source_url || null : null;
+    let prompt = (d.prompt || "").trim() || buildBrollPrompt(ctx.productTitle);
+    if (mode === "avatar") {
+      const action = getAvatarBrollAction(d.avatar_action);
+      if (!action) return { ok: false, reason: "unknown_avatar_action" };
+      if (!ctx.faceUrl) return { ok: false, reason: "no_avatar_face" };
+      if (action.usesProduct && !ctx.isoUrl) return { ok: false, reason: "no_product_image" };
+      const stillPrompt = buildAvatarBrollStill(action, ctx.productTitle);
+      sourceUrl = await step.run("avatar-still-combine", async () => {
+        const images = action.usesProduct ? [ctx.faceUrl!, ctx.isoUrl!] : [ctx.faceUrl!];
+        const { buffer, mimeType } = await generateNanoBananaProCombine({ workspaceId: workspace_id, prompt: stillPrompt, imageUrls: images });
+        const path = `broll-stills/${workspace_id}/${campaign_id}-${ctx.nextSeq}-${action.value}.png`;
+        await uploadBuffer(path, buffer, mimeType);
+        return signedUrl(path);
+      });
+      prompt = `${action.motion}. Photorealistic, keep her face and identity intact — NO morphing, warping, or extra limbs. ${NO_AUDIO_TEXT}`;
+    } else if (mode === "image" && !sourceUrl) {
+      return { ok: false, reason: "image_mode_needs_source" };
+    }
 
     const result = await step.run("veo-generate-persist", async () => {
       const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq: ctx.nextSeq, model: veoModel, prompt, sourceUrl });
@@ -797,6 +846,40 @@ export const adToolPublishToMeta = inngest.createFunction(
   },
 );
 
+// ── Full-ad orchestrator ─────────────────────────────────────────────────────
+// Stages normally run one-at-a-time from the campaign page. This chains them for
+// one campaign so an ad can be produced fire-and-forget (used to batch-build a
+// set of ads): hero → talking head → N avatar b-roll → render, sequentially via
+// step.invoke (each invoke awaits the stage's completion). Concurrency 1/workspace
+// so a batch of these serializes and doesn't burst past Veo's rate cap.
+interface GenerateFullEventData {
+  workspace_id: string;
+  campaign_id: string;
+  broll_actions?: string[]; // AVATAR_BROLL_ACTIONS values (avatar b-roll clips to add)
+}
+
+export const adToolGenerateFull = inngest.createFunction(
+  { id: "ad-tool-generate-full", retries: 0, concurrency: [{ limit: 1, key: "event.data.workspace_id" }], triggers: [{ event: "ad-tool/generate-full" }] },
+  async ({ event, step }) => {
+    const { workspace_id, campaign_id, broll_actions } = event.data as GenerateFullEventData;
+
+    const hero = (await step.invoke("hero", { function: adToolHeroRequested, data: { workspace_id, campaign_id } })) as { ok?: boolean; reason?: string };
+    if (!hero?.ok) return { ok: false, stage: "hero", reason: hero?.reason };
+
+    const th = (await step.invoke("talking-head", { function: adToolTalkingHeadRequested, data: { workspace_id, campaign_id } })) as { ok?: boolean; reason?: string };
+    if (!th?.ok) return { ok: false, stage: "talking-head", reason: th?.reason };
+
+    // Avatar b-roll — sequential (Veo cap). A failed clip doesn't abort the ad.
+    const actions = (broll_actions || []).slice(0, 2);
+    for (let i = 0; i < actions.length; i++) {
+      await step.invoke(`broll-${i}`, { function: adToolBrollRequested, data: { workspace_id, campaign_id, mode: "avatar", avatar_action: actions[i] } });
+    }
+
+    const render = await step.invoke("render", { function: adToolRenderRequested, data: { workspace_id, campaign_id } });
+    return { ok: true, render };
+  },
+);
+
 export const adToolFunctions = [
   adToolFaceRequested,
   adToolHeroRequested,
@@ -807,6 +890,7 @@ export const adToolFunctions = [
   adToolSegmentRegenerate,
   adToolStaticRequested,
   adToolPublishToMeta,
+  adToolGenerateFull,
 ];
 
 // keep imports used even if tree-shaken in some builds

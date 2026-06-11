@@ -125,6 +125,75 @@ export function getSceneStyle(value: string | null | undefined): AdSceneStyle {
   return AD_SCENE_STYLES.find((s) => s.value === value) || AD_SCENE_STYLES[0];
 }
 
+// ── Avatar b-roll actions (animate the avatar, not stock product b-roll) ─────
+// Instead of reusing a product still, generate a NEW b-roll clip of the ad's own
+// avatar doing something — making coffee, sipping, opening the bag, holding a raw
+// ingredient, checking looser clothes in the mirror. Two-step generation (see
+// adToolBrollRequested mode="avatar"):
+//   1. STILL — Nano Banana combine of [avatar face] (+ product bag when
+//      `usesProduct`) with `still` → a photoreal frame of her mid-action, identity
+//      locked to her face.
+//   2. MOTION — Veo image-to-video animates that still with `motion`.
+// `{product}` in a prompt is replaced with the product title at generation time.
+// No real ingredient photos exist, so chaga/cordyceps are model-imagined in her
+// hand (identity still comes from her face).
+export interface AvatarBrollAction {
+  value: string;
+  label: string;
+  usesProduct: boolean; // combine with the product bag image (vs avatar face alone)
+  still: string; // prompt for the action frame (Nano Banana combine)
+  motion: string; // prompt to animate the frame (Veo)
+}
+
+export const AVATAR_BROLL_ACTIONS: readonly AvatarBrollAction[] = [
+  {
+    value: "making_instant_coffee",
+    label: "Making an instant coffee",
+    usesProduct: true,
+    still: "in a bright home kitchen, spooning instant coffee from the {product} pouch (SECOND image) into a mug of hot water on the counter, mid-action and looking down at the mug",
+    motion: "She stirs the instant coffee into the mug of hot water with a spoon, soft steam rising, relaxed handheld kitchen b-roll",
+  },
+  {
+    value: "sipping_coffee",
+    label: "Sipping a coffee",
+    usesProduct: false,
+    still: "holding a warm mug of coffee with both hands close to her face, eyes relaxed, about to take a sip, cozy warm light",
+    motion: "She lifts the mug and takes a slow, satisfied sip of coffee, faint steam, warm natural light, gentle handheld",
+  },
+  {
+    value: "opening_bag",
+    label: "Opening the bag of product",
+    usesProduct: true,
+    still: "holding the {product} pouch (SECOND image) in both hands and peeling open its resealable top, looking down into the bag",
+    motion: "She peels open the resealable pouch and glances inside with a pleased expression, natural handheld close-up",
+  },
+  {
+    value: "holding_chaga",
+    label: "Holding chaga in her hand",
+    usesProduct: false,
+    still: "holding a raw chunk of dark chaga mushroom in her open palm, presenting it toward the camera, soft natural light",
+    motion: "She holds out the raw chunk of chaga mushroom in her open palm and turns it slightly toward the camera, soft daylight",
+  },
+  {
+    value: "holding_cordyceps",
+    label: "Holding cordyceps in her hand",
+    usesProduct: false,
+    still: "holding a small pile of golden dried cordyceps in her open palm, presenting it toward the camera, soft natural light",
+    motion: "She holds out the dried cordyceps in her open palm and turns her hand slightly toward the camera, soft daylight",
+  },
+  {
+    value: "mirror_looser_clothes",
+    label: "Mirror — looser clothes (weight loss)",
+    usesProduct: false,
+    still: "standing at a bedroom mirror, smiling, pulling the waistband of her now-too-loose jeans away from her waist to show how much room there is, happy and surprised",
+    motion: "At the mirror she tugs the waistband of her loose jeans out to show the extra room, happy and a little surprised, natural light",
+  },
+] as const;
+
+export function getAvatarBrollAction(value: string | null | undefined): AvatarBrollAction | null {
+  return AVATAR_BROLL_ACTIONS.find((a) => a.value === value) || null;
+}
+
 // ── Banned soft words (default; workspace-configurable) ─────────────────────
 export const DEFAULT_BANNED_WORDS = [
   "supports", "promotes", "helps", "may aid", "natural", "wellness", "boost", "enhance",

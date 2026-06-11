@@ -38,17 +38,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .single();
   if (!campaign) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  // Add ONE b-roll clip: mode "text" (text-to-video) or "image" (animate a still).
-  const mode = body.mode === "text" ? "text" : "image";
+  // Add ONE b-roll clip: "text" (text-to-video), "image" (animate a still), or
+  // "avatar" (animate the campaign's avatar doing an AVATAR_BROLL_ACTIONS action).
+  const mode = body.mode === "text" ? "text" : body.mode === "avatar" ? "avatar" : "image";
   const model = body.model === "full" ? "full" : "fast";
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   const sourceUrl = typeof body.source_url === "string" ? body.source_url.trim() : "";
+  const avatarAction = typeof body.avatar_action === "string" ? body.avatar_action.trim() : "";
   if (mode === "image" && !sourceUrl) return NextResponse.json({ error: "source_url required for image mode" }, { status: 400 });
   if (mode === "text" && !prompt) return NextResponse.json({ error: "prompt required for text mode" }, { status: 400 });
+  if (mode === "avatar" && !avatarAction) return NextResponse.json({ error: "avatar_action required for avatar mode" }, { status: 400 });
 
   await inngest.send({
     name: "ad-tool/broll-requested",
-    data: { workspace_id: workspaceId as string, campaign_id: id, mode, model, prompt: prompt || undefined, source_url: sourceUrl || undefined },
+    data: { workspace_id: workspaceId as string, campaign_id: id, mode, model, prompt: prompt || undefined, source_url: sourceUrl || undefined, avatar_action: avatarAction || undefined },
   });
 
   return NextResponse.json({ queued: true, mode });

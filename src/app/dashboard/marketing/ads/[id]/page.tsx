@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
-import { AD_SCENE_STYLES, DEFAULT_SCENE_STYLE } from "@/lib/ad-tool-config";
+import { AD_SCENE_STYLES, DEFAULT_SCENE_STYLE, AVATAR_BROLL_ACTIONS } from "@/lib/ad-tool-config";
 import { PublishToMeta } from "./PublishToMeta";
 
 interface Campaign {
@@ -87,13 +87,13 @@ export default function AdDetailPage() {
     setLoading(false);
   }, [id, workspace.id]);
 
-  // Add ONE b-roll clip: text-to-video or animate a chosen photo.
-  async function addBroll(opts: { mode: "text" | "image"; prompt: string; sourceUrl?: string; model: "fast" | "full" }) {
+  // Add ONE b-roll clip: text-to-video, animate a chosen photo, or animate the avatar.
+  async function addBroll(opts: { mode: "text" | "image" | "avatar"; prompt: string; sourceUrl?: string; avatarAction?: string; model: "fast" | "full" }) {
     setMessage(null);
     const res = await fetch(`/api/ads/campaigns/${id}/broll`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, mode: opts.mode, prompt: opts.prompt, source_url: opts.sourceUrl, model: opts.model }),
+      body: JSON.stringify({ workspaceId: workspace.id, mode: opts.mode, prompt: opts.prompt, source_url: opts.sourceUrl, avatar_action: opts.avatarAction, model: opts.model }),
     });
     setMessage(res.ok ? "Generating a b-roll clip — it'll appear below when ready." : "Failed to queue b-roll.");
     if (res.ok) setTimeout(load, 1500);
@@ -586,14 +586,15 @@ function BrollStudio({
   campaignId: string;
   clips: Segment[];
   sources: BrollSource[];
-  onAdd: (opts: { mode: "text" | "image"; prompt: string; sourceUrl?: string; model: "fast" | "full" }) => Promise<void>;
+  onAdd: (opts: { mode: "text" | "image" | "avatar"; prompt: string; sourceUrl?: string; avatarAction?: string; model: "fast" | "full" }) => Promise<void>;
   onReuse: (segId: string) => Promise<void>;
   onRegenerate: (seq: number, opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string }) => Promise<void>;
   onDiscard: (segId: string) => void;
 }) {
-  const [mode, setMode] = useState<"text" | "photo" | "library">("text");
+  const [mode, setMode] = useState<"text" | "photo" | "avatar" | "library">("avatar");
   const [prompt, setPrompt] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
+  const [avatarAction, setAvatarAction] = useState<string>(AVATAR_BROLL_ACTIONS[0].value);
   const [model, setModel] = useState<"fast" | "full">("fast");
   const [busy, setBusy] = useState(false);
   const [library, setLibrary] = useState<LibraryClip[] | null>(null);
@@ -609,11 +610,12 @@ function BrollStudio({
     setBusy(true);
     if (mode === "text") await onAdd({ mode: "text", prompt: prompt.trim(), model });
     else if (mode === "photo" && picked) await onAdd({ mode: "image", prompt: prompt.trim(), sourceUrl: picked, model });
+    else if (mode === "avatar") await onAdd({ mode: "avatar", prompt: "", avatarAction, model });
     setBusy(false);
     setPrompt("");
     setPicked(null);
   }
-  const tab = (k: "text" | "photo" | "library", label: string) => (
+  const tab = (k: "text" | "photo" | "avatar" | "library", label: string) => (
     <button
       onClick={() => (k === "library" ? openLibrary() : setMode(k))}
       className={`rounded-md px-3 py-1.5 text-xs font-medium ${mode === k ? "bg-indigo-600 text-white" : "border border-zinc-300 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"}`}
@@ -631,6 +633,7 @@ function BrollStudio({
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-3 flex flex-wrap gap-2">
+          {tab("avatar", "Animate the avatar")}
           {tab("text", "Describe (text → video)")}
           {tab("photo", "Animate a photo")}
           {tab("library", "From library")}
@@ -653,6 +656,21 @@ function BrollStudio({
           )
         ) : (
           <div>
+            {mode === "avatar" && (
+              <div className="mb-3">
+                <p className="mb-1 text-xs font-medium text-zinc-600 dark:text-zinc-400">What should she do?</p>
+                <select
+                  value={avatarAction}
+                  onChange={(e) => setAvatarAction(e.target.value)}
+                  className="w-full rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+                >
+                  {AVATAR_BROLL_ACTIONS.map((a) => (
+                    <option key={a.value} value={a.value}>{a.label}{a.usesProduct ? " (with the product)" : ""}</option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-zinc-400">Builds a fresh frame of this ad&apos;s avatar doing the action (identity-locked to her face), then animates it — no stock b-roll.</p>
+              </div>
+            )}
             {mode === "photo" && (
               <div className="mb-3">
                 <p className="mb-1 text-xs font-medium text-zinc-600 dark:text-zinc-400">Pick a photo to animate</p>
@@ -674,13 +692,15 @@ function BrollStudio({
                 )}
               </div>
             )}
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={3}
-              placeholder={mode === "text" ? "Describe the b-roll scene (e.g. close-up of coffee being poured into a mug, steam rising, warm morning light)…" : "Optional: guide the motion (e.g. slow push-in, gentle drift, no morphing)…"}
-              className="w-full rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
-            />
+            {mode !== "avatar" && (
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={3}
+                placeholder={mode === "text" ? "Describe the b-roll scene (e.g. close-up of coffee being poured into a mug, steam rising, warm morning light)…" : "Optional: guide the motion (e.g. slow push-in, gentle drift, no morphing)…"}
+                className="w-full rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              />
+            )}
             <div className="mt-2 flex flex-wrap items-center gap-3">
               <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
                 <input type="radio" checked={model === "fast"} onChange={() => setModel("fast")} /> Veo Fast

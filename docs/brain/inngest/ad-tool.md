@@ -29,10 +29,11 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 - Requires `hero_image_url`. `splitScriptIntoSegments` → ~8s beats; for each: `generateVeoVideo` (Veo 3.1 Fast, image-to-video from the hero, native audio = VO spine), Whisper sets the trim, persists an [[../tables/ad_segments]] row (`kind=talking_head`, its `script_text` + `transcript_json` + `trim_sec`). Sequential (Veo Fast daily cap). Emits `ad-tool/talking-head-completed`.
 
 ### `ad-tool-broll-requested` (ONE Veo b-roll clip, on demand)
-- **Trigger:** event `ad-tool/broll-requested` (`{ workspace_id, campaign_id, mode, prompt?, source_url?, model? }`) · **Retries:** 1
+- **Trigger:** event `ad-tool/broll-requested` (`{ workspace_id, campaign_id, mode, prompt?, source_url?, avatar_action?, model? }`) · **Retries:** 1
 - Adds **one** b-roll clip at the next seq (appends; doesn't disturb others):
   - `mode="text"`: text-to-video from `prompt` (no source image).
   - `mode="image"`: animate `source_url` (a chosen still) with `prompt` as guiding text.
+  - `mode="avatar"`: **animate the campaign's own avatar** doing an [[../libraries/ad-tool-config]] `AVATAR_BROLL_ACTIONS` action (`avatar_action`). Loads the avatar face (+ product isolated image when the action `usesProduct`), builds the action frame via `generateNanoBananaProCombine` (`buildAvatarBrollStill`, identity-locked), uploads it to `broll-stills/`, then animates that still with the action's `motion` prompt. Fails soft (`no_avatar_face`/`no_product_image`/`unknown_avatar_action`).
   - `model`: `fast` (default) | `full` (HQ Veo 3).
 - Persists an [[../tables/ad_segments]] row (`kind=broll`, `source_url`, `prompt`). Emits `ad-tool/broll-completed`. **Switched from Higgsfield DoP → Veo** (DoP returned HTTP 422 on this account).
 - **B-roll is a "studio", not a staged button**: add clips one at a time (text / animate-photo / **reuse from library**), keep or discard each; the ad renders with ANY count incl. zero (`buildComposition` overlays however many exist). Tailored default prompt: `buildBrollPrompt(productTitle, slot, alt)` (ingredient macros get subtle motion, not pour/sizzle — generic prompts were producing nonsense motion on a mushroom photo).
@@ -59,9 +60,13 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 - **Trigger:** event `ad-tool/publish-to-meta` (`{ workspace_id, job_id }`) · **Retries:** 1
 - Loads the [[../tables/ad_publish_jobs]] row → `uploadAdVideo` (re-signed video `file_url`) → `waitForVideoReady` (poll) → `createAdCreative` (asset_feed_spec copy variants) → `createAd` (**PAUSED** unless `publish_active`) → writes `meta_video_id`/`meta_creative_id`/`meta_ad_id` + `publish_status`. Graph v21.0 via [[../libraries/meta-ads]]. Routes: `POST /api/ads/campaigns/[id]/publish` (+ `/meta-copy`, `GET /api/ads/meta`). See [[../lifecycles/ad-publish]].
 
+### `ad-tool-generate-full` (orchestrator — whole ad, fire-and-forget)
+- **Trigger:** event `ad-tool/generate-full` (`{ workspace_id, campaign_id, broll_actions?: string[] }`) · **Retries:** 0 · **Concurrency:** 1 / workspace (a batch serializes so it doesn't burst past Veo's rate cap).
+- Chains the stages for one campaign via `step.invoke` (each awaits completion): **hero → talking head → N avatar b-roll** (`mode="avatar"`, one per `broll_actions` value, ≤2) **→ render**. Aborts if hero or talking-head returns `ok:false`; a failed b-roll clip doesn't abort the ad. Used to batch-build a set of ads (e.g. 5 campaigns × varied angle/scene/avatar) without clicking each stage.
+
 ## Staging / UI control
 
-Stages are **manual + staged** (no auto-orchestrator), each fired by its own route from the campaign page's **Production** panel (`/dashboard/marketing/ads/[id]`): `POST /hero`, `/talking-head`, `/broll`, `/music`, `/render` (+ `/segments/regenerate`). The panel shows each stage's state (done/running/ready/blocked) from the DB and lights up the next. Generate in order: hero → talking head → b-roll (optional) → render. An ad rendered before a talking head exists is left in `draft` (recoverable), not `failed`, so it can be resumed and finished.
+Stages are **manual + staged** by default — each fired by its own route from the campaign page's **Production** panel (`/dashboard/marketing/ads/[id]`): `POST /hero`, `/talking-head`, `/broll`, `/music`, `/render` (+ `/segments/regenerate`). The panel shows each stage's state (done/running/ready/blocked) from the DB and lights up the next. Generate in order: hero → talking head → b-roll (optional) → render. An ad rendered before a talking head exists is left in `draft` (recoverable), not `failed`, so it can be resumed and finished. `ad-tool-generate-full` (above) is the fire-and-forget alternative that runs the whole chain for one campaign.
 
 ## Downstream events sent
 
