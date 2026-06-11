@@ -61,7 +61,7 @@ export function ThankYouClient({ order, workspace }: { order: OrderProps; worksp
       <header className="mb-8 flex items-center justify-center">
         {workspace.logo_url ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={workspace.logo_url} alt={workspace.name} className="h-10" />
+          <img src={workspace.logo_url} alt={workspace.name} className="h-16 w-auto max-w-[260px] sm:h-20" />
         ) : (
           <span className="text-xl font-semibold">{workspace.name}</span>
         )}
