@@ -84,13 +84,18 @@ function buildAvatarBrollStill(action: { still: string; usesProduct: boolean }, 
   return `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image ${still}. Keep her face and identity IDENTICAL to the first image.${productClause} Realistic hands with exactly five fingers, natural daylight, authentic non-stock expression. No on-screen text, no watermark.`;
 }
 
-// Resolve a stored image reference to a fetchable URL. Avatar `reference_image_urls`
-// (and some product images) are stored as bucket PATHS since the avatar-library
-// refactor; the Gemini combine fetches the URL directly, so sign paths first.
-// Already-absolute http(s) URLs pass through unchanged.
+// Resolve a stored image reference to a fetchable URL for the Gemini combine.
+// Refs come in three shapes: bare bucket PATHS (avatar library since the refactor),
+// our own Supabase Storage signed/public URLs (which EXPIRE → 400 if reused), and
+// external URLs (e.g. Shopify CDN). For the first two we (re)sign from the path so
+// the URL is always fresh; external URLs pass through.
 async function toFetchableUrl(ref: string | null | undefined): Promise<string | null> {
   if (!ref) return null;
-  return /^https?:\/\//i.test(ref) ? ref : signedUrl(ref);
+  // Our own storage URL → extract the object path and re-sign (stored token is stale).
+  const m = ref.match(/\/storage\/v1\/object\/(?:sign|public)\/ad-tool\/([^?]+)/);
+  if (m) return signedUrl(decodeURIComponent(m[1]));
+  if (/^https?:\/\//i.test(ref)) return ref; // external URL — use as-is
+  return signedUrl(ref); // bare bucket path
 }
 
 const CONCURRENCY: [{ limit: number; key: string }] = [{ limit: 3, key: "event.data.workspace_id" }];
