@@ -13,7 +13,7 @@ import { HOOK_FORMULAS, LIFE_FORCE_8, DEFAULT_BANNED_WORDS } from "@/lib/ad-tool
 import type { AngleGeneratorInput, ProductAdAngle } from "@/lib/ad-types";
 import { validateAdScript, type Violation, estimateSpokenSeconds } from "@/lib/ad-validator";
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY?.trim();
 
 export interface GenerateScriptArgs {
   angle: ProductAdAngle;

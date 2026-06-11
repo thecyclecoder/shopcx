@@ -5,7 +5,10 @@
  * the Hormozi caption layer can sync each word exactly. Persisted on
  * ad_videos.transcript_json. Uses the existing OPENAI_API_KEY.
  */
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// .trim() defends against a trailing newline/space on the env value (a classic
+// dashboard-paste mistake) — an untrimmed key makes the Bearer header invalid and
+// OpenAI returns 401 even though the key itself is correct.
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim();
 
 export interface TranscriptWord {
   word: string;
