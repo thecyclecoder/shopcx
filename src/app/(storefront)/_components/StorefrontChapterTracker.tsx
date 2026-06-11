@@ -146,16 +146,30 @@ export function StorefrontChapterTracker({ productId }: Props) {
       }
     };
 
+    // Effective visibility = max of (a) how much of the ELEMENT is in view
+    // and (b) how much of the VIEWPORT the element covers. (b) is essential
+    // for sections taller than the screen — the Hero fills the viewport on
+    // load but its intersectionRatio (visible ÷ element height) never reaches
+    // 50%, so element-ratio alone reports reach 0 for the most-seen chapter.
+    const visibility = (entry: IntersectionObserverEntry): number => {
+      const rootH = entry.rootBounds?.height || (typeof window !== "undefined" ? window.innerHeight : 0) || 1;
+      const viewportCoverage = entry.intersectionRect.height / rootH;
+      return Math.max(entry.intersectionRatio, viewportCoverage);
+    };
+
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          ratios.set(entry.target, entry.intersectionRatio);
-          if (entry.intersectionRatio >= VIEW_VISIBLE_RATIO) armView(entry.target);
+          const v = visibility(entry);
+          ratios.set(entry.target, v);
+          if (v >= VIEW_VISIBLE_RATIO) armView(entry.target);
           else disarmView(entry.target);
         }
         recomputeActive();
       },
-      { threshold: [0, 0.25, VIEW_VISIBLE_RATIO, 0.75, 1] },
+      // Extra low thresholds so tall sections (whose element-ratio creeps
+      // slowly) still trigger callbacks as they enter/leave the viewport.
+      { threshold: [0, 0.1, 0.25, VIEW_VISIBLE_RATIO, 0.75, 1] },
     );
 
     indexChapters();

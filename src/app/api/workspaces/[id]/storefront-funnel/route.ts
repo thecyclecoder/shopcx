@@ -19,8 +19,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 const FUNNEL_STEPS = [
   "pdp_view",
   "pdp_engaged",
+  // Selecting a pack navigates straight to /customize, so pack_selected and
+  // customize_view are the same moment — we keep pack_selected (the explicit
+  // selection action, which also powers the top-products breakdown) as the
+  // single step and drop customize_view to avoid a redundant funnel row.
   "pack_selected",
-  "customize_view",
   // The checkout page fires checkout_view on load — the reliable "reached
   // checkout" signal. (checkout_redirect, the customize Continue click, never
   // fired and missed direct-to-checkout paths.)
@@ -47,8 +50,19 @@ export async function GET(
     .eq("workspace_id", workspaceId).eq("user_id", user.id).single();
   if (!member) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const start = url.searchParams.get("start") || defaultStart();
+  // Launch floor: the funnel never counts data before the storefront went
+  // live (pre-launch = testing + ad-review crawlers, never real customers).
+  const { data: ws } = await admin
+    .from("workspaces").select("storefront_launch_at")
+    .eq("id", workspaceId).maybeSingle();
+
+  let start = url.searchParams.get("start") || defaultStart();
   const end = url.searchParams.get("end") || defaultEnd();
+  const launchAt = (ws?.storefront_launch_at as string | null) || null;
+  if (launchAt) {
+    const launchDate = new Date(launchAt).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+    if (start < launchDate) start = launchDate; // clamp display + ISO boundary below
+  }
   // Date boundaries interpreted in Central time, matching the rest
   // of the analytics dashboards (ROAS, MRR). Avoids the "events
   // before midnight CT show up in tomorrow's bucket" footgun.
@@ -90,7 +104,7 @@ export async function GET(
 
   const sessionsByStep: Record<FunnelStep, Set<string>> = {
     pdp_view: new Set(), pdp_engaged: new Set(), pack_selected: new Set(),
-    customize_view: new Set(), checkout_view: new Set(), order_placed: new Set(),
+    checkout_view: new Set(), order_placed: new Set(),
   };
   for (const row of (stepRows || []) as { event_type: string; session_id: string }[]) {
     if (internalSessions.has(row.session_id)) continue;

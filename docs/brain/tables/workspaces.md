@@ -10,6 +10,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 |---|---|---|---|
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `name` | `text` | — |  |
+| `storefront_launch_at` | `timestamptz` | ✓ | Go-live floor for the storefront funnel. The funnel clamps its window start to `max(requested, launch_at)`, so pre-launch testing + ad-review crawler data never appears. Null = no floor. |
 | `shopify_domain` | `text` | ✓ |  |
 | `shopify_access_token_encrypted` | `text` | ✓ | AES-256-GCM |
 | `meta_page_id` | `text` | ✓ |  |
