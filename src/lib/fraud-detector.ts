@@ -503,14 +503,19 @@ export async function checkOrderForFraud(
   // Load the order with address details
   const { data: order } = await admin
     .from("orders")
-    .select("id, shopify_order_id, normalized_shipping_address, customer_id, subscription_id, billing_address, shipping_address, source_name, email, order_number, line_items, total_cents")
+    .select("id, shopify_order_id, normalized_shipping_address, customer_id, subscription_id, billing_address, shipping_address, source_name, email, order_number, line_items, total_cents, payment_details")
     .eq("id", orderId)
     .single();
 
   if (!order) return;
 
-  // Fetch billing address + payment details from Shopify if not stored
-  if (!order.billing_address && order.shopify_order_id) {
+  // Fetch billing address + card details from Shopify when missing. We need the
+  // card BIN for bin-velocity, so fetch whenever it isn't captured yet — not just
+  // when billing is absent. Skip subscription renewals (the card never rotates).
+  const existingPd = (order.payment_details && typeof order.payment_details === "object")
+    ? (order.payment_details as Record<string, unknown>) : null;
+  const haveCardBin = !!existingPd?.card_bin;
+  if ((!order.billing_address || !haveCardBin) && order.shopify_order_id && !order.subscription_id) {
     try {
       const { getShopifyCredentials } = await import("@/lib/shopify-sync");
       const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
@@ -527,12 +532,27 @@ export async function checkOrderForFraud(
         const billingAddr = data?.data?.order?.billingAddress;
         const txn = data?.data?.order?.transactions?.[0];
         const updates: Record<string, unknown> = {};
-        if (billingAddr) {
+        if (billingAddr && !order.billing_address) {
           order.billing_address = billingAddr;
           updates.billing_address = billingAddr;
         }
-        if (txn?.paymentDetails && Object.keys(txn.paymentDetails).length > 0) {
-          updates.payment_details = { gateway: txn.gateway, ...txn.paymentDetails };
+        // Capture the card fingerprint into payment_details — MERGE, never clobber
+        // (the column also holds the checkout breakdown: tax/discount/shipping).
+        const card = txn?.paymentDetails as Record<string, unknown> | undefined;
+        if (card?.bin) {
+          const card_bin = String(card.bin).replace(/\D/g, "");
+          const card_last4 = String(card.number || "").replace(/\D/g, "").slice(-4);
+          const merged = {
+            ...(existingPd || {}),
+            gateway: txn.gateway,
+            card_bin,
+            card_last4,
+            card_company: card.company || null,
+            card_name: card.name || null,
+            card_exp: `${card.expirationMonth || ""}/${card.expirationYear || ""}`,
+          };
+          updates.payment_details = merged;
+          order.payment_details = merged;
         }
         if (Object.keys(updates).length) {
           await admin.from("orders").update(updates).eq("id", orderId);
@@ -840,10 +860,193 @@ Respond with EXACTLY "FRAUD" or "OK".`;
     }
   }
 
+  // ── Velocity signals (BIN / email-domain / surname) ──
+  // Rule-independent, defense-in-depth: catches rings that rotate identity but
+  // reuse a stolen-card batch, a throwaway domain, or one surname.
+  try {
+    if (await checkVelocitySignals(workspaceId, order, customer)) flagged = true;
+  } catch (e) {
+    console.error("[fraud] Velocity signal check error:", e);
+  }
+
   // Tag the Shopify order as "suspicious" if any rule flagged it
   if (flagged && order.shopify_order_id) {
     await addOrderTags(workspaceId, order.shopify_order_id, ["suspicious"]);
   }
+}
+
+// ── Velocity signals (real-time, rule-independent) ──────────────────────────
+// Card-testing / stolen-batch rings rotate names, emails and addresses but leak
+// three things that survive the disguise:
+//   • BIN        — the same card BIN (issuer batch) across many orders + buyers
+//   • domain     — the same throwaway custom email domain across fresh accounts
+//   • surname    — the same surname across fresh accounts on custom domains
+// Each fires an OPEN case (Dylan confirms in the UI — that path cancels subs +
+// refunds to head off chargebacks) and tags the ring's orders "suspicious".
+const VELOCITY_WINDOW_DAYS = 30;
+const BIN_MIN_ORDERS = 4; // ≥4 orders on one BIN in the window…
+const BIN_MIN_CUSTOMERS = 2; // …across ≥2 distinct accounts
+const DOMAIN_MIN_CUSTOMERS = 4; // ≥4 distinct accounts on one custom domain
+const SURNAME_MIN_CUSTOMERS = 4; // ≥4 new accounts sharing a surname…
+const SURNAME_MIN_CUSTOM_DOMAIN = 2; // …with ≥2 on non-freemail domains
+
+function emailDomain(email: string | null | undefined): string {
+  const e = (email || "").toLowerCase().trim();
+  const at = e.lastIndexOf("@");
+  return at >= 0 ? e.slice(at + 1) : "";
+}
+
+async function checkVelocitySignals(
+  workspaceId: string,
+  order: { id: string; shopify_order_id: string | null; email: string | null; payment_details: unknown; subscription_id: string | null },
+  customer: { id: string; first_name: string | null; last_name: string | null } | null,
+): Promise<boolean> {
+  if (order.subscription_id) return false; // subscription renewals are legit repeat billing
+  const admin = createAdminClient();
+  const since = new Date(Date.now() - VELOCITY_WINDOW_DAYS * 86_400_000).toISOString();
+  let fired = false;
+
+  // Open (or refresh) one case per distinct velocity key, hold every order in the ring.
+  const openCase = async (
+    ruleType: string,
+    velocityKey: string,
+    title: string,
+    summary: string,
+    evidence: Record<string, unknown>,
+    customerIds: string[],
+    shopOrderIds: string[],
+  ): Promise<void> => {
+    const fullEvidence = { ...evidence, velocity_key: velocityKey };
+    const { data: existing } = await admin
+      .from("fraud_cases")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("rule_type", ruleType)
+      .not("status", "in", '("confirmed_fraud","dismissed")')
+      .filter("evidence->>velocity_key", "eq", velocityKey)
+      .limit(1)
+      .maybeSingle();
+
+    if (existing) {
+      await admin
+        .from("fraud_cases")
+        .update({ evidence: fullEvidence, title, summary, customer_ids: customerIds, order_ids: shopOrderIds, last_seen_at: new Date().toISOString() })
+        .eq("id", existing.id);
+    } else {
+      const { data: nc } = await admin
+        .from("fraud_cases")
+        .insert({
+          workspace_id: workspaceId,
+          rule_type: ruleType,
+          status: "open",
+          severity: "high",
+          title,
+          summary,
+          evidence: fullEvidence,
+          customer_ids: customerIds,
+          order_ids: shopOrderIds,
+          orders_held: true,
+          first_detected_at: new Date().toISOString(),
+          last_seen_at: new Date().toISOString(),
+        })
+        .select("id")
+        .single();
+      if (nc) await inngest.send({ name: "fraud/case.created", data: { caseId: nc.id, workspaceId } });
+    }
+    for (const sid of shopOrderIds) if (sid) addOrderTags(workspaceId, sid, ["suspicious"]).catch(() => {});
+    fired = true;
+  };
+
+  // 1) BIN velocity — same card issuer-batch across many orders + buyers.
+  const pd = (order.payment_details && typeof order.payment_details === "object") ? (order.payment_details as Record<string, unknown>) : null;
+  const bin = pd?.card_bin ? String(pd.card_bin) : "";
+  if (/^\d{6,}$/.test(bin)) {
+    const { data: binOrders } = await admin
+      .from("orders")
+      .select("shopify_order_id, customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since)
+      .filter("payment_details->>card_bin", "eq", bin)
+      .limit(200);
+    const rows = binOrders || [];
+    const custs = new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[]);
+    const shopIds = rows.map((r) => r.shopify_order_id).filter(Boolean) as string[];
+    if (rows.length >= BIN_MIN_ORDERS && custs.size >= BIN_MIN_CUSTOMERS) {
+      await openCase(
+        "bin_velocity",
+        `bin:${bin}`,
+        `Card BIN ${bin} on ${rows.length} orders across ${custs.size} accounts (30d)`,
+        `${rows.length} orders in the last 30 days share card BIN ${bin} across ${custs.size} distinct customers — the fingerprint of a stolen-card batch being run through different identities.`,
+        { card_bin: bin, order_count: rows.length, customer_count: custs.size, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
+        [...custs],
+        shopIds,
+      );
+    }
+  }
+
+  // 2) Email-domain velocity — many fresh accounts on one custom (non-freemail) domain.
+  const domain = emailDomain(order.email);
+  if (domain && !FREEMAIL_DOMAINS.has(domain)) {
+    const { data: domOrders } = await admin
+      .from("orders")
+      .select("shopify_order_id, customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since)
+      .ilike("email", `%@${domain}`)
+      .limit(200);
+    const rows = domOrders || [];
+    const custs = new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[]);
+    const emails = new Set(rows.map((r) => (r.email || "").toLowerCase()).filter(Boolean));
+    const shopIds = rows.map((r) => r.shopify_order_id).filter(Boolean) as string[];
+    if (custs.size >= DOMAIN_MIN_CUSTOMERS && emails.size >= DOMAIN_MIN_CUSTOMERS) {
+      await openCase(
+        "email_domain_velocity",
+        `domain:${domain}`,
+        `${custs.size} accounts on @${domain} ordered in 30d`,
+        `${custs.size} distinct customers on the custom domain @${domain} placed orders in the last 30 days (${emails.size} distinct addresses) — characteristic of a ring spinning up throwaway accounts on one domain it controls.`,
+        { email_domain: domain, customer_count: custs.size, email_count: emails.size, window_days: VELOCITY_WINDOW_DAYS, emails: [...emails].slice(0, 40) },
+        [...custs],
+        shopIds,
+      );
+    }
+  }
+
+  // 3) Surname velocity — many fresh accounts sharing a surname, on custom domains.
+  const lastName = (customer?.last_name || "").trim();
+  if (lastName.length >= 3) {
+    const { data: kin } = await admin
+      .from("customers")
+      .select("id, email")
+      .eq("workspace_id", workspaceId)
+      .ilike("last_name", lastName)
+      .gte("created_at", since)
+      .limit(200);
+    const rows = kin || [];
+    const nonFree = rows.filter((r) => { const d = emailDomain(r.email); return d && !FREEMAIL_DOMAINS.has(d); });
+    if (rows.length >= SURNAME_MIN_CUSTOMERS && nonFree.length >= SURNAME_MIN_CUSTOM_DOMAIN) {
+      const custIds = rows.map((r) => r.id);
+      const { data: kinOrders } = await admin
+        .from("orders")
+        .select("shopify_order_id")
+        .eq("workspace_id", workspaceId)
+        .in("customer_id", custIds)
+        .gte("created_at", since)
+        .not("shopify_order_id", "is", null)
+        .limit(200);
+      const shopIds = (kinOrders || []).map((o) => o.shopify_order_id).filter(Boolean) as string[];
+      await openCase(
+        "surname_velocity",
+        `surname:${lastName.toLowerCase()}`,
+        `${rows.length} new "${lastName}" accounts (${nonFree.length} on custom domains, 30d)`,
+        `${rows.length} new accounts share the surname "${lastName}" in the last 30 days, ${nonFree.length} on custom (non-freemail) domains — characteristic of a ring reusing one identity across throwaway emails.`,
+        { surname: lastName, customer_count: rows.length, non_freemail_count: nonFree.length, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
+        custIds,
+        shopIds,
+      );
+    }
+  }
+
+  return fired;
 }
 
 async function checkAddressForOrder(

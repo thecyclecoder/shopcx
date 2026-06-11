@@ -27,6 +27,8 @@ Five active rules in [[../tables/fraud_rules]]:
 
 Each rule has tunable thresholds + `active` flag in [[../tables/fraud_rules]].`config`.
 
+Plus two rule-**independent** layers that run inside `checkOrderForFraud` regardless of `fraud_rules` rows: **repeat-offender matching** (vs `confirmed_fraud` orders) and **velocity signals** (`bin_velocity` / `email_domain_velocity` / `surname_velocity`). See the dedicated sections below.
+
 ## Phase 1 — order create
 
 Shopify `orders/create` webhook fires. After persisting the order, the handler calls `evaluateFraudRulesForOrder(orderId)` in `src/lib/fraud-detector.ts`:
@@ -121,6 +123,18 @@ After the rules + AI screen, `checkOrderForFraud` compares each new order agains
 
 > The last two were added 2026-06-11 after the **Stephen Reinard ring** (29 customers, `@safelywater.com`/`@chadscaler.com`/`@bowlingdog.com`) landed an order (`SC132418`, "benstephen reinard") that beat every rule at once: fresh address (no shared-address / distance — he made ship=bill), padded first name (beat exact-name), and a fresh local part on the ring's domain (beat exact-email). Domain + fuzzy-name matching now catches that class.
 
+## Velocity signals (rule-independent, real-time)
+
+Repeat-offender matching only catches rings **after** one of their orders is `confirmed_fraud`. Velocity signals catch a ring on its **own internal repetition** — before we've confirmed anyone — by looking at what survives identity rotation. Run inside `checkOrderForFraud` (rule-independent, like the AI screen), 30-day window, each opens a `status='open'` case (Dylan confirms in the UI — that path cancels subs + refunds to head off chargebacks) and tags **every order in the ring** `suspicious`. De-duped by `evidence->>velocity_key` so a ring collapses into one case that refreshes:
+
+| slug | Fires when | velocity_key |
+|---|---|---|
+| `bin_velocity` | One card **BIN** (issuer batch) appears on ≥4 orders across ≥2 distinct customers. Fingerprint of a stolen-card batch run through different identities. | `bin:{bin}` |
+| `email_domain_velocity` | ≥4 distinct customers (≥4 distinct addresses) on one **custom** (non-freemail) email domain. A ring spinning up throwaway accounts on a domain it controls. | `domain:{domain}` |
+| `surname_velocity` | ≥4 new accounts sharing a **surname**, with ≥2 on custom (non-freemail) domains. Tying to custom domains is what suppresses common-surname false positives — a cluster of freemail "Adams" doesn't fire; 5 fresh `@safelywater.com` "Reinard"s does. | `surname:{surname}` |
+
+> Added 2026-06-11 from the Reinard card investigation: pulling each order's Shopify transaction showed he rotated **10 distinct cards** (9 sharing Amex BIN `370021`) across the ring, every order AVS=Y / CVV=M (he holds the real billing data, so AVS/CVV never decline him). Domain + surname velocity already fire on the existing Reinard data; the dry-run also surfaced a **second ring** (surname "porth", 5 fresh custom-domain accounts). **BIN data is captured going forward** — `checkOrderForFraud` now fetches the Shopify card transaction whenever `payment_details.card_bin` is missing and **merges** `card_bin`/`card_last4`/`card_company`/`card_exp` into `orders.payment_details` (never clobbering the checkout breakdown that also lives there). `bin_velocity` therefore strengthens as orders flow; seed it for history with `scripts/_backfill-card-bins.ts` (bounded by date).
+
 ## Address fallback chain
 
 Order ingestion runs through this chain (per feedback_address_mirror_rule):
@@ -175,9 +189,9 @@ For one-off ops:
 
 ## Status / open work
 
-**Shipped:** All five rule types (shared_address, high_velocity, address_distance, name_mismatch, amazon_reseller). Two-pass amazon_reseller matching (normalized exact + Haiku fuzzy). Order hold via `tagsAdd("suspicious")`. `confirmed_fraud` orchestrator short-circuit in `customer-fraud-status.ts`. Weekly reseller discovery scan. Address fallback chain on order ingest.
+**Shipped:** All five rule types (shared_address, high_velocity, address_distance, name_mismatch, amazon_reseller). Two-pass amazon_reseller matching (normalized exact + Haiku fuzzy). Order hold via `tagsAdd("suspicious")`. `confirmed_fraud` orchestrator short-circuit in `customer-fraud-status.ts`. Weekly reseller discovery scan. Address fallback chain on order ingest. Repeat-offender matching (incl. custom-domain + fuzzy-name, 2026-06-11). **Velocity signals** — `bin_velocity` / `email_domain_velocity` / `surname_velocity` (2026-06-11), with Shopify card-BIN capture merged into `orders.payment_details`.
 
-**Known gaps / not yet shipped:** None identified.
+**Known gaps / not yet shipped:** `bin_velocity` only sees BINs captured since 2026-06-11 (forward-filling as orders flow); run `scripts/_backfill-card-bins.ts` to seed history.
 
 **Recent activity:**
 - `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end
