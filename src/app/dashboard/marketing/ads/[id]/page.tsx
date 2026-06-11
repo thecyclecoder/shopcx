@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { AD_SCENE_STYLES, DEFAULT_SCENE_STYLE } from "@/lib/ad-tool-config";
 import { PublishToMeta } from "./PublishToMeta";
 
 interface Campaign {
@@ -13,6 +14,7 @@ interface Campaign {
   script_text: string | null;
   hero_image_url: string | null;
   audio_url: string | null;
+  scene_style: string | null;
   products?: { title: string } | null;
 }
 
@@ -141,6 +143,17 @@ export default function AdDetailPage() {
     setBusyStage(null);
     setTimeout(load, 1500);
   }, [id, workspace.id, load]);
+
+  // Change the scene style. Persists immediately; takes effect when the hero +
+  // talking-head are (re)generated — those read scene_style off the campaign.
+  async function saveSceneStyle(value: string) {
+    setCampaign((c) => (c ? { ...c, scene_style: value } : c));
+    await fetch(`/api/ads/campaigns/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspace.id, scene_style: value }),
+    });
+  }
 
   // Regenerate the hero with an optional free-text correction.
   async function regenerateHero() {
@@ -275,6 +288,23 @@ export default function AdDetailPage() {
             Add a comment + regenerate to fix anatomy/framing issues. */}
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Hero shot</h2>
+
+          {/* Scene style — the setting/action. Changing it re-shoots when you
+              regenerate the hero + talking head below. */}
+          <div className="mb-3 border-b border-zinc-100 pb-3 dark:border-zinc-800">
+            <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Scene style</label>
+            <select
+              value={campaign.scene_style || DEFAULT_SCENE_STYLE}
+              onChange={(e) => saveSceneStyle(e.target.value)}
+              className="w-full rounded-md border border-zinc-300 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+            >
+              {AD_SCENE_STYLES.map((s) => (
+                <option key={s.value} value={s.value}>{s.label} — {s.description}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-zinc-400">Regenerate the hero (and then the talking head) to re-shoot in this setting.</p>
+          </div>
+
           {campaign.hero_image_url ? (
             <div>
               {/* eslint-disable-next-line @next/next/no-img-element */}

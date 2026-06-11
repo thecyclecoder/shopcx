@@ -34,7 +34,7 @@ import {
   saveComposition,
   regenerateSegment,
 } from "@/lib/ad-segments";
-import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
+import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, getSceneStyle, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
@@ -43,8 +43,9 @@ import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, 
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
-function buildTalkingHeadPrompt(productTitle: string, script: string): string {
-  return `A person holding the ${productTitle} speaks directly to camera with warm, casual, confident UGC energy. They say ONLY these exact words and NOTHING else — no extra words, no filler, no improvisation, no repetition: "${script}" Authentic handheld selfie video, natural daylight, subtle real movement, relaxed unhurried pace. NO background music. Do NOT add any on-screen text, captions, subtitles, or words burned into the footage.`;
+function buildTalkingHeadPrompt(productTitle: string, script: string, sceneStyle?: string | null): string {
+  const scene = getSceneStyle(sceneStyle);
+  return `A person holding the ${productTitle} speaks directly to camera with warm, casual, confident UGC energy. They say ONLY these exact words and NOTHING else — no extra words, no filler, no improvisation, no repetition: "${script}" ${scene.motion}. NO background music. Do NOT add any on-screen text, captions, subtitles, or words burned into the footage.`;
 }
 const LYRIA_PROMPT = "Upbeat optimistic uplifting instrumental background music bed, light acoustic guitar and soft claps, warm and energetic but gentle, no vocals, loopable, 25 seconds.";
 
@@ -126,9 +127,10 @@ export const adToolFaceRequested = inngest.createFunction(
 );
 
 // ── Holding-product prompt (Nano Banana Pro combine: face + product) ─────────
-function buildHoldingProductPrompt(productTitle: string, dims: any, vibeTags: string[]): string {
+function buildHoldingProductPrompt(productTitle: string, dims: any, vibeTags: string[], sceneStyle?: string | null): string {
   const shape = dims?.shape || "package";
-  let prompt = `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image holding the ${shape} of ${productTitle} from the SECOND image in their hands at chest height, facing the camera with a warm authentic smile, natural daylight outdoors. Keep their face and identity IDENTICAL to the first image. Reproduce the product packaging artwork and ALL text exactly and sharply from the second image. Realistic hands with exactly five fingers.`;
+  const scene = getSceneStyle(sceneStyle);
+  let prompt = `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image ${scene.hero}, holding the ${shape} of ${productTitle} from the SECOND image in their hands at chest height, looking toward the camera with a warm authentic smile. Keep their face and identity IDENTICAL to the first image. Reproduce the product packaging artwork and ALL text exactly and sharply from the second image. Realistic hands with exactly five fingers.`;
   if (vibeTags.includes("ugly")) prompt += " Slightly off-center phone-camera framing, oversaturated color grading.";
   if (vibeTags.includes("clinical")) prompt += " Bright clean clinical lighting, lab-counter setting.";
   return prompt;
@@ -144,7 +146,7 @@ export const adToolHeroRequested = inngest.createFunction(
     const ctx = await step.run("load", async () => {
       const { data: c } = await admin
         .from("ad_campaigns")
-        .select("id, product_id, variant_id, avatar_id, vibe_tags, products(title)")
+        .select("id, product_id, variant_id, avatar_id, vibe_tags, scene_style, products(title)")
         .eq("id", campaign_id)
         .single();
       const { data: avatar } = await admin.from("ad_avatars").select("name, reference_image_urls").eq("id", c?.avatar_id).single();
@@ -176,7 +178,7 @@ export const adToolHeroRequested = inngest.createFunction(
     }
 
     const productTitle = (ctx.campaign as any)?.products?.title || "the product";
-    let prompt = buildHoldingProductPrompt(productTitle, ctx.dims, (ctx.campaign?.vibe_tags as string[]) || []);
+    let prompt = buildHoldingProductPrompt(productTitle, ctx.dims, (ctx.campaign?.vibe_tags as string[]) || [], (ctx.campaign as any)?.scene_style);
     // Operator corrections from a previous attempt (e.g. anatomy fixes).
     if (feedback) prompt += ` IMPORTANT corrections from the previous attempt — fix these: ${feedback}. Ensure hands, fingers, and arms are anatomically correct and naturally positioned.`;
 
@@ -213,7 +215,7 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
     const { workspace_id, campaign_id } = event.data as EventData;
     const admin = createAdminClient();
     const campaign = await step.run("load", async () => {
-      const { data } = await admin.from("ad_campaigns").select("hero_image_url, script_text, length_sec, products(title)").eq("id", campaign_id).single();
+      const { data } = await admin.from("ad_campaigns").select("hero_image_url, script_text, length_sec, scene_style, products(title)").eq("id", campaign_id).single();
       return data;
     });
     if (!campaign?.hero_image_url) return { ok: false, reason: "missing_hero" };
@@ -228,7 +230,7 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
       await admin.from("ad_segments").update({ is_active: false }).eq("campaign_id", campaign_id).eq("kind", "talking_head");
       const out: Array<{ segId: string; ok: boolean; error?: string }> = [];
       for (let i = 0; i < scripts.length; i++) {
-        const prompt = buildTalkingHeadPrompt(productTitle, scripts[i]);
+        const prompt = buildTalkingHeadPrompt(productTitle, scripts[i], (campaign as any)?.scene_style);
         const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "talking_head", seq: i, scriptText: scripts[i], prompt, model: VEO_FAST_MODEL });
         try {
           const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: campaign.hero_image_url!, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
@@ -583,7 +585,7 @@ export const adToolSegmentRegenerate = inngest.createFunction(
     const admin = createAdminClient();
 
     const ctx = await step.run("load", async () => {
-      const { data: c } = await admin.from("ad_campaigns").select("hero_image_url, products(title)").eq("id", campaign_id).single();
+      const { data: c } = await admin.from("ad_campaigns").select("hero_image_url, scene_style, products(title)").eq("id", campaign_id).single();
       const { data: existing } = await admin
         .from("ad_segments")
         .select("script_text, prompt, source_url")
@@ -594,7 +596,7 @@ export const adToolSegmentRegenerate = inngest.createFunction(
         .order("version", { ascending: false })
         .limit(1)
         .maybeSingle();
-      return { hero: c?.hero_image_url || null, productTitle: (c as any)?.products?.title || "the product", existing };
+      return { hero: c?.hero_image_url || null, productTitle: (c as any)?.products?.title || "the product", sceneStyle: (c as any)?.scene_style || null, existing };
     });
 
     const segId = await step.run("regen-veo", async () => {
@@ -623,7 +625,7 @@ export const adToolSegmentRegenerate = inngest.createFunction(
       if (!ctx.hero) throw new Error("missing_hero");
       const script = (new_script || ctx.existing?.script_text || "").trim();
       if (!script) throw new Error("no_script");
-      const prompt = buildTalkingHeadPrompt(ctx.productTitle, script);
+      const prompt = buildTalkingHeadPrompt(ctx.productTitle, script, ctx.sceneStyle);
       const id = await regenerateSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "talking_head", seq, scriptText: script, prompt, model: veoModel });
       try {
         const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: ctx.hero, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });

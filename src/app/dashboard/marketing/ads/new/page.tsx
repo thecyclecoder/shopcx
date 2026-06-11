@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
-import { LIFE_FORCE_8 } from "@/lib/ad-tool-config";
+import { LIFE_FORCE_8, AD_SCENE_STYLES, DEFAULT_SCENE_STYLE } from "@/lib/ad-tool-config";
 
 interface Avatar {
   id: string;
@@ -58,6 +58,7 @@ export default function NewAdPage() {
   const [angleId, setAngleId] = useState<string | null>(null);
   const [lengthSec, setLengthSec] = useState<15 | 30>(30);
   const [also15, setAlso15] = useState(false);
+  const [sceneStyle, setSceneStyle] = useState<string>(DEFAULT_SCENE_STYLE);
   const [voiceId] = useState<string>("energetic");
 
   // Script editor
@@ -144,6 +145,7 @@ export default function NewAdPage() {
         angleId,
         lengthSec,
         voiceId,
+        sceneStyle,
       }),
     });
     if (res.ok) {
@@ -374,9 +376,9 @@ export default function NewAdPage() {
         </Step>
       )}
 
-      {/* 4. Length */}
+      {/* 4. Length & scene style */}
       {angleId && (
-        <Step n={4} title="Length">
+        <Step n={4} title="Length & scene style">
           <div className="flex flex-wrap items-center gap-4">
             {[15, 30].map((len) => (
               <label key={len} className="flex items-center gap-2 text-sm">
@@ -393,6 +395,33 @@ export default function NewAdPage() {
               <input type="checkbox" checked={also15} onChange={(e) => setAlso15(e.target.checked)} />
               Also produce a 15s cut
             </label>
+          </div>
+
+          <div className="mt-5">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Scene style</p>
+            <p className="mb-3 text-xs text-zinc-500">
+              Where the shot is set and what the person is doing. Pick different styles across campaigns so your ads don&apos;t all look alike.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {AD_SCENE_STYLES.map((s) => (
+                <button
+                  key={s.value}
+                  type="button"
+                  onClick={() => setSceneStyle(s.value)}
+                  className={`rounded-lg border p-3 text-left ${
+                    sceneStyle === s.value
+                      ? "border-indigo-500 ring-1 ring-indigo-500"
+                      : "border-zinc-200 dark:border-zinc-800"
+                  } bg-white dark:bg-zinc-900`}
+                >
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{s.label}</p>
+                  <p className="mt-0.5 text-xs text-zinc-500">{s.description}</p>
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-400">
+              Applies to the hero shot and the talking-head clips. Change it later on the campaign and regenerate to re-shoot in a new setting.
+            </p>
           </div>
         </Step>
       )}

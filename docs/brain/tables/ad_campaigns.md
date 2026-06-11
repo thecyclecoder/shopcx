@@ -20,6 +20,7 @@ A single ad concept: product × variant × [[product_ad_angles|angle]] × [[ad_a
 | `voice_id` | `text` | ✓ |  |
 | `caption_style` | `text` | — | default: `'hormozi_yellow'` |
 | `vibe_tags` | `text[]` | ✓ |  |
+| `scene_style` | `text` | — | default: `'outdoor_selfie'` · the shot's setting + action (kitchen counter, walk & talk, couch, car selfie, desk…). Drives the hero image + Veo talking-head prompts. Values in [[../libraries/ad-tool-config]] `AD_SCENE_STYLES` (plain text, not an enum). See [[../lifecycles/ad-render]]. |
 | `hero_image_url` | `text` | ✓ | holding-product shot (Nano Banana Pro) |
 | `audio_url` | `text` | ✓ | legacy TTS (vestigial in the Veo stack) |
 | `composition` | `jsonb` | ✓ | the **stitch recipe**: ordered [[ad_segments]] refs + b-roll overlays + music mix. Render reads it; re-launch refresh swaps one segment + re-renders. See [[../libraries/ad-segments]], [[../lifecycles/ad-render]]. |

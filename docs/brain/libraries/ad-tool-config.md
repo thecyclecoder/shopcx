@@ -11,6 +11,7 @@ Ad tool — **single source of truth** for the direct-response frameworks the ge
 | `LIFE_FORCE_8` | Cashvertising's 8 primal desires (slot → label) |
 | `HOOK_FORMULAS` (×12) + `HOOK_SLUGS` | the 12 hook formulas (slug, template, lever, bestForLf8, spokenHook) |
 | `URGENCY_LEVERS` / `VIBE_TAGS` | allowed enums (`UrgencyLever`, `VibeTag`) |
+| `AD_SCENE_STYLES` + `DEFAULT_SCENE_STYLE` + `getSceneStyle(value)` | scene presets (`outdoor_selfie`/`kitchen_counter`/`walk_and_talk`/`living_room_couch`/`car_front_seat`/`home_desk`); each has a `hero` clause (→ holding-product image prompt) + `motion` clause (→ Veo talking-head prompt). Stored on [[../tables/ad_campaigns]]`.scene_style`. See [[../lifecycles/ad-render]]. |
 | `DEFAULT_BANNED_WORDS` | soft words rejected by default (supports, helps, natural, boost…) |
 | `BANNED_OPENERS` / `SOFT_CTA_PHRASES` | warm-intro words + soft CTAs the validator rejects |
 | `CAPTION_STYLES` + `CAPTION_SPEC` | Hormozi caption style enum + font/size/color/stroke spec |

@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { generateScript } from "@/lib/ad-script";
-import { resolveAdToolSettings } from "@/lib/ad-tool-config";
+import { resolveAdToolSettings, getSceneStyle } from "@/lib/ad-tool-config";
 
 async function authorize(workspaceId: string | null) {
   const supabase = await createClient();
@@ -68,6 +68,7 @@ export async function POST(req: Request) {
     vibeTags,
     captionStyle,
     voiceId,
+    sceneStyle,
   } = body as {
     name?: string;
     productId?: string;
@@ -78,6 +79,7 @@ export async function POST(req: Request) {
     vibeTags?: string[];
     captionStyle?: string;
     voiceId?: string;
+    sceneStyle?: string;
   };
 
   if (!productId || !angleId)
@@ -134,6 +136,7 @@ export async function POST(req: Request) {
       voice_id: voiceId || null,
       caption_style: captionStyle || settings.default_caption_style,
       vibe_tags: vibe,
+      scene_style: getSceneStyle(sceneStyle).value,
       status: "draft",
       created_by: auth.user.id,
     })

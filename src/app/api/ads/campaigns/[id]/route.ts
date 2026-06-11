@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getSceneStyle } from "@/lib/ad-tool-config";
 
 async function authorize(workspaceId: string | null) {
   const supabase = await createClient();
@@ -115,6 +116,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (typeof body.voice_id === "string") update.voice_id = body.voice_id;
   if (typeof body.caption_style === "string") update.caption_style = body.caption_style;
   if (typeof body.name === "string") update.name = body.name;
+  if (typeof body.scene_style === "string") update.scene_style = getSceneStyle(body.scene_style).value;
 
   if (Object.keys(update).length === 0)
     return NextResponse.json({ error: "no_fields" }, { status: 400 });

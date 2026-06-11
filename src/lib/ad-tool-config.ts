@@ -52,6 +52,79 @@ export type UrgencyLever = (typeof URGENCY_LEVERS)[number];
 export const VIBE_TAGS = ["ugly", "loud", "weird", "phone_recorded", "clinical"] as const;
 export type VibeTag = (typeof VIBE_TAGS)[number];
 
+// ── Scene styles (setting + action) ─────────────────────────────────────────
+// Every ad used to be the identical shot — person holding the product, facing
+// camera, outdoors. That sameness kills the scroll-stopping variety paid social
+// needs. A scene style swaps two things:
+//   - `hero`   → the ENVIRONMENT clause in the holding-product image prompt
+//                (buildHoldingProductPrompt). "holding the product at chest
+//                height, looking at camera" stays constant (the Seedream combine
+//                needs it); only the setting/pose around it changes.
+//   - `motion` → the ACTION + camera clause in the Veo talking-head prompt
+//                (buildTalkingHeadPrompt). The talking-head animates the hero
+//                still, so the motion must be consistent with the hero setting.
+// Per-campaign: `ad_campaigns.scene_style`. Pick different styles across
+// campaigns to make a varied ad library from one product/avatar.
+export interface AdSceneStyle {
+  value: string;
+  label: string;
+  description: string; // operator-facing helper text
+  hero: string; // environment/pose clause for the hero image
+  motion: string; // action/camera clause for the Veo talking-head clip
+}
+
+export const AD_SCENE_STYLES: readonly AdSceneStyle[] = [
+  {
+    value: "outdoor_selfie",
+    label: "Outdoor selfie",
+    description: "The classic — facing camera outdoors in natural daylight. The original look.",
+    hero: "outdoors in bright natural daylight",
+    motion: "Authentic handheld selfie video outdoors, natural daylight, subtle real movement, relaxed unhurried pace",
+  },
+  {
+    value: "kitchen_counter",
+    label: "Kitchen counter",
+    description: "At home in a bright kitchen, product on the countertop — morning-routine feel.",
+    hero: "standing at the counter of a bright, lived-in home kitchen with soft morning light from a window, the product also visible resting on the countertop",
+    motion: "Filmed in a home kitchen with the phone propped up or handheld, the person leans against the counter and occasionally picks up the product, relaxed and conversational morning-routine energy",
+  },
+  {
+    value: "walk_and_talk",
+    label: "Walk & talk",
+    description: "Walking toward the camera while talking — high-energy, native to Reels.",
+    hero: "walking along a sunny, tree-lined sidewalk, caught candidly mid-stride",
+    motion: "Handheld selfie video where the person walks slowly toward the camera while talking, so the frame bobs gently with each step, candid outdoor energy",
+  },
+  {
+    value: "living_room_couch",
+    label: "Cozy couch",
+    description: "Relaxed on the couch at home — warm, intimate, confiding-to-a-friend tone.",
+    hero: "sitting back on a comfortable couch in a cozy, warmly lit living room",
+    motion: "Relaxed handheld selfie on the couch, the person sits back comfortably, warm and intimate living-room energy",
+  },
+  {
+    value: "car_front_seat",
+    label: "Car selfie",
+    description: "Talking from the parked car — the most native, unpolished UGC format.",
+    hero: "sitting in the driver's seat of a parked car with daylight coming through the windshield",
+    motion: "Candid car selfie filmed on a phone propped on the dash or handheld, very native unpolished UGC feel, natural daylight through the windshield",
+  },
+  {
+    value: "home_desk",
+    label: "Desk / WFH",
+    description: "At a home-office desk, product beside the laptop — for the busy-professional buyer.",
+    hero: "sitting at a tidy home-office desk with a laptop and the product on the desk beside the keyboard, soft natural daylight",
+    motion: "Filmed at a desk with the phone propped up, the person takes a short break from work to talk to camera, casual and conversational",
+  },
+] as const;
+
+export const DEFAULT_SCENE_STYLE = "outdoor_selfie";
+
+/** Resolve a scene-style value to its definition (falls back to the default). */
+export function getSceneStyle(value: string | null | undefined): AdSceneStyle {
+  return AD_SCENE_STYLES.find((s) => s.value === value) || AD_SCENE_STYLES[0];
+}
+
 // ── Banned soft words (default; workspace-configurable) ─────────────────────
 export const DEFAULT_BANNED_WORDS = [
   "supports", "promotes", "helps", "may aid", "natural", "wellness", "boost", "enhance",
