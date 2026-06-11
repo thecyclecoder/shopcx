@@ -411,6 +411,17 @@ export function CheckoutClient({
     hasSms: false, hasEmail: false, code: "", busy: false, error: null,
     resendCountdown: 0, statusMsg: null,
   });
+  // Once the customer dismisses the OTP (can't get the code, wants to check out
+  // as a guest), don't re-prompt them — even when the email field blurs again.
+  const otpDismissedRef = useRef(false);
+
+  // Close the OTP and continue WITHOUT logging in: keep everything they typed,
+  // stay unauthenticated (no saved cards / addresses / existing-subs UI), and
+  // never reopen the prompt this session.
+  function dismissOtpAsGuest() {
+    otpDismissedRef.current = true;
+    setOtp((s) => ({ ...s, open: false, busy: false, error: null, code: "" }));
+  }
 
   // Saved payment methods (only when authenticated via OTP or
   // existing sx_session cookie). Used to render the "Pay with •••4242"
@@ -490,6 +501,9 @@ export function CheckoutClient({
   }, [cart.token, authedCustomerId, subscribing]);
 
   async function triggerOtpStart(emailValue: string, channel?: "sms" | "email") {
+    // Already verified, or the customer chose to continue as a guest → never
+    // (re)prompt for a code.
+    if (authedCustomerId || otpDismissedRef.current) return;
     const e = emailValue.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return;
     setOtp((s) => ({ ...s, busy: true, error: null }));
@@ -1592,7 +1606,7 @@ export function CheckoutClient({
               </div>
               <button
                 type="button"
-                onClick={startOver}
+                onClick={dismissOtpAsGuest}
                 aria-label="Close"
                 className="text-zinc-400 hover:text-zinc-600"
               >
@@ -1626,6 +1640,17 @@ export function CheckoutClient({
               className="mt-4 w-full rounded-full px-4 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
             >
               {otp.busy ? "Verifying…" : "Verify & log in"}
+            </button>
+
+            {/* Escape hatch: didn't get the code? Check out as a guest. Keeps
+                everything they typed, stays unauthenticated (no saved cards /
+                addresses / subs), and won't re-prompt. */}
+            <button
+              type="button"
+              onClick={dismissOtpAsGuest}
+              className="mt-3 w-full rounded-full border border-zinc-300 px-4 py-2.5 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+            >
+              Didn&apos;t get a code? Continue as guest
             </button>
 
             <div className="mt-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-xs">
