@@ -14,7 +14,7 @@
 
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { sendAbandonedCartEmail } from "@/lib/email-storefront";
+import { sendCartRecovery } from "@/lib/cart-recovery";
 
 const IDLE_MINUTES = 30;
 const BATCH_SIZE = 50;
@@ -107,7 +107,6 @@ export const abandonedCartReminder = inngest.createFunction(
     let failed = 0;
     for (const cart of due) {
       const result = await step.run(`send-${cart.id}`, async () => {
-        const firstName = cart.customer_id ? firstNamesByCustomer[cart.customer_id] || null : null;
         const lineItems = cart.line_items.map((l) => ({
           title: l.title || "Item",
           variant_title: l.variant_title || null,
@@ -117,12 +116,13 @@ export const abandonedCartReminder = inngest.createFunction(
           line_total_cents: l.line_total_cents,
           image_url: l.image_url || null,
           is_gift: l.is_gift || false,
+          product_id: (l as { product_id?: string }).product_id,
         }));
-        const res = await sendAbandonedCartEmail({
+        const res = await sendCartRecovery({
           workspaceId: cart.workspace_id,
-          to: cart.email,
-          firstName,
           cartToken: cart.token,
+          customerId: cart.customer_id,
+          email: cart.email,
           lineItems,
           subtotalCents: cart.subtotal_cents,
           storefrontDomain: storefrontDomains[cart.workspace_id] || null,
