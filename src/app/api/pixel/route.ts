@@ -222,6 +222,12 @@ async function persistEvents({
   const ipRegion = request.headers.get("x-vercel-ip-country-region") || null;
   const ipCity = decodeHeader(request.headers.get("x-vercel-ip-city")) || null;
 
+  // Internal traffic: a device flagged via the `sx_internal` cookie (set by
+  // visiting ?sx_internal=1) is excluded from the funnel. Source of truth is
+  // the cookie on the request — it rides along same-origin on every pixel
+  // POST/beacon. Once true on a session it sticks.
+  const isInternal = request.cookies.get("sx_internal")?.value === "1";
+
   // Upsert session. ON CONFLICT (workspace_id, anonymous_id) updates
   // last_seen_at + customer_id (if newly known); first-touch
   // attribution fields are only set on INSERT, never overwritten.
@@ -231,7 +237,7 @@ async function persistEvents({
   // unique index.
   const { data: existingSession } = await admin
     .from("storefront_sessions")
-    .select("id, customer_id")
+    .select("id, customer_id, is_internal")
     .eq("workspace_id", workspaceId)
     .eq("anonymous_id", anonymousId)
     .maybeSingle();
@@ -245,6 +251,10 @@ async function persistEvents({
     if (customerId && !existingSession.customer_id) {
       updates.customer_id = customerId;
     }
+    // Flag the session internal on a cookie-marked revisit; never un-flag.
+    if (isInternal && !existingSession.is_internal) {
+      updates.is_internal = true;
+    }
     await admin
       .from("storefront_sessions")
       .update(updates)
@@ -256,6 +266,7 @@ async function persistEvents({
         workspace_id: workspaceId,
         anonymous_id: anonymousId,
         customer_id: customerId,
+        is_internal: isInternal,
         user_agent: ua || null,
         device_type: deviceType,
         os,

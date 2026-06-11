@@ -55,6 +55,24 @@ export async function GET(
   const startIso = centralBoundary(start, false);
   const endIso = centralBoundary(end, true);
 
+  // ── Internal-traffic exclusion ──────────────────────────────────
+  // A session is "ours" (team/testing) if it's cookie-flagged (is_internal)
+  // OR stitches to an internal customer (customers.is_internal). We drop those
+  // sessions + their events from every metric so the funnel = real visitors.
+  const { data: internalCustomerRows } = await admin
+    .from("customers").select("id")
+    .eq("workspace_id", workspaceId).eq("is_internal", true);
+  const internalCustomerIds = (internalCustomerRows || []).map((c) => c.id as string);
+
+  let internalSessionQuery = admin
+    .from("storefront_sessions").select("id")
+    .eq("workspace_id", workspaceId);
+  internalSessionQuery = internalCustomerIds.length > 0
+    ? internalSessionQuery.or(`is_internal.eq.true,customer_id.in.(${internalCustomerIds.join(",")})`)
+    : internalSessionQuery.eq("is_internal", true);
+  const { data: internalSessionRows } = await internalSessionQuery;
+  const internalSessions = new Set((internalSessionRows || []).map((s) => s.id as string));
+
   // ── Funnel: distinct sessions per step ──────────────────────────
   // One row per (event_type, session_id) — group + count distinct
   // sessions client-side. With current volumes that's fine; if we
@@ -73,6 +91,7 @@ export async function GET(
     customize_view: new Set(), checkout_view: new Set(), order_placed: new Set(),
   };
   for (const row of (stepRows || []) as { event_type: string; session_id: string }[]) {
+    if (internalSessions.has(row.session_id)) continue;
     const k = row.event_type as FunnelStep;
     if (k in sessionsByStep) sessionsByStep[k].add(row.session_id);
   }
@@ -93,14 +112,15 @@ export async function GET(
   // ── Top products (by pack_selected) ─────────────────────────────
   const { data: pickedRows } = await admin
     .from("storefront_events")
-    .select("product_id")
+    .select("product_id, session_id")
     .eq("workspace_id", workspaceId)
     .eq("event_type", "pack_selected")
     .not("product_id", "is", null)
     .gte("created_at", startIso)
     .lte("created_at", endIso);
   const productCounts = new Map<string, number>();
-  for (const r of (pickedRows || []) as { product_id: string }[]) {
+  for (const r of (pickedRows || []) as { product_id: string; session_id: string }[]) {
+    if (internalSessions.has(r.session_id)) continue;
     productCounts.set(r.product_id, (productCounts.get(r.product_id) || 0) + 1);
   }
   const topProductIds = [...productCounts.entries()]
@@ -127,10 +147,14 @@ export async function GET(
     .gte("last_seen_at", startIso)
     .lte("last_seen_at", endIso);
 
+  const visibleSessions = (sessionRows || []).filter(
+    (s) => !internalSessions.has((s as { id: string }).id),
+  ) as { id: string; device_type: string | null; ip_country: string | null; utm_source: string | null }[];
+
   const deviceCounts = new Map<string, number>();
   const countryCounts = new Map<string, number>();
   const sourceCounts = new Map<string, number>();
-  for (const s of (sessionRows || []) as { device_type: string | null; ip_country: string | null; utm_source: string | null }[]) {
+  for (const s of visibleSessions) {
     const d = s.device_type || "unknown";
     deviceCounts.set(d, (deviceCounts.get(d) || 0) + 1);
     const c = s.ip_country || "unknown";
@@ -168,6 +192,7 @@ export async function GET(
   const ctaSessions = new Map<string, Set<string>>(); // chapter → sessions w/ scroll_to_price click
   const chapterOrder = new Map<string, number>();
   for (const r of (chapterRows || []) as { event_type: string; session_id: string; meta: Record<string, unknown> }[]) {
+    if (internalSessions.has(r.session_id)) continue;
     const m = r.meta || {};
     const chapter = typeof m.chapter === "string" ? m.chapter : null;
     if (!chapter) continue;
@@ -209,12 +234,16 @@ export async function GET(
     .sort((a, b) => a.chapter_index - b.chapter_index);
 
   // ── Recent events stream ────────────────────────────────────────
-  const { data: recent } = await admin
+  // Over-fetch so that after dropping internal events we still have ~30.
+  const { data: recentRaw } = await admin
     .from("storefront_events")
-    .select("id, event_type, anonymous_id, product_id, meta, url, created_at")
+    .select("id, event_type, session_id, anonymous_id, product_id, meta, url, created_at")
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
-    .limit(30);
+    .limit(120);
+  const recent = (recentRaw || [])
+    .filter((e) => !internalSessions.has((e as { session_id: string }).session_id))
+    .slice(0, 30);
 
   // ── Abandoned cart panel ────────────────────────────────────────
   // Within the same date window (against cart_drafts.created_at):
@@ -316,7 +345,7 @@ export async function GET(
 
   return NextResponse.json({
     range: { start, end },
-    total_sessions: (sessionRows || []).length,
+    total_sessions: visibleSessions.length,
     funnel,
     topProducts,
     deviceBreakdown,

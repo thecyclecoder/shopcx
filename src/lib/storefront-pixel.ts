@@ -99,6 +99,17 @@ export function initPixel(opts: { workspaceId: string; customerId?: string | nul
   // Ensure anonymous_id cookie exists. Side-effect of getOrCreate.
   getOrCreateAnonymousId();
 
+  // Internal-traffic toggle. Visiting any storefront page with
+  // ?sx_internal=1 flags THIS browser as internal (team/testing) via a
+  // long-lived cookie that rides on every /api/pixel request, so the
+  // funnel excludes it — even while browsing logged out. ?sx_internal=0
+  // clears it. The server (api/pixel) reads the cookie as source of truth.
+  try {
+    const flag = new URL(window.location.href).searchParams.get("sx_internal");
+    if (flag === "1") document.cookie = `sx_internal=1; max-age=31536000; path=/; samesite=lax`;
+    else if (flag === "0") document.cookie = `sx_internal=; max-age=0; path=/; samesite=lax`;
+  } catch { /* bad URL — ignore */ }
+
   // Capture first-touch attribution into sessionStorage if not already.
   if (!sessionStorage.getItem(SESSION_STORAGE_KEY)) {
     sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(buildSessionContext()));

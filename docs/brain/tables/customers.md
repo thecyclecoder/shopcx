@@ -14,6 +14,7 @@ Synced from Shopify. Email, retention_score, subscription_status, LTV, marketing
 | `first_name` | `text` | ✓ |  |
 | `last_name` | `text` | ✓ |  |
 | `phone` | `text` | ✓ |  |
+| `is_internal` | `bool` | — | default: `false`. Team/test account. Any [[storefront_sessions]] that stitches to an internal customer is excluded from the storefront funnel, across all devices. Set on the founder/team customer records. |
 | `shopify_customer_id` | `text` | ✓ |  |
 | `stripe_customer_id` | `text` | ✓ |  |
 | `retention_score` | `int4` | ✓ | default: `50` |
