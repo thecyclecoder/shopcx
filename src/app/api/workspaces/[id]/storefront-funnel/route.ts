@@ -21,7 +21,10 @@ const FUNNEL_STEPS = [
   "pdp_engaged",
   "pack_selected",
   "customize_view",
-  "checkout_redirect",
+  // The checkout page fires checkout_view on load — the reliable "reached
+  // checkout" signal. (checkout_redirect, the customize Continue click, never
+  // fired and missed direct-to-checkout paths.)
+  "checkout_view",
   "order_placed",
 ] as const;
 
@@ -67,7 +70,7 @@ export async function GET(
 
   const sessionsByStep: Record<FunnelStep, Set<string>> = {
     pdp_view: new Set(), pdp_engaged: new Set(), pack_selected: new Set(),
-    customize_view: new Set(), checkout_redirect: new Set(), order_placed: new Set(),
+    customize_view: new Set(), checkout_view: new Set(), order_placed: new Set(),
   };
   for (const row of (stepRows || []) as { event_type: string; session_id: string }[]) {
     const k = row.event_type as FunnelStep;

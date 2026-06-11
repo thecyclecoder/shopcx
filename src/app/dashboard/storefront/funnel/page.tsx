@@ -108,7 +108,7 @@ const STEP_LABELS: Record<string, string> = {
   pdp_engaged: "Engaged",
   pack_selected: "Pack selected",
   customize_view: "Customize page",
-  checkout_redirect: "Checkout started",
+  checkout_view: "Checkout started",
   order_placed: "Order placed",
 };
 
@@ -570,6 +570,7 @@ function EventChip({ type }: { type: string }) {
     customize_view: "bg-indigo-100 text-indigo-800",
     upsell_added: "bg-emerald-100 text-emerald-800",
     upsell_skipped: "bg-zinc-100 text-zinc-600",
+    checkout_view: "bg-violet-100 text-violet-800",
     checkout_redirect: "bg-violet-100 text-violet-800",
     order_placed: "bg-emerald-200 text-emerald-900 font-bold",
   };
