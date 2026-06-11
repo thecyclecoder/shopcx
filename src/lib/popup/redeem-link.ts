@@ -19,6 +19,8 @@ export interface PopupLinkPayload {
   code: string; // the derived coupon code (WELCOME-GSXN)
   h: string; // product handle to land on
   ws: string; // workspace id
+  cart?: string; // cart_draft token — set the cart cookie + apply the coupon to it
+  dest?: "pdp" | "checkout"; // where to send them after landing (default: pdp)
   exp: number;
 }
 
@@ -85,6 +87,41 @@ export async function buildPopupRedeemShortUrl(
   try {
     const { createShortlink } = await import("@/lib/shortlink-create");
     // 7-day shelf life, matching the coupon link's TTL.
+    const expiresAt = new Date(Date.now() + DEFAULT_TTL_MS).toISOString();
+    const short = await createShortlink(workspaceId, longUrl, { expiresAt });
+    if (short) return short;
+  } catch {
+    /* fall back to the long URL */
+  }
+  return longUrl;
+}
+
+/**
+ * Resume-checkout link: lands the customer straight on /checkout with their
+ * abandoned cart restored and the recovery coupon applied. Shortened for SMS.
+ * The token carries the cart_draft token + dest=checkout; /api/popup/land sets
+ * the cart cookie, applies the coupon to the draft, and redirects to /checkout.
+ */
+export async function buildCheckoutResumeShortUrl(
+  workspaceId: string,
+  customerId: string,
+  code: string,
+  cartToken: string,
+): Promise<string> {
+  const { createAdminClient } = await import("@/lib/supabase/admin");
+  const admin = createAdminClient();
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("storefront_domain")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  const token = signPopupLink({ c: customerId, code, h: "", ws: workspaceId, cart: cartToken, dest: "checkout" });
+  const domain = (ws?.storefront_domain as string | null) || null;
+  const longUrl = domain
+    ? `https://${domain}/api/popup/land?t=${encodeURIComponent(token)}`
+    : `https://shopcx.ai/api/popup/land?t=${encodeURIComponent(token)}`;
+  try {
+    const { createShortlink } = await import("@/lib/shortlink-create");
     const expiresAt = new Date(Date.now() + DEFAULT_TTL_MS).toISOString();
     const short = await createShortlink(workspaceId, longUrl, { expiresAt });
     if (short) return short;

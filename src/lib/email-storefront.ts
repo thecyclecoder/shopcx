@@ -747,6 +747,127 @@ interface AbandonedCartLine {
   is_gift?: boolean;
 }
 
+interface RecoveryReview {
+  reviewer_name: string | null;
+  rating: number;
+  title: string | null;
+  body: string | null;
+  product_title?: string | null;
+}
+
+/**
+ * Cart-recovery email — the elaborate counterpart to the urgent recovery SMS.
+ * Highlights the extra discount + total savings, shows up to 3 featured reviews,
+ * the brand-trust facts (3rd-party tested, made in USA, Non-GMO), an
+ * expert/nutritionist note, and the 30-day money-back guarantee. CTA drops them
+ * straight onto checkout with the coupon applied.
+ */
+export async function sendCartRecoveryEmail(opts: {
+  workspaceId: string;
+  to: string;
+  firstName?: string | null;
+  lineItems: AbandonedCartLine[];
+  subtotalCents: number;
+  /** Total savings on the cart (qty + S&S + the recovery coupon), in cents. */
+  savingsCents: number;
+  couponPct: number;
+  ctaUrl: string;
+  reviews: RecoveryReview[];
+  nutritionistNote?: string | null;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    const client = await getResendClient(opts.workspaceId, opts.to);
+    if (!client) return { success: false, error: "resend_not_configured_or_blocked" };
+    if (!opts.lineItems || opts.lineItems.length === 0) return { success: false, error: "empty_cart" };
+    const brand = await getBrand(opts.workspaceId, client.domain);
+    const greeting = opts.firstName ? `Hi ${escapeHtml(opts.firstName)}, ` : "Hi there, ";
+    const lineRows = renderLineItemsRows(opts.lineItems as OrderLineLike[]);
+    const reviewsHtml = (opts.reviews || []).slice(0, 3).map((r) => renderReviewBlock(r as NonNullable<Awaited<ReturnType<typeof pickFeaturedReview>>>)).join("");
+
+    const trustBadges = `
+      <tr><td class="sx-pad" style="padding:8px 32px 0 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;">
+          <tr><td style="padding:14px 18px;font-size:13px;color:#166534;line-height:1.8;">
+            <strong style="color:#14532d;">Why ${escapeHtml(brand.brandName)}:</strong><br>
+            ✓ Third-party lab tested for purity &amp; potency<br>
+            ✓ Made in the USA · Non-GMO<br>
+            ✓ Family-run, expert-recommended<br>
+            ✓ 30-day money-back guarantee — love it or your money back
+          </td></tr>
+        </table>
+      </td></tr>`;
+
+    const nutritionistBlock = opts.nutritionistNote ? `
+      <tr><td class="sx-pad" style="padding:16px 32px 0 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#fafafa;border-left:3px solid #18181b;border-radius:4px;">
+          <tr><td style="padding:16px 18px;font-size:14px;color:#27272a;line-height:1.6;font-style:italic;">
+            ${escapeHtml(opts.nutritionistNote)}
+            <div style="font-style:normal;font-size:12px;color:#71717a;margin-top:8px;">— Recommended by nutrition experts</div>
+          </td></tr>
+        </table>
+      </td></tr>` : "";
+
+    const bodyHtml = `
+      <tr><td class="sx-pad" style="padding:32px 32px 8px 32px;">
+        <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">Your cart is waiting</div>
+        <h1 class="sx-h1" style="margin:8px 0 12px 0;font-size:24px;color:#18181b;font-weight:700;">Still thinking it over?</h1>
+        <p class="sx-body" style="margin:0;color:#52525b;font-size:15px;line-height:1.55;">
+          ${greeting}we saved your cart — and we've added an <strong style="color:#15803d;">extra ${opts.couponPct}% off</strong> to help you finish. It's already applied; just tap below.
+        </p>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:16px 32px 8px 32px;" align="center">
+        <a href="${escapeHtml(opts.ctaUrl)}" style="display:inline-block;background:${escapeHtml(brand.primaryColor)};color:#ffffff;font-weight:700;font-size:16px;padding:14px 30px;border-radius:8px;text-decoration:none;">Complete my order — ${opts.couponPct}% off →</a>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:8px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top:1px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
+          ${lineRows}
+        </table>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:12px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:14px;color:#52525b;">
+          <tr><td style="padding:4px 0;">Subtotal</td><td style="padding:4px 0;text-align:right;color:#18181b;">${fmtCents(opts.subtotalCents)}</td></tr>
+          ${opts.savingsCents > 0 ? `<tr><td colspan="2" style="padding:8px 0 0 0;text-align:right;"><span style="display:inline-block;background:#dcfce7;color:#166534;padding:6px 12px;border-radius:999px;font-size:13px;font-weight:700;">You save ${fmtCents(opts.savingsCents)} with your discount</span></td></tr>` : ""}
+        </table>
+      </td></tr>
+
+      ${trustBadges}
+      ${nutritionistBlock}
+      ${reviewsHtml}
+
+      <tr><td class="sx-pad" style="padding:16px 32px 8px 32px;" align="center">
+        <a href="${escapeHtml(opts.ctaUrl)}" style="display:inline-block;background:${escapeHtml(brand.primaryColor)};color:#ffffff;font-weight:700;font-size:16px;padding:14px 30px;border-radius:8px;text-decoration:none;">Complete my order →</a>
+        <div style="font-size:12px;color:#a1a1aa;margin-top:8px;">Your ${opts.couponPct}% discount is already applied at checkout.</div>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:20px 32px;border-top:1px solid #e4e4e7;text-align:center;font-size:13px;color:#71717a;line-height:1.6;">
+        — The ${escapeHtml(brand.brandName)} team
+      </td></tr>
+    `;
+
+    const html = await shellHtml({
+      title: "Your cart is waiting — extra discount inside",
+      preheader: `Finish your order and take an extra ${opts.couponPct}% off — plus free shipping & a 30-day guarantee.`,
+      bodyHtml,
+      brand,
+    });
+
+    const { error } = await client.resend.emails.send({
+      from: `${brand.brandName} <${brand.fromEmail}>`,
+      to: opts.to,
+      replyTo: brand.replyToEmail,
+      subject: `${opts.firstName ? `${opts.firstName}, ` : ""}your cart + an extra ${opts.couponPct}% off`,
+      html,
+    });
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function sendAbandonedCartEmail(opts: {
   workspaceId: string;
   to: string;
