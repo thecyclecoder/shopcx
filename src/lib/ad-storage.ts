@@ -24,9 +24,15 @@ export async function uploadFromUrl(path: string, sourceUrl: string, contentType
 
 export async function uploadBuffer(path: string, buffer: Buffer, contentType: string): Promise<string> {
   const admin = createAdminClient();
-  const { error } = await admin.storage.from(AD_BUCKET).upload(path, buffer, { contentType, upsert: true });
-  if (error) throw new Error(`ad_storage_upload: ${error.message}`);
-  return path;
+  // Retry transient storage failures (e.g. "Bad Gateway" 502s) with backoff.
+  let lastErr = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 1500 * attempt));
+    const { error } = await admin.storage.from(AD_BUCKET).upload(path, buffer, { contentType, upsert: true });
+    if (!error) return path;
+    lastErr = error.message;
+  }
+  throw new Error(`ad_storage_upload: ${lastErr}`);
 }
 
 /** Permanently remove stored objects (e.g. a discarded avatar face). */
