@@ -56,13 +56,39 @@ export async function findVariant(
   ref: { id?: string; shopifyVariantId?: string; sku?: string },
 ): Promise<ProductVariant | null> {
   const admin = createAdminClient();
-  let q = admin.from("product_variants").select(SELECT_COLS).eq("workspace_id", workspaceId);
-  if (ref.id) q = q.eq("id", ref.id);
-  else if (ref.shopifyVariantId) q = q.eq("shopify_variant_id", ref.shopifyVariantId);
-  else if (ref.sku) q = q.eq("sku", ref.sku);
-  else return null;
-  const { data } = await q.maybeSingle();
-  return (data as ProductVariant) || null;
+  // Try each ref in order, FALLING BACK on a miss. The old code used
+  // `if id else if shopify…`, so a present-but-unresolvable id (e.g. a Shopify
+  // numeric id mistakenly in the id slot, which also errors as a non-UUID)
+  // never fell back to shopify_variant_id → spurious variant_not_found.
+  const tryCol = async (col: string, val: string): Promise<ProductVariant | null> => {
+    const { data } = await admin
+      .from("product_variants")
+      .select(SELECT_COLS)
+      .eq("workspace_id", workspaceId)
+      .eq(col, val)
+      .maybeSingle();
+    return (data as ProductVariant) || null;
+  };
+  // Only treat `id` as a UUID lookup (a non-UUID would error the query).
+  if (ref.id && /^[0-9a-f-]{36}$/i.test(ref.id)) {
+    const v = await tryCol("id", ref.id);
+    if (v) return v;
+  }
+  if (ref.shopifyVariantId) {
+    const v = await tryCol("shopify_variant_id", String(ref.shopifyVariantId));
+    if (v) return v;
+  }
+  // A UUID that isn't actually our `id` might be a Shopify variant id stored in
+  // the id slot — try it there too before giving up.
+  if (ref.id && !/^[0-9a-f-]{36}$/i.test(ref.id)) {
+    const v = await tryCol("shopify_variant_id", ref.id);
+    if (v) return v;
+  }
+  if (ref.sku) {
+    const v = await tryCol("sku", ref.sku);
+    if (v) return v;
+  }
+  return null;
 }
 
 /**
