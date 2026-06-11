@@ -88,7 +88,7 @@ export const StaticReview: React.FC<StaticReviewProps> = (p) => {
           </div>
         )}
         {truncated && (
-          <div style={{ fontFamily: ff, fontWeight: 700, fontSize: 28 * u, color: "#1B8A4B", textTransform: "uppercase", letterSpacing: 1, marginTop: 22 * u }}>Read full review</div>
+          <div style={{ fontFamily: ff, fontWeight: 700, fontSize: 30 * u, color: "#1B8A4B", marginTop: 22 * u }}>Click link in bio for full review →</div>
         )}
         <div style={{ marginTop: 50 * u, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 22 * u }}>
