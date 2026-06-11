@@ -64,10 +64,18 @@ export default async function CustomizePage({ searchParams }: PageProps) {
     .from("cart_drafts")
     .select("*")
     .eq("token", token)
-    .eq("status", "open")
     .maybeSingle();
 
   if (!cart) redirect("/");
+  // A consumed cart (e.g. back-button after an order) isn't editable. Don't dump
+  // the customer at "/" (which 404s → /login on the storefront domain): send a
+  // converted cart to its order confirmation, otherwise back to the PDP.
+  if (cart.status !== "open") {
+    if (cart.status === "converted" && cart.converted_order_id) {
+      redirect(`/thank-you?order=${cart.converted_order_id}`);
+    }
+    redirect(cart.source_product_handle ? `/${cart.source_product_handle}` : "/");
+  }
 
   // ── Heal stale carts on load ───────────────────────────────────
   // Re-run ensureFreeGifts (strips paid lines for gift-target

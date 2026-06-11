@@ -59,7 +59,9 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
     if (cart.status === "converted" && cart.converted_order_id) {
       redirect(`/thank-you?order=${cart.converted_order_id}`);
     }
-    redirect("/");
+    // Otherwise back to the PDP they came from — never "/" (404s → /login on
+    // the storefront domain).
+    redirect(cart.source_product_handle ? `/${cart.source_product_handle}` : "/");
   }
 
   // Backfill / heal free gifts on every render. ensureFreeGifts
