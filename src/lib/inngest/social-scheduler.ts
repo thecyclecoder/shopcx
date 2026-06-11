@@ -14,6 +14,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { pickBySourceKind, type SourceKind } from "@/lib/social/resources";
+import { ensureStoryRatio } from "@/lib/social/story-ratio";
 import { generateCaption, type PostType } from "@/lib/social/generate-caption";
 import { publishScheduledPost, type ScheduledPostRow } from "@/lib/social/publish";
 import { loadSlotSignals, pickBestSlot } from "@/lib/social/optimizer";
@@ -146,6 +147,25 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
         asset = await pickBySourceKind(admin, workspaceId, k, reuseDays, date);
       }
       if (!asset) continue;
+
+      // Stories are 9:16 — posting a square/portrait image zoom-crops it badly.
+      // Extend non-9:16 story images with Nano Banana now (not at publish), so
+      // the slot stores a clean 9:16 frame. Promo story graphics are already
+      // 9:16 (mediaUrl set, no bucket/path) → ensureStoryRatio no-ops them.
+      if (type === "story" && asset.mediaPath) {
+        try {
+          const fixed = await ensureStoryRatio({
+            workspaceId, key: asset.sourceRefId,
+            mediaBucket: asset.mediaBucket, mediaPath: asset.mediaPath, mediaUrl: asset.mediaUrl,
+          });
+          if (fixed?.changed && fixed.mediaUrl) {
+            asset = { ...asset, mediaUrl: fixed.mediaUrl, mediaBucket: undefined, mediaPath: undefined };
+          }
+        } catch (e) {
+          console.error(`[social-scheduler] story ratio fix failed:`, e instanceof Error ? e.message : e);
+        }
+      }
+
       const caption = await generateCaption({
         workspaceId, sourceKind: kind, postType: type,
         productId: asset.productId, resourceSummary: asset.resourceSummary,
