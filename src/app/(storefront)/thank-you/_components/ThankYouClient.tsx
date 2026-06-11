@@ -27,6 +27,13 @@ interface OrderProps {
   currency: string;
   line_items: Array<Record<string, unknown>>;
   shipping_address: Record<string, string> | null;
+  savings_cents?: number;
+}
+
+interface ReviewProps {
+  reviewer_name: string | null;
+  rating: number;
+  body: string | null;
 }
 
 interface Workspace {
@@ -37,7 +44,7 @@ interface Workspace {
   meta_pixel_id?: string | null;
 }
 
-export function ThankYouClient({ order, workspace }: { order: OrderProps; workspace: Workspace }) {
+export function ThankYouClient({ order, workspace, review }: { order: OrderProps; workspace: Workspace; review?: ReviewProps | null }) {
   useEffect(() => {
     // The canonical order_placed event (→ Meta Purchase, with the server
     // CAPI backstop) fires from the checkout page immediately after the
@@ -118,6 +125,22 @@ export function ThankYouClient({ order, workspace }: { order: OrderProps; worksp
             <span className="text-sm text-zinc-700">Total</span>
             <span className="text-lg font-bold text-zinc-900">${(order.total_cents / 100).toFixed(2)}</span>
           </div>
+          {order.savings_cents && order.savings_cents > 0 ? (
+            <div className="mt-3 text-right">
+              <span className="inline-block rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
+                🎉 You saved ${(order.savings_cents / 100).toFixed(2)} on this order
+              </span>
+            </div>
+          ) : null}
+        </section>
+      )}
+
+      {review && review.body && (
+        <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">What customers are saying</p>
+          <div className="text-amber-500" aria-hidden>{"★".repeat(Math.round(review.rating || 5))}</div>
+          <p className="mt-1 text-sm leading-relaxed text-zinc-700">“{review.body}”</p>
+          {review.reviewer_name && <p className="mt-2 text-xs font-semibold text-zinc-500">— {review.reviewer_name}</p>}
         </section>
       )}
 

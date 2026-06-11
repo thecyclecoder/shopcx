@@ -42,7 +42,7 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
   const { data: order } = await admin
     .from("orders")
     .select(
-      "id, order_number, email, total_cents, currency, line_items, shipping_address, workspace_id, created_at",
+      "id, order_number, email, total_cents, currency, line_items, shipping_address, workspace_id, created_at, payment_details",
     )
     .eq("id", params.order)
     .maybeSingle();
@@ -57,6 +57,32 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
   const { getMetaPixelId } = await import("@/lib/meta-capi");
   const metaPixelId = await getMetaPixelId(order.workspace_id as string);
 
+  // Savings = MSRP subtotal − what they paid (mirrors the cart + confirmation
+  // email "You saved" treatment).
+  const orderLines = (order.line_items as Array<Record<string, unknown>>) || [];
+  const lineUnit = (l: Record<string, unknown>) => (Number(l.unit_price_cents) || Number(l.price_cents) || 0);
+  const paidSubtotal = (order.payment_details as { subtotal_cents?: number } | null)?.subtotal_cents
+    ?? orderLines.reduce((s, l) => s + (Number(l.line_total_cents) || lineUnit(l) * (Number(l.quantity) || 1)), 0);
+  const msrpSubtotal = orderLines.reduce((s, l) => s + (Number(l.unit_msrp_cents) || lineUnit(l)) * (Number(l.quantity) || 1), 0);
+  const savingsCents = Math.max(0, msrpSubtotal - paidSubtotal);
+
+  // One featured review on a purchased product for post-purchase reassurance.
+  const productIds = Array.from(new Set(orderLines.map((l) => l.product_id).filter((id): id is string => typeof id === "string")));
+  let review: { reviewer_name: string | null; rating: number; body: string | null } | null = null;
+  if (productIds.length > 0) {
+    const { data: rev } = await admin
+      .from("reviews")
+      .select("reviewer_name, rating, body, smart_quote, featured")
+      .eq("workspace_id", order.workspace_id)
+      .in("product_id", productIds)
+      .in("status", ["published", "featured"])
+      .gte("rating", 4)
+      .order("featured", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (rev) review = { reviewer_name: (rev.reviewer_name as string | null), rating: (rev.rating as number), body: ((rev.smart_quote as string | null) || (rev.body as string | null)) };
+  }
+
   return (
     <main className="min-h-screen bg-zinc-50">
       <ThankYouClient
@@ -68,6 +94,7 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
           currency: order.currency || "USD",
           line_items: (order.line_items as Array<Record<string, unknown>>) || [],
           shipping_address: order.shipping_address as Record<string, string> | null,
+          savings_cents: savingsCents,
         }}
         workspace={{
           id: workspace?.id || order.workspace_id,
@@ -76,6 +103,7 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
           primary_color: workspace?.storefront_primary_color || "#18181b",
           meta_pixel_id: metaPixelId,
         }}
+        review={review}
       />
     </main>
   );
