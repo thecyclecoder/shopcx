@@ -39,6 +39,7 @@ import { HeroFeaturedReviews } from "../../_components/HeroFeaturedReviews";
 import type { Review } from "../../_lib/page-data";
 import type { CartDraft, StoredLineItem } from "../../customize/_components/CustomizeClient";
 import { HostedFieldsCard, type HostedFieldsCardHandle } from "./HostedFieldsCard";
+import { PayPalButton } from "./PayPalButton";
 
 interface SavedAddress {
   first_name?: string | null;
@@ -414,9 +415,11 @@ export function CheckoutClient({
   // Saved payment methods (only when authenticated via OTP or
   // existing sx_session cookie). Used to render the "Pay with •••4242"
   // picker above the new-card Hosted Fields form.
-  type SavedMethod = { id: string; token: string; brand: string | null; last4: string | null; exp_month: number | null; exp_year: number | null; is_default: boolean; payment_type: string | null };
+  type SavedMethod = { id: string; token: string; brand: string | null; last4: string | null; exp_month: number | null; exp_year: number | null; is_default: boolean; payment_type: string | null; paypal_email: string | null };
   const [savedMethods, setSavedMethods] = useState<SavedMethod[]>([]);
   const [selectedSavedToken, setSelectedSavedToken] = useState<string | null>(null);
+  // When no saved method is selected, which NEW method is the customer using?
+  const [newMethodType, setNewMethodType] = useState<"card" | "paypal">("card");
 
   // Existing internal subs (only when authenticated). Drives the
   // three-way "what should we do with these items?" choice card.
@@ -658,11 +661,12 @@ export function CheckoutClient({
     }).catch(() => {});
   }
 
-  async function onSubmit() {
-    // Two paths: saved-card (use vaulted token directly) OR new card
-    // (tokenize via Hosted Fields → nonce).
+  async function onSubmit(paypalNonce?: string) {
+    // Three payment paths: saved method (vaulted token), new card (Hosted
+    // Fields → nonce), or PayPal (button → nonce passed in here).
     const usingSavedCard = !!selectedSavedToken;
-    if (!usingSavedCard && (!hostedFieldsRef.current || !cardReady)) {
+    const usingPayPal = !!paypalNonce;
+    if (!usingSavedCard && !usingPayPal && (!hostedFieldsRef.current || !cardReady)) {
       setSubmitError("Payment isn't ready yet — please wait a moment and try again.");
       logBlock("submit", "payment_not_ready", "Hosted Fields not ready when customer hit Pay");
       return;
@@ -678,7 +682,9 @@ export function CheckoutClient({
     try {
       const tokenizeRes = usingSavedCard
         ? { nonce: "", deviceData: "" }
-        : await hostedFieldsRef.current!.tokenize();
+        : usingPayPal
+          ? { nonce: paypalNonce!, deviceData: "" }
+          : await hostedFieldsRef.current!.tokenize();
       const { nonce, deviceData } = tokenizeRes;
       const phoneE164 = phoneToE164(phone);
       const shipping = {
@@ -876,6 +882,20 @@ export function CheckoutClient({
                 </p>
 
                 <div className="mt-3 space-y-2">
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 transition ${subMode === "new_sub" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}>
+                    <input
+                      type="radio"
+                      name="sub-mode"
+                      checked={subMode === "new_sub"}
+                      onChange={() => setSubMode("new_sub")}
+                      className="mt-0.5 h-4 w-4"
+                    />
+                    <div className="min-w-0 flex-1 text-sm">
+                      <div className="font-semibold text-zinc-900">Create a new subscription</div>
+                      <div className="mt-0.5 text-xs text-zinc-500">Keep your current subscription as-is and start a separate one.</div>
+                    </div>
+                  </label>
+
                   <label className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 transition ${subMode === "add_to_sub" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}>
                     <input
                       type="radio"
@@ -901,20 +921,6 @@ export function CheckoutClient({
                     <div className="min-w-0 flex-1 text-sm">
                       <div className="font-semibold text-zinc-900">Add to my next renewal only</div>
                       <div className="mt-0.5 text-xs text-zinc-500">Ship with your next scheduled order — no charge today.</div>
-                    </div>
-                  </label>
-
-                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 transition ${subMode === "new_sub" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}>
-                    <input
-                      type="radio"
-                      name="sub-mode"
-                      checked={subMode === "new_sub"}
-                      onChange={() => setSubMode("new_sub")}
-                      className="mt-0.5 h-4 w-4"
-                    />
-                    <div className="min-w-0 flex-1 text-sm">
-                      <div className="font-semibold text-zinc-900">Create a new subscription</div>
-                      <div className="mt-0.5 text-xs text-zinc-500">Keep your current subscription as-is and start a separate one.</div>
                     </div>
                   </label>
                 </div>
@@ -1244,10 +1250,12 @@ export function CheckoutClient({
                         />
                         <div className="flex-1 text-sm">
                           <div className="font-medium text-zinc-900">
-                            {m.brand || "Card"} •••• {m.last4}
+                            {m.payment_type === "paypal_account"
+                              ? <>PayPal{m.paypal_email ? ` · ${m.paypal_email}` : ""}</>
+                              : <>{m.brand || "Card"} •••• {m.last4}</>}
                             {m.is_default && <span className="ml-2 rounded-full bg-zinc-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-700">Default</span>}
                           </div>
-                          {m.exp_month && m.exp_year && (
+                          {m.payment_type !== "paypal_account" && m.exp_month && m.exp_year && (
                             <div className="text-xs text-zinc-500">
                               Expires {String(m.exp_month).padStart(2, "0")}/{String(m.exp_year).slice(-2)}
                             </div>
@@ -1257,25 +1265,52 @@ export function CheckoutClient({
                     );
                   })}
                   <label
-                    className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-3 transition ${selectedSavedToken === null ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                    className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-3 transition ${selectedSavedToken === null && newMethodType === "card" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
                   >
                     <input
                       type="radio"
                       name="saved-card"
-                      checked={selectedSavedToken === null}
-                      onChange={() => setSelectedSavedToken(null)}
+                      checked={selectedSavedToken === null && newMethodType === "card"}
+                      onChange={() => { setSelectedSavedToken(null); setNewMethodType("card"); }}
                       className="h-4 w-4"
                     />
                     <div className="text-sm font-medium text-zinc-900">Use a new card</div>
                   </label>
+                  <label
+                    className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-3 transition ${selectedSavedToken === null && newMethodType === "paypal" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                  >
+                    <input
+                      type="radio"
+                      name="saved-card"
+                      checked={selectedSavedToken === null && newMethodType === "paypal"}
+                      onChange={() => { setSelectedSavedToken(null); setNewMethodType("paypal"); }}
+                      className="h-4 w-4"
+                    />
+                    <div className="text-sm font-medium text-zinc-900">Pay with PayPal</div>
+                  </label>
                 </div>
               )}
 
-              {/* New-card Hosted Fields — hidden when a saved card is
-                  selected. We still need it mounted (not just
-                  display:none) so Braintree's iframes don't tear down
-                  on toggle. */}
-              <div className={selectedSavedToken ? "hidden" : "block"}>
+              {/* Card / PayPal tabs when there are no saved methods (with saved
+                  methods the radios above already carry the choice). */}
+              {selectedSavedToken === null && savedMethods.length === 0 && (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {(["card", "paypal"] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setNewMethodType(t)}
+                      className={`rounded-lg border px-3 py-2.5 text-sm font-semibold transition ${newMethodType === t ? "border-zinc-900 bg-zinc-50 text-zinc-900" : "border-zinc-200 text-zinc-600 hover:border-zinc-300"}`}
+                    >
+                      {t === "card" ? "Card" : "PayPal"}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* New-card Hosted Fields — kept mounted (iframes are expensive to
+                  recreate); hidden for a saved method or when PayPal is chosen. */}
+              <div className={selectedSavedToken || newMethodType === "paypal" ? "hidden" : "block"}>
                 {cardError ? (
                   <div className="mt-3 rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">
                     Couldn&apos;t load payment form: {cardError}
@@ -1295,6 +1330,27 @@ export function CheckoutClient({
                   </div>
                 )}
               </div>
+
+              {/* PayPal — its own button (the main Pay button is hidden for it).
+                  Validates the form before opening the PayPal popup, then runs
+                  the same submit with the PayPal nonce. */}
+              {selectedSavedToken === null && newMethodType === "paypal" && (
+                clientToken ? (
+                  <PayPalButton
+                    clientToken={clientToken}
+                    validate={() => {
+                      const v = isFormValid();
+                      if (!v.ok) { setSubmitError(v.reason); logBlock("validation", "invalid_form_paypal", v.reason); }
+                      else setSubmitError(null);
+                      return v.ok;
+                    }}
+                    onApprove={(nonce) => { void onSubmit(nonce); }}
+                    onError={(msg) => { setSubmitError(`PayPal: ${msg}`); logBlock("submit", "paypal_error", msg); }}
+                  />
+                ) : (
+                  <p className="mt-3 text-xs text-zinc-500">Loading secure payment…</p>
+                )
+              )}
 
               {/* Billing address toggle + collapsible form. Lives in
                   the Payment section because billing is part of the
@@ -1484,15 +1540,21 @@ export function CheckoutClient({
                 <div className="mt-0.5 text-xs text-zinc-500">Charged today</div>
               )}
             </div>
-            <button
-              type="button"
-              onClick={onSubmit}
-              disabled={submitting || (!selectedSavedToken && !cardReady) || !agreeToTerms}
-              style={{ backgroundColor: workspace.primary_color }}
-              className="rounded-full px-7 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
-            >
-              {submitting ? "Processing…" : "Complete order"}
-            </button>
+            {selectedSavedToken === null && newMethodType === "paypal" ? (
+              <span className="max-w-[180px] text-right text-xs font-medium text-zinc-500">
+                Complete your order with the PayPal button above ↑
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onSubmit()}
+                disabled={submitting || (!selectedSavedToken && !cardReady) || !agreeToTerms}
+                style={{ backgroundColor: workspace.primary_color }}
+                className="rounded-full px-7 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
+              >
+                {submitting ? "Processing…" : "Complete order"}
+              </button>
+            )}
           </div>
         </div>
       </section>
