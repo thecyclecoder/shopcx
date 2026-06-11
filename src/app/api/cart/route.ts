@@ -127,6 +127,10 @@ export async function POST(request: NextRequest) {
   const resolvedLines: StoredLineItem[] = [];
   const mode = body.mode ?? "subscribe";
   const freqDays = body.frequency_days ?? null;
+  // The frequency actually applied to subscribe lines — defaulted from the
+  // product's rule when the caller doesn't pass a valid cadence (e.g. the
+  // checkout "switch to subscribe" button, which has no cadence to send).
+  let resolvedFreqDays: number | null = freqDays;
 
   for (const li of body.line_items) {
     const qty = Math.max(1, Math.floor(li.quantity || 0));
@@ -157,10 +161,20 @@ export async function POST(request: NextRequest) {
     if (ruleAssignment?.pricing_rule_id) {
       const { data: rule } = await admin
         .from("pricing_rules")
-        .select("subscribe_discount_pct")
+        .select("subscribe_discount_pct, available_frequencies")
         .eq("id", ruleAssignment.pricing_rule_id)
         .maybeSingle();
       subDiscountPct = rule?.subscribe_discount_pct || 0;
+      // Default the cadence to the rule's flagged-default (or first) frequency
+      // when subscribing without a valid one, so the line never lands with a
+      // null/invalid frequency the checkout can't bill.
+      if (mode === "subscribe") {
+        const freqs = (rule?.available_frequencies as Array<{ interval_days: number; default?: boolean }> | null) || [];
+        const valid = resolvedFreqDays != null && freqs.some((f) => f.interval_days === resolvedFreqDays);
+        if (!valid && freqs.length > 0) {
+          resolvedFreqDays = (freqs.find((f) => f.default) || freqs[0]).interval_days;
+        }
+      }
     }
 
     const msrp = variant.price_cents;
@@ -190,7 +204,7 @@ export async function POST(request: NextRequest) {
       price_cents_at_add: unit,
       line_total_cents: unit * qty,
       mode,
-      frequency_days: mode === "subscribe" ? freqDays : null,
+      frequency_days: mode === "subscribe" ? resolvedFreqDays : null,
     });
   }
 
@@ -255,7 +269,7 @@ export async function POST(request: NextRequest) {
         // the discount lands on the cart the visitor creates afterwards,
         // without ever showing the code on screen.
         discount_code: body.discount_code || request.cookies.get("popup_coupon")?.value || null,
-        subscription_frequency_days: mode === "subscribe" ? freqDays : null,
+        subscription_frequency_days: mode === "subscribe" ? resolvedFreqDays : null,
         subtotal_cents: subtotalCents,
         discount_cents: discountCents,
         shipping_cents: shippingCents,

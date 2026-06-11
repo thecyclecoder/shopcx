@@ -623,11 +623,18 @@ export function CheckoutClient({
    * frequency. POSTs to /api/cart which re-prices every line with the
    * subscribe discount + injects any qualifying free gifts.
    */
+  const [switchBusy, setSwitchBusy] = useState(false);
   async function switchToSubscribe() {
+    setSwitchBusy(true);
+    setSubmitError(null);
     try {
+      // Pass BOTH ids so the server can resolve the variant either way (the
+      // line might carry an internal UUID or a Shopify numeric id). Omit
+      // frequency_days so /api/cart picks the product's default cadence
+      // (hardcoding 30 broke products whose only cadence is e.g. 28).
       const lines = cart.line_items
         .filter((l) => !l.is_gift)
-        .map((l) => ({ variant_id: l.variant_id, quantity: l.quantity }));
+        .map((l) => ({ variant_id: l.variant_id, shopify_variant_id: (l as { shopify_variant_id?: string | null }).shopify_variant_id ?? undefined, quantity: l.quantity }));
       const res = await fetch("/api/cart", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -636,18 +643,24 @@ export function CheckoutClient({
           workspace_id: workspace.id,
           line_items: lines,
           mode: "subscribe",
-          frequency_days: cart.subscription_frequency_days || 30,
-          email,
+          frequency_days: cart.subscription_frequency_days || undefined,
+          email: email || undefined,
           phone: phoneToE164(phone) || undefined,
         }),
       });
       if (res.ok) {
-        // Hard-reload so the server picks up the new pricing + gift
-        // injection and the page rehydrates cleanly.
+        // Hard-reload so the server picks up the new pricing + gift injection.
         window.location.href = `/checkout?token=${encodeURIComponent(cart.token)}`;
+        return;
       }
-    } catch {
-      /* non-fatal — user can retry */
+      const err = (await res.json().catch(() => ({}))) as { error?: string };
+      setSubmitError(`Couldn't switch to Subscribe & Save — ${err.error || "please try again"}.`);
+      logBlock("submit", "subscribe_switch_failed", err.error || "non-ok", { http_status: res.status });
+      setSwitchBusy(false);
+    } catch (e) {
+      setSubmitError("Couldn't switch to Subscribe & Save. Please try again.");
+      logBlock("submit", "subscribe_switch_exception", e instanceof Error ? e.message : String(e));
+      setSwitchBusy(false);
     }
   }
 
@@ -812,9 +825,10 @@ export function CheckoutClient({
                 <button
                   type="button"
                   onClick={switchToSubscribe}
-                  className="mt-3 inline-flex items-center rounded-full bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800"
+                  disabled={switchBusy}
+                  className="mt-3 inline-flex items-center rounded-full bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
                 >
-                  Switch to Subscribe &amp; Save →
+                  {switchBusy ? "Switching…" : "Switch to Subscribe & Save →"}
                 </button>
               </div>
             </div>
