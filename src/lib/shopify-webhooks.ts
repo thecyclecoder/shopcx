@@ -357,26 +357,35 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
   // Marketing consent: use most permissive state (don't overwrite our "subscribed" with Shopify's null)
   // Check if we already have consent in our DB before overwriting
   if (email) {
-    const { data: existingCust } = await admin.from("customers")
-      .select("email_marketing_status, sms_marketing_status, phone")
-      .eq("workspace_id", workspaceId).eq("email", email).maybeSingle();
-
-    // Phone: never let a Shopify sync without a phone wipe one we have. Prefer
-    // Shopify's (already normalized in `record`), else keep our stored value.
-    if (!payload.phone && existingCust?.phone) {
-      record.phone = existingCust.phone;
-    }
-
-    const ourEmail = existingCust?.email_marketing_status;
-    const ourSms = existingCust?.sms_marketing_status;
+    // Authoritative protection. Load EVERY local row for this email (a
+    // pre-merge duplicate — e.g. an email-only record — may still exist) so a
+    // Shopify sync can never wipe or downgrade what we collected on the
+    // storefront. We OWN marketing consent: there's no Shopify UI for a
+    // customer to unsubscribe, so Shopify may only UPGRADE someone to
+    // "subscribed" — it can never remove a consent (or a phone/name) we hold.
+    const { data: existingRows } = await admin.from("customers")
+      .select("phone, first_name, last_name, email_marketing_status, sms_marketing_status")
+      .eq("workspace_id", workspaceId).eq("email", email);
+    const rows = existingRows || [];
+    const firstTruthy = (vals: (string | null | undefined)[]): string | null => vals.find((v) => !!v) || null;
+    const ourPhone = firstTruthy(rows.map((r) => r.phone as string | null));
+    const ourFirst = firstTruthy(rows.map((r) => r.first_name as string | null));
+    const ourLast = firstTruthy(rows.map((r) => r.last_name as string | null));
+    const ourEmail = rows.some((r) => r.email_marketing_status === "subscribed") ? "subscribed" : firstTruthy(rows.map((r) => r.email_marketing_status as string | null));
+    const ourSms = rows.some((r) => r.sms_marketing_status === "subscribed") ? "subscribed" : firstTruthy(rows.map((r) => r.sms_marketing_status as string | null));
     const shopifyEmail = enrichment.emailMarketingState?.toLowerCase();
     const shopifySms = enrichment.smsMarketingState?.toLowerCase();
 
-    // Take the most permissive: if either side says "subscribed", keep "subscribed"
-    record.email_marketing_status = (ourEmail === "subscribed" || shopifyEmail === "subscribed") ? "subscribed" : (shopifyEmail || ourEmail || null);
-    record.sms_marketing_status = (ourSms === "subscribed" || shopifySms === "subscribed") ? "subscribed" : (shopifySms || ourSms || null);
+    // Never wipe a phone/name we have when Shopify's payload omits it.
+    if (!payload.phone && ourPhone) record.phone = ourPhone;
+    if (!payload.first_name && ourFirst) record.first_name = ourFirst;
+    if (!payload.last_name && ourLast) record.last_name = ourLast;
 
-    // If we had consent that Shopify doesn't, push it to Shopify
+    // Consent: "subscribed" wins; otherwise keep OURS (authoritative) over Shopify's.
+    record.email_marketing_status = (ourEmail === "subscribed" || shopifyEmail === "subscribed") ? "subscribed" : (ourEmail || shopifyEmail || null);
+    record.sms_marketing_status = (ourSms === "subscribed" || shopifySms === "subscribed") ? "subscribed" : (ourSms || shopifySms || null);
+
+    // If we hold consent Shopify doesn't, push it back so the two stay in sync.
     if (ourEmail === "subscribed" && shopifyEmail !== "subscribed") {
       try {
         const { subscribeToEmailMarketing } = await import("@/lib/shopify-marketing");
@@ -384,7 +393,7 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
       } catch { /* non-fatal */ }
     }
     if (ourSms === "subscribed" && shopifySms !== "subscribed") {
-      const phone = (payload.phone as string) || existingCust?.phone;
+      const phone = (payload.phone as string) || ourPhone;
       if (phone) {
         try {
           const { subscribeToSmsMarketing } = await import("@/lib/shopify-marketing");

@@ -18,6 +18,7 @@ See also: [[README]] § Naming conventions for the table-level version of this r
 ## Customer-identity rules
 
 - **`shopify_customer_id` is the primary external lookup** for matching a customer to a Shopify-side payload. Match by Shopify ID first; email is a fallback because emails change.
+- **The Shopify customer sync must never wipe or downgrade storefront-collected data.** A `customers/update` webhook upsert builds the row from the Shopify payload, so a profile that lacks a field would otherwise null it out. We OWN marketing/SMS consent (there is no Shopify UI for a customer to unsubscribe), the verified phone, and names: the sync may only *upgrade* consent to `subscribed` (most-permissive across all local rows for the email) and may only *fill* an empty phone/name — never erase one we hold. See `applyCustomerWebhook` in [[libraries/shopify-webhooks]]. Phones are stored E.164.
 - **No authorized resellers.** Anyone selling our products on Amazon / eBay / wholesale platforms is unauthorized. New rows in `known_resellers` default to `status='active'` (the fraud-detection rule activates immediately). See [[lifecycles/fraud-detection]].
 
 ## Order address fallback
