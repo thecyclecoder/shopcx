@@ -33,11 +33,16 @@ async function toInlineData(url: string): Promise<{ mime_type: string; data: str
   return { mime_type: ct.startsWith("image/") ? ct : "image/png", data: buf.toString("base64") };
 }
 
+/** Output aspect ratios Nano Banana Pro accepts via imageConfig.aspectRatio. */
+export type NanoBananaAspect = "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "4:5" | "5:4" | "9:16" | "16:9" | "21:9";
+
 export interface NanoBananaProArgs {
   workspaceId: string;
   prompt: string;
   imageUrls: string[]; // [face, product, …] — referenced as "the first/second image" in the prompt
   model?: string;
+  /** Force output aspect ratio. Omit to let the model infer (tends to square). */
+  aspectRatio?: NanoBananaAspect;
 }
 
 /**
@@ -50,9 +55,11 @@ export async function generateNanoBananaProCombine(args: NanoBananaProArgs): Pro
   const creds = await getGeminiCredentials(args.workspaceId);
   if (!creds) throw new Error("gemini_not_connected");
   const images = await Promise.all(args.imageUrls.filter(Boolean).map(toInlineData));
+  const generationConfig: Record<string, unknown> = { responseModalities: ["IMAGE"] };
+  if (args.aspectRatio) generationConfig.imageConfig = { aspectRatio: args.aspectRatio };
   const body = {
     contents: [{ parts: [{ text: args.prompt }, ...images.map((im) => ({ inline_data: im }))] }],
-    generationConfig: { responseModalities: ["IMAGE"] },
+    generationConfig,
   };
   const res = await fetch(`${GEMINI_BASE}/models/${args.model || NANO_BANANA_PRO_MODEL}:generateContent`, {
     method: "POST",

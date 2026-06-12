@@ -144,7 +144,7 @@ function systemPrompt(plan: TopicPlan): string {
     `SEO_DESCRIPTION: <~155 chars>`,
     `TAGS: <comma-separated, 4-6>`,
     `HERO_IMAGE: <a styled landscape photo scene. USE THIS COMPOSITION exactly — ${composition}. Do NOT default to a kitchen counter unless that's what's specified. Fill in props relevant to THIS article's topic.>`,
-    `SOCIAL_IMAGE: <a vertical 4:5 portrait of the same scene as the hero (same focal subject, setting, and light), recomposed for a tall Instagram frame and eye-catching.>`,
+    `SOCIAL_IMAGE: <the same scene as the hero (same focal subject, setting, and light), recomposed for a 4:3 social frame and eye-catching. The crop is handled downstream — describe the scene, not the dimensions.>`,
     `HTML:`,
     `<the full article HTML>`,
     `<<<END>>>`,

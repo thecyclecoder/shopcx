@@ -8,16 +8,16 @@
  * 600KB–900KB JPEG at ~1400px, far too heavy for a blog page. WebP @ ~1600px
  * cuts that ~3-4x with no visible loss.
  *
- * The main image is generated twice: a landscape hero for the blog page, and a
- * portrait **4:5 (1080×1350) social variant** stored on the post but never shown
- * — the organic social scheduler picks that up for IG/FB feed posts.
+ * The main image is generated twice: a **16:9 landscape** hero for the blog page,
+ * and a **4:3 social variant** stored on the post but never shown on the blog —
+ * the organic social scheduler picks that up for the blog-on-social feed posts.
  *
  * Quick-win now; the full AVIF/WebP multi-width pipeline ([[image-transcode]])
  * is a spec line item.
  */
 import sharp from "sharp";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { generateNanoBananaProCombine } from "@/lib/gemini";
+import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 
 const BUCKET = "product-media";
 
@@ -80,11 +80,13 @@ export async function genCompressUpload(args: {
   inputImageUrls?: string[];
   maxWidth?: number;
   quality?: number;
+  aspectRatio?: NanoBananaAspect;
 }): Promise<GeneratedImage> {
   const { buffer: raw } = await generateNanoBananaProCombine({
     workspaceId: args.workspaceId,
     prompt: args.prompt,
     imageUrls: args.inputImageUrls || [],
+    aspectRatio: args.aspectRatio,
   });
   const { buffer, width, height } = await compressToWebp(raw, {
     maxWidth: args.maxWidth,
@@ -97,14 +99,14 @@ export async function genCompressUpload(args: {
 /** Standard widths per slot kind. Hero/social a bit larger; in-body lean. */
 export const SLOT_MAX_WIDTH: Record<string, number> = {
   hero: 1600,
-  social: 1080, // 4:5 → 1080×1350
+  social: 1200, // 4:3 → 1200×900
   body: 1280,
 };
 
 /**
- * The 4:5 portrait social variant of the main image — composited from the same
- * isolated product, framed for IG/FB feed. Stored on the post (social_image_url)
- * but never rendered on the blog.
+ * The 4:3 social variant of the main image — composited from the same isolated
+ * product, framed for the blog-on-social feed posts. Stored on the post
+ * (social_image_url) but never rendered on the blog.
  */
 export async function genSocialVariant(args: {
   workspaceId: string;
@@ -120,5 +122,6 @@ export async function genSocialVariant(args: {
     inputImageUrls: args.inputImageUrls,
     maxWidth: SLOT_MAX_WIDTH.social,
     quality: 82,
+    aspectRatio: "4:3",
   });
 }
