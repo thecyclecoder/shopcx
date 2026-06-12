@@ -248,6 +248,9 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
     });
     if (!campaign?.hero_image_url) return { ok: false, reason: "missing_hero" };
     const productTitle = (campaign as any)?.products?.title || "the product";
+    // Re-sign the stored hero URL (the persisted signed URL may have expired since
+    // the hero was made — stale URLs make Veo's image fetch 400).
+    const heroImageUrl = (await toFetchableUrl(campaign.hero_image_url)) || campaign.hero_image_url;
     const scripts = splitScriptIntoSegments(campaign.script_text || "", campaign.length_sec || 15);
     if (!scripts.length) return { ok: false, reason: "no_script" };
 
@@ -261,7 +264,7 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
         const prompt = buildTalkingHeadPrompt(productTitle, scripts[i], (campaign as any)?.scene_style);
         const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "talking_head", seq: i, scriptText: scripts[i], prompt, model: VEO_FAST_MODEL });
         try {
-          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: campaign.hero_image_url!, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
+          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: heroImageUrl, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
           const path = `talking-head/${workspace_id}/${segId}.mp4`;
           await uploadBuffer(path, buffer, "video/mp4");
           // Whisper for the per-segment trim point (kill Veo's end-of-clip dead air).
@@ -680,7 +683,9 @@ export const adToolSegmentRegenerate = inngest.createFunction(
         const sourceUrl = mode === "image" ? existingSource : null;
         const id = await regenerateSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq, prompt, model: veoModel, sourceUrl });
         try {
-          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: sourceUrl || undefined, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
+          // Re-sign the stored still URL — it's a signed URL that has likely expired.
+          const veoImage = sourceUrl ? (await toFetchableUrl(sourceUrl)) || undefined : undefined;
+          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: veoImage, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
           const path = `broll/${workspace_id}/${id}.mp4`;
           await uploadBuffer(path, buffer, "video/mp4");
           await completeSegment(id, { storagePath: path });
@@ -697,7 +702,9 @@ export const adToolSegmentRegenerate = inngest.createFunction(
       const prompt = buildTalkingHeadPrompt(ctx.productTitle, script, ctx.sceneStyle);
       const id = await regenerateSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "talking_head", seq, scriptText: script, prompt, model: veoModel });
       try {
-        const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: ctx.hero, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
+        // Re-sign the stored hero URL — the persisted signed URL likely expired.
+        const heroUrl = (await toFetchableUrl(ctx.hero)) || ctx.hero;
+        const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: heroUrl, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
         const path = `talking-head/${workspace_id}/${id}.mp4`;
         await uploadBuffer(path, buffer, "video/mp4");
         let words: any[] = [];
