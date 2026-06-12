@@ -344,3 +344,33 @@ export async function getProductArchetypes(
     used_fallback: resolved.basis.used_fallback_snapshot,
   };
 }
+
+/** Full per-product demographic basis (gender/age/life-stage/income shares of
+ *  the product's actual buyers). Reuses the same cached archetype resolution as
+ *  the avatar tool — used to auto-fill products.target_customer in the
+ *  intelligence overview. */
+export async function getProductDemographicBasis(productId: string): Promise<DemographicBasis | null> {
+  const admin = createAdminClient();
+  const { data: product } = await admin.from("products").select("id, workspace_id, title").eq("id", productId).single();
+  if (!product) return null;
+  const resolved = await resolveArchetypes(admin, product.workspace_id, productId, product.title, 5, false);
+  return resolved?.basis || null;
+}
+
+/** Compose a one-line target-customer description from a demographic basis —
+ *  the dominant gender / age / life-stage / income of actual purchasers. */
+export function describeTargetCustomer(b: DemographicBasis): string {
+  const top = (m: Record<string, number>): { key: string; pct: number } | null => {
+    const e = Object.entries(m || {})
+      .filter(([k]) => k && k.toLowerCase() !== "unknown")
+      .sort((a, z) => z[1] - a[1])[0];
+    return e ? { key: e[0], pct: e[1] <= 1 ? Math.round(e[1] * 100) : Math.round(e[1]) } : null;
+  };
+  const g = top(b.gender_share), a = top(b.age_range_share), ls = top(b.life_stage_share), inc = top(b.income_bracket_share);
+  const parts: string[] = [];
+  if (g) parts.push(`${g.key}${g.pct ? ` (${g.pct}%)` : ""}`);
+  if (a) parts.push(`ages ${a.key}`);
+  if (ls) parts.push(ls.key);
+  if (inc) parts.push(`${inc.key} income`);
+  return parts.length ? `Primarily ${parts.join(", ")} — based on ${b.cohort_size} purchasers.` : "";
+}
