@@ -58,7 +58,9 @@ const REASON_TYPES = [
 const TYPE_CONFIG_FIELDS: Record<string, { key: string; label: string; type: "number" | "select"; unit?: string; options?: { value: string; label: string }[] }[]> = {
   pause: [
     { key: "pause_days", label: "Pause duration", type: "select", options: [
-      { value: "14", label: "14 days" }, { value: "30", label: "30 days" },
+      // Only durations we seed as remedies — 30/60/90. No 14-day: there is no
+      // seeded 14-day remedy, so it must not be an editable option.
+      { value: "30", label: "30 days" },
       { value: "60", label: "60 days" }, { value: "90", label: "90 days" },
     ]},
   ],
