@@ -78,6 +78,25 @@ export async function GET(
     return NextResponse.json({ error: "Product not found" }, { status: 404 });
   }
 
+  // Auto-fill target_customer from real purchaser demographics when it's blank —
+  // the dominant gender / age / life-stage / income of people who actually bought
+  // it (reuses the per-product demographic basis the avatar tool already computes).
+  if (!productRes.data.target_customer || !String(productRes.data.target_customer).trim()) {
+    try {
+      const { getProductDemographicBasis, describeTargetCustomer } = await import("@/lib/ad-avatar-proposals");
+      const basis = await getProductDemographicBasis(productId);
+      if (basis && basis.cohort_size > 0) {
+        const derived = describeTargetCustomer(basis);
+        if (derived) {
+          await admin.from("products").update({ target_customer: derived }).eq("id", productId).eq("workspace_id", workspaceId);
+          productRes.data.target_customer = derived;
+        }
+      }
+    } catch (e) {
+      console.error("[intelligence-overview] target_customer derivation failed:", e);
+    }
+  }
+
   const researchByIngredient = new Map<string, unknown[]>();
   for (const r of researchRes.data || []) {
     const list = researchByIngredient.get(r.ingredient_id) || [];
