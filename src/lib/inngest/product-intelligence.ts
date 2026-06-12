@@ -342,7 +342,7 @@ export const analyzeReviews = inngest.createFunction(
     // pass over ~500 reviews truncated the JSON at max_tokens and saved empty
     // output. Each chunk returns its own structured analysis (separate step →
     // fault-isolated + resumable). ──
-    const CHUNK = 200;
+    const CHUNK = 100;
     const chunks: (typeof reviews)[] = [];
     for (let i = 0; i < reviews.length; i += CHUNK) chunks.push(reviews.slice(i, i + CHUNK));
 
