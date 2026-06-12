@@ -2,6 +2,8 @@
 
 Multi-language detection + translation hooks.
 
+> **Detection anchors on the customer's established language** (added 2026-06-12, in [[../inngest/unified-ticket-handler]]'s `detect-language` step). `detectLanguage` is a single Haiku call and occasionally misfires on forwarded English emails — a French sender name + a quoted support footer once flipped a long-time English customer to `fr`, and we auto-replied in French (Suzanne Doucet). Guard: if the fresh detection is non-English **but the customer has any prior ticket detected as `en`**, we keep `en`. A genuine language-switcher has no English history, so this only suppresses false flips.
+
 **File:** `src/lib/translate.ts`
 
 ## File header

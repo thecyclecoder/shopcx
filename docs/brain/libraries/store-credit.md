@@ -2,6 +2,8 @@
 
 Store credit issuance via Shopify `storeCreditAccountCredit`. Writes [[../tables/store_credit_log]].
 
+> **Store credit auto-applies to the customer's next charge.** Once issued, a Shopify store-credit balance is automatically used against the customer's next order — **whether that's an Appstle subscription renewal or a one-time order**. Nothing to "apply" manually; it draws down on the next charge. Safe to tell a customer "this $X credit will automatically come off your next order."
+
 **File:** `src/lib/store-credit.ts`
 
 ## Exports
