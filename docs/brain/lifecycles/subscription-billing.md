@@ -50,7 +50,17 @@ source of truth shared with the portal display. For each due sub:
 3. **Snapshot** the engine's per-line charged prices onto the order's line items
    (an order is a historical record, so it bakes the price; the sub never does).
 4. **Apply discount** if `applied_discounts` JSONB has an active code. One coupon
-   per sub — entire-order scope, on the product subtotal.
+   per sub — entire-order scope, on the product subtotal. `applied_discounts`
+   stores bare **`{ code }` references**, not frozen values: each renewal
+   `resolveRenewalDiscount` (coupons.ts) **live-reads** the code (Shopify
+   `codeDiscountNodeByCode` → value + `recurringCycleLimit` + `appliesOncePerCustomer`/
+   `usageLimit`), checks this customer's prior `coupon_redemptions` by code, applies
+   if still valid, and **drops the code off the sub once its one-time/cycle limit is
+   hit**. Redemptions are recorded only AFTER a successful charge (`record-coupon-
+   redemptions` step). Appstle **automatic** discounts (Buy 3 / free shipping) carried
+   on a migrated sub are silently dropped — our pricing rules own those. **Tax is
+   quoted on the POST-coupon base** (line prices scaled by the coupon ratio for the
+   Avalara quote only). (Sharon Mogliotti, 2026-06-12.)
 5. **Shipping** = free when a rule has `free_shipping` (internal subs are always
    subscription-mode, so the threshold doesn't gate it), else the sub's locked
    rate. **Protection** line if

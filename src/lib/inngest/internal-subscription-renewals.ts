@@ -188,15 +188,29 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       ? Number(ctx.sub.shipping_protection_amount_cents || 0)
       : 0;
 
-    // Apply entire-order coupon discounts (consumes recurring_cycle_limit on a
-    // successful charge — persisted in the advance-billing step below). NOTE:
-    // tax is still quoted on the pre-discount subtotal via Avalara; applying
-    // the discount to the taxable base is a documented refinement (spec § 1b).
-    const { computeAppliedDiscountCents } = await import("@/lib/coupons");
-    const { discountCents, nextAppliedDiscounts } = computeAppliedDiscountCents(
-      (ctx.sub.applied_discounts as Array<Record<string, unknown>> | null) ?? null,
-      subtotalCents,
+    // Entire-order coupon discounts. The sub stores coupon CODES; we live-read
+    // each (Shopify / our coupons table), skip ones this customer has already
+    // exhausted (one-time / cycle limit), apply the rest, and report which codes
+    // to keep vs drop. Redemptions are recorded only AFTER a successful charge
+    // (record-coupon-redemptions step below).
+    const { resolveRenewalDiscount } = await import("@/lib/coupons");
+    const { discountCents, keepCodes, toRedeem } = await step.run("resolve-coupons", async () =>
+      resolveRenewalDiscount(
+        workspace_id,
+        (ctx.sub.applied_discounts as Array<Record<string, unknown>> | null) ?? null,
+        subtotalCents,
+        (ctx.sub.customer_id as string | null) ?? null,
+      ),
     );
+
+    // Post-coupon taxable base: scale the line prices by the coupon ratio for
+    // the Avalara quote ONLY — the order still records full prices + discount_cents.
+    const taxItems = discountCents > 0 && subtotalCents > 0
+      ? (items as Array<Record<string, unknown>>).map((i) => ({
+          ...i,
+          price_cents: Math.round((Number(i.price_cents) || 0) * (subtotalCents - discountCents) / subtotalCents),
+        }))
+      : items;
 
     // Reserve the order number NOW so we can use it as the Avalara
     // document code. The orders row gets inserted with this same
@@ -213,7 +227,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       return commitSubscriptionRenewalTax(workspace_id, {
         subscriptionId: subscription_id,
         orderNumber,
-        items,
+        items: taxItems,
         shippingAddress: ctx.shipping_address || ctx.sub.shipping_address,
         shippingCents,
         shippingMethodLabel: (ctx.sub.shipping_method_code as string | null) || "Shipping",
@@ -391,9 +405,10 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       // shouldn't recur.
       const update: Record<string, unknown> = {
         next_billing_date: next.toISOString(),
-        // Persist consumed coupon cycles (decremented / auto-expired) — only
-        // now, after a successful charge, so a failed charge doesn't burn one.
-        applied_discounts: nextAppliedDiscounts,
+        // Keep only the coupon codes that still have cycles left — codes that
+        // hit their one-time / cycle limit this charge are dropped off the sub.
+        // Stored as bare { code } references; the value is re-read live next time.
+        applied_discounts: keepCodes.map((c) => ({ code: c })),
         updated_at: new Date().toISOString(),
       };
       if (droppedAnyOneTime) {
@@ -405,6 +420,20 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         .update(update)
         .eq("id", subscription_id);
     });
+
+    // Record coupon redemptions — only now, after a successful charge, so a
+    // failed charge never burns a one-time code. Separate step for idempotency.
+    if (toRedeem.length) {
+      await step.run("record-coupon-redemptions", async () => {
+        const { recordCouponRedemption } = await import("@/lib/coupons");
+        for (const rc of toRedeem) {
+          await recordCouponRedemption(workspace_id, rc, (ctx.sub.customer_id as string | null) ?? null, {
+            subscriptionId: subscription_id,
+            orderId: newOrder.id,
+          });
+        }
+      });
+    }
 
     // ── 7. Hand off to Amplifier for fulfillment ────────────────
     // Non-fatal: payment is already done; an Amplifier failure just
