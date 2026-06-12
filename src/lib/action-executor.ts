@@ -53,7 +53,7 @@ export interface ActionParams {
   crisis_action_id?: string;
   order_number?: string;
   free_label?: boolean;
-  pause_days?: number;
+  pause_days?: number | string; // model/journey configs may send "60" as a string — coerce with Number() before use
   // Shipping address — used by update_shipping_address (and as an
   // override on create_replacement_order when the customer wants the
   // replacement sent to a different address than the original order).
@@ -1101,15 +1101,20 @@ export const directActionHandlers: Record<
   pause_timed: async (ctx, p) => {
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
-    if (p.pause_days !== 30 && p.pause_days !== 60) return { success: false, error: "pause_days must be 30 or 60" };
+    // We only ever do 30- or 60-day pauses. Coerce before validating: the
+    // orchestrator and journey configs carry pause_days as a STRING ("60"), so a
+    // strict `=== 60` would reject a valid 60-day request (caught on Susan Maex's
+    // pause — the string "60" failed the numeric guard and the pause never ran).
+    const days = Number(p.pause_days);
+    if (days !== 30 && days !== 60) return { success: false, error: "pause_days must be 30 or 60" };
 
     const r = await appstleSubscriptionAction(
       ctx.workspaceId, p.contract_id, "pause",
-      `Customer requested ${p.pause_days}-day pause after renewal charge`,
+      `Customer requested ${days}-day pause after renewal charge`,
     );
     if (!r.success) return { ...r, summary: undefined };
 
-    const resumeAt = new Date(Date.now() + p.pause_days * 86400000);
+    const resumeAt = new Date(Date.now() + days * 86400000);
     await ctx.admin.from("subscriptions")
       .update({
         status: "paused",
@@ -1120,17 +1125,17 @@ export const directActionHandlers: Record<
       .eq("shopify_contract_id", p.contract_id);
 
     const resumeLabel = resumeAt.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-    return { success: true, summary: `Paused for ${p.pause_days} days (auto-resumes ${resumeLabel})` };
+    return { success: true, summary: `Paused for ${days} days (auto-resumes ${resumeLabel})` };
   },
 
   // Alias: Sonnet sometimes emits { type: "pause" } expecting the same behavior
-  // as pause_timed. Default to 30 days if no duration specified.
+  // as pause_timed. Default to 30 days if no duration specified. 30/60 only.
   pause: async (ctx, p) => {
-    const days = p.pause_days || 30;
+    const days = Number(p.pause_days) || 30;
     if (days !== 30 && days !== 60) {
       return {
         success: false,
-        error: `pause action only supports 30 or 60 day durations (got ${days}). For longer pauses, an agent must apply manually.`,
+        error: `pause action only supports 30 or 60 day durations (got ${p.pause_days}). For anything else, an agent must apply manually.`,
       };
     }
     return directActionHandlers.pause_timed(ctx, { ...p, pause_days: days });

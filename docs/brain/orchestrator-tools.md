@@ -33,8 +33,8 @@ Two-bucket reasoning: account question → `get_customer_account` first; product
 Sonnet returns `{action_type, actions: [...]}` with the action type and params; the action-executor dispatches via `directActionHandlers`. Per the [[operational-rules]] § Orchestrator discipline rule, **Sonnet returns IDs only** — hardcoded code paths fetch + validate + execute.
 
 ### Subscription mutations
-- `pause` — pause indefinitely
-- `pause_timed` — pause + schedule resume via [[inngest/portal-auto-resume]]
+- `pause` — pause indefinitely (alias of `pause_timed`; defaults to 30 days)
+- `pause_timed` — pause + schedule resume via [[inngest/portal-auto-resume]]. **`pause_days` is 30 or 60 ONLY** — never 14/90/other. The value is coerced with `Number()` before the guard, because the orchestrator and journey configs carry it as a string (`"60"`); a strict `=== 60` against the string silently rejected a valid 60-day request (Susan Maex, 2026-06-12). The matching `sonnet_prompts` rule tells the agent to only ever *offer* 30 or 60.
 - `resume` — un-pause active
 - `skip_next_order` — advance `next_billing_date` by one cycle
 - `change_frequency` — update billing interval
