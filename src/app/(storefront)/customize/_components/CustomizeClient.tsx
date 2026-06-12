@@ -42,6 +42,7 @@ export interface CartDraft {
   subscription_frequency_days: number | null;
   subtotal_cents: number;
   discount_cents: number;
+  discount_code: string | null;
   shipping_cents: number;
   tax_cents: number;
   total_cents: number;

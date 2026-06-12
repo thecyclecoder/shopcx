@@ -73,18 +73,22 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
   const linesWithGifts = await ensureFreeGifts(cart.workspace_id as string, baseLines);
   if (JSON.stringify(baseLines) !== JSON.stringify(linesWithGifts)) {
     const newSubtotalCents = linesWithGifts.reduce((s, l) => s + l.line_total_cents, 0);
+    // Preserve any persisted coupon discount — gifts are $0 lines so the
+    // subtotal is unchanged, but total_cents must stay subtotal − discount or
+    // the coupon silently vanishes on this checkout render.
+    const newTotalCents = newSubtotalCents - ((cart.discount_cents as number) || 0);
     await admin
       .from("cart_drafts")
       .update({
         line_items: linesWithGifts,
         subtotal_cents: newSubtotalCents,
-        total_cents: newSubtotalCents,
+        total_cents: newTotalCents,
         updated_at: new Date().toISOString(),
       })
       .eq("token", token);
     cart.line_items = linesWithGifts;
     cart.subtotal_cents = newSubtotalCents;
-    cart.total_cents = newSubtotalCents;
+    cart.total_cents = newTotalCents;
   }
 
   const { data: workspace } = await admin

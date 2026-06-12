@@ -153,7 +153,11 @@ export function CheckoutClient({
     () => cart.line_items.reduce((s, l) => s + (l.unit_msrp_cents || l.unit_price_cents) * l.quantity, 0),
     [cart.line_items],
   );
-  const youSaveCents = Math.max(0, msrpSubtotalCents - cart.subtotal_cents) + shippingSavedCents;
+  // Coupon discount persisted on the cart (e.g. WELCOME/COMEBACK). The
+  // customize page subtracts it from the displayed total; checkout must too,
+  // or the price jumps up between pages and the customer bails.
+  const couponDiscountCents = cart.discount_cents || 0;
+  const youSaveCents = Math.max(0, msrpSubtotalCents - cart.subtotal_cents) + shippingSavedCents + couponDiscountCents;
 
   // ── Form state ────────────────────────────────────────────────────
   const [email, setEmail] = useState(cart.email || "");
@@ -184,7 +188,7 @@ export function CheckoutClient({
   const protectionPriceCents = workspace.shipping_protection?.price_cents ?? 0;
   const [shippingProtection, setShippingProtection] = useState(!!workspace.shipping_protection);
   const protectionCents = shippingProtection && workspace.shipping_protection ? protectionPriceCents : 0;
-  const totalCents = cart.subtotal_cents + shippingCents + taxCents + protectionCents;
+  const totalCents = cart.subtotal_cents - couponDiscountCents + shippingCents + taxCents + protectionCents;
   // Separate billing fields used only when billingSameAsShipping is off.
   const [billFirst, setBillFirst] = useState("");
   const [billLast, setBillLast] = useState("");
@@ -1814,6 +1818,12 @@ function OrderSummary({
         <Row label="Subtotal" value={fmt(subtotalCents)} />
         {msrpSubtotalCents > subtotalCents && (
           <Row label="Discount" value={`-${fmt(msrpSubtotalCents - subtotalCents)}`} muted />
+        )}
+        {cart.discount_cents > 0 && (
+          <div className="flex items-baseline justify-between">
+            <dt className="text-sm font-medium text-emerald-700">Coupon{cart.discount_code ? ` (${cart.discount_code})` : ""}</dt>
+            <dd className="text-sm font-semibold text-emerald-700">-{fmt(cart.discount_cents)}</dd>
+          </div>
         )}
         {showShippingStrike ? (
           <div className="flex items-baseline justify-between">

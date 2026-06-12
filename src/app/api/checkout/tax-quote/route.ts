@@ -57,7 +57,7 @@ export async function POST(request: NextRequest) {
 
   const { data: cart } = await admin
     .from("cart_drafts")
-    .select("workspace_id, token, line_items, status")
+    .select("workspace_id, token, line_items, status, discount_cents")
     .eq("token", body.cart_token)
     .maybeSingle();
   if (!cart) return NextResponse.json({ error: "cart_not_found" }, { status: 404 });
@@ -65,6 +65,16 @@ export async function POST(request: NextRequest) {
 
   const lines = (cart.line_items as CartLineForTax[]) || [];
   if (lines.length === 0) return NextResponse.json({ tax_cents: 0, enabled: false, reason: "empty_cart" });
+
+  // Tax the DISCOUNTED base — mirror /api/checkout (which spreads the coupon
+  // across non-gift lines before quoting Avalara), so the displayed tax matches
+  // what's actually charged. Shipping resolution still uses the full `lines`.
+  const discountCents = (cart.discount_cents as number) || 0;
+  const taxableSubtotal = lines.reduce((s, l) => s + (l.line_total_cents || 0), 0);
+  const discountRatio = discountCents > 0 && taxableSubtotal > 0 ? discountCents / taxableSubtotal : 0;
+  const taxableLines = discountRatio > 0
+    ? lines.map((l) => (l.is_gift ? l : { ...l, line_total_cents: Math.round(l.line_total_cents * (1 - discountRatio)) }))
+    : lines;
 
   // Check Avalara is configured + enabled for this workspace
   const { data: ws } = await admin
@@ -92,7 +102,7 @@ export async function POST(request: NextRequest) {
   const avalaraLines = await buildAvalaraLines({
     admin,
     workspaceId: cart.workspace_id as string,
-    lines,
+    lines: taxableLines,
     shippingCents,
     shippingMethodLabel,
     protectionCents,
