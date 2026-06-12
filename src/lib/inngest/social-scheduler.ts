@@ -235,15 +235,22 @@ export const socialSchedulerPlan = inngest.createFunction(
   },
 );
 
+// Retry budget for transient Meta Graph failures (5xx / rate limit / codes
+// 1,2,4…). Must match `retries` below: the publish step throws on a transient
+// error while attempts remain, so Inngest re-runs it with backoff; on the final
+// attempt it returns the failure instead so `finalize` records it (never leaving
+// the row stuck in "publishing"). Permanent errors never throw → fail at once.
+const PUBLISH_RETRIES = 4;
+
 export const socialPublish = inngest.createFunction(
   {
     id: "social-publish",
     name: "Social — publish a scheduled post",
     concurrency: [{ limit: 3 }],
-    retries: 2,
+    retries: PUBLISH_RETRIES,
     triggers: [{ event: "social/publish" }],
   },
-  async ({ event, step }) => {
+  async ({ event, step, attempt }) => {
     const postId = event.data?.post_id as string;
     if (!postId) return { error: "no post_id" };
 
@@ -272,7 +279,16 @@ export const socialPublish = inngest.createFunction(
       await admin.from("scheduled_social_posts").update({ status: "publishing", updated_at: new Date().toISOString() }).eq("id", postId);
     });
 
-    const result = await step.run("publish", () => publishScheduledPost(post));
+    const result = await step.run("publish", async () => {
+      const r = await publishScheduledPost(post);
+      // Transient Meta error + retries left → throw so Inngest retries this step
+      // with backoff. On the last attempt, fall through and return the failure
+      // so `finalize` records it cleanly.
+      if (!r.ok && r.retryable && attempt < PUBLISH_RETRIES) {
+        throw new Error(`transient publish failure (attempt ${attempt + 1}/${PUBLISH_RETRIES + 1}): ${r.error}`);
+      }
+      return r;
+    });
 
     await step.run("finalize", async () => {
       const admin = createAdminClient();

@@ -15,7 +15,10 @@ const GRAPH = "https://graph.facebook.com/v21.0";
 const SIGNED_URL_TTL = 3600; // 1h — Meta fetches within seconds of the call
 
 type Ok<T> = { ok: true } & T;
-type Err = { ok: false; error: string };
+/** `retryable` = a transient Graph error (5xx / rate limit / Meta codes 1,2,4…)
+ *  the caller should retry with backoff, vs. a permanent failure (bad media,
+ *  policy, expired token) that won't succeed on retry. */
+type Err = { ok: false; error: string; retryable?: boolean };
 export type PublishResult = Ok<{ platformId: string; permalink?: string }> | Err;
 
 async function graphPost(path: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; json: any }> {
@@ -31,6 +34,22 @@ async function graphPost(path: string, body: Record<string, unknown>): Promise<{
 const graphErr = (json: any, fallback: string) => json?.error?.message || fallback;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Is a Graph API failure transient (worth a retry)? Meta flags many with
+ *  `is_transient`, plus codes 1 (unknown) / 2 (service down) / 4,17,32,341,613
+ *  (rate limits), and any 5xx/429. These are exactly the "An unexpected error
+ *  has occurred. Please retry" class that was permanently failing posts. */
+function isTransientGraph(status: number, json: any): boolean {
+  if (status >= 500 || status === 429) return true;
+  const e = json?.error;
+  if (e?.is_transient === true) return true;
+  return [1, 2, 4, 17, 32, 341, 613].includes(Number(e?.code));
+}
+
+/** Build an Err from a Graph response, tagging transient failures retryable. */
+function graphFail(r: { status: number; json: any }, fallback: string): Err {
+  return { ok: false, error: graphErr(r.json, `${fallback} (${r.status})`), retryable: isTransientGraph(r.status, r.json) };
+}
+
 // ── Facebook ──
 
 /** Publish a photo to a Facebook Page feed. */
@@ -38,7 +57,7 @@ export async function publishFacebookPhoto(
   pageId: string, pageToken: string, imageUrl: string, caption: string,
 ): Promise<PublishResult> {
   const r = await graphPost(`${pageId}/photos`, { url: imageUrl, caption, access_token: pageToken });
-  if (!r.ok || !r.json?.post_id) return { ok: false, error: graphErr(r.json, `FB photo failed (${r.status})`) };
+  if (!r.ok || !r.json?.post_id) return graphFail(r, "FB photo failed");
   return { ok: true, platformId: r.json.post_id, permalink: `https://www.facebook.com/${r.json.post_id}` };
 }
 
@@ -46,7 +65,7 @@ export async function publishFacebookPhoto(
 
 async function igPublish(igUserId: string, token: string, creationId: string): Promise<PublishResult> {
   const r = await graphPost(`${igUserId}/media_publish`, { creation_id: creationId, access_token: token });
-  if (!r.ok || !r.json?.id) return { ok: false, error: graphErr(r.json, `IG publish failed (${r.status})`) };
+  if (!r.ok || !r.json?.id) return graphFail(r, "IG publish failed");
   // Best-effort permalink fetch (non-fatal).
   let permalink: string | undefined;
   try {
@@ -61,7 +80,7 @@ export async function publishInstagramImage(
   igUserId: string, token: string, imageUrl: string, caption: string,
 ): Promise<PublishResult> {
   const c = await graphPost(`${igUserId}/media`, { image_url: imageUrl, caption, access_token: token });
-  if (!c.ok || !c.json?.id) return { ok: false, error: graphErr(c.json, `IG image container failed (${c.status})`) };
+  if (!c.ok || !c.json?.id) return graphFail(c, "IG image container failed");
   return igPublish(igUserId, token, c.json.id);
 }
 
@@ -70,7 +89,7 @@ export async function publishInstagramReel(
   igUserId: string, token: string, videoUrl: string, caption: string,
 ): Promise<PublishResult> {
   const c = await graphPost(`${igUserId}/media`, { media_type: "REELS", video_url: videoUrl, caption, share_to_feed: true, access_token: token });
-  if (!c.ok || !c.json?.id) return { ok: false, error: graphErr(c.json, `IG reel container failed (${c.status})`) };
+  if (!c.ok || !c.json?.id) return graphFail(c, "IG reel container failed");
   const creationId = c.json.id;
   // Poll status_code (up to ~2 min) — video transcode takes time.
   for (let i = 0; i < 24; i++) {
@@ -90,7 +109,7 @@ export async function publishInstagramStory(
     ? { media_type: "STORIES", video_url: mediaUrl, access_token: token }
     : { media_type: "STORIES", image_url: mediaUrl, access_token: token };
   const c = await graphPost(`${igUserId}/media`, body);
-  if (!c.ok || !c.json?.id) return { ok: false, error: graphErr(c.json, `IG story container failed (${c.status})`) };
+  if (!c.ok || !c.json?.id) return graphFail(c, "IG story container failed");
   if (isVideo) {
     // Video stories need the same processing poll.
     for (let i = 0; i < 24; i++) {
