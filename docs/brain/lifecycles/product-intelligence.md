@@ -77,6 +77,10 @@ All in `src/lib/inngest/product-intelligence.ts` unless noted. Model used everyw
 
 All registered in `src/app/api/inngest/route.ts`. The UI fires these via POST endpoints under `/api/workspaces/[id]/products/[productId]/...`.
 
+### Robustness (2026-06-12 fixes)
+- **`researchIngredients` is fault-isolated per ingredient.** Each ingredient runs in its own `step.run` **wrapped in try/catch** — a slow/timed-out Sonnet call that fails after its retries no longer aborts the whole function (which had stranded 12 of 16 Superfood Tabs ingredients). Failed ingredients are collected + returned; the rest still research. (The per-ingredient delete-before-insert already makes re-research idempotent — multiple rows per ingredient are **one row per benefit**, by design, not duplicates.)
+- **`analyzeReviews` is map-reduce over chunks.** A single pass over ~500 reviews **truncated** the JSON at `max_tokens` (`stop_reason: max_tokens`) → unparseable → empty output. Now: fetch **4+ star** reviews only, ordered by rating then longest-body (the gems), up to 2000; analyze in **chunks of 200** (each its own step, no truncation); **merge programmatically** (top_benefits summed by name; phrases/skeptics/surprises concatenated, deduped, capped; quotes still validated as exact substrings against the full set).
+
 ## API surface
 
 Under `/api/workspaces/[id]/products/[productId]/`:

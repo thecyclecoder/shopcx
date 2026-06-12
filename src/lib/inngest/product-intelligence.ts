@@ -148,7 +148,12 @@ export const researchIngredients = inngest.createFunction(
 
     const targetCustomer = context.product.target_customer || "general adult population";
 
+    // Fault-isolate each ingredient — a slow/timed-out Sonnet call that fails
+    // after its retries used to abort the WHOLE function, leaving every later
+    // ingredient unresearched (Superfood Tabs got only 4 of 16). Catch + continue.
+    const failedIngredients: string[] = [];
     for (const ing of context.ingredients) {
+      try {
       await step.run(`research-${ing.id}`, async () => {
         const admin = createAdminClient();
         const system = `You are a nutritional science researcher. Respond with strict JSON only — no prose, no markdown fences.`;
@@ -218,6 +223,10 @@ Be conservative with confidence scores. Return a JSON array of benefit objects (
           await admin.from("product_ingredient_research").insert(rows);
         }
       });
+      } catch (e) {
+        failedIngredients.push(ing.name);
+        console.error(`[research-ingredients] "${ing.name}" failed after retries — skipping:`, e instanceof Error ? e.message : e);
+      }
     }
 
     await step.run("update-status", async () => {
@@ -229,7 +238,7 @@ Be conservative with confidence scores. Return a JSON array of benefit objects (
         .eq("workspace_id", workspace_id);
     });
 
-    return { researched: context.ingredients.length };
+    return { researched: context.ingredients.length - failedIngredients.length, failed: failedIngredients };
   },
 );
 
@@ -283,16 +292,24 @@ export const analyzeReviews = inngest.createFunction(
 
     const reviews = await step.run("fetch-reviews", async () => {
       const admin = createAdminClient();
+      // Best, product-specific reviews only: 4+ stars, non-empty body. We chunk
+      // below, so we take a deep set (not an arbitrary first 500). Longest bodies
+      // first — the most substantive reviews carry the copywriting gems.
       const { data } = await admin
         .from("product_reviews")
         .select("id, reviewer_name, rating, title, body")
         .eq("workspace_id", workspace_id)
         .eq("product_id", product_id)
         .in("status", ["published", "featured"])
+        .gte("rating", 4)
         .not("body", "is", null)
-        .limit(500);
+        .order("rating", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(2000);
 
-      return (data || []).filter((r) => (r.body || "").trim().length > 0);
+      return (data || [])
+        .filter((r) => (r.body || "").trim().length > 0)
+        .sort((a, b) => (b.body || "").length - (a.body || "").length);
     });
 
     if (reviews.length === 0) {
@@ -321,79 +338,71 @@ export const analyzeReviews = inngest.createFunction(
       return { analyzed: 0 };
     }
 
-    const result = await step.run("analyze", async () => {
-      const reviewsJson = reviews.map((r) => ({
-        id: r.id,
-        reviewer_name: r.reviewer_name || "Anonymous",
-        rating: r.rating,
-        title: r.title || "",
-        body: r.body,
-      }));
+    // ── Map: Sonnet reads the reviews in CHUNKS, never all at once. A single
+    // pass over ~500 reviews truncated the JSON at max_tokens and saved empty
+    // output. Each chunk returns its own structured analysis (separate step →
+    // fault-isolated + resumable). ──
+    const CHUNK = 200;
+    const chunks: (typeof reviews)[] = [];
+    for (let i = 0; i < reviews.length; i += CHUNK) chunks.push(reviews.slice(i, i + CHUNK));
 
-      const system = `You are a copywriting-focused review analyst. Every quote you return MUST be an EXACT substring from the review body. Every review_id MUST match one from the input. Respond with strict JSON only — no prose, no markdown fences.`;
-
-      const user = `Analyze these ${reviews.length} product reviews and return a single JSON object with these keys:
-- top_benefits: [{ benefit, frequency, customer_phrases: string[], review_ids: string[] }] — ranked by frequency, max 10
-- before_after_pain_points: [{ before, after, review_ids: string[] }] — transformation stories
-- skeptic_conversions: [{ summary, quote, review_id, reviewer_name }] — max 5
-- surprise_benefits: [{ benefit, quote, review_id }] — unexpected benefits mentioned
-- most_powerful_phrases: [{ phrase, context, review_id, reviewer_name }] — copywriting-ready quotes, max 15
+    const partials: ReviewAnalysisResult[] = [];
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      const partial = await step.run(`analyze-chunk-${ci}`, async () => {
+        const reviewsJson = chunk.map((r) => ({
+          id: r.id, reviewer_name: r.reviewer_name || "Anonymous", rating: r.rating, title: r.title || "", body: r.body,
+        }));
+        const system = `You are a copywriting-focused review analyst. Every quote you return MUST be an EXACT substring from the review body. Every review_id MUST match one from the input. Respond with strict JSON only — no prose, no markdown fences.`;
+        const user = `Analyze these ${chunk.length} product reviews and return a single JSON object with these keys:
+- top_benefits: [{ benefit, frequency, customer_phrases: string[], review_ids: string[] }]
+- before_after_pain_points: [{ before, after, review_ids: string[] }]
+- skeptic_conversions: [{ summary, quote, review_id, reviewer_name }]
+- surprise_benefits: [{ benefit, quote, review_id }]
+- most_powerful_phrases: [{ phrase, context, review_id, reviewer_name }]
 
 Every quote must be an EXACT substring from a review body. Every review_id must appear in the input.
 
 Reviews:
 ${JSON.stringify(reviewsJson)}`;
-
-      const resp = await callSonnet(system, user, 8192, 0);
-      return resp;
-    });
-
-    if (!result) {
-      throw new Error("No Anthropic API key or AI call failed");
+        const resp = await callSonnet(system, user, 8192, 0);
+        return (resp ? extractJson<ReviewAnalysisResult>(resp.text) : null) || {};
+      });
+      partials.push(partial);
     }
 
-    const parsed = extractJson<ReviewAnalysisResult>(result.text) || {};
-
-    // Validate quotes / review_ids
+    // ── Reduce: merge per-chunk partials; validate against the full review set. ──
     const validIds = new Set(reviews.map((r) => r.id));
     const bodyById = new Map(reviews.map((r) => [r.id, r.body || ""]));
-
     const filterReviewIds = (ids: unknown): string[] =>
-      Array.isArray(ids)
-        ? (ids.filter((id) => typeof id === "string" && validIds.has(id)) as string[])
-        : [];
-
+      Array.isArray(ids) ? (ids.filter((id) => typeof id === "string" && validIds.has(id)) as string[]) : [];
     const validateQuote = (review_id: string | undefined, quote: string | undefined): boolean => {
-      if (!review_id || !quote) return false;
-      if (!validIds.has(review_id)) return false;
-      const body = bodyById.get(review_id) || "";
-      return body.includes(quote);
+      if (!review_id || !quote || !validIds.has(review_id)) return false;
+      return (bodyById.get(review_id) || "").includes(quote);
     };
 
-    const top_benefits = (parsed.top_benefits || []).map((b) => ({
-      benefit: b.benefit,
-      frequency: Number(b.frequency) || 0,
-      customer_phrases: Array.isArray(b.customer_phrases) ? b.customer_phrases.slice(0, 10) : [],
-      review_ids: filterReviewIds(b.review_ids),
-    }));
+    // top_benefits: merge by benefit (case-insensitive), sum frequency across chunks.
+    const benefitMap = new Map<string, { benefit: string; frequency: number; customer_phrases: string[]; review_ids: string[] }>();
+    for (const p of partials) for (const b of p.top_benefits || []) {
+      if (!b?.benefit) continue;
+      const key = b.benefit.trim().toLowerCase();
+      const cur = benefitMap.get(key) || { benefit: b.benefit.trim(), frequency: 0, customer_phrases: [], review_ids: [] };
+      cur.frequency += Number(b.frequency) || 0;
+      cur.customer_phrases.push(...(Array.isArray(b.customer_phrases) ? b.customer_phrases : []));
+      cur.review_ids.push(...filterReviewIds(b.review_ids));
+      benefitMap.set(key, cur);
+    }
+    const top_benefits = [...benefitMap.values()]
+      .map((b) => ({ benefit: b.benefit, frequency: b.frequency, customer_phrases: [...new Set(b.customer_phrases)].slice(0, 10), review_ids: [...new Set(b.review_ids)] }))
+      .sort((a, b) => b.frequency - a.frequency)
+      .slice(0, 10);
 
-    const before_after_pain_points = (parsed.before_after_pain_points || []).map((b) => ({
-      before: b.before,
-      after: b.after,
-      review_ids: filterReviewIds(b.review_ids),
-    }));
-
-    const skeptic_conversions = (parsed.skeptic_conversions || []).filter((s) =>
-      validateQuote(s.review_id, s.quote),
-    );
-
-    const surprise_benefits = (parsed.surprise_benefits || []).filter((s) =>
-      validateQuote(s.review_id, s.quote),
-    );
-
-    const most_powerful_phrases = (parsed.most_powerful_phrases || []).filter((p) =>
-      validateQuote(p.review_id, p.phrase),
-    );
+    const before_after_pain_points = partials
+      .flatMap((p) => (p.before_after_pain_points || []).map((b) => ({ before: b.before, after: b.after, review_ids: filterReviewIds(b.review_ids) })))
+      .slice(0, 15);
+    const skeptic_conversions = partials.flatMap((p) => (p.skeptic_conversions || []).filter((s) => validateQuote(s.review_id, s.quote))).slice(0, 8);
+    const surprise_benefits = partials.flatMap((p) => (p.surprise_benefits || []).filter((s) => validateQuote(s.review_id, s.quote))).slice(0, 12);
+    const most_powerful_phrases = partials.flatMap((p) => (p.most_powerful_phrases || []).filter((pp) => validateQuote(pp.review_id, pp.phrase))).slice(0, 20);
 
     await step.run("upsert-analysis", async () => {
       const admin = createAdminClient();
@@ -407,7 +416,7 @@ ${JSON.stringify(reviewsJson)}`;
           surprise_benefits,
           most_powerful_phrases,
           reviews_analyzed_count: reviews.length,
-          raw_ai_response: result.raw as Record<string, unknown>,
+          raw_ai_response: { map_reduce: true, chunks: chunks.length, reviews_analyzed: reviews.length } as Record<string, unknown>,
           analyzed_at: new Date().toISOString(),
         },
         { onConflict: "workspace_id,product_id" },
