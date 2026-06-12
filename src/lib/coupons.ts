@@ -23,6 +23,8 @@ export interface ResolvedCoupon {
   type: CouponType;
   value: number; // percentage: 0-100 · fixed_amount: cents
   recurring_cycle_limit: number | null; // 1 | N | null (forever)
+  /** Shopify appliesOncePerCustomer OR usageLimit===1 → at most one redemption per customer. */
+  one_time?: boolean;
   source: "internal" | "shopify";
   coupon_id?: string; // internal row id — the MASTER row for derived codes
   /** Derived from a master ("WELCOME-GSXN")? Redemption → ledger, not used_at. */
@@ -177,7 +179,7 @@ async function resolveShopifyCoupon(admin: Admin, workspaceId: string, code: str
         method: "POST",
         headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
         body: JSON.stringify({
-          query: `{ codeDiscountNodeByCode(code: ${JSON.stringify(code)}) { codeDiscount { ... on DiscountCodeBasic { recurringCycleLimit customerGets { value { ... on DiscountPercentage { percentage } ... on DiscountAmount { amount { amount } } } } } } } }`,
+          query: `{ codeDiscountNodeByCode(code: ${JSON.stringify(code)}) { codeDiscount { ... on DiscountCodeBasic { recurringCycleLimit appliesOncePerCustomer usageLimit customerGets { value { ... on DiscountPercentage { percentage } ... on DiscountAmount { amount { amount } } } } } } } }`,
         }),
         cache: "no-store",
       },
@@ -189,11 +191,13 @@ async function resolveShopifyCoupon(admin: Admin, workspaceId: string, code: str
     // recurringCycleLimit: 0/null = forever, 1 = one charge, N = N charges.
     const rawLimit = cd.recurringCycleLimit;
     const recurring_cycle_limit = rawLimit && Number(rawLimit) > 0 ? Number(rawLimit) : null;
+    // One-time PER CUSTOMER: appliesOncePerCustomer, or a global usageLimit of 1.
+    const one_time = !!cd.appliesOncePerCustomer || Number(cd.usageLimit) === 1;
     if (val?.percentage != null) {
-      return { code, type: "percentage", value: Math.round(Number(val.percentage) * 100), recurring_cycle_limit, source: "shopify" };
+      return { code, type: "percentage", value: Math.round(Number(val.percentage) * 100), recurring_cycle_limit, one_time, source: "shopify" };
     }
     if (val?.amount?.amount != null) {
-      return { code, type: "fixed_amount", value: Math.round(parseFloat(val.amount.amount) * 100), recurring_cycle_limit, source: "shopify" };
+      return { code, type: "fixed_amount", value: Math.round(parseFloat(val.amount.amount) * 100), recurring_cycle_limit, one_time, source: "shopify" };
     }
     return null;
   } catch (e) {
@@ -283,7 +287,97 @@ export async function recordCouponRedemption(
       .update({ used_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", resolved.coupon_id)
       .is("used_at", null);
+    return;
   }
+  // Shopify-sourced coupon (no row in our coupons table) — record by code so a
+  // one-time/limited code can't be re-granted to the same customer on a later
+  // renewal. coupon_id is null; derived_code carries the code.
+  if (resolved.source === "shopify" && customerId) {
+    await admin
+      .from("coupon_redemptions")
+      .insert({
+        workspace_id: workspaceId,
+        coupon_id: null,
+        customer_id: customerId,
+        derived_code: resolved.code,
+        order_id: ctx?.orderId || null,
+        subscription_id: ctx?.subscriptionId || null,
+      })
+      .then(() => undefined, (e) => {
+        console.warn("[coupons] shopify redemption insert failed:", e?.message || e);
+      });
+  }
+}
+
+/** How many times this customer has already redeemed `code` (any source). */
+export async function countCouponRedemptions(
+  workspaceId: string,
+  code: string,
+  customerId: string,
+): Promise<number> {
+  const admin = createAdminClient();
+  const { count } = await admin
+    .from("coupon_redemptions")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .ilike("derived_code", code);
+  return count || 0;
+}
+
+/**
+ * Renewal-time coupon resolution. The sub stores coupon CODES (references), not
+ * frozen values. For each code we live-read the current Shopify/internal coupon,
+ * check this customer's prior redemptions, apply the discount if still valid, and
+ * report which codes to KEEP vs DROP (a one-time or cycle-exhausted code is
+ * dropped after this charge). Appstle automatic discounts + unresolvable codes
+ * are dropped silently — our pricing rules own quantity breaks / free shipping.
+ *
+ * Returns the discount to subtract NOW, the codes to keep on the sub, and the
+ * resolved coupons that should be recorded as redeemed AFTER a successful charge.
+ */
+export async function resolveRenewalDiscount(
+  workspaceId: string,
+  appliedDiscounts: Array<Record<string, unknown>> | null,
+  subtotalCents: number,
+  customerId: string | null,
+): Promise<{ discountCents: number; keepCodes: string[]; toRedeem: ResolvedCoupon[] }> {
+  const list = ((appliedDiscounts as AppliedDiscount[] | null) || []).filter(Boolean);
+  let remaining = subtotalCents;
+  let discountCents = 0;
+  const keepCodes: string[] = [];
+  const toRedeem: ResolvedCoupon[] = [];
+  const seen = new Set<string>();
+
+  for (const d of list) {
+    const code = (d.code || d.title || "").trim();
+    // Drop entries with no usable code (Appstle AUTOMATIC discounts have only a
+    // title like "Buy 3 Discount" but resolve to nothing — our pricing rules
+    // already apply those). Dedup repeated codes.
+    if (!code || seen.has(code.toLowerCase())) continue;
+    seen.add(code.toLowerCase());
+
+    const resolved = await resolveCoupon(workspaceId, code, customerId);
+    if (!resolved) continue; // unresolvable / Appstle automatic → drop
+
+    // Per-customer cap: one_time → 1; else recurring_cycle_limit (null = forever).
+    const limit = resolved.one_time ? 1 : resolved.recurring_cycle_limit;
+    const usedCount = customerId ? await countCouponRedemptions(workspaceId, code, customerId) : 0;
+    if (limit != null && usedCount >= limit) continue; // already exhausted → drop
+
+    const amt = resolved.type === "percentage"
+      ? Math.round(remaining * (resolved.value / 100))
+      : Math.min(resolved.value, remaining);
+    const applied = Math.max(0, Math.min(amt, remaining));
+    discountCents += applied;
+    remaining -= applied;
+    toRedeem.push(resolved);
+
+    // Keep the code only if it has cycles left AFTER recording this redemption.
+    if (limit == null || usedCount + 1 < limit) keepCodes.push(resolved.code);
+  }
+
+  return { discountCents, keepCodes, toRedeem };
 }
 
 /**
