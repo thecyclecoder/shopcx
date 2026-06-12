@@ -381,9 +381,16 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
     if (!payload.first_name && ourFirst) record.first_name = ourFirst;
     if (!payload.last_name && ourLast) record.last_name = ourLast;
 
-    // Consent: "subscribed" wins; otherwise keep OURS (authoritative) over Shopify's.
-    record.email_marketing_status = (ourEmail === "subscribed" || shopifyEmail === "subscribed") ? "subscribed" : (ourEmail || shopifyEmail || null);
-    record.sms_marketing_status = (ourSms === "subscribed" || shopifySms === "subscribed") ? "subscribed" : (ourSms || shopifySms || null);
+    // Consent is OURS to own. An explicit local "unsubscribed" is sticky —
+    // Shopify can never re-subscribe an opt-out (stale Shopify "subscribed" is
+    // common since there's no Shopify unsubscribe UI). Otherwise "subscribed"
+    // wins (Shopify may upgrade a not-yet-subscribed), then keep ours.
+    record.email_marketing_status = ourEmail === "unsubscribed"
+      ? "unsubscribed"
+      : ((ourEmail === "subscribed" || shopifyEmail === "subscribed") ? "subscribed" : (ourEmail || shopifyEmail || null));
+    record.sms_marketing_status = ourSms === "unsubscribed"
+      ? "unsubscribed"
+      : ((ourSms === "subscribed" || shopifySms === "subscribed") ? "subscribed" : (ourSms || shopifySms || null));
 
     // If we hold consent Shopify doesn't, push it back so the two stay in sync.
     if (ourEmail === "subscribed" && shopifyEmail !== "subscribed") {
