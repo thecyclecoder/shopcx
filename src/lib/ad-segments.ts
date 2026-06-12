@@ -81,7 +81,27 @@ export function splitScriptIntoSegments(script: string, _lengthSec?: number): st
     curWords += w;
   }
   if (cur.length) segs.push(cur.join(" "));
-  return segs;
+
+  // Merge ultra-short beats into a neighbour. A 2-4 word sentence ("Go try it.")
+  // becomes a ~1s clip that Veo can't generate (returns veo_no_video / RAI-filters
+  // the micro-clip). Fold any sub-MIN beat into the previous clip (or the next, for
+  // the first beat) so every clip has enough spoken content.
+  const MIN_WORDS_PER_CLIP = 5;
+  const wc = (s: string) => s.split(/\s+/).filter(Boolean).length;
+  const merged: string[] = [];
+  for (const s of segs) {
+    if (merged.length && wc(s) < MIN_WORDS_PER_CLIP) {
+      merged[merged.length - 1] += ` ${s}`;
+    } else {
+      merged.push(s);
+    }
+  }
+  // If the very first beat was itself tiny, fold it forward into the second.
+  if (merged.length > 1 && wc(merged[0]) < MIN_WORDS_PER_CLIP) {
+    merged[1] = `${merged[0]} ${merged[1]}`;
+    merged.shift();
+  }
+  return merged;
 }
 
 // ── PURE: assemble the composition from active segments ─────────────────────
