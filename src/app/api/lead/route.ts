@@ -30,6 +30,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
+import { toE164US } from "@/lib/phone";
 
 interface Body {
   workspace_id?: string;
@@ -66,6 +67,8 @@ interface Body {
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as Body;
+  // Store phone canonically as E.164 (UI re-formats for display).
+  const leadPhoneE164 = body.phone ? (toE164US(body.phone) || body.phone) : null;
   if (!body.workspace_id) {
     return NextResponse.json({ error: "workspace_id required" }, { status: 400 });
   }
@@ -92,7 +95,7 @@ export async function POST(request: Request) {
         email,
         first_name: body.first_name || null,
         last_name: body.last_name || null,
-        phone: body.phone || null,
+        phone: leadPhoneE164,
         subscription_status: "never",
         email_marketing_status: body.email_consent ? "subscribed" : "not_subscribed",
         sms_marketing_status: body.sms_consent && body.phone ? "subscribed" : "not_subscribed",
@@ -108,7 +111,7 @@ export async function POST(request: Request) {
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.first_name) updates.first_name = body.first_name;
     if (body.last_name) updates.last_name = body.last_name;
-    if (body.phone) updates.phone = body.phone;
+    if (leadPhoneE164) updates.phone = leadPhoneE164;
     if (typeof body.email_consent === "boolean") {
       updates.email_marketing_status = body.email_consent ? "subscribed" : "unsubscribed";
     }
@@ -189,7 +192,7 @@ export async function POST(request: Request) {
         anonymous_id: body.anonymous_id || null,
         session_id: sessionId,
         email,
-        phone: body.phone || null,
+        phone: leadPhoneE164,
         email_consent_at: body.email_consent ? nowIso : null,
         sms_consent_at: body.sms_consent && body.phone ? nowIso : null,
         source: body.source || "unknown",

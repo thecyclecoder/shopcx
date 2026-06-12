@@ -32,6 +32,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
+import { toE164US } from "@/lib/phone";
 
 interface Body {
   cart_token?: string;
@@ -61,6 +62,11 @@ export async function POST(request: Request) {
   if (!cart) return NextResponse.json({ error: "cart_not_found" }, { status: 404 });
   if (cart.status !== "open") return NextResponse.json({ error: "cart_not_open" }, { status: 400 });
 
+  // Persist phone canonically as E.164 — the UI re-formats it for display, so
+  // storage stays consistent (avoids clobbering a verified number with a
+  // display-formatted one). Falls back to the raw value if it can't parse.
+  const phoneE164 = body.phone ? (toE164US(body.phone) || body.phone) : null;
+
   // Match by email within the workspace.
   let { data: customer } = await admin
     .from("customers")
@@ -77,7 +83,7 @@ export async function POST(request: Request) {
         email,
         first_name: body.first_name || null,
         last_name: body.last_name || null,
-        phone: body.phone || null,
+        phone: phoneE164,
         subscription_status: "never",
         email_marketing_status: body.email_marketing_consent ? "subscribed" : "not_subscribed",
         sms_marketing_status: body.sms_marketing_consent && body.phone ? "subscribed" : "not_subscribed",
@@ -92,7 +98,7 @@ export async function POST(request: Request) {
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.first_name) updates.first_name = body.first_name;
     if (body.last_name) updates.last_name = body.last_name;
-    if (body.phone) updates.phone = body.phone;
+    if (phoneE164) updates.phone = phoneE164;
     if (typeof body.email_marketing_consent === "boolean") {
       updates.email_marketing_status = body.email_marketing_consent ? "subscribed" : "unsubscribed";
     }
@@ -111,7 +117,7 @@ export async function POST(request: Request) {
     .update({
       customer_id: customer.id,
       email,
-      phone: body.phone || null,
+      phone: phoneE164,
       updated_at: new Date().toISOString(),
     })
     .eq("token", body.cart_token);

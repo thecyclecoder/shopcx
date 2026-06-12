@@ -307,14 +307,47 @@ export async function deriveCustomerCoupon(
     .ilike("code", masterCode)
     .maybeSingle();
   if (!master?.code) return null;
-  const { data: cust } = await admin
-    .from("customers")
-    .select("short_code")
-    .eq("id", customerId)
-    .maybeSingle();
-  const sc = (cust?.short_code as string) || null;
+  const sc = await ensureCustomerShortCode(admin, customerId);
   if (!sc) return null;
   return { code: `${master.code}-${sc}` };
+}
+
+// Crockford base32 (no I/L/O/U) — mirrors the customers_assign_short_code
+// trigger so a code generated here is indistinguishable from a trigger one.
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/**
+ * Return the customer's short_code, assigning one if it's missing. New
+ * customers get a short_code from a BEFORE INSERT trigger, but a customer
+ * MATCHED (not inserted) without one — e.g. a pre-trigger record — would
+ * otherwise force the caller into the legacy `WELCOME-{custid}-{rand}` mint.
+ * Assigning here guarantees a clean derived `{MASTER}-{short_code}` code.
+ */
+export async function ensureCustomerShortCode(admin: Admin, customerId: string): Promise<string | null> {
+  const { data: cust } = await admin
+    .from("customers")
+    .select("short_code, workspace_id")
+    .eq("id", customerId)
+    .maybeSingle();
+  if (cust?.short_code) return cust.short_code as string;
+  if (!cust) return null;
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    let candidate = "";
+    for (let i = 0; i < 5; i++) candidate += CROCKFORD[Math.floor(Math.random() * 32)];
+    // Guard on short_code IS NULL so a concurrent assignment never gets
+    // clobbered; unique (workspace_id, short_code) rejects collisions → retry.
+    const { error } = await admin
+      .from("customers")
+      .update({ short_code: candidate })
+      .eq("id", customerId)
+      .is("short_code", null);
+    if (!error) {
+      const { data: re } = await admin.from("customers").select("short_code").eq("id", customerId).maybeSingle();
+      if (re?.short_code) return re.short_code as string;
+    }
+  }
+  return null;
 }
 
 /** Remove a coupon from an internal sub's applied_discounts. */

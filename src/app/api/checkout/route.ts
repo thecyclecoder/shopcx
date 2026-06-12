@@ -50,6 +50,7 @@ import {
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
 import { logCheckoutError } from "@/lib/checkout-error-log";
+import { toE164US } from "@/lib/phone";
 import { resolveRateForCart } from "@/lib/shipping-rates";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 import { checkOrderForFraud } from "@/lib/fraud-detector";
@@ -304,6 +305,11 @@ export async function POST(request: NextRequest) {
   // Checked + email → email subscribed; checked + phone → SMS subscribed;
   // unchecked → unsubscribed. (No phone → can't SMS, leave not_subscribed.)
   const phonePresent = !!(body.phone || ship.phone);
+  // Canonical E.164 for storage (customer + order + Braintree + 3PL). The
+  // checkout UI re-formats for display, so this never changes what the
+  // customer sees — it just keeps the stored number consistent.
+  const phoneRaw = body.phone || ship.phone || null;
+  const phoneE164 = phoneRaw ? (toE164US(phoneRaw) || phoneRaw) : null;
   const emailMarketingStatus = body.email_marketing_consent === false ? "unsubscribed" : "subscribed";
   const smsMarketingStatus = body.sms_marketing_consent === false
     ? "unsubscribed"
@@ -323,7 +329,7 @@ export async function POST(request: NextRequest) {
         email,
         first_name: ship.first_name || null,
         last_name: ship.last_name || null,
-        phone: body.phone || ship.phone || null,
+        phone: phoneE164,
         subscription_status: subscribing ? "active" : "never",
         email_marketing_status: emailMarketingStatus,
         sms_marketing_status: smsMarketingStatus,
@@ -342,7 +348,7 @@ export async function POST(request: NextRequest) {
       .update({
         email_marketing_status: emailMarketingStatus,
         sms_marketing_status: smsMarketingStatus,
-        ...(phonePresent ? { phone: body.phone || ship.phone } : {}),
+        ...(phonePresent ? { phone: phoneE164 } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq("id", customer.id);
@@ -407,7 +413,7 @@ export async function POST(request: NextRequest) {
       email,
       firstName: ship.first_name || customer.first_name,
       lastName: ship.last_name || customer.last_name,
-      phone: body.phone || ship.phone,
+      phone: phoneE164 || undefined,
     });
   } catch (err) {
     return NextResponse.json(
@@ -932,7 +938,7 @@ export async function POST(request: NextRequest) {
         shippingAddress: ship,
         billingAddress: bill,
         email,
-        phone: body.phone || ship.phone || null,
+        phone: phoneE164,
         // Send EVERY line with a SKU — including free gifts. Gifts
         // are physical products that need to ship; only filter out
         // lines that genuinely lack a fulfillment SKU.
