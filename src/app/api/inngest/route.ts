@@ -97,7 +97,10 @@ import { adToolFunctions } from "@/lib/inngest/ad-tool";
 import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 
-export const maxDuration = 300;
+// 800s (Fluid Compute max) — single Inngest steps can run a long Sonnet call
+// (per-ingredient research, per-chunk review analysis). 300s timed those out
+// (FUNCTION_INVOCATION_TIMEOUT) and failed the product-intelligence runs.
+export const maxDuration = 800;
 
 export const { GET, POST, PUT } = serve({
   client: inngest,
