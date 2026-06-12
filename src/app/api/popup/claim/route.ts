@@ -93,7 +93,17 @@ export async function POST(request: Request) {
     const msg = redeemUrl
       ? `Hi ${first}! Your discount is activated.\n\nTap to shop with it auto-applied:\n${redeemUrl}\n\nJust for you, please don't share.`
       : `Hi ${first}! Your discount is activated. Enter code ${couponCode} at checkout. Just for you - please don't share.`;
-    await sendSMS(body.workspace_id, e164, msg);
+    const sms = await sendSMS(body.workspace_id, e164, msg);
+    // Record the message SID + initial status so the Twilio status callback
+    // (marketing-status webhook) can match this lead and log delivery.
+    if (sms.success && sms.messageSid) {
+      await admin.from("storefront_leads").update({
+        sms_message_sid: sms.messageSid,
+        sms_status: "queued",
+        sms_status_at: nowIso,
+        updated_at: nowIso,
+      }).eq("workspace_id", body.workspace_id).eq("customer_id", body.customer_id);
+    }
   } catch (e) {
     console.warn("[popup/claim] SMS send failed:", e instanceof Error ? e.message : e);
   }

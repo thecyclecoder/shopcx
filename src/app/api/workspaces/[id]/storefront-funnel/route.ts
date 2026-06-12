@@ -125,6 +125,23 @@ export async function GET(
     };
   });
 
+  // ── Leads generated (popup marketing signups) ───────────────────
+  // A parallel conversion, not a linear funnel step — someone can become a
+  // lead without buying, and buyers don't have to be leads. Count distinct
+  // real sessions that fired lead_captured in the window.
+  const { data: leadRows } = await admin
+    .from("storefront_events")
+    .select("session_id")
+    .eq("workspace_id", workspaceId)
+    .eq("event_type", "lead_captured")
+    .gte("created_at", startIso)
+    .lte("created_at", endIso);
+  const leadSessions = new Set<string>();
+  for (const r of (leadRows || []) as { session_id: string }[]) {
+    if (!internalSessions.has(r.session_id)) leadSessions.add(r.session_id);
+  }
+  const leadsGenerated = leadSessions.size;
+
   // ── Top products (by pack_selected) ─────────────────────────────
   const { data: pickedRows } = await admin
     .from("storefront_events")
@@ -362,6 +379,7 @@ export async function GET(
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
+    leads_generated: leadsGenerated,
     funnel,
     topProducts,
     deviceBreakdown,

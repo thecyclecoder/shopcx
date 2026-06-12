@@ -89,6 +89,7 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
+  const now = new Date().toISOString();
 
   // Find the recipient by message_sid. message_sid is unique per
   // outbound message, so this is a single-row lookup.
@@ -99,13 +100,24 @@ export async function POST(request: Request) {
     .maybeSingle();
 
   if (!recipient) {
-    // Status callback for a message we don't have a recipient row
-    // for — probably from a different system (ticket reply, dunning,
-    // etc). Silent skip.
+    // Not a marketing-campaign send. Popup-coupon SMS goes through the same
+    // Messaging Service, so its status callbacks land here too — match the
+    // lead by message sid and record delivery there.
+    const { data: lead } = await admin
+      .from("storefront_leads")
+      .select("id")
+      .eq("sms_message_sid", messageSid)
+      .maybeSingle();
+    if (lead) {
+      await admin
+        .from("storefront_leads")
+        .update({ sms_status: status, sms_status_at: now, updated_at: now })
+        .eq("id", lead.id);
+    }
+    // Otherwise it's from another system (ticket reply, dunning, etc). Skip.
     return new NextResponse("", { status: 200 });
   }
 
-  const now = new Date().toISOString();
   switch (status) {
     case "sent": {
       // Twilio handed the message off to the carrier. With SendAt

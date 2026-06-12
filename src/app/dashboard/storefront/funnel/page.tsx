@@ -47,6 +47,7 @@ interface AbandonedCartsBlock {
 interface FunnelData {
   range: { start: string; end: string };
   total_sessions: number;
+  leads_generated: number;
   funnel: FunnelStepRow[];
   topProducts: Array<{ product_id: string; title: string; handle: string | null; pack_selected_count: number }>;
   deviceBreakdown: Array<{ device_type: string; sessions: number }>;
@@ -166,9 +167,10 @@ export default function StorefrontFunnelPage() {
 
       {data && (
         <>
-          <div className="mb-6 grid gap-3 sm:grid-cols-4">
+          <div className="mb-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
             <StatCard label="Total sessions" value={data.total_sessions.toLocaleString()} />
             <StatCard label="PDP visits" value={topOfFunnel.toLocaleString()} />
+            <StatCard label="Leads generated" value={(data.leads_generated ?? 0).toLocaleString()} tone={(data.leads_generated ?? 0) > 0 ? "good" : "neutral"} />
             <StatCard label="Orders" value={orderPlaced.toLocaleString()} />
             <StatCard
               label="Overall conversion"
