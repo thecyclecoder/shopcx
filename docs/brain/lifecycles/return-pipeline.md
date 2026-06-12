@@ -74,6 +74,8 @@ This step is intentionally thin — it exists so the webhook handler stays fast,
 
 ## Phase 4 — issue refund
 
+> **Double-refund guard.** The pipeline skips the refund when the return already has `refunded_at` or `refund_id` set. A direct `partial_refund` on an order now stamps those onto any open return for that order, so a goodwill refund issued *now* + a `refund_return` on the same order can't both pay out (the refund-now path covers it; the return just brings the product back). See [[../operational-rules]] § Returns. (Sonia Stevens, SC132396.)
+
 [[../inngest/returns]] `returns-issue-refund`:
 
 1. Re-load the return. Re-verify state.

@@ -1022,6 +1022,24 @@ export const directActionHandlers: Record<
     const r = await partialRefundByAmount(ctx.workspaceId, p.shopify_order_id!, p.amount_cents!, reason);
     if (r.success) {
       await notifySlack(ctx, p, amountDecimal);
+      // Prevent a DOUBLE refund: if this order already has an open return set to
+      // refund on receipt, mark it already-refunded (pointing at this refund) so
+      // the returns pipeline doesn't refund the customer a SECOND time when the
+      // product is delivered back. (Sonia Stevens, SC132396: a direct goodwill
+      // refund + a `refund_return` on the same order would have refunded twice.)
+      try {
+        const oid = String(p.shopify_order_id);
+        const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+        const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
+        if (ord?.id) {
+          await ctx.admin.from("returns")
+            .update({ refund_id: r.braintreeRefundId || "direct_refund", refunded_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+            .eq("order_id", ord.id)
+            .is("refunded_at", null);
+        }
+      } catch (e) {
+        console.error("[partial_refund] failed to mark existing return as refunded:", e);
+      }
     }
     // When the refund went directly through Braintree (Shopify's native
     // Braintree refund is broken), record that on the ticket so agents/AI
@@ -2127,7 +2145,17 @@ async function handleDirectAction(
     await new Promise(resolve => setTimeout(resolve, 3000));
     const verifyFailures: string[] = [];
 
+    // Refunds are NOT idempotent — re-running one double-refunds the customer.
+    // They're also confirmed by their own handler (Braintree refund id / polled
+    // Shopify gateway status), and their DB verification (Shopify financial_status)
+    // is unreliable for Braintree-direct refunds, which never flip it. So never
+    // self-heal-retry a refund. (Sonia Stevens: a settled $179.88 Braintree refund
+    // couldn't be confirmed via financial_status, the retry tried to refund AGAIN,
+    // hit "amount too large", and falsely escalated a refund that had succeeded.)
+    const NO_SELF_HEAL_RETRY = new Set(["partial_refund", "redeem_points_as_refund"]);
+
     for (const s of successes) {
+      if (NO_SELF_HEAL_RETRY.has(s.action.type)) continue;
       const verified = await verifyActionInDB(ctx, s.action);
       if (!verified) {
         const { addTicketTag } = await import("@/lib/ticket-tags");
