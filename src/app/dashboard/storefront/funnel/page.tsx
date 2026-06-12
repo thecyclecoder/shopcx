@@ -50,6 +50,7 @@ interface FunnelData {
   leads_generated: number;
   funnel: FunnelStepRow[];
   topProducts: Array<{ product_id: string; title: string; handle: string | null; pack_selected_count: number }>;
+  packBreakdown?: Array<{ label: string; count: number }>;
   deviceBreakdown: Array<{ device_type: string; sessions: number }>;
   countryBreakdown: Array<{ ip_country: string; sessions: number }>;
   sourceBreakdown: Array<{ utm_source: string; sessions: number }>;
@@ -236,6 +237,33 @@ export default function StorefrontFunnelPage() {
               </table>
             )}
           </section>
+
+          {data.packBreakdown && data.packBreakdown.length > 0 && (
+            <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
+                Pack size chosen
+              </h2>
+              {(() => {
+                const total = data.packBreakdown.reduce((s, b) => s + b.count, 0) || 1;
+                return (
+                  <div className="space-y-2">
+                    {data.packBreakdown.map(b => (
+                      <div key={b.label} className="flex items-center gap-3">
+                        <div className="w-28 shrink-0 text-sm text-zinc-700 dark:text-zinc-300">{b.label}</div>
+                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                          <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.round((b.count / total) * 100)}%` }} />
+                        </div>
+                        <div className="w-20 shrink-0 text-right text-sm tabular-nums text-zinc-900 dark:text-zinc-100">
+                          <span className="font-semibold">{b.count}</span>
+                          <span className="ml-1 text-xs text-zinc-400">{Math.round((b.count / total) * 100)}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </section>
+          )}
 
           <section className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">

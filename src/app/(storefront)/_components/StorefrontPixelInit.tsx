@@ -159,6 +159,9 @@ export function StorefrontPixelInit({
         trackPayload.upsell_variant_id = ds.upsellVariantId || null;
       } else {
         trackPayload.variant_id = ds.variantId || null;
+        // Pack size (1/2/3) the customer chose — lets the funnel break down
+        // single-product selections by quantity, not just bundles by size.
+        trackPayload.quantity = Number(ds.tierQuantity) || 1;
       }
       track("pack_selected", trackPayload);
       // The pack-select → /customize transition IS the add-to-cart moment

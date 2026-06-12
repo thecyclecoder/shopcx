@@ -142,20 +142,41 @@ export async function GET(
   }
   const leadsGenerated = leadSessions.size;
 
-  // ── Top products (by pack_selected) ─────────────────────────────
+  // ── Top products + pack-size breakdown (by pack_selected) ───────
   const { data: pickedRows } = await admin
     .from("storefront_events")
-    .select("product_id, session_id")
+    .select("product_id, session_id, meta")
     .eq("workspace_id", workspaceId)
     .eq("event_type", "pack_selected")
     .not("product_id", "is", null)
     .gte("created_at", startIso)
     .lte("created_at", endIso);
   const productCounts = new Map<string, number>();
-  for (const r of (pickedRows || []) as { product_id: string; session_id: string }[]) {
+  // Which pack the customer chose: single 1/2/3-pack, or coffee+creamer
+  // bundle 1×1 / 2×2. Single-tier events captured the quantity only after the
+  // instrumentation fix, so older ones land in "Single (qty n/a)".
+  const PACK_ORDER = ["1-pack", "2-pack", "3-pack", "Single (qty n/a)", "Bundle 1×1", "Bundle 2×2", "Bundle"];
+  const packCounts = new Map<string, number>();
+  for (const r of (pickedRows || []) as { product_id: string; session_id: string; meta: Record<string, unknown> }[]) {
     if (internalSessions.has(r.session_id)) continue;
     productCounts.set(r.product_id, (productCounts.get(r.product_id) || 0) + 1);
+    const m = r.meta || {};
+    let label: string;
+    if (m.bundle) {
+      const bs = typeof m.bundle_size === "number" ? m.bundle_size : null;
+      label = bs ? `Bundle ${bs}×${bs}` : "Bundle";
+    } else {
+      const q = typeof m.quantity === "number" ? m.quantity : null;
+      label = q ? `${q}-pack` : "Single (qty n/a)";
+    }
+    packCounts.set(label, (packCounts.get(label) || 0) + 1);
   }
+  const packBreakdown = [...packCounts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => {
+      const ai = PACK_ORDER.indexOf(a.label), bi = PACK_ORDER.indexOf(b.label);
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    });
   const topProductIds = [...productCounts.entries()]
     .sort((a, b) => b[1] - a[1]).slice(0, 10).map(([id]) => id);
   const { data: productRows } = topProductIds.length
@@ -381,6 +402,7 @@ export async function GET(
     total_sessions: visibleSessions.length,
     leads_generated: leadsGenerated,
     funnel,
+    packBreakdown,
     topProducts,
     deviceBreakdown,
     countryBreakdown,
