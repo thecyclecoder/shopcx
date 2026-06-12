@@ -31,9 +31,82 @@ export interface WrittenPost {
   socialImagePrompt: string;
 }
 
+/**
+ * Composition picker — kills the "pouch + mug on a kitchen counter" sameness.
+ *
+ * LLMs collapse to the one example you give them, so instead of letting the
+ * writer invent the frame we hand it a specific composition chosen here.
+ * Each axis hashes (handle + post index + its own salt) independently, so all
+ * four vary freely post-to-post (a single shared hash leaves the bit-slices
+ * correlated — light froze on one value; a mixed-radix ladder freezes the high
+ * digits for dozens of posts). Deterministic + reproducible; the handle in the
+ * seed means two products never open on the same frame. Props stay the writer's
+ * job — it knows the topic; we only fix the part it's bad at (the framing).
+ */
+const FOCUS = [
+  "the product pouch as the clear hero, prominent and sharp",
+  "the prepared drink as the hero (a filled mug/glass front and center), the pouch softly out of focus behind it",
+  "an ingredients-and-product flat-lay where the pouch shares the frame with its raw ingredients",
+  "a lifestyle moment — hands or a person mid-pour/mid-sip — with the pouch present but secondary",
+];
+const SETTINGS = [
+  "a café window table",
+  "a wooden home-office desk with a notebook and laptop edge",
+  "an outdoor picnic blanket on grass",
+  "a plant-filled sunny windowsill",
+  "a rustic dark slate or stone surface",
+  "a bright minimalist bathroom/vanity shelf",
+  "a cozy bedside table in soft morning light",
+  "a marble kitchen island (only occasionally — not the default)",
+  "a garden or patio table outdoors",
+  "a gym/yoga setting — mat, towel, water bottle nearby",
+];
+const ANGLES = [
+  "overhead flat-lay",
+  "45-degree three-quarter view",
+  "eye-level macro with shallow depth of field",
+  "wide environmental lifestyle framing",
+];
+const LIGHT = [
+  "warm golden-hour light",
+  "bright airy high-key daylight",
+  "moody low-key with directional shadows",
+  "cool, crisp morning light",
+];
+
+/**
+ * FNV-1a string hash + an avalanche finalizer → unsigned 32-bit.
+ * The finalizer matters: raw FNV-1a has poor low-bit diffusion, so `% 4`
+ * ignores most of the input (the handle prefix wouldn't move a length-4 axis).
+ * The xorshift/multiply mix spreads entropy down so small moduli are uniform.
+ */
+function seedFrom(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  h ^= h >>> 15; h = Math.imul(h, 2246822519);
+  h ^= h >>> 13; h = Math.imul(h, 3266489917);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
+/** Choose a hero composition for this post (deterministic, rotating per product). */
+export function pickComposition(plan: TopicPlan): string {
+  const base = `${plan.product.handle}:${plan.existingTitles.length}`;
+  const pick = <T>(arr: T[], salt: string): T => arr[seedFrom(`${base}:${salt}`) % arr.length];
+  const focus = pick(FOCUS, "focus");
+  const setting = pick(SETTINGS, "setting");
+  const angle = pick(ANGLES, "angle");
+  const light = pick(LIGHT, "light");
+  return `${focus}. Framing: ${angle}. Light: ${light}. Setting: ${setting}`;
+}
+
 function systemPrompt(plan: TopicPlan): string {
   const a = plan.author;
   const intel = plan.intelligence;
+  const composition = pickComposition(plan);
   const research = intel.research
     .slice(0, 16)
     .map((r) => `- ${r.headline}: ${r.mechanism}${r.citations.length ? ` [studies: ${r.citations.join("; ")}]` : ""}`)
@@ -70,8 +143,8 @@ function systemPrompt(plan: TopicPlan): string {
     `SEO_TITLE: <~60 chars, includes the target topic>`,
     `SEO_DESCRIPTION: <~155 chars>`,
     `TAGS: <comma-separated, 4-6>`,
-    `HERO_IMAGE: <a styled photo scene that includes the product pouch — e.g. on a sunlit kitchen counter with relevant props; landscape>`,
-    `SOCIAL_IMAGE: <a vertical 4:5 portrait version of a hero-like scene with the pouch, eye-catching for Instagram>`,
+    `HERO_IMAGE: <a styled landscape photo scene. USE THIS COMPOSITION exactly — ${composition}. Do NOT default to a kitchen counter unless that's what's specified. Fill in props relevant to THIS article's topic.>`,
+    `SOCIAL_IMAGE: <a vertical 4:5 portrait of the same scene as the hero (same focal subject, setting, and light), recomposed for a tall Instagram frame and eye-catching.>`,
     `HTML:`,
     `<the full article HTML>`,
     `<<<END>>>`,
