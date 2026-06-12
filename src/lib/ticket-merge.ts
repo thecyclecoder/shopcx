@@ -130,6 +130,13 @@ export async function mergeTickets(
     .eq("workspace_id", workspaceId)
     .in("id", ticketIds);
   const allTickets = (rawTickets || []).slice().sort((a, b) => {
+    // Prefer a LIVE ticket as the merge target — we never want to move an
+    // active ticket's messages into an archived stub and lose them from the
+    // queue. Archived tickets are still valid *sources* (we routinely need a
+    // prior, archived thread's context pulled into the current ticket).
+    const aArch = a.status === "archived" ? 1 : 0;
+    const bArch = b.status === "archived" ? 1 : 0;
+    if (aArch !== bArch) return aArch - bArch;
     const aReply = a.last_customer_reply_at ? new Date(a.last_customer_reply_at as string).getTime() : 0;
     const bReply = b.last_customer_reply_at ? new Date(b.last_customer_reply_at as string).getTime() : 0;
     if (bReply !== aReply) return bReply - aReply;
@@ -140,11 +147,9 @@ export async function mergeTickets(
     return { success: false, targetTicketId: "", mergedCount: 0, messagesMoved: 0, error: "Need at least 2 valid tickets" };
   }
 
-  // Reject archived tickets
-  const archived = allTickets.filter(t => t.status === "archived");
-  if (archived.length > 0) {
-    return { success: false, targetTicketId: "", mergedCount: 0, messagesMoved: 0, error: `Cannot merge archived tickets: ${archived.map(t => t.id.substring(0, 8)).join(", ")}` };
-  }
+  // Archived tickets ARE mergeable — an archived prior thread is often exactly
+  // the context we need to bring into the live ticket. The sort above keeps a
+  // live ticket as the target; archived rows merge in as sources.
 
   // Reject already-merged tickets
   const alreadyMerged = allTickets.filter(t => t.merged_into);

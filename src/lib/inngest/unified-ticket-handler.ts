@@ -676,7 +676,19 @@ export const unifiedTicketHandler = inngest.createFunction(
         .select("detected_language").eq("id", tid).single();
       if (existing?.detected_language) return existing.detected_language as string;
       const { detectLanguage } = await import("@/lib/translate");
-      const lang = await detectLanguage(msg, { workspaceId: wsId, ticketId: tid });
+      let lang = await detectLanguage(msg, { workspaceId: wsId, ticketId: tid });
+      // Anchor on the customer's established language. Single-shot detection
+      // occasionally misfires on forwarded English emails (a French sender name
+      // + quoted support footer once flipped a long-time English customer to
+      // "fr", and we replied in French — Suzanne Doucet). If this customer has
+      // ever corresponded in English before, trust that over a fresh non-English
+      // guess; a genuine language-switcher would have no English history.
+      if (lang !== "en" && st.custId) {
+        const { data: prior } = await admin.from("tickets")
+          .select("id").eq("workspace_id", wsId).eq("customer_id", st.custId)
+          .eq("detected_language", "en").neq("id", tid).limit(1);
+        if (prior?.length) lang = "en";
+      }
       await admin.from("tickets").update({ detected_language: lang, updated_at: new Date().toISOString() }).eq("id", tid);
       if (lang !== "en") await sysNote(admin, tid, `[System] Detected language: ${lang}. Outbound copy will be translated.`);
       return lang;

@@ -2,6 +2,8 @@
 
 Merge duplicate tickets into a single home (the target). The source ticket is preserved as a thin archived stub keyed by `merged_into`, but the **conversation, FK references, and escalation all live on the target.**
 
+> **Archived tickets ARE mergeable** (changed 2026-06-12). A prior, archived thread is often exactly the context you need to pull into a live ticket — the old blanket "cannot merge archived tickets" guard blocked that and broke a real case (Suzanne Doucet). The target-selection sort now **prefers a live (non-archived) ticket as the target**, so archived rows merge in as *sources* and an active ticket's messages are never moved into an archived stub.
+
 **File:** `src/lib/ticket-merge.ts`
 
 ## Why this shape
