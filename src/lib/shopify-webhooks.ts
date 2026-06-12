@@ -1,6 +1,7 @@
 import { createHmac } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { toE164US } from "@/lib/phone";
 import { calculateRetentionScore } from "@/lib/retention-score";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { logCustomerEvent } from "@/lib/customer-events";
@@ -316,7 +317,9 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
     email: email || `no-email-${shopifyCustomerId}@unknown.com`,
     first_name: (payload.first_name as string) || null,
     last_name: (payload.last_name as string) || null,
-    phone: (payload.phone as string) || null,
+    // Normalize to E.164; preserved below when Shopify sends no phone so a
+    // sync never wipes a number we collected (e.g. a verified popup phone).
+    phone: (payload.phone as string) ? (toE164US(payload.phone as string) || (payload.phone as string)) : null,
     total_orders: (payload.orders_count as number) ?? 0,
     ltv_cents: dollarsToCents(payload.total_spent as string),
     tags: payload.tags ? (payload.tags as string).split(", ").filter(Boolean) : [],
@@ -355,8 +358,14 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
   // Check if we already have consent in our DB before overwriting
   if (email) {
     const { data: existingCust } = await admin.from("customers")
-      .select("email_marketing_status, sms_marketing_status")
+      .select("email_marketing_status, sms_marketing_status, phone")
       .eq("workspace_id", workspaceId).eq("email", email).maybeSingle();
+
+    // Phone: never let a Shopify sync without a phone wipe one we have. Prefer
+    // Shopify's (already normalized in `record`), else keep our stored value.
+    if (!payload.phone && existingCust?.phone) {
+      record.phone = existingCust.phone;
+    }
 
     const ourEmail = existingCust?.email_marketing_status;
     const ourSms = existingCust?.sms_marketing_status;
@@ -375,7 +384,7 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
       } catch { /* non-fatal */ }
     }
     if (ourSms === "subscribed" && shopifySms !== "subscribed") {
-      const phone = (payload.phone as string) || existingCust?.sms_marketing_status;
+      const phone = (payload.phone as string) || existingCust?.phone;
       if (phone) {
         try {
           const { subscribeToSmsMarketing } = await import("@/lib/shopify-marketing");
