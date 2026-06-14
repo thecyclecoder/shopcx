@@ -154,6 +154,7 @@ const { data } = await admin.from("customers")
 - A lead IS a customer (no orders, `subscription_status='never'`). No parallel `leads` table.
 - `banned` (storefront ban) vs `portal_banned` (customer portal ban) are different flags.
 - Email is the matching key but **`shopify_customer_id` is the primary lookup** — match by it first, fall back to email. See feedback_shopify_id_primary.
+- **Email matching uses `ILIKE` (case-insensitive)** across checkout/lead/OTP/identity paths. The `(workspace_id, email)` btree CANNOT serve `ILIKE` → seq scans. A **trigram GIN index `idx_customers_email_trgm`** (`pg_trgm` + `btree_gin`, migration `20260614180000`) backs it (~4ms). If you add a new email-match query, keep it `ILIKE` (or the trigram won't help) — don't reintroduce a plain btree expecting it to serve case-insensitive matches.
 
 ---
 
