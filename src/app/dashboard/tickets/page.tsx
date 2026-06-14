@@ -200,11 +200,14 @@ export default function TicketsPage() {
     fetchTickets();
   }, [fetchTickets]);
 
-  // Auto-refresh every 10 seconds (silent — no loading flash)
+  // Auto-refresh every 60s (silent — no loading flash). Was 10s, which drove
+  // ~925k tickets-list queries (the top DB consumer); the inbox list doesn't
+  // need second-level freshness. The open-conversation view (tickets/[id])
+  // still polls at 10s so an agent reading a ticket sees new messages promptly.
   useEffect(() => {
     const interval = setInterval(() => {
       fetchTickets(true);
-    }, 10000);
+    }, 60000);
     return () => clearInterval(interval);
   }, [fetchTickets]);
 
