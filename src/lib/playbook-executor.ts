@@ -1610,6 +1610,18 @@ async function handleOfferException(
   const requiredRounds = currentTier === 0 ? preExceptionRounds : betweenTierRounds;
 
   if (sfCount < requiredRounds) {
+    // Don't stand firm on a customer who has stopped pursuing the refund. A
+    // grateful/satisfied/topic-changed message routed here by the classifier
+    // should exit the playbook cleanly, not draw a tone-deaf "your order falls
+    // outside our return window" reply. `complete` clears the active playbook
+    // and closes the ticket (no customer message sent).
+    if (!(await detectStillPursuing(msg))) {
+      return {
+        action: "complete",
+        systemNote: "[Playbook] Customer is no longer pursuing the refund (satisfied / dropped the request) — exiting playbook without a stand-firm round.",
+      };
+    }
+
     // Need more stand firm rounds before escalating
     const bestOffer = ctx.exception_offered as string || "policy";
     const resType = ctx.resolution_type as string || "";
@@ -1783,6 +1795,27 @@ Treat lukewarm-but-positive replies as accept ("ok I guess", "fine", "sure"). Tr
     `Customer's reply: "${msg}"`,
   );
   return (verdict || "").toLowerCase().includes("accept");
+}
+
+// Before standing firm (pre-exception), confirm the customer is actually still
+// pursuing the refund/return. A grateful, satisfied, or moved-on message
+// ("thank you!", "right on", "I'll keep the product") must NOT trigger a
+// stand-firm reply — the playbook should exit cleanly. (Ticket 6e44c252: a happy
+// "RIGHT ON! Thank you!" was read as pushback and fired stand-firm twice on an
+// already-resolved conversation.) Returns true ONLY when they're clearly still
+// pushing for the refund.
+async function detectStillPursuing(msg: string): Promise<boolean> {
+  const verdict = await aiGenerate(
+    `A customer is in a refund/return flow where their order is out of policy. Read ONLY their latest message. Are they still pursuing the refund/return, or have they dropped it?
+
+Respond with EXACTLY one word:
+- "pursuing" — still wants the refund/return, is pushing back on the policy, asking again, negotiating, or expressing frustration that it was denied
+- "dropped" — thanking you, satisfied, accepting the policy, saying they'll keep the product, or talking about something else; no longer pursuing a refund
+
+When the message is just gratitude or acknowledgement ("thank you!", "right on", "ok got it", "👍"), answer "dropped".`,
+    `Customer's message: "${msg}"`,
+  );
+  return !(verdict || "").toLowerCase().includes("dropped");
 }
 
 async function handleInitiateReturn(

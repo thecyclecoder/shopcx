@@ -1242,6 +1242,7 @@ NEW_TOPIC = the customer is switching intent. Examples (any of these → NEW_TOP
   • Asking about a different subscription / order
   • Adding a new question on top of the active case ("also, how do I use my points?")
   • Crisis mention ("I got the wrong flavor") while in a generic return flow
+  • Pure gratitude, satisfaction, or acknowledgement with no new ask ("thank you!", "right on", "perfect, ty", "👍") → NEW_TOPIC. A happy thank-you is NOT pushback on an offer.
 
 When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds.
 
@@ -1530,8 +1531,13 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
             const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
             const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null, tid, wsId);
             await sendWithDelay(admin, wsId, tid, st.ch, closing, cfg.sandbox);
+            // Clear any active playbook on a positive close — otherwise a later
+            // grateful/follow-up message ("Again, right on!") gets routed back
+            // into the stale playbook and fires a tone-deaf stand-firm round
+            // (ticket 6e44c252).
+            await admin.from("tickets").update({ active_playbook_id: null, playbook_step: 0, playbook_exceptions_used: 0 }).eq("id", tid);
             await setStatus(admin, tid, true);
-            await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
+            await sysNote(admin, tid, `[System] Positive close. Ticket closed. Active playbook cleared.`);
           });
           return { status: "positive_close" };
         }
