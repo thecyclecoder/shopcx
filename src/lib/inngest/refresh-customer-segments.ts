@@ -117,6 +117,18 @@ async function refreshOneWorkspace(workspaceId: string): Promise<{ processed: nu
       for (const s of data || []) activeSubCustomers.add(s.customer_id);
     }
 
+    // Customers captured via the new storefront's signup surfaces (any
+    // storefront_leads row) → tagged `storefront_signup` so SMS campaigns
+    // can target net-new signups precisely instead of the huge `cold`
+    // pool (a no-order storefront signup is otherwise just `cold`).
+    // Origin attribute, not time-decaying.
+    const storefrontSignups = new Set<string>();
+    for (let j = 0; j < batch.length; j += 100) {
+      const chunk = batch.slice(j, j + 100);
+      const { data } = await sb.from("storefront_leads").select("customer_id").eq("workspace_id", workspaceId).in("customer_id", chunk);
+      for (const s of data || []) if (s.customer_id) storefrontSignups.add(s.customer_id as string);
+    }
+
     const engByCustomer = new Map<string, { clicked_email_60d: number; atc_30d: number; checkout_30d: number; viewed_product_30d: number }>();
     for (let j = 0; j < batch.length; j += ENGAGEMENT_BATCH) {
       const chunk = batch.slice(j, j + ENGAGEMENT_BATCH);
@@ -155,6 +167,7 @@ async function refreshOneWorkspace(workspaceId: string): Promise<{ processed: nu
         viewedProduct30d: eng.viewed_product_30d,
         now,
       });
+      if (storefrontSignups.has(id)) segments.push("storefront_signup");
       updates.push({ id, segments });
       processed++;
     }

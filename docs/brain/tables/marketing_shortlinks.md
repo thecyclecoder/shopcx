@@ -53,6 +53,7 @@ const { count } = await admin.from("marketing_shortlinks")
 
 - Crockford base32, 6 chars, ~1B namespace.
 - Per-workspace shortlink_domain on `workspaces.shortlink_domain`. Subdomain routing via middleware.
+- **The slug is only the *link code*.** SMS marketing identifies the recipient via a **second path segment**: `superfd.co/{slug}/{customers.short_code}` (e.g. `superfd.co/AB12CD/00059`). `/api/sl/[slug]` reads that trailing customer code → attributes the click + sets `sx_customer`. The bare `superfd.co/{slug}` form carries NO per-user attribution. See [[../inngest/marketing-text]] § Per-recipient shortlink format.
 
 ---
 
