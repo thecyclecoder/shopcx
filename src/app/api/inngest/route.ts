@@ -76,7 +76,7 @@ import {
 import { orderAddressFallback } from "@/lib/inngest/order-address-fallback";
 import { resellerDiscoveryWeeklyCron, resellerDiscoveryManual } from "@/lib/inngest/reseller-discovery";
 import { textCampaignScheduled, textCampaignSendTick } from "@/lib/inngest/marketing-text";
-import { refreshCustomerSegmentsCron } from "@/lib/inngest/refresh-customer-segments";
+import { refreshCustomerSegmentsCron, refreshWorkspaceSegments } from "@/lib/inngest/refresh-customer-segments";
 import { smsWavePromote } from "@/lib/inngest/sms-wave-promote";
 import { marketingCouponAutoDisable } from "@/lib/inngest/marketing-coupon-cron";
 import { abandonedCartReminder } from "@/lib/inngest/abandoned-cart";
@@ -183,6 +183,7 @@ export const { GET, POST, PUT } = serve({
     textCampaignSendTick,
     smsWavePromote,
     refreshCustomerSegmentsCron,
+    refreshWorkspaceSegments,
     marketingCouponAutoDisable,
     abandonedCartReminder,
     socialSchedulerPlan,
