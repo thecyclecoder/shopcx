@@ -40,14 +40,18 @@ const TIMEZONE_OPTIONS = [
 // conversion (engaged → cold) so the "cascade" pattern (include lower
 // tiers, exclude higher tiers) reads naturally top-down. See
 // docs/brain/tables/sms_campaigns.md § "Predictive segmentation" for definitions.
+// Conv % = our OWN per-segment SMS performance (UTM-attributed orders / sent),
+// not Klaviyo's. Computed across 32 single-segment sends, May 2026 (n=42 orders
+// — directional, not precise). See docs/brain/sms-segment-performance.md.
 const ARCHETYPE_SEGMENTS = [
-  { value: "engaged",      label: "Engaged",       hint: "Orders ≥1 + recent email-click / ATC / checkout (0.44% conv)" },
-  { value: "cycle_hitter", label: "Cycle hitter",  hint: "Orders ≥2 + at expected reorder window (0.30% conv)" },
-  { value: "just_ordered", label: "Just ordered",  hint: "Orders ≥2 + ordered recently vs cadence (0.19% conv)" },
-  { value: "lapsed",       label: "Lapsed",        hint: "Orders ≥2 + 1.5–3× past expected reorder gap (0.10% conv)" },
-  { value: "deep_lapsed",  label: "Deep lapsed",   hint: "Orders ≥2 + >3× past expected reorder gap" },
-  { value: "single_order", label: "Single order",  hint: "Exactly 1 prior order (0.03% conv)" },
-  { value: "cold",         label: "Cold",          hint: "0 prior orders (0.003% conv — spam tax)" },
+  { value: "storefront_signup", label: "Storefront signup", hint: "Captured via the storefront signup surfaces (storefront_leads) — warm, opted-in, often no order yet. No send history yet." },
+  { value: "engaged",      label: "Engaged",       hint: "Orders ≥1 + recent click / ATC / checkout. Our sends: 0.35% CVR · $0.35/send" },
+  { value: "cycle_hitter", label: "Cycle hitter",  hint: "Orders ≥2 + at expected reorder window. Our sends: 0.33% CVR · $0.41/send (top rev/send)" },
+  { value: "just_ordered", label: "Just ordered",  hint: "Orders ≥2 + ordered recently vs cadence. Our sends: 0.14% CVR · $0.21/send" },
+  { value: "lapsed",       label: "Lapsed",        hint: "Orders ≥2 + 1.5–3× past reorder gap. Our sends: 0.35% CVR · $0.37/send (beats Klaviyo's 0.10%)" },
+  { value: "deep_lapsed",  label: "Deep lapsed",   hint: "Orders ≥2 + >3× past reorder gap. Our sends: 0.10% CVR · $0.11/send — high volume, biggest total revenue" },
+  { value: "single_order", label: "Single order",  hint: "Exactly 1 prior order. Our sends: 0.05% CVR · $0.03/send (weakest)" },
+  { value: "cold",         label: "Cold",          hint: "0 prior orders — never sent in-house; Klaviyo ~0.003% (spam tax)" },
 ];
 // Flag segments — overlap with archetypes. Used as exclusions.
 const FLAG_SEGMENTS = [

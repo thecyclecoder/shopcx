@@ -86,9 +86,10 @@ const { count } = await admin.from("sms_campaigns")
 
 ## Gotchas
 
-- Message body supports `{coupon}` and `{shortlink}` placeholders — substituted at send time.
-- Coupon code generated in Shopify at schedule time (format `MAY` + 4 base32 chars).
+- Message body supports `{coupon}` and `{shortlink}` placeholders — substituted at send time. Compose with `\n\n` block breaks, GSM-7 only — see [[../inngest/marketing-text]] § Message body formatting.
+- Coupon code generated in Shopify at schedule time (format `MAY` + 4 base32 chars). For a pre-existing Shopify code (e.g. a manual VIP coupon), set `coupon_enabled=false` + `coupon_code` directly so nothing new is minted.
+- Per-segment conversion from our own sends → [[../sms-segment-performance]].
 
 ---
 
-[[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
+[[../README]] · [[../../CLAUDE]] · [[../../DATABASE]] · [[../sms-segment-performance]]

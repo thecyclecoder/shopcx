@@ -189,6 +189,18 @@ async function main() {
       for (const s of data || []) activeSubCustomers.add(s.customer_id);
     }
 
+    // ── Storefront signups (any storefront_leads row) → `storefront_signup` ──
+    const storefrontSignups = new Set<string>();
+    for (let j = 0; j < customerIds.length; j += 100) {
+      const chunk = customerIds.slice(j, j + 100);
+      const { data } = await sb
+        .from("storefront_leads")
+        .select("customer_id")
+        .eq("workspace_id", WS)
+        .in("customer_id", chunk);
+      for (const s of data || []) if (s.customer_id) storefrontSignups.add(s.customer_id as string);
+    }
+
     // ── Bulk-load engagement events (by customer_id, populated by
     // the Phase 1c backfill — Klaviyo profile_id → customer_id) ──
     // Pull only the metric types we use, in the largest of the 3 windows.
@@ -242,6 +254,7 @@ async function main() {
         checkout30d: eng.checkout_30d,
         viewedProduct30d: eng.viewed_product_30d,
       });
+      if (storefrontSignups.has(c.id)) segments.push("storefront_signup");
       for (const s of segments) segCounts.set(s, (segCounts.get(s) || 0) + 1);
       updates.push({ id: c.id, segments });
       processed++;
