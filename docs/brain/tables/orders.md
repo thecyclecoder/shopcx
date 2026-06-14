@@ -136,6 +136,7 @@ const { count } = await admin.from("orders")
 - `shopify_order_id` is a numeric string. Internal joins should use `id` (UUID), not the Shopify id.
 - `financial_status`: **mixed-case in production data** — both `"PAID"` (94% of rows, from Shopify webhook ingestion) and `"paid"` (6%, normalized) exist. Same for `"REFUNDED"`/`"refunded"`, `"PARTIALLY_REFUNDED"`/`"partially_refunded"`, `"PENDING"`/`"pending"`. Use `ILIKE` or `.in("financial_status", ["PAID","paid"])`. Don't use `.eq("financial_status", "paid")` — you'll miss 94% of rows.
 - `fulfillment_status`: `"fulfilled"`, `"partial"`, `"unfulfilled"`, or `null`. Probe before assuming lowercase.
+- **`attributed_utm_*` / `landing_site` / `referring_site` are populated by two paths.** Shopify-webhook orders parse them from `landing_site` (`extractOrderUtms` in `shopify-webhooks.ts`). **Native storefront orders** (`source_name='storefront'`, created in `/api/checkout`) had these NULL until 2026-06-14 — they now backfill **first-touch** from the visitor's `storefront_sessions` (earliest session carrying a `utm_source`, by `customer_id` after the identity stitch). So a Meta-sourced storefront sale now shows `attributed_utm_source='meta'` on the order itself, no `storefront_sessions` join needed. Caveat: first-touch only resolves across sessions the visitor was identified in (cross-anonymous_id stitching isn't done) — a pure-anonymous Meta click that converts in a later direct session still attributes `(direct)`.
 
 ---
 

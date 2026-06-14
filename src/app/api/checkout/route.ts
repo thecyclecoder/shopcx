@@ -999,6 +999,39 @@ export async function POST(request: NextRequest) {
     context: visitorCtx,
   });
 
+  // ── 10b. First-touch marketing attribution onto the order row. ───
+  // Storefront orders are created here, NOT via the Shopify orders/create
+  // webhook that fills attributed_utm_* from landing_site — so the order
+  // row had no attribution (you had to join through storefront_sessions to
+  // see a Meta-sourced sale). Copy the visitor's first-touch UTMs from
+  // storefront_sessions now that the stitch above has linked the converting
+  // session (+ any earlier identified session) to this customer. Pick the
+  // earliest session that carried a utm_source (the first paid/referral
+  // touch); fall back to the earliest session for landing/referrer only.
+  // Best-effort — must never break the checkout response.
+  try {
+    const { data: sessions } = await admin
+      .from("storefront_sessions")
+      .select("utm_source, utm_medium, utm_campaign, utm_content, utm_term, landing_url, referrer, first_seen_at")
+      .eq("workspace_id", cart.workspace_id)
+      .eq("customer_id", customer.id)
+      .order("first_seen_at", { ascending: true });
+    const firstTouch = (sessions || []).find((s) => s.utm_source) || (sessions || [])[0];
+    if (firstTouch) {
+      await admin.from("orders").update({
+        attributed_utm_source: firstTouch.utm_source ?? null,
+        attributed_utm_medium: firstTouch.utm_medium ?? null,
+        attributed_utm_campaign: firstTouch.utm_campaign ?? null,
+        attributed_utm_content: firstTouch.utm_content ?? null,
+        attributed_utm_term: firstTouch.utm_term ?? null,
+        landing_site: firstTouch.landing_url ?? null,
+        referring_site: firstTouch.referrer ?? null,
+      }).eq("id", order.id);
+    }
+  } catch (err) {
+    console.warn(`[checkout] order attribution backfill failed for ${orderNumber}:`, err);
+  }
+
   // ── 11. Order confirmation email. ────────────────────────────────
   // Best-effort — failure logs but doesn't break the response. The
   // packing slip handles the in-the-box copy; this is the inbox copy
