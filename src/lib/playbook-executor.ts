@@ -766,10 +766,13 @@ function buildDataContext(
 
 // ── AI helper ──
 
-async function aiGenerate(systemPrompt: string, userPrompt: string, model = HAIKU_MODEL): Promise<string> {
+// Detects unrendered placeholder tokens that must never reach a customer:
+// [date], [amount], [name], {{anything}}, etc.
+const PLACEHOLDER_RE = /\{\{[^}]+\}\}|\[(?:date|amount|name|order_date|order_amount|order_number|first_name|product|credit|total|coupon[\w-]*)\]/i;
+
+async function callAnthropic(systemPrompt: string, userPrompt: string, model: string): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return "";
-
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
@@ -780,6 +783,26 @@ async function aiGenerate(systemPrompt: string, userPrompt: string, model = HAIK
   return (data.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
+async function aiGenerate(systemPrompt: string, userPrompt: string, model = HAIKU_MODEL): Promise<string> {
+  const out = await callAnthropic(systemPrompt, userPrompt, model);
+  // Backstop: a model occasionally emits an unrendered placeholder ("your order
+  // from [date] for $[amount]") when it tries to cite specifics it wasn't given.
+  // There is no substitution step, so it would reach the customer verbatim.
+  // Regenerate once with an explicit ban; if it still slips through, the system
+  // note is logged by the caller and the message is held for review upstream.
+  if (out && PLACEHOLDER_RE.test(out)) {
+    const retry = await callAnthropic(
+      systemPrompt,
+      `${userPrompt}\n\nYour previous draft contained an unrendered placeholder token (e.g. [date] or [amount]). Rewrite it WITHOUT any bracketed or {{templated}} placeholders. Use only concrete values that appear in the customer data, or phrase generally (e.g. "your most recent order").`,
+      model,
+    );
+    if (retry && !PLACEHOLDER_RE.test(retry)) return retry;
+    // Last resort: strip any remaining placeholder fragments so nothing leaks.
+    return (retry || out).replace(/\s*(?:from |for |of |on )?\$?\{\{[^}]+\}\}|\s*(?:from |for |of |on )?\$?\[(?:date|amount|name|order_date|order_amount|order_number|first_name|product|credit|total|coupon[\w-]*)\]/gi, "").replace(/\s{2,}/g, " ").trim();
+  }
+  return out;
+}
+
 function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string; sign_off?: string | null } | null, policyRules?: string): string {
   return [
     `You are a customer support agent${pers?.name ? ` named ${pers.name}` : ""}.`,
@@ -788,6 +811,7 @@ function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string; si
 - Use HTML for formatting (<p>, <b>, <ul>, <li>). Do NOT use markdown.
 - Max 2-3 sentences per paragraph.
 - NEVER include order numbers (like SC127106) or subscription contract numbers in your response. Refer to orders by date and amount: "your April 4th order for $5.87". Log IDs in system notes only.
+- NEVER output placeholder tokens such as [date], [amount], [name], {{date}}, or {{amount}}. Only state a date or dollar amount if it appears verbatim in the Customer data above; if you don't have the exact value, refer to it generally (e.g. "your most recent order") rather than inserting a placeholder.
 - NEVER introduce yourself or re-greet the customer. No "Hi [name]," or "I'm [name]" — introductions are handled separately.
 - NEVER repeat context already covered (order details, subscription timeline, product lists). The customer already knows — just talk about the current offer.
 - Messages should get SHORTER as the conversation progresses.
@@ -1601,7 +1625,7 @@ async function handleOfferException(
 
     const response = await aiGenerate(
       basePrompt(step, pers, policyRules),
-      `Customer message: "${msg}"\n\n${currentTier === 0
+      `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\n${currentTier === 0
         ? `CRITICAL: The customer's order is out of policy. You have NOT offered any exception. Restate ONLY that the order does not qualify under the store policy. Keep it to 2-3 sentences. Use different wording than previous messages.${sfPolicyUrl}`
         : `CRITICAL: The customer rejected the ${bestOffer} offer (${resLabel}). Restate ONLY the ${bestOffer} offer with different wording. Do NOT mention any other option.`
       } Acknowledge frustration briefly (one sentence max), then restate the current position. Do not argue or get defensive.`,
