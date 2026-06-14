@@ -132,6 +132,43 @@ export const metaCapiDispatchCron = inngest.createFunction(
           : { data: [] };
         const custById = new Map((customers || []).map((c) => [c.id as string, c]));
 
+        // ── First-touch fbc/fbclid recovery ─────────────────────────
+        // user_data.fbc is what ties a conversion to the ad click, and it's
+        // derived from the fbclid that lands in the URL — but that lands on the
+        // FIRST-touch session, while the event (esp. our server order_placed,
+        // which can fall back to a later session) may sit on a session with no
+        // click id. When the event's own session has neither fbc nor fbclid,
+        // recover the EARLIEST fbc/fbclid the visitor ever had (by customer_id,
+        // else anonymous_id) so Meta can still match the order to the click.
+        type FirstTouch = { fbc: string | null; fbclid: string | null; fbp: string | null; ts: number };
+        const ftByCust = new Map<string, FirstTouch>();
+        const ftByAnon = new Map<string, FirstTouch>();
+        const needFt = (events || []).filter((e) => {
+          const s = sessionById.get(e.session_id as string);
+          return !s?.fbc && !s?.fbclid;
+        });
+        const ftCustIds = [...new Set(needFt.map((e) => e.customer_id as string).filter(Boolean))];
+        const ftAnonIds = [...new Set(needFt.map((e) => e.anonymous_id as string).filter(Boolean))];
+        if (ftCustIds.length || ftAnonIds.length) {
+          const idClauses: string[] = [];
+          if (ftCustIds.length) idClauses.push(`customer_id.in.(${ftCustIds.join(",")})`);
+          if (ftAnonIds.length) idClauses.push(`anonymous_id.in.(${ftAnonIds.map((a) => `"${a}"`).join(",")})`);
+          const { data: ftRows } = await admin
+            .from("storefront_sessions")
+            .select("customer_id, anonymous_id, fbc, fbclid, fbp, first_seen_at")
+            .eq("workspace_id", sinkRow.workspace_id)
+            .or("fbc.not.is.null,fbclid.not.is.null")
+            .or(idClauses.join(","))
+            .order("first_seen_at", { ascending: true });
+          for (const r of ftRows || []) {
+            const ft: FirstTouch = { fbc: r.fbc as string | null, fbclid: r.fbclid as string | null, fbp: r.fbp as string | null, ts: new Date(r.first_seen_at as string).getTime() };
+            const c = r.customer_id as string | null;
+            const a = r.anonymous_id as string | null;
+            if (c && !ftByCust.has(c)) ftByCust.set(c, ft);   // first row = earliest (ordered asc)
+            if (a && !ftByAnon.has(a)) ftByAnon.set(a, ft);
+          }
+        }
+
         // Resolve catalog content_ids for the whole batch in one pass. Our
         // events carry UUIDs; this translates UUID → meta_id (the Shopify-
         // derived catalog id) only here, at the Meta egress.
@@ -159,6 +196,19 @@ export const metaCapiDispatchCron = inngest.createFunction(
           const cust = ev.customer_id ? custById.get(ev.customer_id as string) : null;
           const meta = (ev.meta || {}) as Record<string, unknown>;
           const eventTimeMs = new Date(ev.created_at as string).getTime();
+
+          // fbc: event's own session first; else the visitor's first-touch
+          // click id (stamped with that landing's time, per Meta's spec).
+          let fbc = deriveFbc(sess?.fbc ?? null, sess?.fbclid ?? null, eventTimeMs);
+          let fbp = sess?.fbp ?? null;
+          if (!fbc) {
+            const ft = (ev.customer_id ? ftByCust.get(ev.customer_id as string) : null)
+              || (ev.anonymous_id ? ftByAnon.get(ev.anonymous_id as string) : null);
+            if (ft) {
+              fbc = deriveFbc(ft.fbc, ft.fbclid, ft.ts);
+              if (!fbp) fbp = ft.fbp;
+            }
+          }
 
           const customData: Record<string, unknown> = {};
           const cents = typeof meta.total_cents === "number" ? meta.total_cents : typeof meta.value_cents === "number" ? meta.value_cents : null;
@@ -191,8 +241,8 @@ export const metaCapiDispatchCron = inngest.createFunction(
               city: sess?.ip_city ?? null,
               externalId: (ev.customer_id as string) || (ev.anonymous_id as string) || null,
               clientUserAgent: sess?.user_agent ?? null,
-              fbp: sess?.fbp ?? null,
-              fbc: deriveFbc(sess?.fbc ?? null, sess?.fbclid ?? null, eventTimeMs),
+              fbp,
+              fbc,
             },
             customData,
           });

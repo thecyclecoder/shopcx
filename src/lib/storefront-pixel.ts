@@ -129,11 +129,15 @@ export function initPixel(opts: { workspaceId: string; customerId?: string | nul
  * Queue an event. The default flush window is 500ms. order_placed
  * flushes immediately to maximize delivery before navigation.
  */
-export function track(eventType: string, meta?: EventMeta) {
+export function track(eventType: string, meta?: EventMeta, eventId?: string) {
   if (typeof window === "undefined" || !workspaceId) return;
 
   const event: QueuedEvent = {
-    event_id: crypto.randomUUID(),
+    // Callers may pass an explicit id to share with a server-created twin
+    // (order_placed: the server creates the canonical storefront_events row +
+    // CAPI dispatch; we reuse its id here so the browser pixel + our enqueue
+    // dedupe against it instead of creating a divergent second Purchase).
+    event_id: eventId || crypto.randomUUID(),
     event_type: eventType,
     meta,
     url: window.location.href,

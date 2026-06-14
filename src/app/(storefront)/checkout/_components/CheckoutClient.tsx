@@ -770,7 +770,7 @@ export function CheckoutClient({
           existing_sub_id: (subMode === "add_to_sub" || subMode === "renewal_only") ? chosenSubId : undefined,
         }),
       });
-      const data = (await res.json()) as { ok?: boolean; order_id?: string; order_number?: string; error?: string; details?: string };
+      const data = (await res.json()) as { ok?: boolean; order_id?: string; order_number?: string; order_placed_event_id?: string; error?: string; details?: string };
       if (!res.ok || !data.ok || !data.order_id) {
         setSubmitError(data.details || data.error || "Something went wrong with the payment.");
         // Server already logged its own detail; log the client-visible outcome
@@ -779,12 +779,15 @@ export function CheckoutClient({
         setSubmitting(false);
         return;
       }
+      // Reuse the server's canonical order_placed event id so the browser
+      // Meta pixel + our enqueue dedupe against the server-created row + its
+      // CAPI Purchase (no divergent second conversion).
       track("order_placed", {
         cart_token: cart.token,
         order_id: data.order_id,
         order_number: data.order_number,
         total_cents: totalCents,
-      });
+      }, data.order_placed_event_id);
       window.location.href = `/thank-you?order=${data.order_id}`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -28,6 +28,8 @@ Decouples delivery from the hot `/api/pixel` path, batches one POST per sink per
 
 We don't store raw client IP (`storefront_sessions` keeps only geo), so `client_ip_address` is absent; match relies on hashed email/phone (when the session identified) + `fbp`/`fbc` (cookie or derived from `fbclid`) + user-agent + hashed `external_id`.
 
+**First-touch `fbc` recovery:** `fbc` ties the conversion to the ad click and is derived from the `fbclid` that lands in the URL — but `fbclid` is captured on the **first-touch** session, while the event (especially the server-created `order_placed`, which can fall back to a later session) may sit on a session with no click id. When the event's own session has neither `fbc` nor `fbclid`, the dispatcher recovers the visitor's **earliest** `fbc`/`fbclid` (by `customer_id`, else `anonymous_id`) and stamps the derived `fb.1.<ts>.<fbclid>` with that landing's time. Without this, a buyer who clicked the ad then converted in a later/direct session (e.g. via a recovery link) would reach Meta with no click match.
+
 ---
 
 [[../README]] · [[../integrations/inngest]] · [[../libraries/meta-capi]] · [[../lifecycles/storefront-checkout]] · [[../../CLAUDE]]

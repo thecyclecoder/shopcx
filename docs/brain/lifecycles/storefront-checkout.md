@@ -138,21 +138,21 @@ Browser POSTs to `/api/checkout`:
 5. **Vault the card** via [[../integrations/braintree]] `paymentMethod.create({customerId, paymentMethodNonce, options: {verifyCard: true, makeDefault: true}})`. Returns `paymentMethodToken`.
 6. **Charge** via `transaction.sale({paymentMethodToken, amount, customer, shipping, billing, options: {submitForSettlement: true, storeInVaultOnSuccess: true}, externalVault: ..., deviceData})`.
 7. **On success**:
-   - Create [[../tables/orders]] row with `braintree_transaction_id`, `braintree_payment_method_token`, `braintree_customer_id`, `cart_token`, attribution UTMs, addresses.
+   - Create [[../tables/orders]] row with `braintree_transaction_id`, `braintree_payment_method_token`, `braintree_customer_id`, `cart_token`, addresses. **Attribution** (`attributed_utm_*`/`landing_site`/`referring_site`) is backfilled **first-touch** right after the identity stitch — copied from the visitor's earliest [[../tables/storefront_sessions]] row carrying a `utm_source` (so a Meta-sourced sale shows `attributed_utm_source='meta'` on the order itself).
    - Create [[../tables/transactions]] row with `type='initial_checkout'`, `status='settled'`, `attempted_at`, `settled_at`.
    - If subscription mode → create [[../tables/subscriptions]] with `is_internal=true`, `payment_method_token`, `next_billing_date = now() + frequency_days`. This is the new internal-sub path; Appstle is bypassed.
    - Commit the Avalara transaction (type=SalesInvoice, commit:true). Stores `avalara_transaction_code` + `avalara_committed_at` on the order.
    - Mark [[../tables/cart_drafts]].`status='converted'`, `converted_order_id`.
-   - Fire `order_placed` storefront event → CAPI fan-out (see Phase 7).
+   - **Create the canonical `order_placed` storefront event server-side**, keyed to the converting session (falls back to the customer's most-recent session when the cart had no `anonymous_id`, e.g. recovery/coupon links). This guarantees the event exists — and thus the CAPI Purchase fires (Phase 7) — even when the browser pixel is blocked/missed. The server mints `order_placed_event_id` and returns it; the browser reuses it so its `fbq` Purchase + the pixel enqueue dedupe against this one (no double Purchase). → CAPI fan-out (Phase 7).
    - Clear the `cart` cookie.
-   - Return `{redirect: "/thank-you?order=..."}`.
+   - Return `{order_id, order_number, order_placed_event_id, ...}` (client redirects to `/thank-you?order=...`).
 8. **On failure** (declined, 3DS challenge, gateway error):
    - Return `{error: ...}` with user-friendly text from [[../tables/dunning_error_codes]].
    - Cart stays in `pending` — customer can retry.
 
 ## Phase 6 — thank-you
 
-`/thank-you?order={id}` reads the order from [[../tables/orders]]. Fires a rich `order_placed` event with full order context (line items, total, currency, customer email, click IDs) for downstream attribution. This is the Meta/TikTok "Purchase" event.
+`/thank-you?order={id}` reads the order from [[../tables/orders]] and renders the confirmation. It does **NOT** fire `order_placed` — that's fired once from the checkout page right after the confirmed charge (most reliable capture point) using the server's `order_placed_event_id`, and the server also created the canonical row in Phase 5. The thank-you page only fires Meta `PageView`.
 
 ## Phase 7 — CAPI fan-out ✅ (Meta shipped; cron-based, not per-event)
 

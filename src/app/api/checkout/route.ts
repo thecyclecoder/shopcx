@@ -1032,6 +1032,53 @@ export async function POST(request: NextRequest) {
     console.warn(`[checkout] order attribution backfill failed for ${orderNumber}:`, err);
   }
 
+  // ── 10c. Server-side order_placed event (funnel + Meta CAPI). ────
+  // The browser fires order_placed too (→ Meta Purchase), but that pixel can
+  // be missed (ad blockers, early navigation) — when it is, the sale is absent
+  // from the funnel AND no CAPI Purchase reaches Meta (SHOPCX11 hit exactly
+  // this). Create the canonical event server-side, keyed to the converting
+  // session: the minutely meta-capi-dispatch cron forwards it to Meta as a
+  // reliable Purchase. We mint the event_id HERE and return it so the browser
+  // pixel + the client enqueue reuse it — Meta dedupes the browser twin against
+  // this one (no double Purchase), and the funnel counts distinct sessions.
+  // Best-effort; never breaks the response.
+  const orderPlacedEventId = crypto.randomUUID();
+  try {
+    const anonId = (cart.anonymous_id as string | null) || null;
+    let sessionId: string | null = null;
+    let sessionAnon: string | null = anonId;
+    if (anonId) {
+      const { data: sess } = await admin
+        .from("storefront_sessions").select("id")
+        .eq("workspace_id", cart.workspace_id).eq("anonymous_id", anonId).maybeSingle();
+      sessionId = (sess?.id as string | null) || null;
+    }
+    if (!sessionId) {
+      // Cart carried no anonymous_id (e.g. recovery/coupon link — this is how
+      // SHOPCX11 slipped past the funnel). Fall back to the customer's most
+      // recent session so the conversion still counts.
+      const { data: sess } = await admin
+        .from("storefront_sessions").select("id, anonymous_id")
+        .eq("workspace_id", cart.workspace_id).eq("customer_id", customer.id)
+        .order("last_seen_at", { ascending: false }).limit(1).maybeSingle();
+      sessionId = (sess?.id as string | null) || null;
+      sessionAnon = (sess?.anonymous_id as string | null) || sessionAnon;
+    }
+    if (sessionId && sessionAnon) {
+      await admin.from("storefront_events").upsert({
+        id: orderPlacedEventId,
+        workspace_id: cart.workspace_id,
+        session_id: sessionId,
+        anonymous_id: sessionAnon,
+        customer_id: customer.id,
+        event_type: "order_placed",
+        meta: { order_id: order.id, order_number: orderNumber, total_cents: totalCents, cart_token: cart.token, source: "server" },
+      }, { onConflict: "id", ignoreDuplicates: true });
+    }
+  } catch (err) {
+    console.warn(`[checkout] server order_placed emit failed for ${orderNumber}:`, err);
+  }
+
   // ── 11. Order confirmation email. ────────────────────────────────
   // Best-effort — failure logs but doesn't break the response. The
   // packing slip handles the in-the-box copy; this is the inbox copy
@@ -1120,6 +1167,9 @@ export async function POST(request: NextRequest) {
     ok: true,
     order_id: order.id,
     order_number: order.order_number,
+    // Canonical order_placed event id — the browser reuses it so its Meta
+    // Purchase pixel dedupes against the server-created CAPI event.
+    order_placed_event_id: orderPlacedEventId,
     braintree_transaction_id: transaction.id,
     subscription_ids: createdSubscriptionIds,
   });
