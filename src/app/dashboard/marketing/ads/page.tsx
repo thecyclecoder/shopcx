@@ -9,6 +9,7 @@ interface Campaign {
   name: string;
   status: string;
   hero_image_url: string | null;
+  preview_url: string | null;
   created_at: string;
   products?: { title: string } | null;
 }
@@ -104,9 +105,9 @@ export default function AdsLandingPage() {
               className="block overflow-hidden rounded-lg border border-zinc-200 bg-white transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
             >
               <div className="aspect-video w-full bg-zinc-100 dark:bg-zinc-800">
-                {c.hero_image_url ? (
+                {c.preview_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={c.hero_image_url} alt={c.name} className="h-full w-full object-cover" />
+                  <img src={c.preview_url} alt={c.name} className="h-full w-full object-contain" />
                 ) : (
                   <div className="flex h-full w-full items-center justify-center text-xs text-zinc-400">
                     No preview

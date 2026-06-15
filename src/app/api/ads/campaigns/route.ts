@@ -43,10 +43,35 @@ export async function GET(req: Request) {
   // never show a broken image (the stored hero_image_url is a time-limited
   // signed URL that expires). Path is deterministic per campaign.
   const { signedUrl } = await import("@/lib/ad-storage");
+
+  // Static campaigns have no video hero — use their rendered/uploaded static
+  // image as the card preview (re-signed fresh from meta.storage_path, prefer 4:5).
+  const campIds = (data || []).map((c) => c.id);
+  const staticByCamp = new Map<string, string>();
+  if (campIds.length) {
+    const { data: statics } = await auth.admin
+      .from("ad_videos")
+      .select("campaign_id, format, meta")
+      .in("campaign_id", campIds)
+      .eq("media_kind", "static")
+      .eq("status", "ready");
+    for (const v of statics || []) {
+      const sp = (v.meta as { storage_path?: string } | null)?.storage_path;
+      if (!sp) continue;
+      if (!staticByCamp.has(v.campaign_id) || v.format === "feed_4x5") staticByCamp.set(v.campaign_id, sp);
+    }
+  }
+
   const rows = await Promise.all(
     (data || []).map(async (c) => {
-      const fresh = await signedUrl(`avatars/${workspaceId}/heroes/${c.id}.png`).catch(() => null);
-      return fresh ? { ...c, hero_image_url: fresh } : c;
+      const freshHero = await signedUrl(`avatars/${workspaceId}/heroes/${c.id}.png`).catch(() => null);
+      const staticPath = staticByCamp.get(c.id);
+      const staticPreview = staticPath ? await signedUrl(staticPath).catch(() => null) : null;
+      return {
+        ...c,
+        hero_image_url: freshHero || c.hero_image_url,
+        preview_url: freshHero || staticPreview || c.hero_image_url || null,
+      };
     }),
   );
   return NextResponse.json(rows);
