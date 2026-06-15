@@ -49,3 +49,6 @@ twilio-recovery.txt
 
 # ad-tool example render assets (binary, regenerated locally)
 remotion/public/adbuild/
+
+# scratch / one-off debug scripts
+scripts/_*
