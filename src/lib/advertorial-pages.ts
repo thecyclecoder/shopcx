@@ -54,9 +54,14 @@ export interface AdvertorialContent {
   reviewCountDisplay: string;
 }
 
-/** Review counts display as actual + 10,000 (Dylan rule). 2,291 → 12,291. */
-export function displayReviewCount(real: number): string {
-  return (Math.max(0, Math.round(real)) + 10000).toLocaleString("en-US");
+/**
+ * Format an ALREADY-bumped review total for display. `PageData.review_total_count`
+ * already includes the +10,000 off-platform bump (storefront_off_platform_review_count)
+ * — the same value the PDP renders — so just format it. Do NOT add the bump again
+ * here (that double-bumped landers to actual + 20,000 vs the PDP's actual + 10,000).
+ */
+export function displayReviewCount(alreadyBumpedTotal: number): string {
+  return Math.max(0, Math.round(alreadyBumpedTotal)).toLocaleString("en-US");
 }
 
 // Angle hook → hero kind. Testimonial/transformation/social-proof → the avatar
@@ -500,7 +505,7 @@ export async function generateAdvertorialPagesForCampaign(
  * Prefers the generated advertorial_pages slug for the campaign's product/angle;
  * returns null when there's no lander to point at (caller keeps the PDP/override).
  */
-export async function advertorialLanderUrl(workspaceId: string, campaignId: string): Promise<string | null> {
+export async function advertorialLanderUrl(workspaceId: string, campaignId: string, variant: AdvertorialVariant = "advertorial"): Promise<string | null> {
   const admin = createAdminClient();
   const { data: campaign } = await admin
     .from("ad_campaigns")
@@ -510,13 +515,15 @@ export async function advertorialLanderUrl(workspaceId: string, campaignId: stri
     .maybeSingle();
   if (!campaign?.product_id) return null;
 
-  // The advertorial lander for this product (prefer the campaign's angle).
+  // The lander for this product + variant (prefer the campaign's angle). The
+  // before/after row is stored under slug "{base}-ba"; read its actual slug so
+  // the URL angle param matches what loadAdvertorialContent() queries.
   let pageQuery = admin
     .from("advertorial_pages")
     .select("slug, angle_id, updated_at")
     .eq("workspace_id", workspaceId)
     .eq("product_id", campaign.product_id)
-    .eq("variant", "advertorial")
+    .eq("variant", variant)
     .order("updated_at", { ascending: false });
   if (campaign.angle_id) pageQuery = pageQuery.eq("angle_id", campaign.angle_id);
   const { data: page } = await pageQuery.limit(1).maybeSingle();
@@ -528,7 +535,7 @@ export async function advertorialLanderUrl(workspaceId: string, campaignId: stri
   ]);
   if (!product?.handle) return null;
 
-  const qs = `?variant=advertorial&angle=${encodeURIComponent(page.slug)}`;
+  const qs = `?variant=${variant}&angle=${encodeURIComponent(page.slug)}`;
   if (ws?.storefront_domain) return `https://${ws.storefront_domain}/${product.handle}${qs}`;
   if (ws?.storefront_slug) return `https://shopcx.ai/store/${ws.storefront_slug}/${product.handle}${qs}`;
   return null;

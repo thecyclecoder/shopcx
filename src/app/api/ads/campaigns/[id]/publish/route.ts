@@ -35,7 +35,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Validate the campaign + the chosen video belong to the workspace.
   const { data: campaign } = await auth.admin
     .from("ad_campaigns")
-    .select("id, name")
+    .select("id, name, landing_url")
     .eq("id", id)
     .eq("workspace_id", workspaceId as string)
     .single();
@@ -60,7 +60,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const ctaType = META_CTA_TYPES.includes(body.cta_type) ? body.cta_type : "SHOP_NOW";
   // Destination defaults to the campaign angle's advertorial lander (scent-match by
   // construction); an explicit destination_url from the operator still wins.
+  // Prefer the campaign's seeded landing_url (archetype-routed: PDP for testimonial/
+  // authority/big-claim, the matching lander for advertorial/before-after), then the
+  // advertorial-lander fallback. An explicit operator destination_url still wins.
   let destinationUrl = typeof body.destination_url === "string" ? body.destination_url.trim() : "";
+  if (!destinationUrl) destinationUrl = ((campaign as { landing_url?: string | null }).landing_url || "").trim();
   if (!destinationUrl) destinationUrl = (await advertorialLanderUrl(workspaceId as string, id)) || "";
   const required: Record<string, unknown> = { meta_account_id: body.meta_account_id, meta_adset_id: body.meta_adset_id, meta_page_id: body.meta_page_id };
   for (const [k, v] of Object.entries(required)) if (!v) return NextResponse.json({ error: `${k} required` }, { status: 400 });

@@ -28,6 +28,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { KILLER_ARCHETYPES, ARCHETYPE_LANDER, type KillerArchetype } from "@/lib/ad-statics";
 import { generateMetaCopy } from "@/lib/ad-meta-copy";
+import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
 
 const WS = process.env.WS || "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const PID = process.env.PID || "ea433e56-0aa4-4b46-9107-feb11f77f533";
@@ -83,11 +84,20 @@ async function main() {
   const { data: product } = await admin.from("products").select("title, handle").eq("id", PID).maybeSingle();
   const handle = (product as any)?.handle as string | undefined;
   const pdp = handle ? `${STOREFRONT}/products/${handle}` : STOREFRONT;
-  // Landers for advertorial / before_after aren't built yet → route to the PDP
-  // (the ARCHETYPE_LANDER map records the eventual destination once they ship).
-  const landingFor = (archetype: KillerArchetype) => {
+  // Archetype → landing page (ad_creative_rules): testimonial/authority/big_claim
+  // → PDP; advertorial → advertorial lander; before_after → before/after lander.
+  // For the two lander archetypes we generate the lander page here (idempotent
+  // upsert) to learn its real slug, then point landing_url at the matching variant.
+  const resolveLanding = async (archetype: KillerArchetype, campaignId: string): Promise<string> => {
     const kind = ARCHETYPE_LANDER[archetype];
-    void kind; // pdp | advertorial | before_after — all → PDP until landers ship
+    if (kind === "pdp") return pdp;
+    const variant = kind === "before_after" ? "beforeafter" : "advertorial";
+    try {
+      const res = await generateAdvertorialPagesForCampaign(WS, campaignId);
+      const lander = res.landers.find((l) => l.variant === variant);
+      if (lander) return `${pdp}${lander.url_path}`;
+      console.log(`  · no ${variant} lander generated (${res.reason || "?"}) → PDP`);
+    } catch (e) { console.log(`  · lander gen skipped: ${e instanceof Error ? e.message : e}`); }
     return pdp;
   };
 
@@ -95,10 +105,15 @@ async function main() {
   for (const archetype of KILLER_ARCHETYPES) {
     console.log(`• ${archetype}`);
     const angleId = await ensureAngle(admin, archetype);
-    const campaignId = await ensureCampaign(admin, archetype, angleId, landingFor(archetype));
+    const campaignId = await ensureCampaign(admin, archetype, angleId, pdp);
     if (!campaignId) continue;
     await inngest.send({ name: "ad-tool/static-requested", data: { workspace_id: WS, campaign_id: campaignId, archetype } });
     console.log(`  ✓ campaign ${campaignId} — render queued (4:5 + 9:16)`);
+    const landing = await resolveLanding(archetype, campaignId);
+    if (landing !== pdp) {
+      await admin.from("ad_campaigns").update({ landing_url: landing }).eq("id", campaignId).then(undefined, () => {});
+      console.log(`  ✓ lander → ${landing}`);
+    }
     try {
       const copy = await generateMetaCopy(WS, campaignId);
       if (copy && angleId) {

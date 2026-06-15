@@ -12,7 +12,7 @@ import { DEFAULT_PROPS, type AdCompositionProps } from "./types";
 const SBRAND = { bg: "#FBF7F0", fg: "#2B1A12", accent: "#E0561F", accentFg: "#FFFFFF", muted: "#8A7A6E" };
 const SREVIEW: StaticReviewProps = { width: 1080, height: 1350, brand: SBRAND, reviewerName: "Tamara L.", rating: 5, headline: "I have managed to lose roughly 50 pounds on my weight loss journey.", body: "I have been using this for almost two years. It took a bit for my body to adjust and start to feel healthier and help me with my weight loss journey. It's about not expecting immediate results — it's about the journey.", verified: true, productTitle: "Amazing Coffee", productImageUrl: null, fontKey: "montserrat" };
 const SOFFER: StaticOfferProps = { width: 1080, height: 1350, brand: SBRAND, discount: "40% OFF", subline: "+ FREE SHIPPING", urgency: "For a limited time", ctaText: "Shop now", productTitle: "Amazing Coffee", productImageUrl: null, backdropUrl: null };
-const SBENEFIT: StaticBenefitAuthorityProps = { width: 1080, height: 1350, brand: SBRAND, mode: "authority", productTitle: "Amazing Coffee", productImageUrl: null, benefits: ["12 superfoods in one cup", "Clean energy, no crash", "Curbs cravings"], expert: { name: "Lindsey Ray", title: "Registered Dietitian, MS, RD, LD", quote: "This coffee checks all the boxes — rich in antioxidants, supports weight loss, and the taste is delicious.", bullets: ["Antioxidant rich", "Supports weight loss", "Delicious taste"] } };
+const SBENEFIT: StaticBenefitAuthorityProps = { width: 1080, height: 1350, brand: SBRAND, mode: "authority", productTitle: "Amazing Coffee", productImageUrl: null, benefits: ["12 superfoods in one cup", "Supports healthy weight loss", "Antioxidants that fight aging"], expert: { name: "Lindsey Ray", title: "Registered Dietitian, MS, RD, LD", quote: "This coffee checks all the boxes — rich in antioxidants, supports weight loss, and the taste is delicious.", bullets: ["Antioxidant rich", "Supports weight loss", "Delicious taste"] } };
 
 const SADVERTORIAL: StaticAdvertorialProps = {
   width: 1080, height: 1350,
@@ -22,19 +22,19 @@ const SADVERTORIAL: StaticAdvertorialProps = {
   dek: "It looks like regular coffee. But 12 clinically studied superfoods are doing the quiet work behind the scenes.",
   heroImageUrl: null, heroCaption: "Amazing Coffee — 12 superfoods in one cup.",
   body: [
-    "Most people over 50 reach for coffee out of habit. A growing number are swapping it for one that does more than wake them up — without the jitters or the 2pm crash.",
-    "Amazing Coffee blends 12 clinically studied superfoods — including Chaga, Turmeric and Cordyceps — to support clean energy, sharper focus and cardiovascular health, one cup at a time.",
+    "Most people over 50 reach for coffee out of habit. A growing number are swapping it for one built around 12 clinically studied superfoods for healthy weight and younger-looking skin.",
+    "Chaga, Turmeric and Green Coffee are studied for metabolism, antioxidants and skin — so the coffee you already love quietly works with you, not against you.",
   ],
-  rating: 5, reviewCount: "2,291",
+  rating: 5, reviewCount: "12,291",
   badges: ["Non-GMO", "3rd-Party Tested", "Made in USA", "Sugar Free"],
   guarantee: "Backed by a 30-day money-back guarantee.",
   cta: "Read more →", accent: "#B0451C",
 };
 
 const STESTIMONIAL: StaticTestimonialProps = { width: 1080, height: 1350, brandBg: "#FBF8F2", accent: "#B0451C", quote: "I've lost 32 pounds in 9 weeks.", body: "I started drinking Amazing Coffee 9 weeks ago. Along with a healthy diet, the results have been amazing.", reviewerName: "Kristen N.", verified: true, faceImageUrl: null, productImageUrl: null, productTitle: "Amazing Coffee", reviewCount: "2,291", badges: ["Non-GMO", "3rd-Party Tested"], cta: "Shop now →" };
-const SAUTHORITY: StaticAuthorityProps = { width: 1080, height: 1350, brandBg: "#FBF8F2", accent: "#B0451C", expertName: "Lindsey Ray", expertTitle: "Registered Dietitian, MS, RD", quote: "This coffee checks all the boxes — antioxidant rich, supports weight loss, and it tastes delicious.", bullets: ["12 clinically studied superfoods", "Clean energy, no jitters", "Curbs cravings"], faceImageUrl: null, productImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested", "Made in USA"], cta: "Learn more →" };
+const SAUTHORITY: StaticAuthorityProps = { width: 1080, height: 1350, brandBg: "#FBF8F2", accent: "#B0451C", expertName: "Lindsey Ray", expertTitle: "Registered Dietitian, MS, RD", quote: "This coffee checks all the boxes — antioxidant rich, supports weight loss, and it tastes delicious.", bullets: ["Supports healthy weight loss", "Antioxidants that fight aging", "Improves skin elasticity"], faceImageUrl: null, productImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested", "Made in USA"], cta: "Learn more →" };
 const SBIGCLAIM: StaticBigClaimProps = { width: 1080, height: 1350, accent: "#B0451C", eyebrow: "After 50, read this", hook: "Your coffee is aging you.", emphasis: "aging you", reveal: "This one is built to fight back — 12 superfoods studied for antioxidants, weight and younger-looking skin.", productImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested", "Sugar Free"], cta: "Shop now →" };
-const SBEFOREAFTER: StaticBeforeAfterProps = { width: 1080, height: 1350, accent: "#B0451C", headline: "From 2pm crash to all-day clarity", beforeLabel: "Before", afterLabel: "After", beforeText: "Jittery mornings, afternoon energy crash.", afterText: "Clean energy and focus that lasts.", beforeImageUrl: null, afterImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested"], cta: "Shop now →" };
+const SBEFOREAFTER: StaticBeforeAfterProps = { width: 1080, height: 1350, accent: "#B0451C", headline: "The transformation people are talking about", beforeLabel: "Before", afterLabel: "After", beforeText: "Where she started.", afterText: "Lighter, glowing — and getting compliments.", beforeImageUrl: null, afterImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested"], cta: "Shop now →" };
 
 const EXAMPLE_DEFAULT: ExampleAdProps = {
   width: 1080,
