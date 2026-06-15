@@ -41,17 +41,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!campaign) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const videoId = typeof body.video_id === "string" ? body.video_id : null;
+  // Auto-select the latest ready media (video OR static) when no explicit id is
+  // passed. Statics publish as image creatives (adToolPublishToMeta branches on
+  // media_kind); the operator can pass a specific video_id to pick an archetype.
   const { data: video } = await auth.admin
     .from("ad_videos")
-    .select("id, final_mp4_url, status")
+    .select("id, final_mp4_url, static_jpg_url, media_kind, status")
     .eq("campaign_id", id)
-    .eq("media_kind", "video")
     .eq("status", "ready")
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   const useVideoId = videoId || video?.id || null;
-  if (!useVideoId) return NextResponse.json({ error: "no_ready_video" }, { status: 400 });
+  if (!useVideoId) return NextResponse.json({ error: "no_ready_media" }, { status: 400 });
 
   const headlines = arr(body.headlines), primaryTexts = arr(body.primary_texts);
   const ctaType = META_CTA_TYPES.includes(body.cta_type) ? body.cta_type : "SHOP_NOW";

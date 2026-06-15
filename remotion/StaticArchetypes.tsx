@@ -52,9 +52,15 @@ const frame = (p: Common) => ({ paddingTop: (p.safeTopPct ?? 0) * p.height, padd
 export interface StaticTestimonialProps extends Common { brandBg: string; quote: string; body?: string; reviewerName: string; verified: boolean; faceImageUrl?: string | null; productImageUrl?: string | null; productTitle: string; reviewCount: string; }
 export const StaticTestimonial: React.FC<StaticTestimonialProps> = (p) => {
   const u = p.width / 1080; const accent = p.accent || "#B0451C";
+  // Portrait (9:16) is far taller than the content needs → centering left a dead
+  // gap in the middle. Header / GROWING centered middle / footer distributes the
+  // whitespace, the quote bumps up, and the product anchors the mid-frame so it
+  // reads full, not sparse.
+  const portrait = p.height / p.width > 1.5;
+  const quoteSize = (portrait ? 88 : 76) * u;
   return (
     <AbsoluteFill style={{ background: p.brandBg || "#FBF8F2", fontFamily: mont, color: "#1A140F", ...frame(p) }}>
-      <div style={{ flex: 1, padding: `${56 * u}px ${64 * u}px`, display: "flex", flexDirection: "column", justifyContent: "center", gap: 36 * u }}>
+      <div style={{ flex: 1, padding: `${56 * u}px ${64 * u}px`, display: "flex", flexDirection: "column", gap: 32 * u }}>
         <div style={{ display: "flex", alignItems: "center", gap: 28 * u }}>
           <SafeImg src={p.faceImageUrl} style={{ width: 180 * u, height: 180 * u, borderRadius: 999, objectFit: "cover", border: `${5 * u}px solid #fff`, boxShadow: `0 ${8 * u}px ${24 * u}px rgba(0,0,0,0.18)`, flexShrink: 0 }} />
           <div>
@@ -63,11 +69,18 @@ export const StaticTestimonial: React.FC<StaticTestimonialProps> = (p) => {
             {p.verified && <div style={{ marginTop: 6 * u }}><VerifiedTag s={28 * u} /></div>}
           </div>
         </div>
-        <div style={{ fontWeight: 800, fontSize: 76 * u, lineHeight: 1.08, letterSpacing: -1 * u }}>
-          <span style={{ color: accent }}>“</span>{p.quote}<span style={{ color: accent }}>”</span>
+        {/* Growing, vertically-centered middle — fills the tall 9:16 frame. */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: 32 * u, minHeight: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: quoteSize, lineHeight: 1.08, letterSpacing: -1 * u }}>
+            <span style={{ color: accent }}>“</span>{p.quote}<span style={{ color: accent }}>”</span>
+          </div>
+          {p.body && <div style={{ fontWeight: 500, fontSize: 36 * u, lineHeight: 1.4, color: "#473C32" }}>{p.body}</div>}
+          {portrait && p.productImageUrl && (
+            <div style={{ display: "flex", justifyContent: "center", marginTop: 8 * u }}>
+              <SafeImg src={p.productImageUrl} style={{ height: 360 * u, maxWidth: "70%", objectFit: "contain", filter: `drop-shadow(0 ${14 * u}px ${28 * u}px rgba(0,0,0,0.18))` }} />
+            </div>
+          )}
         </div>
-        {p.body && <div style={{ fontWeight: 500, fontSize: 36 * u, lineHeight: 1.4, color: "#473C32" }}>{p.body}</div>}
-        <div style={{ flex: 1 }} />
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 * u }}>
           <div style={{ display: "flex", alignItems: "center", gap: 18 * u }}>
             <SafeImg src={p.productImageUrl} style={{ height: 130 * u, width: 130 * u, objectFit: "contain" }} />

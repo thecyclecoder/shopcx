@@ -9,11 +9,14 @@ interface PageOpt extends Opt { instagram_user_id: string | null }
 interface PublishJob { id: string; publish_status: string; meta_ad_id: string | null; meta_account_id: string; error: string | null; created_at: string }
 
 export function PublishToMeta({
-  workspaceId, campaignId, videoReady, publishJobs, onChange,
+  workspaceId, campaignId, videoReady, defaultDestinationUrl, publishJobs, onChange,
 }: {
   workspaceId: string;
   campaignId: string;
+  /** Ready to publish (video OR static media is rendered). */
   videoReady: boolean;
+  /** Campaign's default landing URL (ad_campaigns.landing_url) — pre-fills the destination. */
+  defaultDestinationUrl?: string;
   publishJobs: PublishJob[];
   onChange: () => void;
 }) {
@@ -22,8 +25,14 @@ export function PublishToMeta({
   const [primaryTexts, setPrimaryTexts] = useState<string[]>([""]);
   const [description, setDescription] = useState("");
   const [cta, setCta] = useState("SHOP_NOW");
-  const [destUrl, setDestUrl] = useState("");
+  const [destUrl, setDestUrl] = useState(defaultDestinationUrl || "");
   const [genBusy, setGenBusy] = useState(false);
+
+  // Pre-fill the destination from the campaign's landing_url once it loads (don't
+  // clobber an edit the operator has already started).
+  useEffect(() => {
+    if (defaultDestinationUrl) setDestUrl((cur) => cur || defaultDestinationUrl);
+  }, [defaultDestinationUrl]);
 
   const [pages, setPages] = useState<PageOpt[]>([]);
   const [accounts, setAccounts] = useState<Opt[]>([]);

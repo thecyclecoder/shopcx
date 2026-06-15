@@ -7,6 +7,22 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { AD_SCENE_STYLES, DEFAULT_SCENE_STYLE, AVATAR_BROLL_ACTIONS } from "@/lib/ad-tool-config";
 import { PublishToMeta } from "./PublishToMeta";
 
+// Static-ad archetypes. The cold-50+ "killer" set is trust-first (both 4:5 + 9:16);
+// the legacy set is kept for back-compat. Mirrors KILLER_ARCHETYPES in ad-statics.ts.
+const KILLER_STATIC_DEFS: Array<{ k: string; label: string }> = [
+  { k: "advertorial", label: "Advertorial" },
+  { k: "testimonial", label: "Testimonial" },
+  { k: "authority", label: "Authority" },
+  { k: "big_claim", label: "Big claim" },
+  { k: "before_after", label: "Before / after" },
+];
+const LEGACY_STATIC_DEFS: Array<{ k: string; label: string }> = [
+  { k: "review", label: "Review screenshot" },
+  { k: "offer", label: "Offer card" },
+  { k: "benefit_authority", label: "Benefit / authority" },
+];
+const STATIC_DEFS = [...KILLER_STATIC_DEFS, ...LEGACY_STATIC_DEFS];
+
 interface Campaign {
   id: string;
   name: string;
@@ -229,6 +245,7 @@ export default function AdDetailPage() {
   const musicReady = segments.filter((s) => s.kind === "music" && s.status === "ready");
   const musicGenerating = segments.some((s) => s.kind === "music" && s.status === "generating");
   const videoReady = videoOutputs.some((v) => v.status === "ready");
+  const staticReady = staticOutputs.some((v) => v.status === "ready");
   const isRendering = campaign.status === "rendering" || videos.some((v) => v.status === "rendering");
 
   type StageState = "done" | "running" | "ready" | "blocked";
@@ -395,19 +412,15 @@ export default function AdDetailPage() {
       )}
 
       {/* Publish the rendered video to Meta (Facebook/Instagram) ads. */}
-      <PublishToMeta workspaceId={workspace.id} campaignId={id} videoReady={videoReady} publishJobs={publishJobs} onChange={load} />
+      <PublishToMeta workspaceId={workspace.id} campaignId={id} videoReady={videoReady || staticReady} defaultDestinationUrl={(campaign as any)?.landing_url || undefined} publishJobs={publishJobs} onChange={load} />
 
       {/* Static ads — a separate, design-led process (not video frames). */}
       <div className="mt-8 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Static ads</h2>
-        <span className="text-xs text-zinc-400">Designed stills from your product data — 1:1 / 4:5 / 9:16</span>
+        <span className="text-xs text-zinc-400">Designed stills from your product data — trust-first for cold 50+ (4:5 + 9:16)</span>
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
-        {[
-          { k: "review", label: "Review screenshot" },
-          { k: "offer", label: "Offer card" },
-          { k: "benefit_authority", label: "Benefit / authority" },
-        ].map((a) => (
+        {KILLER_STATIC_DEFS.map((a) => (
           <button
             key={a.k}
             onClick={() => generateStatic(a.k)}
@@ -416,14 +429,23 @@ export default function AdDetailPage() {
             + {a.label}
           </button>
         ))}
+        <span className="mx-1 self-center text-xs text-zinc-300 dark:text-zinc-600">·</span>
+        {LEGACY_STATIC_DEFS.map((a) => (
+          <button
+            key={a.k}
+            onClick={() => generateStatic(a.k)}
+            className="rounded-md border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-500 dark:hover:bg-zinc-800"
+          >
+            + {a.label}
+          </button>
+        ))}
       </div>
       {staticOutputs.length === 0 ? (
-        <p className="mt-3 text-sm text-zinc-500">No static ads yet. Generate one above — each makes 3 formats.</p>
+        <p className="mt-3 text-sm text-zinc-500">No static ads yet. Generate one above — each makes both feed (4:5) + stories (9:16).</p>
       ) : (
-        ["review", "offer", "benefit_authority"].map((arch) => {
+        STATIC_DEFS.map(({ k: arch, label }) => {
           const rows = staticOutputs.filter((v) => v.meta?.archetype === arch);
           if (!rows.length) return null;
-          const label = arch === "review" ? "Review screenshot" : arch === "offer" ? "Offer card" : "Benefit / authority";
           return (
             <div key={arch} className="mt-4">
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">{label}</p>

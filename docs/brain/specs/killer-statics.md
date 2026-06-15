@@ -1,6 +1,13 @@
-# Killer statics — cold-50+ archetypes, both formats ⏳
+# Killer statics — cold-50+ archetypes, both formats 🚧
 
-Status: ⏳ planned (designs proven locally) · owner: Dylan · created 2026-06-15
+Status: 🚧 code-complete (P1–P4 built + typechecked on branch `killer-statics-iso`) · owner: Dylan · created 2026-06-15
+
+> **Remaining operational steps before this is fully shipped (then fold + delete this spec):**
+> 1. Apply the migration `supabase/migrations/20260615120000_ad_campaigns_landing_url.sql` (adds `ad_campaigns.landing_url`). Helper: `scripts/_apply-landing-url.ts <region> <prefix>` (needs the correct Supabase pooler region).
+> 2. Re-run `scripts/deploy-remotion-lambda.ts` so the Lambda site has the updated `remotion/StaticArchetypes.tsx` (9:16 testimonial fix) + `remotion/AdStatic.tsx` (SafeImg).
+> 3. Verify a render in-app: open an Amazing Coffee campaign → generate each killer archetype → confirm 4:5 + 9:16 land on Lambda (the SafeImg + fresh-signed-URL fix should clear the old static-on-Lambda failure).
+> 4. Seed the publish-ready campaigns: `npx tsx scripts/seed-killer-statics.ts` (creates angles + campaigns + landing_url, fires renders, pre-generates Meta copy) → open each + click Publish.
+> 5. Dylan design pass on the five archetype components (visual iteration in `remotion/StaticAdvertorial.tsx` + `remotion/StaticArchetypes.tsx`).
 
 ## Context — why this exists
 
@@ -60,10 +67,10 @@ Investigation (2026-06-15) found the Meta publish path is **video-only** and sta
 4. **Seed step** — upload the rendered statics to the `ad-tool` bucket (`finals/{ws}/{id}.jpg`), create one `ad_campaigns` row per static (with `angle_id` + `landing_url`) + its `ad_videos` static rows (4:5 + 9:16, `media_kind='static'`, `status='ready'`, linked via `format_variant_of_id`), and pre-generate the Meta copy (4 headlines + 4 primary + desc + CTA) so the operator only clicks **Publish**. Seed all archetypes including before/after (publishable for this account) → each routed to its mapped landing page.
 
 ## Phases
-- ⏳ **P1 — Productionize the 5 archetype components** (already built locally): finalize, fix the 9:16 testimonial sparse-middle, add safe-zone assertions.
-- ⏳ **P2 — Copy + hero generators** reusing `ad-angles`/`ad-validator`/`gemini`; angle→archetype/hero mapping; permanent per-product ingredient/face hero set.
-- ⏳ **P3 — Wire into the render path** (`ad-tool/render-requested` static branch → Lambda, both formats) + Lambda `SafeImg` fix; `ad_videos` rows; campaign-page archetype picker + audience-aware default.
-- ⏳ **P4 — Publish path + seed** (see "Publish path" above): image-creative support in `meta-ads.ts`, `landing_url` migration + archetype→lander routing, then **seed the proven Amazing Coffee statics as campaigns with angle metadata + pre-generated copy** so Dylan only clicks Publish. ([[../lifecycles/ad-publish]])
+- ✅ **P1 — Productionize the 5 archetype components** — components built + registered in `remotion/Root.tsx`; 9:16 testimonial sparse-middle fixed (`StaticTestimonial` now header / growing-centered-middle / footer + portrait product anchor); 9:16 safe-zone insets applied per `KILLER_FORMATS` (`safeTopPct`/`safeBottomPct`); `AdStatic.tsx` got the SafeImg fix.
+- ✅ **P2 — Copy + hero generators** — new `src/lib/ad-statics-copy.ts` (advertorial / big_claim / before_after via Opus, gated through `validateAdScript` for banned words; testimonial/authority use REAL review/endorsement text) + `src/lib/ad-statics.ts` (`loadKillerAssets`, hero auto-select by angle, ingredient/face hero gen via `gemini` with reuse-if-present, `buildKillerStatic` → fresh signed URLs). Review counts = real + 10,000; badges from PI certs.
+- ✅ **P3 — Wire into the render path** — `adToolStaticRequested` (`ad-tool/static-requested`) branches killer vs legacy; killer renders both 4:5 + 9:16 → `ad_videos` (`media_kind='static'`, `meta.archetype`, `format_variant_of_id`); fresh signed URLs + SafeImg components clear the Lambda static failure; campaign-page archetype picker (`KILLER_STATIC_DEFS`) + grouped outputs; static route accepts the killer archetypes.
+- ✅ **P4 — Publish path + seed** — `meta-ads.ts` `createAdCreative` supports `imageHash` → `object_story_spec.image_data`; `adToolPublishToMeta` branches on `media_kind` (static → `uploadAdImage` → image creative); publish route dropped the `media_kind='video'` filter; `ad_campaigns.landing_url` migration + PublishToMeta pre-fills from it; `scripts/seed-killer-statics.ts` seeds angles + campaigns + landing_url + fires renders + pre-generates Meta copy. ([[../lifecycles/ad-publish]]) **Operational run pending — see the steps at the top.**
 
 ## Files to touch (anticipated)
 - `remotion/StaticAdvertorial.tsx`, `remotion/StaticArchetypes.tsx` — new (built locally on this branch)

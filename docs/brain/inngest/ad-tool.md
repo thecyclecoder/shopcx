@@ -54,7 +54,10 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 
 ### `ad-tool-static-requested` (static ads — separate process)
 - **Trigger:** event `ad-tool/static-requested` (`{ workspace_id, campaign_id, archetype, copy? }`) · **Retries:** 1
-- A **distinct** pipeline from video (no talking head/b-roll/music/timeline). `loadStaticInputs` (reviews, endorsement, benefits, product image) → PURE `build{Review,Offer,BenefitAuthority}Props` → renders the matching designed still (`StaticReview`/`StaticOffer`/`StaticBenefitAuthority`) via `renderStillCompositionTo` across **3 formats** (`feed_1x1`/`feed_4x5`/`stories_9x16`) → `ad_videos` rows (`media_kind='static'`, `meta.archetype`). Route: `POST /api/ads/campaigns/[id]/static`. See [[../lifecycles/ad-static]].
+- A **distinct** pipeline from video (no talking head/b-roll/music/timeline). The handler **branches on archetype**:
+  - **Legacy** (`review`/`offer`/`benefit_authority`): `loadStaticInputs` → PURE `build{Review,Offer,BenefitAuthority}Props` → `StaticReview`/`StaticOffer`/`StaticBenefitAuthority` across **3 formats** (`feed_1x1`/`feed_4x5`/`stories_9x16`).
+  - **Killer (cold-50+)** (`advertorial`/`testimonial`/`authority`/`big_claim`/`before_after`): `loadKillerAssets` + `buildKillerStatic` ([[../libraries/ad-statics]], async — generates copy + heroes, fresh signed URLs) → the matching `Static*` composition across **both formats** (`feed_4x5` + `stories_9x16` with safe-zone insets).
+  - Both write `ad_videos` rows (`media_kind='static'`, `meta.archetype`, `format_variant_of_id`) via `renderStillCompositionTo`. Route: `POST /api/ads/campaigns/[id]/static`. See [[../lifecycles/ad-static]] + [[../specs/killer-statics]].
 
 ### `ad-tool-publish-to-meta` (publish ad to Meta)
 - **Trigger:** event `ad-tool/publish-to-meta` (`{ workspace_id, job_id }`) · **Retries:** 1
