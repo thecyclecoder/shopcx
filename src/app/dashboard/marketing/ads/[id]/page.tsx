@@ -247,6 +247,12 @@ export default function AdDetailPage() {
   const videoReady = videoOutputs.some((v) => v.status === "ready");
   const staticReady = staticOutputs.some((v) => v.status === "ready");
   const isRendering = campaign.status === "rendering" || videos.some((v) => v.status === "rendering");
+  // Static-first campaign (e.g. the seeded killer statics): no video script/hero/
+  // segments/outputs. Hide the whole video-production UI and lead with the statics
+  // so the operator isn't staring at talking-head/b-roll controls for an image ad.
+  const isStaticCampaign =
+    staticOutputs.length > 0 ||
+    (!campaign.script_text && !campaign.hero_image_url && videoOutputs.length === 0 && segments.length === 0);
 
   type StageState = "done" | "running" | "ready" | "blocked";
   const heroState: StageState = busyStage === "hero" ? "running" : campaign.hero_image_url ? "done" : "ready";
@@ -287,6 +293,14 @@ export default function AdDetailPage() {
 
       {message && <p className="mb-4 text-sm text-emerald-600">{message}</p>}
 
+      {isStaticCampaign && (
+        <p className="mb-6 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+          This is a <strong>static (image) ad</strong> campaign. Generate the designed stills below — each archetype makes both feed (4:5) + stories (9:16) — then publish.
+        </p>
+      )}
+
+      {!isStaticCampaign && (
+      <>
       {/* Production — staged, in order. Each stage lights up the next. */}
       <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Production</h2>
@@ -410,11 +424,10 @@ export default function AdDetailPage() {
           ))}
         </div>
       )}
+      </>
+      )}
 
-      {/* Publish the rendered video to Meta (Facebook/Instagram) ads. */}
-      <PublishToMeta workspaceId={workspace.id} campaignId={id} videoReady={videoReady || staticReady} defaultDestinationUrl={(campaign as any)?.landing_url || undefined} publishJobs={publishJobs} onChange={load} />
-
-      {/* Static ads — a separate, design-led process (not video frames). */}
+      {/* Static ads — designed stills. The primary creative for image campaigns. */}
       <div className="mt-8 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Static ads</h2>
         <span className="text-xs text-zinc-400">Designed stills from your product data — trust-first for cold 50+ (4:5 + 9:16)</span>
@@ -458,6 +471,11 @@ export default function AdDetailPage() {
           );
         })
       )}
+
+      {/* Publish to Meta — works for static (image creative) + video campaigns. */}
+      <div className="mt-8">
+        <PublishToMeta workspaceId={workspace.id} campaignId={id} videoReady={videoReady || staticReady} defaultDestinationUrl={(campaign as any)?.landing_url || undefined} publishJobs={publishJobs} onChange={load} />
+      </div>
     </div>
   );
 }

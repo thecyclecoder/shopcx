@@ -21,6 +21,8 @@ Static ads are single, design-led, scroll-stopping **stills** — not frozen vid
    - For each of **3 formats** (`feed_1x1` 1080², `feed_4x5` 1080×1350, `stories_9x16` 1080×1920): `renderStillCompositionTo(<composition>, {width,height,...props})` → upload → `ad_videos` row (`media_kind='static'`, `meta.archetype`, `static_jpg_url`).
 3. The campaign page groups static outputs by `meta.archetype` with previews + download.
 
+**Static-first campaign view:** the campaign detail page (`/dashboard/marketing/ads/[id]`) detects a static-first campaign (`isStaticCampaign` — has static outputs, or no video script/hero/segments/outputs, e.g. the seeded killer statics) and **hides the whole video-production UI** (Production stages, hero, script, b-roll, creative library, video formats), leading with the **Static ads** section + Publish. Avoids showing talking-head/render controls for an image ad.
+
 ## Design / engine
 
 - **Hybrid, designed-first**: precise Remotion templates (brand palette, Anton + Inter, stars/badges/cards) — not AI-generated layout. `StaticOffer` supports an optional **Nano Banana Pro backdrop** (`backdropUrl`) with crisp overlaid text (plumbing in `buildOfferProps`; auto-gen is a future toggle).
