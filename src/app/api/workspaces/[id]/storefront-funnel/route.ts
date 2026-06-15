@@ -402,10 +402,54 @@ export async function GET(
     recent: recentAbandoned,
   };
 
+  // ── Lead-capture popup funnel (shown → engaged → email → phone) ──
+  // shown/engaged/converted come from popup_decisions (one row per session);
+  // the email step (step 1) isn't a popup_decisions flag, so it's counted
+  // from storefront_leads by source. variant: discount = offer, quiz = survey.
+  const { data: popupDecisionRows } = await admin
+    .from("popup_decisions")
+    .select("variant, shown, engaged, converted, session_id")
+    .eq("workspace_id", workspaceId)
+    .gte("created_at", startIso)
+    .lte("created_at", endIso);
+  const { data: popupLeadRows } = await admin
+    .from("storefront_leads")
+    .select("source, email, session_id")
+    .eq("workspace_id", workspaceId)
+    .gte("created_at", startIso)
+    .lte("created_at", endIso);
+
+  const popupVariants = [
+    { variant: "discount", label: "Offer", shown: 0, engaged: 0, email: 0, phone: 0 },
+    { variant: "quiz", label: "Survey", shown: 0, engaged: 0, email: 0, phone: 0 },
+  ];
+  const byVariant = new Map(popupVariants.map((v) => [v.variant, v]));
+  for (const r of (popupDecisionRows || []) as { variant: string; shown: boolean; engaged: boolean; converted: boolean; session_id: string | null }[]) {
+    if (r.session_id && internalSessions.has(r.session_id)) continue;
+    const v = byVariant.get(r.variant);
+    if (!v) continue; // skip "none" (suppressed)
+    if (r.shown) v.shown++;
+    if (r.engaged) v.engaged++;
+    if (r.converted) v.phone++;
+  }
+  const sourceToVariant: Record<string, string> = { popup_discount: "discount", popup_quiz: "quiz" };
+  for (const r of (popupLeadRows || []) as { source: string | null; email: string | null; session_id: string | null }[]) {
+    if (r.session_id && internalSessions.has(r.session_id)) continue;
+    if (!r.email) continue;
+    const v = byVariant.get(sourceToVariant[r.source || ""] || "");
+    if (v) v.email++;
+  }
+  const popupTotals = popupVariants.reduce(
+    (acc, v) => ({ shown: acc.shown + v.shown, engaged: acc.engaged + v.engaged, email: acc.email + v.email, phone: acc.phone + v.phone }),
+    { shown: 0, engaged: 0, email: 0, phone: 0 },
+  );
+  const popupFunnel = { byVariant: popupVariants, totals: popupTotals };
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
     leads_generated: leadsGenerated,
+    popupFunnel,
     funnel,
     packBreakdown,
     topProducts,

@@ -30,6 +30,8 @@ One row per smart-popup decision per session (storefront-mvp Phase 4). Logs the 
 
 `decided_by` × `converted` proves rules-vs-Haiku lift; `variant` × `converted` proves discount-vs-quiz; `reason` shows which hesitation signals convert.
 
+Surfaced in the **Storefront funnel dashboard** (`/dashboard/storefront/funnel` → "Lead-capture popup" panel): the `/api/workspaces/[id]/storefront-funnel` route joins this table with [[storefront_leads]] to render the shown → engaged → email(step 1) → phone(step 2) funnel split by variant (offer/survey), with per-step %. shown/engaged/converted come from here; the email step is counted from [[storefront_leads]] by `source` (no email flag exists on this table).
+
 ---
 
 [[../README]] · [[../lifecycles/storefront-checkout]] · [[../libraries/popup-decide]] · [[../tables/storefront_leads]] · [[../../CLAUDE]]

@@ -48,6 +48,10 @@ interface FunnelData {
   range: { start: string; end: string };
   total_sessions: number;
   leads_generated: number;
+  popupFunnel?: {
+    byVariant: Array<{ variant: string; label: string; shown: number; engaged: number; email: number; phone: number }>;
+    totals: { shown: number; engaged: number; email: number; phone: number };
+  };
   funnel: FunnelStepRow[];
   topProducts: Array<{ product_id: string; title: string; handle: string | null; pack_selected_count: number }>;
   packBreakdown?: Array<{ label: string; count: number }>;
@@ -186,6 +190,8 @@ export default function StorefrontFunnelPage() {
             </h2>
             <FunnelChart funnel={data.funnel} topOfFunnel={topOfFunnel} />
           </section>
+
+          {data.popupFunnel && <PopupFunnelPanel data={data.popupFunnel} />}
 
           <div className="mb-8 grid gap-4 lg:grid-cols-3">
             <BreakdownCard
@@ -417,6 +423,66 @@ function FunnelChart({ funnel, topOfFunnel }: { funnel: FunnelStepRow[]; topOfFu
         );
       })}
     </div>
+  );
+}
+
+function PopupFunnelPanel({ data }: { data: NonNullable<FunnelData["popupFunnel"]> }) {
+  const pct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
+  const rows = [
+    ...data.byVariant.map((v) => ({ ...v, isTotal: false })),
+    { variant: "total", label: "Total", ...data.totals, isTotal: true },
+  ];
+  // A cell shows the count and, beneath it, its share of that row's "shown".
+  const Cell = ({ n, shown, pctLabel }: { n: number; shown: number; pctLabel?: string }) => (
+    <td className="py-2 pr-2 text-right tabular-nums">
+      <span className="font-semibold text-zinc-900 dark:text-zinc-100">{n.toLocaleString()}</span>
+      {pctLabel !== "" && <span className="ml-1.5 text-xs text-zinc-400">{pctLabel ?? pct(n, shown)}</span>}
+    </td>
+  );
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+          Lead-capture popup
+        </h2>
+        <span className="text-[11px] text-zinc-400">
+          Offer = discount variant · Survey = quiz variant · % is of that row&apos;s shown
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+              <th className="py-2 pr-2">Variant</th>
+              <th className="py-2 pr-2 text-right">Shown</th>
+              <th className="py-2 pr-2 text-right">Engaged</th>
+              <th className="py-2 pr-2 text-right">Email (step 1)</th>
+              <th className="py-2 pr-2 text-right">Phone (step 2)</th>
+              <th className="py-2 pr-2 text-right">Email→Phone</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr
+                key={r.variant}
+                className={`border-b border-zinc-100 last:border-0 dark:border-zinc-800/50 ${r.isTotal ? "font-semibold" : ""}`}
+              >
+                <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{r.label}</td>
+                <Cell n={r.shown} shown={r.shown} pctLabel="" />
+                <Cell n={r.engaged} shown={r.shown} />
+                <Cell n={r.email} shown={r.shown} />
+                <Cell n={r.phone} shown={r.shown} />
+                <td className="py-2 pr-2 text-right tabular-nums">
+                  <span className={r.email > 0 ? "font-semibold text-emerald-600" : "text-zinc-400"}>
+                    {pct(r.phone, r.email)}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
