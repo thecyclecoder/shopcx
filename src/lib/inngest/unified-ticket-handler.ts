@@ -1237,14 +1237,16 @@ Is this message a continuation of the ${pbName.toLowerCase()} flow, or is the cu
 
 PLAYBOOK = the customer is answering the playbook's prompt, providing requested info (an order #, a yes/no, a specific item they want returned/refunded), confirming, asking a clarifying question about the same issue, or pushing back on an offer in the same flow.
 
-NEW_TOPIC = the customer is switching intent. Examples (any of these → NEW_TOPIC, even if the surrounding flow is similar):
+ACCEPT/REJECT OVERRIDES EVERYTHING: If the message accepts or rejects the offer currently on the table ("yes do it", "I'll accept the refund", "no, I want my money back", "that works"), it is PLAYBOOK — even when it is bundled with a tag-on question (e.g. "I'll accept the refund. Are you cancelling the June 15 order?"). The playbook's acceptance handler answers the question AND executes the next step (it generates the return label / issues the resolution). Routing an acceptance to NEW_TOPIC drops it out of the playbook, where there is no return-label guardrail — so the accept signal always wins.
+
+NEW_TOPIC = the customer is switching intent, with NO accept/reject of the active offer. Examples (any of these → NEW_TOPIC, even if the surrounding flow is similar):
   • Requesting a different action: "please pause my subscription" while in a refund flow → NEW_TOPIC
   • Asking about a different subscription / order
-  • Adding a new question on top of the active case ("also, how do I use my points?")
+  • Adding a new question with no accept/reject ("also, how do I use my points?")
   • Crisis mention ("I got the wrong flavor") while in a generic return flow
   • Pure gratitude, satisfaction, or acknowledgement with no new ask ("thank you!", "right on", "perfect, ty", "👍") → NEW_TOPIC. A happy thank-you is NOT pushback on an offer.
 
-When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds.
+When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds. The ONE exception to "lean NEW_TOPIC": a clear accept/reject of the active offer is always PLAYBOOK.
 
 Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: wsId, ticketId: tid, purpose: "playbook-drift-check" });
           return (result || "").trim().toUpperCase().includes("PLAYBOOK");

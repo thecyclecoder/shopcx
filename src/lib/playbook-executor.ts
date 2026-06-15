@@ -1638,9 +1638,9 @@ async function handleOfferException(
     const response = await aiGenerate(
       basePrompt(step, pers, policyRules),
       `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\n${currentTier === 0
-        ? `CRITICAL: The customer's order is out of policy. You have NOT offered any exception. Restate ONLY that the order does not qualify under the store policy. Keep it to 2-3 sentences. Use different wording than previous messages.${sfPolicyUrl}`
+        ? `CRITICAL: The customer's order is out of policy. You have NOT offered any exception, and there is NO offer available to you at this step. Restate ONLY that the order does not qualify under the store policy. Keep it to 2-3 sentences. Use different wording than previous messages.${sfPolicyUrl}`
         : `CRITICAL: The customer rejected the ${bestOffer} offer (${resLabel}). Restate ONLY the ${bestOffer} offer with different wording. Do NOT mention any other option.`
-      } Acknowledge frustration briefly (one sentence max), then restate the current position. Do not argue or get defensive.`,
+      } Acknowledge frustration briefly (one sentence max), then restate the current position. Do not argue or get defensive. HARD RULE: Do NOT offer, name, hint at, tease, or pre-announce any refund, store credit, discount, replacement, or exception${currentTier === 0 ? "" : " other than the one stated above"}. Do NOT say "I'd like to make this right", "let me see what I can do", "let's explore options", or anything implying a better offer is coming — the system controls when (and which) exception is offered, not you. State only the current position.`,
     );
 
     return {

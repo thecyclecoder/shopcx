@@ -13,49 +13,47 @@ import { sendTicketReply } from "@/lib/email";
 ```ts
 async function sendTicketReply(args: {
   workspaceId: string;
-  ticketId: string;
-  fromName: string;
   toEmail: string;
   subject: string;
-  bodyHtml: string;
-  inReplyTo?: string;        // Gmail Message-ID of the original inbound email
-  references?: string[];
-  trackOpens?: boolean;
-  trackClicks?: boolean;
-}): Promise<{ resendEmailId: string }>
+  body: string;              // HTML — wrapped in a styled <div> by the helper
+  inReplyTo: string | null;  // Gmail Message-ID; sets BOTH In-Reply-To and References
+  agentName: string;         // persona display name, e.g. "Suzie" → from "Suzie via {workspaceName}"
+  workspaceName: string;
+}): Promise<{ messageId?: string; error?: string }>
 ```
+
+The `from` line is `"{agentName} via {workspaceName} <support@{resend_domain}>"`. Open/click tracking is **not** a param — the helper doesn't take `fromName`, `ticketId`, `references[]`, or `trackOpens/trackClicks`. `subject` gets a `Re:` prefix automatically when `inReplyTo` is set.
 
 ## Minimal example
 
 ```ts
-// Always thread into the ticket's existing email_message_id
 const { data: ticket } = await admin
   .from("tickets")
   .select("email_message_id, subject")
   .eq("id", ticketId).single();
 
-const { resendEmailId } = await sendTicketReply({
+const { messageId, error } = await sendTicketReply({
   workspaceId,
-  ticketId,
-  fromName: "Suzie",
   toEmail: customer.email,
-  subject: `Re: ${ticket.subject}`,
-  bodyHtml: "<p>Hi! Thanks for reaching out…</p>",
-  inReplyTo: ticket.email_message_id,
-  references: ticket.email_message_id ? [ticket.email_message_id] : undefined,
-  trackOpens: true,
-  trackClicks: true,
+  subject: ticket.subject,
+  body: "<p>Hi! Thanks for reaching out…</p>",
+  inReplyTo: ticket.email_message_id ?? null,
+  agentName: "Suzie",
+  workspaceName: "Superfoods Company",
 });
+if (error || !messageId) throw new Error(`send failed: ${error}`);
 
-// Persist the outbound message
-await admin.from("ticket_messages").insert({
+// Persist the outbound message (check the returned error — a bad insert is silent otherwise)
+const { error: insErr } = await admin.from("ticket_messages").insert({
   ticket_id: ticketId,
   direction: "outbound",
-  visibility: "public",
-  author_type: "ai",
-  body: bodyHtml,
-  resend_email_id: resendEmailId,
+  visibility: "external",   // CHECK constraint: 'external' | 'internal' — NOT 'public'
+  author_type: "ai",        // 'customer' | 'agent' | 'ai' | 'system'
+  body,
+  resend_email_id: messageId,
+  sent_at: new Date().toISOString(),
 });
+if (insErr) throw new Error(insErr.message);
 ```
 
 ## Outbound delay pattern
@@ -67,9 +65,9 @@ const delaySec = workspace.response_delays?.email ?? 60;
 await admin.from("ticket_messages").insert({
   ticket_id: ticketId,
   direction: "outbound",
-  visibility: "public",
+  visibility: "external",
   author_type: "ai",
-  body: bodyHtml,
+  body,
   pending_send_at: new Date(Date.now() + delaySec * 1000).toISOString(),
 });
 ```
@@ -80,9 +78,10 @@ The customer sees the message in the UI immediately; the actual transport call h
 
 - **Thread via `email_message_id`** (Gmail Message-ID stored on the ticket). NOT `resend_email_id` — that's only on our outbound. See [[../journeys/README]] § Email Threading.
 - **`resend_email_id` not `resend_id`.** Supabase-js silently drops unknown columns on insert. Spelling matters. See [[../tables/ticket_messages]] gotchas.
-- **Open + click tracking** is self-hosted, not Resend's. The helper passes the tracking flag to the body rewriter.
-- **Sandbox mode**: when `workspaces.sandbox_mode=true`, outbound messages become internal notes. The helper checks this — don't bypass.
-- **Reply-to / from**: `workspaces.transactional_from_email`, `transactional_from_name`, `transactional_reply_to_email` control these.
+- **`visibility` is a CHECK constraint: `'external'` or `'internal'` only.** `'public'` throws `ticket_messages_visibility_check`. The insert fails *silently* unless you capture `error` — always `.select()` or check the returned error.
+- **`sendTicketReply` destructures named args.** Passing `bodyHtml`/`fromName` instead of `body`/`agentName` doesn't error — the wrong keys are just `undefined`, and (with sandbox off) Resend sends a garbled "undefined via undefined" email. Match the signature exactly.
+- **Sandbox mode**: when `workspaces.sandbox_mode=true`, `getResendClient` returns null for non-member recipients and `sendTicketReply` returns `{ error: "Resend not configured" }` — nothing sends. Check the result.
+- **Reply-to / from**: `from` is built from `agentName` + `workspaceName` + `resend_domain`; `replyTo` is `workspaces.support_email` (falls back to `support@{resend_domain}`).
 
 ## Related
 
