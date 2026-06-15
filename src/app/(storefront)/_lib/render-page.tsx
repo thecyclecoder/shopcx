@@ -162,15 +162,20 @@ export function StorefrontPage({
         benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
       />
 
-      <StorefrontHeader
-        workspaceId={data.product.workspace_id}
-        productId={data.product.id}
-        productHandle={data.product.handle}
-        productTitle={data.product.title}
-        headerText={data.product.header_text}
-        headerColor={data.product.header_text_color}
-        headerWeight={data.product.header_text_weight}
-      />
+      {/* No storefront chrome on advertorial/before-after landers — the fixed
+          brand nav breaks the "native editorial article" illusion that makes an
+          advertorial convert. The masthead inside AdvertorialHero stands in for it. */}
+      {!advertorial && (
+        <StorefrontHeader
+          workspaceId={data.product.workspace_id}
+          productId={data.product.id}
+          productHandle={data.product.handle}
+          productTitle={data.product.title}
+          headerText={data.product.header_text}
+          headerColor={data.product.header_text_color}
+          headerWeight={data.product.header_text_weight}
+        />
+      )}
 
       <AutoCouponProvider workspaceId={data.workspace.id}>
       <AutoCouponWelcome />

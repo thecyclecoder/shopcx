@@ -35,6 +35,11 @@ Anchor every angle to the product's **core desires**, never to functional/second
 - Every asset renders **4:5 (feed) AND 9:16 (stories/reels)** from the same parametric component.
 - 9:16 uses Meta safe-zone insets (`safeTopPct` ~0.08 / `safeBottomPct` ~0.14) so the masthead clears the top overlay and the CTA clears the bottom nav. Assert content inside `safeCore` (`FORMAT_SPECS`) pre-encode.
 
+## Lander rendering rules
+- **Internally-created landers live on the in-house storefront domain** (`storefront_domain`, e.g. `shop.superfoodscompany.com/{handle}?variant=…`), NEVER the Shopify store (`superfoodscompany.com/products/…` has no lander code).
+- **No storefront chrome on advertorial/before-after landers.** The fixed brand nav header is suppressed (`render-page.tsx` gates `StorefrontHeader` on `!advertorial`) — a brand nav bar breaks the native-editorial illusion. The AdvertorialHero masthead stands in for it.
+- **Advertorial avatar hero = an avatar-holding-product shot**, never a UGC lifestyle model. A real slim model under "lost 30 lbs" copy reads false; a 50s avatar holding the product is believable. The generator borrows a product ad campaign's `hero_image_url` when the campaign has none.
+
 ## Landing routing (ad → page scent-match)
 - **Testimonial · Authority · Big-claim → existing PDP.**
 - **Advertorial → advertorial lander** ([[specs/advertorial-landers]]).

@@ -35,17 +35,23 @@ export function AdvertorialHero({ data, content }: { data: PageData; content: Ad
   return (
     <section data-section="advertorial-hero" className="w-full bg-[#FBF8F2]">
       <div className="mx-auto max-w-3xl px-5 pt-6 pb-10 md:px-8">
-        {/* Masthead — brand-owned, never impersonates a real outlet. */}
-        <div className="flex items-center justify-between border-b-2 border-zinc-900 pb-3">
-          <span className="rounded bg-zinc-900 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-[#FBF8F2]">
-            {content.sponsorLabel}
-          </span>
-          <span style={{ fontFamily: SERIF }} className="text-lg font-black uppercase tracking-wide text-zinc-900 sm:text-2xl">
+        {/* Masthead — brand-owned, never impersonates a real outlet. Stacked so
+            the serif title can't collide with the tags on narrow screens. */}
+        <div className="border-b-2 border-zinc-900 pb-3">
+          <div className="flex items-center justify-between">
+            <span className="rounded bg-zinc-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#FBF8F2] sm:text-[11px]">
+              {content.sponsorLabel}
+            </span>
+            <span className="text-[10px] font-bold uppercase tracking-widest sm:text-[11px]" style={{ color: "var(--storefront-accent)" }}>
+              Health
+            </span>
+          </div>
+          <div
+            style={{ fontFamily: SERIF }}
+            className="mt-2 text-center text-xl font-black uppercase tracking-wide text-zinc-900 sm:text-3xl"
+          >
             {content.publication}
-          </span>
-          <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: "var(--storefront-accent)" }}>
-            Health
-          </span>
+          </div>
         </div>
 
         <div className="mt-3 text-sm font-medium text-zinc-500">By the Editorial Team</div>

@@ -32,7 +32,7 @@ import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
 
 const WS = process.env.WS || "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const PID = process.env.PID || "ea433e56-0aa4-4b46-9107-feb11f77f533";
-const STOREFRONT = process.env.STOREFRONT_BASE || "https://superfoodscompany.com";
+const STOREFRONT_OVERRIDE = process.env.STOREFRONT_BASE || "";
 
 // Angle per archetype — anchored to the product's core desires (NEVER functional energy).
 const ANGLE_BY_ARCHETYPE: Record<KillerArchetype, { hook_slug: string; lf8_slot: number; lead_benefit_anchor: string; hook_one_liner: string; pain_now: string; desired_outcome: string }> = {
@@ -83,7 +83,11 @@ async function main() {
   const admin = createAdminClient();
   const { data: product } = await admin.from("products").select("title, handle").eq("id", PID).maybeSingle();
   const handle = (product as any)?.handle as string | undefined;
-  const pdp = handle ? `${STOREFRONT}/products/${handle}` : STOREFRONT;
+  // Internally-created landers live on the IN-HOUSE storefront domain
+  // (shop.superfoodscompany.com), NOT the Shopify store (superfoodscompany.com/products).
+  const { data: ws } = await admin.from("workspaces").select("storefront_domain").eq("id", WS).maybeSingle();
+  const base = STOREFRONT_OVERRIDE || ((ws as any)?.storefront_domain ? `https://${(ws as any).storefront_domain}` : "https://shop.superfoodscompany.com");
+  const pdp = handle ? `${base}/${handle}` : base;
   // Archetype → landing page (ad_creative_rules): testimonial/authority/big_claim
   // → PDP; advertorial → advertorial lander; before_after → before/after lander.
   // For the two lander archetypes we generate the lander page here (idempotent

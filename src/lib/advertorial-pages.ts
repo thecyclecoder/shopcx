@@ -454,7 +454,24 @@ export async function generateAdvertorialPagesForCampaign(
   const hasBeforeAfter = slots.has("before") && slots.has("after");
 
   const slug = angle ? slugForAngle(angle) : slugify(`${inputs.product_title}-default`);
-  const avatarPath = extractAdToolPath(campaign.hero_image_url);
+  // Avatar hero = a believable avatar-holding-product shot. Prefer this campaign's
+  // own hero; if it has none (e.g. seeded static campaigns), borrow one from any of
+  // the product's ad campaigns. Never fall back to a UGC lifestyle model — a real
+  // slim model under "lost 30 lbs" copy reads false; a 50s avatar holding the product
+  // is believable.
+  let avatarPath = extractAdToolPath(campaign.hero_image_url);
+  if (!avatarPath) {
+    const { data: heroCamp } = await admin
+      .from("ad_campaigns")
+      .select("hero_image_url")
+      .eq("workspace_id", workspaceId)
+      .eq("product_id", campaign.product_id)
+      .not("hero_image_url", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    avatarPath = extractAdToolPath((heroCamp as { hero_image_url?: string | null })?.hero_image_url || null);
+  }
 
   // Which variant(s) to generate. Advertorial always; before/after when the
   // product has the real transformation media to back it.
