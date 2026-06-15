@@ -21,7 +21,7 @@ Designs built + rendered with real Amazing Coffee PI; artifacts on Dylan's Deskt
 | **Testimonial** (face) | `remotion/StaticArchetypes.tsx` | branded (Montserrat) | lifestyle model + product | 4:5 + 9:16 |
 | **Authority** (face) | `StaticArchetypes.tsx` | branded | **real Lindsey Ray** (`endorsement_1_avatar`) + product | 4:5 + 9:16 |
 | **Big-claim — contrarian hook** | `StaticArchetypes.tsx` | branded | isolated product cutout | 4:5 + 9:16 (3 hook directions) |
-| **Before / after** | `StaticArchetypes.tsx` | branded | **real customer `before`/`after` photos** ⚠️ Meta-restricted | 4:5 + 9:16 |
+| **Before / after** | `StaticArchetypes.tsx` | branded | **real customer `before`/`after` photos** | 4:5 + 9:16 |
 
 ## Decisions locked (2026-06-15)
 - **Advertorial uses an editorial serif** (Playfair); it must NOT look branded — the un-ad look is its conversion mechanism. All other archetypes use the **storefront font (Montserrat)** — they're overt brand creative.
@@ -40,7 +40,7 @@ Designs built + rendered with real Amazing Coffee PI; artifacts on Dylan's Deskt
 - **Review counts display as actual + 10,000.** Amazing Coffee has 2,291 real reviews → show **12,291**. Generator: `displayCount = realCount + 10000`.
 - **Use REAL assets from `product_media`, not generated stand-ins, when they exist:** `endorsement_1_avatar` = the real Lindsey Ray headshot; `before`/`after` = real customer transformation photos; `ingredient_*` = real ingredient shots; `lifestyle_1`, `hero`. Generate only what's missing (e.g. a lifestyle testimonial model).
 - **Authority card must show the product** (anchors the endorsement to the SKU) + the endorser's real photo + their real PI quote.
-- ⚠️ **Meta before/after policy:** weight-loss before/after imagery is **prohibited in Meta ads** — the BeforeAfter archetype likely won't pass ad review. Keep it for the advertorial **lander** + organic social; don't auto-publish it as a Meta ad.
+- **Before/after is publishable for this Meta account** (Dylan, 2026-06-15) — treat it like any other archetype (publishable ad → before/after lander). Do not re-add a Meta before/after blocker. Still avoid specific weight-loss numbers as the ad's own claim (keep those in real testimonial quotes).
 
 ## Architecture
 1. **Copy generation** — Opus generates per-archetype copy (advertorial hero+dek+narrative; testimonial picks a real 5★ review; authority quote; big-claim stat; before/after problem→solution) from the five PI tiers via `loadAngleInputs` ([[../libraries/ad-angles]]), gated by `validateAdScript`/angle validator ([[../libraries/ad-validator]]) so every claim stays anchored. Shares the angle with the matching ad.
@@ -57,7 +57,7 @@ Investigation (2026-06-15) found the Meta publish path is **video-only** and sta
 1. **Image creatives in Meta** — `src/lib/meta-ads.ts` `createAdCreative` only accepts `videoId`; add an `imageUrl`/`imageHash` path that uploads the static JPG (`uploadAdImage` → hash) and builds `object_story_spec.image_data` instead of `video_data`. Update `adToolPublishToMeta` ([[../inngest/ad-tool]] ~L800) + `POST /api/ads/campaigns/[id]/publish` (drop the hardcoded `.eq("media_kind","video")`; fetch `static_jpg_url` / re-sign `meta.storage_path` for `media_kind='static'`).
 2. **Per-ad angle metadata** — set `ad_campaigns.angle_id` on each seeded campaign (create matching `product_ad_angles` rows: weight / anti-aging / best-self / each contrarian hook). `ad-meta-copy.ts` already reads `angle_id` → `hook_one_liner` + `lead_benefit_anchor`, so copy auto-matches the ad's angle. Optionally pre-bake `meta_headline`/`meta_primary_text`/`meta_description` on the angle.
 3. **Per-ad landing routing** — add `ad_campaigns.landing_url` (migration; campaigns have no URL field today — destination only lives on `ad_publish_jobs` at publish time). Default it from the archetype→page map (testimonial/authority/big-claim → PDP; advertorial → advertorial lander; before/after → before/after lander). `PublishToMeta` pre-fills from it; operator can override.
-4. **Seed step** — upload the rendered statics to the `ad-tool` bucket (`finals/{ws}/{id}.jpg`), create one `ad_campaigns` row per static (with `angle_id` + `landing_url`) + its `ad_videos` static rows (4:5 + 9:16, `media_kind='static'`, `status='ready'`, linked via `format_variant_of_id`), and pre-generate the Meta copy (4 headlines + 4 primary + desc + CTA) so the operator only clicks **Publish**. ⚠️ Don't seed the before/after ad as a Meta-publishable campaign (Meta prohibits before/after) — route it to organic / the lander.
+4. **Seed step** — upload the rendered statics to the `ad-tool` bucket (`finals/{ws}/{id}.jpg`), create one `ad_campaigns` row per static (with `angle_id` + `landing_url`) + its `ad_videos` static rows (4:5 + 9:16, `media_kind='static'`, `status='ready'`, linked via `format_variant_of_id`), and pre-generate the Meta copy (4 headlines + 4 primary + desc + CTA) so the operator only clicks **Publish**. Seed all archetypes including before/after (publishable for this account) → each routed to its mapped landing page.
 
 ## Phases
 - ⏳ **P1 — Productionize the 5 archetype components** (already built locally): finalize, fix the 9:16 testimonial sparse-middle, add safe-zone assertions.

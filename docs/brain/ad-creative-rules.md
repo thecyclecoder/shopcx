@@ -40,10 +40,9 @@ Anchor every angle to the product's **core desires**, never to functional/second
 - **Advertorial → advertorial lander** ([[specs/advertorial-landers]]).
 - **Before/After → before/after lander** (before/after hero + weight-loss testimonials + rest of PDP — [[specs/advertorial-landers]]).
 
-## Meta policy (hard constraints)
-- **Weight-loss before/after imagery is prohibited in Meta ads** — the Before/After archetype is for the **lander + organic social**, not Meta ad creative.
-- **No specific weight-loss numbers as ad claims/headlines** ("32 lbs in 9 weeks") — keep those inside real testimonial quotes, not as the ad's claim.
-- No negative-self-perception framing.
+## Meta policy
+- **Before/after IS publishable for this ad account** (Dylan, 2026-06-15 — his account is cleared for it). Treat Before/After like any other archetype: publishable Meta ad → routes to the before/after lander. (Meta's general before/after restriction does not apply here; don't re-add it as a blocker.)
+- **No specific weight-loss numbers as ad claims/headlines** ("32 lbs in 9 weeks") — keep those inside real testimonial quotes, not as the ad's own claim.
 
 ## Related
 [[lifecycles/ad-static]] · [[lifecycles/ad-render]] · [[lifecycles/ad-publish]] · [[specs/killer-statics]] · [[specs/advertorial-landers]] · [[customer-voice]] · [[tables/product_ad_angles]]
