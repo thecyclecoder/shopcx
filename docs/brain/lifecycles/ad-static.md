@@ -43,6 +43,16 @@ A **second, trust-first** static system layered on top of this lifecycle for the
 - **Publish:** statics publish as Meta **image creatives** (see [[ad-publish]]); `ad_campaigns.landing_url` carries the per-ad destination; `scripts/seed-killer-statics.ts` seeds publish-ready campaigns.
 - **Spec + remaining ops:** [[../specs/killer-statics]] (apply landing_url migration, redeploy Lambda site, verify, run seed, Dylan design pass). The legacy `review`/`offer`/`benefit_authority` archetypes below are kept for back-compat but superseded for cold 50+.
 
+## Upload-your-own static (skip generation, 2026-06-15)
+For statics made elsewhere (or by the local render scripts), `/dashboard/marketing/ads/upload` wraps a finished image into a publish-ready campaign — no generation. Form: **product · category (the 5 archetypes) · description · image(s)** (4:5 + 9:16). `POST /api/ads/upload-static`:
+1. Mints a `product_ad_angles` row (archetype → hook formula + LF8 slot; the **description becomes the hook one-liner** so the AI Meta copy is grounded in the actual image).
+2. Creates the `ad_campaigns` row (`status='ready'`, `angle_id`).
+3. Uploads each image to the `ad-tool` bucket → `ad_videos` (`media_kind='static'`, `status='ready'`, `static_jpg_url` + `meta.{archetype, storage_path}`, 4:5 + 9:16 linked via `format_variant_of_id`).
+4. Sets `landing_url` by archetype — advertorial/before-after generate the lander ([[advertorial-landers]]) and point at it; the rest point at the in-house storefront PDP.
+5. Pre-generates Meta copy onto the angle's `meta_*`. Redirects to the campaign page (static-first view) → ready to Publish.
+
+Entry: "Upload static ad" card on `/dashboard/marketing/ads`.
+
 ## Status / open work (2026-06-05)
 
 **Shipped + verified:** all three archetypes render on Lambda (~1-3s each); the in-app flow (Inngest → Lambda → `ad_videos`) is verified (9/9 outputs across review/offer/benefit × 1:1/4:5/9:16). Uploads retry transient storage 502s ([[../libraries/ad-storage]]).

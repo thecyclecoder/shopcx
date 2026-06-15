@@ -51,6 +51,13 @@ export default function AdsLandingPage() {
           <p className="mt-1 text-xs text-zinc-500">Build a new ad — avatar, product, angle, script.</p>
         </Link>
         <Link
+          href="/dashboard/marketing/ads/upload"
+          className="rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Upload static ad</h2>
+          <p className="mt-1 text-xs text-zinc-500">Skip generation — upload a finished image, get landers + AI copy.</p>
+        </Link>
+        <Link
           href="/dashboard/settings/ad-tool"
           className="rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
         >
