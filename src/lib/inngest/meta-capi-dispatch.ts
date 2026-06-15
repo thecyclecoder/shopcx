@@ -67,17 +67,10 @@ export const metaCapiDispatchCron = inngest.createFunction(
           { pdp_view: 1, add_to_cart: 1, checkout_view: 1, order_placed: 1, lead_captured: 1 },
         ).filter((t) => sink.eventTypes.length === 0 || sink.eventTypes.includes(t));
 
-        const { data: recentEvents } = await admin
-          .from("storefront_events")
-          .select("id")
-          .eq("workspace_id", sinkRow.workspace_id)
-          .in("event_type", mappedTypes)
-          .gte("created_at", sinceIso)
-          .limit(1000);
-
-        if (recentEvents && recentEvents.length > 0) {
-          const eventIds = recentEvents.map((e) => e.id as string);
-          // Which already have a dispatch for this sink?
+        // Seed `pending` dispatch rows for a set of event ids, skipping any
+        // that already have one for this sink. Idempotent — safe to re-run.
+        const seedMissing = async (eventIds: string[]) => {
+          if (eventIds.length === 0) return;
           const { data: existing } = await admin
             .from("event_dispatches")
             .select("event_id")
@@ -85,17 +78,44 @@ export const metaCapiDispatchCron = inngest.createFunction(
             .in("event_id", eventIds);
           const have = new Set((existing || []).map((d) => d.event_id as string));
           const toSeed = eventIds.filter((id) => !have.has(id));
-          if (toSeed.length > 0) {
-            await admin.from("event_dispatches").upsert(
-              toSeed.map((event_id) => ({
-                workspace_id: sinkRow.workspace_id,
-                event_id,
-                sink_id: sinkRow.id,
-                status: "pending",
-              })),
-              { onConflict: "event_id,sink_id", ignoreDuplicates: true },
-            );
-          }
+          if (toSeed.length === 0) return;
+          await admin.from("event_dispatches").upsert(
+            toSeed.map((event_id) => ({
+              workspace_id: sinkRow.workspace_id,
+              event_id,
+              sink_id: sinkRow.id,
+              status: "pending",
+            })),
+            { onConflict: "event_id,sink_id", ignoreDuplicates: true },
+          );
+        };
+
+        const { data: recentEvents } = await admin
+          .from("storefront_events")
+          .select("id")
+          .eq("workspace_id", sinkRow.workspace_id)
+          .in("event_type", mappedTypes)
+          .gte("created_at", sinceIso)
+          .limit(1000);
+        await seedMissing((recentEvents || []).map((e) => e.id as string));
+
+        // ── 1b. Safety net for order_placed (the money event) ────────
+        // The 20-minute lookback above permanently skips any order_placed
+        // row whose created_at is already older than the window when it's
+        // inserted — e.g. a server-side backfill recreating a pixel-missed
+        // purchase with created_at = order time. Re-scan order_placed across
+        // Meta's 7-day CAPI acceptance window and seed any still-undispatched.
+        // Volume is ~one row per order, and seedMissing() keeps it idempotent.
+        if (mappedTypes.includes("order_placed")) {
+          const capiWindowIso = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+          const { data: purchases } = await admin
+            .from("storefront_events")
+            .select("id")
+            .eq("workspace_id", sinkRow.workspace_id)
+            .eq("event_type", "order_placed")
+            .gte("created_at", capiWindowIso)
+            .limit(1000);
+          await seedMissing((purchases || []).map((e) => e.id as string));
         }
 
         // ── 2. Pull pending + retryable-failed dispatches ────────────

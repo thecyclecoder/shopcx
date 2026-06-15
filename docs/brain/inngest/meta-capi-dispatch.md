@@ -12,7 +12,8 @@ The Meta CAPI fan-out: `storefront_events` → `event_dispatches` → Meta Conve
 
 Per active `meta_capi` sink:
 1. **Seed** — find mapped storefront events (ViewContent/AddToCart/InitiateCheckout/Purchase/Lead) from the last 20 min that have no [[../tables/event_dispatches]] row for this sink yet → insert `pending` (idempotent via the `(event_id, sink_id)` unique key). Honors the sink's `event_types` filter (empty = all mapped).
-2. **Send** — pull `pending` + retryable `failed` dispatches (`attempts < 5`), load each event + its session (+ customer for email/phone/name), build `CapiEvent` payloads ([[../libraries/meta-capi]] does the hashing), and POST one batch via `sendCapiEvents`.
+1b. **Seed safety net (`order_placed` only)** — re-scan `order_placed` events across Meta's **7-day** acceptance window and seed any still undispatched. The 20-min lookback in step 1 keys off `created_at`, so an event whose `created_at` is *already* older than the window when the row is inserted — a server-side **backfill** recreating a pixel-missed purchase with `created_at = order time` — would never be seeded and the Purchase would silently never reach Meta. Because the money event funds the ad account, it gets this wider idempotent sweep. (This is exactly how SHOPCX11 went missing: a `source: server_backfill` `order_placed` row, backdated to the order time, sat outside every tick's 20-min window.)
+2. **Send** — pull `pending` + retryable `failed` dispatches (`attempts < 5`), load each event + its session (+ customer for email/phone/name), build `CapiEvent` payloads ([[../libraries/meta-capi]] does the hashing), and POST one batch via `sendCapiEvents`. No date filter here — the send step picks up any `pending` row regardless of age, so seeding is the only place a late event can be dropped.
 3. **Record** — write `sent` / `failed` / `dlq` (≥5 attempts) + response code/body back on the dispatch row.
 
 ## Why a cron sweep (not a per-event emit)
