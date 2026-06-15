@@ -205,9 +205,11 @@ export function StorefrontPage({
             {advertorial ? (
               advertorial.variant === "beforeafter" ? (
                 <>
-                  {/* Before/after lander: transformation hero → weight-loss
-                      testimonial wall → the rest of the existing PDP. */}
+                  {/* Before/after lander: transformation hero → PDP hero as the
+                      product intro (chapter 2) → weight-loss testimonial wall →
+                      the rest of the existing PDP. */}
                   <BeforeAfterHero data={data} content={advertorial} />
+                  <HeroSection data={data} />
                   <StickyJumpNav />
                   <WeightLossTestimonialWall data={data} />
                   <IngredientsSection data={data} />
