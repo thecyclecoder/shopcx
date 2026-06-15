@@ -67,15 +67,11 @@ export function decideByRules(t: PopupTimeline): PopupDecision {
   const dq = disqualifyReason(t);
   if (dq) return { show: false, variant: "none", reason: dq, decided_by: "rules" };
 
-  // ── Indecision → quiz (they can't choose) ─────────────────────────
-  // Checked first: a comparing/confused shopper needs guidance, not just
-  // a discount thrown at them.
-  if (t.rage_clicks >= 2) {
-    return { show: true, variant: "quiz", reason: "rage_taps_in_price", decided_by: "rules" };
-  }
-  if (t.price_viewed && t.price_dwell_ms >= 25_000 && t.scroll_reversals >= 4 && !t.pack_selected) {
-    return { show: true, variant: "quiz", reason: "long_compare_no_select", decided_by: "rules" };
-  }
+  // ── The quiz variant moved to a visible PDP chapter (SurveyChapter) ──
+  // The popup is now discount-only: its job is the price-moment intervention.
+  // The old indecision→quiz triggers (rage taps, long-compare) are retired here
+  // because the survey now lives in-page after the hero, not in a popup. The
+  // `quiz` variant type is kept only for the ?popup=quiz QA preview.
 
   // ── Price hesitation → discount (they want it, stuck on price) ────
   // Highest confidence: clicked a scroll-to-price CTA, reached pricing,
@@ -126,13 +122,12 @@ export async function challengeWithHaiku(t: PopupTimeline): Promise<PopupDecisio
         model: HAIKU_MODEL,
         max_tokens: 120,
         system:
-          `You decide whether to show a single behavioral popup to a storefront visitor, and which kind. ` +
-          `Protect margin: do NOT interrupt a decisive buyer. Only intervene on genuine hesitation or indecision.\n` +
+          `You decide whether to show a single behavioral discount popup to a storefront visitor. ` +
+          `Protect margin: do NOT interrupt a decisive buyer. Only intervene on genuine price hesitation.\n` +
           `Variants:\n` +
           `- "discount": price hesitation — they want the product but are stuck on price (dwelled on pricing, bounced to customize and back, yo-yo'd around price, tabbed away and returned).\n` +
-          `- "quiz": indecision — they can't choose / are comparing (rage taps, long compare with no selection, reversals between price cards).\n` +
-          `- "none": no clear hesitation, or signs they're already deciding.\n` +
-          `Reply with ONLY compact JSON: {"show": boolean, "variant": "discount"|"quiz"|"none", "reason": "<short_snake_case>"}.`,
+          `- "none": no clear price hesitation, or signs they're already deciding.\n` +
+          `Reply with ONLY compact JSON: {"show": boolean, "variant": "discount"|"none", "reason": "<short_snake_case>"}.`,
         messages: [{ role: "user", content: `Visitor session signals:\n${JSON.stringify(t)}` }],
       }),
     });
@@ -142,10 +137,12 @@ export async function challengeWithHaiku(t: PopupTimeline): Promise<PopupDecisio
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) return null;
     const parsed = JSON.parse(match[0]) as { show?: boolean; variant?: string; reason?: string };
-    const variant = (["discount", "quiz", "none"].includes(parsed.variant || "") ? parsed.variant : "none") as PopupVariant;
+    // Popup is discount-only now (survey moved to a chapter). Coerce anything
+    // that isn't "discount" to "none" so a stray "quiz" never renders.
+    const variant: PopupVariant = parsed.variant === "discount" ? "discount" : "none";
     return {
-      show: !!parsed.show && variant !== "none",
-      variant: parsed.show ? variant : "none",
+      show: !!parsed.show && variant === "discount",
+      variant: parsed.show && variant === "discount" ? "discount" : "none",
       reason: parsed.reason || "haiku",
       decided_by: "haiku",
     };

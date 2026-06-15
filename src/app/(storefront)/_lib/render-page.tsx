@@ -25,6 +25,7 @@ import { ProductJsonLd } from "../_components/ProductJsonLd";
 import { StorefrontPixelInit } from "../_components/StorefrontPixelInit";
 import { StorefrontChapterTracker } from "../_components/StorefrontChapterTracker";
 import { SmartPopup } from "../_components/SmartPopup";
+import { SurveyChapter } from "../_sections/SurveyChapter";
 import { BrandTrustSection } from "../_sections/BrandTrustSection";
 import { StorefrontFooter } from "../_components/StorefrontFooter";
 import { ActiveMemberProvider } from "./active-member-context";
@@ -235,16 +236,21 @@ export function StorefrontPage({
             <>
             <CompleteOrderBanner />
             <HeroSection data={data} />
-            {/* HowItWorksSection ("Why this works") now absorbs what
-                MechanismSection used to render — single block below the
-                hero with image + CTA. MechanismSection still exists in
-                the codebase but is no longer in the flow. */}
+            {/* Survey chapter — interactive lead-capture quiz placed right
+                after the hero to rescue the ~70% hero→ch1 drop-off, capture
+                zero-party data, and gate the signup code behind email/phone.
+                Replaces the (structurally dead) quiz popup variant. */}
+            <SurveyChapter
+              workspaceId={data.workspace.id}
+              productId={data.product.id}
+              productHandle={data.product.handle}
+              benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
+            />
+            {/* Converter-first order: the two chapters that best drive to
+                pricing (why-this-works 19%, ingredients 17% view→price) run
+                before the price table, while attention is highest. */}
             <HowItWorksSection data={data} />
-            <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-            <ComparisonSection data={data} />
             <IngredientsSection data={data} />
-            <NutritionistEndorsementSection data={data} />
-            <WhatToExpectTimeline data={data} />
             {/* Upsell complementarity chapter — only rendered when the
                 primary has an upsell partner configured and AI/admin
                 has saved complementarity copy. Sits between the primary
@@ -253,6 +259,15 @@ export function StorefrontPage({
             <UpsellChapter data={data} />
             <PriceTableSection data={data} />
             <BundlePriceTableSection data={data} />
+            {/* "Learn more" zone — below the price table. Detail / social-proof
+                chapters that historically get low reach (skipped on the way to
+                price) live here for shoppers who scroll past pricing wanting
+                more. Kept, not cut. UGC has high dwell but low price-intent, so
+                it reinforces here after price rather than delaying it. */}
+            <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
+            <ComparisonSection data={data} />
+            <NutritionistEndorsementSection data={data} />
+            <WhatToExpectTimeline data={data} />
             <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
             <FAQSection data={data} />
             <FinalCTASection data={data} />

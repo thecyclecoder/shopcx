@@ -4,6 +4,8 @@
 
 Phase legend: ⏳ planned · 🚧 in progress · ✅ shipped
 
+**Status (2026-06-15): all phases shipped.** Pending fold into [[../lifecycles/storefront-checkout]] + [[../libraries/popup-decide]] (then delete this spec, per [[../project-management]]). New file: `src/app/(storefront)/_sections/SurveyChapter.tsx`; new route: `src/app/api/popup/offer/route.ts`.
+
 ---
 
 ## Why (the data, audited 2026-06-15)
@@ -22,7 +24,7 @@ Storefront launched 2026-06-11; numbers are directional (~4 days, 646 PDP views,
 
 Done in this session. `/dashboard/storefront/funnel` now has a **Lead-capture popup** panel: shown → engaged → email(step 1) → phone(step 2), split by variant (Offer/Survey) with per-step %, via `/api/workspaces/[id]/storefront-funnel` joining [[../tables/popup_decisions]] + [[../tables/storefront_leads]]. (Commit separately from the build below.)
 
-## Phase 2 — Converter-first chapter reorder ⏳
+## Phase 2 — Converter-first chapter reorder ✅
 
 Edit the standard-PDP branch of `src/app/(storefront)/_lib/render-page.tsx` (the `!advertorial` block). Keep every section — **relocate, don't delete**. Leave the advertorial / before-after layout modes unchanged.
 
@@ -50,7 +52,7 @@ Rationale: front-load the two chapters that actually drive to pricing; get price
 
 **Acceptance:** PDP renders in the new order; `chapter_view`/`chapter_dwell` events show the new indices; advertorial modes untouched; `npx tsc --noEmit` clean.
 
-## Phase 3 — Survey as a visible chapter ⏳
+## Phase 3 — Survey as a visible chapter ✅
 
 New section `src/app/(storefront)/_sections/SurveyChapter.tsx`, rendered after the hero (Phase 2), `data-section="survey"` (so chapter tracking works for free).
 
@@ -63,13 +65,13 @@ New section `src/app/(storefront)/_sections/SurveyChapter.tsx`, rendered after t
 
 **Acceptance:** survey renders as a chapter after the hero on every standard PDP; completing it persists answers (queryable in `storefront_events`); the code is **only** revealed/delivered after email or phone is captured; that capture writes a `storefront_leads` row with `source='survey_chapter'`; then scrolls to price; tsc clean.
 
-## Phase 4 — Survey chapter analytics ⏳
+## Phase 4 — Survey chapter analytics ✅
 
 Add pixel events: `survey_shown` (or reuse `chapter_view` for `data-section="survey"`), `survey_started`, `survey_completed`. Surface a small **Survey chapter** block on the funnel dashboard: shown → started → completed → (email → phone via `source='survey_chapter'`), with %. Extend `/api/workspaces/[id]/storefront-funnel` to compute it from `storefront_events` + `storefront_leads`. This closes the "survey drop-off invisible" gap from the audit.
 
 **Acceptance:** dashboard shows survey completion rate + lead conversion for `source='survey_chapter'`.
 
-## Phase 5 — Retire/contain the popup quiz variant ⏳ (optional)
+## Phase 5 — Retire/contain the popup quiz variant ✅
 
 With the survey now a chapter, the popup-quiz variant in `src/lib/popup/decide.ts` is redundant (and dead). Either remove the `quiz` branches from `decideByRules`/`challengeWithHaiku` (popup becomes discount-only — its real job is the price-moment intervention), or leave them (they almost never fire). Recommended: simplify to discount-only and note the survey moved to a chapter. Update `SmartPopup.tsx` if the `quiz` variant is removed.
 

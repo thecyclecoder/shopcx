@@ -414,7 +414,7 @@ export async function GET(
     .lte("created_at", endIso);
   const { data: popupLeadRows } = await admin
     .from("storefront_leads")
-    .select("source, email, session_id")
+    .select("source, email, phone, session_id")
     .eq("workspace_id", workspaceId)
     .gte("created_at", startIso)
     .lte("created_at", endIso);
@@ -445,11 +445,44 @@ export async function GET(
   );
   const popupFunnel = { byVariant: popupVariants, totals: popupTotals };
 
+  // ── Survey chapter funnel (shown → completed → email → phone) ────
+  // shown/completed = distinct real sessions firing the survey events;
+  // email/phone = storefront_leads with source='survey_chapter'.
+  const { data: surveyEventRows } = await admin
+    .from("storefront_events")
+    .select("event_type, session_id")
+    .eq("workspace_id", workspaceId)
+    .in("event_type", ["survey_shown", "survey_completed"])
+    .gte("created_at", startIso)
+    .lte("created_at", endIso);
+  const surveyShownSessions = new Set<string>();
+  const surveyCompletedSessions = new Set<string>();
+  for (const r of (surveyEventRows || []) as { event_type: string; session_id: string }[]) {
+    if (internalSessions.has(r.session_id)) continue;
+    if (r.event_type === "survey_shown") surveyShownSessions.add(r.session_id);
+    else if (r.event_type === "survey_completed") surveyCompletedSessions.add(r.session_id);
+  }
+  let surveyEmail = 0;
+  let surveyPhone = 0;
+  for (const r of (popupLeadRows || []) as { source: string | null; email: string | null; phone: string | null; session_id: string | null }[]) {
+    if (r.session_id && internalSessions.has(r.session_id)) continue;
+    if (r.source !== "survey_chapter") continue;
+    if (r.email) surveyEmail++;
+    if (r.phone) surveyPhone++;
+  }
+  const surveyFunnel = {
+    shown: surveyShownSessions.size,
+    completed: surveyCompletedSessions.size,
+    email: surveyEmail,
+    phone: surveyPhone,
+  };
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
     leads_generated: leadsGenerated,
     popupFunnel,
+    surveyFunnel,
     funnel,
     packBreakdown,
     topProducts,

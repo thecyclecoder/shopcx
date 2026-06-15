@@ -52,6 +52,7 @@ interface FunnelData {
     byVariant: Array<{ variant: string; label: string; shown: number; engaged: number; email: number; phone: number }>;
     totals: { shown: number; engaged: number; email: number; phone: number };
   };
+  surveyFunnel?: { shown: number; completed: number; email: number; phone: number };
   funnel: FunnelStepRow[];
   topProducts: Array<{ product_id: string; title: string; handle: string | null; pack_selected_count: number }>;
   packBreakdown?: Array<{ label: string; count: number }>;
@@ -192,6 +193,7 @@ export default function StorefrontFunnelPage() {
           </section>
 
           {data.popupFunnel && <PopupFunnelPanel data={data.popupFunnel} />}
+          {data.surveyFunnel && <SurveyFunnelPanel data={data.surveyFunnel} />}
 
           <div className="mb-8 grid gap-4 lg:grid-cols-3">
             <BreakdownCard
@@ -482,6 +484,38 @@ function PopupFunnelPanel({ data }: { data: NonNullable<FunnelData["popupFunnel"
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunnel"]> }) {
+  const { shown, completed, email, phone } = data;
+  const pct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
+  const steps = [
+    { label: "Shown", n: shown, of: shown },
+    { label: "Completed survey", n: completed, of: shown },
+    { label: "Email (step 1)", n: email, of: shown },
+    { label: "Phone (step 2)", n: phone, of: shown },
+  ];
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Survey chapter</h2>
+        <span className="text-[11px] text-zinc-400">In-page survey after the hero · % is of shown</span>
+      </div>
+      {shown === 0 ? (
+        <p className="text-xs text-zinc-400">No survey impressions in this range yet.</p>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {steps.map((s, i) => (
+            <div key={s.label} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+              <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{s.label}</p>
+              <p className="mt-1 text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">{s.n.toLocaleString()}</p>
+              {i > 0 && <p className="text-xs text-zinc-400">{pct(s.n, s.of)} of shown</p>}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
