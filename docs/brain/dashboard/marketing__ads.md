@@ -1,6 +1,6 @@
 # Dashboard · marketing/ads
 
-The ad-studio landing. Split layout: **Avatars** · **New ad** · **Library** (grid of completed [[../tables/ad_videos]]). Entry point for the [[../lifecycles/ad-render|ad-render lifecycle]] — click into the builder to generate, or into Avatars to manage spokespersons.
+The ad-studio landing. Split layout: **Avatars** · **New ad** · **Upload static ad** ([[../lifecycles/ad-static]] upload flow) · **Settings** · **Library** (grid of completed [[../tables/ad_videos]]). Entry point for the [[../lifecycles/ad-render|ad-render lifecycle]] — click into the builder to generate, or into Avatars to manage spokespersons. Library cards have a hover **Delete** (`DELETE /api/ads/campaigns/[id]`; child rows cascade, the generated lander survives via `ON DELETE SET NULL`).
 
 **Route:** `/dashboard/marketing/ads`
 

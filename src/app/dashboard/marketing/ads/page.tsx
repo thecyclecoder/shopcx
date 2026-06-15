@@ -28,6 +28,16 @@ export default function AdsLandingPage() {
     load();
   }, [load]);
 
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const remove = useCallback(async (c: Campaign) => {
+    if (!confirm(`Delete "${c.name}"? This removes the campaign and its static/video outputs. The generated lander (if any) stays.`)) return;
+    setDeletingId(c.id);
+    const res = await fetch(`/api/ads/campaigns/${c.id}?workspaceId=${workspace.id}`, { method: "DELETE" });
+    setDeletingId(null);
+    if (res.ok) setCampaigns((prev) => prev.filter((x) => x.id !== c.id));
+    else alert("Failed to delete campaign.");
+  }, [workspace.id]);
+
   return (
     <div className="mx-auto max-w-screen-xl px-4 py-6 sm:px-6">
       <h1 className="mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Ads</h1>
@@ -80,10 +90,18 @@ export default function AdsLandingPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {campaigns.map((c) => (
+            <div key={c.id} className="group relative">
+            <button
+              onClick={() => remove(c)}
+              disabled={deletingId === c.id}
+              title="Delete campaign"
+              className="absolute right-2 top-2 z-10 rounded-md bg-white/90 px-2 py-1 text-xs font-medium text-red-600 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100 disabled:opacity-50 dark:bg-zinc-900/90 dark:hover:bg-zinc-900"
+            >
+              {deletingId === c.id ? "Deleting…" : "Delete"}
+            </button>
             <Link
-              key={c.id}
               href={`/dashboard/marketing/ads/${c.id}`}
-              className="overflow-hidden rounded-lg border border-zinc-200 bg-white transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+              className="block overflow-hidden rounded-lg border border-zinc-200 bg-white transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
             >
               <div className="aspect-video w-full bg-zinc-100 dark:bg-zinc-800">
                 {c.hero_image_url ? (
@@ -105,6 +123,7 @@ export default function AdsLandingPage() {
                 </p>
               </div>
             </Link>
+            </div>
           ))}
         </div>
       )}

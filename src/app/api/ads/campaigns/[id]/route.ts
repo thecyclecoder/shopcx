@@ -134,3 +134,21 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
   return NextResponse.json({ campaign });
 }
+
+// Delete a campaign. Child rows (ad_videos, ad_segments, creative library,
+// publish jobs) cascade; advertorial_pages unlink via ON DELETE SET NULL (the
+// generated lander survives, reachable by product+slug).
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const workspaceId = new URL(req.url).searchParams.get("workspaceId");
+  const auth = await authorize(workspaceId);
+  if (auth.error) return auth.error;
+
+  const { error } = await auth.admin
+    .from("ad_campaigns")
+    .delete()
+    .eq("id", id)
+    .eq("workspace_id", workspaceId as string);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ ok: true });
+}
