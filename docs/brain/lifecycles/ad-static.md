@@ -31,6 +31,16 @@ Static ads are single, design-led, scroll-stopping **stills** — not frozen vid
 
 Runs on **Remotion Lambda** (`renderStillCompositionTo` → `renderStillOnLambda`) — see [[../integrations/remotion-lambda]]. Local dev renders in-process. **Re-run `scripts/deploy-remotion-lambda.ts` after editing `remotion/StaticAds.tsx`** so the Lambda site has the latest templates ([[../operational-rules]] § Remotion site deploy).
 
+## Cold-50+ "killer" archetype system (2026-06-15, 🚧 code-complete)
+
+A **second, trust-first** static system layered on top of this lifecycle for the cold-50+ ad set (where statics often beat video). Five archetypes — **advertorial** (editorial serif), **testimonial** (face), **authority** (expert), **big_claim** (contrarian hook), **before_after** — each rendered in **both 4:5 + 9:16** (9:16 with Meta safe-zone insets), auto-built from PI + existing ad assets. Trust-first because loud/brutalist reads as spam to older buyers.
+
+- **Components:** `remotion/StaticAdvertorial.tsx` (Playfair serif — must NOT look branded) + `remotion/StaticArchetypes.tsx` (Montserrat). All use the SafeImg pattern.
+- **Data/build:** [[../libraries/ad-statics]] (`loadKillerAssets` + `buildKillerStatic`) + [[../libraries/ad-statics-copy]] (Opus copy for advertorial/big_claim/before_after; testimonial/authority use REAL review/endorsement text). Hero auto-selected by angle (avatar vs ingredient shot); review counts = real + 10,000; NEVER product-on-white (isolated cutout only).
+- **Render:** the same `adToolStaticRequested` path branches killer vs legacy → both formats on Lambda → `ad_videos` (`media_kind='static'`).
+- **Publish:** statics publish as Meta **image creatives** (see [[ad-publish]]); `ad_campaigns.landing_url` carries the per-ad destination; `scripts/seed-killer-statics.ts` seeds publish-ready campaigns.
+- **Spec + remaining ops:** [[../specs/killer-statics]] (apply landing_url migration, redeploy Lambda site, verify, run seed, Dylan design pass). The legacy `review`/`offer`/`benefit_authority` archetypes below are kept for back-compat but superseded for cold 50+.
+
 ## Status / open work (2026-06-05)
 
 **Shipped + verified:** all three archetypes render on Lambda (~1-3s each); the in-app flow (Inngest → Lambda → `ad_videos`) is verified (9/9 outputs across review/offer/benefit × 1:1/4:5/9:16). Uploads retry transient storage 502s ([[../libraries/ad-storage]]).

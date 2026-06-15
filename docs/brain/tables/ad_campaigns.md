@@ -24,6 +24,7 @@ A single ad concept: product × variant × [[product_ad_angles|angle]] × [[ad_a
 | `hero_image_url` | `text` | ✓ | holding-product shot (Nano Banana Pro) |
 | `audio_url` | `text` | ✓ | legacy TTS (vestigial in the Veo stack) |
 | `composition` | `jsonb` | ✓ | the **stitch recipe**: ordered [[ad_segments]] refs + b-roll overlays + music mix. Render reads it; re-launch refresh swaps one segment + re-renders. See [[../libraries/ad-segments]], [[../lifecycles/ad-render]]. |
+| `landing_url` | `text` | ✓ | default click-through destination for this ad (migration `20260615120000`). Set from the archetype→lander map at seed time; pre-fills the Meta publish panel; operator-overridable. See [[../lifecycles/ad-publish]], [[../specs/killer-statics]]. |
 | `status` | `text` | — | default: `'draft'` · `draft` \| `rendering` \| `ready` \| `failed` |
 | `created_by` | `uuid` | ✓ |  |
 | `created_at` | `timestamptz` | — | default: `now()` |

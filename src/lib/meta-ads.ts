@@ -126,8 +126,12 @@ export interface CreativeArgs {
   name: string;
   pageId: string;
   instagramUserId?: string | null;
-  videoId: string;
+  /** Video ad: the uploaded video id (+ optional thumbnail hash). */
+  videoId?: string | null;
   thumbnailHash?: string | null;
+  /** Image ad (static): the uploaded image hash. When set, builds image_data
+   *  instead of video_data (the image itself is the creative — no thumbnail). */
+  imageHash?: string | null;
   headlines: string[]; // headline + variations
   primaryTexts: string[]; // primary text + variations
   description?: string | null;
@@ -174,17 +178,30 @@ export async function getVideoThumbnail(token: string, videoId: string): Promise
  *   - UTM tracking stays in the top-level `url_tags` (the asset feed can't carry it).
  */
 export async function createAdCreative(token: string, a: CreativeArgs): Promise<string> {
+  // Static (image) ads carry the creative in image_data; video ads in video_data.
+  // Everything else (text variations, CTA link, IG placement, UTM) is identical.
+  const storyMedia = a.imageHash
+    ? {
+        image_data: {
+          image_hash: a.imageHash,
+          ...(a.description ? { link_description: a.description } : {}),
+          call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
+        },
+      }
+    : {
+        video_data: {
+          video_id: a.videoId,
+          ...(a.thumbnailHash ? { image_hash: a.thumbnailHash } : {}),
+          ...(a.description ? { link_description: a.description } : {}),
+          call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
+        },
+      };
   const body: Record<string, unknown> = {
     name: a.name,
     object_story_spec: {
       page_id: a.pageId,
       ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}),
-      video_data: {
-        video_id: a.videoId,
-        ...(a.thumbnailHash ? { image_hash: a.thumbnailHash } : {}),
-        ...(a.description ? { link_description: a.description } : {}),
-        call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
-      },
+      ...storyMedia,
     },
     asset_feed_spec: {
       titles: a.headlines.filter(Boolean).map((text) => ({ text })),

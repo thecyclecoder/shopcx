@@ -44,6 +44,9 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
+**Cross-cutting (storefront × ad builder):**
+- ⏳ **Auto-generated advertorial landers** — [[advertorial-landers]]. When an ad campaign hits `ready`, auto-generate a matched advertorial landing page (per ad *angle*) reusing the ad's assets (angle, hero image, script) + the PDP's working sections (ingredients, price table, checkout). Zero manual design; scent-match by construction. Targets the proven 86%→24% hero cliff (funnel data in the spec). Auto-design scope = editorial hero + chapter 1 only; everything below is the existing PDP reused. Prereq: fix `product_id` attribution on checkout/order events.
+
 ## Active project 2 — Customer portal 🚧
 
 **Lifecycle:** [[../lifecycles/customer-portal]]
@@ -91,6 +94,7 @@ Single source of truth for what's being built next, what's parked, and what just
 - ✅ **Static ads — separate design-led process (2026-06-05)** — three designed archetypes (review screenshot · offer card · benefit/authority), hybrid engine, rendered on Lambda across 1:1/4:5/9:16 from product intelligence. Verified in-app (Inngest → Lambda). Folded into [[../lifecycles/ad-static]]; spec deleted.
 
 **Open sub-work:**
+- 🚧 **Killer statics — cold-50+ archetypes, both formats** — [[killer-statics]] (code-complete + typechecked on branch `killer-statics-iso`; remaining ops = apply the landing_url migration, redeploy the Lambda site, verify a render, run `scripts/seed-killer-statics.ts`, Dylan design pass). Replaces the loud brutalist `AdStatic` with a trust-first archetype system (advertorial editorial serif · testimonial · authority · big-claim · before/after), rendered 4:5 **and** 9:16 (safe-zone aware), auto-built from PI + existing ad assets, audience-aware selection, + the Lambda static-image fix. **Copy rules:** anchor angles to weight/aging/best-self/social (never energy/no-crash); review counts = actual + 10,000; use real `product_media` assets (real endorser photo, real before/after).
 - ✅ **Publish ads to Meta (2026-06-10)** — campaign-page "Publish to Meta": generate copy (4 headlines + 4 primary texts + CTA), pick page → ad account → campaign → ad set, upload video → creative (dynamic) → ad (PAUSED default). `src/lib/meta-ads.ts` + `ad-meta-copy.ts` + `ad_publish_jobs` + Inngest `adToolPublishToMeta`. Read-side verified live. Folded into [[../lifecycles/ad-publish]]; spec deleted.
 - ⏳ **TODO (Dylan): static-ad design tweaks** — the static pipeline ships, but the *visual design* of the three archetypes is a first pass and needs Dylan's review/iteration. All visual changes live in `remotion/StaticAds.tsx` + `DEFAULT_BRAND` (`src/lib/ad-static.ts`); preview via sample render, then re-run `scripts/deploy-remotion-lambda.ts`. Details + checklist in [[../lifecycles/ad-static]] § Status / open work.
 - Minor: NBP backdrop auto-gen for offer cards; editable-copy UI before static render; native/UGC archetype; only talking beats refreshable via UI ([[../lifecycles/ad-render]] / [[../lifecycles/ad-static]] § Open).

@@ -39,6 +39,7 @@ import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
+import { KILLER_ARCHETYPES, KILLER_FORMATS, loadKillerAssets, buildKillerStatic, type KillerArchetype } from "@/lib/ad-statics";
 import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createAd } from "@/lib/meta-ads";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
@@ -741,7 +742,7 @@ const STATIC_COMPOSITION: Record<StaticArchetype, string> = {
 interface StaticEventData {
   workspace_id: string;
   campaign_id: string;
-  archetype: StaticArchetype;
+  archetype: string; // legacy (review|offer|benefit_authority) OR killer (advertorial|testimonial|authority|big_claim|before_after)
   copy?: Record<string, string>;
 }
 
@@ -751,29 +752,44 @@ export const adToolStaticRequested = inngest.createFunction(
     const d = event.data as StaticEventData;
     const { workspace_id, campaign_id, archetype } = d;
     const admin = createAdminClient();
+    const isKiller = (KILLER_ARCHETYPES as string[]).includes(archetype);
 
+    // resolve: pick the composition + build its props. Killer archetypes hydrate
+    // assets, generate/reuse heroes + copy, and return FRESH signed URLs.
     const base = await step.run("resolve", async () => {
-      const { data: c } = await admin.from("ad_campaigns").select("product_id").eq("id", campaign_id).single();
+      const { data: c } = await admin.from("ad_campaigns").select("product_id, angle_id").eq("id", campaign_id).single();
       if (!c?.product_id) throw new Error("no_product");
+      if (isKiller) {
+        const assets = await loadKillerAssets(c.product_id);
+        let angle: any = null;
+        if (c.angle_id) { const { data: ar } = await admin.from("product_ad_angles").select("*").eq("id", c.angle_id).maybeSingle(); angle = ar; }
+        const built = await buildKillerStatic({ workspaceId: workspace_id, productId: c.product_id, archetype: archetype as KillerArchetype, assets, angle });
+        return { composition: built.composition, props: built.props, killer: true };
+      }
       const inp = await loadStaticInputs(c.product_id);
-      // Resolve the archetype's content (PURE), with any operator copy overrides.
       const props =
         archetype === "review" ? buildReviewProps(inp, DEFAULT_BRAND)
         : archetype === "offer" ? buildOfferProps(inp, DEFAULT_BRAND, d.copy)
         : buildBenefitAuthorityProps(inp, DEFAULT_BRAND);
-      return { props: props as unknown as Record<string, unknown> };
+      return { composition: STATIC_COMPOSITION[archetype as StaticArchetype], props: props as unknown as Record<string, unknown>, killer: false };
     });
+
+    // Killer statics render both formats (4:5 + 9:16) with Meta safe-zone insets;
+    // legacy archetypes keep the 1:1 / 4:5 / 9:16 set.
+    const dims = base.killer
+      ? KILLER_FORMATS.map((f) => ({ format: f.format, w: f.w, h: f.h, extra: { safeTopPct: f.safeTopPct, safeBottomPct: f.safeBottomPct } as Record<string, unknown> }))
+      : STATIC_DIMS.map((f) => ({ format: f.format, w: f.w, h: f.h, extra: {} as Record<string, unknown> }));
 
     const results = await step.run("render-formats", async () => {
       const out: any[] = [];
       let canonicalId: string | null = null;
-      for (const dim of STATIC_DIMS) {
+      for (const dim of dims) {
         const row: any = { workspace_id, campaign_id, format: dim.format, media_kind: "static", format_variant_of_id: canonicalId, status: "rendering", meta: { archetype } };
         const { data: vrow } = await admin.from("ad_videos").insert(row).select("id").single();
         if (!canonicalId) canonicalId = vrow!.id;
         try {
           const tmp = `/tmp/static_${campaign_id}_${archetype}_${dim.format}.jpg`;
-          await renderStillCompositionTo(STATIC_COMPOSITION[archetype], { width: dim.w, height: dim.h, ...base.props }, tmp);
+          await renderStillCompositionTo(base.composition, { width: dim.w, height: dim.h, ...dim.extra, ...base.props }, tmp);
           const fs = await import("fs/promises");
           const buf = await fs.readFile(tmp);
           const storagePath = `finals/${workspace_id}/${vrow!.id}.jpg`;
@@ -809,50 +825,65 @@ export const adToolPublishToMeta = inngest.createFunction(
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
       if (!job) throw new Error("job_not_found");
       const { data: campaign } = await admin.from("ad_campaigns").select("name").eq("id", job.campaign_id).single();
-      const { data: video } = await admin.from("ad_videos").select("meta, final_mp4_url").eq("id", job.video_id).single();
+      const { data: video } = await admin.from("ad_videos").select("meta, final_mp4_url, static_jpg_url, media_kind").eq("id", job.video_id).single();
+      const mediaKind = (video?.media_kind as string) || "video";
       const storagePath = (video?.meta as any)?.storage_path as string | undefined;
-      // Fresh signed URL so Meta can download the video (stored URL may be stale).
-      const fileUrl = storagePath ? await signedUrl(storagePath, 60 * 60 * 6) : video?.final_mp4_url;
+      // Fresh signed URL so Meta can download the media (stored URL may be stale).
+      const fileUrl = storagePath
+        ? await signedUrl(storagePath, 60 * 60 * 6)
+        : mediaKind === "static" ? video?.static_jpg_url : video?.final_mp4_url;
       const token = await getMetaUserToken(workspace_id);
-      return { job, adName: campaign?.name || "ShopCX Ad", fileUrl, token };
+      return { job, adName: campaign?.name || "ShopCX Ad", fileUrl, mediaKind, token };
     });
 
     if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
-    if (!ctx.fileUrl) { await setStatus("failed", { error: "no_video_url" }); return { ok: false, reason: "no_video_url" }; }
+    if (!ctx.fileUrl) { await setStatus("failed", { error: "no_media_url" }); return { ok: false, reason: "no_media_url" }; }
     const j = ctx.job as any;
+    const isStatic = ctx.mediaKind === "static";
 
     const result = await step.run("publish", async () => {
       try {
-        await setStatus("uploading");
-        const videoId = await uploadAdVideo(ctx.token!, j.meta_account_id, ctx.fileUrl!, ctx.adName);
-        await admin.from("ad_publish_jobs").update({ meta_video_id: videoId }).eq("id", job_id);
-        await waitForVideoReady(ctx.token!, videoId, { timeoutMs: 300000 });
-
-        await setStatus("creating");
-        // Video ads need a thumbnail. asset_feed_spec wants a thumbnail_hash, so
-        // pull Meta's auto-generated thumbnail and re-upload it to get a hash.
-        let thumbnailHash: string | null = null;
-        const thumbnailUrl = await getVideoThumbnail(ctx.token!, videoId);
-        if (thumbnailUrl) {
-          try {
-            const bytes = Buffer.from(await (await fetch(thumbnailUrl)).arrayBuffer());
-            thumbnailHash = await uploadAdImage(ctx.token!, j.meta_account_id, bytes);
-          } catch { /* fall through — creative create will surface a thumbnail error if truly required */ }
-        }
-        const creativeId = await createAdCreative(ctx.token!, {
+        const baseCreative = {
           accountId: j.meta_account_id,
           name: ctx.adName,
           pageId: j.meta_page_id,
           instagramUserId: j.meta_instagram_user_id,
-          videoId,
-          thumbnailHash,
           headlines: j.headlines || [],
           primaryTexts: j.primary_texts || [],
           description: j.description,
           ctaType: j.cta_type,
           destinationUrl: j.destination_url,
           urlTags: `utm_source=meta&utm_medium=paid_social&utm_campaign=${encodeURIComponent(ctx.adName)}`,
-        });
+        };
+
+        let creativeId: string;
+        let videoId: string | null = null;
+        if (isStatic) {
+          // Static (image) ad: upload the JPG → image hash → image creative.
+          await setStatus("uploading");
+          const bytes = Buffer.from(await (await fetch(ctx.fileUrl!)).arrayBuffer());
+          const imageHash = await uploadAdImage(ctx.token!, j.meta_account_id, bytes, "static.jpg");
+          await setStatus("creating");
+          creativeId = await createAdCreative(ctx.token!, { ...baseCreative, imageHash });
+        } else {
+          await setStatus("uploading");
+          videoId = await uploadAdVideo(ctx.token!, j.meta_account_id, ctx.fileUrl!, ctx.adName);
+          await admin.from("ad_publish_jobs").update({ meta_video_id: videoId }).eq("id", job_id);
+          await waitForVideoReady(ctx.token!, videoId, { timeoutMs: 300000 });
+
+          await setStatus("creating");
+          // Video ads need a thumbnail. asset_feed_spec wants a thumbnail_hash, so
+          // pull Meta's auto-generated thumbnail and re-upload it to get a hash.
+          let thumbnailHash: string | null = null;
+          const thumbnailUrl = await getVideoThumbnail(ctx.token!, videoId);
+          if (thumbnailUrl) {
+            try {
+              const bytes = Buffer.from(await (await fetch(thumbnailUrl)).arrayBuffer());
+              thumbnailHash = await uploadAdImage(ctx.token!, j.meta_account_id, bytes);
+            } catch { /* fall through — creative create will surface a thumbnail error if truly required */ }
+          }
+          creativeId = await createAdCreative(ctx.token!, { ...baseCreative, videoId, thumbnailHash });
+        }
         await admin.from("ad_publish_jobs").update({ meta_creative_id: creativeId }).eq("id", job_id);
 
         const adId = await createAd(ctx.token!, j.meta_account_id, {

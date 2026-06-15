@@ -20,11 +20,17 @@ async function authorize(workspaceId: string | null) {
   return { user, admin };
 }
 
-const ARCHETYPES = ["review", "offer", "benefit_authority"];
+const ARCHETYPES = [
+  // cold-50+ "killer" set (trust-first; both 4:5 + 9:16)
+  "advertorial", "testimonial", "authority", "big_claim", "before_after",
+  // legacy set (kept for back-compat)
+  "review", "offer", "benefit_authority",
+];
 
 /**
  * Generate a STATIC ad (separate process from video). One archetype → a designed
- * Remotion still rendered across 1:1 / 4:5 / 9:16. See docs/brain/lifecycles/ad-static.
+ * Remotion still. The cold-50+ "killer" archetypes render both 4:5 + 9:16; the
+ * legacy archetypes render 1:1 / 4:5 / 9:16. See docs/brain/lifecycles/ad-static.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -34,7 +40,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (auth.error) return auth.error;
 
   const archetype = ARCHETYPES.includes(body.archetype) ? body.archetype : "";
-  if (!archetype) return NextResponse.json({ error: "archetype required (review|offer|benefit_authority)" }, { status: 400 });
+  if (!archetype) return NextResponse.json({ error: `archetype required (one of: ${ARCHETYPES.join("|")})` }, { status: 400 });
 
   const { data: campaign } = await auth.admin
     .from("ad_campaigns")

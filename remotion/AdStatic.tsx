@@ -1,7 +1,21 @@
-import React from "react";
+import React, { useState } from "react";
 import { AbsoluteFill, Img } from "remotion";
 import type { AdCompositionProps } from "./types";
 import { CredibilityRow } from "./components";
+
+/**
+ * SafeImg — the Lambda static fix. A raw <Img> with a signed Supabase hero URL
+ * won't always decode inside Remotion's delayRender() window on Lambda (the #1
+ * open item in docs/brain/lifecycles/ad-render.md): a slow/stale fetch hard-fails
+ * the whole still. onError-hide drops a failed hero instead of crashing the
+ * render, and pauseWhenLoading holds the frame until the image is ready rather
+ * than racing the encode. Same pattern the new archetype components use.
+ */
+const SafeImg: React.FC<{ src?: string | null; style: React.CSSProperties }> = ({ src, style }) => {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) return null;
+  return <Img src={src} style={style} onError={() => setFailed(true)} pauseWhenLoading />;
+};
 
 /**
  * Static-ad composition (one still per format). V1 ships the
@@ -30,13 +44,12 @@ export const AdStatic: React.FC<AdCompositionProps> = (props) => {
 
   return (
     <AbsoluteFill style={{ backgroundColor: bg }}>
-      {/* Hero — can bleed off the edge; not safe-zone-constrained. */}
-      {props.heroImageUrl && (
-        <Img
-          src={props.heroImageUrl}
-          style={{ position: "absolute", right: -40, bottom: props.height * 0.18, width: props.width * 0.72, objectFit: "contain" }}
-        />
-      )}
+      {/* Hero — can bleed off the edge; not safe-zone-constrained. SafeImg so a
+          flaky signed URL hides instead of hard-failing the still on Lambda. */}
+      <SafeImg
+        src={props.heroImageUrl}
+        style={{ position: "absolute", right: -40, bottom: props.height * 0.18, width: props.width * 0.72, objectFit: "contain" }}
+      />
 
       {/* Headline — top of the safe core. */}
       <div
