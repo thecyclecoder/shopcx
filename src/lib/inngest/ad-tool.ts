@@ -40,7 +40,7 @@ import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
 import { KILLER_ARCHETYPES, KILLER_FORMATS, loadKillerAssets, buildKillerStatic, type KillerArchetype } from "@/lib/ad-statics";
-import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createAd } from "@/lib/meta-ads";
+import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createAd } from "@/lib/meta-ads";
 import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
@@ -832,21 +832,38 @@ export const adToolPublishToMeta = inngest.createFunction(
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
       if (!job) throw new Error("job_not_found");
       const { data: campaign } = await admin.from("ad_campaigns").select("name").eq("id", job.campaign_id).single();
-      const { data: video } = await admin.from("ad_videos").select("meta, final_mp4_url, static_jpg_url, media_kind").eq("id", job.video_id).single();
-      const mediaKind = (video?.media_kind as string) || "video";
-      const storagePath = (video?.meta as any)?.storage_path as string | undefined;
+      // Gather BOTH ratios for the campaign so we can publish one placement-customized
+      // ad — 4:5 in feed, 9:16 in stories/reels (like shopgrowth). Falls back to a
+      // single asset when only one ratio is ready.
+      const { data: vids } = await admin
+        .from("ad_videos")
+        .select("id, format, media_kind, meta, final_mp4_url, static_jpg_url")
+        .eq("campaign_id", job.campaign_id).eq("status", "ready");
+      const all = vids || [];
+      const anchor = all.find((v) => v.id === job.video_id) || all[0] || null;
+      const mediaKind = (anchor?.media_kind as string) || "video";
+      const sameKind = all.filter((v) => (v.media_kind as string) === mediaKind);
+      const feed = sameKind.find((v) => v.format === "feed_4x5") || null;
+      const story = sameKind.find((v) => v.format === "reels_9x16" || v.format === "stories_9x16") || null;
       // Fresh signed URL so Meta can download the media (stored URL may be stale).
-      const fileUrl = storagePath
-        ? await signedUrl(storagePath, 60 * 60 * 6)
-        : mediaKind === "static" ? video?.static_jpg_url : video?.final_mp4_url;
+      const urlFor = async (v: (typeof all)[number] | null) => {
+        if (!v) return null;
+        const sp = (v.meta as { storage_path?: string } | null)?.storage_path;
+        if (sp) return signedUrl(sp, 60 * 60 * 6);
+        return mediaKind === "static" ? v.static_jpg_url : v.final_mp4_url;
+      };
+      const feedUrl = await urlFor(feed);
+      const storyUrl = await urlFor(story);
+      const singleUrl = storyUrl || feedUrl || (await urlFor(anchor));
       const token = await getMetaUserToken(workspace_id);
-      return { job, adName: campaign?.name || "ShopCX Ad", fileUrl, mediaKind, token };
+      return { job, adName: campaign?.name || "ShopCX Ad", mediaKind, feedUrl, storyUrl, singleUrl, token };
     });
 
     if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
-    if (!ctx.fileUrl) { await setStatus("failed", { error: "no_media_url" }); return { ok: false, reason: "no_media_url" }; }
+    if (!ctx.singleUrl) { await setStatus("failed", { error: "no_media_url" }); return { ok: false, reason: "no_media_url" }; }
     const j = ctx.job as any;
     const isStatic = ctx.mediaKind === "static";
+    const dual = !!(ctx.feedUrl && ctx.storyUrl);
 
     const result = await step.run("publish", async () => {
       try {
@@ -865,16 +882,43 @@ export const adToolPublishToMeta = inngest.createFunction(
 
         let creativeId: string;
         let videoId: string | null = null;
-        if (isStatic) {
-          // Static (image) ad: upload the JPG → image hash → image creative.
+        const fetchBytes = async (u: string) => Buffer.from(await (await fetch(u)).arrayBuffer());
+
+        if (dual && isStatic) {
+          // Both ratios → one placement-customized image ad (4:5 feed, 9:16 stories).
           await setStatus("uploading");
-          const bytes = Buffer.from(await (await fetch(ctx.fileUrl!)).arrayBuffer());
-          const imageHash = await uploadAdImage(ctx.token!, j.meta_account_id, bytes, "static.jpg");
+          const [fb, sb] = await Promise.all([fetchBytes(ctx.feedUrl!), fetchBytes(ctx.storyUrl!)]);
+          const [feedImageHash, storyImageHash] = await Promise.all([
+            uploadAdImage(ctx.token!, j.meta_account_id, fb, "feed.jpg"),
+            uploadAdImage(ctx.token!, j.meta_account_id, sb, "story.jpg"),
+          ]);
+          await setStatus("creating");
+          creativeId = await createDualAssetCreative(ctx.token!, { ...baseCreative, feedImageHash, storyImageHash });
+        } else if (dual && !isStatic) {
+          // Both ratios → one placement-customized video ad (4:5 feed, 9:16 reels/stories).
+          await setStatus("uploading");
+          const [feedVid, storyVid] = await Promise.all([
+            uploadAdVideo(ctx.token!, j.meta_account_id, ctx.feedUrl!, `${ctx.adName} (feed)`),
+            uploadAdVideo(ctx.token!, j.meta_account_id, ctx.storyUrl!, `${ctx.adName} (reels)`),
+          ]);
+          videoId = storyVid;
+          await admin.from("ad_publish_jobs").update({ meta_video_id: storyVid }).eq("id", job_id);
+          await Promise.all([
+            waitForVideoReady(ctx.token!, feedVid, { timeoutMs: 300000 }),
+            waitForVideoReady(ctx.token!, storyVid, { timeoutMs: 300000 }),
+          ]);
+          await setStatus("creating");
+          creativeId = await createDualAssetCreative(ctx.token!, { ...baseCreative, feedVideoId: feedVid, storyVideoId: storyVid });
+        } else if (isStatic) {
+          // Single static (image) ad.
+          await setStatus("uploading");
+          const imageHash = await uploadAdImage(ctx.token!, j.meta_account_id, await fetchBytes(ctx.singleUrl!), "static.jpg");
           await setStatus("creating");
           creativeId = await createAdCreative(ctx.token!, { ...baseCreative, imageHash });
         } else {
+          // Single video ad.
           await setStatus("uploading");
-          videoId = await uploadAdVideo(ctx.token!, j.meta_account_id, ctx.fileUrl!, ctx.adName);
+          videoId = await uploadAdVideo(ctx.token!, j.meta_account_id, ctx.singleUrl!, ctx.adName);
           await admin.from("ad_publish_jobs").update({ meta_video_id: videoId }).eq("id", job_id);
           await waitForVideoReady(ctx.token!, videoId, { timeoutMs: 300000 });
 
@@ -885,8 +929,7 @@ export const adToolPublishToMeta = inngest.createFunction(
           const thumbnailUrl = await getVideoThumbnail(ctx.token!, videoId);
           if (thumbnailUrl) {
             try {
-              const bytes = Buffer.from(await (await fetch(thumbnailUrl)).arrayBuffer());
-              thumbnailHash = await uploadAdImage(ctx.token!, j.meta_account_id, bytes);
+              thumbnailHash = await uploadAdImage(ctx.token!, j.meta_account_id, await fetchBytes(thumbnailUrl));
             } catch { /* fall through — creative create will surface a thumbnail error if truly required */ }
           }
           creativeId = await createAdCreative(ctx.token!, { ...baseCreative, videoId, thumbnailHash });

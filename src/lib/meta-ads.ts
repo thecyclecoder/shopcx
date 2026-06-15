@@ -184,6 +184,9 @@ export async function createAdCreative(token: string, a: CreativeArgs): Promise<
     ? {
         image_data: {
           image_hash: a.imageHash,
+          // image_data REQUIRES a top-level link (subcode "link field is required");
+          // video_data does not. The CTA link alone is not enough for image creatives.
+          link: a.destinationUrl,
           ...(a.description ? { link_description: a.description } : {}),
           call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
         },
@@ -207,6 +210,103 @@ export async function createAdCreative(token: string, a: CreativeArgs): Promise<
       titles: a.headlines.filter(Boolean).map((text) => ({ text })),
       bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
       optimization_type: "DEGREES_OF_FREEDOM",
+    },
+    degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
+    ...(a.urlTags ? { url_tags: a.urlTags } : {}),
+  };
+  const j = await metaPost(`${actId(a.accountId)}/adcreatives`, body, token);
+  if (!j.id) throw new Error("meta_creative_no_id");
+  return j.id;
+}
+
+export interface DualAssetCreativeArgs {
+  accountId: string;
+  name: string;
+  pageId: string;
+  instagramUserId?: string | null;
+  headlines: string[];
+  primaryTexts: string[];
+  description?: string | null;
+  ctaType: string;
+  destinationUrl: string;
+  urlTags?: string | null;
+  // feed placement = the 4:5 asset; stories/reels = the 9:16 asset.
+  feedVideoId?: string; storyVideoId?: string;
+  feedImageHash?: string; storyImageHash?: string;
+}
+
+/**
+ * Placement Asset Customization (PAC) creative — ONE ad that serves the **4:5**
+ * asset in feed and the **9:16** asset in stories/reels. Mirrors the proven
+ * shopgrowth dual-asset shape: `object_story_spec` carries only page identity;
+ * the `asset_feed_spec` uses `ad_formats:["AUTOMATIC_FORMAT"]` +
+ * `optimization_type:"PLACEMENT"` + placement-labeled assets + customization rules
+ * (feed→4:5, stories→9:16, default→9:16). This is NOT Dynamic Creative — it
+ * publishes into a regular ad set. (Pinning `ad_formats:["SINGLE_VIDEO"]` is what
+ * triggers the "Dynamic Creative Ad Sets" rejection; AUTOMATIC_FORMAT does not.)
+ */
+export async function createDualAssetCreative(token: string, a: DualAssetCreativeArgs): Promise<string> {
+  const isVideo = !!(a.feedVideoId && a.storyVideoId);
+  const prefix = `cx_${Date.now()}`;
+  const lbl = (kind: string, p: string) => ({ name: `${prefix}_${kind}_${p}` });
+  const allBody = [lbl("body", "stories"), lbl("body", "feed"), lbl("body", "default")];
+  const allTitle = [lbl("title", "stories"), lbl("title", "feed"), lbl("title", "default")];
+  const allUrl = [lbl("url", "stories"), lbl("url", "feed"), lbl("url", "default")];
+
+  const labeledBodies = a.primaryTexts.filter(Boolean).map((text) => ({ text, adlabels: allBody }));
+  const labeledTitles = a.headlines.filter(Boolean).map((text) => ({ text, adlabels: allTitle }));
+  const labeledLinkUrls = [{ website_url: a.destinationUrl, adlabels: allUrl }];
+
+  // 9:16 → stories + default; 4:5 → feed. video_label / image_label by media kind.
+  const assetKey = isVideo ? "videos" : "images";
+  const assets = isVideo
+    ? [
+        { video_id: a.storyVideoId, adlabels: [lbl("vid", "stories"), lbl("vid", "default")] },
+        { video_id: a.feedVideoId, adlabels: [lbl("vid", "feed")] },
+      ]
+    : [
+        { hash: a.storyImageHash, adlabels: [lbl("img", "stories"), lbl("img", "default")] },
+        { hash: a.feedImageHash, adlabels: [lbl("img", "feed")] },
+      ];
+  const assetLabel = (p: string) => (isVideo ? { video_label: lbl("vid", p) } : { image_label: lbl("img", p) });
+
+  const rule = (p: string, priority: number, spec: Record<string, unknown>) => ({
+    customization_spec: { age_min: 13, age_max: 65, ...spec },
+    ...assetLabel(p),
+    body_label: lbl("body", p),
+    title_label: lbl("title", p),
+    link_url_label: lbl("url", p),
+    priority,
+  });
+
+  const body: Record<string, unknown> = {
+    name: a.name,
+    object_story_spec: {
+      page_id: a.pageId,
+      ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}),
+    },
+    asset_feed_spec: {
+      ad_formats: ["AUTOMATIC_FORMAT"],
+      optimization_type: "PLACEMENT",
+      [assetKey]: assets,
+      bodies: labeledBodies,
+      titles: labeledTitles,
+      descriptions: [{ text: (a.description || "").trim() }],
+      call_to_action_types: [a.ctaType],
+      link_urls: labeledLinkUrls,
+      asset_customization_rules: [
+        rule("feed", 1, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["feed", "profile_feed", "marketplace", "search"],
+          instagram_positions: ["stream", "explore_home", "profile_feed"],
+        }),
+        rule("stories", 2, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["story", "facebook_reels", "video_feeds"],
+          instagram_positions: ["story", "reels"],
+        }),
+        rule("default", 3, {}),
+      ],
     },
     degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
     ...(a.urlTags ? { url_tags: a.urlTags } : {}),
