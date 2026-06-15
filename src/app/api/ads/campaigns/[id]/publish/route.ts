@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { META_CTA_TYPES } from "@/lib/ad-meta-copy";
+import { advertorialLanderUrl } from "@/lib/advertorial-pages";
 
 async function authorize(workspaceId: string | null) {
   const supabase = await createClient();
@@ -55,7 +56,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const headlines = arr(body.headlines), primaryTexts = arr(body.primary_texts);
   const ctaType = META_CTA_TYPES.includes(body.cta_type) ? body.cta_type : "SHOP_NOW";
-  const destinationUrl = typeof body.destination_url === "string" ? body.destination_url.trim() : "";
+  // Destination defaults to the campaign angle's advertorial lander (scent-match by
+  // construction); an explicit destination_url from the operator still wins.
+  let destinationUrl = typeof body.destination_url === "string" ? body.destination_url.trim() : "";
+  if (!destinationUrl) destinationUrl = (await advertorialLanderUrl(workspaceId as string, id)) || "";
   const required: Record<string, unknown> = { meta_account_id: body.meta_account_id, meta_adset_id: body.meta_adset_id, meta_page_id: body.meta_page_id };
   for (const [k, v] of Object.entries(required)) if (!v) return NextResponse.json({ error: `${k} required` }, { status: 400 });
   if (!headlines.length || !primaryTexts.length) return NextResponse.json({ error: "headlines + primary_texts required" }, { status: 400 });

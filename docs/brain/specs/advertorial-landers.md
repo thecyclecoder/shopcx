@@ -1,6 +1,8 @@
-# Auto-generated ad-matched landers (advertorial + before/after) ⏳
+# Auto-generated ad-matched landers (advertorial + before/after) 🚧
 
-Status: ⏳ planned · owner: Dylan · created 2026-06-15
+Status: 🚧 in progress (P1–P4 code-complete on branch `advertorial-landers`) · owner: Dylan · created 2026-06-15
+
+> **Shipped on branch:** layout modes + sections, `advertorial_pages` generator + migration + API, auto-trigger on `ready` + Meta destination default, and the `product_id` checkout/order attribution fix. End-to-end trace folded into [[../lifecycles/advertorial-landers]] + [[../tables/advertorial_pages]]. Remaining = operator go-live steps (apply migration, `PUT /api/inngest` sync, real generation, A/B) + campaign-page preview UI. Delete this spec once those land and it's verified in production.
 
 ## Context — why this exists
 
@@ -80,10 +82,10 @@ Anchor narrative to the CORE desires — **weight loss · fighting aging · best
 - All already computed by `GET /api/workspaces/[id]/storefront-funnel`.
 
 ## Phases
-- ⏳ **P1 — Layout mode + manual content.** `AdvertorialHero` + `AdvertorialChapter` sections, `?variant=advertorial` branch in `render-page.tsx`, reuse ingredients/pricing, sticky nav, `data-section` tracking. Hand-fed content first to validate the layout.
-- ⏳ **P2 — Generator.** `advertorial_pages` table + Opus copy gen (reusing `ad-angles`/`ad-validator`) + angle→hero auto-selection. `POST /api/ads/.../advertorial` + GET.
-- ⏳ **P3 — Auto-trigger.** Fire generation when a campaign hits `ready` (Inngest, in `src/lib/inngest/ad-tool.ts`); set ad destination URL on Meta publish.
-- ⏳ **P4 — Attribution fix + A/B + dashboard surfacing.**
+- 🚧 **P1 — Layout mode + sections.** ✅ `AdvertorialHero` + `AdvertorialChapter` + `BeforeAfterHero` + `WeightLossTestimonialWall` + `StickyJumpNav`; `?variant=advertorial|beforeafter` branch in `render-page.tsx` + the storefront route reads `searchParams`; reuse ingredients/pricing/reviews; `data-section` tracking. Reader (`loadAdvertorialContent`) with PI fallback so the layout always renders.
+- 🚧 **P2 — Generator.** ✅ `advertorial_pages` table (migration `20260615120000`) + `generateAdvertorialNarrative`/`generateAdvertorialPagesForCampaign` (Opus, reusing `ad-angles`/`ad-validator`, deterministic fallback) + angle→hero auto-selection. `POST`/`GET /api/ads/campaigns/[id]/advertorial`.
+- 🚧 **P3 — Auto-trigger.** ✅ Fires generation when a campaign hits `ready` (`adToolRenderRequested` → `ad-tool/advertorial-page-requested` → `adToolAdvertorialPageRequested`); publish route defaults `destination_url` to `advertorialLanderUrl`. ⏳ `PUT /api/inngest` sync needed to register the function.
+- 🚧 **P4 — Attribution fix + A/B.** ✅ `product_id` on `checkout_view` + `order_placed` (client + server) + `?product_id` scope on `storefront-funnel`. ⏳ A/B run (advertorial lander vs standard PDP) + dashboard surfacing.
 
 ## Files to touch (anticipated)
 - `src/app/(storefront)/_lib/render-page.tsx` — advertorial layout branch

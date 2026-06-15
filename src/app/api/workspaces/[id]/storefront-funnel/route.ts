@@ -39,6 +39,9 @@ export async function GET(
 ) {
   const { id: workspaceId } = await params;
   const url = new URL(request.url);
+  // Optional product scope: with product_id on checkout_view/order_placed now
+  // carried, the whole funnel can resolve per product (advertorial-lander A/B).
+  const productScope = url.searchParams.get("product_id");
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -94,13 +97,15 @@ export async function GET(
   // sessions client-side. With current volumes that's fine; if we
   // grow into millions of events we'd push this into a SQL view or
   // materialized rollup.
-  const { data: stepRows } = await admin
+  let stepQuery = admin
     .from("storefront_events")
     .select("event_type, session_id")
     .eq("workspace_id", workspaceId)
     .in("event_type", FUNNEL_STEPS as readonly string[])
     .gte("created_at", startIso)
     .lte("created_at", endIso);
+  if (productScope) stepQuery = stepQuery.eq("product_id", productScope);
+  const { data: stepRows } = await stepQuery;
 
   const sessionsByStep: Record<FunnelStep, Set<string>> = {
     pdp_view: new Set(), pdp_engaged: new Set(), pack_selected: new Set(),

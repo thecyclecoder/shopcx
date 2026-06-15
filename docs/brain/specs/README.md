@@ -45,7 +45,7 @@ Single source of truth for what's being built next, what's parked, and what just
 ---
 
 **Cross-cutting (storefront × ad builder):**
-- ⏳ **Auto-generated advertorial landers** — [[advertorial-landers]]. When an ad campaign hits `ready`, auto-generate a matched advertorial landing page (per ad *angle*) reusing the ad's assets (angle, hero image, script) + the PDP's working sections (ingredients, price table, checkout). Zero manual design; scent-match by construction. Targets the proven 86%→24% hero cliff (funnel data in the spec). Auto-design scope = editorial hero + chapter 1 only; everything below is the existing PDP reused. Prereq: fix `product_id` attribution on checkout/order events.
+- 🚧 **Auto-generated advertorial landers** — [[advertorial-landers]] (P1–P4 code-complete on branch `advertorial-landers`; lifecycle [[../lifecycles/advertorial-landers]]). When an ad campaign hits `ready`, auto-generate a matched advertorial landing page (per ad *angle*) reusing the ad's assets (angle, hero image, script) + the PDP's working sections (ingredients, price table, checkout). Zero manual design; scent-match by construction. Targets the proven 86%→24% hero cliff (funnel data in the spec). Auto-design scope = editorial hero + chapter 1 only; everything below is the existing PDP reused. `product_id` attribution on checkout/order shipped. Remaining: migration apply + Inngest sync + A/B.
 
 ## Active project 2 — Customer portal 🚧
 

@@ -40,6 +40,7 @@ import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
 import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createAd } from "@/lib/meta-ads";
+import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -625,6 +626,12 @@ export const adToolRenderRequested = inngest.createFunction(
 
     const anyReady = results.some((r: any) => r.ok);
     await admin.from("ad_campaigns").update({ status: anyReady ? "ready" : "failed" }).eq("id", campaign_id);
+    // Ad + its ad-matched lander come out together: when a campaign reaches ready,
+    // auto-generate the advertorial / before-after lander for its angle (idempotent
+    // — upsert keyed by product_id+slug). See docs/brain/specs/advertorial-landers.md.
+    if (anyReady) {
+      await step.sendEvent("advertorial-page", { name: "ad-tool/advertorial-page-requested", data: { workspace_id, campaign_id } });
+    }
     return { ok: anyReady, results };
   },
 );
@@ -907,6 +914,17 @@ export const adToolGenerateFull = inngest.createFunction(
   },
 );
 
+// ── Advertorial lander (auto-generated when a campaign reaches ready) ────────
+// Generates the ad-matched landing page(s) for the campaign's angle so the ad +
+// its scent-matched lander ship together. Idempotent (upsert by product+slug).
+export const adToolAdvertorialPageRequested = inngest.createFunction(
+  { id: "ad-tool-advertorial-page-requested", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/advertorial-page-requested" }] },
+  async ({ event }) => {
+    const { workspace_id, campaign_id } = event.data as EventData;
+    return generateAdvertorialPagesForCampaign(workspace_id, campaign_id);
+  },
+);
+
 export const adToolFunctions = [
   adToolFaceRequested,
   adToolHeroRequested,
@@ -918,6 +936,7 @@ export const adToolFunctions = [
   adToolStaticRequested,
   adToolPublishToMeta,
   adToolGenerateFull,
+  adToolAdvertorialPageRequested,
 ];
 
 // keep imports used even if tree-shaken in some builds

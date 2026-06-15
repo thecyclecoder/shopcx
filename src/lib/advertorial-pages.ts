@@ -1,0 +1,535 @@
+/**
+ * Auto-generated ad-matched landers (advertorial + before/after).
+ *
+ * A lander is a LAYOUT MODE of the storefront PDP, reached via
+ * `?variant=advertorial|beforeafter&angle={slug}`. It continues the scent of an
+ * advertorial / before-after ad (editorial serif, real-person/ingredient hero,
+ * "looks like an article, not an ad") so the cold-50+ click doesn't bounce on the
+ * standard branded PDP. Only the custom top (hero + chapter 1) is generated; every
+ * section below it (ingredients, pricing, reviews, checkout) is the existing PDP,
+ * reused unchanged.
+ *
+ * This file is BOTH the reader the render path uses (`loadAdvertorialContent`) and
+ * the generator the Inngest auto-trigger calls (`generateAdvertorialPage`). The
+ * reader degrades gracefully: if no generated row exists (or the table isn't there
+ * yet), it derives a sensible editorial top from the already-loaded PageData + PI
+ * so the layout always renders. See docs/brain/specs/advertorial-landers.md.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { OPUS_MODEL } from "@/lib/ai-models";
+import { logAiUsage } from "@/lib/ai-usage";
+import { loadAngleInputs } from "@/lib/ad-angles";
+import { validateAdScript } from "@/lib/ad-validator";
+import { resolveAdToolSettings } from "@/lib/ad-tool-config";
+import type { AngleGeneratorInput } from "@/lib/ad-types";
+import type { PageData, Review } from "@/app/(storefront)/_lib/page-data";
+
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+export type AdvertorialVariant = "advertorial" | "beforeafter";
+export type AdvertorialHeroKind = "avatar" | "ingredient" | "beforeafter";
+
+/** Everything the advertorial/before-after sections need to render. Pure data —
+ *  resolved from a generated `advertorial_pages` row or derived from PageData. */
+export interface AdvertorialContent {
+  variant: AdvertorialVariant;
+  angleSlug: string | null;
+  /** Brand-owned masthead, e.g. "THE SUPERFOODS REPORT" (advertorial only). */
+  publication: string;
+  sponsorLabel: string;
+  /** Editorial serif hero headline. */
+  headline: string;
+  /** One-line standfirst under the headline. */
+  dek: string;
+  heroKind: AdvertorialHeroKind;
+  heroImageUrl: string | null;
+  heroCaption: string;
+  /** Before/after transformation hero (before/after lander). */
+  beforeImageUrl: string | null;
+  afterImageUrl: string | null;
+  /** Narrative chapter 1 (problem → mechanism/story → proof). */
+  chapter: { heading: string; paragraphs: string[] };
+  rating: number;
+  /** Review count, already display-formatted (actual + 10,000). */
+  reviewCountDisplay: string;
+}
+
+/** Review counts display as actual + 10,000 (Dylan rule). 2,291 → 12,291. */
+export function displayReviewCount(real: number): string {
+  return (Math.max(0, Math.round(real)) + 10000).toLocaleString("en-US");
+}
+
+// Angle hook → hero kind. Testimonial/transformation/social-proof → the avatar
+// holding-product shot; mechanism/curiosity/clinical → an ingredient shot.
+const INGREDIENT_HOOKS = new Set([
+  "contrarian",
+  "secret_reveal",
+  "enemy",
+  "urgent_question",
+  "problem_now",
+  "visual_shock",
+]);
+
+export function heroKindForHook(hookSlug: string | null): "avatar" | "ingredient" {
+  return hookSlug && INGREDIENT_HOOKS.has(hookSlug) ? "ingredient" : "avatar";
+}
+
+// Reviews that speak to the CORE desires — weight / appearance / being noticed.
+// Used by the before/after lander's testimonial wall (and to anchor proof copy).
+const WEIGHT_RE = /\b(weight|pounds?|lbs?|lost|losing|slim|trimm?er|size[sd]?|smaller|jeans|scale|inches?|figure)\b/i;
+const APPEARANCE_RE = /\b(younger|skin|glow|complexion|wrinkles?|compliments?|confiden\w*|noticed|radiant)\b/i;
+
+export function weightLossReviews(reviews: Review[], limit = 9): Review[] {
+  const fiveStar = reviews.filter((r) => (r.rating ?? 0) >= 5);
+  const onDesire = fiveStar.filter((r) => {
+    const text = `${r.title || ""} ${r.body || ""} ${r.smart_quote || ""}`;
+    return WEIGHT_RE.test(text) || APPEARANCE_RE.test(text);
+  });
+  // Prefer on-desire reviews; backfill with other 5★ so the wall is never empty.
+  const picked = [...onDesire];
+  for (const r of fiveStar) {
+    if (picked.length >= limit) break;
+    if (!picked.includes(r)) picked.push(r);
+  }
+  return picked.slice(0, limit);
+}
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+/** Re-sign an ad-tool storage path → fresh URL; pass public/external URLs through. */
+async function resolveHeroUrl(ref: string | null | undefined): Promise<string | null> {
+  if (!ref) return null;
+  if (/^https?:\/\//i.test(ref)) return ref;
+  // Bare ad-tool bucket path → short-lived signed URL.
+  try {
+    const admin = createAdminClient();
+    const { data } = await admin.storage.from("ad-tool").createSignedUrl(ref, 60 * 60);
+    return data?.signedUrl || null;
+  } catch {
+    return null;
+  }
+}
+
+function mediaUrl(data: PageData, slot: string): string | null {
+  const m = data.media_by_slot[slot];
+  if (!m) return null;
+  // MediaItem carries a url (public product-media bucket) in this codebase.
+  const anyM = m as unknown as { url?: string | null; storage_path?: string | null };
+  if (anyM.url) return anyM.url;
+  if (anyM.storage_path && SUPABASE_URL) return `${SUPABASE_URL}/storage/v1/object/public/product-media/${anyM.storage_path}`;
+  return null;
+}
+
+// ── Reader ───────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the advertorial/before-after top for a lander. Prefers a generated
+ * `advertorial_pages` row (keyed by product_id + slug); falls back to deriving
+ * an editorial top from the already-loaded PageData so the layout always renders.
+ */
+export async function loadAdvertorialContent(
+  data: PageData,
+  variant: AdvertorialVariant,
+  angleSlug: string | null,
+): Promise<AdvertorialContent> {
+  const productId = data.product.id;
+  let row: AdvertorialPageRow | null = null;
+  if (angleSlug) {
+    try {
+      const admin = createAdminClient();
+      const { data: r } = await admin
+        .from("advertorial_pages")
+        .select("*")
+        .eq("product_id", productId)
+        .eq("slug", angleSlug)
+        .eq("variant", variant)
+        .maybeSingle();
+      row = (r as AdvertorialPageRow) || null;
+    } catch {
+      row = null; // table may not exist yet (pre-migration) — fall back
+    }
+  }
+  return row ? rowToContent(data, variant, angleSlug, row) : fallbackContent(data, variant, angleSlug);
+}
+
+interface AdvertorialPageRow {
+  slug: string;
+  variant: string;
+  publication: string | null;
+  sponsor_label: string | null;
+  headline: string | null;
+  dek: string | null;
+  hero_kind: string | null;
+  hero_storage_path: string | null;
+  hero_caption: string | null;
+  chapter_heading: string | null;
+  chapter_paragraphs: string[] | null;
+}
+
+async function rowToContent(
+  data: PageData,
+  variant: AdvertorialVariant,
+  angleSlug: string | null,
+  row: AdvertorialPageRow,
+): Promise<AdvertorialContent> {
+  const fb = fallbackContent(data, variant, angleSlug);
+  const heroFromRow = await resolveHeroUrl(row.hero_storage_path);
+  return {
+    variant,
+    angleSlug,
+    publication: row.publication || fb.publication,
+    sponsorLabel: row.sponsor_label || fb.sponsorLabel,
+    headline: row.headline || fb.headline,
+    dek: row.dek || fb.dek,
+    heroKind: (row.hero_kind as AdvertorialHeroKind) || fb.heroKind,
+    heroImageUrl: heroFromRow || fb.heroImageUrl,
+    heroCaption: row.hero_caption || fb.heroCaption,
+    beforeImageUrl: fb.beforeImageUrl,
+    afterImageUrl: fb.afterImageUrl,
+    chapter: {
+      heading: row.chapter_heading || fb.chapter.heading,
+      paragraphs: row.chapter_paragraphs?.length ? row.chapter_paragraphs : fb.chapter.paragraphs,
+    },
+    rating: fb.rating,
+    reviewCountDisplay: fb.reviewCountDisplay,
+  };
+}
+
+/** Editorial top derived from PageData when no generated row exists. */
+function fallbackContent(data: PageData, variant: AdvertorialVariant, angleSlug: string | null): AdvertorialContent {
+  const title = data.product.title;
+  const pc = data.page_content;
+  const rating = Math.round(data.product.rating || 5);
+  const before = mediaUrl(data, "before");
+  const after = mediaUrl(data, "after");
+  const avatar = mediaUrl(data, "lifestyle_1") || mediaUrl(data, "hero");
+  const ingredient =
+    Object.keys(data.media_by_slot).find((s) => s.startsWith("ingredient_")) ?? null;
+  const ingredientUrl = ingredient ? mediaUrl(data, ingredient) : null;
+
+  if (variant === "beforeafter") {
+    return {
+      variant,
+      angleSlug,
+      publication: "REAL RESULTS",
+      sponsorLabel: "SPONSORED",
+      headline: "The transformation people over 50 are talking about",
+      dek: "Real customers. Real photos. One simple change to their morning.",
+      heroKind: "beforeafter",
+      heroImageUrl: after || avatar,
+      heroCaption: `Real ${title} customers.`,
+      beforeImageUrl: before,
+      afterImageUrl: after,
+      chapter: {
+        heading: "What changed",
+        paragraphs: [
+          pc?.mechanism_copy?.split(/\n\n+/)[0] ||
+            `They didn't overhaul their lives. They swapped one cup — ${title} — and let it do the quiet work.`,
+        ],
+      },
+      rating,
+      reviewCountDisplay: displayReviewCount(data.review_total_count || 0),
+    };
+  }
+
+  const heroKind: AdvertorialHeroKind = ingredientUrl && !avatar ? "ingredient" : "avatar";
+  const mech = (pc?.mechanism_copy || "").split(/\n\n+/).filter(Boolean);
+  return {
+    variant,
+    angleSlug,
+    publication: "THE SUPERFOODS REPORT",
+    sponsorLabel: "SPONSORED",
+    headline: pc?.hero_headline || `The Morning Coffee People Over 50 Are Switching To`,
+    dek: pc?.hero_subheadline || `It looks like ordinary coffee. The results people report are anything but.`,
+    heroKind,
+    heroImageUrl: heroKind === "ingredient" ? ingredientUrl : avatar,
+    heroCaption: `${title}.`,
+    beforeImageUrl: before,
+    afterImageUrl: after,
+    chapter: {
+      heading: "Why people are making the switch",
+      paragraphs: mech.length
+        ? mech.slice(0, 2)
+        : [
+            `A growing number of people over 50 are quietly swapping their morning routine for ${title} — and talking about how they look and feel because of it.`,
+            `The difference isn't a quick jolt of energy. It's what shows up over the weeks: in the mirror, on the scale, and in the compliments.`,
+          ],
+    },
+    rating,
+    reviewCountDisplay: displayReviewCount(data.review_total_count || 0),
+  };
+}
+
+// ── Generator (Opus copy + hero auto-select + persist) ───────────────────────
+
+interface AngleRow {
+  id: string;
+  hook_slug: string | null;
+  lf8_slot: number | null;
+  lead_benefit_anchor: string | null;
+  hook_one_liner: string | null;
+  pain_now: string | null;
+  desired_outcome: string | null;
+  enemy: string | null;
+}
+
+const slugify = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+/** Stable per-product URL slug for an angle's lander (readable + unique). */
+export function slugForAngle(angle: { id: string; hook_slug: string | null }): string {
+  const base = slugify(angle.hook_slug || "angle");
+  return `${base}-${angle.id.slice(0, 8)}`;
+}
+
+/** Pull the ad-tool bucket PATH out of a (possibly signed) hero URL so we persist
+ *  a re-signable path, not an expiring signed URL. */
+function extractAdToolPath(ref: string | null | undefined): string | null {
+  if (!ref) return null;
+  const m = ref.match(/\/(?:sign|public)\/ad-tool\/([^?]+)/) || ref.match(/\/ad-tool\/([^?]+)/);
+  if (m) return decodeURIComponent(m[1]);
+  if (!/^https?:\/\//i.test(ref)) return ref; // already a bare path
+  return null; // external/expiring URL we can't re-sign — fall back to media
+}
+
+interface NarrativeCopy {
+  publication: string;
+  sponsorLabel: string;
+  headline: string;
+  dek: string;
+  heroCaption: string;
+  chapterHeading: string;
+  chapterParagraphs: string[];
+}
+
+function narrativeFallback(inputs: AngleGeneratorInput, angle: AngleRow | null, variant: AdvertorialVariant): NarrativeCopy {
+  const title = inputs.product_title;
+  const lead = angle?.hook_one_liner || inputs.hero_headline || "";
+  if (variant === "beforeafter") {
+    return {
+      publication: "REAL RESULTS",
+      sponsorLabel: "SPONSORED",
+      headline: lead || "The transformation people over 50 are talking about",
+      dek: "Real customers. Real photos. One simple change to their morning.",
+      heroCaption: `Real ${title} customers.`,
+      chapterHeading: "What changed",
+      chapterParagraphs: [
+        `They didn't overhaul their lives. They swapped one cup — ${title} — and let it do the quiet work, week after week.`,
+      ],
+    };
+  }
+  return {
+    publication: "THE SUPERFOODS REPORT",
+    sponsorLabel: "SPONSORED",
+    headline: lead || inputs.hero_headline || `The Morning Coffee People Over 50 Are Switching To`,
+    dek: inputs.hero_subheadline || `It looks like ordinary coffee. The results people report are anything but.`,
+    heroCaption: `${title}.`,
+    chapterHeading: "Why people are making the switch",
+    chapterParagraphs: [
+      `A growing number of people over 50 are quietly swapping their morning routine for ${title} — and talking about how they look and feel because of it.`,
+      `The difference isn't a quick jolt of energy. It's what shows up over the weeks: in the mirror, on the scale, and in the compliments.`,
+    ],
+  };
+}
+
+async function callOpus(workspaceId: string, prompt: string): Promise<Record<string, unknown> | null> {
+  if (!ANTHROPIC_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: OPUS_MODEL, max_tokens: 1300, messages: [{ role: "user", content: prompt }] }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) return null;
+    await logAiUsage({ workspaceId, model: OPUS_MODEL, usage: out.usage, purpose: "advertorial_lander_copy", ticketId: null }).catch(() => {});
+    const m = (out?.content?.[0]?.text || "").match(/\{[\s\S]*\}/);
+    return m ? JSON.parse(m[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate the editorial headline + dek + chapter-1 narrative for a lander —
+ * the SAME angle + PI tiers that drive the ad, so the lander is scent-matched by
+ * construction. PI-anchored with a deterministic fallback; banned-word-gated via
+ * the existing ad validator so claims stay anchored.
+ */
+export async function generateAdvertorialNarrative(
+  workspaceId: string,
+  inputs: AngleGeneratorInput,
+  angle: AngleRow | null,
+  variant: AdvertorialVariant,
+  script: string,
+  bannedWords: string[],
+): Promise<NarrativeCopy> {
+  const fb = narrativeFallback(inputs, angle, variant);
+  const benefits = (inputs.lead_benefits || []).map((b) => b.name).filter(Boolean).slice(0, 6);
+  const science = (inputs.ingredient_science || []).map((s) => `${s.ingredient_name}: ${s.benefit_headline}`).filter(Boolean).slice(0, 5);
+  const reviews = (inputs.proof_quotes || []).slice(0, 4).map((q) => `"${q.quote}"`);
+  const prompt = `You write the editorial TOP of an advertorial landing page for a COLD 50+ audience. It must read like a trustworthy health-magazine article continuing from an ad they just clicked — NOT a loud DTC page (the un-ad look is the whole conversion mechanism). Product: "${inputs.product_title}".
+
+ANCHOR everything to the CORE desires, in order: weight loss, fighting aging, being the best version of yourself, being noticed/liked (social approval). NEVER lead with functional/secondary benefits (energy, "no jitters", "no 2pm crash", focus).
+
+Lead angle (honor it): hook "${angle?.hook_one_liner || ""}", anchor benefit (verbatim) "${angle?.lead_benefit_anchor || ""}", pain "${angle?.pain_now || ""}", desired outcome "${angle?.desired_outcome || ""}".
+Truthful inputs (no invented/medical claims): benefits ${benefits.join("; ") || "(none)"}; ingredient science ${science.join("; ") || "(none)"}; guarantee ${inputs.guarantee_copy || "(none)"}; real review quotes ${reviews.join(" ") || "(none)"}.
+The matching ad's spoken script (for tone): """${(script || "").slice(0, 600)}"""
+${variant === "beforeafter" ? "This is a BEFORE/AFTER lander — keep specific weight-loss numbers OUT of the page's own claims (those belong in real testimonial quotes)." : ""}
+
+Write the editorial top. The chapter-1 narrative goes problem → mechanism/story → proof, 2 short paragraphs. American English, plain, no hype. Do NOT use these words: ${bannedWords.join(", ") || "(none)"}.
+
+Return ONLY JSON:
+{"publication":"brand-owned masthead, e.g. THE SUPERFOODS REPORT","headline":"editorial serif hero headline, ~10-14 words, curiosity/benefit-led, no brand name first","dek":"one-sentence standfirst","heroCaption":"short italic photo caption","chapterHeading":"short chapter heading","chapterParagraphs":["paragraph 1","paragraph 2"]}`;
+
+  const j = await callOpus(workspaceId, prompt);
+  if (!j) return fb;
+  const paras = (Array.isArray(j.chapterParagraphs) ? j.chapterParagraphs : []).map((s: unknown) => String(s).trim()).filter(Boolean).slice(0, 3);
+  const out: NarrativeCopy = {
+    publication: String(j.publication || fb.publication).trim(),
+    sponsorLabel: fb.sponsorLabel,
+    headline: String(j.headline || fb.headline).trim(),
+    dek: String(j.dek || fb.dek).trim(),
+    heroCaption: String(j.heroCaption || fb.heroCaption).trim(),
+    chapterHeading: String(j.chapterHeading || fb.chapterHeading).trim(),
+    chapterParagraphs: paras.length ? paras : fb.chapterParagraphs,
+  };
+  // Banned-word gate (lenient — the opener/length codes are spoken-script specific).
+  try {
+    const res = validateAdScript([out.headline, out.dek, ...out.chapterParagraphs].join(" "), null, inputs, { bannedWords });
+    if (res.violations.some((v) => v.severity === "fatal" && v.code === "banned_word")) return fb;
+  } catch {
+    /* validator is best-effort */
+  }
+  return out;
+}
+
+export interface GeneratedLander {
+  variant: AdvertorialVariant;
+  slug: string;
+  url_path: string;
+}
+
+/**
+ * Generate + persist the ad-matched lander(s) for a campaign that reached `ready`.
+ * Always builds the advertorial lander; additionally builds the before/after
+ * lander when the product has real before/after media (weight-loss scent). Keyed
+ * by (product_id, slug) so it's reused across all campaigns/ads of that angle.
+ */
+export async function generateAdvertorialPagesForCampaign(
+  workspaceId: string,
+  campaignId: string,
+): Promise<{ ok: boolean; landers: GeneratedLander[]; reason?: string }> {
+  const admin = createAdminClient();
+  const { data: campaign } = await admin
+    .from("ad_campaigns")
+    .select("id, product_id, angle_id, hero_image_url, script_text")
+    .eq("id", campaignId)
+    .eq("workspace_id", workspaceId)
+    .single();
+  if (!campaign?.product_id) return { ok: false, landers: [], reason: "no_product" };
+
+  let angle: AngleRow | null = null;
+  if (campaign.angle_id) {
+    const { data: a } = await admin
+      .from("product_ad_angles")
+      .select("id, hook_slug, lf8_slot, lead_benefit_anchor, hook_one_liner, pain_now, desired_outcome, enemy")
+      .eq("id", campaign.angle_id)
+      .maybeSingle();
+    angle = (a as AngleRow) || null;
+  }
+
+  const [inputs, ws, mediaRes] = await Promise.all([
+    loadAngleInputs(campaign.product_id),
+    admin.from("workspaces").select("ad_tool_settings").eq("id", workspaceId).single(),
+    admin.from("product_media").select("slot").eq("product_id", campaign.product_id),
+  ]);
+  const settings = resolveAdToolSettings(ws.data?.ad_tool_settings);
+  const slots = new Set((mediaRes.data || []).map((m) => m.slot));
+  const hasBeforeAfter = slots.has("before") && slots.has("after");
+
+  const slug = angle ? slugForAngle(angle) : slugify(`${inputs.product_title}-default`);
+  const avatarPath = extractAdToolPath(campaign.hero_image_url);
+
+  // Which variant(s) to generate. Advertorial always; before/after when the
+  // product has the real transformation media to back it.
+  const variants: AdvertorialVariant[] = hasBeforeAfter ? ["advertorial", "beforeafter"] : ["advertorial"];
+  const landers: GeneratedLander[] = [];
+
+  for (const variant of variants) {
+    const copy = await generateAdvertorialNarrative(workspaceId, inputs, angle, variant, campaign.script_text || "", settings.banned_words || []);
+    const heroKind: AdvertorialHeroKind =
+      variant === "beforeafter" ? "beforeafter" : heroKindForHook(angle?.hook_slug || null);
+    // Persist a re-signable hero path only for the avatar case (from the campaign
+    // hero). ingredient/beforeafter heroes resolve from product_media at render.
+    const heroStoragePath = heroKind === "avatar" ? avatarPath : null;
+    const rowSlug = variant === "beforeafter" ? `${slug}-ba` : slug;
+
+    await admin
+      .from("advertorial_pages")
+      .upsert(
+        {
+          workspace_id: workspaceId,
+          product_id: campaign.product_id,
+          angle_id: campaign.angle_id,
+          campaign_id: campaignId,
+          slug: rowSlug,
+          variant,
+          publication: copy.publication,
+          sponsor_label: copy.sponsorLabel,
+          headline: copy.headline,
+          dek: copy.dek,
+          hero_kind: heroKind,
+          hero_storage_path: heroStoragePath,
+          hero_caption: copy.heroCaption,
+          chapter_heading: copy.chapterHeading,
+          chapter_paragraphs: copy.chapterParagraphs,
+          status: "ready",
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "workspace_id,product_id,slug" },
+      );
+    landers.push({ variant, slug: rowSlug, url_path: `?variant=${variant}&angle=${encodeURIComponent(rowSlug)}` });
+  }
+
+  return { ok: true, landers };
+}
+
+/**
+ * Build the public destination URL for a campaign's advertorial lander, so the
+ * Meta publish step can point the ad at its scent-matched page by construction.
+ * Prefers the generated advertorial_pages slug for the campaign's product/angle;
+ * returns null when there's no lander to point at (caller keeps the PDP/override).
+ */
+export async function advertorialLanderUrl(workspaceId: string, campaignId: string): Promise<string | null> {
+  const admin = createAdminClient();
+  const { data: campaign } = await admin
+    .from("ad_campaigns")
+    .select("product_id, angle_id")
+    .eq("id", campaignId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (!campaign?.product_id) return null;
+
+  // The advertorial lander for this product (prefer the campaign's angle).
+  let pageQuery = admin
+    .from("advertorial_pages")
+    .select("slug, angle_id, updated_at")
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", campaign.product_id)
+    .eq("variant", "advertorial")
+    .order("updated_at", { ascending: false });
+  if (campaign.angle_id) pageQuery = pageQuery.eq("angle_id", campaign.angle_id);
+  const { data: page } = await pageQuery.limit(1).maybeSingle();
+  if (!page?.slug) return null;
+
+  const [{ data: product }, { data: ws }] = await Promise.all([
+    admin.from("products").select("handle").eq("id", campaign.product_id).maybeSingle(),
+    admin.from("workspaces").select("storefront_domain, storefront_slug").eq("id", workspaceId).maybeSingle(),
+  ]);
+  if (!product?.handle) return null;
+
+  const qs = `?variant=advertorial&angle=${encodeURIComponent(page.slug)}`;
+  if (ws?.storefront_domain) return `https://${ws.storefront_domain}/${product.handle}${qs}`;
+  if (ws?.storefront_slug) return `https://shopcx.ai/store/${ws.storefront_slug}/${product.handle}${qs}`;
+  return null;
+}
