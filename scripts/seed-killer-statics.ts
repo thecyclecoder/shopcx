@@ -102,13 +102,22 @@ async function main() {
   };
 
   console.log(`Seeding killer statics for "${product?.title || PID}" → ${pdp}\n`);
+  let renderQueueFailed = false;
   for (const archetype of KILLER_ARCHETYPES) {
     console.log(`• ${archetype}`);
     const angleId = await ensureAngle(admin, archetype);
     const campaignId = await ensureCampaign(admin, archetype, angleId, pdp);
     if (!campaignId) continue;
-    await inngest.send({ name: "ad-tool/static-requested", data: { workspace_id: WS, campaign_id: campaignId, archetype } });
-    console.log(`  ✓ campaign ${campaignId} — render queued (4:5 + 9:16)`);
+    // Fire the render. Needs INNGEST_EVENT_KEY (set locally, or trigger from the
+    // deployed dashboard which has it). Don't abort the whole seed if it's missing —
+    // the campaign/angle/landing/copy are still seeded and renders can fire later.
+    try {
+      await inngest.send({ name: "ad-tool/static-requested", data: { workspace_id: WS, campaign_id: campaignId, archetype } });
+      console.log(`  ✓ campaign ${campaignId} — render queued (4:5 + 9:16)`);
+    } catch (e) {
+      renderQueueFailed = true;
+      console.log(`  · campaign ${campaignId} — render NOT queued (${e instanceof Error ? e.message.split("\n")[0] : e})`);
+    }
     const landing = await resolveLanding(archetype, campaignId);
     if (landing !== pdp) {
       await admin.from("ad_campaigns").update({ landing_url: landing }).eq("id", campaignId).then(undefined, () => {});
@@ -126,6 +135,13 @@ async function main() {
       }
     } catch (e) { console.log(`  · copy skipped: ${e instanceof Error ? e.message : e}`); }
   }
-  console.log(`\nDone. Statics render in the background; open each campaign and click Publish.`);
+  if (renderQueueFailed) {
+    console.log(`\n⚠ Some renders weren't queued (no INNGEST_EVENT_KEY locally). Campaigns,`);
+    console.log(`  angle metadata, landing URLs and Meta copy ARE seeded. To render the statics:`);
+    console.log(`  • add INNGEST_EVENT_KEY to .env.local and re-run this seed, OR`);
+    console.log(`  • open each campaign in the dashboard and click "Generate" (the app has the key).`);
+  } else {
+    console.log(`\nDone. Statics render in the background; open each campaign and click Publish.`);
+  }
 }
 main().catch((e) => { console.error(e); process.exit(1); });

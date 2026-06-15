@@ -148,6 +148,7 @@ export async function loadAdvertorialContent(
         .eq("product_id", productId)
         .eq("slug", angleSlug)
         .eq("variant", variant)
+        .eq("status", "ready")
         .maybeSingle();
       row = (r as AdvertorialPageRow) || null;
     } catch {

@@ -20,7 +20,6 @@ One row per (product, ad angle, variant) = the generated editorial **TOP** of a 
 | `hero_caption` | text | italic photo caption |
 | `chapter_heading` | text | chapter-1 heading |
 | `chapter_paragraphs` | jsonb | chapter-1 paragraphs (string[]) |
-| `sticky_nav` | jsonb | optional jump-nav config |
 | `status` | text | `draft` \| `ready` |
 | `created_at` / `updated_at` | timestamptz | |
 
