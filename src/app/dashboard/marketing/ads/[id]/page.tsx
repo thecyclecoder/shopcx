@@ -247,12 +247,13 @@ export default function AdDetailPage() {
   const videoReady = videoOutputs.some((v) => v.status === "ready");
   const staticReady = staticOutputs.some((v) => v.status === "ready");
   const isRendering = campaign.status === "rendering" || videos.some((v) => v.status === "rendering");
-  // Static-first campaign (e.g. the seeded killer statics): no video script/hero/
-  // segments/outputs. Hide the whole video-production UI and lead with the statics
-  // so the operator isn't staring at talking-head/b-roll controls for an image ad.
-  const isStaticCampaign =
-    staticOutputs.length > 0 ||
-    (!campaign.script_text && !campaign.hero_image_url && videoOutputs.length === 0 && segments.length === 0);
+  // Static-first campaign (e.g. the seeded/uploaded killer statics): has NO video
+  // signals at all. Video signals win — a real video campaign that also happens to
+  // have a static output must still show the video UI (don't gate purely on
+  // staticOutputs, or any video campaign with a static gets its production UI hidden).
+  const hasVideoSignals =
+    !!campaign.script_text || !!campaign.hero_image_url || videoOutputs.length > 0 || segments.length > 0;
+  const isStaticCampaign = !hasVideoSignals;
 
   type StageState = "done" | "running" | "ready" | "blocked";
   const heroState: StageState = busyStage === "hero" ? "running" : campaign.hero_image_url ? "done" : "ready";
