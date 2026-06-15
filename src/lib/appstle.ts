@@ -9,6 +9,7 @@ import {
   internalSubUpdateBillingInterval,
   internalSubUpdateNextBillingDate,
   internalSubNotYetSupported,
+  advanceDate,
 } from "@/lib/internal-subscription";
 
 async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
@@ -116,30 +117,43 @@ export async function appstleSkipNextOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // A "skip" = push the next order out by one billing cycle. We implement
+  // it as a change-next-billing-date rather than Appstle's dedicated skip
+  // endpoint (subscription-contracts-skip), which returns 405 / is unreliable
+  // (see project_appstle_disabled_features). Advancing the date is functionally
+  // equivalent and uses the working reschedule endpoint — same behavior for
+  // internal subs (internalSubUpdateNextBillingDate just sets the date).
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSkipNextOrder(workspaceId, contractId);
   }
-  await healOnTouch(workspaceId, contractId);
-  const creds = await getAppstleCredentials(workspaceId);
-  if (!creds) return { success: false, error: "Appstle not configured" };
 
-  try {
-    const res = await loggedAppstleFetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-skip?contractId=${contractId}&api_key=${creds.apiKey}`,
-      { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
-    );
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("next_billing_date, billing_interval, billing_interval_count")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub) return { success: false, error: "Subscription not found" };
 
-    if (!res.ok && res.status !== 204) {
-      const text = await res.text();
-      console.error(`Appstle skip error for contract ${contractId}:`, text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
-    }
+  const interval = (sub.billing_interval || "month").toLowerCase();
+  const count = sub.billing_interval_count || 1;
+  const base = sub.next_billing_date ? new Date(sub.next_billing_date) : new Date();
+  const next = advanceDate(base, interval, count);
 
-    return { success: true };
-  } catch (err) {
-    console.error("Appstle skip failed:", err);
-    return { success: false, error: String(err) };
-  }
+  // Reschedule via the working change-date endpoint.
+  const result = await appstleUpdateNextBillingDate(workspaceId, contractId, next.toISOString());
+  if (!result.success) return result;
+
+  // Mirror the new date locally (the Appstle reschedule endpoint doesn't write
+  // our table; keep the portal/next-billing views accurate until the next sync).
+  await admin
+    .from("subscriptions")
+    .update({ next_billing_date: next.toISOString(), updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId);
+
+  return { success: true };
 }
 
 export async function appstleUpdateBillingInterval(
@@ -334,6 +348,13 @@ export async function appstleSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // Internal subs have no Appstle billing attempts — advance the next
+  // billing date locally instead of calling Appstle (which 405s / 400s
+  // on an internal contract id). Mirrors appstleSkipNextOrder's guard so
+  // the admin dashboard "skip" works for internal subs too.
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubSkipNextOrder(workspaceId, contractId);
+  }
   await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };

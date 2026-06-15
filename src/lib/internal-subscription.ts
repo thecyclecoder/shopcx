@@ -440,7 +440,7 @@ export function internalSubNotYetSupported(action: string): ActionResult {
 // Date arithmetic — Appstle stores billing dates per cycle; for our
 // internal mode we compute the next date by adding (interval × count).
 // ────────────────────────────────────────────────────────────────────
-function advanceDate(base: Date, interval: string, count: number): Date {
+export function advanceDate(base: Date, interval: string, count: number): Date {
   const d = new Date(base);
   const i = interval.toLowerCase();
   if (i === "day") d.setUTCDate(d.getUTCDate() + count);

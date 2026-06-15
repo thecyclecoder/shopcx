@@ -110,6 +110,12 @@ If the customer picks a remedy, action executor handles it by type:
 
 The remedy outcome is written to [[../tables/remedy_outcomes]] with `outcome='accepted'`, `cancel_reason`, `subscription_id`, `first_renewal`, `session_id`. Feeds future Haiku selection.
 
+#### Internal subs (`is_internal = true`)
+
+Remedy execution does **not** branch on sub type at the call site. Each `appstle*` helper (and `applyDiscountWithReplace`) checks `isInternalSubscription()` at the top and, if true, delegates to the matching `internal-subscription.ts` function (same signature + return shape). So coupon, pause/cancel/resume, frequency_change, free_product, and line_item_modifier all work on internal subs unchanged. Detection keys on `subscriptions.shopify_contract_id` — every internal sub has one (migrated subs keep the numeric Appstle id; native subs get a synthetic `internal-…` id), so the lookup never misses.
+
+**`skip` is implemented as a reschedule.** Appstle's dedicated skip endpoint (`subscription-contracts-skip`) returns **405** and is unreliable (see project_appstle_disabled_features), so `appstleSkipNextOrder` does *not* call it. Instead it advances `next_billing_date` by one billing cycle — internal subs via `internalSubSkipNextOrder`, Appstle subs via the working `subscription-contracts-update-billing-date` endpoint (`appstleUpdateNextBillingDate`). Functionally identical to a skip, and works on both sub types. (Occasionally returns a transient "billing operation in progress" 400 if a charge is mid-flight — a retry-later condition, not a hard failure.)
+
 ### Step 5 — confirm cancel (if all remedies declined)
 
 "Are you sure?" — not guilt-trippy, just a clean confirmation. Final cancel button.
@@ -198,15 +204,21 @@ All three produce the same [[../tables/ticket_messages]] rows + the same [[../ta
 
 ## Status / open work
 
-**Shipped:** Cancel journey with Haiku remedy selection, customer-facing mini-site, Appstle subscription mutations, outcome tracking, social-proof reviews, open-ended Sonnet conversation — all functional end-to-end.
+**Shipped:** Cancel journey with Haiku remedy selection, customer-facing mini-site, Appstle subscription mutations, outcome tracking, social-proof reviews, open-ended Sonnet conversation — all functional end-to-end. Internal-sub support via the `isInternalSubscription()` delegation pattern (see Step 4 → Internal subs).
 
-**Known gaps / not yet shipped:** None identified.
+**Fixed 2026-06-15 (audit):**
+- **Skip remedy 405.** `appstleSkipNextOrder` no longer calls Appstle's dead skip endpoint — it now reschedules `next_billing_date` forward one cycle (works for Appstle + internal). The "Skip next order" remedy was failing on every Appstle sub with a 405 (`customer_events.portal.error` → `remedy_action_failed`); now succeeds.
+- **Admin dashboard skip.** `appstleSkipUpcomingOrder` now delegates to internal subs.
+- **`subRemoveItem`** now checks internal *before* falling through to Appstle (a lineId-only call on an internal sub returns a clear error instead of hitting Appstle).
+
+**Known gaps / open work:**
+- **Internal-sub billing/dunning not wired.** `appstleAttemptBilling` / dunning have no internal path (Braintree renewal scheduler not built — see `internal-subscription.ts` stubs). Internal subs don't generate Appstle billing attempts, so this isn't reached in normal flow, but bill-now / dunning admin paths assume Appstle.
 
 **Recent activity:**
 - `a6844aaa` CSAT: resolution-gate survey + cron-driven send + dashboard (cross-system)
 - `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end
 
-**Open questions:** None.
+**Open questions:** Wire a Braintree renewal scheduler so internal-sub billing/dunning works (currently stubbed).
 
 ## Related
 

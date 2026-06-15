@@ -354,7 +354,13 @@ export async function subRemoveItem(
   variantOrLine: string | { variantId?: string; lineGid?: string },
 ): Promise<{ success: boolean; error?: string }> {
   const arg = typeof variantOrLine === "string" ? { variantId: variantOrLine } : variantOrLine;
-  if (arg.variantId && (await isInternalSubscription(workspaceId, contractId))) {
+  // Internal subs are matched by variant_id (no Appstle line gids). Check
+  // internal FIRST so a lineId-only call can't silently fall through to the
+  // Appstle endpoint with an internal contract id.
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    if (!arg.variantId) {
+      return { success: false, error: "Internal subscription requires a variantId to remove a line item" };
+    }
     return internalSubRemoveItem(workspaceId, contractId, arg.variantId);
   }
   // Use dedicated remove-line-item endpoint (not replaceVariants)
