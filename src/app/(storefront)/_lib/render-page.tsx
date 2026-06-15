@@ -32,6 +32,14 @@ import { PricingModeProvider } from "./pricing-mode-context";
 import { AutoCouponProvider } from "../_components/AutoCouponProvider";
 import { AutoCouponWelcome } from "../_components/AutoCouponWelcome";
 import { UpsellChapter } from "../_sections/UpsellChapter";
+// Advertorial / before-after lander sections (ad-matched layout modes). Only
+// rendered when `advertorial` content is passed (via ?variant=…&angle=…).
+import { AdvertorialHero } from "../_sections/AdvertorialHero";
+import { AdvertorialChapter } from "../_sections/AdvertorialChapter";
+import { BeforeAfterHero } from "../_sections/BeforeAfterHero";
+import { WeightLossTestimonialWall } from "../_sections/WeightLossTestimonialWall";
+import { StickyJumpNav } from "../_components/StickyJumpNav";
+import type { AdvertorialContent } from "@/lib/advertorial-pages";
 
 // PriceTable is mid-page but interactive on first scroll — load its
 // JS with the page but in a separate chunk so it doesn't inflate the
@@ -74,10 +82,15 @@ export function StorefrontPage({
   data,
   canonicalPath,
   reviewSlug,
+  advertorial = null,
 }: {
   data: PageData;
   canonicalPath: string;
   reviewSlug: string;
+  /** When set, renders an ad-matched lander layout (advertorial / before-after)
+   *  instead of the standard PDP. The custom top swaps; everything below the
+   *  custom top (ingredients, pricing, reviews, checkout) is reused unchanged. */
+  advertorial?: AdvertorialContent | null;
 }) {
   // Per-workspace theming via CSS custom properties. The font allowlist
   // is pre-registered in next/font so the browser picks the right file;
@@ -184,6 +197,35 @@ export function StorefrontPage({
           }
         >
           <main className="flex w-full flex-col">
+            {advertorial ? (
+              advertorial.variant === "beforeafter" ? (
+                <>
+                  {/* Before/after lander: transformation hero → weight-loss
+                      testimonial wall → the rest of the existing PDP. */}
+                  <BeforeAfterHero data={data} content={advertorial} />
+                  <StickyJumpNav />
+                  <WeightLossTestimonialWall data={data} />
+                  <IngredientsSection data={data} />
+                  <PriceTableSection data={data} />
+                  <FinalCTASection data={data} />
+                  <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+                </>
+              ) : (
+                <>
+                  {/* Advertorial lander: editorial hero → narrative chapter 1 →
+                      reuse ingredients / pricing / reviews / checkout unchanged. */}
+                  <AdvertorialHero data={data} content={advertorial} />
+                  <StickyJumpNav />
+                  <AdvertorialChapter data={data} content={advertorial} />
+                  <IngredientsSection data={data} />
+                  <PriceTableSection data={data} />
+                  <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
+                  <FinalCTASection data={data} />
+                  <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+                </>
+              )
+            ) : (
+            <>
             <CompleteOrderBanner />
             <HeroSection data={data} />
             {/* HowItWorksSection ("Why this works") now absorbs what
@@ -210,6 +252,8 @@ export function StorefrontPage({
             {/* Brand-trust chapter + policies footer — on every PDP for
                 legitimacy/trust. */}
             <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+            </>
+            )}
           </main>
           <StorefrontFooter
             workspaceName={data.workspace.name || "Superfoods Company"}

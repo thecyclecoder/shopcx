@@ -212,6 +212,17 @@ export function CheckoutClient({
     [cart.line_items],
   );
 
+  // Primary product for conversion attribution — the highest-value line (so the
+  // advertorial-lander → purchase funnel resolves per product). checkout_view +
+  // order_placed previously carried no product_id.
+  const primaryProductId = useMemo(() => {
+    let best: { product_id: string; line_total_cents: number } | null = null;
+    for (const l of cart.line_items) {
+      if (!best || l.line_total_cents > best.line_total_cents) best = { product_id: l.product_id, line_total_cents: l.line_total_cents };
+    }
+    return best?.product_id ?? null;
+  }, [cart.line_items]);
+
   // ── Braintree Hosted Fields ─────────────────────────────────────
   // We fetch a client_token here, then pass it to the HostedFieldsCard
   // which owns the visual mockup + iframe lifecycle.
@@ -229,6 +240,7 @@ export function CheckoutClient({
       cart_token: cart.token,
       line_item_count: cart.line_items.length,
       total_cents: totalCents,
+      product_id: primaryProductId ?? undefined,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -787,6 +799,7 @@ export function CheckoutClient({
         order_id: data.order_id,
         order_number: data.order_number,
         total_cents: totalCents,
+        product_id: primaryProductId ?? undefined,
       }, data.order_placed_event_id);
       window.location.href = `/thank-you?order=${data.order_id}`;
     } catch (err) {

@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 
 import { getPageData, listPublishedProducts } from "../../../_lib/page-data";
 import { StorefrontPage } from "../../../_lib/render-page";
+import { loadAdvertorialContent, type AdvertorialVariant } from "@/lib/advertorial-pages";
 
 /**
  * The single storefront route.
@@ -77,12 +78,22 @@ export async function generateMetadata({
 
 export default async function StorefrontProductPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspace: string; slug: string }>;
+  // Ad-matched lander modes. Reading searchParams keeps the param-less PDP
+  // statically generated (generateStaticParams) and only renders these requests
+  // dynamically — and the route still reads no headers/cookies, so it's ISR-safe.
+  searchParams: Promise<{ variant?: string; angle?: string }>;
 }) {
   const { workspace, slug } = await params;
+  const sp = await searchParams;
   const data = await getPageData(workspace, slug);
   if (!data) notFound();
+
+  const variant: AdvertorialVariant | null =
+    sp.variant === "advertorial" || sp.variant === "beforeafter" ? sp.variant : null;
+  const advertorial = variant ? await loadAdvertorialContent(data, variant, sp.angle ?? null) : null;
 
   const canonical = data.workspace.storefront_domain
     ? `https://${data.workspace.storefront_domain}/${slug}`
@@ -93,6 +104,7 @@ export default async function StorefrontProductPage({
       data={data}
       canonicalPath={canonical}
       reviewSlug={slug}
+      advertorial={advertorial}
     />
   );
 }

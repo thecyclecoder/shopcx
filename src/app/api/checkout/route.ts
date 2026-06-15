@@ -1065,6 +1065,10 @@ export async function POST(request: NextRequest) {
       sessionAnon = (sess?.anonymous_id as string | null) || sessionAnon;
     }
     if (sessionId && sessionAnon) {
+      // product_id scopes the conversion to a product so advertorial-lander →
+      // purchase funnels resolve per product (checkout/order previously carried
+      // none). See docs/brain/specs/advertorial-landers.md § attribution fix.
+      const primaryProductId = lines.find((l) => l.product_id)?.product_id || null;
       await admin.from("storefront_events").upsert({
         id: orderPlacedEventId,
         workspace_id: cart.workspace_id,
@@ -1072,7 +1076,8 @@ export async function POST(request: NextRequest) {
         anonymous_id: sessionAnon,
         customer_id: customer.id,
         event_type: "order_placed",
-        meta: { order_id: order.id, order_number: orderNumber, total_cents: totalCents, cart_token: cart.token, source: "server" },
+        product_id: primaryProductId,
+        meta: { order_id: order.id, order_number: orderNumber, total_cents: totalCents, cart_token: cart.token, source: "server", product_id: primaryProductId },
       }, { onConflict: "id", ignoreDuplicates: true });
     }
   } catch (err) {
