@@ -174,7 +174,7 @@ This is the locked-in creative pipeline, confirmed by building a real Amazing Co
 - **Captions never empty**: the render `assemble` step backfills Whisper transcripts for any talking clip missing them (was silently empty in prod). `OPENAI_API_KEY` present in Vercel.
 - **URL durability**: `ad_videos.meta.storage_path` stored; campaign GET re-signs `final_mp4_url`/`static_jpg_url` from it (no more 90-day-expiry links).
 
-**✅ Verified live (2026-06-05):** an in-app render (Inngest → Lambda) produced both **video** formats — `reels_9x16` + `feed_4x5`, valid MP4s (HTTP 200, ~18-24 MB, 16s, captions + b-roll + music) in ~1 min. Note: Vercel git auto-deploy wasn't firing on recent pushes — production was updated via `vercel deploy --prod`.
+**✅ Verified live (2026-06-05):** an in-app render (Inngest → Lambda) produced both **video** formats — `reels_9x16` + `feed_4x5`, valid MP4s (HTTP 200, ~18-24 MB, 16s, captions + b-roll + music) in ~1 min. (Vercel auto-deploys production on push to `main` — no manual `vercel deploy --prod` needed.)
 
 **⏳ Open:**
 - **Static formats fail on Lambda** — `AdStatic` (`stories_9x16` + `feed_4x5` static) errors with "Error loading image" for the hero (signed Supabase URL). `renderStillOnLambda` can't fetch/decode it within Remotion's `delayRender` window. Video is unaffected. Fix: pass the hero as a longer-TTL/public URL or preload it. The two **video** formats are the priority and work.
