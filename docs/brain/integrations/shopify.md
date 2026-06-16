@@ -88,6 +88,11 @@ Webhook HMAC verified with Client Secret.
 - `src/lib/shopify-draft-orders.ts` — Draft order creation
 - `src/lib/shopify-customer-update.ts` — Customer mutations
 - `src/lib/multipass.ts` — Multipass SSO
+- `src/lib/shopify-theme.ts` — theme read (Shopify) + write (GitHub commit) — see Theme management
+
+## Theme management (via ShopCX)
+
+The live theme (`theme-superfoodscompany.com/master`, role MAIN) is managed through its **GitHub repo** (`thecyclecoder/theme-superfoodscompany.com@master`) — Shopify's GitHub integration auto-deploys commits. ShopCX reads the live theme via the Shopify theme-files API (`read_themes`) and writes by committing to the repo (`GITHUB_TOKEN`). Lib: `src/lib/shopify-theme.ts` (`getLiveTheme` / `listLiveThemeFiles` / `readThemeFile` / `commitThemeFiles` / `verifyDeployed`). Reconcile drift with `scripts/reconcile-shopify-theme.ts` (semantic JSON diff — Shopify serves JSON theme files as JSONC with a `/* auto-generated */` header). How-to + the single-writer guardrail: [[../recipes/edit-shopify-theme]]. Short-term until the in-house storefront retires Shopify.
 
 ## Related
 
