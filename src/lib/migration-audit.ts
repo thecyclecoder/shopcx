@@ -157,9 +157,20 @@ async function autoHealMigration(
     const fixed = await Promise.all(items.map(async (i) => {
       const isProt = String(i.title || "").toLowerCase().includes("shipping protection");
       if (isProt || UUID_RE.test(String(i.variant_id || ""))) return i;
-      const { data: v } = await admin
+      const { data: byShopId } = await admin
         .from("product_variants").select("id, product_id, title, sku")
         .eq("shopify_variant_id", String(i.variant_id || "")).maybeSingle();
+      // Fall back to SKU (workspace-scoped) when the Shopify variant id isn't on
+      // our catalog — a migrated line can carry a Shopify id we never synced, but
+      // the SKU still resolves the internal variant.
+      let v = byShopId;
+      if (!v && i.sku) {
+        const { data: bySku } = await admin
+          .from("product_variants").select("id, product_id, title, sku")
+          .eq("workspace_id", audit.workspace_id as string)
+          .eq("sku", String(i.sku)).maybeSingle();
+        v = bySku;
+      }
       if (!v) return i; // can't resolve — leave (will stay flagged)
       touched = true;
       return { ...i, variant_id: v.id, product_id: v.product_id, sku: i.sku ?? v.sku ?? undefined };
