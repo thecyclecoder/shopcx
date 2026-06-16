@@ -99,7 +99,7 @@ export function IngredientsSection({ data }: { data: PageData }) {
                         )}
                         {Array.isArray(r.citations) && r.citations.length > 0 && (
                           <p className="mt-1.5 text-sm text-zinc-500 sm:text-base">
-                            Supported by {r.citations.length} study{r.citations.length === 1 ? "" : "ies"}
+                            Supported by {r.citations.length} {r.citations.length === 1 ? "study" : "studies"}
                           </p>
                         )}
                       </div>

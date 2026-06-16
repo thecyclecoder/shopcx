@@ -3,6 +3,17 @@
 import { useEffect, useState } from "react";
 import { ChatOverlay } from "./ChatOverlay";
 
+// Hamburger menu → on-page chapter jumps. Each links to a section's
+// data-section anchor; missing sections (e.g. on a variant that omits one)
+// are simply no-ops. "Shop Now" is rendered separately as the primary CTA.
+const MENU_LINKS: { label: string; selector: string }[] = [
+  { label: "Testimonials", selector: '[data-section="reviews"]' },
+  { label: "Ingredients", selector: '[data-section="ingredients"]' },
+  { label: "How It Works", selector: '[data-section="why-this-works"]' },
+  { label: "What Nutritionists Say", selector: '[data-section="endorsement"]' },
+  { label: "FAQs", selector: '[data-section="faq"]' },
+];
+
 interface StorefrontHeaderProps {
   workspaceId: string;
   productId: string;        // internal UUID
@@ -57,6 +68,14 @@ export function StorefrontHeader({
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+
+  const goToSection = (selector: string) => {
+    setMenuOpen(false);
+    // Defer so the drawer-close state flush doesn't interrupt the scroll.
+    requestAnimationFrame(() => {
+      document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
 
   return (
     <>
@@ -133,7 +152,26 @@ export function StorefrontHeader({
                 </svg>
               </button>
             </div>
-            <p className="text-xs text-zinc-500">Menu items coming soon.</p>
+            <nav className="flex flex-col">
+              {MENU_LINKS.map((item) => (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={() => goToSection(item.selector)}
+                  className="border-b border-zinc-100 py-3 text-left text-base font-medium text-zinc-800 transition hover:text-zinc-950"
+                >
+                  {item.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => goToSection('[data-section="pricing"]')}
+                className="mt-5 rounded-full py-3 text-center text-sm font-extrabold uppercase tracking-wide text-white shadow-sm transition hover:brightness-110"
+                style={{ backgroundColor: "var(--storefront-primary)", fontFamily: "var(--storefront-heading-font)" }}
+              >
+                Shop Now
+              </button>
+            </nav>
           </div>
         </div>
       )}

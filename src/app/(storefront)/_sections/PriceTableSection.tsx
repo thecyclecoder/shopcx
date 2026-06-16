@@ -209,7 +209,7 @@ function stripDefaultTitle(s: string | null | undefined): string {
 }
 
 /** Display tier — common shape for rule-driven + legacy tiers. */
-interface DisplayTier {
+export interface DisplayTier {
   id: string;
   variant_id: string | null;
   tier_name: string;
@@ -230,7 +230,7 @@ interface DisplayTier {
   msrp_total_cents: number | null;
 }
 
-function buildTiersFromRule(
+export function buildTiersFromRule(
   rule: PricingRule,
   basePriceCents: number,
   variantId: string | null, // internal variant UUID — flows to the cart + event stream
@@ -281,7 +281,7 @@ function legacyToDisplay(t: PricingTier): DisplayTier {
   };
 }
 
-function PriceCard({
+export function PriceCard({
   tier,
   mode,
   rule,
@@ -300,6 +300,10 @@ function PriceCard({
   servingsUnit: string | null;
   productTitle: string;
 }) {
+  // The per-cup banner reflects the live (coupon-aware) price, which only
+  // settles client-side — gate it on mount so SSR and first hydration agree.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const showSubscribe = mode === "subscribe" && tier.subscribe_price_cents != null;
   const price = showSubscribe ? tier.subscribe_price_cents! : tier.price_cents;
   const perUnit = showSubscribe && tier.subscribe_price_cents != null
@@ -433,6 +437,16 @@ function PriceCard({
           {(savingsCents / 100).toFixed(2)}
         </div>
       )}
+
+      {/* Per-cup emphasis — anchors the price against a coffee-shop cup. */}
+      {mounted && servingsPerPack && servingsPerPack > 0 && (() => {
+        const perCup = price / (servingsPerPack * tier.quantity);
+        return (
+          <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-center text-xs font-semibold leading-snug text-amber-900 ring-1 ring-amber-200">
+            {`☕ Just $${(perCup / 100).toFixed(2)} a cup — vs the $3–$6 you'd spend at national coffee chains, with way more benefits.`}
+          </div>
+        );
+      })()}
 
       <ul className="mt-5 space-y-2.5 text-sm text-zinc-700">
         {servingsPerPack && servingsPerPack > 0 && (() => {

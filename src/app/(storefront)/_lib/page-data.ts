@@ -101,6 +101,10 @@ export interface PageContent {
   hero_headline: string | null;
   hero_subheadline: string | null;
   benefit_bar: Array<{ icon_hint?: string; text: string }>;
+  // Problem/solution lead-in shown above the benefit bar (headline + a
+  // transition line that hands off to the cards). Null = no lead-in.
+  benefit_bar_intro: string | null;
+  benefit_bar_transition: string | null;
   mechanism_copy: string | null;
   ingredient_cards: Array<{
     name: string;
@@ -503,7 +507,7 @@ export async function getPageData(
     admin
       .from("product_page_content")
       .select(
-        "id, hero_headline, hero_subheadline, benefit_bar, mechanism_copy, ingredient_cards, comparison_table_rows, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsements, expectation_timeline, status, version",
+        "id, hero_headline, hero_subheadline, benefit_bar, benefit_bar_intro, benefit_bar_transition, mechanism_copy, ingredient_cards, comparison_table_rows, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsements, expectation_timeline, status, version",
       )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)
