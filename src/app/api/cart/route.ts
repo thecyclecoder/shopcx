@@ -132,6 +132,30 @@ export async function POST(request: NextRequest) {
   // checkout "switch to subscribe" button, which has no cadence to send).
   let resolvedFreqDays: number | null = freqDays;
 
+  // Quantity break % for a given total unit count: highest break whose
+  // quantity threshold is met. Mirrors the storefront's discountForTotal.
+  const qtyBreakPct = (
+    breaks: Array<{ quantity: number; discount_pct: number }>,
+    total: number,
+  ): number => {
+    const eligible = (breaks || []).filter((b) => b.quantity <= total);
+    return eligible.length ? eligible.reduce((m, b) => (b.discount_pct > m ? b.discount_pct : m), 0) : 0;
+  };
+
+  interface Prepped {
+    variant: { id: string; product_id: string; shopify_variant_id: string | null; sku: string | null; title: string | null; image_url: string | null; price_cents: number };
+    qty: number;
+    subDiscountPct: number;
+    breaks: Array<{ quantity: number; discount_pct: number }>;
+    title: string;
+  }
+
+  // ── Pass 1: resolve each variant + its pricing rule (subscribe % AND
+  // quantity breaks), and sum the cart-wide quantity. Quantity breaks apply
+  // CROSS-PRODUCT (1 coffee + 1 creamer = 2 units → the qty-2 break), matching
+  // how the storefront price tables and bundle cards quote it.
+  const prepped: Prepped[] = [];
+  let totalQty = 0;
   for (const li of body.line_items) {
     const qty = Math.max(1, Math.floor(li.quantity || 0));
     if (qty === 0) continue;
@@ -147,10 +171,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Pull the product's pricing rule to apply subscribe discount.
-    // We don't apply quantity_breaks here — those are pre-grouped
-    // on the storefront (Bundle-1 vs Bundle-2 etc); the cart stores
-    // whatever the customer added.
     const { data: ruleAssignment } = await admin
       .from("product_pricing_rule")
       .select("pricing_rule_id")
@@ -158,13 +178,15 @@ export async function POST(request: NextRequest) {
       .eq("product_id", variant.product_id)
       .maybeSingle();
     let subDiscountPct = 0;
+    let breaks: Array<{ quantity: number; discount_pct: number }> = [];
     if (ruleAssignment?.pricing_rule_id) {
       const { data: rule } = await admin
         .from("pricing_rules")
-        .select("subscribe_discount_pct, available_frequencies")
+        .select("subscribe_discount_pct, available_frequencies, quantity_breaks")
         .eq("id", ruleAssignment.pricing_rule_id)
         .maybeSingle();
       subDiscountPct = rule?.subscribe_discount_pct || 0;
+      breaks = (rule?.quantity_breaks as Array<{ quantity: number; discount_pct: number }> | null) || [];
       // Default the cadence to the rule's flagged-default (or first) frequency
       // when subscribing without a valid one, so the line never lands with a
       // null/invalid frequency the checkout can't bill.
@@ -177,32 +199,40 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const msrp = variant.price_cents;
-    const unit = mode === "subscribe" && subDiscountPct > 0
-      ? Math.round(msrp * (1 - subDiscountPct / 100))
-      : msrp;
-
-    // Product title for the line snapshot — we want it to read nicely
-    // in the customize page without joining at render time.
+    // Product title for the line snapshot — reads nicely on the customize
+    // page without a render-time join.
     const { data: product } = await admin
       .from("products")
       .select("title")
       .eq("id", variant.product_id)
       .single();
 
+    prepped.push({ variant, qty, subDiscountPct, breaks, title: product?.title || "Item" });
+    totalQty += qty;
+  }
+
+  // ── Pass 2: price each line. unit = msrp × (1 − qty break) × (1 − subscribe),
+  // with the quantity break resolved at the CART-WIDE total so cross-product
+  // bundles unlock the same break the storefront showed.
+  for (const p of prepped) {
+    const msrp = p.variant.price_cents;
+    const afterQty = Math.round(msrp * (1 - qtyBreakPct(p.breaks, totalQty) / 100));
+    const unit = mode === "subscribe" && p.subDiscountPct > 0
+      ? Math.round(afterQty * (1 - p.subDiscountPct / 100))
+      : afterQty;
     resolvedLines.push({
-      variant_id: variant.id,
-      product_id: variant.product_id,
-      shopify_variant_id: variant.shopify_variant_id,
-      sku: variant.sku || null,
-      title: product?.title || "Item",
-      variant_title: variant.title || null,
-      image_url: variant.image_url,
-      quantity: qty,
+      variant_id: p.variant.id,
+      product_id: p.variant.product_id,
+      shopify_variant_id: p.variant.shopify_variant_id,
+      sku: p.variant.sku || null,
+      title: p.title,
+      variant_title: p.variant.title || null,
+      image_url: p.variant.image_url,
+      quantity: p.qty,
       unit_price_cents: unit,
       unit_msrp_cents: msrp,
       price_cents_at_add: unit,
-      line_total_cents: unit * qty,
+      line_total_cents: unit * p.qty,
       mode,
       frequency_days: mode === "subscribe" ? resolvedFreqDays : null,
     });

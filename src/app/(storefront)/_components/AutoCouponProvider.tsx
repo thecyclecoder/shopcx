@@ -21,9 +21,20 @@ export interface AutoCoupon {
 }
 
 const Ctx = createContext<AutoCoupon | null>(null);
+const SetCtx = createContext<(c: AutoCoupon | null) => void>(() => {});
 
 export function useAutoCoupon(): AutoCoupon | null {
   return useContext(Ctx);
+}
+
+/**
+ * Imperatively set the active auto-coupon — used by the survey when the
+ * visitor unlocks the offer (email/phone). Setting it reprices every price
+ * display on the page live (price tables + survey result card) via
+ * useAutoCoupon. Idempotent: it's the one offer, so re-setting never stacks.
+ */
+export function useSetAutoCoupon(): (c: AutoCoupon | null) => void {
+  return useContext(SetCtx);
 }
 
 /** Apply the auto-coupon to a displayed price (cents). Percentage only affects
@@ -56,5 +67,9 @@ export function AutoCouponProvider({ workspaceId, children }: { workspaceId: str
     return () => { cancelled = true; };
   }, [workspaceId]);
 
-  return <Ctx.Provider value={coupon}>{children}</Ctx.Provider>;
+  return (
+    <SetCtx.Provider value={setCoupon}>
+      <Ctx.Provider value={coupon}>{children}</Ctx.Provider>
+    </SetCtx.Provider>
+  );
 }

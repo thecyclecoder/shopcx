@@ -23,12 +23,14 @@
  * so they always match the primary table.
  */
 
+import { useEffect, useState } from "react";
 import type { PageData } from "../_lib/page-data";
 import { useActiveProductData } from "../_lib/active-member-context";
 import { usePricingMode } from "../_lib/pricing-mode-context";
 import { PackageStack } from "../_components/PackageStack";
 import { ShopCTA } from "../_components/ShopCTA";
-import { useAutoCoupon, applyAutoCoupon } from "../_components/AutoCouponProvider";
+import { useAutoCoupon, applyAutoCoupon, type AutoCoupon } from "../_components/AutoCouponProvider";
+import type { PricingRule } from "../_lib/page-data";
 import { AutoCouponBanner } from "../_components/AutoCouponBanner";
 import { cdnUrl } from "../_lib/image-urls";
 
@@ -40,6 +42,55 @@ import {
   SubscribeToggle,
   FrequencyPicker,
 } from "./PriceTableSection";
+
+export interface BundleCardData {
+  n: number;
+  totalUnits: number;
+  msrp: number;
+  qtyDiscount: number;
+  finalPrice: number;
+  savingsCents: number;
+  savingsPct: number;
+}
+
+/**
+ * Compute one bundle card's pricing (n primary + n upsell). Single source of
+ * truth shared by the bundle price table and the survey's inline bundle
+ * recommendation, so both show identical numbers (incl. auto-coupon repricing).
+ */
+export function computeBundleCard(
+  n: number,
+  rule: PricingRule,
+  primaryPrice: number,
+  upsellPrice: number,
+  showSubscribe: boolean,
+  autoCoupon: AutoCoupon | null,
+): BundleCardData {
+  const breaks = rule.quantity_breaks || [];
+  const discountForTotal = (total: number): number => {
+    const eligible = breaks.filter((b) => b.quantity <= total);
+    if (eligible.length === 0) return 0;
+    return eligible.reduce((max, b) => (b.discount_pct > max ? b.discount_pct : max), 0);
+  };
+  const subDiscount = rule.subscribe_discount_pct || 0;
+  const totalUnits = n * 2;
+  const msrp = primaryPrice * n + upsellPrice * n;
+  // Quantity breaks apply CROSS-PRODUCT: total units across the bundle (n
+  // coffee + n creamer) determine the break, so a 1+1 bundle = 2 units = the
+  // qty-2 discount. The checkout engine must mirror this.
+  const qtyDiscount = discountForTotal(totalUnits);
+  const afterQty = Math.round(msrp * (1 - qtyDiscount / 100));
+  const afterSub = showSubscribe ? Math.round(afterQty * (1 - subDiscount / 100)) : afterQty;
+  const finalPrice = applyAutoCoupon(afterSub, autoCoupon);
+  const shipValueCents = rule.free_shipping && (!rule.free_shipping_subscription_only || showSubscribe) ? FREE_SHIP_VALUE_CENTS : 0;
+  const giftQtyOk = totalUnits >= (rule.free_gift_min_quantity || 1);
+  const giftSubOk = !rule.free_gift_subscription_only || showSubscribe;
+  const giftValueCents = rule.free_gift_variant_id && giftQtyOk && giftSubOk ? (rule.free_gift_price_cents || 0) : 0;
+  const anchor = msrp + shipValueCents + giftValueCents;
+  const savingsCents = (msrp - finalPrice) + shipValueCents + giftValueCents;
+  const savingsPct = anchor > 0 ? Math.round((savingsCents / anchor) * 100) : 0;
+  return { n, totalUnits, msrp: anchor, qtyDiscount, finalPrice, savingsCents, savingsPct };
+}
 
 export function BundlePriceTableSection({ data }: { data: PageData }) {
   const { pricingRule: rule, baseVariant } = useActiveProductData(data);
@@ -60,15 +111,6 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
   const breaks = rule.quantity_breaks || [];
   if (breaks.length === 0) return null;
 
-  // Resolve the discount % for a given total unit count by finding the
-  // highest break whose quantity is <= total. This matches how single-
-  // product tier math works when a customer "lands between" two breaks.
-  const discountForTotal = (total: number): number => {
-    const eligible = breaks.filter(b => b.quantity <= total);
-    if (eligible.length === 0) return 0;
-    return eligible.reduce((max, b) => (b.discount_pct > max ? b.discount_pct : max), 0);
-  };
-
   const subDiscount = rule.subscribe_discount_pct || 0;
   const showSubscribe = shared?.mode === "subscribe" && subDiscount > 0;
   const mode = shared?.mode ?? "subscribe";
@@ -78,27 +120,9 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
   const frequencies = rule.available_frequencies || [];
   const hasAnySubscribe = subDiscount > 0;
 
-  const cards = [1, 2].map(n => {
-    const totalUnits = n * 2;
-    const msrp = primaryPrice * n + upsellPrice * n;
-    const qtyDiscount = discountForTotal(totalUnits);
-    const afterQty = Math.round(msrp * (1 - qtyDiscount / 100));
-    const afterSub = showSubscribe
-      ? Math.round(afterQty * (1 - subDiscount / 100))
-      : afterQty;
-    // Auto-applied popup coupon stacks on top (percentage), reflected in-table.
-    const finalPrice = applyAutoCoupon(afterSub, autoCoupon);
-    // Fold the perk value (free shipping + free gift) into the headline savings
-    // so the % matches the popup's stacked offer instead of under-counting.
-    const shipValueCents = rule.free_shipping && (!rule.free_shipping_subscription_only || showSubscribe) ? FREE_SHIP_VALUE_CENTS : 0;
-    const giftQtyOk = totalUnits >= (rule.free_gift_min_quantity || 1);
-    const giftSubOk = !rule.free_gift_subscription_only || showSubscribe;
-    const giftValueCents = rule.free_gift_variant_id && giftQtyOk && giftSubOk ? (rule.free_gift_price_cents || 0) : 0;
-    const anchor = msrp + shipValueCents + giftValueCents;
-    const savingsCents = (msrp - finalPrice) + shipValueCents + giftValueCents;
-    const savingsPct = anchor > 0 ? Math.round((savingsCents / anchor) * 100) : 0;
-    return { n, totalUnits, msrp: anchor, qtyDiscount, finalPrice, savingsCents, savingsPct };
-  });
+  const cards = [1, 2].map((n) =>
+    computeBundleCard(n, rule, primaryPrice, upsellPrice, showSubscribe, autoCoupon),
+  );
 
   // No real savings on either card? Don't bother rendering the table —
   // it'd look like a duplicate of the single-product price table.
@@ -173,6 +197,7 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
               primaryImageUrl={baseVariant.image_url}
               primaryTitle={data.product.title}
               primaryVariantId={baseVariant.id}
+              primaryServingsPerPack={baseVariant.servings || null}
               upsellImageUrl={upsell.base_variant!.image_url}
               upsellTitle={upsell.product.title}
               upsellVariantId={upsell.base_variant!.id}
@@ -197,7 +222,7 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
   );
 }
 
-function BundleCard({
+export function BundleCard({
   n,
   totalUnits,
   msrpTotalCents,
@@ -209,6 +234,7 @@ function BundleCard({
   primaryImageUrl,
   primaryTitle,
   primaryVariantId,
+  primaryServingsPerPack,
   upsellImageUrl,
   upsellTitle,
   upsellVariantId,
@@ -234,6 +260,7 @@ function BundleCard({
   primaryImageUrl: string | null;
   primaryTitle: string;
   primaryVariantId: string | null;
+  primaryServingsPerPack: number | null;
   upsellImageUrl: string | null;
   upsellTitle: string;
   upsellVariantId: string | null;
@@ -248,6 +275,10 @@ function BundleCard({
   freeGiftMinQty: number;
   freeGiftSubOnly: boolean;
 }) {
+  // Per-cup banner reflects the live (coupon-aware) price — gate on mount so
+  // SSR and first hydration agree (avoids a structural hydration mismatch).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const perUnitCents = Math.round(finalPriceCents / Math.max(1, totalUnits));
   const isSubscribing = mode === "subscribe";
 
@@ -329,6 +360,16 @@ function BundleCard({
           {(savingsCents / 100).toFixed(2)}
         </div>
       )}
+
+      {/* Per-cup emphasis — bundle is creamer + coffee, so anchor against a latte. */}
+      {mounted && primaryServingsPerPack && primaryServingsPerPack > 0 && (() => {
+        const perCup = finalPriceCents / (primaryServingsPerPack * n);
+        return (
+          <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-center text-xs font-semibold leading-snug text-amber-900 ring-1 ring-amber-200">
+            {`☕ Just $${(perCup / 100).toFixed(2)} a cup — vs a $5–$8 latte at national chains, with better flavor and more benefits.`}
+          </div>
+        );
+      })()}
 
       <ul className="mt-5 space-y-2.5 text-sm text-zinc-700">
         <li className="flex items-start gap-2">

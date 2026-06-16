@@ -207,74 +207,39 @@ export function StorefrontPage({
             {advertorial ? (
               advertorial.variant === "beforeafter" ? (
                 <>
-                  {/* Before/after lander: transformation hero → PDP hero as the
-                      product intro (chapter 2) → weight-loss testimonial wall →
-                      the rest of the existing PDP. */}
+                  {/* Before/after lander: unique chapters 1-3 (transformation
+                      hero → PDP hero → weight-loss testimonial wall), then the
+                      SAME full chapter body as the standard PDP — variants must
+                      never have fewer chapters than the main PDP. */}
                   <BeforeAfterHero data={data} content={advertorial} />
                   <HeroSection data={data} />
                   <StickyJumpNav />
                   <WeightLossTestimonialWall data={data} />
-                  <IngredientsSection data={data} />
-                  <PriceTableSection data={data} />
-                  <FinalCTASection data={data} />
-                  <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+                  <StandardChapters data={data} reviewSlug={reviewSlug} />
                 </>
               ) : (
                 <>
-                  {/* Advertorial lander: editorial hero → narrative chapter 1 →
-                      reuse ingredients / pricing / reviews / checkout unchanged. */}
+                  {/* Advertorial lander: unique chapters 1-3 (editorial hero →
+                      narrative chapter), then the SAME full chapter body as the
+                      standard PDP — variants must never have fewer chapters. */}
                   <AdvertorialHero data={data} content={advertorial} />
                   <StickyJumpNav />
                   <AdvertorialChapter data={data} content={advertorial} />
-                  <IngredientsSection data={data} />
-                  <PriceTableSection data={data} />
-                  <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-                  <FinalCTASection data={data} />
-                  <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+                  <StandardChapters data={data} reviewSlug={reviewSlug} />
                 </>
               )
             ) : (
             <>
-            <CompleteOrderBanner />
+            <CompleteOrderBanner guaranteeCopy={data.page_content?.guarantee_copy ?? null} />
             <HeroSection data={data} />
             {/* Survey chapter — interactive lead-capture quiz placed right
                 after the hero to rescue the ~70% hero→ch1 drop-off, capture
                 zero-party data, and gate the signup code behind email/phone.
                 Replaces the (structurally dead) quiz popup variant. */}
-            <SurveyChapter
-              workspaceId={data.workspace.id}
-              productId={data.product.id}
-              productHandle={data.product.handle}
-              benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
-            />
-            {/* Converter-first order: the two chapters that best drive to
-                pricing (why-this-works 19%, ingredients 17% view→price) run
-                before the price table, while attention is highest. */}
-            <HowItWorksSection data={data} />
-            <IngredientsSection data={data} />
-            {/* Upsell complementarity chapter — only rendered when the
-                primary has an upsell partner configured and AI/admin
-                has saved complementarity copy. Sits between the primary
-                product's chapters and the price tables so the bundle
-                pitch is set up before the customer hits pricing. */}
-            <UpsellChapter data={data} />
-            <PriceTableSection data={data} />
-            <BundlePriceTableSection data={data} />
-            {/* "Learn more" zone — below the price table. Detail / social-proof
-                chapters that historically get low reach (skipped on the way to
-                price) live here for shoppers who scroll past pricing wanting
-                more. Kept, not cut. UGC has high dwell but low price-intent, so
-                it reinforces here after price rather than delaying it. */}
-            <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-            <ComparisonSection data={data} />
-            <NutritionistEndorsementSection data={data} />
-            <WhatToExpectTimeline data={data} />
-            <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-            <FAQSection data={data} />
-            <FinalCTASection data={data} />
-            {/* Brand-trust chapter + policies footer — on every PDP for
-                legitimacy/trust. */}
-            <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+            <SurveyChapter data={data} />
+            {/* Shared content body — the full chapter set, identical across
+                the standard PDP and the ad variants (see StandardChapters). */}
+            <StandardChapters data={data} reviewSlug={reviewSlug} />
             </>
             )}
           </main>
@@ -288,6 +253,45 @@ export function StorefrontPage({
 
       <RecentOrdersToast orders={data.recent_orders_for_proof} />
     </div>
+  );
+}
+
+/**
+ * The full PDP content body — every chapter below the hero/intro. Shared
+ * by the standard PDP and the advertorial / before-after variants so the
+ * variants never carry fewer chapters than the main page; they only swap
+ * the intro (chapters 1-3) and then render this identical set.
+ *
+ * Order: converter-first (why-this-works, ingredients run before pricing
+ * while attention is highest), then the "learn more" zone below the price
+ * table for shoppers who scroll past pricing wanting more.
+ */
+function StandardChapters({ data, reviewSlug }: { data: PageData; reviewSlug: string }) {
+  const wsSlug = data.workspace.storefront_slug || "";
+  const wsName = data.workspace.name || "Superfoods Company";
+  return (
+    <>
+      <HowItWorksSection data={data} />
+      <IngredientsSection data={data} />
+      {/* Expert endorsement sits right under ingredients — credentials
+          reinforce the ingredient story before the customer reaches pricing. */}
+      <NutritionistEndorsementSection data={data} />
+      {/* Upsell complementarity chapter — only renders when the primary has
+          an upsell partner + saved copy. Sits before pricing so the bundle
+          pitch is set up first. */}
+      <UpsellChapter data={data} />
+      <PriceTableSection data={data} />
+      <BundlePriceTableSection data={data} />
+      {/* "Learn more" zone — detail / social-proof chapters for shoppers who
+          scroll past pricing. Kept, not cut. */}
+      <UGCSection data={data} slug={reviewSlug} workspaceSlug={wsSlug} />
+      <ComparisonSection data={data} />
+      <WhatToExpectTimeline data={data} />
+      <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={wsSlug} />
+      <FAQSection data={data} />
+      <FinalCTASection data={data} />
+      <BrandTrustSection workspaceName={wsName} />
+    </>
   );
 }
 

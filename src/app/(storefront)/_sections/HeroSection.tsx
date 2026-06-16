@@ -199,6 +199,12 @@ export function HeroSection({ data }: { data: PageData }) {
             </p>
           )}
 
+          {/* "As Seen On" press row — placed high (right under the headline)
+              so the trust signal lands before the fold on mobile and desktop. */}
+          <div className="mt-5">
+            <PressLogos media={data.media_by_slot} label="As Seen On" align="center" />
+          </div>
+
           {(data.product.awards || []).length > 0 && (
             <div className="mt-4">
               <PressQuote items={data.product.awards} variant="light" />
@@ -250,7 +256,21 @@ export function HeroSection({ data }: { data: PageData }) {
 
           {benefitBar.length > 0 && (
             <>
-              <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {/* Problem/solution lead-in — frames the benefits as the answer
+                  to a real pain instead of an unprompted feature list. */}
+              {data.page_content?.benefit_bar_intro && (
+                <div className="mt-6">
+                  <p className="text-lg font-extrabold leading-snug text-zinc-900 sm:text-xl">
+                    {data.page_content.benefit_bar_intro}
+                  </p>
+                  {data.page_content.benefit_bar_transition && (
+                    <p className="mt-1.5 text-sm font-medium text-zinc-500">
+                      {data.page_content.benefit_bar_transition}
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                 {benefitBar.slice(0, 4).map((b, i) => (
                   <BenefitChip key={i} label={b.text} index={i} />
                 ))}
@@ -289,9 +309,6 @@ export function HeroSection({ data }: { data: PageData }) {
             </div>
           )}
 
-          <div className="mt-6">
-            <PressLogos media={data.media_by_slot} />
-          </div>
         </div>
       </div>
     </section>
