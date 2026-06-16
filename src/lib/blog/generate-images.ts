@@ -99,14 +99,15 @@ export async function genCompressUpload(args: {
 /** Standard widths per slot kind. Hero/social a bit larger; in-body lean. */
 export const SLOT_MAX_WIDTH: Record<string, number> = {
   hero: 1600,
-  social: 1200, // 4:3 → 1200×900
+  social: 1080, // 4:5 → 1080×1350 (IG/FB feed portrait)
   body: 1280,
 };
 
 /**
- * The 4:3 social variant of the main image — composited from the same isolated
- * product, framed for the blog-on-social feed posts. Stored on the post
- * (social_image_url) but never rendered on the blog.
+ * The 4:5 portrait social variant of the main image — composited from the same
+ * isolated product, framed for the blog-on-social feed posts. Stored on the
+ * post (social_image_url) but never rendered on the blog. 4:5 is the tallest
+ * ratio IG/FB feed allows, so it claims the most vertical real estate.
  */
 export async function genSocialVariant(args: {
   workspaceId: string;
@@ -122,6 +123,6 @@ export async function genSocialVariant(args: {
     inputImageUrls: args.inputImageUrls,
     maxWidth: SLOT_MAX_WIDTH.social,
     quality: 82,
-    aspectRatio: "4:3",
+    aspectRatio: "4:5",
   });
 }
