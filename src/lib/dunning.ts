@@ -572,6 +572,24 @@ export async function cancelForTerminalNoBackup(params: {
   const admin = createAdminClient();
   const { appstleSubscriptionAction } = await import("@/lib/appstle");
 
+  // Record an EXHAUSTED dunning cycle for this terminal cancel. The recovery flow
+  // (reactivateDunningCancelledSubs) only reactivates + charges a cancelled sub
+  // that has a cycle in [exhausted, cancelled] — so without this the recovery
+  // email we send below promises a reactivation that can never happen (the sub is
+  // cancelled, migrated on recovery, but never re-charged → no order).
+  try {
+    const { data: subRow } = await admin
+      .from("subscriptions")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    const cyc = await createDunningCycle(workspaceId, contractId, (subRow?.id as string) ?? null, customerId, null);
+    await updateDunningCycle(cyc.id, { status: "exhausted", terminal_error_code: errorCode });
+  } catch (e) {
+    console.error("[Dunning terminal-cancel] dunning cycle create failed:", e);
+  }
+
   try {
     await appstleSubscriptionAction(
       workspaceId, contractId, "cancel", "dunning",
@@ -593,7 +611,7 @@ export async function cancelForTerminalNoBackup(params: {
   }
 
   await postDunningNoteOnTicket(workspaceId, customerId, dunningInternalNote(
-    `Terminal billing error: ${errorCode}. Customer has only ${paymentMethodCount} payment method(s). Subscription cancelled — will auto-reactivate if customer adds a new payment method. (No dunning cycle created.)`
+    `Terminal billing error: ${errorCode}. Customer has only ${paymentMethodCount} payment method(s). Subscription cancelled — exhausted dunning cycle recorded, so adding a working payment method will auto-reactivate + charge it.`
   ));
   await tagOpenTickets(workspaceId, customerId, "dunning:terminal");
 }
