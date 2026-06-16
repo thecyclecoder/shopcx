@@ -152,7 +152,7 @@ export default function StorefrontFunnelPage() {
   const overallCvr = topOfFunnel > 0 ? (orderPlaced / topOfFunnel) * 100 : 0;
 
   return (
-    <div className="mx-auto max-w-screen-2xl overflow-x-hidden px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-screen-2xl overflow-x-hidden px-4 py-6 sm:px-6">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Funnel Stats</h1>
