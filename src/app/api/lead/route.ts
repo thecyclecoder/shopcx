@@ -32,6 +32,29 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 import { toE164US } from "@/lib/phone";
 
+// CORS — /api/lead is hit cross-origin by the Shopify theme homepage signup
+// form (and same-origin by the in-house storefront popup). Reflect allowed
+// brand origins only (not "*") since this endpoint creates customers + coupons.
+const LEAD_CORS_ORIGINS = new Set([
+  "https://superfoodscompany.com",
+  "https://www.superfoodscompany.com",
+  "https://shop.superfoodscompany.com",
+  "https://2c6b02-3.myshopify.com",
+]);
+function leadCors(request: Request): Record<string, string> {
+  const origin = request.headers.get("origin") || "";
+  if (!LEAD_CORS_ORIGINS.has(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  };
+}
+export function OPTIONS(request: Request) {
+  return new NextResponse(null, { status: 204, headers: leadCors(request) });
+}
+
 interface Body {
   workspace_id?: string;
   email?: string;
@@ -66,14 +89,15 @@ interface Body {
 }
 
 export async function POST(request: Request) {
+  const cors = leadCors(request);
   const body = (await request.json().catch(() => ({}))) as Body;
   // Store phone canonically as E.164 (UI re-formats for display).
   const leadPhoneE164 = body.phone ? (toE164US(body.phone) || body.phone) : null;
   if (!body.workspace_id) {
-    return NextResponse.json({ error: "workspace_id required" }, { status: 400 });
+    return NextResponse.json({ error: "workspace_id required" }, { status: 400, headers: cors });
   }
   if (!body.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
-    return NextResponse.json({ error: "invalid_email" }, { status: 400 });
+    return NextResponse.json({ error: "invalid_email" }, { status: 400, headers: cors });
   }
   const email = body.email.trim().toLowerCase();
   const admin = createAdminClient();
@@ -103,7 +127,7 @@ export async function POST(request: Request) {
       .select("id")
       .single();
     if (error || !row) {
-      return NextResponse.json({ error: error?.message || "customer_create_failed" }, { status: 500 });
+      return NextResponse.json({ error: error?.message || "customer_create_failed" }, { status: 500, headers: cors });
     }
     customer = row;
     created = true;
@@ -234,5 +258,5 @@ export async function POST(request: Request) {
     );
   }
 
-  return NextResponse.json({ customer_id: customer.id, created, coupon_minted: !!mintedCoupon });
+  return NextResponse.json({ customer_id: customer.id, created, coupon_minted: !!mintedCoupon }, { headers: cors });
 }
