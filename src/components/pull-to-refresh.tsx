@@ -82,7 +82,7 @@ export default function PullToRefresh({ children }: { children: ReactNode }) {
   const progress = Math.min(pullDistance / THRESHOLD, 1);
 
   return (
-    <div ref={containerRef} className="relative h-full overflow-y-auto scrollbar-hidden">
+    <div ref={containerRef} className="relative h-full overflow-x-hidden overflow-y-auto scrollbar-hidden">
       {/* Pull indicator */}
       {pulling && (
         <div

@@ -544,8 +544,8 @@ function BreakdownCard({
           {rows.slice(0, 6).map((r) => (
             <li key={r.label} className="text-xs">
               <div className="flex items-center justify-between">
-                <span className="truncate text-zinc-700 dark:text-zinc-300">{r.label}</span>
-                <span className="ml-2 tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">{r.value}</span>
+                <span className="min-w-0 truncate text-zinc-700 dark:text-zinc-300">{r.label}</span>
+                <span className="ml-2 shrink-0 tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">{r.value}</span>
               </div>
               <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
                 <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.value / max) * 100}%` }} />
