@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { bucketOrder } from "@/lib/order-bucketing";
 
 export async function GET(
   request: Request,
@@ -52,27 +53,33 @@ export async function GET(
 
     const { data: todayOrders } = await admin
       .from("orders")
-      .select("source_name, total_cents, tags")
+      .select("source_name, total_cents, tags, subscription_id")
       .eq("workspace_id", workspaceId)
       .gte("created_at", utcStart)
       .lt("created_at", utcEnd);
 
+    // Bucket via the shared helper (same logic as the daily snapshot) so
+    // internal storefront subs count as new_sub and internal renewals count
+    // as recurring (excluded), instead of all landing in one_time.
+    const { data: wsMapRow } = await admin
+      .from("workspaces").select("order_source_mapping").eq("id", workspaceId).maybeSingle();
+    const sourceMapping = (wsMapRow?.order_source_mapping || {}) as Record<string, string>;
+
     let newSubCount = 0, newSubRev = 0, oneTimeCount = 0, oneTimeRev = 0;
     let recurringCount = 0, recurringRev = 0;
     for (const o of todayOrders || []) {
-      if (o.source_name === "subscription_contract_checkout_one") {
+      const bucket = bucketOrder(o, sourceMapping);
+      if (bucket === "recurring") {
         recurringCount++;
         recurringRev += o.total_cents || 0;
-        continue;
-      }
-      const tags = (o.tags || "").toLowerCase();
-      if (tags.includes("first subscription")) {
+      } else if (bucket === "new_sub") {
         newSubCount++;
         newSubRev += o.total_cents || 0;
-      } else {
+      } else if (bucket === "one_time") {
         oneTimeCount++;
         oneTimeRev += o.total_cents || 0;
       }
+      // replacement → excluded from ROAS (matches the snapshot's totals)
     }
 
     shopifyRows.push({

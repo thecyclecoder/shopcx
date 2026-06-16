@@ -8,8 +8,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
-
-type SourceCategory = "recurring" | "checkout" | "replacement" | "unknown";
+import { bucketOrder } from "@/lib/order-bucketing";
 
 // Self-heal cron — runs at 7 AM Central (after the 1 AM snapshot + after our
 // Shopify→DB orders sync typically catches up). Looks at the last 7 days of
@@ -94,26 +93,17 @@ export const dailyOrderSnapshot = inngest.createFunction(
         const utcStartISO = utcStart.toISOString();
         const utcEndISO = utcEnd.toISOString();
 
-        // Build source category map from workspace config
+        // Source → bucket mapping from workspace config (shared helper handles
+        // the fallback heuristics + new-sub detection, incl. internal storefront
+        // subs via subscription_id). See src/lib/order-bucketing.ts.
         const sourceMapping = (ws.order_source_mapping || {}) as Record<string, string>;
-        function categorize(sourceName: string): SourceCategory {
-          const mapped = sourceMapping[sourceName];
-          if (mapped === "recurring") return "recurring";
-          if (mapped === "checkout") return "checkout";
-          if (mapped === "replacement") return "replacement";
-          // Fallback heuristics
-          if (sourceName.includes("subscription")) return "recurring";
-          if (sourceName === "web" || sourceName === "pos") return "checkout";
-          if (sourceName === "shopify_draft_order") return "replacement";
-          return "unknown";
-        }
 
         // Query our DB
-        const dbOrders: { source_name: string; total_cents: number; tags: string | string[] | null }[] = [];
+        const dbOrders: { source_name: string; total_cents: number; tags: string | string[] | null; subscription_id: string | null }[] = [];
         let offset = 0;
         while (true) {
           const { data } = await admin.from("orders")
-            .select("source_name, total_cents, tags")
+            .select("source_name, total_cents, tags, subscription_id")
             .eq("workspace_id", ws.id)
             .gte("created_at", utcStartISO)
             .lt("created_at", utcEndISO)
@@ -123,38 +113,30 @@ export const dailyOrderSnapshot = inngest.createFunction(
             source_name: o.source_name || "unknown",
             total_cents: o.total_cents || 0,
             tags: o.tags,
+            subscription_id: o.subscription_id,
           })));
           if (data.length < 1000) break;
           offset += 1000;
         }
 
-        // Categorize
+        // Categorize via the shared bucketer
         let recurringCount = 0, recurringRevenue = 0;
         let newSubCount = 0, newSubRevenue = 0;
         let oneTimeCount = 0, oneTimeRevenue = 0;
         let replacementCount = 0, replacementRevenue = 0;
 
         for (const o of dbOrders) {
-          const category = categorize(o.source_name);
-          const tagList = Array.isArray(o.tags) ? o.tags : typeof o.tags === "string" ? [o.tags] : [];
-          const hasFirstSub = tagList.some(t => t.toLowerCase().includes("first subscription"));
-
-          if (category === "recurring") {
+          const bucket = bucketOrder(o, sourceMapping);
+          if (bucket === "recurring") {
             recurringCount++;
             recurringRevenue += o.total_cents;
-          } else if (category === "checkout") {
-            if (hasFirstSub) {
-              newSubCount++;
-              newSubRevenue += o.total_cents;
-            } else {
-              oneTimeCount++;
-              oneTimeRevenue += o.total_cents;
-            }
-          } else if (category === "replacement") {
+          } else if (bucket === "new_sub") {
+            newSubCount++;
+            newSubRevenue += o.total_cents;
+          } else if (bucket === "replacement") {
             replacementCount++;
             replacementRevenue += o.total_cents;
           } else {
-            // Unknown — treat as one-time
             oneTimeCount++;
             oneTimeRevenue += o.total_cents;
           }
