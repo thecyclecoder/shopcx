@@ -152,7 +152,7 @@ export default function StorefrontFunnelPage() {
   const overallCvr = topOfFunnel > 0 ? (orderPlaced / topOfFunnel) * 100 : 0;
 
   return (
-    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl overflow-x-hidden px-4 py-6 sm:px-6">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Storefront funnel</h1>
@@ -173,7 +173,7 @@ export default function StorefrontFunnelPage() {
 
       {data && (
         <>
-          <div className="mb-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             <StatCard label="Total sessions" value={data.total_sessions.toLocaleString()} />
             <StatCard label="PDP visits" value={topOfFunnel.toLocaleString()} />
             <StatCard label="Leads generated" value={(data.leads_generated ?? 0).toLocaleString()} tone={(data.leads_generated ?? 0) > 0 ? "good" : "neutral"} />
@@ -225,24 +225,26 @@ export default function StorefrontFunnelPage() {
             {data.topProducts.length === 0 ? (
               <p className="text-xs text-zinc-400">No pack selections in this range yet.</p>
             ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                    <th className="py-2 pr-2">Product</th>
-                    <th className="py-2 pr-2 text-right">Selections</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.topProducts.map(p => (
-                    <tr key={p.product_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                      <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{p.title}</td>
-                      <td className="py-2 pr-2 text-right font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                        {p.pack_selected_count.toLocaleString()}
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+                      <th className="py-2 pr-2">Product</th>
+                      <th className="py-2 pr-2 text-right">Selections</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {data.topProducts.map(p => (
+                      <tr key={p.product_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                        <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{p.title}</td>
+                        <td className="py-2 pr-2 text-right font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                          {p.pack_selected_count.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
 
@@ -388,11 +390,11 @@ function FunnelChart({ funnel, topOfFunnel }: { funnel: FunnelStepRow[]; topOfFu
         const dropPct = isFirst ? null : 100 - row.conv_from_prev_pct;
         return (
           <div key={row.step}>
-            <div className="flex items-center justify-between gap-3 text-sm">
-              <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-sm">
+              <span className="min-w-0 truncate font-semibold text-zinc-900 dark:text-zinc-100">
                 {STEP_LABELS[row.step] || row.step}
               </span>
-              <div className="flex items-center gap-4 tabular-nums">
+              <div className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
                 <span className="text-zinc-900 dark:text-zinc-100 font-semibold">
                   {row.sessions.toLocaleString()}
                 </span>
@@ -443,7 +445,7 @@ function PopupFunnelPanel({ data }: { data: NonNullable<FunnelData["popupFunnel"
   );
   return (
     <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex items-baseline justify-between">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
           Lead-capture popup
         </h2>
@@ -499,7 +501,7 @@ function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunne
   ];
   return (
     <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex items-baseline justify-between">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Survey chapter</h2>
         <span className="text-[11px] text-zinc-400">In-page survey after the hero · % is of shown</span>
       </div>
@@ -556,7 +558,7 @@ function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
   const recoveredPct = block.recovery_rate_pct;
   return (
     <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex items-baseline justify-between">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
           Abandoned carts
         </h2>
@@ -638,7 +640,7 @@ function ChapterPerformancePanel({ rows }: { rows: NonNullable<FunnelData["chapt
   const fmtDwell = (ms: number) => ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
   return (
     <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex items-baseline justify-between">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
           Chapter performance
         </h2>
