@@ -5,7 +5,7 @@ Short-term bridge until the in-house storefront retires Shopify. Dylan chats; Cl
 ## Model
 
 - **GitHub repo is the source of truth.** `thecyclecoder/theme-superfoodscompany.com@master` → Shopify's GitHub integration auto-deploys commits to the live MAIN theme (`theme-superfoodscompany.com/master`).
-- ShopCX **reads** the live theme from Shopify (`read_themes`) and **writes** by committing to the repo (`GITHUB_TOKEN`). No local theme folder needed.
+- ShopCX **reads** the live theme from Shopify (`read_themes`) and **writes** by committing to the repo (`GITHUB_TOKEN`). The local `theme-superfoodscompany.com/` working folder was **retired 2026-06-16** — the GitHub repo is the sole source of truth (keep a clone only for occasional `Shopify/dawn` upstream merges).
 
 ## Workflow
 

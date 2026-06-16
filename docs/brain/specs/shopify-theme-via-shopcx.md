@@ -4,7 +4,7 @@
 
 Phase legend: ⏳ planned · 🚧 in progress · ✅ shipped
 
-**Status (2026-06-16): shipped.** Built in worktree `shopify-theme-via-shopcx`. Reconciliation run + verified (0 remaining diff). Pending fold into [[../integrations/shopify]] (done — Theme management section) + this spec's deletion once stable.
+**Status (2026-06-16): shipped + merged to main.** Reconciliation run + verified (0 remaining diff). Local `theme-superfoodscompany.com/` folder retired/deleted (GitHub is sole source of truth). Brain coverage: [[../libraries/shopify-theme]], [[../recipes/edit-shopify-theme]], [[../integrations/shopify]] § Theme management. Fold this spec into those + delete once the workflow has a few real edits under its belt.
 
 ## Context (verified 2026-06-16)
 
