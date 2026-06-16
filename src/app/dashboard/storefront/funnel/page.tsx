@@ -283,7 +283,7 @@ export default function StorefrontFunnelPage() {
               <p className="text-xs text-zinc-400">No events in this range.</p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-xs">
+                <table className="w-full min-w-[640px] text-xs">
                   <thead>
                     <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
                       <th className="py-2 pr-2">Time</th>
@@ -305,11 +305,15 @@ export default function StorefrontFunnelPage() {
                         <td className="py-2 pr-2 font-mono text-[10px] text-zinc-400">
                           {e.anonymous_id.slice(0, 8)}…
                         </td>
-                        <td className="max-w-[300px] truncate py-2 pr-2 text-zinc-600 dark:text-zinc-400" title={e.url || ""}>
-                          {e.url ? new URL(e.url).pathname + new URL(e.url).search : "—"}
+                        <td className="py-2 pr-2 text-zinc-600 dark:text-zinc-400" title={e.url || ""}>
+                          <div className="max-w-[260px] truncate">
+                            {e.url ? new URL(e.url).pathname + new URL(e.url).search : "—"}
+                          </div>
                         </td>
-                        <td className="max-w-[300px] truncate py-2 pr-2 font-mono text-[10px] text-zinc-500" title={JSON.stringify(e.meta)}>
-                          {e.meta && Object.keys(e.meta).length > 0 ? JSON.stringify(e.meta) : "—"}
+                        <td className="py-2 pr-2 font-mono text-[10px] text-zinc-500" title={JSON.stringify(e.meta)}>
+                          <div className="max-w-[260px] truncate">
+                            {e.meta && Object.keys(e.meta).length > 0 ? JSON.stringify(e.meta) : "—"}
+                          </div>
                         </td>
                       </tr>
                     ))}

@@ -32,7 +32,7 @@ export default async function DashboardLayout({
           workspace={current}
           user={{ id: user.id, email: user.email!, name: user.user_metadata?.full_name || user.user_metadata?.name }}
         />
-        <main className="flex-1 overflow-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
+        <main className="min-w-0 flex-1 overflow-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
           <PullToRefresh>
             <ImportProgressBar />
             <PatternReviewBanner />
