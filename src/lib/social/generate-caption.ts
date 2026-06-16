@@ -119,9 +119,18 @@ export async function generateCaption(args: GenerateCaptionArgs): Promise<string
   });
   if (!res.ok) return null;
   const json = await res.json();
-  const text = (json?.content?.[0]?.text || "").trim();
+  const text = stripMarkdown((json?.content?.[0]?.text || "").trim());
   if (json?.usage) {
     try { await logAiUsage({ workspaceId: args.workspaceId, model: SONNET_MODEL, usage: json.usage, purpose: "social_caption", ticketId: null }); } catch { /* ignore */ }
   }
   return text || null;
+}
+
+/** FB/IG render captions as plain text — strip any stray markdown emphasis the
+ *  model adds (**bold**, *italic*, __x__) so it doesn't show literally. */
+function stripMarkdown(s: string): string {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/(^|[\s(])[*_](\S.*?\S|\S)[*_]([\s).,!?]|$)/g, "$1$2$3");
 }
