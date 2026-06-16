@@ -4,6 +4,8 @@
 
 Phase legend: ⏳ planned · 🚧 in progress · ✅ shipped
 
+**Status (2026-06-16): v1 built, on preview branch.** 9 custom DR sections + `templates/index.json` + 4 press-logo assets committed to theme branch `homepage-rebuild` (`c7e2f67f`); live `master` untouched. Awaiting Dylan to connect the branch as a Shopify preview theme + approve, then merge → master to go live. Lib gained `ensureBranch`. Sections (brand green `#006540` / orange CTA `#f16033`): dr-hero, dr-trust (press+badges), dr-bestsellers (6 products, Tabs first), dr-goals, dr-why (+founder), dr-reviews, dr-offer (S&S+guarantee), dr-faq, dr-reorder (reorder+capture).
+
 ## Decisions (settled with Dylan 2026-06-16)
 
 - **Hero leads with Superfood Tabs** — best seller + best organic seller.

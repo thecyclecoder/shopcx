@@ -200,8 +200,29 @@ export async function listRepoFiles(target: ThemeTarget): Promise<Map<string, st
 }
 
 /**
- * Commit one or more file changes to the connected branch in a SINGLE atomic
- * commit (Git Data API). Shopify's GitHub integration then auto-deploys it.
+ * Ensure `target.branch` exists; create it from `fromBranch` (default the
+ * connected `master`) if missing. Used to stage work (e.g. a homepage rebuild)
+ * on a side branch a Shopify preview theme can connect to, without touching MAIN.
+ */
+export async function ensureBranch(target: ThemeTarget, fromBranch = "master"): Promise<void> {
+  const base = `/repos/${target.owner}/${target.repo}`;
+  try {
+    await gh(`${base}/git/ref/heads/${target.branch}`);
+    return;
+  } catch (e) {
+    if (!(e instanceof Error && e.message.includes(": 404"))) throw e;
+  }
+  const from = await gh<{ object: { sha: string } }>(`${base}/git/ref/heads/${fromBranch}`);
+  await gh(`${base}/git/refs`, {
+    method: "POST",
+    body: JSON.stringify({ ref: `refs/heads/${target.branch}`, sha: from.object.sha }),
+  });
+}
+
+/**
+ * Commit one or more file changes to `target.branch` in a SINGLE atomic commit
+ * (Git Data API). For the connected branch Shopify auto-deploys; for a side
+ * branch a connected preview theme picks it up.
  */
 export async function commitThemeFiles(
   target: ThemeTarget,
