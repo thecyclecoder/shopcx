@@ -87,7 +87,7 @@ export default function UploadStaticPage() {
   );
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6">
       <Link href="/dashboard/marketing/ads" className="text-xs text-indigo-600 hover:underline">← Ads</Link>
       <h1 className="mt-1 mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Upload static ad</h1>
       <p className="mb-6 text-sm text-zinc-500">

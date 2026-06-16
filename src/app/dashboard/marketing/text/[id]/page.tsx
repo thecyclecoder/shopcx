@@ -200,7 +200,7 @@ export default function TextCampaignDetailPage() {
   const fallbackPct = totalResolved > 0 ? (fallbackCount / totalResolved) * 100 : 0;
 
   return (
-    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
       <Link href="/dashboard/marketing/text" className="mb-4 inline-flex text-sm text-zinc-500 hover:text-zinc-700">
         &larr; All campaigns
       </Link>

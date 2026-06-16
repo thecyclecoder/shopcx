@@ -44,7 +44,7 @@ export default function ResponseDelayPage() {
   if (loading) return <div className="p-6"><div className="animate-pulse h-40 bg-zinc-100 dark:bg-zinc-800 rounded-xl" /></div>;
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6">
       <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Response Delay</h1>
       <p className="mt-2 text-sm text-zinc-500">How long workflows and AI wait before sending auto-replies. Prevents instant robotic-feeling responses.</p>
 

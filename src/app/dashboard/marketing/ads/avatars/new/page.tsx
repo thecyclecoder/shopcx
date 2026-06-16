@@ -240,7 +240,7 @@ export default function NewAvatarPage() {
     "mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 p-6">
+    <div className="mx-auto w-full max-w-2xl space-y-6 p-6">
       <div>
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">New avatar</h1>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">

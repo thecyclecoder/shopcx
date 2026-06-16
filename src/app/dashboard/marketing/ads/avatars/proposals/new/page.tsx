@@ -52,7 +52,7 @@ export default function NewProposalsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 p-6">
+    <div className="mx-auto w-full max-w-2xl space-y-6 p-6">
       <div>
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Suggest avatars</h1>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">

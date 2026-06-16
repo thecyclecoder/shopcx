@@ -30,7 +30,7 @@ export default function AutoClosePage() {
   if (loading) return <div className="p-6"><div className="animate-pulse h-40 bg-zinc-100 dark:bg-zinc-800 rounded-xl" /></div>;
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6">
       <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Auto-Close Reply</h1>
       <p className="mt-2 text-sm text-zinc-500">Message sent when a customer confirms with "thanks" or similar after a workflow reply.</p>
 

@@ -108,7 +108,7 @@ export default function AvatarsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-8 p-6">
+    <div className="mx-auto w-full max-w-5xl space-y-8 p-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Avatars</h1>

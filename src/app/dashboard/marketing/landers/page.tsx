@@ -36,7 +36,7 @@ export default function LandersPage() {
   };
 
   return (
-    <div className="mx-auto max-w-screen-xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
       <h1 className="mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Landers</h1>
       <p className="mb-8 text-sm text-zinc-500">
         Auto-generated, ad-matched landing pages on your in-house storefront. Advertorial and

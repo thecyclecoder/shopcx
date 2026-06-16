@@ -219,7 +219,7 @@ export default function NewAdPage() {
   const selectedProduct = products.find((p) => p.id === productId);
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
       <Link href="/dashboard/marketing/ads" className="text-xs text-indigo-600 hover:underline">
         ← Ads
       </Link>

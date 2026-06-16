@@ -173,7 +173,7 @@ export default function SlackSettingsPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
+      <div className="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
         <h1 className="text-2xl font-bold mb-6">Slack Notifications</h1>
         <div className="animate-pulse space-y-4">
           {[1, 2, 3].map((i) => (
@@ -185,7 +185,7 @@ export default function SlackSettingsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
       <h1 className="text-2xl font-bold mb-2">Slack Notifications</h1>
       <p className="text-gray-500 mb-6">Configure which events send Slack messages and where they go.</p>
 

@@ -137,7 +137,7 @@ export default function TextMarketingSettingsPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-screen-2xl px-4 py-6">
+      <div className="mx-auto w-full max-w-screen-2xl px-4 py-6">
         <p className="text-sm text-zinc-400">Loading…</p>
       </div>
     );
@@ -148,7 +148,7 @@ export default function TextMarketingSettingsPage() {
   const isApex = cnameName === "@";
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
       <h1 className="mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Text marketing</h1>
       <p className="mb-8 text-sm text-zinc-500">
         Configuration for SMS/MMS campaigns. Manage campaigns themselves at{" "}

@@ -87,7 +87,7 @@ export default function CommentAnalysisPage() {
   }), [rows]);
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-8">
+    <div className="mx-auto w-full max-w-7xl px-6 py-8">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <Link href="/dashboard/social-comments" className="text-sm text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">

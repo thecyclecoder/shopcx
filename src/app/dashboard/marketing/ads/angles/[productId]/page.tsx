@@ -55,7 +55,7 @@ export default function AngleLibraryPage() {
   }
 
   return (
-    <div className="mx-auto max-w-screen-xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Angle library</h1>

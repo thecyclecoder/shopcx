@@ -148,7 +148,7 @@ export default function SocialPublisherPage() {
   );
 
   return (
-    <div className="mx-auto max-w-5xl p-6 text-zinc-900 dark:text-zinc-100">
+    <div className="mx-auto w-full max-w-5xl p-6 text-zinc-900 dark:text-zinc-100">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">Social Publisher</h1>

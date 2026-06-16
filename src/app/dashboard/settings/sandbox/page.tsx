@@ -34,7 +34,7 @@ export default function SandboxSettingsPage() {
   if (loading) return <div className="p-8 text-center text-zinc-400">Loading...</div>;
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Sandbox Mode</h1>
         <p className="mt-1 text-sm text-zinc-500">Control whether AI replies are sent to customers or held for review</p>

@@ -78,7 +78,7 @@ export default function ProductsPage() {
   }, [products, intelFilter, search]);
 
   return (
-    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Product Intelligence</h1>
         <p className="mt-1 text-sm text-zinc-500">

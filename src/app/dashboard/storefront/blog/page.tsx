@@ -81,7 +81,7 @@ export default async function StorefrontBlogPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+    <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">Blog</h1>

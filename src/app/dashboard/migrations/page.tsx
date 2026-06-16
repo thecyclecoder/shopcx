@@ -46,7 +46,7 @@ export default function MigrationsPage() {
   }, [workspace.id]);
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
+    <div className="mx-auto w-full max-w-5xl px-4 py-8">
       <h1 className="text-2xl font-bold text-zinc-900">Migrations</h1>
       <p className="mt-1 text-sm text-zinc-500">
         Appstle→internal migration health. A <strong>failed</strong> row is a renewal at risk — fix it before the next bill.
