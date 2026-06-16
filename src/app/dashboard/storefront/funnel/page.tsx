@@ -155,7 +155,7 @@ export default function StorefrontFunnelPage() {
     <div className="mx-auto max-w-screen-2xl overflow-x-hidden px-4 py-6 sm:px-6">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Storefront funnel</h1>
+          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Funnel Stats</h1>
           <p className="mt-1 text-sm text-zinc-500">
             Pixel events from the public storefront. Sessions count distinct visitors per step.
           </p>
