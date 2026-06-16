@@ -430,6 +430,7 @@ export interface PageData {
     shopify_myshopify_domain: string | null;
     support_email: string | null;
     meta_pixel_id: string | null;
+    storefront_skip_customize: boolean;
     design: {
       font_key: string | null;
       primary_color: string | null;
@@ -449,7 +450,7 @@ export async function getWorkspaceBySlug(slug: string) {
   const { data } = await admin
     .from("workspaces")
     .select(
-      "id, name, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url, storefront_off_platform_review_count",
+      "id, name, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url, storefront_off_platform_review_count, storefront_skip_customize",
     )
     .eq("storefront_slug", slug)
     .maybeSingle();
@@ -957,6 +958,7 @@ export async function getPageData(
       shopify_myshopify_domain: workspace.shopify_myshopify_domain,
       support_email: workspace.support_email,
       meta_pixel_id: metaPixelId,
+      storefront_skip_customize: !!(workspace as { storefront_skip_customize?: boolean }).storefront_skip_customize,
       design: {
         font_key: workspace.storefront_font || null,
         primary_color: workspace.storefront_primary_color || null,

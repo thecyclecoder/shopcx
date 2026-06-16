@@ -26,6 +26,9 @@ interface Props {
   productHandle: string;
   customerId?: string | null;
   metaPixelId?: string | null;
+  /** When true, pack-select skips /customize and goes straight to /checkout
+   *  (the friction-reducing bypass). add_to_cart still fires below. */
+  skipCustomize?: boolean;
 }
 
 interface CtaPayload {
@@ -41,6 +44,7 @@ export function StorefrontPixelInit({
   productHandle,
   customerId,
   metaPixelId,
+  skipCustomize,
 }: Props) {
   useEffect(() => {
     initPixel({ workspaceId, customerId: customerId || null, metaPixelId: metaPixelId || null });
@@ -200,7 +204,11 @@ export function StorefrontPixelInit({
           }
           const json = (await res.json()) as { cart?: { token: string } };
           const token = json.cart?.token;
-          window.location.href = token ? `/customize?token=${token}` : "/customize";
+          // Bypass: straight to /checkout (friction reducer). The cart is fully
+          // formed with defaults; "Customize your order" on checkout is the opt-in
+          // editor. add_to_cart already fired above, so CAPI is unaffected.
+          const dest = skipCustomize ? "/checkout" : "/customize";
+          window.location.href = token ? `${dest}?token=${token}` : dest;
         })
         .catch((err) => {
           console.error("cart create error:", err);
@@ -217,7 +225,7 @@ export function StorefrontPixelInit({
     // client-side nav between PDPs). customerId changing alone
     // doesn't need a re-init — identify() handles that case.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, productId, productHandle]);
+  }, [workspaceId, productId, productHandle, skipCustomize]);
 
   return null;
 }

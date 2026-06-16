@@ -61,6 +61,7 @@ interface Workspace {
   storefront_domain: string | null;
   storefront_slug: string | null;
   meta_pixel_id?: string | null;
+  skip_customize?: boolean;
   shipping_protection: {
     price_cents: number;
     title: string;
@@ -236,12 +237,21 @@ export function CheckoutClient({
 
   useEffect(() => {
     initPixel({ workspaceId: workspace.id, customerId: cart.customer_id, metaPixelId: workspace.meta_pixel_id || null });
-    track("checkout_view", {
-      cart_token: cart.token,
-      line_item_count: cart.line_items.length,
-      total_cents: totalCents,
-      product_id: primaryProductId ?? undefined,
-    });
+    // Fire checkout_view (→ Meta InitiateCheckout) once per cart token. Checkout
+    // is now the first funnel page AND the return target from "Customize your
+    // order", so guard against a round-trip double-firing InitiateCheckout.
+    const seenKey = `cx_checkout_view_${cart.token}`;
+    let seen = false;
+    try { seen = sessionStorage.getItem(seenKey) === "1"; } catch { /* private mode */ }
+    if (!seen) {
+      try { sessionStorage.setItem(seenKey, "1"); } catch { /* ignore */ }
+      track("checkout_view", {
+        cart_token: cart.token,
+        line_item_count: cart.line_items.length,
+        total_cents: totalCents,
+        product_id: primaryProductId ?? undefined,
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -910,6 +920,7 @@ export function CheckoutClient({
               protectionCents={protectionCents}
               protectionTitle={workspace.shipping_protection?.title || null}
               backLink={backLink}
+              showCustomizeButton={workspace.skip_customize}
               recurringCents={recurringCents}
               subscribing={subscribing}
               taxCents={taxCents}
@@ -1524,6 +1535,7 @@ export function CheckoutClient({
               protectionCents={protectionCents}
               protectionTitle={workspace.shipping_protection?.title || null}
               backLink={backLink}
+              showCustomizeButton={workspace.skip_customize}
               recurringCents={recurringCents}
               subscribing={subscribing}
               taxCents={taxCents}
@@ -1739,6 +1751,7 @@ function OrderSummary({
   protectionCents,
   protectionTitle,
   backLink,
+  showCustomizeButton,
   recurringCents,
   subscribing,
   taxCents,
@@ -1754,6 +1767,7 @@ function OrderSummary({
   protectionCents: number;
   protectionTitle: string | null;
   backLink: string;
+  showCustomizeButton?: boolean;
   recurringCents: number;
   subscribing: boolean;
   taxCents: number;
@@ -1825,11 +1839,22 @@ function OrderSummary({
           </li>
         )}
       </ul>
-      <div className="mt-3 text-right text-xs">
-        <a href={backLink} className="text-zinc-500 underline-offset-2 hover:text-zinc-800 hover:underline">
-          Make changes
+      {showCustomizeButton ? (
+        // Bypass funnel: customize was skipped, so make the editor an obvious
+        // button under the items (not just a subtle "Make changes" link).
+        <a
+          href={backLink}
+          className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-300 px-4 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:border-zinc-400 hover:bg-zinc-50"
+        >
+          Customize your order
         </a>
-      </div>
+      ) : (
+        <div className="mt-3 text-right text-xs">
+          <a href={backLink} className="text-zinc-500 underline-offset-2 hover:text-zinc-800 hover:underline">
+            Make changes
+          </a>
+        </div>
+      )}
       <dl className="mt-3 space-y-1 border-t border-zinc-200 pt-3 text-sm">
         <Row label="Subtotal" value={fmt(subtotalCents)} />
         {msrpSubtotalCents > subtotalCents && (

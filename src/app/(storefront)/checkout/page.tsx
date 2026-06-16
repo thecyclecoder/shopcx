@@ -94,7 +94,7 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "id, name, storefront_slug, storefront_primary_color, storefront_logo_url, storefront_domain, shipping_protection_enabled, shipping_protection_price_cents, shipping_protection_title, shipping_protection_description",
+      "id, name, storefront_slug, storefront_primary_color, storefront_logo_url, storefront_domain, shipping_protection_enabled, shipping_protection_price_cents, shipping_protection_title, shipping_protection_description, storefront_skip_customize",
     )
     .eq("id", cart.workspace_id)
     .single();
@@ -162,6 +162,7 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
           storefront_domain: workspace?.storefront_domain || null,
           storefront_slug: workspace?.storefront_slug || null,
           meta_pixel_id: metaPixelId,
+          skip_customize: !!(workspace as { storefront_skip_customize?: boolean })?.storefront_skip_customize,
           shipping_protection: workspace?.shipping_protection_enabled
             ? {
                 price_cents: (workspace?.shipping_protection_price_cents as number) || 495,
