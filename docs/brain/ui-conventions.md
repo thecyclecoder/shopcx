@@ -31,6 +31,14 @@ add `.dark` to `<html>`.
 - **Mutation actions show the animated ActionOverlay**, never a corner toast. The overlay covers the page during the action with loading → success/error states. Toasts disappear; agents need the overlay's confirmation to trust that the mutation landed.
 - **Tag overflow wraps or truncates.** Ticket sidebar tags shouldn't blow out the sidebar width — long tag lists wrap to multiple lines or truncate gracefully.
 
+## Dashboard mobile layout (hard invariants)
+
+The dashboard `<main>` (in `dashboard/layout.tsx`) is a flex item and `PullToRefresh` (`src/components/pull-to-refresh.tsx`) wraps every page in a **flex column** and is the **scroll container**. Three rules keep pages from breaking on mobile:
+
+- **Page roots need `w-full`.** A page root styled `mx-auto max-w-screen-2xl …` is a flex item of the PullToRefresh column; `mx-auto` disables flex-stretch, so without `w-full` the container **shrinks-to-fit its widest child** — one wide table drags the *entire page* (stat cards included) past the viewport, and it gets clipped. Always `mx-auto w-full max-w-…` (identical in block context, correct in flex). All dashboard page roots carry `w-full` as of 2026-06-16.
+- **`main` has `min-w-0`** and **`PullToRefresh` clips X** (`overflow-x-hidden overflow-y-auto`) so the page itself never scrolls sideways. (`overflow-y:auto` alone computes `overflow-x` to `auto` — it silently becomes a horizontal scroller.)
+- **Wide tables get their own `overflow-x-auto` wrapper + a `min-w-[Npx]`** so they scroll *inside their card* (the page clips, so an unwrapped wide table is cut off, not scrollable). `max-width`/`truncate` on a `<td>` is ignored in `table-layout:auto` — put the truncation on an inner `<div>`.
+
 ## Cross-page elements
 
 - **Shared components live in `src/components/`.** When a UI element appears in two places (subscription card, customer chip, status badge), it's a component, not inline JSX. Duplicated inline copies drift.
