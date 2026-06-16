@@ -458,7 +458,7 @@ function PopupFunnelPanel({ data }: { data: NonNullable<FunnelData["popupFunnel"
         </span>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[600px] text-sm">
           <thead>
             <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
               <th className="py-2 pr-2">Variant</th>
@@ -592,7 +592,7 @@ function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
         <p className="text-xs text-zinc-400">No abandoned carts in this range yet.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[720px] text-sm">
             <thead>
               <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
                 <th className="py-2 pr-2">Created</th>
@@ -653,7 +653,7 @@ function ChapterPerformancePanel({ rows }: { rows: NonNullable<FunnelData["chapt
         </span>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[560px] text-sm">
           <thead>
             <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
               <th className="py-2 pr-2">Chapter</th>
