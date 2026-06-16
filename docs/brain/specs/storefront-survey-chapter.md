@@ -4,7 +4,7 @@
 
 Phase legend: ⏳ planned · 🚧 in progress · ✅ shipped
 
-**Status (2026-06-15): all phases shipped.** Pending fold into [[../lifecycles/storefront-checkout]] + [[../libraries/popup-decide]] (then delete this spec, per [[../project-management]]). New file: `src/app/(storefront)/_sections/SurveyChapter.tsx`; new route: `src/app/api/popup/offer/route.ts`.
+**Status (2026-06-15): all phases shipped — then REBUILT 2026-06-16 (PR #31).** The original "gate-the-signup-code" survey below was replaced by a **personalized recommender**: one question per screen (cups → goal → coffee style) with imagery, a recommendation rendered as a real inline `PriceCard`/`BundleCard` (cups→pack, creamer→bundle), checkout-anytime, and an optional email→phone step that applies the same popup discount on-page (live reprice via `useSetAutoCoupon`). Current behavior is documented in [[../lifecycles/storefront-checkout]] § Survey chapter (recommender) — that's canonical now. This spec is retained for the **"Why (the data)" rationale** below that drove the work. New file: `src/app/(storefront)/_sections/SurveyChapter.tsx`; route: `src/app/api/popup/offer/route.ts`.
 
 ---
 

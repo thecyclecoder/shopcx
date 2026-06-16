@@ -47,13 +47,29 @@ Subsequent events on the same page:
 
 Rollup: `/api/workspaces/[id]/storefront-funnel` returns `chapterPerformance` (reach, reach %, avg dwell, →pricing sessions, **view→pricing %** = the effectiveness metric) rendered on the funnel dashboard.
 
+### PDP composition (sections)
+
+`render-page.tsx` renders the hero, then a shared `StandardChapters` body: How It Works → Ingredients → **Recommended by Nutritionists** → Upsell → PriceTable → BundlePriceTable → UGC → Comparison → What-to-Expect → Reviews → FAQ → Final CTA → Brand Trust. The **advertorial + before/after variant landers reuse the SAME `StandardChapters`** after their unique intro chapters — variants must never carry fewer chapters than the main PDP (only the first 1–3 differ).
+
+Trust / conversion elements:
+- **Guarantee bar** (`CompleteOrderBanner`) — sticky top bar; with an open cart it shows "Complete your order", otherwise the resting "Love It in 30 Days or Your Money Back" which opens a trust modal with a `GuaranteeSeal` SVG badge.
+- **"As Seen On" press row** (`PressLogos`) — labeled, brand-tinted, high under the hero headline; reads `press_1..5` [[../tables/product_media]] slots.
+- **Benefit-bar lead-in** — problem/solution headline + transition above the benefit cards, from [[../tables/product_page_content]].`benefit_bar_intro`/`benefit_bar_transition` (renders only when set).
+- **Per-cup price banners** on price/bundle cards (vs $3–6 coffee / $5–8 latte). **Mount-gated** (`useEffect` flag) because they reflect the live coupon-aware price — gating avoids a structural hydration mismatch.
+- **Trust chips** (`TrustChipRow`) — allergen-free claims use green checks (a red circle-slash read as a negation, e.g. "not sugar free").
+- **Hamburger menu** deep-links to `[data-section]` chapters (Testimonials/Ingredients/How It Works/What Nutritionists Say/FAQs/Shop Now).
+
+### Survey chapter (recommender)
+
+The `SurveyChapter` (after the hero) is a **personalized recommender**, not just a lead-gate: one question per screen (cups/day → health goal → coffee style) with per-question imagery (Nano Banana Pro, `survey_q1..q3` media slots), then a **recommendation** rendered as a real inline `PriceCard` (1 cup→1-pack, 2→2-pack, 3-4→3-pack) or `BundleCard` (chose "with creamer" → Coffee+Creamer bundle), with checkout available at any time. An optional email→phone step applies the **same** popup discount on-page via `useSetAutoCoupon` (`AutoCouponProvider`) and reprices live — never stacked (one offer). `survey_step` fires per step (anon included) for funnel visibility. Reuses `/api/lead` + `/api/popup/claim` (source `survey_chapter`). Superseded the older gate-the-code design in [[../specs/storefront-survey-chapter]].
+
 ## Phase 2 — cart create
 
 Customer clicks "Add to cart" / "Subscribe" → browser POSTs to `/api/cart` with `{line_items, mode, frequency_days, ...}`.
 
 `src/app/api/cart/route.ts`:
 
-1. **Validate every line item** against [[../tables/pricing_rules]] and [[../tables/product_variants]].`price_cents`. Server computes line totals — client price is advisory only.
+1. **Validate + price every line item** against [[../tables/pricing_rules]] and [[../tables/product_variants]].`price_cents` — client price is advisory only. Unit price = `msrp × (1 − quantity_break%) × (1 − subscribe%)`. The **quantity break is CROSS-PRODUCT**: the route sums ALL line quantities (a coffee + a creamer = 2 units → the qty-2 break), then applies each line's own rule break at that cart-wide total — mirroring how the price-table columns + bundle cards quote it (`buildTiersFromRule` / `computeBundleCard`). ⚠️ Pre-2026-06-16 the cart applied ONLY the subscribe discount and silently dropped the quantity break (a stale "breaks are pre-grouped on the storefront" comment) — so bundles AND single-product multi-packs were over-charged vs the displayed price. Fixed in `cart/route.ts` (two-pass: total qty → apply break).
 2. **Record `price_cents_at_add`** on each line so we can detect drift between add + checkout.
 3. **Persist cart_drafts row** with workspace_id, line_items (JSONB), totals, expires_at.
 4. **Set `cart` cookie** (token-bound, 30d).
@@ -220,6 +236,7 @@ The identity stitch mechanism — see [[customer-link-confirmation]] for the bro
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- `6b83532f` (PR #31) Storefront PDP enhancements: guarantee bar + trust modal, As-Seen-On press row, trust-chip fix, menu chapter nav, variant chapter parity, benefit-bar lead-in, **survey recommender rebuild**, per-cup banners, and the **cross-product quantity-break checkout fix** (card ↔ checkout now agree)
 - `aeb8b074` Checkout: free-gift image fix, identity stitch, guarantee badge
 - `6b85f4b5` Braintree direct refunds + quantity-reduction positive-close fix
 - `f3d1f969` Customize page: heal stale carts on load

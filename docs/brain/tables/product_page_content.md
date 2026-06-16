@@ -14,7 +14,9 @@ PDP content blocks per product (sections, ordering).
 | `version` | `int4` | — | default: `1` |
 | `hero_headline` | `text` | ✓ |  |
 | `hero_subheadline` | `text` | ✓ |  |
-| `benefit_bar` | `jsonb` | ✓ | default: `'[]'` |
+| `benefit_bar` | `jsonb` | ✓ | default: `'[]'` · array of `{ icon_hint?, text }`; first item leads the hero stack |
+| `benefit_bar_intro` | `text` | ✓ | problem/solution lead-in **headline** rendered above the benefit cards (e.g. "Tired of brain fog and a scale that won't budge…"). Null = no lead-in. |
+| `benefit_bar_transition` | `text` | ✓ | one-line transition under the intro that hands off to the cards (e.g. "Amazing Coffee was made to change that:") |
 | `mechanism_copy` | `text` | ✓ |  |
 | `ingredient_cards` | `jsonb` | ✓ | default: `'[]'` |
 | `comparison_table_rows` | `jsonb` | ✓ | default: `'[]'` |
