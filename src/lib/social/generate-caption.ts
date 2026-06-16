@@ -78,7 +78,7 @@ function userPrompt(kind: SourceKind, postType: PostType, pi: ProductPI | null, 
     case "resource":
       return `Write a caption for a blog/recipe RESOURCE post. Summarize the value and invite them to read/try it. ${len}\n\nRESOURCE SUMMARY:\n${(resourceSummary || "").slice(0, 1200)}`;
     case "blog":
-      return `Write ONE caption for a brand-new BLOG ARTICLE we just published. Open with a hook, tease the single most useful takeaway, and end with a soft invitation to read the full article. Do NOT paste a URL (the link is attached separately), do NOT write platform labels like "Facebook:" or "Instagram:", and don't claim it's "trending" or invent stats. ${len}\n\nARTICLE:\n${(resourceSummary || "").slice(0, 1200)}`;
+      return `Write ONE caption for a brand-new BLOG ARTICLE we just published. Open with a hook, tease the single most useful takeaway, and end with a short CTA that points to the article itself — e.g. "Click to read the full blog" / "Full guide on the blog 👇". This post carries a clickable link, so do NOT say "link in bio". Also do NOT paste a URL (the link is attached separately), do NOT write platform labels like "Facebook:" or "Instagram:", and don't claim it's "trending" or invent stats. ${len}\n\nARTICLE:\n${(resourceSummary || "").slice(0, 1200)}`;
     case "avatar":
       return `Write a caption for a feed post whose image shows a happy customer holding the product. Benefit-led, grounded in the PI. ${len}\n\nPRODUCT INTELLIGENCE:\n${pi ? piBlock(pi) : "(none)"}`;
     case "ad_video":
