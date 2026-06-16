@@ -117,6 +117,11 @@ Querying this table reveals retry patterns + failure-code distribution — feeds
 
 `isTerminalErrorCode()` in `src/lib/dunning.ts` short-circuits the flow for codes like `card_blocked`, `do_not_honor` after first occurrence — no point rotating to other cards from the same customer if the bank has hard-blocked transactions. Direct-jump to the cycle action.
 
+### Early terminal + no-backup cancel
+`cancelForTerminalNoBackup` (`src/lib/dunning.ts`, called from the Appstle webhook's early path) handles **terminal error + ≤1 payment method**: there's nothing to rotate to, so it cancels the sub + sends the recovery email immediately, skipping the rotation/retry phases.
+
+**Gotcha (fixed 2026-06-16):** this path used to create **no dunning cycle**. But new-card recovery's reactivation (`reactivateDunningCancelledSubs`) only reactivates a cancelled sub that has a cycle in `[exhausted, cancelled]`. So a customer cancelled via this path who later recovered with a working card was **migrated to internal but never reactivated or charged → no order** — even though the recovery email promised exactly that. `cancelForTerminalNoBackup` now records an **`exhausted`** cycle (with `terminal_error_code`) at cancel time so recovery can fulfill the promise. (Only customer hit before the fix: gerkenjeanie@yahoo.com — manually backfilled: exhausted cycle → reactivate the one failed sub → charge → order. The customer's other cancelled subs had no payment failure, so they correctly stayed cancelled.)
+
 ## Gotcha: Appstle `contract-external` returns a stale status after a write
 
 Right after `appstleSubscriptionAction(resume/pause/cancel)`, reading `subscription-contracts/contract-external/{id}` can return the **pre-change** status for a short window (Appstle eventual consistency). Don't use that read to verify a status change succeeded — it produces false negatives (we briefly believed a successfully-resumed sub was still `CANCELLED`). The authoritative signal that a resume worked is that `top-orders` returns a fresh QUEUED billing schedule. A `resume` on a dunning-cancelled contract **does** reactivate it (confirmed in the Appstle UI) — the contract is not terminal the way a raw Shopify cancel would be.
