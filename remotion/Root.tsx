@@ -6,6 +6,7 @@ import { ExampleAd, type ExampleAdProps } from "./ExampleAd";
 import { StaticReview, StaticOffer, StaticBenefitAuthority, type StaticReviewProps, type StaticOfferProps, type StaticBenefitAuthorityProps } from "./StaticAds";
 import { StaticAdvertorial, type StaticAdvertorialProps } from "./StaticAdvertorial";
 import { StaticTestimonial, StaticAuthority, StaticBigClaim, StaticBeforeAfter, type StaticTestimonialProps, type StaticAuthorityProps, type StaticBigClaimProps, type StaticBeforeAfterProps } from "./StaticArchetypes";
+import { StaticIngredientBreakdown, type StaticIngredientBreakdownProps } from "./StaticIngredientBreakdown";
 import { DEFAULT_PROPS, type AdCompositionProps } from "./types";
 
 // Static-ad design defaults (4:5 feed). Brand mirrors src/lib/ad-static DEFAULT_BRAND.
@@ -35,6 +36,19 @@ const STESTIMONIAL: StaticTestimonialProps = { width: 1080, height: 1350, brandB
 const SAUTHORITY: StaticAuthorityProps = { width: 1080, height: 1350, brandBg: "#FBF8F2", accent: "#B0451C", expertName: "Lindsey Ray", expertTitle: "Registered Dietitian, MS, RD", quote: "This coffee checks all the boxes — antioxidant rich, supports weight loss, and it tastes delicious.", bullets: ["Supports healthy weight loss", "Antioxidants that fight aging", "Improves skin elasticity"], faceImageUrl: null, productImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested", "Made in USA"], cta: "Learn more →" };
 const SBIGCLAIM: StaticBigClaimProps = { width: 1080, height: 1350, accent: "#B0451C", eyebrow: "After 50, read this", hook: "Your coffee is aging you.", emphasis: "aging you", reveal: "This one is built to fight back — 12 superfoods studied for antioxidants, weight and younger-looking skin.", productImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested", "Sugar Free"], cta: "Shop now →" };
 const SBEFOREAFTER: StaticBeforeAfterProps = { width: 1080, height: 1350, accent: "#B0451C", headline: "The transformation people are talking about", beforeLabel: "Before", afterLabel: "After", beforeText: "Where she started.", afterText: "Lighter, glowing — and getting compliments.", beforeImageUrl: null, afterImageUrl: null, productTitle: "Amazing Coffee", badges: ["Non-GMO", "3rd-Party Tested"], cta: "Shop now →" };
+const SBREAKDOWN: StaticIngredientBreakdownProps = {
+  width: 1080, height: 1350,
+  headline: "THE LONGER YOU DRINK IT, THE MORE IT WORKS.",
+  heroImageUrl: null, productLabel: "12 Superfoods",
+  ingredients: [
+    { name: "Green Coffee", benefit: "Burns Fat", icon: "flame" },
+    { name: "Matcha", benefit: "Metabolism", icon: "bolt" },
+    { name: "Chaga", benefit: "Fights Aging", icon: "shield" },
+    { name: "Turmeric", benefit: "Radiant Skin", icon: "sun" },
+    { name: "Cordyceps", benefit: "Clean Energy", icon: "leaf" },
+    { name: "Maca Root", benefit: "Drive", icon: "heart" },
+  ],
+};
 
 const EXAMPLE_DEFAULT: ExampleAdProps = {
   width: 1080,
@@ -139,6 +153,7 @@ export const RemotionRoot: React.FC = () => {
       <Composition id="StaticAuthority" component={StaticAuthority as React.FC<Record<string, unknown>>} durationInFrames={1} fps={1} width={SAUTHORITY.width} height={SAUTHORITY.height} defaultProps={SAUTHORITY as unknown as Record<string, unknown>} calculateMetadata={({ props }) => { const p = props as unknown as StaticAuthorityProps; return { durationInFrames: 1, fps: 1, width: p.width, height: p.height }; }} />
       <Composition id="StaticBigClaim" component={StaticBigClaim as React.FC<Record<string, unknown>>} durationInFrames={1} fps={1} width={SBIGCLAIM.width} height={SBIGCLAIM.height} defaultProps={SBIGCLAIM as unknown as Record<string, unknown>} calculateMetadata={({ props }) => { const p = props as unknown as StaticBigClaimProps; return { durationInFrames: 1, fps: 1, width: p.width, height: p.height }; }} />
       <Composition id="StaticBeforeAfter" component={StaticBeforeAfter as React.FC<Record<string, unknown>>} durationInFrames={1} fps={1} width={SBEFOREAFTER.width} height={SBEFOREAFTER.height} defaultProps={SBEFOREAFTER as unknown as Record<string, unknown>} calculateMetadata={({ props }) => { const p = props as unknown as StaticBeforeAfterProps; return { durationInFrames: 1, fps: 1, width: p.width, height: p.height }; }} />
+      <Composition id="StaticIngredientBreakdown" component={StaticIngredientBreakdown as React.FC<Record<string, unknown>>} durationInFrames={1} fps={1} width={SBREAKDOWN.width} height={SBREAKDOWN.height} defaultProps={SBREAKDOWN as unknown as Record<string, unknown>} calculateMetadata={({ props }) => { const p = props as unknown as StaticIngredientBreakdownProps; return { durationInFrames: 1, fps: 1, width: p.width, height: p.height }; }} />
     </>
   );
 };

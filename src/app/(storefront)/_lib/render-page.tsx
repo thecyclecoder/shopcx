@@ -37,6 +37,7 @@ import { UpsellChapter } from "../_sections/UpsellChapter";
 // rendered when `advertorial` content is passed (via ?variant=…&angle=…).
 import { AdvertorialHero } from "../_sections/AdvertorialHero";
 import { AdvertorialChapter } from "../_sections/AdvertorialChapter";
+import { ReasonsListicle } from "../_sections/ReasonsListicle";
 import { BeforeAfterHero } from "../_sections/BeforeAfterHero";
 import { WeightLossTestimonialWall } from "../_sections/WeightLossTestimonialWall";
 import { StickyJumpNav } from "../_components/StickyJumpNav";
@@ -205,7 +206,21 @@ export function StorefrontPage({
         >
           <main className="flex w-full flex-col">
             {advertorial ? (
-              advertorial.variant === "beforeafter" ? (
+              advertorial.variant === "reasons" ? (
+                <>
+                  {/* "N reasons why" listicle lander: editorial hero → numbered
+                      reasons (with mid-list CTA) → reuse ingredients / pricing /
+                      reviews / checkout unchanged. */}
+                  <AdvertorialHero data={data} content={advertorial} />
+                  <StickyJumpNav />
+                  <ReasonsListicle data={data} content={advertorial} />
+                  <IngredientsSection data={data} />
+                  <PriceTableSection data={data} />
+                  <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
+                  <FinalCTASection data={data} />
+                  <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+                </>
+              ) : advertorial.variant === "beforeafter" ? (
                 <>
                   {/* Before/after lander: unique chapters 1-3 (transformation
                       hero → PDP hero → weight-loss testimonial wall), then the

@@ -92,7 +92,7 @@ export default async function StorefrontProductPage({
   if (!data) notFound();
 
   const variant: AdvertorialVariant | null =
-    sp.variant === "advertorial" || sp.variant === "beforeafter" ? sp.variant : null;
+    sp.variant === "advertorial" || sp.variant === "beforeafter" || sp.variant === "reasons" ? sp.variant : null;
   const advertorial = variant ? await loadAdvertorialContent(data, variant, sp.angle ?? null) : null;
 
   const canonical = data.workspace.storefront_domain

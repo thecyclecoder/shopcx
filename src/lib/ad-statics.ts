@@ -26,13 +26,14 @@ import { loadAngleInputs } from "@/lib/ad-angles";
 import { generateNanoBananaProCombine } from "@/lib/gemini";
 import type { AngleGeneratorInput, ProductAdAngle } from "@/lib/ad-types";
 import { DEFAULT_BRAND } from "@/lib/ad-static";
-import { generateAdvertorialCopy, generateBigClaimCopy, generateBeforeAfterCopy, type AdvertorialHeroKind } from "@/lib/ad-statics-copy";
+import { generateAdvertorialCopy, generateBigClaimCopy, generateBeforeAfterCopy, generateIngredientBreakdownCopy, type AdvertorialHeroKind } from "@/lib/ad-statics-copy";
 
-export type KillerArchetype = "advertorial" | "testimonial" | "authority" | "big_claim" | "before_after";
-export const KILLER_ARCHETYPES: KillerArchetype[] = ["advertorial", "testimonial", "authority", "big_claim", "before_after"];
+export type KillerArchetype = "advertorial" | "testimonial" | "authority" | "big_claim" | "before_after" | "ingredient_breakdown";
+export const KILLER_ARCHETYPES: KillerArchetype[] = ["advertorial", "testimonial", "authority", "big_claim", "before_after", "ingredient_breakdown"];
 
-/** Cold 50+ defaults to the trust set; big_claim/before_after are more overt tests. */
-export const TRUST_ARCHETYPES: KillerArchetype[] = ["advertorial", "testimonial", "authority"];
+/** Cold 50+ defaults to the trust set; big_claim/before_after are more overt tests.
+ *  ingredient_breakdown is trust-first (legible, "here's exactly what's inside"). */
+export const TRUST_ARCHETYPES: KillerArchetype[] = ["advertorial", "testimonial", "authority", "ingredient_breakdown"];
 
 export const KILLER_COMPOSITION: Record<KillerArchetype, string> = {
   advertorial: "StaticAdvertorial",
@@ -40,6 +41,7 @@ export const KILLER_COMPOSITION: Record<KillerArchetype, string> = {
   authority: "StaticAuthority",
   big_claim: "StaticBigClaim",
   before_after: "StaticBeforeAfter",
+  ingredient_breakdown: "StaticIngredientBreakdown",
 };
 
 export const KILLER_ARCHETYPE_LABELS: Record<KillerArchetype, string> = {
@@ -48,6 +50,7 @@ export const KILLER_ARCHETYPE_LABELS: Record<KillerArchetype, string> = {
   authority: "Authority (expert)",
   big_claim: "Big claim (hook)",
   before_after: "Before / after",
+  ingredient_breakdown: "Ingredient breakdown",
 };
 
 /** Both formats, every time. 9:16 carries Meta safe-zone insets. */
@@ -57,13 +60,15 @@ export const KILLER_FORMATS: Array<{ format: string; w: number; h: number; safeT
 ];
 
 /** Archetype → default landing-page kind (operator can override at publish). */
-export type LanderKind = "pdp" | "advertorial" | "before_after";
+export type LanderKind = "pdp" | "advertorial" | "before_after" | "reasons";
 export const ARCHETYPE_LANDER: Record<KillerArchetype, LanderKind> = {
   advertorial: "advertorial",
   testimonial: "pdp",
   authority: "pdp",
   big_claim: "pdp",
   before_after: "before_after",
+  // ingredient_breakdown → the "reasons" listicle continues the "what's inside" scent.
+  ingredient_breakdown: "reasons",
 };
 
 const ACCENT = "#B0451C";
@@ -92,6 +97,51 @@ async function ensureGeneratedImage(workspaceId: string, key: string, prompt: st
   }
 }
 
+// ── Ingredient-breakdown "split bag cutaway" hero ────────────────────────────
+// Fuses the real isolated bag + real ingredient photos into a sliced-open pouch
+// (left = intact bag, right = ingredients stacked inside). Nano Banana won't emit
+// a real alpha channel (it bakes a checkerboard), so we generate on flat magenta,
+// chroma-key it to true transparency, and trim the border so the bag fills its
+// column. Reused per-product → no repeat spend.
+const BREAKDOWN_HERO_PROMPT =
+  `Using the FIRST image (a stand-up coffee pouch) and the following ingredient reference photos, create ONE photorealistic product hero. The pouch stands upright, centered, FULLY in frame (do not crop its packaging text). Its RIGHT HALF is rendered as a clean vertical cross-section "cutaway" — as if sliced open — revealing the real ingredients densely stacked INSIDE the bag, from top to bottom: pale cluster mushrooms, reddish-orange cordyceps, sliced brown mushrooms, light woody roots, bright green matcha powder, then roasted coffee beans at the very bottom. Keep the LEFT HALF as the actual intact pouch with its original packaging artwork and text sharp and legible. Warm soft studio lighting that matches the pouch. No added text, no labels, no shadow. CRITICAL: place the pouch on a SOLID FLAT PURE MAGENTA background, hex #FF00FF, perfectly even edge to edge — no gradient, checkerboard, texture or other objects — so it can be cleanly keyed out.`;
+
+async function chromaKeyAndTrim(buf: Buffer): Promise<Buffer> {
+  const sharp = (await import("sharp")).default;
+  const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { width, height, channels } = info;
+  for (let i = 0; i < data.length; i += channels) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    if (r > 120 && b > 120 && g < 130 && r - g > 45 && b - g > 45) {
+      data[i + 3] = 0; // magenta background → transparent
+    } else if (r - g > 25 && b - g > 25 && g < 170) {
+      const spill = Math.min(r, b) - g; // anti-aliased fringe → ramp alpha + neutralise pink
+      data[i + 3] = Math.max(0, Math.min(255, 255 - spill * 3));
+      data[i + 1] = Math.round((r + b) / 2 * 0.6 + g * 0.4);
+    }
+  }
+  return sharp(data, { raw: { width, height, channels } }).trim({ threshold: 12 }).png().toBuffer();
+}
+
+async function ensureBreakdownHero(workspaceId: string, productId: string, assets: KillerAssets): Promise<string | null> {
+  const key = `statics/${productId}/breakdown-hero.png`;
+  try { return await signedUrl(key); } catch { /* not present yet */ }
+  const bag = assets.isolatedProductUrl;
+  if (!bag) return null; // no isolated cutout → no faithful cutaway (SafeImg hides it)
+  const ingRefs = Object.keys(assets.media)
+    .filter((k) => k.startsWith("ingredient_") && assets.media[k])
+    .slice(0, 5)
+    .map((k) => assets.media[k]);
+  try {
+    const { buffer } = await generateNanoBananaProCombine({ workspaceId, prompt: BREAKDOWN_HERO_PROMPT, imageUrls: [bag, ...ingRefs], aspectRatio: "3:4" });
+    const keyed = await chromaKeyAndTrim(buffer);
+    await uploadBuffer(key, keyed, "image/png");
+    return await signedUrl(key);
+  } catch {
+    return null;
+  }
+}
+
 // ── Assets ─────────────────────────────────────────────────────────────────--
 export interface KillerAssets {
   productTitle: string;
@@ -104,6 +154,7 @@ export interface KillerAssets {
   badges: string[];
   reviewCountDisplay: string; // real + 10,000
   rating: number;
+  ingredientNames: string[]; // real product_ingredients, display order (for the breakdown poster)
 }
 
 function normalizeBadges(inp: AngleGeneratorInput): string[] {
@@ -125,7 +176,7 @@ export async function loadKillerAssets(productId: string): Promise<KillerAssets>
   const admin = createAdminClient();
   const inputs = await loadAngleInputs(productId);
 
-  const [reviewsRes, pageRes, mediaRes, heroRes] = await Promise.all([
+  const [reviewsRes, pageRes, mediaRes, heroRes, ingRes] = await Promise.all([
     admin
       .from("product_reviews")
       .select("reviewer_name, rating, body, smart_quote, verified_purchase, featured")
@@ -144,6 +195,7 @@ export async function loadKillerAssets(productId: string): Promise<KillerAssets>
       .maybeSingle(),
     admin.from("product_media").select("slot, url, webp_1080_url").eq("product_id", productId),
     admin.from("ad_campaigns").select("hero_image_url, scene_style").eq("product_id", productId).not("hero_image_url", "is", null).order("created_at", { ascending: false }).limit(8),
+    admin.from("product_ingredients").select("name, display_order").eq("product_id", productId).order("display_order", { ascending: true }),
   ]);
 
   const endos = Array.isArray(pageRes.data?.endorsements) ? (pageRes.data!.endorsements as any[]) : [];
@@ -170,6 +222,7 @@ export async function loadKillerAssets(productId: string): Promise<KillerAssets>
     badges: normalizeBadges(inputs),
     reviewCountDisplay: (realCount + 10000).toLocaleString("en-US"),
     rating: Math.min(5, Math.max(4, Math.round(inputs.credibility?.review_avg || 5))),
+    ingredientNames: (ingRes.data || []).map((i) => i.name as string).filter(Boolean),
   };
 }
 
@@ -261,6 +314,19 @@ export async function buildKillerStatic(args: {
         bullets: (e?.bullets?.length ? e.bullets : a.inputs.lead_benefits.map((b) => b.name)).filter(Boolean).slice(0, 3),
         faceImageUrl: face, productImageUrl: product, productTitle: a.productTitle,
         badges: a.badges, cta: "Learn more →",
+      },
+    };
+  }
+
+  if (archetype === "ingredient_breakdown") {
+    const copy = await generateIngredientBreakdownCopy(workspaceId, a.inputs, angle, a.ingredientNames);
+    const hero = await ensureBreakdownHero(workspaceId, productId, a);
+    return {
+      composition: KILLER_COMPOSITION.ingredient_breakdown,
+      landerKind,
+      props: {
+        headline: copy.headline, productLabel: copy.productLabel,
+        ingredients: copy.ingredients, heroImageUrl: hero,
       },
     };
   }

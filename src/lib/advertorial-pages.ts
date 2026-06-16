@@ -20,14 +20,19 @@ import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { validateAdScript } from "@/lib/ad-validator";
-import { resolveAdToolSettings } from "@/lib/ad-tool-config";
+import { resolveAdToolSettings, DEFAULT_BANNED_WORDS } from "@/lib/ad-tool-config";
+import { generateNanoBananaProCombine } from "@/lib/gemini";
+import { compressToWebp } from "@/lib/blog/generate-images";
 import type { AngleGeneratorInput } from "@/lib/ad-types";
 import type { PageData, Review } from "@/app/(storefront)/_lib/page-data";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-export type AdvertorialVariant = "advertorial" | "beforeafter";
+export type AdvertorialVariant = "advertorial" | "beforeafter" | "reasons";
 export type AdvertorialHeroKind = "avatar" | "ingredient" | "beforeafter";
+
+/** One item in a "N reasons why" listicle lander. */
+export interface ReasonItem { heading: string; body: string }
 
 /** Everything the advertorial/before-after sections need to render. Pure data —
  *  resolved from a generated `advertorial_pages` row or derived from PageData. */
@@ -49,6 +54,8 @@ export interface AdvertorialContent {
   afterImageUrl: string | null;
   /** Narrative chapter 1 (problem → mechanism/story → proof). */
   chapter: { heading: string; paragraphs: string[] };
+  /** "N reasons why" listicle items (variant='reasons'). */
+  reasons: ReasonItem[];
   rating: number;
   /** Review count, already display-formatted (actual + 10,000). */
   reviewCountDisplay: string;
@@ -170,6 +177,7 @@ interface AdvertorialPageRow {
   hero_caption: string | null;
   chapter_heading: string | null;
   chapter_paragraphs: string[] | null;
+  reasons: ReasonItem[] | null;
 }
 
 async function rowToContent(
@@ -196,9 +204,23 @@ async function rowToContent(
       heading: row.chapter_heading || fb.chapter.heading,
       paragraphs: row.chapter_paragraphs?.length ? row.chapter_paragraphs : fb.chapter.paragraphs,
     },
+    reasons: row.reasons?.length ? row.reasons : fb.reasons,
     rating: fb.rating,
     reviewCountDisplay: fb.reviewCountDisplay,
   };
+}
+
+/** Derive a sensible "N reasons why" listicle from PageData when nothing is generated. */
+function fallbackReasons(data: PageData, title: string): ReasonItem[] {
+  const out: ReasonItem[] = [];
+  for (const b of data.benefit_selections || []) {
+    if (!b.benefit_name) continue;
+    out.push({ heading: b.benefit_name, body: `${title} is built around ${b.benefit_name.toLowerCase()} — one of the reasons people over 50 are making the switch.` });
+    if (out.length >= 6) break;
+  }
+  out.push({ heading: "It works the longer you drink it", body: `The difference isn't a quick jolt. It's what shows up over the weeks — in the mirror, on the scale, and in the compliments.` });
+  out.push({ heading: "Backed by a money-back guarantee", body: `There's no risk in trying it. If it isn't for you, you're covered.` });
+  return out.slice(0, 8);
 }
 
 /** Editorial top derived from PageData when no generated row exists. */
@@ -212,6 +234,24 @@ function fallbackContent(data: PageData, variant: AdvertorialVariant, angleSlug:
   const ingredient =
     Object.keys(data.media_by_slot).find((s) => s.startsWith("ingredient_")) ?? null;
   const ingredientUrl = ingredient ? mediaUrl(data, ingredient) : null;
+  const reasons = fallbackReasons(data, title);
+
+  if (variant === "reasons") {
+    const ing: AdvertorialHeroKind = ingredientUrl ? "ingredient" : "avatar";
+    return {
+      variant, angleSlug,
+      publication: "THE SUPERFOODS REPORT", sponsorLabel: "SPONSORED",
+      headline: "8 Reasons Why People Over 50 Are Switching Their Morning Coffee",
+      dek: `It looks like ordinary coffee. Here's why it isn't.`,
+      heroKind: ing,
+      heroImageUrl: ing === "ingredient" ? ingredientUrl : avatar,
+      heroCaption: `${title}.`,
+      beforeImageUrl: before, afterImageUrl: after,
+      chapter: { heading: "", paragraphs: [] },
+      reasons,
+      rating, reviewCountDisplay: displayReviewCount(data.review_total_count || 0),
+    };
+  }
 
   if (variant === "beforeafter") {
     return {
@@ -233,6 +273,7 @@ function fallbackContent(data: PageData, variant: AdvertorialVariant, angleSlug:
             `They didn't overhaul their lives. They swapped one cup — ${title} — and let it do the quiet work.`,
         ],
       },
+      reasons,
       rating,
       reviewCountDisplay: displayReviewCount(data.review_total_count || 0),
     };
@@ -261,6 +302,7 @@ function fallbackContent(data: PageData, variant: AdvertorialVariant, angleSlug:
             `The difference isn't a quick jolt of energy. It's what shows up over the weeks: in the mirror, on the scale, and in the compliments.`,
           ],
     },
+    reasons,
     rating,
     reviewCountDisplay: displayReviewCount(data.review_total_count || 0),
   };
@@ -305,6 +347,33 @@ interface NarrativeCopy {
   heroCaption: string;
   chapterHeading: string;
   chapterParagraphs: string[];
+  reasons: ReasonItem[]; // populated for the "reasons" listicle variant
+}
+
+/** This variant's headline always leads with "8 Reasons Why" (Dylan, 2026-06-16). */
+function eightReasonsHeadline(h: string): string {
+  const t = (h || "").trim();
+  if (/^8\s+reasons\s+why/i.test(t)) return t;
+  const subject = t.replace(/^\d+\s+reasons(\s+why)?\b[:\s-]*/i, "").trim();
+  return `8 Reasons Why ${subject || "People Over 50 Are Switching Their Morning Coffee"}`;
+}
+
+/** Deterministic listicle from PI — used as the reasons-variant fallback. */
+function reasonsFallback(inputs: AngleGeneratorInput): ReasonItem[] {
+  const title = inputs.product_title;
+  const out: ReasonItem[] = [];
+  for (const b of (inputs.lead_benefits || [])) {
+    if (!b.name) continue;
+    out.push({ heading: b.name, body: `${title} is built around ${b.name.toLowerCase()} — one of the core reasons people over 50 are making the switch.` });
+    if (out.length >= 5) break;
+  }
+  for (const s of (inputs.ingredient_science || [])) {
+    if (!s.ingredient_name || !s.benefit_headline) continue;
+    out.push({ heading: s.ingredient_name, body: s.benefit_headline });
+    if (out.length >= 7) break;
+  }
+  out.push({ heading: "It works the longer you drink it", body: "The difference isn't a quick jolt — it's what shows up over the weeks, in the mirror and on the scale." });
+  return out.slice(0, 8);
 }
 
 function narrativeFallback(inputs: AngleGeneratorInput, angle: AngleRow | null, variant: AdvertorialVariant): NarrativeCopy {
@@ -321,6 +390,21 @@ function narrativeFallback(inputs: AngleGeneratorInput, angle: AngleRow | null, 
       chapterParagraphs: [
         `They didn't overhaul their lives. They swapped one cup — ${title} — and let it do the quiet work, week after week.`,
       ],
+      reasons: [],
+    };
+  }
+  if (variant === "reasons") {
+    const reasons = reasonsFallback(inputs);
+    return {
+      publication: "THE SUPERFOODS REPORT",
+      sponsorLabel: "SPONSORED",
+      // Clean template (NOT the product's hero_headline — "8 Reasons Why Brew. Sip…" reads broken).
+      headline: "8 Reasons Why People Over 50 Are Switching Their Morning Coffee",
+      dek: `It looks like ordinary coffee. Here's why it isn't.`,
+      heroCaption: `${title}.`,
+      chapterHeading: "",
+      chapterParagraphs: [],
+      reasons,
     };
   }
   return {
@@ -334,6 +418,7 @@ function narrativeFallback(inputs: AngleGeneratorInput, angle: AngleRow | null, 
       `A growing number of people over 50 are quietly swapping their morning routine for ${title} — and talking about how they look and feel because of it.`,
       `The difference isn't a quick jolt of energy. It's what shows up over the weeks: in the mirror, on the scale, and in the compliments.`,
     ],
+    reasons: [],
   };
 }
 
@@ -343,7 +428,7 @@ async function callOpus(workspaceId: string, prompt: string): Promise<Record<str
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: OPUS_MODEL, max_tokens: 1300, messages: [{ role: "user", content: prompt }] }),
+      body: JSON.stringify({ model: OPUS_MODEL, max_tokens: 3000, messages: [{ role: "user", content: prompt }] }),
     });
     const out = await res.json().catch(() => ({}));
     if (!res.ok) return null;
@@ -373,6 +458,53 @@ export async function generateAdvertorialNarrative(
   const benefits = (inputs.lead_benefits || []).map((b) => b.name).filter(Boolean).slice(0, 6);
   const science = (inputs.ingredient_science || []).map((s) => `${s.ingredient_name}: ${s.benefit_headline}`).filter(Boolean).slice(0, 5);
   const reviews = (inputs.proof_quotes || []).slice(0, 4).map((q) => `"${q.quote}"`);
+
+  // ── "N reasons why" listicle variant — distinct prompt + JSON shape. ──
+  if (variant === "reasons") {
+    const prompt = `You write the top of a "reasons why" listicle landing page for a COLD 50+ audience — it continues the scent of an ingredient-breakdown ad they just clicked ("here's exactly what's inside / why it works"). It reads like a trustworthy health-magazine listicle, NOT a loud DTC page. Product: "${inputs.product_title}".
+
+ANCHOR every reason to the CORE desires, in order: weight loss, fighting aging, being the best version of yourself, being noticed/liked (social approval). NEVER lead with functional/secondary benefits (energy, "no jitters", "no 2pm crash", focus) — energy is at most a supporting mechanism.
+
+Lead angle (honor it): hook "${angle?.hook_one_liner || ""}", anchor benefit (verbatim) "${angle?.lead_benefit_anchor || ""}", pain "${angle?.pain_now || ""}", desired outcome "${angle?.desired_outcome || ""}".
+Truthful inputs (no invented/medical claims): benefits ${benefits.join("; ") || "(none)"}; ingredient science ${science.join("; ") || "(none)"}; guarantee ${inputs.guarantee_copy || "(none)"}; real review quotes ${reviews.join(" ") || "(none)"}.
+
+Write with CONFIDENCE — these are real results customers ARE reporting, not possibilities. NEVER hedge: do not use "may", "might", "could", "may help", "can help", "helps support", or "studied for" in the headings. Frame the desire-led reasons as what real customers are experiencing/reporting, grounded in the real review quotes (e.g. heading "Customers Are Losing Weight" or "Drinkers Report Smaller Waistlines", body "One customer dropped 30 lbs in four months after switching her morning cup."). State it directly. (Ingredient-mechanism reasons may still describe what an ingredient does, plainly.)
+
+Write EXACTLY 8 reasons. Each reason: a short punchy heading (3-7 words) + ONE short sentence body. American English, plain, no hype. Do NOT use these words: ${bannedWords.join(", ") || "(none)"}.
+
+Return ONLY JSON:
+{"publication":"brand-owned masthead, e.g. THE SUPERFOODS REPORT","headline":"MUST start with the exact words '8 Reasons Why', e.g. '8 Reasons Why People Over 50 Are Switching Their Morning Coffee'","dek":"one-sentence standfirst","heroCaption":"short italic photo caption","reasons":[{"heading":"reason heading","body":"one short sentence"}]}`;
+    const j = await callOpus(workspaceId, prompt);
+    if (!j) return fb;
+    const reasons: ReasonItem[] = (Array.isArray(j.reasons) ? j.reasons : [])
+      .map((r: unknown) => {
+        const o = (r || {}) as { heading?: unknown; body?: unknown };
+        return { heading: String(o.heading || "").trim(), body: String(o.body || "").trim() };
+      })
+      .filter((r: ReasonItem) => r.heading && r.body)
+      .slice(0, 8);
+    if (reasons.length < 4) return fb;
+    const out: NarrativeCopy = {
+      publication: String(j.publication || fb.publication).trim(),
+      sponsorLabel: fb.sponsorLabel,
+      headline: eightReasonsHeadline(String(j.headline || fb.headline)),
+      dek: String(j.dek || fb.dek).trim(),
+      heroCaption: String(j.heroCaption || fb.heroCaption).trim(),
+      chapterHeading: "",
+      chapterParagraphs: [],
+      reasons,
+    };
+    // Editorial listicle copy legitimately uses "supports/helps/natural" ("supports
+    // immune function" is trustworthy 50+ language) — the DR soft-word defaults are
+    // for punchy spoken hooks, not this. Gate only on a workspace's EXPLICIT banned
+    // words, never the soft-word defaults.
+    const soft = new Set(DEFAULT_BANNED_WORDS.map((w) => w.toLowerCase()));
+    const hardBanned = bannedWords.filter((w) => !soft.has(w.toLowerCase()));
+    const blob = [out.headline, out.dek, ...reasons.flatMap((r) => [r.heading, r.body])].join(" ").toLowerCase();
+    if (hardBanned.some((w) => w && blob.includes(w.toLowerCase()))) return fb;
+    return out;
+  }
+
   const prompt = `You write the editorial TOP of an advertorial landing page for a COLD 50+ audience. It must read like a trustworthy health-magazine article continuing from an ad they just clicked — NOT a loud DTC page (the un-ad look is the whole conversion mechanism). Product: "${inputs.product_title}".
 
 ANCHOR everything to the CORE desires, in order: weight loss, fighting aging, being the best version of yourself, being noticed/liked (social approval). NEVER lead with functional/secondary benefits (energy, "no jitters", "no 2pm crash", focus).
@@ -398,6 +530,7 @@ Return ONLY JSON:
     heroCaption: String(j.heroCaption || fb.heroCaption).trim(),
     chapterHeading: String(j.chapterHeading || fb.chapterHeading).trim(),
     chapterParagraphs: paras.length ? paras : fb.chapterParagraphs,
+    reasons: [],
   };
   // Banned-word gate (lenient — the opener/length codes are spoken-script specific).
   try {
@@ -413,6 +546,41 @@ export interface GeneratedLander {
   variant: AdvertorialVariant;
   slug: string;
   url_path: string;
+}
+
+/**
+ * The reasons-listicle hero: a Nano Banana Pro **Amazing Coffee** image — the
+ * product's REAL isolated pouch composited into a warm lifestyle coffee scene
+ * (same approach as the auto-blog hero, [[blog/generate-images]]). Compressed to
+ * WebP + uploaded to the public product-media bucket; reused per-product so the
+ * generation cost is paid once. Returns a public URL (the lander reader passes
+ * http(s) heroes straight through). Null if the product has no isolated pouch or
+ * generation fails (the fallback ingredient/avatar hero still renders).
+ */
+const REASONS_HERO_BUCKET = "product-media";
+export async function ensureReasonsHero(workspaceId: string, productId: string): Promise<string | null> {
+  const admin = createAdminClient();
+  const [{ data: product }, { data: variant }] = await Promise.all([
+    admin.from("products").select("handle, title").eq("id", productId).maybeSingle(),
+    admin.from("product_variants").select("isolated_image_url").eq("product_id", productId).not("isolated_image_url", "is", null).limit(1).maybeSingle(),
+  ]);
+  const handle = product?.handle;
+  const isolated = variant?.isolated_image_url as string | undefined;
+  if (!handle || !isolated) return null;
+  const path = `workspaces/${workspaceId}/landers/${handle}/reasons-hero.webp`;
+  const publicUrl = admin.storage.from(REASONS_HERO_BUCKET).getPublicUrl(path).data.publicUrl;
+  // Reuse if already generated.
+  try { const head = await fetch(publicUrl, { method: "HEAD" }); if (head.ok) return publicUrl; } catch { /* generate */ }
+  const prompt = `Photorealistic lifestyle product photograph for "${product?.title || "a superfood coffee"}". Composite the EXACT product pouch shown in the first image (keep its packaging artwork, colors and text sharp and accurate) standing on a warm wooden kitchen counter beside a freshly poured mug of creamy coffee with gentle steam, a scatter of roasted coffee beans and a soft hint of green herbs, bathed in soft golden morning light, shallow depth of field, inviting and premium editorial food photography. No text overlays, no logos other than the pouch, no people.`;
+  try {
+    const { buffer: raw } = await generateNanoBananaProCombine({ workspaceId, prompt, imageUrls: [isolated], aspectRatio: "16:9" });
+    const { buffer } = await compressToWebp(raw, { maxWidth: 1600, quality: 82 });
+    const { error } = await admin.storage.from(REASONS_HERO_BUCKET).upload(path, buffer, { contentType: "image/webp", upsert: true });
+    if (error) return null;
+    return publicUrl;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -473,19 +641,26 @@ export async function generateAdvertorialPagesForCampaign(
     avatarPath = extractAdToolPath((heroCamp as { hero_image_url?: string | null })?.hero_image_url || null);
   }
 
-  // Which variant(s) to generate. Advertorial always; before/after when the
-  // product has the real transformation media to back it.
-  const variants: AdvertorialVariant[] = hasBeforeAfter ? ["advertorial", "beforeafter"] : ["advertorial"];
+  // Which variant(s) to generate. Advertorial + reasons-listicle always; before/
+  // after when the product has the real transformation media to back it.
+  const variants: AdvertorialVariant[] = hasBeforeAfter
+    ? ["advertorial", "reasons", "beforeafter"]
+    : ["advertorial", "reasons"];
   const landers: GeneratedLander[] = [];
 
   for (const variant of variants) {
     const copy = await generateAdvertorialNarrative(workspaceId, inputs, angle, variant, campaign.script_text || "", settings.banned_words || []);
+    // The reasons listicle uses a generated Nano Banana Pro Amazing Coffee hero.
     const heroKind: AdvertorialHeroKind =
-      variant === "beforeafter" ? "beforeafter" : heroKindForHook(angle?.hook_slug || null);
-    // Persist a re-signable hero path only for the avatar case (from the campaign
-    // hero). ingredient/beforeafter heroes resolve from product_media at render.
-    const heroStoragePath = heroKind === "avatar" ? avatarPath : null;
-    const rowSlug = variant === "beforeafter" ? `${slug}-ba` : slug;
+      variant === "beforeafter" ? "beforeafter" : variant === "reasons" ? "ingredient" : heroKindForHook(angle?.hook_slug || null);
+    // Persist a re-signable hero path: avatar = the campaign hero; reasons = the
+    // generated lifestyle coffee hero (public URL). beforeafter resolves from
+    // product_media at render.
+    const heroStoragePath =
+      variant === "reasons" ? await ensureReasonsHero(workspaceId, campaign.product_id)
+      : heroKind === "avatar" ? avatarPath
+      : null;
+    const rowSlug = variant === "beforeafter" ? `${slug}-ba` : variant === "reasons" ? `${slug}-reasons` : slug;
 
     await admin
       .from("advertorial_pages")
@@ -506,6 +681,7 @@ export async function generateAdvertorialPagesForCampaign(
           hero_caption: copy.heroCaption,
           chapter_heading: copy.chapterHeading,
           chapter_paragraphs: copy.chapterParagraphs,
+          reasons: copy.reasons,
           status: "ready",
           updated_at: new Date().toISOString(),
         },

@@ -29,6 +29,7 @@ Designs built + rendered with real Amazing Coffee PI; artifacts on Dylan's Deskt
 | **Authority** (face) | `StaticArchetypes.tsx` | branded | **real Lindsey Ray** (`endorsement_1_avatar`) + product | 4:5 + 9:16 |
 | **Big-claim — contrarian hook** | `StaticArchetypes.tsx` | branded | isolated product cutout | 4:5 + 9:16 (3 hook directions) |
 | **Before / after** | `StaticArchetypes.tsx` | branded | **real customer `before`/`after` photos** | 4:5 + 9:16 |
+| **Ingredient breakdown** ("what's inside") | `remotion/StaticIngredientBreakdown.tsx` | chunky serif (Fraunces) headline + Montserrat list | **split-bag CUTAWAY** (isolated bag + real ingredient photos, Nano Banana → chroma-key + trim) | 4:5 + 9:16 |
 
 ## Decisions locked (2026-06-15)
 - **Advertorial uses an editorial serif** (Playfair); it must NOT look branded — the un-ad look is its conversion mechanism. All other archetypes use the **storefront font (Montserrat)** — they're overt brand creative.
@@ -65,6 +66,15 @@ Investigation (2026-06-15) found the Meta publish path is **video-only** and sta
 2. **Per-ad angle metadata** — set `ad_campaigns.angle_id` on each seeded campaign (create matching `product_ad_angles` rows: weight / anti-aging / best-self / each contrarian hook). `ad-meta-copy.ts` already reads `angle_id` → `hook_one_liner` + `lead_benefit_anchor`, so copy auto-matches the ad's angle. Optionally pre-bake `meta_headline`/`meta_primary_text`/`meta_description` on the angle.
 3. **Per-ad landing routing** — add `ad_campaigns.landing_url` (migration; campaigns have no URL field today — destination only lives on `ad_publish_jobs` at publish time). Default it from the archetype→page map (testimonial/authority/big-claim → PDP; advertorial → advertorial lander; before/after → before/after lander). `PublishToMeta` pre-fills from it; operator can override.
 4. **Seed step** — upload the rendered statics to the `ad-tool` bucket (`finals/{ws}/{id}.jpg`), create one `ad_campaigns` row per static (with `angle_id` + `landing_url`) + its `ad_videos` static rows (4:5 + 9:16, `media_kind='static'`, `status='ready'`, linked via `format_variant_of_id`), and pre-generate the Meta copy (4 headlines + 4 primary + desc + CTA) so the operator only clicks **Publish**. Seed all archetypes including before/after (publishable for this account) → each routed to its mapped landing page.
+
+## ✅ Added 2026-06-16 — 6th archetype: Ingredient breakdown ("what's inside")
+erth.labs-style poster Dylan approved: chunky Fraunces headline + a **split-bag cutaway** hero (left = the real isolated bag, right = the ingredients sliced open inside) + a vertical ingredient→benefit list with sage-circle icons. Wired through the full engine (renders both 4:5 + 9:16, in the campaign-page picker, publishable):
+- `remotion/StaticIngredientBreakdown.tsx` (registered in `remotion/Root.tsx`) — parametric on width/height + safe insets, SafeImg, inline SVG icon set (`flame/bolt/shield/sun/leaf/heart/brain/drop/scale`).
+- `ad-statics-copy.ts` `generateIngredientBreakdownCopy` — Opus picks 6 of the product's REAL `product_ingredients`, assigns a core-desire benefit (weight/aging/best-self; energy only as support) + an icon; banned-word gated; proven-default fallback.
+- `ad-statics.ts` — `KillerArchetype` += `ingredient_breakdown`; in `TRUST_ARCHETYPES`; `KillerAssets.ingredientNames` loaded from `product_ingredients`; `ensureBreakdownHero` generates the split-bag cutaway via `generateNanoBananaProCombine` (isolated bag + up to 5 ingredient photos) on flat **magenta**, then `chromaKeyAndTrim` (sharp) → true alpha (Nano bakes a checkerboard instead of emitting alpha; key it out + trim the border so the bag fills its column). Reused per-product.
+- `ARCHETYPE_LANDER.ingredient_breakdown = "reasons"` → the new listicle lander (below).
+- Verified end-to-end on Amazing Coffee via the engine path (loadKillerAssets → buildKillerStatic → render): real headline *"ONE CUP. YOUNGER MIRROR. SMALLER JEANS."*, 6 anchored rows, fresh cutaway hero. POC render scripts: `scripts/render-ingredient-breakdown.ts`, `scripts/render-breakdown-headlines.ts`.
+- **Operational**: re-run `scripts/deploy-remotion-lambda.ts` so the Lambda site has the new component before in-app prod renders (local dev render already verified).
 
 ## Phases
 - ✅ **P1 — Productionize the 5 archetype components** — components built + registered in `remotion/Root.tsx`; 9:16 testimonial sparse-middle fixed (`StaticTestimonial` now header / growing-centered-middle / footer + portrait product anchor); 9:16 safe-zone insets applied per `KILLER_FORMATS` (`safeTopPct`/`safeBottomPct`); `AdStatic.tsx` got the SafeImg fix.

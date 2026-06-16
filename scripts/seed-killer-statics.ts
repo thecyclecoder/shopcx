@@ -41,6 +41,7 @@ const ANGLE_BY_ARCHETYPE: Record<KillerArchetype, { hook_slug: string; lf8_slot:
   authority: { hook_slug: "secret_reveal", lf8_slot: 1, lead_benefit_anchor: "antioxidants that fight aging", hook_one_liner: "What a dietitian says about the coffee that fights aging", pain_now: "aging shows up first in the mirror", desired_outcome: "fight visible aging and look younger" },
   big_claim: { hook_slug: "contrarian", lf8_slot: 1, lead_benefit_anchor: "antioxidants that fight aging", hook_one_liner: "Your coffee is aging you — this one fights back", pain_now: "ordinary coffee adds to oxidative stress", desired_outcome: "firmer, younger-looking skin" },
   before_after: { hook_slug: "results_first", lf8_slot: 8, lead_benefit_anchor: "healthy weight loss", hook_one_liner: "Lighter, brighter — and getting compliments again", pain_now: "feeling invisible and not like yourself", desired_outcome: "be noticed and complimented again" },
+  ingredient_breakdown: { hook_slug: "secret_reveal", lf8_slot: 6, lead_benefit_anchor: "healthy weight loss", hook_one_liner: "The longer you drink it, the more it works", pain_now: "ordinary coffee does nothing for the weight or the aging", desired_outcome: "lose weight and fight aging from one morning cup" },
 };
 
 async function ensureAngle(admin: ReturnType<typeof createAdminClient>, archetype: KillerArchetype): Promise<string | null> {
@@ -95,7 +96,7 @@ async function main() {
   const resolveLanding = async (archetype: KillerArchetype, campaignId: string): Promise<string> => {
     const kind = ARCHETYPE_LANDER[archetype];
     if (kind === "pdp") return pdp;
-    const variant = kind === "before_after" ? "beforeafter" : "advertorial";
+    const variant = kind === "before_after" ? "beforeafter" : kind === "reasons" ? "reasons" : "advertorial";
     try {
       const res = await generateAdvertorialPagesForCampaign(WS, campaignId);
       const lander = res.landers.find((l) => l.variant === variant);

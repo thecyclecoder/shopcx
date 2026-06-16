@@ -22,7 +22,7 @@ async function authorize(workspaceId: string | null) {
 
 const ARCHETYPES = [
   // cold-50+ "killer" set (trust-first; both 4:5 + 9:16)
-  "advertorial", "testimonial", "authority", "big_claim", "before_after",
+  "advertorial", "testimonial", "authority", "big_claim", "before_after", "ingredient_breakdown",
   // legacy set (kept for back-compat)
   "review", "offer", "benefit_authority",
 ];

@@ -28,6 +28,11 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 export interface AdvertorialCopy { category: string; headline: string; dek: string; body: string[]; heroCaption: string; }
 export interface BigClaimCopy { eyebrow: string; hook: string; emphasis: string; reveal: string; }
 export interface BeforeAfterCopy { headline: string; beforeText: string; afterText: string; }
+/** Icons available on the ingredient-breakdown poster (must match remotion/StaticIngredientBreakdown.tsx IconKey). */
+export type BreakdownIconKey = "flame" | "bolt" | "shield" | "sun" | "leaf" | "heart" | "brain" | "drop" | "scale";
+export const BREAKDOWN_ICONS: BreakdownIconKey[] = ["flame", "bolt", "shield", "sun", "leaf", "heart", "brain", "drop", "scale"];
+export interface BreakdownRow { name: string; benefit: string; icon: BreakdownIconKey }
+export interface IngredientBreakdownCopy { headline: string; productLabel: string; ingredients: BreakdownRow[]; }
 
 /** Advertorial hero is an avatar (lifestyle) or an ingredient shot — drives the copy register. */
 export type AdvertorialHeroKind = "avatar" | "ingredient";
@@ -149,6 +154,49 @@ export async function generateBigClaimCopy(workspaceId: string, inp: AngleGenera
     reveal: String(j.reveal || fallback.reveal).trim(),
   };
   if (hasBannedWord([out.hook, out.reveal].join(" "), inp, banned(settings))) return fallback;
+  return out;
+}
+
+// ── Ingredient breakdown ("what's inside" mechanism poster) ──────────────────
+// erth.labs-style: a chunky-serif hook headline + a split-bag cutaway hero + a
+// vertical ingredient→benefit list with icons. Benefits are anchored to the core
+// desires (weight / aging / best-self), energy only as support. Pulls from the
+// product's REAL ingredient list so every benefit is pinned to a named ingredient.
+export async function generateIngredientBreakdownCopy(workspaceId: string, inp: AngleGeneratorInput, angle: ProductAdAngle | null, ingredientNames: string[]): Promise<IngredientBreakdownCopy> {
+  const fallback: IngredientBreakdownCopy = {
+    headline: "THE LONGER YOU DRINK IT, THE MORE IT WORKS.",
+    productLabel: "12 Superfoods in one cup",
+    ingredients: [
+      { name: "Green Coffee", benefit: "Burns Fat", icon: "flame" },
+      { name: "Matcha", benefit: "Metabolism", icon: "bolt" },
+      { name: "Chaga", benefit: "Fights Aging", icon: "shield" },
+      { name: "Turmeric", benefit: "Radiant Skin", icon: "sun" },
+      { name: "Cordyceps", benefit: "Clean Energy", icon: "leaf" },
+      { name: "Maca Root", benefit: "Drive", icon: "heart" },
+    ],
+  };
+  const pool = ingredientNames.map((s) => String(s).trim()).filter(Boolean);
+  if (!pool.length) return fallback;
+  const settings = await settingsFor(workspaceId);
+  const system = `You write punchy "what's inside" ingredient-breakdown ad copy for a superfood product. The poster shows a chunky headline + a list of up to 6 ingredients, each paired with a 1-2 word benefit and an icon. ${CORE_DESIRE_RULES} The headline must be scroll-stopping (a contrarian hook, a curiosity gap, or a compounding-results promise) — short, uppercase-ready, NO brand name first.`;
+  const user = `${factsBlock(inp)}${angleBlock(angle)}\n\nThe product's REAL ingredients (pick the 6 most desire-relevant; use the exact names): ${pool.join(", ")}.\n\nReturn ONLY JSON:\n{"headline":"scroll-stopping hook, 4-9 words","productLabel":"tiny kicker, e.g. '12 Superfoods in one cup'","ingredients":[{"name":"exact ingredient name","benefit":"1-2 word benefit anchored to weight/aging/best-self (energy only as support)","icon":"one of: ${BREAKDOWN_ICONS.join(", ")}"}]}\nExactly 6 ingredients. Choose the icon that best fits each benefit (flame=fat-burning, bolt=metabolism, shield=immunity/aging, sun=skin/glow, leaf=natural/energy, heart=drive/vitality, brain=focus, drop=hydration/detox, scale=weight). No banned words: ${banned(settings).join(", ") || "(none)"}.`;
+  const j = await callOpusJSON(workspaceId, system, user, "ad_static_breakdown_copy");
+  if (!j || !Array.isArray(j.ingredients)) return fallback;
+  const rows: BreakdownRow[] = j.ingredients
+    .map((r: any) => ({
+      name: String(r?.name || "").trim(),
+      benefit: String(r?.benefit || "").trim(),
+      icon: (BREAKDOWN_ICONS.includes(r?.icon) ? r.icon : "leaf") as BreakdownIconKey,
+    }))
+    .filter((r: BreakdownRow) => r.name && r.benefit)
+    .slice(0, 6);
+  if (rows.length < 4) return fallback;
+  const out: IngredientBreakdownCopy = {
+    headline: String(j.headline || fallback.headline).trim(),
+    productLabel: String(j.productLabel || fallback.productLabel).trim(),
+    ingredients: rows,
+  };
+  if (hasBannedWord([out.headline, ...rows.map((r) => `${r.name} ${r.benefit}`)].join(" "), inp, banned(settings))) return fallback;
   return out;
 }
 

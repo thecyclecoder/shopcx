@@ -15,6 +15,7 @@ const KILLER_STATIC_DEFS: Array<{ k: string; label: string }> = [
   { k: "authority", label: "Authority" },
   { k: "big_claim", label: "Big claim" },
   { k: "before_after", label: "Before / after" },
+  { k: "ingredient_breakdown", label: "Ingredient breakdown" },
 ];
 const LEGACY_STATIC_DEFS: Array<{ k: string; label: string }> = [
   { k: "review", label: "Review screenshot" },
@@ -218,7 +219,7 @@ export default function AdDetailPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-screen-xl px-4 py-6">
+      <div className="mx-auto w-full max-w-screen-xl px-4 py-6">
         <p className="text-sm text-zinc-500">Loading…</p>
       </div>
     );
@@ -226,7 +227,7 @@ export default function AdDetailPage() {
 
   if (!campaign) {
     return (
-      <div className="mx-auto max-w-screen-xl px-4 py-6">
+      <div className="mx-auto w-full max-w-screen-xl px-4 py-6">
         <p className="text-sm text-zinc-500">Ad not found.</p>
         <Link href="/dashboard/marketing/ads" className="text-sm text-indigo-600 hover:underline">
           Back to ads
@@ -271,7 +272,7 @@ export default function AdDetailPage() {
   const nextStage = stages.find((s) => s.state === "ready")?.key;
 
   return (
-    <div className="mx-auto max-w-screen-xl px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <Link href="/dashboard/marketing/ads" className="text-xs text-indigo-600 hover:underline">
