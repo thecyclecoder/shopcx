@@ -47,6 +47,7 @@ interface AbandonedCartsBlock {
 interface FunnelData {
   range: { start: string; end: string };
   total_sessions: number;
+  add_to_cart: number;
   leads_generated: number;
   popupFunnel?: {
     byVariant: Array<{ variant: string; label: string; shown: number; engaged: number; email: number; phone: number }>;
@@ -149,7 +150,9 @@ export default function StorefrontFunnelPage() {
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
+  const addToCart = data?.add_to_cart ?? 0;
   const overallCvr = topOfFunnel > 0 ? (orderPlaced / topOfFunnel) * 100 : 0;
+  const atcRate = topOfFunnel > 0 ? (addToCart / topOfFunnel) * 100 : 0;
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl overflow-x-hidden px-4 py-6 sm:px-6">
@@ -158,6 +161,7 @@ export default function StorefrontFunnelPage() {
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Funnel Stats</h1>
           <p className="mt-1 text-sm text-zinc-500">
             Pixel events from the public storefront. Sessions count distinct visitors per step.
+            Conversion rates are based on <strong>PDP visits</strong> (product-page viewers), not total sessions.
           </p>
         </div>
         <DateRangePicker
@@ -173,13 +177,14 @@ export default function StorefrontFunnelPage() {
 
       {data && (
         <>
-          <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <StatCard label="Total sessions" value={data.total_sessions.toLocaleString()} />
             <StatCard label="PDP visits" value={topOfFunnel.toLocaleString()} />
+            <StatCard label="Add-to-cart rate" value={`${atcRate.toFixed(1)}%`} tone={atcRate >= 5 ? "good" : "neutral"} />
             <StatCard label="Leads generated" value={(data.leads_generated ?? 0).toLocaleString()} tone={(data.leads_generated ?? 0) > 0 ? "good" : "neutral"} />
             <StatCard label="Orders" value={orderPlaced.toLocaleString()} />
             <StatCard
-              label="Overall conversion"
+              label="PDP → order"
               value={`${overallCvr.toFixed(2)}%`}
               tone={overallCvr >= 2 ? "good" : "neutral"}
             />

@@ -33,6 +33,29 @@ const FUNNEL_STEPS = [
 
 type FunnelStep = (typeof FUNNEL_STEPS)[number];
 
+/**
+ * Page past PostgREST's `max-rows` cap (1000 on this instance). An unbounded
+ * `.select()` silently returns only the first 1000 rows — which was undercounting
+ * every funnel step once a window held >1000 events. `makeQuery` must return a
+ * FRESH builder each call (Supabase builders are single-use once awaited) AND
+ * carry a deterministic `.order()` — range paging overlaps/skips rows without a
+ * stable total sort.
+ */
+async function fetchAllRows<T>(makeQuery: () => { range: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }> }): Promise<T[]> {
+  const PAGE = 1000;
+  const out: T[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await makeQuery().range(from, from + PAGE - 1);
+    if (error) break;
+    const rows = data || [];
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+    from += PAGE;
+  }
+  return out;
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -93,29 +116,35 @@ export async function GET(
   const internalSessions = new Set((internalSessionRows || []).map((s) => s.id as string));
 
   // ── Funnel: distinct sessions per step ──────────────────────────
-  // One row per (event_type, session_id) — group + count distinct
-  // sessions client-side. With current volumes that's fine; if we
-  // grow into millions of events we'd push this into a SQL view or
-  // materialized rollup.
-  let stepQuery = admin
-    .from("storefront_events")
-    .select("event_type, session_id")
-    .eq("workspace_id", workspaceId)
-    .in("event_type", FUNNEL_STEPS as readonly string[])
-    .gte("created_at", startIso)
-    .lte("created_at", endIso);
-  if (productScope) stepQuery = stepQuery.eq("product_id", productScope);
-  const { data: stepRows } = await stepQuery;
+  // Paginated (fetchAllRows) so we count ALL events, not the first 1000.
+  // We also pull add_to_cart in the same sweep (same moment as pack_selected,
+  // but surfaced as its own "Add to cart" metric).
+  const STEP_FETCH = [...FUNNEL_STEPS, "add_to_cart"];
+  const stepRows = await fetchAllRows<{ event_type: string; session_id: string }>(() => {
+    let q = admin
+      .from("storefront_events")
+      .select("event_type, session_id")
+      .eq("workspace_id", workspaceId)
+      .in("event_type", STEP_FETCH)
+      .gte("created_at", startIso)
+      .lte("created_at", endIso)
+      .order("id", { ascending: true });
+    if (productScope) q = q.eq("product_id", productScope);
+    return q;
+  });
 
   const sessionsByStep: Record<FunnelStep, Set<string>> = {
     pdp_view: new Set(), pdp_engaged: new Set(), pack_selected: new Set(),
     checkout_view: new Set(), order_placed: new Set(),
   };
-  for (const row of (stepRows || []) as { event_type: string; session_id: string }[]) {
+  const atcSessions = new Set<string>();
+  for (const row of stepRows) {
     if (internalSessions.has(row.session_id)) continue;
+    if (row.event_type === "add_to_cart") { atcSessions.add(row.session_id); continue; }
     const k = row.event_type as FunnelStep;
     if (k in sessionsByStep) sessionsByStep[k].add(row.session_id);
   }
+  const addToCart = atcSessions.size;
 
   const funnel = FUNNEL_STEPS.map((step, i) => {
     const count = sessionsByStep[step].size;
@@ -199,12 +228,15 @@ export async function GET(
   // We aggregate over storefront_sessions whose last_seen_at falls in
   // the window. Acceptable approximation; perfectly accurate
   // attribution would require per-event joins which we can add later.
-  const { data: sessionRows } = await admin
-    .from("storefront_sessions")
-    .select("id, device_type, ip_country, utm_source")
-    .eq("workspace_id", workspaceId)
-    .gte("last_seen_at", startIso)
-    .lte("last_seen_at", endIso);
+  const sessionRows = await fetchAllRows<{ id: string; device_type: string | null; ip_country: string | null; utm_source: string | null }>(() =>
+    admin
+      .from("storefront_sessions")
+      .select("id, device_type, ip_country, utm_source")
+      .eq("workspace_id", workspaceId)
+      .gte("last_seen_at", startIso)
+      .lte("last_seen_at", endIso)
+      .order("id", { ascending: true }),
+  );
 
   const visibleSessions = (sessionRows || []).filter(
     (s) => !internalSessions.has((s as { id: string }).id),
@@ -238,13 +270,16 @@ export async function GET(
   // sessions that viewed a chapter, how many then clicked a
   // scroll-to-price CTA *from that chapter* (cta_click kind, origin
   // chapter). High view→scroll-to-price = the chapter sells.
-  const { data: chapterRows } = await admin
-    .from("storefront_events")
-    .select("event_type, session_id, meta")
-    .eq("workspace_id", workspaceId)
-    .in("event_type", ["chapter_view", "chapter_dwell", "cta_click"])
-    .gte("created_at", startIso)
-    .lte("created_at", endIso);
+  const chapterRows = await fetchAllRows<{ event_type: string; session_id: string; meta: Record<string, unknown> }>(() =>
+    admin
+      .from("storefront_events")
+      .select("event_type, session_id, meta")
+      .eq("workspace_id", workspaceId)
+      .in("event_type", ["chapter_view", "chapter_dwell", "cta_click"])
+      .gte("created_at", startIso)
+      .lte("created_at", endIso)
+      .order("id", { ascending: true }),
+  );
 
   const viewSessions = new Map<string, Set<string>>(); // chapter → sessions
   const dwellTotals = new Map<string, { ms: number; n: number }>();
@@ -480,6 +515,7 @@ export async function GET(
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
+    add_to_cart: addToCart,
     leads_generated: leadsGenerated,
     popupFunnel,
     surveyFunnel,
