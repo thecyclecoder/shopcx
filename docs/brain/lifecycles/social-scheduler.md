@@ -26,18 +26,19 @@ For each workspace with `enabled` + `target_meta_page_ids`:
 
 1. Load the optimizer signals once (`loadSlotSignals`).
 2. For each of the next 7 days (rolling horizon — each run adds the new day-7):
-   - Weekday cadence: **story daily, feed Mon/Wed/Fri/Sun, reel Tue/Thu/Sat** (= 7 stories + 4 feeds + 3 reels/week).
+   - Weekday cadence: **daily blog + story daily, feed Mon/Wed/Fri/Sun, reel Tue/Thu/Sat** (= 7 blogs + 7 stories + 4 feeds + 3 reels/week).
    - Seed per-platform `dayCount` + per-page taken-hours from rows already on that day (idempotent — skip a (type, day) already planned).
    - Load the active promo covering the date (themes captions; may lift the cap).
-   - Per type: pick the source kind (reel→ad_video; feed→avatar/testimonial/resource; story→avatar/testimonial), `pickBySourceKind` (rotates, skips recently-used + off-season resources), generate a PI-grounded caption (`generateCaption`, season + promo aware).
-   - Cross-post one asset/caption to every target page: enforce the **per-platform daily cap** (default 3), pick the time via `pickBestSlot`, insert a `scheduled_social_posts` row, fire `social/publish`. `require_approval` → rows land as `draft` (no event until approved).
+   - **Daily blog slot (always-on, added first):** `source_kind='blog'`, `post_type='feed'`, cross-posted to IG feed + FB. `pickNewestBlog` returns the freshest published `is_resource` post the brand hasn't recently posted (newest-first + reuse-aware, so the 7-day window spreads distinct recent articles and a brand-new blog goes out the soonest open day). Image = the post's 4:5 `social_image_url` (auto-blog always generates one; older `shopify_blog` imports fall back to the landscape hero). It carries `link_url` (`https://{storefront_domain}/blog/{handle}`) → **FB renders a clickable link card** (`POST /{page}/feed {message, link}`, OG image from the article); IG can't link so the caption says "link in bio". Idempotency keys on `source_kind='blog'` (it shares `post_type='feed'` with the rotating feed). **Exempt from the daily cap** — it's the priority diversity slot.
+   - Per type: pick the source kind (reel→ad_video; feed→avatar/testimonial/resource; story→avatar/testimonial), `pickBySourceKind` (rotates, skips recently-used + off-season resources), generate a PI-grounded caption (`generateCaption`, season + promo aware). Regular feed idempotency keys on `post_type='feed'` **excluding** the blog row.
+   - Cross-post one asset/caption to every target page: enforce the **per-platform daily cap** (default 3; blog exempt), pick the time via `pickBestSlot`, insert a `scheduled_social_posts` row, fire `social/publish`. `require_approval` → rows land as `draft` (no event until approved).
 
 ## Phase 2 — publish (per-post `socialPublish`)
 
 `step.sleepUntil(scheduled_at)` → **re-read the row** (honors dashboard edits / cancels — only `scheduled` proceeds) → `status='publishing'` → `publishScheduledPost`:
 
 - Resolve a fresh media URL: private `ad-tool` assets are re-signed (1h) so Meta can fetch; resource images pass through public.
-- FB feed → `POST /{page}/photos`. IG feed → `/media` + `/media_publish`. IG reel → `/media` (REELS) + **poll status_code until FINISHED** + publish. IG story → `/media` (STORIES, media-only — no caption/overlay via API) + publish.
+- FB blog (has `link_url`) → `POST /{page}/feed {message, link}` (clickable link card, OG image from the article). FB feed photo → `POST /{page}/photos`. IG feed → `/media` + `/media_publish`. IG reel → `/media` (REELS) + **poll status_code until FINISHED** + publish. IG story → `/media` (STORIES, media-only — no caption/overlay via API) + publish.
 - Record `posted` (+ platform id + permalink) or `failed` (+ error). retries=2.
 
 ## Phase 3 — measure + optimize (daily `socialInsightsSync`, 08:30 UTC)
@@ -64,7 +65,9 @@ For each workspace with `enabled` + `target_meta_page_ids`:
 
 **Shipped (2026-06-10):** all five phases + season/promo layer + per-platform cap. Live test confirmed publishing on FB + IG.
 
-**Open:** validate Insights parsing on real posted metrics; optional resource-performance weighting + true frequency auto-tune; FB reels/stories (currently FB = feed photos only); multi-brand rollout (Ashwavana pages exist).
+**Shipped (2026-06-16):** always-on **daily blog slot** (newest-first, IG feed + FB) with **FB clickable link cards** to the article (`link_url` column + `publishFacebookLink`). Exempt from the daily cap.
+
+**Open:** validate Insights parsing on real posted metrics; optional resource-performance weighting + true frequency auto-tune; FB reels/stories (currently FB = feed photos + blog link cards only); multi-brand rollout (Ashwavana pages exist).
 
 ## Related
 

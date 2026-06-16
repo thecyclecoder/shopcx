@@ -17,8 +17,10 @@ export interface PickedAsset {
   productId: string | null;
   mediaBucket?: string;
   mediaPath?: string;
-  mediaUrl?: string;            // public assets (resources)
-  resourceSummary?: string;     // resources only
+  mediaUrl?: string;            // public assets (resources / blog)
+  resourceSummary?: string;     // resources / blog only
+  linkUrl?: string;             // blog only — public article URL (FB link card)
+  title?: string;               // blog only — article title (caption grounding)
 }
 
 /** Parse `{bucket, path}` out of a Supabase storage object URL (signed or public). */
@@ -128,7 +130,54 @@ export async function pickResource(admin: Admin, workspaceId: string, exclude: S
   };
 }
 
-export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource";
+/**
+ * The single freshest blog the brand hasn't recently posted — for the always-on
+ * daily blog slot. Unlike `pickResource` (random evergreen recipe), this is
+ * newest-first and deterministic, so a brand-new blog goes out the soonest open
+ * day and the 7-day window spreads the most-recent distinct articles across days.
+ * Returns a public 4:5 image (auto-blog generates `social_image_url`) + the
+ * article URL for Facebook's link card. Off-season posts are skipped.
+ */
+export async function pickNewestBlog(admin: Admin, workspaceId: string, exclude: Set<string>, now: Date = new Date()): Promise<PickedAsset | null> {
+  const { data } = await admin
+    .from("posts")
+    .select("id, title, handle, tags, excerpt, content_text, featured_image_url, social_image_url, published_at, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("is_resource", true)
+    .eq("published", true)
+    .not("featured_image_url", "is", null)
+    .order("published_at", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
+    .limit(40);
+  const eligible = (data || []).filter((p) =>
+    !exclude.has(p.id) && (p as { handle?: string }).handle &&
+    isSeasonallyAppropriate(`${p.title || ""} ${(p.tags || []).join(" ")} ${(p.excerpt || p.content_text || "").slice(0, 800)}`, now));
+  const pick = eligible[0]; // newest eligible (already sorted desc)
+  if (!pick) return null;
+
+  // Public article URL for the FB link card. Falls back to null (no domain →
+  // FB posts the image instead of a link card).
+  const { data: ws } = await admin.from("workspaces").select("storefront_domain, storefront_slug").eq("id", workspaceId).maybeSingle();
+  const handle = (pick as { handle: string }).handle;
+  const domain = (ws as { storefront_domain?: string | null })?.storefront_domain;
+  const slug = (ws as { storefront_slug?: string | null })?.storefront_slug;
+  const linkUrl = domain ? `https://${domain}/blog/${handle}` : (slug ? `https://shopcx.ai/store/${slug}/blog/${handle}` : undefined);
+
+  let productId: string | null = null;
+  const { data: link } = await admin.from("post_products").select("product_id").eq("post_id", pick.id).limit(1).maybeSingle();
+  productId = (link?.product_id as string) || null;
+
+  return {
+    sourceRefId: pick.id,
+    productId,
+    mediaUrl: (pick as { social_image_url?: string | null }).social_image_url || pick.featured_image_url,
+    resourceSummary: (pick.excerpt || pick.content_text || "").slice(0, 1500),
+    linkUrl,
+    title: (pick.title as string) || undefined,
+  };
+}
+
+export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource" | "blog";
 
 export async function pickBySourceKind(admin: Admin, workspaceId: string, kind: SourceKind, reuseDays: number, now: Date = new Date()): Promise<PickedAsset | null> {
   const exclude = await recentlyUsedRefIds(admin, workspaceId, kind, reuseDays);
@@ -137,5 +186,6 @@ export async function pickBySourceKind(admin: Admin, workspaceId: string, kind: 
     case "ad_video": return pickAdVideo(admin, workspaceId, exclude);
     case "testimonial": return pickTestimonial(admin, workspaceId, exclude);
     case "resource": return pickResource(admin, workspaceId, exclude, now);
+    case "blog": return pickNewestBlog(admin, workspaceId, exclude, now);
   }
 }

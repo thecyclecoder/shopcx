@@ -13,11 +13,12 @@ The social scheduler's content calendar — one row per planned/published organi
 | `meta_page_id` | uuid | → [[meta_pages]] (the FB page / IG account) |
 | `platform` | text | `facebook` \| `instagram` |
 | `post_type` | text | `feed` \| `reel` \| `story` |
-| `source_kind` | text | `avatar` \| `ad_video` \| `testimonial` \| `resource` |
+| `source_kind` | text | `avatar` \| `ad_video` \| `testimonial` \| `resource` \| `blog` \| `promo` |
 | `source_ref_id` | uuid | campaign_id / ad_video_id / post_id |
 | `product_id` | uuid | → [[products]] (PI source for the caption; null for non-product resources) |
 | `media_bucket`, `media_path` | text | private-bucket asset — **re-signed at publish** |
-| `media_url` | text | public asset (resource images) |
+| `media_url` | text | public asset (resource / blog images) |
+| `link_url` | text | blog posts only — public article URL → **FB link card** (`/feed {message, link}`); ignored on IG |
 | `caption` | text | generated copy (ignored for stories — media-only) |
 | `scheduled_at` | timestamptz | when the publisher fires |
 | `status` | text | `draft` \| `scheduled` \| `publishing` \| `posted` \| `failed` \| `skipped` \| `cancelled` |

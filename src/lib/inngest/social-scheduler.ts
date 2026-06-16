@@ -114,22 +114,31 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
     const capForDay = promo?.boost_per_platform_per_day ? Math.max(dailyCap, promo.boost_per_platform_per_day) : dailyCap;
 
     // Cadence by weekday: story daily, feed Mon/Wed/Fri/Sun, reel Tue/Thu/Sat.
-    const plan: { type: PostType; pages: typeof igPages }[] = [];
+    // The blog slot is ALWAYS-ON (every day, IG feed + FB) and added first so the
+    // freshest blog goes out on top of the regular cadence. Feed-type image on IG,
+    // clickable link card on FB. Exempt from the daily cap (priority for diversity).
+    const plan: { type: PostType; pages: typeof igPages; forceKind?: SourceKind }[] = [];
+    plan.push({ type: "feed", pages: [...igPages, ...fbPages], forceKind: "blog" });
     if (config.cadence.story > 0) plan.push({ type: "story", pages: igPages });
     if (config.cadence.feed > 0 && [0, 1, 3, 5].includes(dow)) plan.push({ type: "feed", pages: [...igPages, ...fbPages] });
     if (config.cadence.reel > 0 && [2, 4, 6].includes(dow)) plan.push({ type: "reel", pages: igPages });
 
-    for (const { type, pages: targets } of plan) {
+    for (const { type, pages: targets, forceKind } of plan) {
       if (!targets.length) continue;
-      // Idempotent: skip this (type, day) if already planned.
+      // Idempotent. The blog slot and the rotating feed are BOTH post_type=feed,
+      // so blog keys on source_kind='blog' while the regular slots key on
+      // post_type (excluding any blog row that day).
       const dayStart = `${dateStr}T00:00:00Z`, dayEnd = `${dateStr}T23:59:59Z`;
-      const { data: existing } = await admin
+      let existsQ = admin
         .from("scheduled_social_posts")
         .select("id")
         .eq("workspace_id", workspaceId)
-        .eq("post_type", type)
         .gte("scheduled_at", dayStart).lte("scheduled_at", dayEnd)
         .limit(1);
+      existsQ = forceKind === "blog"
+        ? existsQ.eq("source_kind", "blog")
+        : existsQ.eq("post_type", type).neq("source_kind", "blog");
+      const { data: existing } = await existsQ;
       if (existing?.length) continue;
 
       // Pick ONE asset + caption, cross-post to every target platform.
@@ -137,8 +146,11 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
       // graphic; reels (video) still come from the ad-video library.
       let kind: SourceKind | "promo";
       let asset: Awaited<ReturnType<typeof pickBySourceKind>> = null;
-      const promoGraphic = (type === "feed" || type === "story") ? promoMedia.find((g) => g.post_type === type) : undefined;
-      if (promoGraphic) {
+      const promoGraphic = !forceKind && (type === "feed" || type === "story") ? promoMedia.find((g) => g.post_type === type) : undefined;
+      if (forceKind) {
+        kind = forceKind;
+        asset = await pickBySourceKind(admin, workspaceId, forceKind, reuseDays, date);
+      } else if (promoGraphic) {
         kind = "promo";
         asset = { sourceRefId: promo!.id, productId: promo!.emphasis_product_id || null, mediaUrl: promoGraphic.url };
       } else {
@@ -166,16 +178,20 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
         }
       }
 
+      const captionSummary = kind === "blog" && asset.title
+        ? `Title: ${asset.title}\n\n${asset.resourceSummary || ""}`
+        : asset.resourceSummary;
       const caption = await generateCaption({
         workspaceId, sourceKind: kind, postType: type,
-        productId: asset.productId, resourceSummary: asset.resourceSummary,
+        productId: asset.productId, resourceSummary: captionSummary,
         now: date, campaignBrief: promo?.brief || undefined,
       });
       const candidateSlots = config.time_slots[type] || ["12:00"];
       const status = config.require_approval ? "draft" : "scheduled";
 
       for (const page of targets) {
-        if ((dayCount[page.platform] || 0) >= capForDay) continue;  // per-platform daily cap (promo may lift it)
+        // Blog is exempt from the daily cap — it's the always-on diversity slot.
+        if (kind !== "blog" && (dayCount[page.platform] || 0) >= capForDay) continue;  // per-platform daily cap (promo may lift it)
         // Optimizer picks the best open slot for this page/type (falls back to
         // the configured order before any insights data exists).
         const taken = takenByPage.get(page.id) || new Set<number>();
@@ -192,6 +208,7 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
           media_bucket: asset.mediaBucket || null,
           media_path: asset.mediaPath || null,
           media_url: asset.mediaUrl || null,
+          link_url: asset.linkUrl || null,
           caption,
           scheduled_at: scheduledAt,
           status,
@@ -268,7 +285,7 @@ export const socialPublish = inngest.createFunction(
       const admin = createAdminClient();
       const { data } = await admin
         .from("scheduled_social_posts")
-        .select("id, workspace_id, meta_page_id, platform, post_type, caption, media_url, media_bucket, media_path, status")
+        .select("id, workspace_id, meta_page_id, platform, post_type, caption, media_url, media_bucket, media_path, link_url, status")
         .eq("id", postId).maybeSingle();
       return data as (ScheduledPostRow & { status: string }) | null;
     });

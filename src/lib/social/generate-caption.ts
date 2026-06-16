@@ -16,7 +16,7 @@ import { currentDateContext } from "@/lib/social/seasonality";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource" | "promo";
+export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource" | "promo" | "blog";
 export type PostType = "feed" | "reel" | "story";
 
 export interface ProductPI {
@@ -77,6 +77,8 @@ function userPrompt(kind: SourceKind, postType: PostType, pi: ProductPI | null, 
       return `Write a caption to accompany a 5-star customer TESTIMONIAL card image (the review text, reviewer name, rating, and product are already ON the image). Do NOT repeat the review quote. Add brief social-proof framing plus a real benefit from the PI. ${len}\n\nPRODUCT INTELLIGENCE:\n${pi ? piBlock(pi) : "(none)"}`;
     case "resource":
       return `Write a caption for a blog/recipe RESOURCE post. Summarize the value and invite them to read/try it. ${len}\n\nRESOURCE SUMMARY:\n${(resourceSummary || "").slice(0, 1200)}`;
+    case "blog":
+      return `Write a caption for a brand-new BLOG ARTICLE we just published. Tease the single most useful takeaway and invite them to read the full article. On Facebook the article link is attached as a clickable card, so DON'T paste a URL; on Instagram say "link in bio". Don't claim it's "trending" or invent stats. ${len}\n\nARTICLE:\n${(resourceSummary || "").slice(0, 1200)}`;
     case "avatar":
       return `Write a caption for a feed post whose image shows a happy customer holding the product. Benefit-led, grounded in the PI. ${len}\n\nPRODUCT INTELLIGENCE:\n${pi ? piBlock(pi) : "(none)"}`;
     case "ad_video":

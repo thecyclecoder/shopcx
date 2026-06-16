@@ -61,6 +61,21 @@ export async function publishFacebookPhoto(
   return { ok: true, platformId: r.json.post_id, permalink: `https://www.facebook.com/${r.json.post_id}` };
 }
 
+/**
+ * Publish a Facebook Page link post — renders a clickable card with the link's
+ * Open Graph image + title (used for blog posts). The message is the caption;
+ * Facebook fetches the preview from the URL itself, so no image upload needed.
+ * /feed returns the composed post id in `id` (not `post_id` like /photos).
+ */
+export async function publishFacebookLink(
+  pageId: string, pageToken: string, link: string, message: string,
+): Promise<PublishResult> {
+  const r = await graphPost(`${pageId}/feed`, { message, link, access_token: pageToken });
+  const id = r.json?.id || r.json?.post_id;
+  if (!r.ok || !id) return graphFail(r, "FB link post failed");
+  return { ok: true, platformId: id, permalink: `https://www.facebook.com/${id}` };
+}
+
 // ── Instagram (two-step: create container → publish) ──
 
 async function igPublish(igUserId: string, token: string, creationId: string): Promise<PublishResult> {
@@ -148,6 +163,7 @@ export interface ScheduledPostRow {
   media_url: string | null;
   media_bucket: string | null;
   media_path: string | null;
+  link_url?: string | null;   // blog posts → FB link card
 }
 
 /**
@@ -172,7 +188,11 @@ export async function publishScheduledPost(post: ScheduledPostRow): Promise<Publ
   const caption = post.caption || "";
 
   if (post.platform === "facebook") {
-    // Only feed photos on FB for now (FB reels/stories are a later add).
+    // Blog posts → link card (clickable, uses the article's OG image). Everything
+    // else → photo. (FB reels/stories are a later add.)
+    if (post.link_url) {
+      return publishFacebookLink(String(page.meta_page_id), token, post.link_url, caption);
+    }
     return publishFacebookPhoto(String(page.meta_page_id), token, mediaUrl, caption);
   }
 
