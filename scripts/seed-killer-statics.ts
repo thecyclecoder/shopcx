@@ -18,12 +18,11 @@
  * Idempotent: re-running reuses a campaign with the same name and won't duplicate.
  * Operational (creates rows, sends events, calls Opus) — run intentionally.
  */
-import { readFileSync } from "fs";
-for (const line of readFileSync("/Users/admin/Projects/shopcx/.env.local", "utf8").split("\n")) {
-  const t = line.trim(); if (!t || t.startsWith("#")) continue;
-  const eq = t.indexOf("="); if (eq < 0) continue;
-  if (!process.env[t.slice(0, eq)]) process.env[t.slice(0, eq)] = t.slice(eq + 1);
-}
+// MUST be first: populates process.env from .env.local before the Inngest client
+// (and other lib clients) evaluate — they capture env at import time, so the
+// inline env-load that used to live here ran too late (ESM hoists imports above
+// top-level code) and INNGEST_EVENT_KEY was missing → renders weren't queued.
+import "./load-env";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { KILLER_ARCHETYPES, ARCHETYPE_LANDER, type KillerArchetype } from "@/lib/ad-statics";
