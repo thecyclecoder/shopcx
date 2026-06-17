@@ -22,6 +22,18 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** always-on organic posts/reels/stories to FB + IG for customer engagement, sourced from existing assets (campaign avatar-holding-product images, finished ad videos, blog resources) with PI-grounded copy. Live test 2026-06-10 proved our current page tokens can publish on both platforms — no new scopes. Rolling 7-day window: daily planner cron tops up the calendar, Inngest publishes each post at its time. Dashboard shows posted + scheduled.
 
+## Active project — Roadmap Build Console ⏳
+
+**Spec:** [[roadmap-build-console]]
+
+**Why this matters:** a phone-first dashboard console that closes the loop from idea → merged PR with no laptop. Three surfaces over infra we already have ([[../lifecycles/agent-todo-system]]): a roadmap board that reads the brain's spec/lifecycle status; a spec-authoring chat (Opus via API — cheap conversation tokens) that talks a feature through and writes `specs/{slug}.md` + a build todo; and a build dispatcher that runs the spec autonomously on the **Max subscription** via the Claude Code Routine (no `ANTHROPIC_API_KEY` → subscription-billed) and opens a `claude/*` PR squash-merged from [[../dashboard/branches]]. Core invariant: the routine builds it itself with native tools — it never shells out to `claude` (nested-session guard).
+
+## Active project — Repo Skills Catalog 🚧
+
+**Spec:** [[repo-skills-catalog]]
+
+**Why this matters:** ShopCX has zero repo-committed Claude Code skills, so routines have no reusable procedures and every session re-derives the operational recipes. This catalogs the skills an agent needs to build/operate ShopCX (mapped to the 29 recipes + 230 scripts) and prioritizes them. P0 four scaffolded this session: `build-spec`, `probe-db`, `write-migration`, `customer-remedy` (`.claude/skills/`). Prereq for [[roadmap-build-console]] — the routine can't shell out to `/goal`, so the build procedure must live as a committed `build-spec` skill.
+
 ## Active project 1 — Storefront 🚧
 
 **Lifecycle:** [[../lifecycles/storefront-checkout]]
