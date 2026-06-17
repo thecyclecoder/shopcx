@@ -14,7 +14,8 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { startVerification } from "@/lib/twilio-verify";
+import { startVerificationWithFallback } from "@/lib/twilio-verify";
+import { toE164US } from "@/lib/phone";
 
 interface PostBody {
   email?: string;
@@ -86,18 +87,23 @@ export async function POST(request: NextRequest) {
   const serviceSid = ws?.twilio_verify_service_sid as string | null;
   if (!serviceSid) return NextResponse.json({ error: "verify_not_configured" }, { status: 500 });
 
-  const profilePhone = (customer.phone as string | null) || null;
+  // Normalize to E.164 — many stored numbers are display-formatted
+  // ("(858) 334-9198"), which Twilio Verify rejects outright. Without
+  // this the SMS path silently 502s and the customer never gets a code.
+  const profilePhone = customer.phone ? toE164US(customer.phone as string) : null;
   const hasSms = !!profilePhone;
-  let channel: "sms" | "email" = body.channel || (hasSms ? "sms" : "email");
-  if (channel === "sms" && !hasSms) channel = "email";
+  const requested: "sms" | "email" = body.channel || (hasSms ? "sms" : "email");
 
-  const destination = channel === "sms" ? profilePhone! : (customer.email as string);
-  const maskedDestination = channel === "sms" ? maskPhone(destination) : maskEmail(destination);
-
-  const verifyRes = await startVerification(serviceSid, destination, channel);
+  const verifyRes = await startVerificationWithFallback(serviceSid, {
+    phoneE164: profilePhone,
+    email: (customer.email as string) || null,
+    requested,
+  });
   if (!verifyRes.success) {
     return NextResponse.json({ error: "verify_send_failed", details: verifyRes.error }, { status: 502 });
   }
+  const channel = verifyRes.channel;
+  const maskedDestination = channel === "sms" ? maskPhone(verifyRes.destination) : maskEmail(verifyRes.destination);
 
   const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const { data: sessionRow, error: insertErr } = await admin
@@ -124,5 +130,6 @@ export async function POST(request: NextRequest) {
     channel,
     masked_destination: maskedDestination,
     has_sms: hasSms,
+    fell_back: verifyRes.fellBack,
   });
 }

@@ -6,7 +6,8 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { startVerification } from "@/lib/twilio-verify";
+import { startVerificationWithFallback } from "@/lib/twilio-verify";
+import { toE164US } from "@/lib/phone";
 
 interface PostBody {
   session_id?: string;
@@ -49,16 +50,19 @@ export async function POST(request: NextRequest) {
   const serviceSid = ws?.twilio_verify_service_sid as string | null;
   if (!serviceSid) return NextResponse.json({ error: "verify_not_configured" }, { status: 500 });
 
-  const profilePhone = (customer.phone as string | null) || null;
-  let channel: "sms" | "email" = body.channel || (session.channel as "sms" | "email");
-  if (channel === "sms" && !profilePhone) channel = "email";
-  const destination = channel === "sms" ? profilePhone! : (customer.email as string);
-  const maskedDestination = channel === "sms" ? maskPhone(destination) : maskEmail(destination);
+  const profilePhone = customer.phone ? toE164US(customer.phone as string) : null;
+  const requested: "sms" | "email" = body.channel || (session.channel as "sms" | "email");
 
-  const verifyRes = await startVerification(serviceSid, destination, channel);
+  const verifyRes = await startVerificationWithFallback(serviceSid, {
+    phoneE164: profilePhone,
+    email: (customer.email as string) || null,
+    requested,
+  });
   if (!verifyRes.success) {
     return NextResponse.json({ error: "verify_send_failed", details: verifyRes.error }, { status: 502 });
   }
+  const channel = verifyRes.channel;
+  const maskedDestination = channel === "sms" ? maskPhone(verifyRes.destination) : maskEmail(verifyRes.destination);
 
   await admin.from("auth_otp_sessions").update({
     channel, phone_masked: channel === "sms" ? maskedDestination : null,
@@ -66,5 +70,5 @@ export async function POST(request: NextRequest) {
     updated_at: new Date().toISOString(),
   }).eq("id", session.id);
 
-  return NextResponse.json({ ok: true, channel, masked_destination: maskedDestination });
+  return NextResponse.json({ ok: true, channel, masked_destination: maskedDestination, fell_back: verifyRes.fellBack });
 }
