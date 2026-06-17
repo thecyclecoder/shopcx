@@ -1,107 +1,40 @@
-<div
-  class="subscriptions-portal"
-  data-app="subscriptions-portal"
-  data-workspace="{{ block.settings.workspace_id }}"
->
+{%- comment -%}
+  This page now HANDS OFF to the in-house portal (portal.superfoodscompany.com)
+  instead of rendering the embedded subscriptions portal SPA.
 
-  {{ 'portal.min.css'
-  | asset_url
-  | stylesheet_tag
-}}
+  - Logged in  → /apps/portal-v2?route=sso : the App Proxy attaches the verified
+    logged_in_customer_id, our `sso` handler mints a magic-link and 302s the
+    customer into the portal already authenticated (no second login).
+  - Logged out → straight to the portal, where they sign in (login-help chat there).
 
-  {% if block.settings.heading != blank %}
-    <div class="app-title-wrapper">
-      <h2 class="sp-page-title">{{ block.settings.heading }}</h2>
-      <div class="sp-page-subhead">
-        <span class="sp-pill sp-pill--secure">🔒 Secure</span>
-      </div>
+  Liquid `{% if customer %}` decides the target at render time; no app JS loads.
+{%- endcomment -%}
+
+{%- if customer -%}
+  {%- assign portal_target = '/apps/portal-v2?route=sso' -%}
+{%- else -%}
+  {%- assign portal_target = 'https://portal.superfoodscompany.com/' -%}
+{%- endif -%}
+
+<div class="subscriptions-portal" data-app="subscriptions-portal">
+  {%- if request.design_mode -%}
+    <div style="padding:14px; border:1px dashed #d1d5db; border-radius:10px;">
+      <strong>Subscriptions Portal</strong>
+      <p style="margin:6px 0 0; color:#6b7280;">
+        On the live storefront this page redirects to portal.superfoodscompany.com
+        ({% if customer %}signed in via SSO{% else %}sign-in{% endif %}). Redirect is
+        suppressed here in the theme editor.
+      </p>
     </div>
-  {% endif %}
-
-  {% unless customer %}
-  {%- assign return_to = request.path -%}
-  {%- if request.query_string != blank -%}
-    {%- assign return_to = return_to | append: '?' | append: request.query_string -%}
-  {%- endif -%}
-
-  {% if block.settings.redirect_to_login %}
-    <meta
-      http-equiv="refresh"
-      content="0; url={{ routes.storefront_login_url }}?return_url={{ return_to | url_encode }}"
-    >
+  {%- else -%}
     <script>
-      (function () {
-        var returnTo = {{ return_to | json }};
-        window.location.href =
-          {{ routes.account_login_url | json }} +
-          "?return_url=" +
-          encodeURIComponent(returnTo);
-      })();
+      window.location.replace({{ portal_target | json }});
     </script>
-    <p>Redirecting to login…</p>
-  {% else %}
-    <div class="sp-loggedout">
-      <div class="sp-loggedout__inner">
-        <div class="sp-loggedout__kicker">Manage subscriptions in seconds</div>
-
-        <h3 class="sp-loggedout__title">Your subscription portal is ready.</h3>
-
-        <p class="sp-loggedout__sub sp-muted">
-          Pause, swap flavors, update shipping, and apply rewards without waiting on support.
-        </p>
-
-        <div class="sp-loggedout__chips" aria-hidden="true">
-          <span class="sp-loggedout__chip">🔒 Secure</span>
-          <span class="sp-loggedout__chip">⚡ Fast changes</span>
-          <span class="sp-loggedout__chip">✅ Easy to use</span>
-        </div>
-
-        <div class="sp-loggedout__bullets">
-          <div class="sp-loggedout__bullet"><span class="sp-loggedout__dot"></span><span>Skip or pause anytime</span></div>
-          <div class="sp-loggedout__bullet"><span class="sp-loggedout__dot"></span><span>Swap items and flavors in a tap</span></div>
-          <div class="sp-loggedout__bullet"><span class="sp-loggedout__dot"></span><span>Update shipping and billing</span></div>
-          <div class="sp-loggedout__bullet"><span class="sp-loggedout__dot"></span><span>Turn points into coupons for your subscription</span></div>
-        </div>
-
-        <div class="sp-loggedout__actions">
-          <a
-            class="sp-btn sp-btn-primary sp-loggedout__btn"
-            href="{{ routes.storefront_login_url }}?return_url={{ return_to | url_encode }}"
-          >
-            Log in to manage my subscriptions
-          </a>
-
-          <div class="sp-loggedout__help sp-muted">
-            Having trouble logging in?
-            <a class="sp-loggedout__link" href="{{ routes.storefront_login_url }}">
-              Try again
-            </a>
-            or
-            <a class="sp-loggedout__link" href="/pages/contact">
-              contact us
-            </a>.
-          </div>
-        </div>
-      </div>
-    </div>
-  {% endif %}
-
-{% else %}
-    <div id="subscriptions-portal-root">
-      {% if request.design_mode %}
-        <div style="padding: 14px; border: 1px dashed #d1d5db; border-radius: 10px;">
-          <strong>Subscriptions Portal</strong>
-          <p style="margin: 6px 0 0; color: #6b7280;">
-            Logged-in preview may differ in the theme editor. View on the live storefront to test signed requests.
-          </p>
-        </div>
-      {% else %}
-        <p style="text-align: center;">Loading…</p>
-      {% endif %}
-    </div>
-
-    <script src="{{ 'subscription-portal.js' | asset_url }}" defer></script>
-  {% endunless %}
+    <noscript>
+      <meta http-equiv="refresh" content="0; url={{ portal_target }}">
+    </noscript>
+    <p style="text-align:center; padding:24px; color:#6b7280;">Taking you to your account…</p>
+  {%- endif -%}
 </div>
 {% schema %}
 {
