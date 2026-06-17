@@ -37,10 +37,18 @@ All workspace members (middleware auth + workspace membership). The API re-check
 
 ## Gotchas
 
-- `utm_campaign` is a **name**, not a key — two creatives sharing a name would merge. Hardening (put `ad_campaigns.id` in `utm_content`) is noted in the spec.
+- `utm_campaign` is a **name**, not a key — two creatives sharing a name would merge. Hardening: put `ad_campaigns.id` in `utm_content` at publish time so the join is on a UUID.
 - Lander purchases use session-scoped `order_placed`, so a coupon-return that converts on a UTM-less session attributes to `(default PDP)`, not the original variant. Ad-creative purchases avoid this via first-touch.
 - The `(no utm_campaign)` / `(default PDP)` buckets collect organic-social / direct traffic — useful to watch, not an ad/lander.
 
+## Future / open work (folded from the shipped spec)
+
+- 🔭 **Spend / ROAS.** Pull Meta ad-insights (spend, CPM) via the Marketing API keyed by `meta_ad_id` (= `utm_content`) → cost-per-engaged-visitor, CPA, ROAS. Needs a Meta Marketing API **read** integration we don't have yet (today we publish to Meta but don't pull insights back — see [[../integrations/meta-marketing]]). The P1/P2 scorecard stands on its own without it.
+- **Ad × lander cross-tab** — same ad, different landers, to isolate the lander's lift from the ad's traffic quality. Deferred from P2.
+- **Quality-score weighting** — current blend is `cvr×6 + atc×2 + lead×1.5 + engaged×0.4`; revisit weights (or expose them) once there's more volume than the launch window.
+- **Lander identity persistence** — purchases attribute via `landing_url` params today; persisting a resolved `advertorial_page_id`/variant on the session (and/or order, alongside the `product_id` attribution from [[../lifecycles/advertorial-landers]]) would survive URL rewrites and let lander purchases use first-touch too.
+- **Attribution-accuracy dependencies** (tighten the purchase columns, not blockers): the `?applied=1` SMS-coupon return stitch in `/api/popup/land` (anonymous returns land UTM-less; first-touch only recovers them for identified customers) and a referrer-based channel fallback for no-UTM organic-social sessions. Both detailed in [[../lifecycles/storefront-checkout]] § attribution.
+
 ---
 
-[[../README]] · [[../../CLAUDE]] · spec: [[../specs/ad-lander-scorecard]]
+[[../README]] · [[../../CLAUDE]] · siblings: [[storefront__funnel]]
