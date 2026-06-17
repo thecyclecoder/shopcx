@@ -1633,7 +1633,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           await sysNote(
             admin,
             tid,
-            `[System] Auto-linked ${result.linkedCount} account${result.linkedCount === 1 ? "" : "s"} from inline email mention(s) in inbound message: ${result.linkedEmails.join(", ")}`,
+            `[System] Auto-linked ${result.linkedCount} account${result.linkedCount === 1 ? "" : "s"} from inline email/order-number mention(s) in inbound messages: ${result.linkedEmails.join(", ")}`,
           );
         }
       });

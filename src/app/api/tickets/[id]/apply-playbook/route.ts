@@ -85,27 +85,30 @@ export async function POST(
     body: `${agentName} applied playbook "${playbook.name}"${context?.trim() ? ` with context: "${context.trim()}"` : ""}.`,
   });
 
-  // Fire the playbook by sending an Inngest event
+  // Fire the playbook via the Inngest SDK client.
+  //
+  // This previously POSTed to `https://inn.gs/e` with an
+  // `Authorization: Bearer <key>` header — but that endpoint 404s
+  // (Inngest's event API wants the key in the URL PATH: `/e/<key>`).
+  // The 404 was swallowed by the bare `catch`, so a freshly-applied
+  // playbook silently sat at step 0 until the customer next replied.
+  // `inngest.send` formats the request correctly (and no-ops cleanly
+  // in dev). Verified 2026-06-17: raw `/e` + Bearer → HTTP 404; SDK → 200.
   try {
-    const inngestKey = process.env.INNGEST_EVENT_KEY;
-    if (inngestKey) {
-      await fetch(process.env.INNGEST_EVENT_URL || "https://inn.gs/e", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${inngestKey}` },
-        body: JSON.stringify({
-          name: "ticket/inbound-message",
-          data: {
-            ticket_id: ticketId,
-            workspace_id: ticket.workspace_id,
-            message_body: "playbook-apply",
-            channel: ticket.channel || "email",
-            is_new_ticket: false,
-          },
-        }),
-      });
-    }
-  } catch {
-    // Non-fatal — playbook will execute on next inbound message
+    const { inngest } = await import("@/lib/inngest/client");
+    await inngest.send({
+      name: "ticket/inbound-message",
+      data: {
+        ticket_id: ticketId,
+        workspace_id: ticket.workspace_id,
+        message_body: "playbook-apply",
+        channel: ticket.channel || "email",
+        is_new_ticket: false,
+      },
+    });
+  } catch (err) {
+    // Non-fatal — playbook will execute on next inbound message.
+    console.error("apply-playbook: failed to fire ticket/inbound-message", err);
   }
 
   return NextResponse.json({ success: true, playbook_name: playbook.name });

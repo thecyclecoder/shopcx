@@ -53,6 +53,12 @@ Customer message → orchestrator picks playbook → playbookExecutor.start()
 
 Playbook ownership of the ticket persists until a terminal step fires: refund applied, replacement order created, customer cancelled mid-flow, agent intervened, or stand-firm limit hit.
 
+### Manual apply (agent applies a playbook from the dashboard)
+
+`POST /api/tickets/[id]/apply-playbook` sets `active_playbook_id` + `playbook_step=0` + `playbook_context` (with the agent's free-text context inserted as an internal inbound message), then **kicks step 0 by firing `ticket/inbound-message` with `message_body:"playbook-apply"`** (a sentinel the [[../inngest/unified-ticket-handler]] routes straight to the executor — see its sentinel short-circuit). Without that event the playbook just sits at step 0 until the customer next replies.
+
+> **Gotcha (fixed 2026-06-17, ticket 23fe617c):** that trigger event must be sent via the `inngest` SDK client (`inngest.send`), NOT a raw `fetch` to `https://inn.gs/e` with an `Authorization: Bearer` header. The `/e` endpoint (no key in path) returns **HTTP 404** — Inngest's event API wants the key in the URL *path* (`/e/<key>`). The old raw-fetch call 404'd on every apply and the error was swallowed by a bare `catch`, so manually-applied playbooks never triggered a step run (Katherine's Refund playbook sat at step 0 until the event was re-fired correctly). If an applied playbook isn't advancing, re-fire `ticket/inbound-message` / `message_body:"playbook-apply"` via the SDK.
+
 ## Step types
 
 Common across playbooks (`playbook_steps.type`):
