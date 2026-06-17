@@ -212,7 +212,7 @@ async function buildPreContext(
   channel: string,
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
-): Promise<string> {
+): Promise<{ system: string; userBlock: string }> {
   const admin = createAdminClient();
 
   const [
@@ -247,13 +247,13 @@ async function buildPreContext(
       .order("created_at", { ascending: true }),
     admin.from("journey_definitions")
       .select("name, trigger_intent, description")
-      .eq("workspace_id", workspaceId).eq("is_active", true),
+      .eq("workspace_id", workspaceId).eq("is_active", true).order("name"),
     admin.from("playbooks")
       .select("name, trigger_intents, description")
-      .eq("workspace_id", workspaceId).eq("is_active", true),
+      .eq("workspace_id", workspaceId).eq("is_active", true).order("name"),
     admin.from("workflows")
       .select("name, template, trigger_tag")
-      .eq("workspace_id", workspaceId).eq("enabled", true),
+      .eq("workspace_id", workspaceId).eq("enabled", true).order("name"),
     admin.from("sonnet_prompts")
       .select("category, title, content")
       .eq("workspace_id", workspaceId).eq("enabled", true)
@@ -370,32 +370,35 @@ async function buildPreContext(
     ? `\nCUSTOMER LANGUAGE: ${detectedLang}. The customer writes in this language. When you generate any response_message, write it directly in ${detectedLang} — do not draft in English. Canned playbook/macro text is auto-translated downstream; only your own writing needs to be in-language.`
     : "";
 
-  return `You are a customer support agent for ${wsName}. Analyze the customer's message and decide the best action.
+  const pageContextNote = (() => {
+    const pc = ticket?.page_context as { product_title?: string; product_handle?: string; page_path?: string } | null;
+    if (!pc) return "";
+    const parts: string[] = [];
+    if (pc.product_title) parts.push(`viewing the ${pc.product_title} product page`);
+    else if (pc.product_handle) parts.push(`viewing /products/${pc.product_handle}`);
+    else if (pc.page_path) parts.push(`viewing ${pc.page_path}`);
+    return parts.length
+      ? `\nPAGE CONTEXT: Customer started this chat while ${parts.join(", ")}. If their question is product-related, prioritize that product in your answer.`
+      : "";
+  })();
 
-${currentDateContext()}
+  const agentContextNote = agentContext?.assigned ? `
+AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response). For any new request or follow-up, do NOT take direct actions and do NOT provide detailed information — acknowledge and hold for the human agent. When acknowledging, briefly mirror back the specific concerns the customer just raised (e.g. name the charge amount, the wrong product, the delivery issue — whatever they actually said) in one short sentence, then say an agent will be back with them shortly. A bare "we're reviewing your ticket" with no mirroring reads as robotic and increases frustration when the customer has just listed concrete grievances.` : "";
+
+  // ── STABLE system prompt — byte-identical for every ticket in the
+  // workspace (modulo channel/personality). It carries the heavy, shared
+  // payload: handlers, personality, policies, rules, output schema. The
+  // orchestrator marks this with a 1-hour cache breakpoint, so it's written
+  // once per hour and read at 0.1x on every subsequent ticket / turn /
+  // tool-use round. CRITICAL: keep this free of per-ticket, per-turn, or
+  // per-call content — prompt caching is a prefix match, so anything
+  // volatile here invalidates the shared prefix for everyone. (That was the
+  // pre-2026-06 leak: the whole prompt was one block with the customer +
+  // conversation ahead of the rules, so cache_creation ≈ cache_read and the
+  // ~60K stable payload was re-billed at full price on every ticket.)
+  const system = `You are a customer support agent for ${wsName}. Analyze the customer's message and decide the best action.
 
 You have tools to look up data. Use them to gather what you need before making your decision.
-
-CUSTOMER: ${cName} (${cEmail})${langDirective}
-TICKET SUBJECT: ${ticketSubject || "(none)"}
-TICKET TAGS: ${tags}${activePlaybookNote}${(() => {
-  const pc = ticket?.page_context as { product_title?: string; product_handle?: string; page_path?: string } | null;
-  if (!pc) return "";
-  const parts: string[] = [];
-  if (pc.product_title) parts.push(`viewing the ${pc.product_title} product page`);
-  else if (pc.product_handle) parts.push(`viewing /products/${pc.product_handle}`);
-  else if (pc.page_path) parts.push(`viewing ${pc.page_path}`);
-  return parts.length
-    ? `\nPAGE CONTEXT: Customer started this chat while ${parts.join(", ")}. If their question is product-related, prioritize that product in your answer.`
-    : "";
-})()}${agentContext?.assigned ? `
-AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response). For any new request or follow-up, do NOT take direct actions and do NOT provide detailed information — acknowledge and hold for the human agent. When acknowledging, briefly mirror back the specific concerns the customer just raised (e.g. name the charge amount, the wrong product, the delivery issue — whatever they actually said) in one short sentence, then say an agent will be back with them shortly. A bare "we're reviewing your ticket" with no mirroring reads as robotic and increases frustration when the customer has just listed concrete grievances.` : ""}
-
-${guidanceBlock ? `AGENT GUIDANCE (binding for this ticket — written by a human agent who knows context the system doesn't. Follow these even if they conflict with default reasoning):
-${guidanceBlock}
-
-` : ""}CONVERSATION:
-${convoBlock || `Customer: ${message.slice(0, 300)}`}
 
 AVAILABLE HANDLERS (interactive flows you can route customers to — you select them, the system builds the form):
 Journeys (on chat: embedded form, on email: CTA button to mini-site):
@@ -422,6 +425,23 @@ When you have enough data, respond with ONLY valid JSON (no tool calls):
   "needs_clarification": false,
   "clarification_question": null
 }`;
+
+  // ── VOLATILE per-ticket / per-turn content — NOT cached (it changes every
+  // turn as the conversation grows). currentDateContext() lives here too so
+  // the daily date rollover never invalidates the shared system prefix.
+  const userBlock = `${currentDateContext()}
+
+CUSTOMER: ${cName} (${cEmail})${langDirective}
+TICKET SUBJECT: ${ticketSubject || "(none)"}
+TICKET TAGS: ${tags}${activePlaybookNote}${pageContextNote}${agentContextNote}
+
+${guidanceBlock ? `AGENT GUIDANCE (binding for this ticket — written by a human agent who knows context the system doesn't. Follow these even if they conflict with default reasoning):
+${guidanceBlock}
+
+` : ""}CONVERSATION:
+${convoBlock || `Customer: ${message.slice(0, 300)}`}`;
+
+  return { system, userBlock };
 }
 
 // ── Tool Execution ──
@@ -1289,19 +1309,31 @@ export async function callSonnetOrchestratorV2(
   };
 
   try {
-    const preContext = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
-    // Cache-control breakpoints. The tools array is identical across
-    // every call, and the pre-context block is the heavy part of the
-    // input (~60K tokens) that doesn't change across the 1-3 tool-use
-    // rounds within a single decision. Marking both means subsequent
-    // rounds bill the cached prefix at 10% of input price instead of
-    // 100%. Without these markers the orchestrator paid full freight
-    // on every round (cache_create=0, cache_read=0 in logs) — that's
-    // the leak that produced the $5 K-cups ticket.
+    const { system, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
+    // Cache-control breakpoints, 1-hour TTL. The heavy, shared payload
+    // (tools + system rules/policies/handlers, ~40-50K tokens) is now
+    // byte-identical for every ticket in the workspace, so the first
+    // ticket each hour writes it and every subsequent ticket / turn /
+    // tool-use round reads it at 10% of input price. The volatile
+    // per-ticket context (customer + conversation + date) lives in the
+    // uncached user turn below, so it never invalidates the shared prefix.
+    // Before this split the whole prompt was one user block with volatile
+    // content ahead of the rules → cache_creation ≈ cache_read and the
+    // stable payload was re-billed at full freight on every ticket.
+    const apiHeaders = {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "extended-cache-ttl-2025-04-11",
+      "Content-Type": "application/json",
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const systemBlocks: any[] = [
+      { type: "text", text: system, cache_control: { type: "ephemeral", ttl: "1h" } },
+    ];
     const baseTools = buildToolDefinitions();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const tools = baseTools.map((t, i) => i === baseTools.length - 1
-      ? { ...t, cache_control: { type: "ephemeral" } }
+      ? { ...t, cache_control: { type: "ephemeral", ttl: "1h" } }
       : t) as any[];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1309,7 +1341,7 @@ export async function callSonnetOrchestratorV2(
       {
         role: "user",
         content: [
-          { type: "text", text: preContext, cache_control: { type: "ephemeral" } },
+          { type: "text", text: userBlock },
         ],
       },
     ];
@@ -1319,14 +1351,11 @@ export async function callSonnetOrchestratorV2(
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: {
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-        },
+        headers: apiHeaders,
         body: JSON.stringify({
           model: modelId,
           max_tokens: 2000,
+          system: systemBlocks,
           tools,
           messages,
         }),
@@ -1340,8 +1369,8 @@ export async function callSonnetOrchestratorV2(
           await new Promise(r => setTimeout(r, 2000));
           const retry = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
-            headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-            body: JSON.stringify({ model: modelId, max_tokens: 2000, tools, messages }),
+            headers: apiHeaders,
+            body: JSON.stringify({ model: modelId, max_tokens: 2000, system: systemBlocks, tools, messages }),
           });
           if (retry.ok) {
             const retryData = await retry.json();
@@ -1391,8 +1420,8 @@ export async function callSonnetOrchestratorV2(
           await new Promise(r => setTimeout(r, 1500));
           const retry = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
-            headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-            body: JSON.stringify({ model: modelId, max_tokens: 2000, tools, messages }),
+            headers: apiHeaders,
+            body: JSON.stringify({ model: modelId, max_tokens: 2000, system: systemBlocks, tools, messages }),
           });
           if (retry.ok) {
             const retryData = await retry.json();
@@ -1428,10 +1457,11 @@ export async function callSonnetOrchestratorV2(
         try {
           const jsonRetry = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
-            headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+            headers: apiHeaders,
             body: JSON.stringify({
               model: modelId,
               max_tokens: 2000,
+              system: systemBlocks,
               messages: [
                 ...messages,
                 { role: "assistant", content: text },
@@ -1484,10 +1514,11 @@ export async function callSonnetOrchestratorV2(
     try {
       const forceRes = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+        headers: apiHeaders,
         body: JSON.stringify({
           model: modelId,
           max_tokens: 2000,
+          system: systemBlocks,
           messages: [
             ...messages,
             {
