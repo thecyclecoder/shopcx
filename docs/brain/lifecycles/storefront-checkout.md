@@ -110,11 +110,11 @@ When the email field loses focus (debounced), the client POSTs to `/api/checkout
 
 1. Looks up the email in [[../tables/customers]] (workspace-scoped).
 2. **Skips OTP for bare leads** — only triggers when the matched customer has order history OR a subscription. Random email entries don't get challenged.
-3. If gated: creates an [[../tables/auth_otp_sessions]] row with `cart_token` + `customer_id`, calls [[../integrations/twilio]] Verify via `src/lib/twilio-verify.ts` → `startVerification(channel)`. Twilio sends the code; we don't store it.
+3. If gated: creates an [[../tables/auth_otp_sessions]] row with `cart_token` + `customer_id`, calls [[../integrations/twilio]] Verify via `src/lib/twilio-verify.ts` → `startVerificationWithFallback({ phoneE164, email, requested })`. SMS is primary; if the SMS send fails (carrier reject / unreachable) and an email is on file, it **transparently retries over email** and returns `channel` = what actually sent + `fell_back: true`. The client uses that to show the truthful "we texted your phone •••12" vs "we emailed •••@x.com" copy (and a "couldn't reach your phone, emailed instead" note on fallback) rather than promising a text that never arrived. Twilio sends the code; we don't store it.
 4. Phone-spoofing defense: the OTP is sent to the customer's `phone` on file from `customers`, NOT a phone entered at checkout. A fraudster who knows the email can't redirect the code to their own phone.
 5. Client renders an OTP modal. Customer enters the code → `/api/checkout/otp/verify` calls `checkVerification(code)` against Twilio, then on success backfills `cart_drafts.customer_id` + `email` + `phone` so the rest of the checkout flow has the linked identity.
 
-Resend support: `/api/checkout/otp/resend` re-fires `startVerification` (rate-limited by Twilio).
+Resend support: `/api/checkout/otp/resend` re-fires through the same `startVerificationWithFallback` (rate-limited 60s/session), so an explicit "Text me a code instead" that fails also falls back to email. Customers who can't get a code can **dismiss the modal and check out as a guest** (`dismissOtpAsGuest` — stays unauthenticated, won't re-prompt). The portal login reuses the same backend but has **no guest escape** (auth is required there) — see [[customer-portal]].
 
 ## Phase 4.6 — Subscription choice for verified existing customers
 

@@ -28,7 +28,7 @@ export default async function PortalLoginPage({ params }: { params: Promise<{ sl
   const admin = createAdminClient();
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("name, portal_config, storefront_logo_url, storefront_primary_color")
+    .select("id, name, portal_config, storefront_logo_url, storefront_primary_color")
     .eq("help_slug", slug)
     .single();
 
@@ -45,6 +45,11 @@ export default async function PortalLoginPage({ params }: { params: Promise<{ sl
   const brandName = (workspace?.name as string) || "";
 
   return (
-    <LoginClient logoUrl={logoUrl} primaryColor={primaryColor} brandName={brandName} />
+    <LoginClient
+      workspaceId={(workspace?.id as string) || ""}
+      logoUrl={logoUrl}
+      primaryColor={primaryColor}
+      brandName={brandName}
+    />
   );
 }
