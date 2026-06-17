@@ -37,7 +37,7 @@ const ICONS = {
 };
 
 interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean; adminOnly?: boolean; ownerOnly?: boolean }
-interface NavSection { label: string; icon?: string; items: NavItem[]; collapsible?: boolean }
+interface NavSection { label: string; icon?: string; items: NavItem[]; collapsible?: boolean; ownerOnly?: boolean }
 
 const NAV_STRUCTURE: (NavItem | NavSection)[] = [
   { href: "/dashboard", label: "Dashboard", icon: ICONS.dashboard },
@@ -126,7 +126,16 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "#", label: "Email", icon: ICONS.marketing, comingSoon: true },
     ],
   },
-  { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
+  {
+    label: "Developer",
+    ownerOnly: true,
+    icon: "M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5",
+    collapsible: true,
+    items: [
+      { href: "/dashboard/roadmap", label: "Roadmap", icon: "M9 4.5v15m6-15v15m-10.875 0h15.75c.621 0 1.125-.504 1.125-1.125V5.625c0-.621-.504-1.125-1.125-1.125H4.125C3.504 4.5 3 5.004 3 5.625v12.75c0 .621.504 1.125 1.125 1.125z" },
+      { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
+    ],
+  },
   { href: "/dashboard/settings", label: "Settings", icon: ICONS.settings },
 ];
 
@@ -286,6 +295,7 @@ export default function Sidebar({
           // Section with children
           if ("items" in entry) {
             const section = entry as NavSection;
+            if (section.ownerOnly && workspace.role !== "owner") return null;
             const isExpanded = expandedSections.has(section.label);
             const sectionHasActive = section.items.some(i => pathname.startsWith(i.href) && i.href !== "#");
             return (
@@ -351,6 +361,11 @@ export default function Sidebar({
                                 : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-500"
                             }`}>
                               {fraudCount.count > 99 ? "99+" : fraudCount.count}
+                            </span>
+                          )}
+                          {item.href === "/dashboard/branches" && branchesCount > 0 && (
+                            <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                              {branchesCount > 99 ? "99+" : branchesCount}
                             </span>
                           )}
                         </Link>
