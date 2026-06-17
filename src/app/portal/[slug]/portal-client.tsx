@@ -38,6 +38,7 @@ import { HelpCenterSection } from "./_sections/HelpCenterSection";
 import { SupportSection } from "./_sections/SupportSection";
 import { PaymentMethodsSection } from "./_sections/PaymentMethodsSection";
 import { SubscriptionDetailScreen } from "./_sections/SubscriptionDetailScreen";
+import { portalHref } from "@/lib/portal-nav";
 
 interface Props {
   slug: string;
@@ -184,6 +185,7 @@ export default function PortalClient(props: Props) {
         <div className="border-t border-zinc-200 p-3">
           <a
             href="/logout"
+            onClick={(e) => { e.preventDefault(); window.location.href = portalHref("/logout"); }}
             className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900"
           >
             <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

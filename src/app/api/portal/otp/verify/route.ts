@@ -10,6 +10,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { checkVerification } from "@/lib/twilio-verify";
 import { setSessionCookie } from "@/lib/auth-session";
+import { toE164US } from "@/lib/phone";
 
 interface PostBody {
   session_id?: string;
@@ -57,7 +58,11 @@ export async function POST(request: NextRequest) {
   const serviceSid = ws?.twilio_verify_service_sid as string | null;
   if (!serviceSid) return NextResponse.json({ error: "verify_not_configured" }, { status: 500 });
 
-  const destination = session.channel === "sms" ? (customer.phone as string) : (customer.email as string);
+  // Must hit the same E.164 destination that start/resend sent to, or
+  // Twilio's verification_check won't match the pending verification.
+  const destination = session.channel === "sms"
+    ? (toE164US(customer.phone as string) || (customer.phone as string))
+    : (customer.email as string);
   const check = await checkVerification(serviceSid, destination, code);
   if (!check.approved) {
     await admin

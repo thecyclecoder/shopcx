@@ -3,13 +3,14 @@
 import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { ChatOverlay } from "@/app/(storefront)/_components/ChatOverlay";
+import { portalHref } from "@/lib/portal-nav";
 
 interface Props {
+  /** Workspace UUID — used for slug-aware nav and to mount the login-help chat widget. */
+  workspaceId: string;
   logoUrl: string;
   primaryColor: string;
   brandName: string;
-  /** Workspace UUID — mounts the login-help chat widget when chatEnabled. */
-  workspaceId?: string;
   /** Whether the anonymous live-chat widget should show on this login page. */
   chatEnabled?: boolean;
 }
@@ -77,7 +78,7 @@ function transformLogoUrl(url: string, heightPx: number): string {
 
 type Stage = "email" | "code" | "magic_sent" | "auto_logging";
 
-function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
+function PortalLogin({ workspaceId, logoUrl, primaryColor, brandName }: Props) {
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
   const next = searchParams.get("next");
@@ -91,6 +92,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
   const [channel, setChannel] = useState<"sms" | "email">("sms");
   const [maskedDestination, setMaskedDestination] = useState("");
   const [hasSms, setHasSms] = useState(false);
+  const [fellBack, setFellBack] = useState(false);
   const [code, setCode] = useState("");
   const [resendCountdown, setResendCountdown] = useState(0);
 
@@ -105,7 +107,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
       .then(r => r.json())
       .then(data => {
         if (data.success && data.redirectUrl) {
-          window.location.href = data.redirectUrl;
+          window.location.href = portalHref(data.redirectUrl);
         } else {
           setError(data.error || "Invalid or expired link. Please log in below.");
           setStage("email");
@@ -134,7 +136,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
       const res = await fetch("/api/portal/otp/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim() }),
+        body: JSON.stringify({ email: email.trim(), workspace_id: workspaceId || undefined }),
       });
       const data = await res.json();
       if (data.eligible && data.session_id) {
@@ -142,6 +144,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
         setChannel(data.channel);
         setMaskedDestination(data.masked_destination);
         setHasSms(!!data.has_sms);
+        setFellBack(!!data.fell_back);
         setResendCountdown(60);
         setStage("code");
         setLoading(false);
@@ -151,7 +154,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
       const magicRes = await fetch("/api/portal/magic-login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim() }),
+        body: JSON.stringify({ email: email.trim(), workspace_id: workspaceId || undefined }),
       });
       const magicData = await magicRes.json();
       if (magicData.success) {
@@ -178,7 +181,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
       });
       const data = await res.json();
       if (res.ok && data.ok) {
-        window.location.href = "/";
+        window.location.href = portalHref("/");
       } else {
         setError(data.error === "invalid_code" ? "That code didn't match. Try again." : (data.error || "Verification failed."));
       }
@@ -203,6 +206,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
       if (res.ok) {
         if (data.channel) setChannel(data.channel);
         if (data.masked_destination) setMaskedDestination(data.masked_destination);
+        setFellBack(!!data.fell_back);
         setResendCountdown(60);
         setCode("");
       } else if (data.error === "rate_limited") {
@@ -222,7 +226,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
       const res = await fetch("/api/portal/magic-login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim() }),
+        body: JSON.stringify({ email: email.trim(), workspace_id: workspaceId || undefined }),
       });
       const data = await res.json();
       if (data.success) {
@@ -289,9 +293,16 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
       <div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center", padding: "0 20px" }}>
         {logoEl}
         <h1 style={{ fontSize: 24, fontWeight: 900, marginBottom: 8 }}>Enter your code</h1>
-        <p style={{ color: "#6b7280", marginBottom: 24, fontSize: 15 }}>
-          We sent a 6-digit code to <strong>{maskedDestination}</strong>.
+        <p style={{ color: "#6b7280", marginBottom: fellBack ? 8 : 24, fontSize: 15 }}>
+          {channel === "sms"
+            ? <>We texted a 6-digit code to your phone <strong>{maskedDestination}</strong>.</>
+            : <>We emailed a 6-digit code to <strong>{maskedDestination}</strong>.</>}
         </p>
+        {fellBack && (
+          <p style={{ color: "#6b7280", marginBottom: 24, fontSize: 13 }}>
+            We couldn&apos;t reach your phone, so we sent it to your email instead. Check your inbox.
+          </p>
+        )}
         <input
           type="text"
           inputMode="numeric"

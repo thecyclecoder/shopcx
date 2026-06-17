@@ -132,6 +132,59 @@ export async function startVerification(
 }
 
 /**
+ * Start a verification with transparent SMS→email fallback.
+ *
+ * The OTP gate is SMS-primary, but a single SMS send can fail (carrier
+ * reject, unreachable number, Verify error) even when the number looked
+ * valid. Rather than dead-end the customer on a 502, we retry once over
+ * email when the profile has one. The caller gets back the channel that
+ * ACTUALLY sent + a `fellBack` flag so the UI can say "we emailed it
+ * instead" rather than lying about a text that never arrived.
+ *
+ * `phoneE164` must already be normalized (or null). `requested` is the
+ * channel the caller wants; we downgrade to email if SMS isn't possible.
+ */
+export async function startVerificationWithFallback(
+  serviceSid: string,
+  opts: { phoneE164: string | null; email: string | null; requested: "sms" | "email" },
+): Promise<{
+  success: boolean;
+  channel: "sms" | "email";
+  destination: string;
+  fellBack: boolean;
+  verifySid?: string;
+  error?: string;
+}> {
+  const { phoneE164, email } = opts;
+
+  // Resolve the channel we can actually send on.
+  let channel: "sms" | "email" = opts.requested;
+  if (channel === "sms" && !phoneE164) channel = "email";
+  if (channel === "email" && !email && phoneE164) channel = "sms";
+
+  const destination = channel === "sms" ? phoneE164 : email;
+  if (!destination) {
+    return { success: false, channel, destination: "", fellBack: false, error: "no_destination" };
+  }
+
+  const first = await startVerification(serviceSid, destination, channel);
+  if (first.success) {
+    return { success: true, channel, destination, fellBack: false, verifySid: first.verifySid };
+  }
+
+  // SMS send failed but we have an email on file → fall back transparently.
+  if (channel === "sms" && email) {
+    const second = await startVerification(serviceSid, email, "email");
+    if (second.success) {
+      return { success: true, channel: "email", destination: email, fellBack: true, verifySid: second.verifySid };
+    }
+    return { success: false, channel: "email", destination: email, fellBack: true, error: second.error || first.error };
+  }
+
+  return { success: false, channel, destination, fellBack: false, error: first.error };
+}
+
+/**
  * Submit the customer-entered code for verification. Returns
  * `approved: true` on success.
  */

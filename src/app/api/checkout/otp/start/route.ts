@@ -24,7 +24,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { startVerification } from "@/lib/twilio-verify";
+import { startVerificationWithFallback } from "@/lib/twilio-verify";
 import { toE164US } from "@/lib/shopify-customer-update";
 
 interface PostBody {
@@ -105,16 +105,18 @@ export async function POST(request: NextRequest) {
   const profilePhone = customer.phone ? toE164US(customer.phone as string) : null;
   const hasSms = !!profilePhone;
   const hasEmail = !!customer.email;
-  let channel: "sms" | "email" = body.channel || (hasSms ? "sms" : "email");
-  if (channel === "sms" && !hasSms) channel = "email";
+  const requested: "sms" | "email" = body.channel || (hasSms ? "sms" : "email");
 
-  const destination = channel === "sms" ? profilePhone! : (customer.email as string);
-  const maskedDestination = channel === "sms" ? maskPhone(destination) : maskEmail(destination);
-
-  const verifyRes = await startVerification(serviceSid, destination, channel);
+  const verifyRes = await startVerificationWithFallback(serviceSid, {
+    phoneE164: profilePhone,
+    email: (customer.email as string) || null,
+    requested,
+  });
   if (!verifyRes.success) {
     return NextResponse.json({ error: "verify_send_failed", details: verifyRes.error }, { status: 502 });
   }
+  const channel = verifyRes.channel;
+  const maskedDestination = channel === "sms" ? maskPhone(verifyRes.destination) : maskEmail(verifyRes.destination);
 
   // Persist the session row
   const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -144,5 +146,6 @@ export async function POST(request: NextRequest) {
     masked_destination: maskedDestination,
     has_sms: hasSms,
     has_email: hasEmail,
+    fell_back: verifyRes.fellBack,
   });
 }

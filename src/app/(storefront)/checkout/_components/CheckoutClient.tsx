@@ -426,6 +426,7 @@ export function CheckoutClient({
     maskedDestination: string;
     hasSms: boolean;
     hasEmail: boolean;
+    fellBack: boolean;
     code: string;
     busy: boolean;
     error: string | null;
@@ -434,7 +435,7 @@ export function CheckoutClient({
   };
   const [otp, setOtp] = useState<OtpState>({
     open: false, sessionId: null, channel: "sms", maskedDestination: "",
-    hasSms: false, hasEmail: false, code: "", busy: false, error: null,
+    hasSms: false, hasEmail: false, fellBack: false, code: "", busy: false, error: null,
     resendCountdown: 0, statusMsg: null,
   });
   // Once the customer dismisses the OTP (can't get the code, wants to check out
@@ -553,6 +554,7 @@ export function CheckoutClient({
         maskedDestination: data.masked_destination,
         hasSms: !!data.has_sms,
         hasEmail: !!data.has_email,
+        fellBack: !!data.fell_back,
         code: "",
         busy: false,
         error: null,
@@ -584,14 +586,20 @@ export function CheckoutClient({
       setOtp((s) => ({ ...s, busy: false, error: data.error === "rate_limited" ? `Wait ${data.retry_after_seconds}s before resending` : (data.error || "Could not resend") }));
       return;
     }
+    const fb = !!data.fell_back;
     setOtp((s) => ({
       ...s,
       busy: false,
       channel: data.channel,
       maskedDestination: data.masked_destination,
+      fellBack: fb,
       code: "",
       resendCountdown: 60,
-      statusMsg: opts?.channel ? `Code sent via ${data.channel === "sms" ? "text" : "email"} to ${data.masked_destination}` : `New code sent to ${data.masked_destination}`,
+      statusMsg: fb
+        ? `We couldn't text you, so we emailed a code to ${data.masked_destination}`
+        : opts?.channel
+          ? `Code sent via ${data.channel === "sms" ? "text" : "email"} to ${data.masked_destination}`
+          : `New code sent to ${data.masked_destination}`,
     }));
   }
 
@@ -634,7 +642,7 @@ export function CheckoutClient({
     setPhone("");
     setFirstName("");
     setLastName("");
-    setOtp({ open: false, sessionId: null, channel: "sms", maskedDestination: "", hasSms: false, hasEmail: false, code: "", busy: false, error: null, resendCountdown: 0, statusMsg: null });
+    setOtp({ open: false, sessionId: null, channel: "sms", maskedDestination: "", hasSms: false, hasEmail: false, fellBack: false, code: "", busy: false, error: null, resendCountdown: 0, statusMsg: null });
     setAuthedCustomerId(null);
   }
 
@@ -1633,8 +1641,15 @@ export function CheckoutClient({
                 <p className="mt-1 text-sm text-zinc-600">
                   {otp.statusMsg
                     ? otp.statusMsg
-                    : <>We sent a 6-digit code to{" "}<span className="font-semibold">{otp.maskedDestination}</span>.</>}
+                    : otp.channel === "sms"
+                      ? <>We texted a 6-digit code to your phone{" "}<span className="font-semibold">{otp.maskedDestination}</span>.</>
+                      : <>We emailed a 6-digit code to{" "}<span className="font-semibold">{otp.maskedDestination}</span>.</>}
                 </p>
+                {!otp.statusMsg && otp.fellBack && (
+                  <p className="mt-1 text-xs text-zinc-500">
+                    We couldn&apos;t reach your phone, so we sent it to your email instead.
+                  </p>
+                )}
               </div>
               <button
                 type="button"
