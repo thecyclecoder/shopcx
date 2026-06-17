@@ -229,6 +229,8 @@ export interface PortalOrder {
     title: string;
     variant_title?: string | null;
     quantity: number;
+    /** Per-unit price as stored on the order line (checkout + renewals write this). */
+    price_cents?: number;
     unit_price_cents?: number;
     line_total_cents?: number;
     image_url?: string | null;

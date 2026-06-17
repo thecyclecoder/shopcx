@@ -116,6 +116,8 @@ The Shopify theme is moving its "My Account" surface off the Shopify extension a
 
 Below the CTA the drawer shows a "what you can do" showcase (subscriptions, orders, rewards, payment, help center, support) to make the portal inviting. Replaces the old two-link (Orders + Subscriptions) drawer.
 
+**`/pages/portal` redirects too.** The theme app-extension block (`shopify-extension/extensions/subscriptions-portal-theme/blocks/subscription-portal.liquid`) no longer renders the embedded portal SPA — it does the same Liquid `{% if customer %}` branch and `window.location.replace`s to `/apps/portal-v2?route=sso` (logged in) or the bare portal (logged out). So both entry points (header drawer + the `/pages/portal` page) funnel to the in-house portal. Requires `shopify app deploy` to ship. The customer-account extension SPA (`portal-src/`) is now effectively retired on the storefront page; the `subscription-portal.js` asset still ships but isn't loaded by the block.
+
 ## Login-page chat widget
 
 The portal **login page only** mounts the same anonymous live-chat widget the storefront + KB mini-site use (`ChatOverlay` → `/widget/{workspaceId}`), gated on `widget_enabled` + `chat_ticket_creation`. It helps people who can't log in (wrong email, no code received) reach a human/AI without being locked out. The authenticated portal does NOT mount it — the Support section already covers logged-in help.

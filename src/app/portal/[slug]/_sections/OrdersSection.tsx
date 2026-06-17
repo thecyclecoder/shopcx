@@ -32,11 +32,18 @@ function fmtCents(c: number): string {
   return `$${(c / 100).toFixed(2)}`;
 }
 
-function statusLabel(o: PortalOrder): { label: string; tone: "emerald" | "amber" | "zinc" } {
+function statusLabel(o: PortalOrder): { label: string; tone: "emerald" | "amber" | "zinc" } | null {
   if (o.amplifier_status === "Shipped" || o.amplifier_tracking_number) return { label: "Shipped", tone: "emerald" };
   if (o.amplifier_status === "Cancelled") return { label: "Cancelled", tone: "zinc" };
   if (o.financial_status === "refunded" || o.financial_status === "partially_refunded") return { label: "Refunded", tone: "amber" };
   if (o.amplifier_status) return { label: o.amplifier_status, tone: "amber" };
+  // Fallback is "Processing" — but a historical sync gap left old orders stuck
+  // there with no real status. Rather than show a misleading "Processing" badge
+  // on orders we'll never reconcile, omit the status for anything older than 2
+  // months (not worth a backfill). Recent orders still legitimately process.
+  const twoMonthsAgo = new Date();
+  twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+  if (new Date(o.created_at) < twoMonthsAgo) return null;
   return { label: "Processing", tone: "amber" };
 }
 
@@ -56,10 +63,10 @@ export function OrdersSection({ orders }: Props) {
     <div className="space-y-3">
       {orders.map((o) => {
         const isOpen = openId === o.id;
-        const tone = statusLabel(o);
-        const toneClass = tone.tone === "emerald"
+        const status = statusLabel(o);
+        const toneClass = status?.tone === "emerald"
           ? "bg-emerald-50 text-emerald-700"
-          : tone.tone === "amber"
+          : status?.tone === "amber"
             ? "bg-amber-50 text-amber-800"
             : "bg-zinc-100 text-zinc-600";
         const realItems = o.line_items.filter((l) => !l.is_gift);
@@ -74,9 +81,11 @@ export function OrdersSection({ orders }: Props) {
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
                   <span className="text-base font-semibold text-zinc-900">{o.order_number}</span>
-                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${toneClass}`}>
-                    {tone.label}
-                  </span>
+                  {status && (
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${toneClass}`}>
+                      {status.label}
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1 text-sm text-zinc-500">
                   {new Date(o.created_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
@@ -114,11 +123,17 @@ export function OrdersSection({ orders }: Props) {
                         </div>
                         <div className="text-xs text-zinc-500">Qty {it.quantity}</div>
                       </div>
-                      <div className="text-sm text-zinc-700">
-                        {it.is_gift
-                          ? "Free"
-                          : fmtCents(it.line_total_cents ?? (it.unit_price_cents || 0) * it.quantity)}
-                      </div>
+                      {(() => {
+                        // Line total: prefer an explicit line total, else per-unit
+                        // price × qty. The stored field is `price_cents` (per unit);
+                        // `unit_price_cents`/`line_total_cents` are legacy fallbacks.
+                        const lineTotal = it.line_total_cents ?? (it.price_cents ?? it.unit_price_cents ?? 0) * it.quantity;
+                        if (it.is_gift) return <div className="text-sm text-zinc-700">Free</div>;
+                        // Historical sync gap left some lines at 0 even though the
+                        // order has a total — omit rather than show a misleading $0.00.
+                        if (lineTotal <= 0) return null;
+                        return <div className="text-sm text-zinc-700">{fmtCents(lineTotal)}</div>;
+                      })()}
                     </li>
                   ))}
                 </ul>
