@@ -142,7 +142,7 @@ When a customer clicks "Cancel subscription" in the portal, the handler does NOT
 
 **Shipped:** Both surfaces (Shopify extension + in-house mini-site). All listed handlers wired. Cancel-via-journey. Loyalty redeem + apply. Coupon validation. Address + frequency + line-item mutations. Payment method update with Appstle → internal migration on card change. Identity linking. Event log + internal ticket notes.
 
-**In flight ([[../specs/portal-account-handoff-and-help-center]]):** Shopify→portal SSO (`route=sso` handler), drawer redesign (1 CTA + showcase), login-page chat widget, Help Center sidebar section. App-side code complete + typechecked on branch `worktree-portal-account-handoff`. Theme drawer committed to theme-repo branch `account-portal-drawer` and **merged into `homepage-rebuild`** (the standing preview branch with a connected unpublished theme) for review — **pending Dylan sign-off before promotion to `master` (live).** SSO route must be deployed to production (the App Proxy is fixed to `shopcx.ai/api/portal`) for the drawer CTA to resolve end-to-end.
+**Shipped 2026-06-17 — Shopify→portal handoff:** the account drawer + `/pages/portal` (theme app extension `shopcx-98`) redirect to the in-house portal — logged-in via the App-Proxy SSO route (`route=sso` handler → magic-link → authenticated, no second login), logged-out → bare portal. Drawer = 1 CTA + capability showcase ([[../recipes/edit-shopify-theme]]). Login-page anonymous chat widget. Help Center sidebar (product cards + General). Orders list: stale "Processing" hidden on >2-month-old orders, line-item prices read `price_cents × qty` (0 omitted, not "$0.00").
 
 **Known gaps / not yet shipped:** None identified.
 
