@@ -1,88 +1,120 @@
 # Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app ⏳
 
-> **🔒 CORE INVARIANT — the routine builds it itself; it never shells out to `claude`.** Inside a Claude Code Routine you are *already* in a `claude` session (`CLAUDECODE=1`), so spawning a new `claude` CLI — directly (`claude -p "/goal …"`) or via the Agent SDK — hits the nested-session guard and exits 1. The build MUST be done by the routine's **own native agent** (`Read`/`Edit`/`Bash`/`Grep` + GitHub REST API for the PR), never a subprocess. (A spawned `claude -p "/goal …"` is only valid on a *self-hosted worker box*, where `claude` is the top-level process — the Phase-4 "Open questions" executor fork.)
+> **🔒 CORE INVARIANTS**
+> 1. **Max-billing.** Builds run as `env -u ANTHROPIC_API_KEY claude -p …` on the build box. The box's shell env and repo `.env.local` must **never** expose `ANTHROPIC_API_KEY` — auth precedence would silently flip builds to metered API. Claude is authed to **Max** via `~/.claude` on the box (verified: headless `claude -p` runs with no API key present).
+> 2. **Box, not a routine.** A routine is itself a `claude` session (`CLAUDECODE=1`), so it can't spawn `claude -p` (nested-session guard). The **self-hosted box runs `claude` as the top-level process**, so `claude -p` is valid there. This is why the executor is a box + worker, not a Claude Code Routine.
 
-A phone-first console on the dashboard that closes the loop from *idea* to *merged PR* without a laptop or a terminal. Three surfaces over infrastructure we already have ([[../lifecycles/agent-todo-system]]): a **roadmap board** that reads the brain and shows what's planned / in progress / shipped; a **spec-authoring chat** where you talk a feature through with Opus until you love it, and it writes the `docs/brain/specs/{slug}.md` + creates a build todo; and a **build dispatcher** that runs the spec autonomously on your **Max subscription** (via the existing Claude Code Routine) and opens a `claude/*` PR you squash-merge from `/dashboard/branches`.
+A phone-first console on the dashboard that closes the loop from *idea* to *merged PR* without a laptop or a terminal. Three surfaces over infrastructure we already have ([[../lifecycles/agent-todo-system]]): a **roadmap board** that reads the brain and shows what's planned / in progress / shipped; a **spec-authoring chat** where you talk a feature through with Opus until you love it, and it writes `docs/brain/specs/{slug}.md` + queues a build; and a **build dispatcher** that runs the spec autonomously on your **Max subscription** (via a self-hosted Ubuntu box + a `systemd` worker) and opens a `claude/*` PR you squash-merge from `/dashboard/branches`.
 
-**Business outcome:** Dylan can stand up new work from anywhere ("on the pickleball court") — describe a feature on his phone, refine the spec in chat, tap *build*, and merge the resulting PR — with Dylan-level judgment preserved at the spec-approval and PR-merge gates.
+**Business outcome:** Dylan can stand up new work from anywhere ("on the pickleball court") — describe a feature on his phone, refine the spec in chat, tap *build*, answer any questions the build raises, and merge the resulting PR — with Dylan-level judgment preserved at the spec-approval, mid-build-question, and PR-merge gates.
 
-## Billing model (the whole point — see invariants)
+## Billing model
 
-Two deliberate cost models:
-- **Spec-authoring chat → Anthropic API (Opus).** Interactive in-app chat; the app backend calls Opus (direct or via Vercel AI Gateway). Cheap conversation tokens. A routine *cannot* do this (routines aren't conversational).
-- **Spec execution / build → Max subscription.** The Claude Code Routine's **own native agent** does the coding with its native tools. **Max-billed only if** the build routine's env has **no `ANTHROPIC_API_KEY`** and it does NOT shell to a Messages-API script. (Verified: today's `agent-todo-routine` is API-billed because `reasoning.ts:368-402` calls the Messages API with `x-api-key` and `ANTHROPIC_API_KEY` is in its env per `scripts/print-routine-env.ts:35`. The build path must avoid both.)
+- **Spec-authoring chat → Anthropic API (Opus).** Interactive in-app chat; the app backend calls Opus (direct or via Vercel AI Gateway). Cheap conversation tokens. The *only* sanctioned API spend.
+- **Spec execution / build → Max subscription.** The box runs `claude -p` as a headless session, Max-billed because no `ANTHROPIC_API_KEY` is present. Answering a build's mid-flight questions is plain text typed in the web app → **no LLM, no token cost**; only the resumed build run costs Max.
+
+## Infra — the build box (provisioned 2026-06-17)
+
+- **Hetzner CCX33** — Ubuntu 26.04, 8 vCPU, 30 GiB RAM, 240 GB disk. Hostname `claude-server`.
+- **Network:** Tailscale-only. Tailnet IP `100.75.99.7` (tailnet `dylanralston@gmail.com`); public SSH (port 22 on the public IP) **firewalled off** via `ufw` (allow `tailscale0` + outbound only). The box reaches *out* to Supabase/GitHub; nothing reaches *in* except over the tailnet.
+- **Stack:** Node 24, Claude Code 2.1.179, build-essential. Repo cloned at `/root/shopcx` (`main`); `node_modules` installed; `tsc` available.
+- **Secrets:** `/root/shopcx/.env.local` carries prod secrets + `GITHUB_TOKEN`, with **`ANTHROPIC_API_KEY` commented out** (so a stray `source .env.local` can't flip billing).
+- **Auth:** Claude logged in to **Max** (`dylan@superfoodscompany.com`); creds persist in `/root/.claude`.
 
 ## What already exists (reuse, don't rebuild)
 
-- **`agent_todos`** approval queue ([[../tables/agent_todos]]) — has `source='manual'`, `payload` jsonb, `code_change` PR action, owner-only approval, drift, group_id. Migration `supabase/migrations/20260604190000_agent_todos.sql`.
-- **Claude Code Routine** ([[../inngest/agent-todo-routine]]) — created at `claude.ai/code/routines`, **schedule + on-demand API trigger**, network policy allowlisting Supabase/OpenAI/GitHub, opens `claude/*` PRs via the GitHub REST API (not `gh` CLI), `git apply --recount`, CI gate `npx tsc --noEmit`.
+- **`agent_todos`** approval queue ([[../tables/agent_todos]]) — `source='manual'`, `payload` jsonb, owner-only approval, drift, group_id. (The new `agent_jobs` queue mirrors this shape.)
 - **`/dashboard/branches`** ([[../dashboard/branches]]) — every open `claude/*` PR with CI status + mergeability + **owner squash-merge from the dashboard** (phone-friendly). `POST /api/branches/[number]/merge`.
-- **`/dashboard/tickets/todos`** approval UI + `/api/todos/[id]/approve` (which already wakes the routine on-demand for system todos).
-- **The brain spec convention** ([[../project-management]]) — `docs/brain/specs/{slug}.md` with `⏳ 🚧 ✅` phase emojis; `specs/README.md` index.
+- **Brain spec convention** ([[../project-management]]) — `docs/brain/specs/{slug}.md` with `⏳ 🚧 ✅`; `specs/README.md` index.
+- **P0 skills** (`.claude/skills/`, [[repo-skills-catalog]]) — `build-spec`, `probe-db`, `write-migration`, `customer-remedy`. The worker invokes the **`build-spec`** skill.
 
 ---
 
 ## Phase 1 — Roadmap board (read-only) ⏳
 
-A phone-friendly dashboard page that parses the brain and renders the status board the user originally asked for.
-
 - ⏳ Route `src/app/dashboard/roadmap/page.tsx` (+ sidebar link). Server component.
-- ⏳ Parser: read `docs/brain/specs/*.md` + `specs/README.md`; extract `⏳ / 🚧 / ✅` against `## Phase`/heading/bullet lines; also read the `## Status / open work` block from `lifecycles/*.md` for shipped features. (Markdown is the source of truth — no DB, never drifts.)
-- ⏳ Render three columns — **Planned / In progress / Shipped** — grouped by project track (the `## Active project — …` headings in `specs/README.md`). Each card = a spec; expand to its phases.
-- ⏳ Runtime file access on Vercel: ensure `docs/brain/**` is traced into the function bundle (or parse at build time). Decide + document.
+- ⏳ Parser: read `docs/brain/specs/*.md` + `specs/README.md`; extract `⏳ / 🚧 / ✅` against `## Phase`/heading/bullet lines; also read the `## Status / open work` block from `lifecycles/*.md`. (Markdown is the source of truth — never drifts.)
+- ⏳ Three columns — **Planned / In progress / Shipped** — grouped by project track. Each card = a spec; expand to its phases + live build status.
+- ⏳ Runtime file access on Vercel: trace `docs/brain/**` into the function bundle (or parse at build time).
 
 ## Phase 2 — Spec-authoring chat (Opus via API) ⏳
 
-A chat window where Dylan describes a feature, iterates with Opus, and on "I love it" the assistant emits the spec file + a build todo.
+- ⏳ Chat UI on `/dashboard/roadmap` ("New feature" → conversational panel). Phone-first.
+- ⏳ Backend `POST /api/roadmap/chat` streams Opus (Anthropic API / Vercel AI Gateway). System prompt loads the spec template ([[../project-management]] § Writing a spec) + brain context so the spec is grounded in real tables/libs.
+- ⏳ "Finalize" → model produces the full spec markdown. App (a) commits `docs/brain/specs/{slug}.md` to a `claude/*` branch via GitHub REST, (b) inserts an `agent_jobs` row (`status='queued'`).
+- ⏳ New spec shows on the board as ⏳ planned immediately.
 
-- ⏳ Chat UI on `/dashboard/roadmap` (e.g. "New feature" → conversational panel). Phone-first.
-- ⏳ Backend: `POST /api/roadmap/chat` streams Opus (Anthropic API or Vercel AI Gateway). System prompt loads the brain spec template ([[../project-management]] § Writing a spec) + relevant brain context so the spec is grounded in real tables/libs.
-- ⏳ "Finalize" action: the model produces the full `docs/brain/specs/{slug}.md` content. The app:
-  1. Creates the spec file on a `claude/*` branch via the GitHub REST API (consistent with `brain_doc_edit`), **and**
-  2. Inserts an `agent_todos` row, `action_type='spec_build'`, `source='manual'`, `payload={ spec_slug, spec_branch, instructions }`, `status='pending'`.
-- ⏳ The new spec shows on the board as ⏳ planned immediately.
+## Phase 3 — `agent_jobs` queue + dispatch ⏳
 
-## Phase 3 — `spec_build` todo type + dispatch trigger ⏳
+The bridge from an on-demand phone tap to the (tailnet-only, no-inbound) box. The box can't be reached from Vercel, so the box reaches **out** to this queue.
 
-- ⏳ Add `spec_build` to the `action_type` taxonomy (`src/lib/agent-todos/constants.ts`) — family **system**, approver **owner only**, executor **Routine (PR)**, **never auto-merges** (same class as `code_change`).
-- ⏳ Board "Build" button = approve the `spec_build` todo → `POST /api/todos/[id]/approve` (existing path) → **wakes the routine on-demand** (existing capability). No new trigger plumbing.
-- ⏳ Surface build status on the board card (pending → building → PR open → merged) by reading the todo's `status` + `execution_result.pr_url`.
+- ⏳ New `agent_jobs` table: `id, spec_slug, spec_branch, instructions, status (queued|claimed|building|needs_input|queued_resume|completed|failed|needs_attention), claude_session_id, questions jsonb, answers jsonb, pr_url, log_tail, claimed_at, updated_at`. Migration via the `write-migration` skill. RLS: members read, service role writes.
+- ⏳ Board **"Build"** button → owner-gated → inserts/updates an `agent_jobs` row to `status='queued'`. (No inbound call to the box — just a DB write.)
+- ⏳ Status + PR url surface on the board card by reading the job row (poll, simplest for v1).
 
-## Phase 4 — Max-billed build executor (routine) ⏳
+## Phase 4 — Build box + `systemd` worker (the executor) ⏳
 
-- ⏳ A **dedicated build routine** (separate from `agent-todo-routine`, or a clearly-gated branch of it) whose prompt: "Find approved `spec_build` todos. For each, read `docs/brain/specs/{slug}.md`, implement it with your **own native tools** (Read/Edit/Bash/Grep), run `npx tsc --noEmit`, open a `claude/*` PR via the GitHub REST API, update the todo (`status`, `execution_result.pr_url`)."
-- ⏳ **Env: NO `ANTHROPIC_API_KEY`** (so the routine's native agent bills to Max). Do **not** call the Messages-API reasoning script in this path.
-- ⏳ Per-spec PR; phase emojis in the spec flip ⏳→🚧→✅ as work lands (same as a `/goal` session would do locally).
-- ⏳ **Stop-and-surface rule:** if the build hits a product decision the spec doesn't cover, it does NOT guess — it records the question under "Open questions" in the PR body and stops that item. Dylan answers in chat/PR; a follow-up build continues.
+- ⏳ A `systemd` service `shopcx-builder.service` on the box runs a **worker loop** (a Node/tsx script): poll Supabase every few seconds (or Supabase Realtime) for `status='queued'` / `'queued_resume'`, **atomically claim** one, run the build, write status back. Always-on → survives reboots/disconnects (this is the "session persistence" — **no tmux needed**).
+- ⏳ A fresh build runs:
+  ```bash
+  cd /root/shopcx && git fetch origin && git checkout -B claude/<slug>-<ts> origin/main
+  env -u ANTHROPIC_API_KEY claude -p "Use the build-spec skill on docs/brain/specs/<slug>.md" \
+    --permission-mode acceptEdits --output-format stream-json
+  ```
+- ⏳ Worker parses the `stream-json` stream for: the `claude_session_id` (store it — needed for resume), terminal status, and any structured questions block (Phase 5). The `build-spec` skill opens the `claude/*` PR via GitHub REST with the token in `.env.local`.
+- ⏳ Concurrency 1–2 to start (8 cores can do more, but **Max rate limits** are the real ceiling). `--max-turns` + a wall-clock timeout guard runaway → `needs_attention` with `log_tail`.
 
-## Phase 5 — Review + merge from phone ⏳
+## Phase 5 — Build feedback / questions loop ⏳ (the answer to "builds have questions")
 
-- ✅ (exists) `/dashboard/branches` lists the `claude/*` PR with CI status + mergeability; owner **Squash & merge** works from the phone. Reuse as-is; just confirm `spec_build` PRs surface here (they will — head ref is `claude/*`).
-- ⏳ Cross-link the board card → its PR on `/dashboard/branches`.
+A build is a **multi-turn conversation spread across separate headless invocations.** The `agent_jobs` row carries questions/answers between turns; Claude's **on-disk transcript** (`~/.claude/projects/`) carries the context. The worker is the durable process; the *job* waits, never a live process — so no tmux, no held-open SSH.
+
+**When a build hits a decision the spec doesn't cover, it does NOT guess. It:**
+1. Commits its partial work to the branch and opens (or leaves) the PR as **draft** — progress is never lost.
+2. Emits a structured block as the last thing in its response (the `build-spec` skill instructs this): a fenced ```json {"status":"needs_input","questions":[{"id","q","options?"}]}```.
+3. The worker parses that, writes `questions` + `claude_session_id` to the job row, mirrors the questions into the PR's `## ⏳ Open questions` section, sets `status='needs_input'`, and exits the invocation.
+
+**Answering (phone-friendly, zero token cost):**
+4. The web app surfaces the questions on the board card / a lightweight chat thread (+ optional push notification). Dylan types answers → written to `agent_jobs.answers`, `status='queued_resume'`. No LLM involved.
+5. The worker picks up `queued_resume` and resumes the *same* session:
+   ```bash
+   env -u ANTHROPIC_API_KEY claude --resume <claude_session_id> -p "Answers to your open questions: <answers>"
+   ```
+   Claude continues with full prior context (transcript on disk, survives reboots), incorporates the answers, and either finishes (`completed`, PR marked ready) or raises more questions (`needs_input` again). **Loop until `completed`.**
+
+This is the same conversational pattern as the Phase-2 authoring chat, just at execution time. (Future: a custom `request_input` MCP tool would be cleaner than the JSON-block convention, but the convention needs zero extra infra.)
+
+## Phase 6 — Review + merge from phone ⏳
+
+- ✅ (exists) `/dashboard/branches` lists the `claude/*` PR with CI status + mergeability; owner **Squash & merge** works from the phone. Confirm `spec_build` PRs surface (head ref is `claude/*` → they do).
+- ⏳ Cross-link the board card → its PR; only show "ready to merge" once the job is `completed` (PR un-drafted).
 
 ## Safety / invariants
 
-- **Max-billing invariant:** the build routine's env must never contain `ANTHROPIC_API_KEY`, and the build path must never shell to a Messages-API script or spawn a nested `claude` CLI. Verify via [claude.ai/settings/usage] (should move) vs the API console (should stay flat). The authoring chat is the *only* sanctioned API spend.
-- **Human gates preserved:** `spec_build` is owner-only to approve; PRs **never auto-merge** (mirrors `code_change`); merge to main is an owner click on `/dashboard/branches` with server-side re-validation.
-- **CI gate:** `npx tsc --noEmit` before any PR opens (existing routine behavior). No broken PR reaches the branches surface.
-- **Stop-and-surface, never block:** a build always terminates — "done" or "done what I could + open questions in the PR." It never hangs waiting for input (headless has no interactive channel).
-- **Brain discipline:** the spec file IS the contract; the build folds new concepts into brain pages in the same PR (per [[../project-management]]).
-- **One active build per spec** (mirror the `agent_todos` one-active-group-per-source guard).
+- **Max-billing:** builds run `env -u ANTHROPIC_API_KEY claude -p …`; the box env + `.env.local` never expose `ANTHROPIC_API_KEY`. Verify via claude.ai/settings/usage (should move) vs the API console (flat).
+- **No inbound to the box:** the trigger is always a DB write the worker polls — never an HTTP call into the box (it's tailnet-only, no public port).
+- **Never block, never guess:** each build invocation terminates ("done" / "needs_input" / "failed"); the job waits, not a process. On a real decision it surfaces a question, it does not guess. Partial work is committed before pausing.
+- **Human gates preserved:** Build is owner-gated; PRs **never auto-merge**; merge to main is an owner click on `/dashboard/branches` with server-side re-validation.
+- **CI gate:** `npx tsc --noEmit` before any PR opens (in the `build-spec` skill). No broken PR reaches the branches surface.
+- **Resume integrity:** resume targets the stored `claude_session_id` so context is intact across reboots; transcripts on disk are the source of session truth.
+- **Brain discipline:** the spec is the contract; the build folds new concepts into brain pages in the same PR.
+- **One active build per spec.**
 
 ## Completion criteria
 
 - From a phone: open `/dashboard/roadmap`, see Planned/In-progress/Shipped from the brain.
-- Describe a feature in chat, refine with Opus, finalize → a real `docs/brain/specs/{slug}.md` appears on a `claude/*` branch + a `spec_build` todo is created.
-- Approve/tap Build → the routine implements it on **Max** (confirmed: API console flat, Max usage moves) → a CI-passing `claude/*` PR appears on `/dashboard/branches`.
+- Describe a feature in chat → finalize → a real `docs/brain/specs/{slug}.md` on a `claude/*` branch + a `queued` `agent_jobs` row.
+- Tap Build → the box worker implements it on **Max** (API console flat, Max usage moves) → CI-passing `claude/*` PR on `/dashboard/branches`.
+- A build that raises a question surfaces it on the phone; answering it resumes the same session and the build finishes.
 - Squash-merge from the phone. Spec phase emojis reflect reality throughout.
 
 ## Open questions
 
-- **Spec file delivery:** write straight to a `claude/*` branch from the authoring chat, or stage it as a `brain_doc_edit` todo first? (Leaning: branch directly — it's just a doc, low risk, and the build PR can amend it.)
-- **One routine or two:** extend `agent-todo-routine` with a `spec_build` branch (API key present → would need careful per-task auth handling) vs. a **separate build routine with no API key** (cleaner billing isolation). Leaning separate.
-- **Concurrency vs the daily run cap:** routines have a per-account daily run start cap — fine for occasional builds; revisit if Dylan fires many/day (then graduate to a self-hosted worker box with `CLAUDE_CODE_OAUTH_TOKEN`, swapping only the executor — UI/queue/PR layers unchanged).
-- **Build-progress streaming:** poll the todo row vs. a live stream. Poll is simplest for v1.
+- **Poll vs Realtime** for the worker: poll (simplest, a few-sec latency — fine for pickleball) vs Supabase Realtime (instant). Start with poll.
+- **Question UX surface:** board-card thread vs a dedicated chat panel vs PR comments. Leaning board-card thread (phone-first) + mirror to PR for the record.
+- **Structured-questions mechanism:** JSON-block convention (v1, zero infra) vs a `request_input` MCP tool (cleaner, later).
+- **Concurrency vs Max rate limits:** start at 1–2; measure before raising.
+- **`.git/config` token:** the clone embedded the token in the remote URL — acceptable on a locked box; consider a credential helper later.
 
 ## Related
 
-[[../lifecycles/agent-todo-system]] · [[../inngest/agent-todo-routine]] · [[../tables/agent_todos]] · [[../dashboard/branches]] · [[../dashboard/tickets__todos]] · [[../project-management]] · [[README]]
+[[repo-skills-catalog]] · [[../lifecycles/agent-todo-system]] · [[../tables/agent_todos]] · [[../dashboard/branches]] · [[../project-management]] · [[README]]

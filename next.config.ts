@@ -9,6 +9,12 @@ const nextConfig: NextConfig = {
   // Inngest render step dynamic-imports it to call AWS Lambda. Without this the
   // function throws "Cannot find package '@remotion/lambda'" at runtime.
   serverExternalPackages: ["@remotion/lambda", "@remotion/lambda-client"],
+  // The /dashboard/roadmap server component reads docs/brain/specs (+ lifecycles) at
+  // request time. Vercel's file tracer prunes files nothing imports, so include the
+  // brain markdown explicitly or the route renders empty on its own data in production.
+  outputFileTracingIncludes: {
+    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md"],
+  },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>
   // bloated to 162 KB, pushing the hero <img> from byte ~5K to byte
