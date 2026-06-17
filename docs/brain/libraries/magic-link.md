@@ -34,7 +34,9 @@ async function generateMagicLinkURL(customerId: string, shopifyCustomerId: strin
 
 ## Callers
 
-- `src/app/api/portal/magic-login/route.ts`
+- `src/app/api/portal/magic-login/route.ts` — verifies the token, sets the session cookie.
+- `src/lib/portal/handlers/sso.ts` — Shopify App-Proxy SSO mints `generateMagicLinkURL` from the verified `logged_in_customer_id` and 302s into the portal. See [[portal__handlers__sso]].
+- `src/lib/inngest/*` payment-recovery — `generatePaymentRecoveryLink` (7-day token → `/payment-methods?recover=1`).
 
 ## Gotchas
 

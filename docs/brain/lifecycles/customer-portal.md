@@ -107,6 +107,23 @@ Every portal action logs to [[../tables/customer_events]] (event_type `portal.su
 
 Per [[../operational-rules]] § Identifier discipline in URLs, customer URLs always use the **internal UUID**, never the Shopify customer ID — saved portal links survive the Shopify cutover.
 
+## Shopify → portal SSO (account-drawer handoff)
+
+The Shopify theme is moving its "My Account" surface off the Shopify extension and onto the in-house portal. The theme account drawer (`snippets/account-drawer.liquid`) branches in Liquid on `{% if customer %}`:
+
+- **Logged in →** one CTA to the App Proxy `/apps/portal-v2?route=sso`. The [[../libraries/portal__handlers__sso]] handler reads Shopify's HMAC-verified `logged_in_customer_id`, mints a signed magic-link ([[../libraries/magic-link]]), and 302s the customer into `portal.superfoodscompany.com` already authenticated — **no second login.** Identity is App-Proxy-verified only (never a client-supplied id), so the link can't be forged into account takeover.
+- **Logged out →** straight to the bare portal, where they sign in (the login page has a chat widget for anyone stuck — see below).
+
+Below the CTA the drawer shows a "what you can do" showcase (subscriptions, orders, rewards, payment, help center, support) to make the portal inviting. Replaces the old two-link (Orders + Subscriptions) drawer.
+
+## Login-page chat widget
+
+The portal **login page only** mounts the same anonymous live-chat widget the storefront + KB mini-site use (`ChatOverlay` → `/widget/{workspaceId}`), gated on `widget_enabled` + `chat_ticket_creation`. It helps people who can't log in (wrong email, no code received) reach a human/AI without being locked out. The authenticated portal does NOT mount it — the Support section already covers logged-in help.
+
+## Help Center section
+
+A "Help Center" sidebar item (`_sections/HelpCenterSection.tsx`) surfaces all published KB articles in-portal, searchable, without leaving. Reuses the public help APIs: list via `GET /api/help/{help_slug}?search=` (title+content ilike), inline reader via `GET /api/widget/{workspaceId}/articles/{id}` (`content_html` in a `prose` wrapper). `help` is whitelisted in the middleware `PORTAL_SECTIONS` set for a clean `/help` URL. Distinct from **Support** (ticket submission) and **Resources** (blog product guides).
+
 ## Cancel → journey, not hard cancel
 
 When a customer clicks "Cancel subscription" in the portal, the handler does NOT hard-cancel. Instead it triggers the cancel journey ([[cancel-flow]]) — AI-selected remedies, social proof, save offers. Only if the customer completes the journey saying "still cancel" does the actual cancel fire via Appstle's DELETE endpoint with `cancellationFeedback`.
@@ -114,6 +131,8 @@ When a customer clicks "Cancel subscription" in the portal, the handler does NOT
 ## Status / open work
 
 **Shipped:** Both surfaces (Shopify extension + in-house mini-site). All listed handlers wired. Cancel-via-journey. Loyalty redeem + apply. Coupon validation. Address + frequency + line-item mutations. Payment method update with Appstle → internal migration on card change. Identity linking. Event log + internal ticket notes.
+
+**In flight ([[../specs/portal-account-handoff-and-help-center]]):** Shopify→portal SSO (`route=sso` handler), drawer redesign (1 CTA + showcase), login-page chat widget, Help Center sidebar section. App-side code complete + typechecked on branch `worktree-portal-account-handoff`. Theme drawer committed to theme-repo branch `account-portal-drawer` — **pending preview-theme review + Dylan sign-off before promotion to `master` (live).** SSO route must be deployed to production (the App Proxy is fixed to `shopcx.ai/api/portal`) for the drawer CTA to resolve.
 
 **Known gaps / not yet shipped:** None identified.
 
@@ -131,6 +150,9 @@ When a customer clicks "Cancel subscription" in the portal, the handler does NOT
 | `src/app/api/portal/route.ts` | Main API entry, dispatches to handlers |
 | `src/lib/portal/auth.ts` | HMAC verification + workspace resolution |
 | `src/lib/portal/handlers/*` | Per-action handlers (one per route name) |
+| `src/lib/portal/handlers/sso.ts` | Shopify App-Proxy → magic-link 302 SSO ([[../libraries/portal__handlers__sso]]) |
+| `src/app/portal/[slug]/_sections/HelpCenterSection.tsx` | In-portal searchable KB browser |
+| `src/app/portal/[slug]/login/LoginClient.tsx` | Login form + login-help chat widget |
 | `src/lib/portal/helpers.ts` | Response helpers, event logging, Appstle error handling |
 | `src/app/api/portal/otp/*` | OTP start / verify / resend for the mini-site |
 | `src/app/api/portal/magic-login/route.ts` | Magic-link auth |

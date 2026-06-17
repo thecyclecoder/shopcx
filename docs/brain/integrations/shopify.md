@@ -34,7 +34,7 @@ Scopes: see `SHOPIFY_SCOPES` in `src/lib/shopify.ts` — read_all_orders, write_
 | Bulk Operations | GraphQL `bulkOperationRunQuery` | Customer + order + product imports (free, async). `startBulkOperation()` / `pollBulkOperation()`. |
 | REST Admin | `https://{shop}.myshopify.com/admin/api/{version}/...` | Rarely — used when GraphQL is missing the surface. |
 | Storefront API | `https://{shop}.myshopify.com/api/{version}/graphql.json` | Public-side cart bridge for landing pages (Storefront access token). |
-| App Proxy | `https://shopcx.ai/api/portal` | Shopify forwards customer portal requests, HMAC-signed. `SHOPIFY_APP_PROXY_SECRET` env. |
+| App Proxy | `https://shopcx.ai/api/portal` | Shopify forwards customer portal requests (subpath `portal-v2`, prefix `apps` → storefront `/apps/portal-v2`), HMAC-signed. `SHOPIFY_APP_PROXY_SECRET` env. Sub-actions are **query params** (`?route=…`), not path tails. `?route=sso` → storefront→portal SSO: the theme account drawer links to `/apps/portal-v2?route=sso`, the [[../libraries/portal__handlers__sso]] handler mints a magic-link from the verified `logged_in_customer_id` and 302s into `portal.superfoodscompany.com` already logged in. |
 | Multipass | `https://{shop}.myshopify.com/account/login/multipass/...` | SSO for customer portal. Uses `shopify_multipass_secret_encrypted`. |
 
 Common mutations used:

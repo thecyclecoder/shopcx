@@ -34,6 +34,7 @@ import { OrdersSection } from "./_sections/OrdersSection";
 import { RewardsSection } from "./_sections/RewardsSection";
 import { HomeSection } from "./_sections/HomeSection";
 import { ResourcesSection } from "./_sections/ResourcesSection";
+import { HelpCenterSection } from "./_sections/HelpCenterSection";
 import { SupportSection } from "./_sections/SupportSection";
 import { PaymentMethodsSection } from "./_sections/PaymentMethodsSection";
 import { SubscriptionDetailScreen } from "./_sections/SubscriptionDetailScreen";
@@ -64,7 +65,7 @@ interface Props {
   orders: PortalOrder[];
 }
 
-type SectionId = "home" | "subscriptions" | "orders" | "rewards" | "payment_methods" | "support" | "account" | "resources";
+type SectionId = "home" | "subscriptions" | "orders" | "rewards" | "payment_methods" | "support" | "help" | "account" | "resources";
 
 // Each section's URL-bar slug. We rewrite these in middleware so the
 // customer never sees the /portal/{slug} prefix.
@@ -75,6 +76,7 @@ const SECTION_PATHS: Record<SectionId, string> = {
   rewards: "/rewards",
   payment_methods: "/payment-methods",
   support: "/support",
+  help: "/help",
   account: "/account",
   resources: "/resources",
 };
@@ -86,6 +88,7 @@ const NAV_ITEMS: Array<{ id: SectionId; label: string; icon: string }> = [
   { id: "rewards", label: "Rewards", icon: "M20 12v9H4v-9M2 7h20v5H2V7zm10 0v14m0-14C12 4 9 2 7.5 3.5S6 7 12 7zm0 0c0-3 3-5 4.5-3.5S18 7 12 7z" },
   { id: "payment_methods", label: "Payment Methods", icon: "M2 5a2 2 0 012-2h16a2 2 0 012 2v14a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm0 4h20m-14 4h6m-6 3h4" },
   { id: "support", label: "Support", icon: "M12 2a10 10 0 100 20 10 10 0 000-20zm-1 14h2v2h-2v-2zm0-10h2v8h-2V6z" },
+  { id: "help", label: "Help Center", icon: "M12 2a10 10 0 100 20 10 10 0 000-20zm0 16a1.25 1.25 0 110-2.5A1.25 1.25 0 0112 18zm1.6-6.1c-.6.4-.85.65-.85 1.35v.25h-1.5v-.4c0-1.1.5-1.7 1.2-2.15.55-.35.8-.6.8-1.1 0-.6-.5-1-1.2-1-.65 0-1.2.4-1.4 1.05l-1.4-.5C9.3 6.85 10.4 6 12 6c1.65 0 2.9.95 2.9 2.45 0 1.05-.55 1.7-1.3 2.15z" },
   { id: "resources", label: "Resources", icon: "M4 6h16v12H4V6zm2 2v8h12V8H6zm2 2h8v1H8v-1zm0 3h8v1H8v-1z" },
   { id: "account", label: "Account", icon: "M12 12a5 5 0 100-10 5 5 0 000 10zM2 22a10 10 0 0120 0H2z" },
 ];
@@ -266,6 +269,13 @@ export default function PortalClient(props: Props) {
           )}
           {section === "support" && (
             <SupportSection primaryColor={props.workspace.primaryColor} />
+          )}
+          {section === "help" && (
+            <HelpCenterSection
+              helpSlug={props.slug}
+              workspaceId={props.workspace.id}
+              primaryColor={props.workspace.primaryColor}
+            />
           )}
           {section === "resources" && (
             <ResourcesSection primaryColor={props.workspace.primaryColor} />

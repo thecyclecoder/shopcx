@@ -2,18 +2,69 @@
 
 import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import { ChatOverlay } from "@/app/(storefront)/_components/ChatOverlay";
 
 interface Props {
   logoUrl: string;
   primaryColor: string;
   brandName: string;
+  /** Workspace UUID — mounts the login-help chat widget when chatEnabled. */
+  workspaceId?: string;
+  /** Whether the anonymous live-chat widget should show on this login page. */
+  chatEnabled?: boolean;
 }
 
 export default function LoginClient(props: Props) {
   return (
     <Suspense fallback={<div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center" }}><p style={{ color: "#6b7280" }}>Loading...</p></div>}>
       <PortalLogin {...props} />
+      {props.chatEnabled && props.workspaceId && (
+        <LoginChat workspaceId={props.workspaceId} primaryColor={props.primaryColor} />
+      )}
     </Suspense>
+  );
+}
+
+/**
+ * Login-help chat launcher. A fixed bubble that opens the SAME widget the
+ * storefront + KB mini-site use (ChatOverlay → /widget/{workspaceId}). Anonymous
+ * — the visitor isn't logged in yet; the whole point is to help someone who
+ * can't get in. Rendered only on the login page (not inside the authenticated
+ * portal, where the Support section already covers help).
+ */
+function LoginChat({ workspaceId, primaryColor }: { workspaceId: string; primaryColor: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      {!open && (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-label="Need help logging in? Chat with us"
+          style={{
+            position: "fixed", right: 20, bottom: 20, zIndex: 50,
+            display: "flex", alignItems: "center", gap: 8,
+            padding: "12px 18px", borderRadius: 9999, border: "none",
+            background: primaryColor, color: "#fff", fontSize: 14, fontWeight: 700,
+            cursor: "pointer", boxShadow: "0 6px 20px rgba(0,0,0,0.18)",
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />
+          </svg>
+          Need help?
+        </button>
+      )}
+      {open && (
+        <ChatOverlay
+          workspaceId={workspaceId}
+          productId=""
+          productHandle=""
+          productTitle=""
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
