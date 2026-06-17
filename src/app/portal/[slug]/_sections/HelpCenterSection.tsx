@@ -90,8 +90,38 @@ export function HelpCenterSection({
       general.push(a);
     }
   }
-  // Only products that actually have published articles, in the API's order.
-  const productCards = products.filter((p) => (byProduct.get(p.id)?.length ?? 0) > 0);
+  // Shared-line pooling: some product lines are unevenly classified — e.g. all
+  // generic "Ashwavana" FAQs landed on the Zen Relax variant, leaving Guru Focus
+  // empty even though the articles apply to both. Group products by brand token
+  // (first word of the title) and, ONLY when a group has both an empty member and
+  // a populated one (the "incomplete line" signal), pool the group's articles so
+  // every variant shows them. Lines where each product has its own articles (e.g.
+  // Amazing Coffee vs Amazing Creamer) are left separate.
+  const brandToken = (t: string) => (t || "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  const groups = new Map<string, KbProduct[]>();
+  for (const p of products) {
+    const k = brandToken(p.title);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(p);
+  }
+  const effectiveByProduct = new Map<string, KbArticle[]>();
+  for (const members of groups.values()) {
+    const own = (p: KbProduct) => byProduct.get(p.id) ?? [];
+    const incompleteLine = members.length > 1
+      && members.some((p) => own(p).length === 0)
+      && members.some((p) => own(p).length > 0);
+    if (incompleteLine) {
+      const seen = new Set<string>();
+      const pooled: KbArticle[] = [];
+      for (const p of members) for (const a of own(p)) if (!seen.has(a.id)) { seen.add(a.id); pooled.push(a); }
+      for (const p of members) effectiveByProduct.set(p.id, pooled);
+    } else {
+      for (const p of members) effectiveByProduct.set(p.id, own(p));
+    }
+  }
+
+  // Only products that end up with articles (own or pooled), in the API's order.
+  const productCards = products.filter((p) => (effectiveByProduct.get(p.id)?.length ?? 0) > 0);
 
   const searchBar = (
     <div className="rounded-2xl border border-zinc-200 bg-white p-6">
@@ -125,7 +155,7 @@ export function HelpCenterSection({
 
   // ── Drill-in — one product's (or general) articles ──
   if (selected) {
-    const list = selected === GENERAL ? general : (byProduct.get(selected) ?? []);
+    const list = selected === GENERAL ? general : (effectiveByProduct.get(selected) ?? []);
     const title = selected === GENERAL ? "General" : (products.find((p) => p.id === selected)?.title ?? "Articles");
     return (
       <div className="space-y-4">
@@ -154,7 +184,7 @@ export function HelpCenterSection({
               key={p.id}
               title={p.title}
               imageUrl={p.image_url}
-              count={byProduct.get(p.id)!.length}
+              count={effectiveByProduct.get(p.id)!.length}
               onClick={() => setSelected(p.id)}
             />
           ))}
