@@ -28,7 +28,7 @@ export default async function PortalLoginPage({ params }: { params: Promise<{ sl
   const admin = createAdminClient();
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("id, name, portal_config, storefront_logo_url, storefront_primary_color")
+    .select("id, name, portal_config, storefront_logo_url, storefront_primary_color, widget_enabled, chat_ticket_creation")
     .eq("help_slug", slug)
     .single();
 
@@ -44,12 +44,18 @@ export default async function PortalLoginPage({ params }: { params: Promise<{ sl
     "#18181b";
   const brandName = (workspace?.name as string) || "";
 
+  // Live-chat widget on the login page ONLY — helps people who can't log in
+  // (wrong email, no code received). Anonymous widget; gated on the same
+  // workspace flags the storefront/KB embeds use.
+  const chatEnabled = !!workspace?.widget_enabled && !!workspace?.chat_ticket_creation;
+
   return (
     <LoginClient
-      workspaceId={(workspace?.id as string) || ""}
       logoUrl={logoUrl}
       primaryColor={primaryColor}
       brandName={brandName}
+      workspaceId={(workspace?.id as string) || ""}
+      chatEnabled={chatEnabled}
     />
   );
 }

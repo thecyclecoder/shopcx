@@ -74,6 +74,8 @@ import { braintreeClientToken } from "./braintree-client-token";
 export { braintreeClientToken } from "./braintree-client-token";
 import { setSubscriptionPaymentMethod } from "./set-subscription-payment-method";
 export { setSubscriptionPaymentMethod } from "./set-subscription-payment-method";
+import { sso } from "./sso";
+export { sso } from "./sso";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -163,4 +165,5 @@ export const routeMap: Record<string, RouteHandler> = {
   setSubscriptionPaymentMethod,
   setsubscriptionpaymentmethod: setSubscriptionPaymentMethod,
   set_subscription_payment_method: setSubscriptionPaymentMethod,
+  sso,
 };
