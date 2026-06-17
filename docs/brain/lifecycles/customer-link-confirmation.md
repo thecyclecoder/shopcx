@@ -30,7 +30,7 @@ Several signals propose a link:
 3. **Same default address** — bill+ship both match → propose link.
 4. **Shopify customer merge** — fires `customers/merge` webhook; auto-link.
 5. **Meta sender** — DM lands; we ask "is this you?" if email match exists.
-6. **Order-number search** — customer messages with an order # belonging to a different email → propose link.
+6. **Order-number search** — customer messages with an order # belonging to a different email → auto-link to the order's owner (Phase 2; resolves via Shopify when the order isn't synced locally).
 
 Each surface generates a *candidate* link; we always seek confirmation before committing high-impact actions on the back of it.
 
@@ -47,14 +47,18 @@ No customer confirmation needed — Shopify already authoritative.
 
 ## Phase 2 — message-driven auto-link
 
-When a customer sends a message and is unmatched, `src/lib/auto-link-customer-from-message.ts` runs:
+Before Sonnet runs, `src/lib/auto-link-customer-from-message.ts` scans the **last 10 inbound external messages** on the ticket (not just the latest — the identifier is often given a turn or two before we act on it) and links any identifier that resolves to a *different* customer profile in the same workspace. Wired as the `auto-link-from-inbound` step in [[../inngest/unified-ticket-handler]], on every customer inbound. Best-effort, never throws; the orchestrator runs regardless. Links commit **silently** — an explicit mention IS the confirmation (this is the auto-confirm path; the inline confirm in Phase 3 is for *candidate* links surfaced elsewhere, e.g. name-match journeys).
 
-1. Extract order numbers from the message via regex (e.g. `SC129467`).
-2. Look up [[../tables/orders]] by order_number. If found and its `customer_id` is different from the message-source customer → propose link.
-3. Extract email addresses; look up [[../tables/customers]] for each; propose links.
-4. Extract phone numbers; same lookup.
+Two identifier kinds:
 
-For each proposal, the orchestrator may auto-confirm (if the order number was unambiguous + the message strongly implies "this is me") or ask for inline confirmation.
+1. **Email** — extract addresses (our own + transactional domains filtered out), look up [[../tables/customers]] by email, link if found and not already in the same group.
+2. **Order number** — extract `SC######`-style names + bare numerics in an explicit "order #…" context, then resolve the order's **owner**:
+   - our [[../tables/orders]] by `order_number` (the Shopify order *name*, e.g. `SC132076`; the table has no `name` column — see [[../tables/orders]]), else
+   - **Shopify fallback** for unsynced orders: `orders(first:1, query:"name:…")` → read the order's email + customer; find the local profile by `shopify_customer_id`, then by email; if none exists, **create a minimal customer row** (upsert on `workspace_id,shopify_customer_id`, enriched by a later full sync) so there's a UUID to link.
+
+   Then link that owner to the ticket customer. The order number is authoritative when the customer misremembers which email they ordered under — ticket 23fe617c: wrote in from `lovethosebuysllc@gmail.com`, *guessed* `lovethosebuys@gmail.com` (no profile → `link_account_by_email` hard-failed and escalated), but order **#SC132076** actually belonged to `kzcosmetiks@gmail.com`. Only the order number resolved it.
+
+Linking before Sonnet runs lets `get_customer_account` return the merged set so the orchestrator routes straight to the right journey instead of asking an identity question the customer already answered. (Phone-number extraction is not implemented — emails + order numbers only.)
 
 ### Meta DM specifics (channel = meta_dm)
 
@@ -63,7 +67,7 @@ Meta delivers only a **page-scoped sender ID (PSID)** in the webhook — no emai
 1. **[[../tables/meta_sender_customer_links]] lookup** — if a confirmed binding exists for the PSID, use that `customer_id`. This is the only auto-link path for DMs.
 2. **Graph API name fetch** — using the recipient page's token from [[../tables/meta_pages]] (PSIDs are page-scoped; only the page that received the DM can resolve them). The returned first/last name is used for the ticket subject and the first-turn greeting; **it is NOT used to match a customer record**. Fuzzy name matching is unsafe for DMs because common names collide (multiple "Susan Smiths" in the customers table; picking one wrong is worse than admitting we don't know).
 3. **If no link** → the orchestrator asks for **email or order number** on the first reply. Account-related answers ("do I have a sub?", "where's my order?", LTV, loyalty, cancel) are gated until the customer provides one. General questions (product info, return policy, ingredients) can still be answered without a match. See sonnet_prompts rule `0d75ac46-4338-47f2-aba6-8235910f98e2` for the exact greeting template.
-4. **Customer's next message with email/order#** flows through Phase 2 above: `auto-link-customer-from-message.ts` extracts the identifier, looks up the customer record, proposes the link, and the orchestrator then runs with the matched `customer_id`.
+4. **Customer's next message with email/order#** flows through Phase 2 above: `auto-link-customer-from-message.ts` extracts the identifier, resolves the customer record (Shopify fallback for order numbers), links it, and the orchestrator then runs with the matched `customer_id`.
 
 Why: telling someone "you don't have a subscription" when they actually have a $3K LTV sub is a worse failure than a one-turn delay to verify identity. Verify-then-act is the right UX whenever the platform doesn't hand us a verified email.
 
