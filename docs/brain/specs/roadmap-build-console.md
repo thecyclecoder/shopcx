@@ -1,5 +1,7 @@
 # Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app ✅
 
+**Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
+
 > **🔒 CORE INVARIANTS**
 > 1. **Max-billing.** Builds run as `env -u ANTHROPIC_API_KEY claude -p …` on the build box. The box's shell env and repo `.env.local` must **never** expose `ANTHROPIC_API_KEY` — auth precedence would silently flip builds to metered API. Claude is authed to **Max** via `~/.claude` on the box (verified: headless `claude -p` runs with no API key present).
 > 2. **Box, not a routine.** A routine is itself a `claude` session (`CLAUDECODE=1`), so it can't spawn `claude -p` (nested-session guard). The **self-hosted box runs `claude` as the top-level process**, so `claude -p` is valid there. This is why the executor is a box + worker, not a Claude Code Routine.

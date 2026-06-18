@@ -18,7 +18,18 @@ Continuously find, test, and scale **winning static creative**, and kill losers 
 - **Loop:** source proven static concepts → drop into the **ideas bin** → produce variants → test → scale winners / cut losers → feed learnings back.
 - **Specs under this mandate:**
   - [[../specs/winning-static-creative-finder]] ⏳ — ingest winning static ads (competitor/library/our own top performers) into the ideas bin so we can make more killer statics.
+  - [[../specs/killer-statics]] ✅ — cold-50+ static archetypes, both formats.
   - _(future: auto-pause underperformers; variant generator; creative-performance scoring)_
+
+### Ad-matched landing pages
+Every ad has a scent-matched lander (advertorial / before-after) so paid traffic converts.
+- **Metric:** lander conversion rate by campaign; ad→lander scent-match coverage.
+- **Specs:** [[../specs/advertorial-landers]] ✅
+
+### Storefront CRO
+The storefront is a conversion surface — continuously lift PDP engagement and price-step conversion across the Amazing Coffee funnel.
+- **Metric:** PDP engagement, price-step conversion, sessions→subscription rate.
+- **Specs:** [[../specs/storefront-mvp]] ✅ · [[../specs/homepage-rebuild]] ✅ · [[../specs/checkout-customize-bypass]] ✅ · [[../specs/storefront-survey-chapter]] ⏳ · [[../specs/storefront-iteration-engine]] ⏳ (the perpetual-CRO engine itself).
 
 ## Owned / contributed goals
 

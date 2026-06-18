@@ -1,5 +1,7 @@
 # Automated Organic Social Scheduler ✅ (built — pending live config)
 
+**Owner:** [[../functions/cmo]] · **Parent:** Cmo mandate "Organic social"
+
 **Goal:** an always-on content engine that auto-plans and publishes organic **posts, reels, and stories** to the brand's Facebook + Instagram, on a rolling schedule, for **enhanced customer engagement** — plus a dashboard to see what's posted and what's queued.
 
 **Status (2026-06-10):** all five phases shipped + the season/promo layer. Trace: [[../lifecycles/social-scheduler]]. The engine is OFF until an operator opens **Marketing › Social**, picks target pages, and toggles it on (safe by default — `enabled=false`, no `target_meta_page_ids`). Remaining = validate Meta Insights response shapes against live posted data (Phase 5 parsing is defensive but unverified end-to-end).

@@ -1,5 +1,7 @@
 # Spec lifecycle + archival — verify → fold → archive → re-hydrate ⏳
 
+**Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
+
 Refine the spec lifecycle so shipped specs don't pile up in "Shipped" forever, and add a **Verified** gate distinct from Shipped. Today ✅ = built + deployed (the build pipeline stamps it); there's no signal for *"I tested it in production and it works."* This spec adds that gate + a clean archival flow, with **git as the immutable archive** and **re-hydration from the brain** so nothing is ever lost.
 
 **Business outcome:** the board stays honest — "Shipped" becomes a short, real to-do list ("live but not yet prod-verified"), and verified features retire into their permanent brain home (lifecycle/table/dashboard pages) instead of cluttering the board.

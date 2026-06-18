@@ -1,5 +1,7 @@
 # Appstle pricing heal + migration monitor ✅
 
+**Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity"
+
 > **Build status (2026-06-09): Phases 1–3 shipped.** Heal-on-touch gateway, smart migration (heal-by-migration), and the migration monitor (audit table + checklist + retry cron + `/dashboard/migrations`) are live. Resolved open questions: retry bound **N = 3** (10-min cron); dashboard at **`/dashboard/migrations`** (owner-only). **Remaining:** Phase 1b (consolidate stray direct fetches onto real wrappers) + the standalone integrity sweep — both ⏳ below. New code lives in [[../libraries/appstle-pricing]], [[../libraries/migration-audit]], [[../tables/migration_audits]].
 
 **Goal:** make every Appstle subscription structurally correct (a real `pricingPolicy` with base price + S&S cycle discount) before we ever act on it, migrate subs to internal with *provably correct* pricing, and **monitor that the post-payment-method actions (migration, cancel, immediate charge) happen flawlessly** — because the one thing we cannot lose is "free" renewal revenue.

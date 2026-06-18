@@ -66,6 +66,16 @@ function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
       {spec.summary && (
         <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{spec.summary}</p>
       )}
+      {(spec.owner || spec.parent) && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {spec.owner && (
+            <span className="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-300">
+              {spec.owner}
+            </span>
+          )}
+          {spec.parent && <span className="truncate text-[10px] text-zinc-400">↳ {spec.parent}</span>}
+        </div>
+      )}
       <CountPills counts={spec.counts} />
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 flex items-center justify-between gap-2">

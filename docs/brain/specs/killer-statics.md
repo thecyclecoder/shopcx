@@ -1,5 +1,7 @@
 # Killer statics — cold-50+ archetypes, both formats ✅
 
+**Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Static-ad optimization"
+
 Status: ✅ shipped 2026-06-18 (landing_url migration applied, seed campaigns + landers created, Remotion Lambda redeployed with the archetypes) · owner: Dylan · created 2026-06-15
 
 > **✅ Go-live completed 2026-06-18** — landing_url migration applied, `scripts/seed-killer-statics.ts` run, Remotion Lambda redeployed with the archetype components. Re-render the seeded campaigns (queued just before the redeploy) + optional Dylan design pass. Historical go-live checklist below; fold + delete this spec on the next housekeeping pass.

@@ -1,5 +1,7 @@
 # Checkout customize-bypass (straight PDP → checkout) ✅
 
+**Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
+
 Status: 🚧 built (pending live verify) · owner: Dylan · created 2026-06-16
 
 ## Context

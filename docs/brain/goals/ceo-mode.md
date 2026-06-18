@@ -1,6 +1,6 @@
 # CEO Mode
 
-**Outcome:** ShopCX runs in "CEO mode" — a standing executive team of specialist agents (CFO, Growth, CMO, Logistics, Customer Service) each watching their domain, reporting to a **CEO agent** that prioritizes under constraints and directs traffic. It continuously ingests the company's financial, inventory, ads, website, Amazon, and supplier data, reasons about the gap to our growth targets, and either **executes** low-risk moves or **recommends** the high-stakes ones — growing the **top line** (revenue) and **bottom line** (profit), with every action measured after it ships.
+**Outcome:** ShopCX runs in "CEO mode" — a standing executive team of specialist agents (CFO, Growth, CMO, Retention, Logistics, Customer Service) each watching their domain, reporting to a **CEO agent** that prioritizes under constraints and directs traffic. It continuously ingests the company's financial, inventory, ads, website, Amazon, and supplier data, reasons about the gap to our growth targets, and either **executes** low-risk moves or **recommends** the high-stakes ones — growing the **top line** (revenue) and **bottom line** (profit), with every action measured after it ships.
 
 **Success metric:** a weekly CEO brief that (a) reports top- and bottom-line vs. target from a single trusted source, (b) issues ranked, quantified moves ("raise SKU X price 8% → +$Y margin/mo; reorder SKU Z by date D"), and (c) shows whether *last* week's moves actually shifted the metric. North star: **enterprise value** (we are building toward a sellable company) = EBITDA × multiple + a defensible moat + clean books, with a non-negotiable monthly-profitability floor.
 
@@ -21,9 +21,12 @@
 |---|---|---|---|
 | **CFO** | P&L, margin, cash, LTV:CAC, unit economics | orders, Braintree, Avalara | COGS/supplier, metrics spine |
 | **Growth** | paid ads + landing-page CRO, CAC, ROAS | Meta + Google Ads, storefront analytics | LP experiment harness |
-| **CMO** | email/SMS/organic/blog/site, retention | Klaviyo, Twilio, social, [[../specs/auto-blog-generation\|auto-blog]] | content→revenue attribution |
+| **CMO** | email/SMS/organic/blog/site content | Klaviyo, Twilio, social, [[../specs/auto-blog-generation\|auto-blog]] | content→revenue attribution |
+| **Retention** | subscriptions, dunning, cancel-flow, win-back — keeping people subscribed | [[../tables/subscriptions]], [[../lifecycles/cancel-flow]], [[../lifecycles/dunning]] | churn modeling |
 | **Logistics** | inventory, 3PL, suppliers, stockouts | `product_variants` ([[../inngest/sync-inventory]]), Amplifier | supplier lead times, Amazon |
 | **CS Manager** | ticket volume, CSAT, churn, refund/return rate, the AI's own performance | tickets, analyses, CSAT | — (rich already) |
+
+Plus a non-business seat: **[[../functions/platform|Platform / Engineering]]** (the CTO-equivalent) owns the build system that ships every capability-gap spec the directors surface — see the two-lanes loop below.
 
 **The CEO is a prioritizer, not an aggregator.** Any director can find ten opportunities; the CEO decides **the few that matter this month**, arbitrates conflicts (CFO "cut spend" vs Growth "scale, CAC is under target") against the standing priorities, and says explicitly what we are *not* doing and why.
 
@@ -51,7 +54,7 @@ _Planner fills/refines this (Plan → propose tree → approve branches). Curren
 - **M0 — CEO constitution + report contract.** The decision doc + the director output schema. Cheap, foundational, first. ⏳
 - **M1 — Metrics spine + COGS.** Unified store the analysts read instead of 8 live APIs; COGS/landed-cost so margin is computable (CFO + Logistics depend on it). ⏳
 - **M2 — Growth Director (first director prototype).** Ads + landing-page CRO over Meta + Google (data we have) → ROAS/CAC moves, measurable week-over-week. Proves the director→CEO contract. ⏳
-- **M3 — Remaining directors** — CFO, CMO, Logistics, CS Manager (one spec each). ⏳
+- **M3 — Remaining directors** — CFO, CMO, Retention, Logistics, CS Manager (one spec each). ⏳
 - **M4 — CEO synthesizer.** Reads director reports + constitution → ranked brief + the two lanes + auto-exec/gate routing. ⏳
 - **M5 — Weekly brief delivery + measurement loop.** Attribute shipped moves to metric movement. ⏳
 - **M6 — Close remaining data gaps** surfaced along the way (Amazon integration, supplier lead times). ⏳

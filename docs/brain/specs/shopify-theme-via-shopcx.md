@@ -1,5 +1,7 @@
 # Shopify theme management via ShopCX (AI-driven, short-term)
 
+**Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Store tech / Shopify"
+
 **Goal:** let Dylan chat with Claude and have theme changes built + shipped to the live Shopify store through ShopCX — **Option A**: ShopCX writes to the theme's GitHub repo and Shopify's GitHub integration auto-deploys. Short-term bridge until the in-house storefront retires Shopify, so kept thin (tooling + scripts, no UI). First, **reconcile** the GitHub repo with manual live edits.
 
 Phase legend: ⏳ planned · 🚧 in progress · ✅ shipped
