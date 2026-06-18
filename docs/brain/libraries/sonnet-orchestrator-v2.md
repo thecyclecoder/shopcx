@@ -1,6 +1,6 @@
 # libraries/sonnet-orchestrator-v2
 
-The brain. Tool-use orchestrator that picks an action_type per inbound message. Loads on-demand data via tool calls (get_customer_account, get_returns, get_crisis_status, etc.). Returns a `SonnetDecision` JSON the action executor dispatches.
+The brain. Tool-use orchestrator that picks an action_type per inbound message. Loads on-demand data via tool calls (get_customer_account, get_returns, get_crisis_status, check_inventory, etc.). Returns a `SonnetDecision` JSON the action executor dispatches. Full tool catalog: [[../orchestrator-tools]].
 
 **File:** `src/lib/sonnet-orchestrator-v2.ts`
 
