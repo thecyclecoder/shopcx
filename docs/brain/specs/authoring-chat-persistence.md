@@ -35,4 +35,4 @@ The Roadmap authoring chat ([[../lifecycles/roadmap-build-console]] Phase 2) kee
 - Finalizing marks the session finalized and links its `spec_slug`.
 
 ## Related
-[[roadmap-build-console]] · [[authoring-chat-grounding]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../tables/agent_jobs]] · [[../project-management]]
+[[roadmap-build-console]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../tables/agent_jobs]] · [[../project-management]]
