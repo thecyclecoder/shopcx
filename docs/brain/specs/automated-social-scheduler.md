@@ -1,6 +1,6 @@
 # Automated Organic Social Scheduler ✅ (built — pending live config)
 
-**Owner:** [[../functions/cmo]] · **Parent:** Cmo mandate "Organic social"
+**Owner:** [[../functions/cmo]] · **Parent:** CMO mandate "Organic social"
 
 **Goal:** an always-on content engine that auto-plans and publishes organic **posts, reels, and stories** to the brand's Facebook + Instagram, on a rolling schedule, for **enhanced customer engagement** — plus a dashboard to see what's posted and what's queued.
 
