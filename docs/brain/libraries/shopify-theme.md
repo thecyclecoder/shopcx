@@ -16,7 +16,8 @@ GitHub repo is the **source of truth**; Shopify's GitHub integration auto-deploy
 | `listLiveThemeFiles(workspaceId, themeId)` | Every file of a theme via the Shopify theme-files GraphQL API (paginated). Text inline; binary as base64; large files fetched from the returned URL. |
 | `readThemeFile(target, path)` | One file's UTF-8 content from the connected branch (GitHub Contents API) — the source of truth. `null` on 404. |
 | `listRepoFiles(target)` | Map of `path → blob sha` for the branch tree (recursive). |
-| `commitThemeFiles(target, changes[], message)` | Atomic multi-file commit via the GitHub Git Data API (blobs → tree on `base_tree` → commit → ref). `{path, content}` / `{path, contentBase64}` / `{path, delete:true}`. Shopify auto-deploys it. |
+| `ensureBranch(target, fromBranch = "master")` | Idempotently create `target.branch` off `fromBranch` (no-op if it already exists). Enables **preview staging**: build on a side branch, connect a Shopify preview theme to it, then merge → `master` on approval. Added for the [[../recipes/edit-shopify-theme#preview-staging-a-big-change|homepage rebuild]]. |
+| `commitThemeFiles(target, changes[], message)` | Atomic multi-file commit via the GitHub Git Data API (blobs → tree on `base_tree` → commit → ref). `{path, content}` / `{path, contentBase64}` / `{path, delete:true}`. On the connected branch Shopify auto-deploys; on a side branch a connected preview theme picks it up. |
 | `verifyDeployed(workspaceId, expected[])` | Re-export from Shopify; confirm given paths match expected UTF-8 (post-commit sanity for liquid/text). |
 
 Types: `ThemeFile`, `FileChange`, `ThemeTarget`.
