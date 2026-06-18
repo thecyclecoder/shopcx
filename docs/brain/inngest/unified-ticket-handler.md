@@ -41,6 +41,13 @@ _None._
 - [[../tables/ticket_messages]]
 - [[../tables/tickets]]
 
+## Channel behavior
+
+Per-channel settings come from [[../tables/ai_channel_config]] (`channelCfg`) and `workspaces.response_delays` (`responseDelay`), both keyed by the ticket's `channel`.
+
+- **`portal`** (customer-portal "Support" sidebar, [[../libraries/portal__handlers__support]]) is treated **exactly like `chat`** for AI: it's in every `short` message array (clarify / macro / KB / journey lead-in / positive close → terse replies), gets HTML formatting in [[../libraries/playbook-executor]] / [[../libraries/workflow-executor]] (`useHtml`), and runs journeys/playbooks (it's not `social_comments`).
+- **Delivery differs from chat.** `chat` shows in the live widget and only emails on idle; `portal` **always emails** a threaded digest (latest message on top + external-only history) via [[../libraries/portal__thread-email]] — handled in `send()` (immediate) and [[deliver-pending-send]] (delayed). No live widget to fall back from.
+
 ## Tables read (not written)
 
 - [[../tables/ai_channel_config]]

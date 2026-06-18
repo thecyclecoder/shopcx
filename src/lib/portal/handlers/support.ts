@@ -1,6 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan, logPortalAction } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { inngest } from "@/lib/inngest/client";
 
 /**
  * Portal route: list the customer's support tickets.
@@ -199,6 +200,21 @@ export const supportReply: RouteHandler = async ({ auth, route, req }) => {
       .eq("id", payload.ticketId);
   }
 
+  // Kick the unified ticket handler. Inserting the message alone does
+  // NOT trigger it — the handler fires only on this Inngest event (there
+  // is no DB trigger on ticket_messages). Mirror the email/chat reply
+  // path so Sonnet/agent routing runs exactly the same way.
+  await inngest.send({
+    name: "ticket/inbound-message",
+    data: {
+      workspace_id: auth.workspaceId,
+      ticket_id: payload.ticketId,
+      message_body: body,
+      channel: ticket.channel || "portal",
+      is_new_ticket: false,
+    },
+  });
+
   await logPortalAction({
     workspaceId: auth.workspaceId, customerId: customer.id,
     eventType: "portal.support.reply_sent",
@@ -235,7 +251,7 @@ export const supportCreate: RouteHandler = async ({ auth, route, req }) => {
       workspace_id: auth.workspaceId,
       customer_id: customer.id,
       subject,
-      channel: "help_center",  // Portal-originated; treated the same as help-center widget
+      channel: "portal",  // Portal-originated; gets its own AI Agent Channel config (mirrors live chat)
       status: "open",
       last_customer_reply_at: new Date().toISOString(),
     })
@@ -252,6 +268,21 @@ export const supportCreate: RouteHandler = async ({ auth, route, req }) => {
     author_type: "customer",
     body,
     body_clean: body,
+  });
+
+  // Kick the unified ticket handler. Inserting the ticket + message does
+  // NOT trigger it — the handler fires only on this Inngest event (there
+  // is no DB trigger on ticket_messages). Without this, portal-created
+  // tickets sit untouched with no AI ever running on them.
+  await inngest.send({
+    name: "ticket/inbound-message",
+    data: {
+      workspace_id: auth.workspaceId,
+      ticket_id: ticket.id,
+      message_body: body,
+      channel: "portal",
+      is_new_ticket: true,
+    },
   });
 
   await logPortalAction({

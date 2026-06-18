@@ -10,6 +10,8 @@ Cron: scans `ticket_messages.pending_send_at <= now()` and actually sends the me
 - **Trigger:** cron `* * * * *`
 - **Concurrency:** `concurrency: [{ limit: 1 }]`
 
+**Per-channel delivery branches:** `email` → Resend reply; `chat` → mark sent, email only if customer idle ([[../libraries/delivery-channel]]); **`portal` → mark sent + always email a threaded digest via [[../libraries/portal__thread-email]]**; other channels → mark sent only. A newer inbound since the message was queued cancels the pending send.
+
 
 ## Downstream events sent
 

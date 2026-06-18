@@ -10,7 +10,7 @@ Per-(workspace, channel) AI agent settings — personality, confidence threshold
 |---|---|---|---|
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
-| `channel` | `text` | — |  |
+| `channel` | `text` | — | CHECK: `email`, `chat`, `sms`, `meta_dm`, `phone`, `help_center`, `social_comments`, `portal` |
 | `personality_id` | `uuid` | ✓ | → [[ai_personalities]].id |
 | `enabled` | `bool` | — | default: `false` |
 | `sandbox` | `bool` | — | default: `true` |

@@ -721,7 +721,7 @@ async function executeSubscriptionInquiry(admin: Admin, config: Record<string, u
   // ── No active subscriptions ──
   if (active.length === 0) {
     const channel = (ctx.ticket?.channel as string) || "email";
-    const useHtml = ["email", "chat", "help_center"].includes(channel);
+    const useHtml = ["email", "chat", "help_center", "portal"].includes(channel);
     let reply = "You don't currently have any active subscriptions.";
 
     const showPaused = paused.slice(0, 2);
@@ -842,7 +842,7 @@ async function executeSubscriptionInquirySingle(
   const totalSavings = totalMsrp - totalAfterDiscounts;
 
   const channel = (ctx.ticket?.channel as string) || "email";
-  const useHtml = ["email", "chat", "help_center"].includes(channel);
+  const useHtml = ["email", "chat", "help_center", "portal"].includes(channel);
   const fmt = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
   // Build canned subscription details card
@@ -976,7 +976,7 @@ async function executeAccountLogin(admin: Admin, config: Record<string, unknown>
 
   // Build response with the magic link
   const channel = (ctx.ticket?.channel as string) || "email";
-  const useHtml = ["email", "chat", "help_center"].includes(channel);
+  const useHtml = ["email", "chat", "help_center", "portal"].includes(channel);
 
   let reply: string;
   if (useHtml) {

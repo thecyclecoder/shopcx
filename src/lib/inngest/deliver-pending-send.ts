@@ -69,6 +69,18 @@ export const deliverPendingSends = inngest.createFunction(
           return;
         }
 
+        // Portal channel — always email: latest message on top + history.
+        if (ticket.channel === "portal") {
+          await admin.from("ticket_messages").update({ sent_at: new Date().toISOString(), pending_send_at: null }).eq("id", msg.id);
+          delivered++;
+          const { sendPortalThreadEmail } = await import("@/lib/portal/portal-thread-email");
+          const msgId = await sendPortalThreadEmail(admin, ticket.workspace_id, msg.ticket_id);
+          if (msgId) {
+            await admin.from("ticket_messages").update({ resend_email_id: msgId, email_status: "sent" }).eq("id", msg.id);
+          }
+          return;
+        }
+
         // Chat channel — check if customer is idle, send via email if so
         if (ticket.channel === "chat") {
           await admin.from("ticket_messages").update({ sent_at: new Date().toISOString(), pending_send_at: null }).eq("id", msg.id);

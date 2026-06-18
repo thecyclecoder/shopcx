@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-const CHANNELS = ["email", "chat", "sms", "meta_dm", "phone"];
+const CHANNELS = ["email", "chat", "sms", "meta_dm", "phone", "portal"];
 
 export async function GET(
   request: Request,

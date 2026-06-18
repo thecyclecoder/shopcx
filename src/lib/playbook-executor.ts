@@ -992,7 +992,7 @@ Reference hints they may use: order number, date ("April 4"), product name ("the
 
   // First time — show the order list and ask
   const channel = (ctx._channel as string) || "email";
-  const useHtml = ["email", "chat", "help_center"].includes(channel);
+  const useHtml = ["email", "chat", "help_center", "portal"].includes(channel);
 
   // We need admin + wsId to enrich variant titles, but they're not passed to this function
   // Use a simple fallback: load variant map inline if we can detect workspace from orders
@@ -1365,7 +1365,7 @@ async function handleApplyPolicy(
   const finalEvents = deduped;
 
   const channel = (ctx._channel as string) || "email";
-  const useHtml = ["email", "chat", "help_center"].includes(channel);
+  const useHtml = ["email", "chat", "help_center", "portal"].includes(channel);
 
   let timeline: string;
   if (useHtml) {

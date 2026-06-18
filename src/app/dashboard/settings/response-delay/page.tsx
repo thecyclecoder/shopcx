@@ -5,7 +5,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 
 export default function ResponseDelayPage() {
   const workspace = useWorkspace();
-  const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10, social_comments: 10 });
+  const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10, social_comments: 10, portal: 5 });
   const [skipForMembers, setSkipForMembers] = useState(false);
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -39,6 +39,7 @@ export default function ResponseDelayPage() {
     { key: "sms", label: "SMS" },
     { key: "meta_dm", label: "Social DMs" },
     { key: "social_comments", label: "Social Comments" },
+    { key: "portal", label: "Customer Portal" },
   ];
 
   if (loading) return <div className="p-6"><div className="animate-pulse h-40 bg-zinc-100 dark:bg-zinc-800 rounded-xl" /></div>;

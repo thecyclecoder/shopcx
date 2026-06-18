@@ -143,7 +143,7 @@ async function loadPersonality(admin: Admin, pid: string | null) {
 
 async function responseDelay(admin: Admin, wsId: string, ch: string, customerEmail?: string | null): Promise<number> {
   const { data } = await admin.from("workspaces").select("response_delays").eq("id", wsId).single();
-  const d = (data?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 }) as Record<string, unknown>;
+  const d = (data?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10, portal: 5 }) as Record<string, unknown>;
 
   // Skip delay for workspace members (debug/testing)
   if (d.skip_delay_for_members && customerEmail) {
@@ -208,14 +208,14 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
 }
 
 async function clarifyQ(msg: string, intent: string, conf: number, ch: string, p: { name?: string; tone?: string } | null) {
-  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const short = ["chat", "sms", "meta_dm", "portal"].includes(ch);
   const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
   return (await claude(`${persona} Never reveal AI. Customer: "${msg}". Guess: "${intent}" (${conf}%). Ask ONE clarifying question. ${short ? "Max 20 words." : "Max 30 words."} Only the question.`, "haiku", 80))
     || "Could you tell me a bit more about what you need help with?";
 }
 
 async function personalizeMacroText(content: string, ctx: string, msg: string, ch: string, p: { tone?: string } | null) {
-  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const short = ["chat", "sms", "meta_dm", "portal"].includes(ch);
   const hasLinks = content.includes("<a ");
   return (await claude(`Lightly personalize this response. Insert customer name and relevant details from context. Do NOT make it longer. ${p?.tone ? `Tone: ${p.tone}.` : ""} ${short ? "Very short." : ""}
 ${hasLinks ? "IMPORTANT: Preserve ALL <a href> HTML links exactly as they appear in the original. Include them in your output." : "No markdown."}
@@ -226,7 +226,7 @@ Only the personalized response, nothing else.`, "haiku", 800)) || content;
 }
 
 async function kbResponse(article: string, title: string, msg: string, ch: string, p: { tone?: string } | null) {
-  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const short = ["chat", "sms", "meta_dm", "portal"].includes(ch);
   return (await claude(`Answer using ONLY this KB article. Extract relevant answer. ${short ? "Max 2 sentences." : "Max 3-4 sentences."} No markdown. ${p?.tone ? `Tone: ${p.tone}.` : ""}
 Question: "${msg}"
 KB "${title}": ${article.slice(0, 1500)}
@@ -234,7 +234,7 @@ Only your response.`, "haiku", 500)) || article.slice(0, 500);
 }
 
 async function generateJourneyLeadIn(msg: string, journeyName: string, ch: string, p: { name?: string; tone?: string } | null): Promise<{ leadIn: string; ctaText: string }> {
-  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const short = ["chat", "sms", "meta_dm", "portal"].includes(ch);
   const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
   const raw = await claude(`${persona} Never reveal AI. Customer sent: "${msg}". You're helping them with "${journeyName}".
 
@@ -252,7 +252,7 @@ Return JSON: { "lead_in": "...", "cta_text": "..." }`, "haiku", 150);
 }
 
 async function generatePositiveClose(msg: string, ch: string, p: { name?: string; tone?: string; sign_off?: string | null } | null, autoCloseReply: string | null, ticketId?: string, workspaceId?: string): Promise<string> {
-  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const short = ["chat", "sms", "meta_dm", "portal"].includes(ch);
   const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
 
   // Detect whether this conversation involved a return / refund / cancellation
@@ -337,6 +337,20 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
           await logEmailSent({ workspaceId: wsId, resendEmailId: emailResult.messageId, recipientEmail: cust.email, subject: t?.subject || "Your request", ticketId: tid, customerId: t.customer_id });
         }
       }
+    }
+  }
+
+  // Portal: always email the customer — most recent message on top, then
+  // the conversation history below (external messages only). The portal
+  // UI shows the thread too, but the customer isn't necessarily watching
+  // it, so email is the guaranteed delivery.
+  if (ch === "portal") {
+    const { sendPortalThreadEmail } = await import("@/lib/portal/portal-thread-email");
+    const msgId = await sendPortalThreadEmail(admin, wsId, tid);
+    if (msgId) {
+      await admin.from("ticket_messages").update({ resend_email_id: msgId, email_status: "sent" })
+        .eq("ticket_id", tid).eq("direction", "outbound").is("resend_email_id", null)
+        .order("created_at", { ascending: false }).limit(1);
     }
   }
 
