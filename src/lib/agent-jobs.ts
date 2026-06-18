@@ -13,6 +13,7 @@ export type JobStatus =
   | "needs_approval"
   | "queued_resume"
   | "completed"
+  | "merged"
   | "failed"
   | "needs_attention";
 
@@ -75,4 +76,40 @@ export async function getLatestJobsBySlug(workspaceId: string): Promise<Record<s
     if (!map[j.spec_slug]) map[j.spec_slug] = j;
   }
   return map;
+}
+
+const GH_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
+function ghToken() {
+  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
+}
+
+/**
+ * Self-heal: a `completed` job whose PR was merged/closed OUTSIDE the dashboard (e.g. merged on
+ * GitHub directly) still shows a stale "Squash & merge" button. Check GitHub; if the PR is no
+ * longer open, flip the job to `merged` (mutates the passed jobs in place + persists).
+ */
+export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
+  const tok = ghToken();
+  if (!tok) return;
+  const stale = jobs.filter((j) => j.status === "completed" && j.pr_number);
+  if (!stale.length) return;
+  const admin = createAdminClient();
+  await Promise.all(
+    stale.map(async (j) => {
+      try {
+        const res = await fetch(`https://api.github.com/repos/${GH_REPO}/pulls/${j.pr_number}`, {
+          headers: { Authorization: `Bearer ${tok}`, Accept: "application/vnd.github+json" },
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const pr = (await res.json()) as { merged?: boolean; state?: string };
+        if (pr.merged || pr.state === "closed") {
+          j.status = "merged";
+          await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", j.id);
+        }
+      } catch {
+        /* transient — try again next load */
+      }
+    }),
+  );
 }
