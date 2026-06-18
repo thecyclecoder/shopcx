@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { marked } from "marked";
 import { getSpec, listSpecSlugs, type Phase } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestJobsBySlug } from "@/lib/agent-jobs";
+import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import StatusControl from "../StatusControl";
 import AuthoringChat from "../AuthoringChat";
 import BuildButton from "../BuildButton";
@@ -34,8 +34,11 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const [spec, specSlugs, workspaceId] = await Promise.all([getSpec(slug), listSpecSlugs(), getActiveWorkspaceId()]);
   if (!spec) notFound();
 
-  const jobsBySlug = workspaceId ? await getLatestJobsBySlug(workspaceId) : {};
+  const [jobsBySlug, folds] = workspaceId
+    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId)])
+    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>];
   const job = jobsBySlug[slug] ?? null;
+  const fold = folds[slug] ?? null;
 
   // Trusted internal content (our own brain markdown), owner-only page → marked → prose.
   const html = await marked.parse(preprocessWikilinks(spec.raw, specSlugs));
@@ -86,7 +89,7 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
             )}
 
             <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
-              <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} />
+              <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} initialFold={fold} />
             </div>
 
             {spec.card.phases.length > 0 && (

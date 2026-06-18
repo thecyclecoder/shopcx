@@ -33,7 +33,10 @@ const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN || "";
 const POLL_MS = 5000;
 const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
-const MAX_CONCURRENT = 5; // real ceiling is Max rate limits, not the box
+const MAX_CONCURRENT = 5; // build/plan pool — real ceiling is Max rate limits, not the box
+// Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
+// index files (archive.md / README counts → now generated), so it must never race a feature build.
+const MAX_FOLD = 1;
 
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
 // A planner-proposed spec branch, carried on a type:'spec' action (goal-decomposition-engine).
@@ -59,9 +62,9 @@ interface PendingAction {
 interface Job {
   id: string;
   workspace_id: string;
-  spec_slug: string; // for kind='plan' this is the GOAL slug
+  spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan";
+  kind: "build" | "plan" | "fold";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -173,13 +176,13 @@ async function gh(method: string, path: string, body?: unknown) {
   return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
 }
 
-async function ensurePr(branch: string, title: string, draft: boolean): Promise<{ url: string; number: number } | null> {
+async function ensurePr(branch: string, title: string, draft: boolean, body?: string): Promise<{ url: string; number: number } | null> {
   const owner = REPO.split("/")[0];
   const created = await gh("POST", `/repos/${REPO}/pulls`, {
     title,
     head: branch,
     base: "main",
-    body: `Automated build of \`docs/brain/specs/${title}\` by the box worker. ${draft ? "**Draft — has open questions.**" : ""}`,
+    body: body ?? `Automated build of \`docs/brain/specs/${title}\` by the box worker. ${draft ? "**Draft — has open questions.**" : ""}`,
     draft,
   });
   if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number };
@@ -448,8 +451,156 @@ async function runPlanJob(job: Job) {
   }
 }
 
+// ── Batch fold-build (fold-build-batching) ──────────────────────────────────
+// A kind='fold' job folds EVERY pending-fold spec for its workspace into the brain in ONE branch/PR
+// (instead of one build per spec). Runs in the concurrency-1 fold lane so it never races a feature
+// build on the (now generated) index files. Each fold writes a per-spec docs/brain/archive.d/{slug}.md
+// and runs scripts/brain-index.mjs to regenerate archive.md + README counts — no contended hand-edits.
+
+async function setFoldRows(jobId: string, from: string, patch: Record<string, unknown>) {
+  await db.from("pending_folds").update({ ...patch, updated_at: new Date().toISOString() }).eq("job_id", jobId).eq("status", from);
+}
+
+function foldBatchPrompt(slugs: string[]): string {
+  const slugList = slugs.map((s) => `- docs/brain/specs/${s}.md`).join("\n");
+  return [
+    `BATCH FOLD-BUILD — fold these owner-verified, shipped specs into the brain and retire them, all in ONE branch. The owner has confirmed each works in production. This is DOCS-ONLY: do NOT rebuild or change any product code.`,
+    ``,
+    `Specs to fold:`,
+    slugList,
+    ``,
+    `For EACH spec above, follow docs/brain/project-management.md "Folding a shipped spec into the brain":`,
+    `1. Confirm the spec's durable knowledge is already folded into its permanent brain homes (the relevant lifecycles/ table(s)/ libraries/ inngest/ integrations/ dashboard/ recipes/ pages, each with a "Status / open work" block where applicable). If anything is missing, fold it now and cross-link it (3-5 wikilinks, linked FROM at least one existing page).`,
+    `2. Create docs/brain/archive.d/{slug}.md containing EXACTLY ONE line — the per-spec archive entry. archive.md is GENERATED from this directory, so NEVER hand-edit docs/brain/archive.md. Use exactly this shape:`,
+    `     - **<the spec's real title>** · verified <today's date — run \`date +%F\`> · → [[lifecycles/<the feature's primary lifecycle or brain home slug>]]`,
+    `3. \`git rm docs/brain/specs/{slug}.md\` — git history is the immutable archive; a deleted spec is always \`git show\`-recoverable.`,
+    ``,
+    `Then ONCE for the whole batch:`,
+    `4. Run \`node scripts/brain-index.mjs\` — it regenerates docs/brain/archive.md's Index from docs/brain/archive.d/ and refreshes docs/brain/README.md's folder counts. Do NOT hand-edit archive.md or the README count lines.`,
+    `5. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
+    ``,
+    `If you cannot determine where a spec's knowledge belongs (no obvious lifecycle/brain home), do NOT guess: still fold the others, and surface that one as a needs_input question naming the slug.`,
+    ``,
+    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control); \`git rm\` to stage spec deletions is fine. Final message = ONLY one JSON object: {"status":"completed","summary":"folded N specs: …"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
+  ].join("\n");
+}
+
+async function runFoldJob(job: Job) {
+  const isResume = !!job.claude_session_id;
+  const tag = `[fold:${job.id.slice(0, 8)}]`;
+  const wt = join(BUILDS_DIR, job.id);
+
+  // Snapshot the batch. Fresh run: atomically claim every 'pending' spec for this workspace → 'folding'
+  // bound to this job (specs verified after this point ride the NEXT queued fold job). Resume: re-read
+  // the specs already bound to this job.
+  let slugs: string[];
+  if (isResume) {
+    const { data } = await db.from("pending_folds").select("spec_slug").eq("job_id", job.id).eq("status", "folding");
+    slugs = ((data ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug);
+  } else {
+    const { data } = await db
+      .from("pending_folds")
+      .update({ status: "folding", job_id: job.id, updated_at: new Date().toISOString() })
+      .eq("workspace_id", job.workspace_id)
+      .eq("status", "pending")
+      .select("spec_slug");
+    slugs = ((data ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug);
+  }
+  console.log(`${tag} ${isResume ? "resuming" : "folding"} ${slugs.length} spec(s): ${slugs.join(", ") || "(none)"}`);
+  if (!slugs.length) {
+    await update(job.id, { status: "completed", log_tail: "no pending-fold specs; nothing to fold" });
+    return;
+  }
+
+  sh("git", ["fetch", "origin"]);
+  let branch = job.spec_branch;
+  sh("git", ["worktree", "remove", "--force", wt]);
+  if (!isResume) {
+    branch = `claude/fold-${Date.now().toString(36)}`;
+    const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
+    if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
+    await update(job.id, { spec_branch: branch });
+  } else {
+    let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
+    if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]);
+    if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
+  }
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  try {
+    const prompt = isResume
+      ? `${(job.answers || []).length ? `Answers to your questions: ${JSON.stringify(job.answers)}. ` : ""}Continue the batch fold-build for specs: ${slugs.join(", ")}. Same rules and the same final JSON output protocol as before.`
+      : foldBatchPrompt(slugs);
+
+    const { session, resultText, isError, raw } = await runClaude(prompt, job.claude_session_id, wt);
+    const logTail = raw.slice(-2000);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = parseStatus(resultText);
+    console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    const prBody = `Batch fold-build by the box worker — folds ${slugs.length} owner-verified spec(s) into the brain and retires them:\n${slugs.map((s) => `- \`${s}\``).join("\n")}\n\narchive.md + README counts regenerated via \`scripts/brain-index.mjs\`. See docs/brain/specs/fold-build-batching.md.`;
+
+    if (parsed?.status === "needs_input") {
+      if (sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()) {
+        sh("git", ["add", "-A"], { cwd: wt });
+        sh("git", ["commit", "-m", `wip: fold-batch (needs input)`], { cwd: wt });
+        sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+      }
+      const pr = await ensurePr(branch!, "fold-batch", true, prBody);
+      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      return; // specs stay 'folding' bound to this job → re-read on resume
+    }
+
+    if (isError && !parsed) {
+      await setFoldRows(job.id, "folding", { status: "pending", job_id: null }); // release for the next batch
+      await update(job.id, { status: "failed", error: "claude run errored", log_tail: logTail });
+      return;
+    }
+
+    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    if (tsc.code !== 0) {
+      await setFoldRows(job.id, "folding", { status: "pending", job_id: null });
+      await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
+      return;
+    }
+
+    const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
+    if (!dirty) {
+      // Nothing changed — likely already folded. Treat as done so specs don't loop.
+      await setFoldRows(job.id, "folding", { status: "folded" });
+      await update(job.id, { status: "completed", log_tail: "no file changes; specs already folded" });
+      return;
+    }
+    sh("git", ["add", "-A"], { cwd: wt });
+    const commit = sh("git", ["commit", "-m", `fold: ${slugs.length} spec(s)\n\n${slugs.join(", ")}`], { cwd: wt });
+    if (commit.code !== 0) {
+      await setFoldRows(job.id, "folding", { status: "pending", job_id: null });
+      await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
+      return;
+    }
+    const push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+    if (push.code !== 0) {
+      await setFoldRows(job.id, "folding", { status: "pending", job_id: null });
+      await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
+      return;
+    }
+    const pr = await ensurePr(branch!, "fold-batch", false, prBody);
+    if (!pr) {
+      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
+      return;
+    }
+    await markReady(pr.number);
+    await setFoldRows(job.id, "folding", { status: "folded" });
+    await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
+    console.log(`${tag} ✓ completed → ${pr.url}`);
+  } finally {
+    sh("git", ["worktree", "remove", "--force", wt]);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
+  if (job.kind === "fold") return runFoldJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -589,23 +740,39 @@ async function main() {
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO}, up to ${MAX_CONCURRENT} parallel builds, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold lane, polling every ${POLL_MS}ms`);
 
-  const active = new Map<string, Promise<void>>();
+  // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
+  // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
+  const active = new Map<string, "fold" | "other">();
+  const countOf = (k: "fold" | "other") => [...active.values()].filter((v) => v === k).length;
+  const launch = (job: Job) => {
+    active.set(job.id, job.kind === "fold" ? "fold" : "other");
+    runJob(job)
+      .catch(async (e) => {
+        console.error(`[${job.spec_slug}] failed:`, e);
+        await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+      })
+      .finally(() => active.delete(job.id));
+  };
+
   for (;;) {
     try {
-      while (active.size < MAX_CONCURRENT) {
-        const { data } = await db.rpc("claim_agent_job");
+      // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
+      while (countOf("fold") < MAX_FOLD) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
-        if (!job || !job.id) break; // queue empty
-        console.log(`claimed ${job.spec_slug} → ${active.size + 1}/${MAX_CONCURRENT} lanes`);
-        const p = runJob(job)
-          .catch(async (e) => {
-            console.error(`[${job.spec_slug}] failed:`, e);
-            await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
-          })
-          .finally(() => active.delete(job.id));
-        active.set(job.id, p);
+        if (!job || !job.id) break;
+        console.log(`claimed fold ${job.id.slice(0, 8)} → ${countOf("fold") + 1}/${MAX_FOLD} fold lane`);
+        launch(job);
+      }
+      // Fill the build/plan pool.
+      while (countOf("other") < MAX_CONCURRENT) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ${job.spec_slug} → ${countOf("other") + 1}/${MAX_CONCURRENT} build lanes`);
+        launch(job);
       }
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
-import type { AgentJob, JobStatus } from "@/lib/agent-jobs";
+import type { AgentJob, JobStatus, PendingFold } from "@/lib/agent-jobs";
 import type { Phase } from "@/lib/brain-roadmap";
 
 const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
@@ -33,9 +33,10 @@ const CHIP: Record<JobStatus, string> = {
   needs_attention: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
-export default function BuildButton({ slug, initialJob, specStatus }: { slug: string; initialJob: AgentJob | null; specStatus: Phase }) {
+export default function BuildButton({ slug, initialJob, specStatus, initialFold }: { slug: string; initialJob: AgentJob | null; specStatus: Phase; initialFold?: PendingFold | null }) {
   const workspace = useWorkspace();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
+  const [fold, setFold] = useState<PendingFold | null>(initialFold ?? null);
   const [busy, setBusy] = useState(false);
   const [showAnswers, setShowAnswers] = useState(false);
   const [answerMap, setAnswerMap] = useState<Record<string, string>>({});
@@ -53,20 +54,28 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
   const poll = useCallback(async () => {
     try {
       const res = await fetch(`/api/roadmap/build?slug=${encodeURIComponent(slug)}`);
-      if (res.ok) setJob((await res.json()).job);
+      if (res.ok) {
+        const d = await res.json();
+        setJob(d.job);
+        setFold(d.fold ?? null);
+      }
     } catch {
       /* transient — keep polling */
     }
   }, [slug]);
 
-  // Poll while the job is live; stop on a terminal status.
+  // A pending/folding spec is being retired by a batch fold-build (fold-build-batching) — its own build
+  // job no longer maps 1:1 to a PR, so show "Folding…" and keep polling until the fold row clears.
+  const folding = !!fold && (fold.status === "pending" || fold.status === "folding");
+
+  // Poll while the job is live OR a fold is in flight; stop on a terminal state.
   useEffect(() => {
-    if (!job || !ACTIVE.includes(job.status)) return;
+    if (!(job && ACTIVE.includes(job.status)) && !folding) return;
     timer.current = setInterval(poll, 4000);
     return () => {
       if (timer.current) clearInterval(timer.current);
     };
-  }, [job, poll]);
+  }, [job, folding, poll]);
 
   const active = !!job && ACTIVE.includes(job.status);
 
@@ -186,7 +195,8 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
       });
       const d = await res.json();
       if (d.job) {
-        setJob(d.job);
+        // Verify coalesces into a batch fold job — flip to "Folding…" immediately; poll refreshes it.
+        setFold({ spec_slug: slug, status: "pending", job_id: d.job.id ?? null, foldJob: d.job });
         setConfirmVerify(false);
       }
     } finally {
@@ -197,14 +207,34 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
   const needsInput = job?.status === "needs_input";
   const needsApproval = job?.status === "needs_approval";
   const canMerge = !!job?.pr_number && job.status === "completed" && !merged;
-  // Verify is the owner-only "I tested it in prod" gate, offered only on shipped specs with no live build.
-  const canVerify = specStatus === "shipped" && !active && !merged;
+  // Verify is the owner-only "I tested it in prod" gate, offered only on shipped specs with no live build
+  // and not already in a fold batch.
+  const canVerify = specStatus === "shipped" && !active && !merged && !folding;
+  const foldPrLink = fold?.foldJob?.pr_url ? (
+    <a href={fold.foldJob.pr_url} target="_blank" rel="noreferrer" className="text-[11px] text-teal-600 hover:underline">
+      fold PR ↗
+    </a>
+  ) : null;
 
   return (
     <div className="w-full">
       <div className="flex items-center justify-end gap-2">
-        {chip}
-        {prLink}
+        {folding ? (
+          <>
+            <span
+              className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+              title="Verified — being retired into the brain by a batch fold-build (one PR folds all verified specs)"
+            >
+              Folding…
+            </span>
+            {foldPrLink}
+          </>
+        ) : (
+          <>
+            {chip}
+            {prLink}
+          </>
+        )}
         {merged && <span className="text-[11px] text-emerald-600">merged ✓</span>}
         {canMerge && (
           <button

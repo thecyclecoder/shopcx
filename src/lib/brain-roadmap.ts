@@ -44,6 +44,7 @@ export interface RoadmapData {
 
 const SPECS_DIR = path.join(process.cwd(), "docs", "brain", "specs");
 const ARCHIVE_FILE = path.join(process.cwd(), "docs", "brain", "archive.md");
+const ARCHIVE_DIR = path.join(process.cwd(), "docs", "brain", "archive.d");
 
 const PLANNED = "⏳";
 const IN_PROGRESS = "🚧";
@@ -306,13 +307,48 @@ export interface ArchiveEntry {
   label: string; // display label for the link (last path segment, humanized)
 }
 
+/** Parse one archive entry list item ("- **Title** · verified YYYY-MM-DD · → [[link]]") → entry, or null. */
+function parseArchiveLine(line: string): ArchiveEntry | null {
+  const t = line.trim();
+  if (!t.startsWith("- ")) return null;
+  const link = t.match(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/);
+  if (!link) return null; // index rows always carry a wikilink; prose/placeholder don't
+  const target = link[1].trim().replace(/^\.\.\//, "").replace(/\.md$/, "");
+  const date = (t.match(/verified\s+(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
+  const titleM = t.match(/\*\*(.+?)\*\*/);
+  const title = titleM ? cleanInline(titleM[1]) : cleanInline(t.slice(2).split("·")[0]);
+  const label = functionLabel(target.replace(/^.*\//, "")); // humanize last segment
+  return { title, date, link: target, label };
+}
+
 /**
- * Parse archive.md's index list. Each verified feature is one list item shaped
+ * Verified/retired features for the board's Archived section. Each is one entry shaped
  *   - **Title** · verified YYYY-MM-DD · → [[lifecycles/{slug}]]
- * The fold-build appends these on verify (see docs/brain/project-management.md). Newest first
- * (file order is authored newest-first). Tolerant: skips the "No features archived yet." placeholder.
+ * Source of truth is docs/brain/archive.d/{slug}.md (one file per spec, fold-build-batching Phase 3):
+ * read those directly so two parallel folds never collide on a shared file. Falls back to the
+ * generated docs/brain/archive.md (e.g. if archive.d/ isn't bundled). Newest first, tie-broken by slug.
  */
 export async function getArchive(): Promise<ArchiveEntry[]> {
+  try {
+    const files = (await fs.readdir(ARCHIVE_DIR)).filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md");
+    if (files.length) {
+      const parsed = await Promise.all(
+        files.map(async (f) => {
+          const raw = await fs.readFile(path.join(ARCHIVE_DIR, f), "utf8");
+          const line = raw.split("\n").find((l) => l.trim().startsWith("- "));
+          const entry = line ? parseArchiveLine(line) : null;
+          return entry ? { slug: f.replace(/\.md$/, ""), entry } : null;
+        }),
+      );
+      const entries = parsed.filter((x): x is { slug: string; entry: ArchiveEntry } => x !== null);
+      if (entries.length) {
+        entries.sort((a, b) => b.entry.date.localeCompare(a.entry.date) || a.slug.localeCompare(b.slug));
+        return entries.map((e) => e.entry);
+      }
+    }
+  } catch {
+    /* no archive.d/ (or unreadable) — fall back to the generated archive.md */
+  }
   let raw: string;
   try {
     raw = await fs.readFile(ARCHIVE_FILE, "utf8");
@@ -321,16 +357,8 @@ export async function getArchive(): Promise<ArchiveEntry[]> {
   }
   const entries: ArchiveEntry[] = [];
   for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (!t.startsWith("- ")) continue;
-    const link = t.match(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/);
-    if (!link) continue; // index rows always carry a wikilink; prose/placeholder don't
-    const target = link[1].trim().replace(/^\.\.\//, "").replace(/\.md$/, "");
-    const date = (t.match(/verified\s+(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
-    const titleM = t.match(/\*\*(.+?)\*\*/);
-    const title = titleM ? cleanInline(titleM[1]) : cleanInline(t.slice(2).split("·")[0]);
-    const label = functionLabel(target.replace(/^.*\//, "")); // humanize last segment
-    entries.push({ title, date, link: target, label });
+    const entry = parseArchiveLine(line);
+    if (entry) entries.push(entry);
   }
   return entries;
 }

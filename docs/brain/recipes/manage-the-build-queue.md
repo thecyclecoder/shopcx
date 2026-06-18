@@ -28,5 +28,9 @@ ssh root@<box> 'systemctl start shopcx-builder'      # resume — worker drains 
 
 After any restart that killed in-flight builds, `requeue-stale` re-queues the orphans. See [[../lifecycles/roadmap-build-console]] for the worker model + [[build-box-setup]] § Parallel builds for the gotchas (worktrees, `node_modules` symlink, async exec).
 
+## Fold-builds run in their own lane
+
+`kind='fold'` jobs (the batch fold-builds behind "Mark verified & archive", [[../specs/fold-build-batching]]) claim into a **concurrency-1 lane** separate from the 5 build/plan lanes — `claim_agent_job(['fold'])` vs `claim_agent_job(['build','plan'])`. A fold edits the generated index files (`archive.md` / `README.md` counts, via `scripts/brain-index.mjs`), so serializing it keeps the fleet mergeable. The specs a fold will retire live in [[../tables/pending_folds]] (status `pending|folding`), not on the job — `queue-control list` shows the fold job under the `fold-batch` sentinel slug. To clear a stuck fold batch, reset its `pending_folds` rows (`pending`, or `folded` if already done) and force the job via `complete`.
+
 ## Related
-[[build-box-setup]] · [[../dashboard/roadmap]] · [[../lifecycles/roadmap-build-console]] · [[../tables/agent_jobs]]
+[[build-box-setup]] · [[../dashboard/roadmap]] · [[../lifecycles/roadmap-build-console]] · [[../tables/agent_jobs]] · [[../tables/pending_folds]] · [[../specs/fold-build-batching]]
