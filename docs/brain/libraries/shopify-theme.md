@@ -16,7 +16,8 @@ GitHub repo is the **source of truth**; Shopify's GitHub integration auto-deploy
 | `listLiveThemeFiles(workspaceId, themeId)` | Every file of a theme via the Shopify theme-files GraphQL API (paginated). Text inline; binary as base64; large files fetched from the returned URL. |
 | `readThemeFile(target, path)` | One file's UTF-8 content from the connected branch (GitHub Contents API) — the source of truth. `null` on 404. |
 | `listRepoFiles(target)` | Map of `path → blob sha` for the branch tree (recursive). |
-| `commitThemeFiles(target, changes[], message)` | Atomic multi-file commit via the GitHub Git Data API (blobs → tree on `base_tree` → commit → ref). `{path, content}` / `{path, contentBase64}` / `{path, delete:true}`. Shopify auto-deploys it. |
+| `ensureBranch(target, fromBranch="master")` | Create a branch off `fromBranch` if it doesn't exist (idempotent) — used to stage a multi-section change (e.g. the homepage rebuild) on its own branch before promoting to `master`. Connect that branch as a Shopify **preview theme** to eyeball before merging. |
+| `commitThemeFiles(target, changes[], message)` | Atomic multi-file commit via the GitHub Git Data API (blobs → tree on `base_tree` → commit → ref). Commits to `target.branch` (pass an `ensureBranch`-created branch to stage). `{path, content}` / `{path, contentBase64}` / `{path, delete:true}`. Shopify auto-deploys the connected branch. |
 | `verifyDeployed(workspaceId, expected[])` | Re-export from Shopify; confirm given paths match expected UTF-8 (post-commit sanity for liquid/text). |
 
 Types: `ThemeFile`, `FileChange`, `ThemeTarget`.
@@ -25,6 +26,7 @@ Types: `ThemeFile`, `FileChange`, `ThemeTarget`.
 
 - `scripts/reconcile-shopify-theme.ts` — export-live → commit-diff-to-repo.
 - Ad-hoc: Claude edits the theme on request (read → edit → `commitThemeFiles`).
+- **Homepage rebuild** — `ensureBranch` + `commitThemeFiles` staged 9 direct-response `sections/dr-*.liquid` + `templates/index.json` + 4 press-logo theme assets on a `homepage-rebuild` branch (live `master` untouched), to connect as a Shopify preview theme before promoting. See [[../recipes/edit-shopify-theme]] § Staging a big change.
 
 ## Gotchas
 
@@ -35,4 +37,4 @@ Types: `ThemeFile`, `FileChange`, `ThemeTarget`.
 
 ## Related
 
-[[../integrations/shopify]] · [[../recipes/edit-shopify-theme]] · [[../specs/shopify-theme-via-shopcx]]
+[[../integrations/shopify]] · [[../recipes/edit-shopify-theme]] · [[../lifecycles/storefront-checkout]]

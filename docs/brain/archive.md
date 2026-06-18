@@ -12,6 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Storefront MVP — Amazing Coffee subscription funnel (internal subs · instrumentation · Meta CAPI · smart popup · checkout hardening)** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
+- **Blog → Posts + Product Resources (portal Resources + public storefront blog)** · verified 2026-06-18 · → [[lifecycles/blog-resources]]
+- **Shopify theme management via ShopCX (AI-driven, GitHub-commit)** · verified 2026-06-18 · → [[recipes/edit-shopify-theme]]
+- **Homepage rebuild — direct-response, Tabs-led** · verified 2026-06-18 · → [[recipes/edit-shopify-theme]]
 - **Storefront: survey chapter + converter-first PDP reorder** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
 - **Authoring chat grounding — give the Roadmap Opus chat live brain access** · verified 2026-06-18 · → [[lifecycles/roadmap-build-console]]
 - **Parallel builds (worktree-isolated, 5 lanes)** · verified 2026-06-18 · → [[recipes/build-box-setup]]
