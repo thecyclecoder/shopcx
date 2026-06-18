@@ -1,4 +1,4 @@
-# Appstle pricing heal + migration monitor 🚧
+# Appstle pricing heal + migration monitor ✅
 
 > **Build status (2026-06-09): Phases 1–3 shipped.** Heal-on-touch gateway, smart migration (heal-by-migration), and the migration monitor (audit table + checklist + retry cron + `/dashboard/migrations`) are live. Resolved open questions: retry bound **N = 3** (10-min cron); dashboard at **`/dashboard/migrations`** (owner-only). **Remaining:** Phase 1b (consolidate stray direct fetches onto real wrappers) + the standalone integrity sweep — both ⏳ below. New code lives in [[../libraries/appstle-pricing]], [[../libraries/migration-audit]], [[../tables/migration_audits]].
 
