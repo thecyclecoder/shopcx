@@ -1,8 +1,8 @@
-# Killer statics — cold-50+ archetypes, both formats 🚧
+# Killer statics — cold-50+ archetypes, both formats ✅
 
-Status: 🚧 code-complete (P1–P4 built + typechecked on branch `killer-statics-iso`) · owner: Dylan · created 2026-06-15
+Status: ✅ shipped 2026-06-18 (landing_url migration applied, seed campaigns + landers created, Remotion Lambda redeployed with the archetypes) · owner: Dylan · created 2026-06-15
 
-> **Remaining operational steps before this is fully shipped (then fold + delete this spec):**
+> **✅ Go-live completed 2026-06-18** — landing_url migration applied, `scripts/seed-killer-statics.ts` run, Remotion Lambda redeployed with the archetype components. Re-render the seeded campaigns (queued just before the redeploy) + optional Dylan design pass. Historical go-live checklist below; fold + delete this spec on the next housekeeping pass.
 > 1. Apply the migration `supabase/migrations/20260615120000_ad_campaigns_landing_url.sql` (adds `ad_campaigns.landing_url`). Helper: `scripts/_apply-landing-url.ts <region> <prefix>` (needs the correct Supabase pooler region).
 > 2. Re-run `scripts/deploy-remotion-lambda.ts` so the Lambda site has the updated `remotion/StaticArchetypes.tsx` (9:16 testimonial fix) + `remotion/AdStatic.tsx` (SafeImg).
 > 3. Verify a render in-app: open an Amazing Coffee campaign → generate each killer archetype → confirm 4:5 + 9:16 land on Lambda (the SafeImg + fresh-signed-URL fix should clear the old static-on-Lambda failure).

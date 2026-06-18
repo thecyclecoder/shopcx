@@ -1,8 +1,8 @@
-# Auto-generated ad-matched landers (advertorial + before/after) 🚧
+# Auto-generated ad-matched landers (advertorial + before/after) ✅
 
-Status: 🚧 in progress (P1–P4 code-complete on branch `advertorial-landers`) · owner: Dylan · created 2026-06-15
+Status: ✅ shipped 2026-06-18 (migrations applied + Inngest auto-trigger synced; landers auto-generate when a campaign hits `ready`) · owner: Dylan · created 2026-06-15
 
-> **Shipped on branch:** layout modes + sections, `advertorial_pages` generator + migration + API, auto-trigger on `ready` + Meta destination default, and the `product_id` checkout/order attribution fix. End-to-end trace folded into [[../lifecycles/advertorial-landers]] + [[../tables/advertorial_pages]]. Remaining = operator go-live steps (apply migration, `PUT /api/inngest` sync, real generation, A/B) + campaign-page preview UI. Delete this spec once those land and it's verified in production.
+> **Shipped on branch:** layout modes + sections, `advertorial_pages` generator + migration + API, auto-trigger on `ready` + Meta destination default, and the `product_id` checkout/order attribution fix. End-to-end trace folded into [[../lifecycles/advertorial-landers]] + [[../tables/advertorial_pages]]. ✅ Go-live completed 2026-06-18: migrations applied + `PUT /api/inngest` synced — landers auto-generate on `ready`. Follow-ons (not blocking shipped): A/B measurement accrues over time; campaign-page preview UI stays deferred. (Fold into the lifecycle + delete this spec on the next housekeeping pass.)
 
 ## Context — why this exists
 
