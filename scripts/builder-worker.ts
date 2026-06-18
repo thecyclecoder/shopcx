@@ -162,14 +162,10 @@ async function runJob(job: Job) {
   const prompt = isResume
     ? `Here are answers to your open questions: ${JSON.stringify(job.answers)}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
     : [
-        `You are an autonomous build agent. Implement the spec at docs/brain/specs/${slug}.md by editing files in this repo (cwd is the repo root).`,
+        `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
         ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
-        `- Do the work with your own tools; match existing code style. Update the spec's phase emojis (⏳→🚧→✅) as you finish phases.`,
-        `- Do NOT run git, push, or open a PR — the harness handles version control.`,
-        `- If you hit a product decision the spec does not cover, do NOT guess.`,
-        `- Run \`npx tsc --noEmit\` and fix any type errors you introduce.`,
-        `- When finished, output ONLY a JSON object as your final message:`,
-        `  {"status":"completed","summary":"<one line>"}  OR  {"status":"needs_input","questions":[{"id":"q1","q":"<question>"}]}`,
+        `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations as code via the write-migration skill, but do NOT apply them to prod (that's a deliberate post-merge step). Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
+        `When finished, output ONLY a JSON object as your final message: {"status":"completed","summary":"<one line>"} OR {"status":"needs_input","questions":[{"id":"q1","q":"<question>"}]}.`,
       ].join("\n");
 
   const { session, resultText, isError, raw } = runClaude(prompt, job.claude_session_id);
