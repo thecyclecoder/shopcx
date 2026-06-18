@@ -77,6 +77,7 @@ Goal: on approval, fire existing ShopCX systems to build assets and Meta objects
 - Phases 4 and earlier have zero external write side effects.
 - Ship execution adapters (Phase 6) one action type at a time, each verified before the next is enabled.
 - Engine reads metrics from scorecard tables (Phase 3), never directly from raw session/insight tables.
+- **Supervisable, not silent.** The engine is a *tool* under the Growth role agent ([[../functions/growth]] § "The Growth agent supervises its tools"). It MUST (a) **surface its reasoning** with every recommendation — *why* it's scaling/pausing and the trigger conditions (e.g. "down-scaling: CPA > target, 0 creatives winning"), so the agent can catch a divergence; and (b) **respect agent-set guardrails** — a budget floor and a "never fully pause" list — so its proxy optimization (ROAS) can't drive a degenerate state (budget→0) that destroys the objective (revenue). Hitting a guardrail is a signal to escalate to the role agent, not an outcome to silently execute.
 
 ## Completion criteria
 - Phase 0 grounding doc exists with confirmed file paths and table/column names for product intelligence, sessions, attribution, and Meta connection.
