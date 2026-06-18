@@ -144,6 +144,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `meta_connected_admin_email` | `text` | ✓ |  |
 | `meta_connected_admin_name` | `text` | ✓ |  |
 | `social_brand_proof_points` | `text` | ✓ |  |
+| `storefront_skip_customize` | `bool` | — | default: `false`. When true, pack-select navigates **straight to `/checkout`** (skipping `/customize`); checkout then shows a "Customize your order" button as the opt-in editor. A/B-toggleable without a deploy. On for Superfoods. See [[../lifecycles/storefront-checkout]] (the customize-bypass funnel). |
 
 ## Foreign keys
 
