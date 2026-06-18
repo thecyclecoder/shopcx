@@ -20,7 +20,7 @@ Shopify Admin API (GraphQL + REST + Bulk Operations) + Storefront API + Customer
 - **App-level (no per-workspace fallback):** None — must be configured per workspace.
 - **HMAC verification** for OAuth redirect + webhooks: `verifyShopifyHmac()` in `src/lib/shopify.ts` uses Client Secret.
 
-Scopes: see `SHOPIFY_SCOPES` in `src/lib/shopify.ts` — read_all_orders, write_customers, write_discounts, write_draft_orders, read_inventory, etc.
+Scopes: see `SHOPIFY_SCOPES` in `src/lib/shopify.ts` — read_all_orders, write_customers, write_discounts, write_draft_orders, read_inventory, `read_content` (blog import — see [[../lifecycles/blog-resources]]), `read_themes`/`write_themes` (theme management, below), etc.
 
 ## API version
 
@@ -96,4 +96,4 @@ The live theme (`theme-superfoodscompany.com/master`, role MAIN) is managed thro
 
 ## Related
 
-[[../tables/customers]] · [[../tables/orders]] · [[../tables/products]] · [[../tables/product_variants]] · [[../tables/subscriptions]] · [[../tables/customer_payment_methods]] · [[../tables/store_credit_log]] · [[../tables/import_jobs]] · [[../inngest/sync-shopify]] · [[../inngest/today-sync]] · [[../inngest/sync-inventory]]
+[[../tables/customers]] · [[../tables/orders]] · [[../tables/products]] · [[../tables/product_variants]] · [[../tables/subscriptions]] · [[../tables/customer_payment_methods]] · [[../tables/store_credit_log]] · [[../tables/import_jobs]] · [[../tables/posts]] · [[../lifecycles/blog-resources]] · [[../libraries/shopify-theme]] · [[../recipes/edit-shopify-theme]] · [[../inngest/sync-shopify]] · [[../inngest/today-sync]] · [[../inngest/sync-inventory]]

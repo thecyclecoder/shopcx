@@ -13,7 +13,7 @@ The permanent owner of **owned + organic marketing** — email, SMS, organic soc
 ### Organic content & SEO
 A standing engine of genuinely useful, human-voiced content (blog + resources) that ranks, gives value to buyers, and reinforces value for considerers.
 - **Metric:** ranked keywords, blog-driven sessions, content→assisted-revenue.
-- **Specs:** [[../specs/auto-blog-generation]] ✅ · [[../specs/blog-resources]] ✅
+- **Specs:** [[../specs/auto-blog-generation]] ✅ · **blog-resources** ✅ (verified + archived → [[../lifecycles/blog-resources]])
 
 ### Organic social
 Always-on organic posts/reels/stories to FB + IG for engagement, sourced from existing assets + PI-grounded copy.

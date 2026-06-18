@@ -16,7 +16,7 @@
 
 The social scheduler tells people "link in bio," but **the Instagram Graph API cannot set a profile's bio link/website** — it's read-only for that field ([Elfsight IG Graph API guide](https://elfsight.com/blog/instagram-graph-api-complete-developer-guide-for-2026/)). Instagram *does* support up to **5 native bio links** now, but only editable manually in the app ([multi-link guide](https://addtoqr.com/blog/sharing-multiple-links-in-instagram)). So we can't point the bio at each new post programmatically. **Decision:** a self-hosted **`/links` page we control** — set the bio link to it once (permanent), and it stays current automatically (latest posts + referenced PDPs). This is the standard creator pattern (a self-hosted Linktree) and needs no API access. Future: order `/links` by what was *most recently socially promoted* (join `scheduled_social_posts`), not just newest blog post.
 
-**Goal:** a scheduled engine (target **1 post/day**) that picks a product with [[../lifecycles/product-intelligence|intelligence]], chooses a category + topic from its SEO keywords / ingredients / benefits, researches the web, writes a genuinely useful human-voiced article, generates original branded imagery, and publishes it to the storefront blog ([[blog-resources]]).
+**Goal:** a scheduled engine (target **1 post/day**) that picks a product with [[../lifecycles/product-intelligence|intelligence]], chooses a category + topic from its SEO keywords / ingredients / benefits, researches the web, writes a genuinely useful human-voiced article, generates original branded imagery, and publishes it to the storefront blog ([[../lifecycles/blog-resources]]).
 
 **The three goals every post must serve one of:**
 1. **Rank** on a target topic — pull from [[../tables/product_seo_keywords]] (we have real keyword + Search Console data per product).
@@ -29,9 +29,9 @@ Everything needed already exists:
 - **Intelligence** — 7 tables per product ([[../tables/product_ingredients]], [[../tables/product_ingredient_research]] with **real PubMed-style citations**, [[../tables/product_review_analysis]], [[../tables/product_benefit_selections]], [[../tables/product_seo_keywords]]). Amazing Coffee alone has 13 ingredients, 62 research rows, 50 keywords, 1,873 reviews.
 - **Image gen** — [[../libraries/gemini]] `generateNanoBananaProCombine` (`gemini-3-pro-image`). Multi-image fusion: pass the **isolated product pouch** + a scene prompt → photoreal hero with the real label intact. Pass `imageUrls: []` → text-to-image for generated in-body shots. Per-workspace key already set.
 - **Isolated product shot** — comes from **`product_variants.image_url`** (uploaded to shopcx/Supabase, NOT the Shopify-CDN images in `products.variants` JSON). Verified: `product_variants` pos0/pos1 hold the styled pouch on a light bg — ideal Nano Banana input.
-- **Write path** — mirror [[blog-resources]] `import-article.ts`: upsert `posts` + replace `post_products`. Images upload to `product-media` bucket at `workspaces/{ws}/posts/{handle}/{slot}.{ext}`.
+- **Write path** — mirror [[../lifecycles/blog-resources]] `import-article.ts`: upsert `posts` + replace `post_products`. Images upload to `product-media` bucket at `workspaces/{ws}/posts/{handle}/{slot}.{ext}`.
 - **Web research** — `WebSearch`/`WebFetch` (used in the prototype to ground the trend framing + the L-theanine/jitter mechanism).
-- **Rendering** — the public blog ([[blog-resources]] § Storefront rendering) already renders `posts` with SEO + JSON-LD. No new render work.
+- **Rendering** — the public blog ([[../lifecycles/blog-resources]] § Storefront rendering) already renders `posts` with SEO + JSON-LD. No new render work.
 
 ## Making them NOT read as AI (the human-likeness problem)
 
@@ -114,4 +114,4 @@ Remaining for the cron:
 
 ## Related
 
-[[blog-resources]] · [[../lifecycles/product-intelligence]] · [[../libraries/gemini]] · [[../tables/product_seo_keywords]] · [[../tables/product_ingredient_research]] · [[../customer-voice]] · [[README]]
+[[../lifecycles/blog-resources]] · [[../lifecycles/product-intelligence]] · [[../libraries/gemini]] · [[../tables/product_seo_keywords]] · [[../tables/product_ingredient_research]] · [[../customer-voice]] · [[README]]

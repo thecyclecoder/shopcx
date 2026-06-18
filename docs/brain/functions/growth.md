@@ -29,7 +29,7 @@ Every ad has a scent-matched lander (advertorial / before-after) so paid traffic
 ### Storefront CRO
 The storefront is a conversion surface — continuously lift PDP engagement and price-step conversion across the Amazing Coffee funnel.
 - **Metric:** PDP engagement, price-step conversion, sessions→subscription rate.
-- **Specs:** [[../specs/storefront-mvp]] ✅ · [[../specs/homepage-rebuild]] ✅ · [[../specs/checkout-customize-bypass]] ✅ · **storefront-survey-chapter** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · [[../specs/storefront-iteration-engine]] ⏳ (the perpetual-CRO engine itself).
+- **Specs:** **storefront-mvp** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **homepage-rebuild** ✅ (verified + archived → [[../recipes/edit-shopify-theme]]) · **checkout-customize-bypass** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **storefront-survey-chapter** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · [[../specs/storefront-iteration-engine]] ⏳ (the perpetual-CRO engine itself).
 
 ## The Growth agent supervises its tools (worked example)
 

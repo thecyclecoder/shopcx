@@ -55,4 +55,4 @@ The resolver normalizes a coupon into an entry on [[subscriptions]].`applied_dis
 
 ---
 
-[[../README]] · [[../libraries/coupons]] · [[../lifecycles/subscription-billing]] · [[../specs/storefront-mvp]]
+[[../README]] · [[../libraries/coupons]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/storefront-checkout]]

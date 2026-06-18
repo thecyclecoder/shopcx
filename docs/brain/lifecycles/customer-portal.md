@@ -27,7 +27,7 @@ Every Appstle **mutation** (portal action, ticket handler, orchestrator, cron) r
 
 ## Identifier discipline: UUID internally, contract id only at the Appstle edge
 
-A subscription's canonical key is its **UUID** (`subscriptions.id`). `shopify_contract_id` is an *external* detail — numeric for Appstle-billed subs, `internal-<hex>` for subs flipped to internal billing ([[../specs/storefront-mvp]] § 1c migration). It exists only to talk to Appstle.
+A subscription's canonical key is its **UUID** (`subscriptions.id`). `shopify_contract_id` is an *external* detail — numeric for Appstle-billed subs, `internal-<hex>` for subs flipped to internal billing ([[subscription-billing]] § Migration path). It exists only to talk to Appstle.
 
 Every write handler resolves the sub through **`resolveSub(admin, workspaceId, rawId, loggedInShopifyCustomerId)`** in [[../libraries/portal__helpers]]:
 - Accepts the UUID **or** the legacy contract-id shape (transitional — both frontends still send `contract.id`).
@@ -128,6 +128,10 @@ The portal **login page only** mounts the same anonymous live-chat widget the st
 
 A "Help Center" sidebar item (`_sections/HelpCenterSection.tsx`) surfaces all published KB articles in-portal, searchable, without leaving. Reuses the public help APIs: list via `GET /api/help/{help_slug}?search=` (title+content ilike), inline reader via `GET /api/widget/{workspaceId}/articles/{id}` (`content_html` in a `prose` wrapper). `help` is whitelisted in the middleware `PORTAL_SECTIONS` set for a clean `/help` URL. Distinct from **Support** (ticket submission) and **Resources** (blog product guides).
 
+## Resources section (blog product guides)
+
+A "Resources" sidebar item (`_sections/ResourcesSection.tsx`) surfaces the imported Superfood-Scoop blog as product guides — a **search bar** + **product → grouping** (Recipes / How it works / How to use / Science) two-level navigation + an inline reader rendering the post's `content_html` (our hosted images). Reads [[../tables/posts]] (`is_resource` + `published`) via [[../tables/post_products]]; a post linked to multiple products appears under each. Distinct from **Help Center** (KB articles) and **Support** (tickets). Full flow — import, AI classification, public storefront blog, admin view — in [[blog-resources]].
+
 ### Host-rewrite nav model (the prefix gotcha)
 
 The mini-site runs on a **custom domain** (`portal.{brand}.com`). `src/proxy.ts` middleware (`updateSession`) rewrites `/portal/{slug}/*` → `/*` for that host **only**, so on the live domain every internal path is root-relative (`/`, `/logout`, `/subscriptions`). On **localhost and path-based `shopcx.ai/portal/{slug}`** there is NO rewrite — the portal lives under `/portal/{slug}` and a bare root path (`/`, `/logout`) escapes the portal and hits the **admin app**, which bounces to its own `/login`. This bit us twice (post-OTP redirect, and the Sign-out link).
@@ -173,4 +177,4 @@ When a customer clicks "Cancel subscription" in the portal, the handler does NOT
 
 ## Related
 
-[[cancel-flow]] · [[dunning]] · [[storefront-checkout]] · [[customer-link-confirmation]] · [[../libraries/portal__handlers__index]] · [[../integrations/twilio]] · [[../integrations/braintree]] · [[../integrations/shopify]] · [[../tables/customer_events]] · [[../tables/auth_otp_sessions]]
+[[cancel-flow]] · [[dunning]] · [[storefront-checkout]] · [[blog-resources]] · [[customer-link-confirmation]] · [[../libraries/portal__handlers__index]] · [[../integrations/twilio]] · [[../integrations/braintree]] · [[../integrations/shopify]] · [[../tables/customer_events]] · [[../tables/auth_otp_sessions]]

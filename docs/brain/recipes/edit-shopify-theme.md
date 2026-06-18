@@ -1,6 +1,6 @@
 # Edit the Shopify theme (chat → build → deploy)
 
-Short-term bridge until the in-house storefront retires Shopify. Dylan chats; Claude builds the change and ships it to the live store via a GitHub commit. See [[../specs/shopify-theme-via-shopcx]] and `src/lib/shopify-theme.ts`.
+Short-term bridge until the in-house storefront retires Shopify. Dylan chats; Claude builds the change and ships it to the live store via a GitHub commit. Lib: [[../libraries/shopify-theme]] (`src/lib/shopify-theme.ts`).
 
 ## Model
 
@@ -33,6 +33,27 @@ await commitThemeFiles(target, [{ path: "sections/main-product.liquid", content:
 
 `scripts/reconcile-shopify-theme.ts` exports the live theme and commits any files whose content genuinely differs from the repo (semantic JSON compare; byte compare for liquid/css/js/binary). Dry-run by default; `--commit` to push. Run it whenever live and GitHub may have drifted (e.g. after manual editor edits). It only adds/updates — never deletes repo files missing from live.
 
+## Staging a big change (preview branch) — the homepage rebuild
+
+For a multi-section change you want eyeballed before it goes live, stage it on its own branch instead of committing straight to `master`:
+
+```ts
+import { getLiveTheme, ensureBranch, commitThemeFiles } from "@/lib/shopify-theme";
+const { target } = await getLiveTheme(WORKSPACE_ID);
+await ensureBranch(target, "master");                          // idempotent
+const staged = { ...target, branch: "homepage-rebuild" };
+await commitThemeFiles(staged, files, "Homepage: DR rebuild v1");
+// Connect `homepage-rebuild` as a Shopify PREVIEW theme → eyeball → merge to master to publish.
+```
+
+The **homepage rebuild** (direct-response, Tabs-led) shipped this way: 9 custom `sections/dr-*.liquid` (dr-hero, dr-trust, dr-bestsellers, dr-goals, dr-why, dr-reviews, dr-offer, dr-faq, dr-reorder) + `templates/index.json` committed to a `homepage-rebuild` branch (live `master` untouched). Patterns worth reusing:
+
+- **Compose, don't reinvent** — a new `templates/index.json` orders purpose-built DR sections + reuses good existing sections.
+- **Bake curated content as section defaults** (image URLs + copy in schema defaults / index settings) so it renders correct with **zero customizer work**.
+- **Auto-source images, no uploads** — product shots from each product's Shopify `featuredImage`, hero/lifestyle from the Files library; Nano Banana Pro generation only to fill a genuine gap.
+- **Press logos the token can't write to Files** (no `write_files`) go in as **theme assets** (`assets/dr-press-*.avif`, `write_themes`) referenced with `asset_url`.
+- On approval, the branch's files land on `master` (MAIN auto-deploys); single-writer rule still applies.
+
 ## Related
 
-[[../integrations/shopify]] · [[../specs/shopify-theme-via-shopcx]] · [[../lifecycles/storefront-checkout]]
+[[../integrations/shopify]] · [[../libraries/shopify-theme]] · [[../lifecycles/storefront-checkout]]
