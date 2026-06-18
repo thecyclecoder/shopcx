@@ -89,7 +89,7 @@ begin
     values (p_workspace, p_slug, 'pending', p_user)
   on conflict (workspace_id, spec_slug) do update
     set status = 'pending', requested_by = excluded.requested_by, updated_at = now()
-    where public.pending_folds.status not in ('pending', 'folding');
+    where pending_folds.status not in ('pending', 'folding');
 
   -- Reuse an already-queued fold job (the spec joins that batch); else open one.
   select * into job from public.agent_jobs
