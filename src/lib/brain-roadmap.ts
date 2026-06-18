@@ -43,6 +43,7 @@ export interface RoadmapData {
 }
 
 const SPECS_DIR = path.join(process.cwd(), "docs", "brain", "specs");
+const ARCHIVE_FILE = path.join(process.cwd(), "docs", "brain", "archive.md");
 
 const PLANNED = "⏳";
 const IN_PROGRESS = "🚧";
@@ -294,6 +295,44 @@ export async function getFunctionMap(): Promise<FunctionMap> {
       return { fn, label: functionLabel(fn), total: list.length, counts, groups };
     });
   return { functions, unassigned };
+}
+
+// ── Archive index (docs/brain/archive.md) — verified, retired specs ──
+
+export interface ArchiveEntry {
+  title: string;
+  date: string; // verified date, "YYYY-MM-DD" (or "" if unparseable)
+  link: string; // brain-relative slug the entry points at, e.g. "lifecycles/roadmap-build-console"
+  label: string; // display label for the link (last path segment, humanized)
+}
+
+/**
+ * Parse archive.md's index list. Each verified feature is one list item shaped
+ *   - **Title** · verified YYYY-MM-DD · → [[lifecycles/{slug}]]
+ * The fold-build appends these on verify (see docs/brain/project-management.md). Newest first
+ * (file order is authored newest-first). Tolerant: skips the "No features archived yet." placeholder.
+ */
+export async function getArchive(): Promise<ArchiveEntry[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(ARCHIVE_FILE, "utf8");
+  } catch {
+    return [];
+  }
+  const entries: ArchiveEntry[] = [];
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("- ")) continue;
+    const link = t.match(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/);
+    if (!link) continue; // index rows always carry a wikilink; prose/placeholder don't
+    const target = link[1].trim().replace(/^\.\.\//, "").replace(/\.md$/, "");
+    const date = (t.match(/verified\s+(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
+    const titleM = t.match(/\*\*(.+?)\*\*/);
+    const title = titleM ? cleanInline(titleM[1]) : cleanInline(t.slice(2).split("·")[0]);
+    const label = functionLabel(target.replace(/^.*\//, "")); // humanize last segment
+    entries.push({ title, date, link: target, label });
+  }
+  return entries;
 }
 
 /** Raw markdown + parsed card for one spec, or null if it doesn't exist. Slug is path-guarded. */

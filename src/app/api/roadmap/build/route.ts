@@ -13,6 +13,28 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ACTIVE_STATUSES, getLatestJobsBySlug, reconcileMergedJobs, type AgentJob } from "@/lib/agent-jobs";
 
+/**
+ * Canonical fold-build instructions for "Mark verified & archive". The build agent runs these
+ * INSTEAD of (re)building the spec — the feature is already shipped + owner-verified. Self-contained
+ * (doesn't depend on the not-yet-built fold-to-brain skill); mirrors project-management.md's fold
+ * procedure plus this spec's archive-index step. The agent owns nothing in prod here — pure docs.
+ */
+function foldInstructions(slug: string): string {
+  return [
+    `VERIFY + ARCHIVE the shipped spec docs/brain/specs/${slug}.md — the workspace owner has confirmed this feature works in production. Do NOT rebuild or change any product code. Your job is to retire the spec into the brain, following docs/brain/project-management.md "Folding a shipped spec into the brain":`,
+    ``,
+    `1. Confirm the spec's durable knowledge is already folded into its permanent brain homes (the relevant lifecycles/ table(s)/ libraries/ inngest/ integrations/ dashboard/ recipes/ pages, each with a "Status / open work" block where applicable). If anything is missing, fold it now and cross-link it (3-5 wikilinks, linked FROM at least one existing page).`,
+    `2. Append ONE line to docs/brain/archive.md's "## Index" list, newest-first (above existing entries, replacing the "No features archived yet." placeholder if present). Use exactly this shape:`,
+    `     - **${slug}** · verified <today's date as YYYY-MM-DD> · → [[lifecycles/<the feature's primary lifecycle or brain home slug>]]`,
+    `   Use the spec's real title for the bold part, and run \`date +%F\` for the date.`,
+    `3. \`git rm docs/brain/specs/${slug}.md\` — git history is the immutable archive; a deleted spec is always \`git show\`-recoverable.`,
+    `4. Update docs/brain/README.md folder/count lines if the fold added or moved a page.`,
+    `5. \`npx tsc --noEmit\` (should be a no-op — docs only) and open the PR. The PR body should list which brain pages absorbed the spec and the archive-index line added.`,
+    ``,
+    `If you cannot determine where the spec's knowledge belongs (no obvious lifecycle/brain home), STOP and surface it as an open question — do not guess.`,
+  ].join("\n");
+}
+
 async function ctx() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -50,11 +72,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Only the workspace owner can start a build" }, { status: 403 });
   }
 
-  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; instructions?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; instructions?: unknown; verify?: unknown };
   const slug = body.slug;
   if (typeof slug !== "string" || !/^[a-z0-9-]+$/i.test(slug)) {
     return NextResponse.json({ error: "bad slug" }, { status: 400 });
   }
+
+  // "Mark verified & archive" → a fold-build: the owner has confirmed the shipped feature works in
+  // prod, so retire its spec into the brain instead of rebuilding it. Reuses the build pipeline; the
+  // canonical instructions drive the fold + archive-index + git rm (no spec/product code changes).
+  // See docs/brain/specs/spec-lifecycle-and-archival.md + docs/brain/project-management.md.
+  const instructions = body.verify === true ? foldInstructions(slug) : (typeof body.instructions === "string" ? body.instructions : null);
 
   // One active build per spec.
   const { data: existing } = await admin
@@ -74,7 +102,7 @@ export async function POST(request: Request) {
       workspace_id: workspaceId,
       spec_slug: slug,
       status: "queued",
-      instructions: typeof body.instructions === "string" ? body.instructions : null,
+      instructions,
       created_by: user.id,
     })
     .select("*")

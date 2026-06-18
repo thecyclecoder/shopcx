@@ -191,11 +191,16 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     messages?: Msg[];
     slug?: string;
+    seedSlug?: string;
     action?: "chat" | "finalize";
     queueBuild?: boolean;
   };
   const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
   const refineSlug = typeof body.slug === "string" && /^[a-z0-9-]+$/i.test(body.slug) ? body.slug : null;
+  // Re-hydration ("New spec from brain"): a brain-relative slug (e.g. lifecycles/x) to seed a FRESH spec
+  // from the CURRENT brain. Ignored when refining an existing spec. Path-guarded like read_brain_page.
+  const seedSlugRaw = typeof body.seedSlug === "string" ? body.seedSlug.trim().replace(/\.md$/, "") : "";
+  const seedSlug = !refineSlug && seedSlugRaw && /^[a-z0-9/_-]+$/i.test(seedSlugRaw) && !seedSlugRaw.includes("..") ? seedSlugRaw : null;
 
   // For refine: pull the current spec content (+ sha for the later commit).
   let current = "";
@@ -207,10 +212,21 @@ export async function POST(request: Request) {
       currentSha = get.json.sha as string;
     }
   }
+  // Re-hydration: load the seed brain page's CURRENT content so Opus drafts against live reality.
+  let seedContent = "";
+  if (seedSlug) {
+    const get = await gh("GET", `/repos/${REPO}/contents/docs/brain/${seedSlug}.md?ref=main`);
+    if (!get.ok) return NextResponse.json({ error: `brain page not found: ${seedSlug}` }, { status: 404 });
+    seedContent = Buffer.from(String(get.json.content || "").replace(/\s/g, ""), "base64").toString("utf8");
+    if (seedContent.length > 12000) seedContent = seedContent.slice(0, 12000) + "\n…[truncated]";
+  }
+
   const index = await brainIndex();
   const grounding = index ? `\n\n## ShopCX brain index — the curated map of what already exists (slug — title; read full pages with read_brain_page)\n${index}` : "";
   const system = refineSlug
     ? `${BASE_SYSTEM}${grounding}\n\nYou are REFINING the existing spec docs/brain/specs/${refineSlug}.md. Discuss changes/additions; preserve shipped (✅) phases unless told otherwise. Current content:\n\n${current}`
+    : seedSlug
+    ? `${BASE_SYSTEM}${grounding}\n\nYou are drafting a NEW spec by RE-HYDRATING from the current brain page docs/brain/${seedSlug}.md (an already-shipped feature or a reference page). Read it below as the source of truth for what exists TODAY, then help Dylan shape a fresh spec that EXTENDS or FIXES it — never just restate it, and never reactivate a stale snapshot. Inherit the owner/parent taxonomy from the page where sensible. All new phases start ⏳. Current page content:\n\n${seedContent}`
     : `${BASE_SYSTEM}${grounding}`;
 
   if (body.action !== "finalize") {

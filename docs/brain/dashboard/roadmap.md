@@ -13,6 +13,9 @@ The project-manager board + build console for the brain. Reads `docs/brain/specs
 - **Authoring chat** — `AuthoringChat.tsx` + `POST /api/roadmap/chat` (Opus `claude-opus-4-8`, Anthropic API). **✨ New feature** (board header) writes a new `specs/{slug}.md`; **Refine with Opus** (detail page) edits an existing one. Finalize commits the spec to `main` (+ optional **Save & build** queues a job).
 - **Build dispatch** — `BuildButton.tsx`: **Build/Rebuild** (hidden on shipped specs), per-phase **build**, and **Report issue** (queues a scoped *fix-build* via `instructions` — works on shipped specs, no spec edit). All hit `POST /api/roadmap/build` → inserts an [[../tables/agent_jobs]] row (one active per spec). The chip polls `GET /api/roadmap/build?slug=` until terminal.
 - **Build feedback** — when a build pauses: `needs_input` shows an **answer form** (`POST /api/roadmap/answer`); `needs_approval` shows **Approve & apply** cards with the command preview (`POST /api/roadmap/approve`). Both flip the job to `queued_resume` so the box worker resumes it. Completed builds show **Squash & merge** (reuses `POST /api/branches/[number]/merge`).
+- **Verify + archive** (`BuildButton.tsx`, owner) — shipped cards show **Mark verified & archive**: the owner-only, human "I tested it in prod" gate distinct from Shipped (built + deployed, automated). It queues a **fold-build** (`POST /api/roadmap/build` `{ verify: true }` → canonical fold instructions): the build folds the spec into its brain homes, appends an entry to [[../archive]], `git rm`s `specs/{slug}.md`, and opens a PR. Merge → the spec leaves the board into the **Archived** section. The Shipped column is relabeled **"Shipped — awaiting verification"** so it stays a short, real to-do list.
+- **Archived section** — a collapsed `<details>` below the columns reads [[../archive]] (`getArchive()` parses its index list) and lists verified features (link → their lifecycle/brain page). Each row also offers **New spec from brain** (re-hydration) seeded with that page.
+- **New spec from brain** (re-hydration) — `AuthoringChat seed` (board header **🧠 New spec from brain**, or per archived entry with a fixed `seedSlug`). Pick a brain page (lifecycle/dashboard/table) or archived entry → `POST /api/roadmap/chat` seeds Opus with the **current** brain page content → drafts a *fresh* spec to extend/fix it (never reactivates a stale snapshot) → normal Save / Save & build.
 
 ## Data sources
 
@@ -29,10 +32,10 @@ The board/detail read files under `docs/brain/`, which Vercel's tracer would pru
 
 ## Status / open work
 
-**Shipped:** board, detail pages, editable card + per-phase status (incl. Cut), authoring chat (new + refine), build dispatch + per-phase build + report-issue fix-builds, answer loop, approval gates, squash-merge. The box worker runs builds on Max ([[../recipes/build-box-setup]]).
+**Shipped:** board, detail pages, editable card + per-phase status (incl. Cut), authoring chat (new + refine + **seed/re-hydrate**), build dispatch + per-phase build + report-issue fix-builds, answer loop, approval gates, squash-merge, **verify → fold-build → archive** (Mark verified & archive), the **Archived** section, and **New spec from brain**. The box worker runs builds on Max ([[../recipes/build-box-setup]]).
 
-**Open:** instant card re-bucket on status change (currently reflects on reload); README track-emoji auto-sync; the `needs_input`/`needs_approval` round-trips await their first real-build exercise.
+**Open:** instant card re-bucket on status change (currently reflects on reload); README track-emoji auto-sync; the `needs_input`/`needs_approval` round-trips await their first real-build exercise; the **New spec from brain** picker is a typed brain-slug (no autocomplete over the ~600 pages yet).
 
 ## Related
 
-[[../lifecycles/roadmap-build-console]] · [[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../tables/agent_jobs]] · [[branches]] · [[../recipes/build-box-setup]] · [[../project-management]]
+[[../lifecycles/roadmap-build-console]] · [[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../archive]] · [[../tables/agent_jobs]] · [[branches]] · [[../recipes/build-box-setup]] · [[../project-management]]

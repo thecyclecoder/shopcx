@@ -7,10 +7,25 @@ import { useWorkspace } from "@/lib/workspace-context";
 type Msg = { role: "user" | "assistant"; content: string };
 
 /**
- * Opus authoring chat — talk a feature through, then save it as docs/brain/specs/{slug}.md
- * (new) or refine an existing one (pass `slug`). Optionally queues a build. Owner-only.
+ * Opus authoring chat — three modes, all Opus-grounded in the brain (POST /api/roadmap/chat):
+ *  - new:    talk a feature through → save docs/brain/specs/{slug}.md
+ *  - refine: pass `slug` → edit an existing spec
+ *  - seed ("New spec from brain" / re-hydrate): pass `seed` + an optional `seedSlug` (a brain page —
+ *    lifecycle/dashboard/table or an archived entry). Opus reads the CURRENT brain page and drafts a
+ *    FRESH spec to extend/fix it (never reactivates a stale snapshot). If no seedSlug, asks for one.
+ * Optionally queues a build. Owner-only.
  */
-export default function AuthoringChat({ slug, triggerLabel }: { slug?: string; triggerLabel: string }) {
+export default function AuthoringChat({
+  slug,
+  triggerLabel,
+  seed = false,
+  seedSlug,
+}: {
+  slug?: string;
+  triggerLabel: string;
+  seed?: boolean;
+  seedSlug?: string;
+}) {
   const workspace = useWorkspace();
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -19,12 +34,17 @@ export default function AuthoringChat({ slug, triggerLabel }: { slug?: string; t
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ slug: string; title: string; queued: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [seedValue, setSeedValue] = useState(seedSlug || "");
 
   if (workspace.role !== "owner") return null;
 
+  // In seed mode the effective brain page comes from the prop (archived entry) or the input box.
+  const activeSeed = seed ? (seedSlug || seedValue.trim()) : undefined;
+  const seedReady = !seed || !!activeSeed;
+
   async function send() {
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text || loading || !seedReady) return;
     const next = [...messages, { role: "user" as const, content: text }];
     setMessages(next);
     setInput("");
@@ -34,7 +54,7 @@ export default function AuthoringChat({ slug, triggerLabel }: { slug?: string; t
       const res = await fetch("/api/roadmap/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: next, slug, action: "chat" }),
+        body: JSON.stringify({ messages: next, slug, seedSlug: activeSeed, action: "chat" }),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || "chat failed");
@@ -54,7 +74,7 @@ export default function AuthoringChat({ slug, triggerLabel }: { slug?: string; t
       const res = await fetch("/api/roadmap/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages, slug, action: "finalize", queueBuild }),
+        body: JSON.stringify({ messages, slug, seedSlug: activeSeed, action: "finalize", queueBuild }),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || "finalize failed");
@@ -73,6 +93,7 @@ export default function AuthoringChat({ slug, triggerLabel }: { slug?: string; t
     setInput("");
     setResult(null);
     setError(null);
+    if (!seedSlug) setSeedValue("");
   }
 
   return (
@@ -93,15 +114,30 @@ export default function AuthoringChat({ slug, triggerLabel }: { slug?: string; t
           >
             <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                {slug ? `Refine: ${slug}` : "New feature"}
+                {seed ? "New spec from brain" : slug ? `Refine: ${slug}` : "New feature"}
               </h2>
               <button onClick={close} className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200">✕</button>
             </div>
 
             <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+              {seed && !seedSlug && messages.length === 0 && !result && (
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-2.5 dark:border-zinc-700 dark:bg-zinc-950">
+                  <label className="block text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
+                    Brain page to seed from (slug, no <code>.md</code>):
+                  </label>
+                  <input
+                    value={seedValue}
+                    onChange={(e) => setSeedValue(e.target.value)}
+                    placeholder="e.g. lifecycles/roadmap-build-console · dashboard/tickets · tables/agent_jobs"
+                    className="mt-1 w-full rounded-md border border-zinc-200 px-2 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                  />
+                </div>
+              )}
               {messages.length === 0 && !result && (
                 <p className="py-6 text-center text-xs text-zinc-400">
-                  {slug
+                  {seed
+                    ? "Opus reads the current brain page and drafts a fresh spec to extend or fix it — not a stale snapshot. Set the page above, then describe what to change or add."
+                    : slug
                     ? "Describe what to change or add to this spec. Opus will refine it; then Save."
                     : "Describe the feature you want. Opus will ask questions and shape a spec; then Save (and optionally build it)."}
                 </p>
@@ -145,7 +181,7 @@ export default function AuthoringChat({ slug, triggerLabel }: { slug?: string; t
                   />
                   <button
                     onClick={send}
-                    disabled={loading || !input.trim()}
+                    disabled={loading || !input.trim() || !seedReady}
                     className="self-end rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-200 dark:text-zinc-900"
                   >
                     Send

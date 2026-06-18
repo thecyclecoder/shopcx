@@ -46,6 +46,8 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
   const [showIssue, setShowIssue] = useState(false);
   const [issueText, setIssueText] = useState("");
   const [reporting, setReporting] = useState(false);
+  const [confirmVerify, setConfirmVerify] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -173,9 +175,30 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
     }
   }
 
+  async function verify() {
+    if (verifying) return;
+    setVerifying(true);
+    try {
+      const res = await fetch("/api/roadmap/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, verify: true }),
+      });
+      const d = await res.json();
+      if (d.job) {
+        setJob(d.job);
+        setConfirmVerify(false);
+      }
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   const needsInput = job?.status === "needs_input";
   const needsApproval = job?.status === "needs_approval";
   const canMerge = !!job?.pr_number && job.status === "completed" && !merged;
+  // Verify is the owner-only "I tested it in prod" gate, offered only on shipped specs with no live build.
+  const canVerify = specStatus === "shipped" && !active && !merged;
 
   return (
     <div className="w-full">
@@ -211,6 +234,16 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
             {showIssue ? "Cancel" : "Report issue"}
           </button>
         )}
+        {canVerify && (
+          <button
+            type="button"
+            onClick={() => setConfirmVerify((v) => !v)}
+            className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700"
+            title="Owner gate: confirm this shipped feature works in production, then fold + archive its spec"
+          >
+            {confirmVerify ? "Cancel" : "Mark verified & archive"}
+          </button>
+        )}
         {!active && specStatus !== "shipped" && (
           <button
             type="button"
@@ -222,6 +255,23 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
           </button>
         )}
       </div>
+      {canVerify && confirmVerify && (
+        <div className="mt-2 space-y-2 rounded-md border border-emerald-200 bg-emerald-50/50 p-2 text-left dark:border-emerald-900/40 dark:bg-emerald-950/20">
+          <p className="text-[11px] text-emerald-800 dark:text-emerald-300">
+            You&apos;ve confirmed this works in production. This queues a fold-build that folds the spec into the brain,
+            appends an archive entry, and deletes <code>specs/{slug}.md</code> — opening a PR for you to merge. Nothing is
+            lost (git-recoverable; knowledge lives in the brain).
+          </p>
+          <button
+            type="button"
+            onClick={verify}
+            disabled={verifying}
+            className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {verifying ? "Queuing…" : "Verify & queue fold-build"}
+          </button>
+        </div>
+      )}
       {needsInput && showAnswers && (
         <div className="mt-2 space-y-2 rounded-md border border-indigo-200 bg-indigo-50/40 p-2 text-left dark:border-indigo-900/40 dark:bg-indigo-950/20">
           {(job!.questions || []).map((q) => (
