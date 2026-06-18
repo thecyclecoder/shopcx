@@ -23,6 +23,7 @@
     "email-reply-parser": "^2.3.5",
     "html-to-text": "^9.0.5",
     "inngest": "^4.0.5",
+    "marked": "^18.0.5",
     "next": "16.2.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",

@@ -1,4 +1,6 @@
+import Link from "next/link";
 import { getRoadmap, type Phase, type SpecCard } from "@/lib/brain-roadmap";
+import StatusControl from "./StatusControl";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 export const dynamic = "force-dynamic";
@@ -47,10 +49,12 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
 function Card({ spec }: { spec: SpecCard }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="flex items-start gap-2">
+      <Link href={`/dashboard/roadmap/${spec.slug}`} className="group flex items-start gap-2">
         <span className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${DOT[spec.status]}`} />
-        <h3 className="text-sm font-medium leading-snug text-zinc-900 dark:text-zinc-100">{spec.title}</h3>
-      </div>
+        <h3 className="text-sm font-medium leading-snug text-zinc-900 group-hover:text-indigo-600 dark:text-zinc-100 dark:group-hover:text-indigo-400">
+          {spec.title}
+        </h3>
+      </Link>
       {spec.summary && (
         <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{spec.summary}</p>
       )}
@@ -70,8 +74,9 @@ function Card({ spec }: { spec: SpecCard }) {
           </ul>
         </details>
       )}
-      <div className="mt-2 text-[11px] text-zinc-400">
-        <code>specs/{spec.slug}.md</code>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <code className="text-[11px] text-zinc-400">specs/{spec.slug}.md</code>
+        <StatusControl slug={spec.slug} status={spec.status} />
       </div>
     </div>
   );

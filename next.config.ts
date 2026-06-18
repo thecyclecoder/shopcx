@@ -14,6 +14,7 @@ const nextConfig: NextConfig = {
   // brain markdown explicitly or the route renders empty on its own data in production.
   outputFileTracingIncludes: {
     "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md"],
+    "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>

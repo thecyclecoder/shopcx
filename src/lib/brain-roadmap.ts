@@ -189,3 +189,24 @@ export async function getRoadmap(): Promise<RoadmapData> {
   const [specs, tracks] = await Promise.all([readSpecs(), readTracks()]);
   return { specs, tracks };
 }
+
+/** Slugs of every spec file (no README). Used to resolve [[wikilinks]] to detail pages. */
+export async function listSpecSlugs(): Promise<string[]> {
+  try {
+    const files = await fs.readdir(SPECS_DIR);
+    return files.filter((f) => f.endsWith(".md") && f !== "README.md").map((f) => f.replace(/\.md$/, ""));
+  } catch {
+    return [];
+  }
+}
+
+/** Raw markdown + parsed card for one spec, or null if it doesn't exist. Slug is path-guarded. */
+export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCard } | null> {
+  if (!/^[a-z0-9-]+$/i.test(slug)) return null;
+  try {
+    const raw = await fs.readFile(path.join(SPECS_DIR, `${slug}.md`), "utf8");
+    return { raw, card: parseSpec(slug, raw) };
+  } catch {
+    return null;
+  }
+}

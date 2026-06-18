@@ -2,8 +2,10 @@
 
 Project-manager board that reads the brain and shows what's **planned / in progress / shipped** — the read-only Phase 1 of [[../specs/roadmap-build-console]]. Owner-only (under the **Developer** sidebar section, alongside [[branches]]).
 
-**Route:** `/dashboard/roadmap` · **File:** `src/app/dashboard/roadmap/page.tsx` (server component, `dynamic = "force-dynamic"`)
-**Parser:** `src/lib/brain-roadmap.ts` → `getRoadmap()`
+**Routes:** `/dashboard/roadmap` (board) + `/dashboard/roadmap/[slug]` (spec detail) — both server components, `dynamic = "force-dynamic"`.
+**Parser:** `src/lib/brain-roadmap.ts` → `getRoadmap()` (board), `getSpec(slug)` + `listSpecSlugs()` (detail).
+**Detail render:** `marked` → `prose` (`@tailwindcss/typography`); `[[wikilinks]]` to specs become links to their detail pages, other brain links render as plain text.
+**Status editing:** `StatusControl.tsx` (owner-only client control) → `POST /api/roadmap/status` rewrites the H1 emoji in `specs/{slug}.md` and **commits straight to main** via the GitHub Contents API (owner-gated, mirrors [[branches]]). The brain markdown stays the source of truth — no DB overrides. Optimistic UI; each save is a commit → a Vercel deploy.
 **Sidebar:** **Developer** section (owner-only) → **Roadmap** + **Branches**.
 
 ## Data source — the markdown is the spec
@@ -22,9 +24,9 @@ The route reads files under `docs/brain/`, which Vercel's file tracer would othe
 
 ## Status / open work
 
-**Shipped:** Phase 1 board — parser + columns + track chips + nav, read-only.
+**Shipped:** Phase 1 board (parser + columns + track chips + nav); clickable spec **detail pages** (`marked` → `prose`, wikilinks→links); owner **status editing** (segmented control → emoji commit to main).
 
-**Not yet (later phases of [[../specs/roadmap-build-console]]):** spec-authoring chat (Opus), the `agent_jobs` queue + "Build" button, the box `systemd` worker that runs the build on Max, and the per-card live build status + questions loop.
+**Not yet (later phases of [[../specs/roadmap-build-console]]):** spec-authoring chat (Opus), the `agent_jobs` queue + "Build" button, the box `systemd` worker that runs the build on Max, and the per-card live build status + questions loop. Possible polish: skip the Vercel deploy for status-only commits + read status live (the "no churn" option we deferred); auto-sync the README track emoji when a spec's status flips.
 
 ## Related
 
