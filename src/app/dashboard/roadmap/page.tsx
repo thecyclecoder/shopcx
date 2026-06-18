@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { getRoadmap, type Phase, type SpecCard } from "@/lib/brain-roadmap";
+import { getActiveWorkspaceId } from "@/lib/workspace";
+import { getLatestJobsBySlug, type AgentJob } from "@/lib/agent-jobs";
 import StatusControl from "./StatusControl";
+import BuildButton from "./BuildButton";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 export const dynamic = "force-dynamic";
@@ -46,7 +49,7 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-function Card({ spec }: { spec: SpecCard }) {
+function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <Link href={`/dashboard/roadmap/${spec.slug}`} className="group flex items-start gap-2">
@@ -75,8 +78,11 @@ function Card({ spec }: { spec: SpecCard }) {
         </details>
       )}
       <div className="mt-2 flex items-center justify-between gap-2">
-        <code className="text-[11px] text-zinc-400">specs/{spec.slug}.md</code>
         <StatusControl slug={spec.slug} status={spec.status} />
+        <BuildButton slug={spec.slug} initialJob={job} />
+      </div>
+      <div className="mt-1.5 text-[11px] text-zinc-400">
+        <code>specs/{spec.slug}.md</code>
       </div>
     </div>
   );
@@ -84,6 +90,8 @@ function Card({ spec }: { spec: SpecCard }) {
 
 export default async function RoadmapPage() {
   const { specs, tracks } = await getRoadmap();
+  const workspaceId = await getActiveWorkspaceId();
+  const jobsBySlug = workspaceId ? await getLatestJobsBySlug(workspaceId) : {};
   const byStatus = (s: Phase) => specs.filter((sp) => sp.status === s);
 
   return (
@@ -130,7 +138,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} />)
                   )}
                 </div>
               </div>
