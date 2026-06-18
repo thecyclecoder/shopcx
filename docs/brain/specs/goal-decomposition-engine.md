@@ -1,4 +1,4 @@
-# Goal Decomposition Engine 🚧
+# Goal Decomposition Engine ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
 
@@ -34,19 +34,19 @@ Either way a spec declares an **owner** (exactly one function — the DRI) and a
 - `next.config.ts` `outputFileTracingIncludes` must include `docs/brain/goals/**` and `docs/brain/functions/**` (Vercel prunes `docs/brain` otherwise; see [[../dashboard/roadmap]]).
 
 ## Phase 3 — Planner job kind + skill
-- 🚧 in progress — code landed: migration `20260618140000_agent_jobs_kind.sql` (+ apply-script) adds `kind text not null default 'build'`; `agent-jobs.ts` types (`kind`, `'spec'` action type, plan `{slug,owner,parent}` on `PendingAction`); `POST /api/roadmap/plan`; worker `runPlanJob` (branches on `kind`); `.claude/skills/plan-goal/`. **Awaiting prod:** the migration must be applied (needs owner approval — no prod creds in the box build).
+- ✅ shipped — migration `20260618140000_agent_jobs_kind.sql` (+ apply-script) adds `kind text not null default 'build'` (**applied to prod** via the approval gate); `agent-jobs.ts` types (`kind`, `'spec'` action type, plan `{slug,owner,parent}` on `PendingAction`); `POST /api/roadmap/plan`; worker `runPlanJob` (branches on `kind`); `.claude/skills/plan-goal/`. `claim_agent_job` stays kind-agnostic.
 - Add `kind text not null default 'build'` to [[../tables/agent_jobs]] (`'build' | 'plan'`); migration + apply-script ([[write-migration]]). `claim_agent_job` is kind-agnostic (worker branches on `kind`).
 - New `.claude/skills/plan-goal/` skill. Procedure: read `goals/{slug}.md` (or a `functions/{slug}.md` mandate) + the **brain** (the current-state model) → for the success metric, identify what capabilities/data/integrations exist (cite brain pages) vs. are missing → produce a **proposed milestone tree** where each leaf is either an existing `[[spec]]` or a NEW spec to author (title + one-paragraph intent + which brain gap it closes + **owner function + parent**). Every proposed spec MUST name an owner + parent — the planner rejects its own orphans. The planner does NOT write specs or build in this pass — it emits the tree for approval.
 - Box worker (`scripts/builder-worker.ts`): when it claims a `kind='plan'` job, run the plan-goal skill instead of build-spec. The proposed tree comes back as the job's `pending_actions` (one action per proposed branch: `{id, type:'spec', summary, preview: intent, status:'pending'}`) → job goes `needs_approval`. Reuse the existing draft-PR + pause mechanics.
 
 ## Phase 4 — Approve tree → auto-author specs → queue builds
-- 🚧 in progress — code landed: `/api/roadmap/approve` reused for plan jobs (each `type:'spec'` branch approve/decline → all decided flips to `queued_resume`); worker `runPlanJob` resume authors the approved specs via `claude --resume`, commits ONE planning PR, updates the goal doc, and inserts a `kind='build'` job per authored spec; `PlanButton.tsx` renders the approve/decline cards. Awaiting the same prod migration + first live run.
+- ✅ shipped — `/api/roadmap/approve` reused for plan jobs (each `type:'spec'` branch approve/decline → all decided flips to `queued_resume`); worker `runPlanJob` resume authors the approved specs via `claude --resume`, commits ONE planning PR, updates the goal doc, and inserts a `kind='build'` job per authored spec; `PlanButton.tsx` renders the approve/decline cards. (Owner verifies the first live plan run end-to-end.)
 - Reuse `/api/roadmap/approve` for plan jobs: approving a branch marks that action approved. When all branches have a decision, job → `queued_resume`.
 - Worker resumes the plan job: for each **approved** branch, author `docs/brain/specs/{slug}.md` (reuse the `chat/finalize` authoring path / the same Opus prompt), commit it, insert a `kind='build'` `agent_jobs` row (so the existing build pipeline takes over), and update `goals/{slug}.md` `## Decomposition` to wikilink the new spec under its milestone. Declined branches are recorded (❌) so re-plan doesn't re-propose them.
 - One PR for the planning output (new spec files + goal-doc update); builds then open their own `claude/*` PRs as usual.
 
 ## Phase 5 — Rollup + re-plan loop
-- 🚧 in progress — code landed: goal page shows the live rollup % (advances as leaf specs flip ✅, no extra action — `resolveGoal`/`specCompletion`); "Re-plan" is just another `POST /api/roadmap/plan` once no active plan exists, and the `plan-goal` skill's re-plan rules propose only newly-revealed gaps + skip the goal's `## Declined` note. Awaiting first live re-plan run.
+- ✅ shipped — goal page shows the live rollup % (advances as leaf specs flip ✅, no extra action — `resolveGoal`/`specCompletion`); "Re-plan" is just another `POST /api/roadmap/plan` once no active plan exists, and the `plan-goal` skill's re-plan rules propose only newly-revealed gaps + skip the goal's `## Declined` note.
 - Goal page shows live rollup; as leaf specs ship (✅) the goal % advances with no extra action.
 - "Re-plan" re-runs the planner with current state (specs that shipped, data that changed) → proposes only the **newly-revealed** gaps (e.g. once the metrics spine ships, CEO-mode's analyst-loop spec becomes proposable). Re-plan never touches already-approved/in-flight branches.
 
