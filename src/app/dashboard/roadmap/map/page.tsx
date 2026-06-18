@@ -49,9 +49,14 @@ export default async function RoadmapMapPage() {
     <div className="mx-auto w-full max-w-screen-2xl p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Taxonomy map</h1>
-        <Link href="/dashboard/roadmap" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
-          Board view →
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link href="/dashboard/roadmap/goals" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+            Goals →
+          </Link>
+          <Link href="/dashboard/roadmap" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+            Board view →
+          </Link>
+        </div>
       </div>
       <p className="mb-5 text-sm text-zinc-500 dark:text-zinc-400">
         Every spec grouped by <span className="font-medium">Function → Mandate / Goal → Spec</span> — the big-picture view of what each role is working on. Built from each spec&apos;s owner + parent, so it never drifts.
@@ -66,10 +71,10 @@ export default async function RoadmapMapPage() {
           {functions.map((f) => (
             <section key={f.fn} className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
               <div className="mb-3 flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 dark:border-zinc-800">
-                <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                <Link href={`/dashboard/roadmap/functions/${f.fn}`} className="group flex items-center gap-2 text-sm font-semibold text-zinc-900 hover:text-indigo-600 dark:text-zinc-100 dark:hover:text-indigo-400">
                   {f.label}
                   <span className="text-xs font-normal tabular-nums text-zinc-400">{f.total}</span>
-                </h2>
+                </Link>
                 <CountPills counts={f.counts} />
               </div>
               <div className="space-y-3">
