@@ -222,6 +222,80 @@ export async function listSpecSlugs(): Promise<string[]> {
   }
 }
 
+// ── Taxonomy map: Function → (Mandate | Goal) → Spec ──
+
+/** Pretty display name for a function slug (acronyms uppercased). */
+const FUNCTION_LABELS: Record<string, string> = {
+  growth: "Growth", cmo: "CMO", retention: "Retention",
+  cfo: "CFO", logistics: "Logistics", cs: "CS", platform: "Platform / Eng",
+};
+export function functionLabel(slug: string): string {
+  return FUNCTION_LABELS[slug] || slug.replace(/(^|[-_])(\w)/g, (_m, sep, c) => (sep ? " " : "") + c.toUpperCase());
+}
+
+/** The mandate/goal name from a spec's parent line — the quoted part if present, else the whole string. */
+export function parentLabel(parent: string): string {
+  const q = parent.match(/"([^"]+)"/);
+  return q ? q[1] : parent;
+}
+
+export interface ParentGroup {
+  parent: string; // raw parent string (groups by this)
+  label: string; // cleaned mandate/goal name
+  specs: SpecCard[];
+}
+export interface FunctionGroup {
+  fn: string; // owner slug
+  label: string; // display name
+  total: number;
+  counts: Record<Phase, number>;
+  groups: ParentGroup[];
+}
+export interface FunctionMap {
+  functions: FunctionGroup[];
+  unassigned: SpecCard[]; // specs with no owner (should be empty — the no-orphan rule)
+}
+
+/** Order: CEO-mode business directors first, the build org last, unknowns after. */
+const FUNCTION_ORDER = ["growth", "cmo", "retention", "cfo", "logistics", "cs", "platform"];
+
+/**
+ * Group every spec by Function (owner) → Mandate/Goal (parent) for the
+ * big-picture taxonomy view. Built from the specs themselves (owner +
+ * parent lines), so it's always in sync with the no-orphan rule.
+ */
+export async function getFunctionMap(): Promise<FunctionMap> {
+  const { specs } = await getRoadmap();
+  const byFn = new Map<string, SpecCard[]>();
+  const unassigned: SpecCard[] = [];
+  for (const s of specs) {
+    if (!s.owner) { unassigned.push(s); continue; }
+    const arr = byFn.get(s.owner) || [];
+    arr.push(s);
+    byFn.set(s.owner, arr);
+  }
+  const ord = (fn: string) => { const i = FUNCTION_ORDER.indexOf(fn); return i < 0 ? 99 : i; };
+  const functions: FunctionGroup[] = [...byFn.entries()]
+    .sort((a, b) => ord(a[0]) - ord(b[0]) || a[0].localeCompare(b[0]))
+    .map(([fn, list]) => {
+      const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
+      for (const s of list) counts[s.status]++;
+      const pmap = new Map<string, SpecCard[]>();
+      for (const s of list) {
+        const key = s.parent || "(unparented)";
+        const arr = pmap.get(key) || [];
+        arr.push(s);
+        pmap.set(key, arr);
+      }
+      const rank: Record<Phase, number> = { in_progress: 0, planned: 1, shipped: 2, rejected: 3 };
+      const groups: ParentGroup[] = [...pmap.entries()]
+        .map(([parent, ss]) => ({ parent, label: parentLabel(parent), specs: ss.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title)) }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      return { fn, label: functionLabel(fn), total: list.length, counts, groups };
+    });
+  return { functions, unassigned };
+}
+
 /** Raw markdown + parsed card for one spec, or null if it doesn't exist. Slug is path-guarded. */
 export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;

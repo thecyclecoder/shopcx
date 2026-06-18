@@ -15,6 +15,7 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md"],
     "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md"],
+    "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md"],
     "/dashboard/brain": ["./docs/brain/**/*.md"],
     "/dashboard/brain/[...slug]": ["./docs/brain/**/*.md"],
   },

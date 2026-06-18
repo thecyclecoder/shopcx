@@ -99,7 +99,12 @@ export default async function RoadmapPage() {
     <div className="mx-auto w-full max-w-screen-2xl p-6">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Roadmap</h1>
-        <AuthoringChat triggerLabel="✨ New feature" />
+        <div className="flex items-center gap-3">
+          <Link href="/dashboard/roadmap/map" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+            Map view →
+          </Link>
+          <AuthoringChat triggerLabel="✨ New feature" />
+        </div>
       </div>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
         Live view of <code>docs/brain/specs/</code> — the markdown is the source of truth, so this never drifts.
