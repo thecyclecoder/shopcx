@@ -126,11 +126,30 @@ export async function GET(
   // ── 4. Token usage / cost ──
   // Group by model + day. Compute total cost, per-ticket cost, and the
   // Opus-vs-Sonnet split via the `purpose` prefix written by the orchestrator.
-  const { data: usageRows } = await admin
-    .from("ai_token_usage")
-    .select("model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, purpose, ticket_id, created_at")
-    .eq("workspace_id", workspaceId)
-    .gte("created_at", since);
+  // ai_token_usage routinely exceeds PostgREST's 1000-row cap for a 30-90d
+  // window. Without pagination the query silently returned only the OLDEST
+  // 1000 rows — undercounting cost AND excluding the most recent days (so
+  // today/yesterday would read zero). Page through all rows. (Same 1000-row
+  // cap class the storefront-funnel fix addressed.)
+  type UsageRow = {
+    model: string; input_tokens: number | null; output_tokens: number | null;
+    cache_creation_tokens: number | null; cache_read_tokens: number | null;
+    purpose: string | null; ticket_id: string | null; created_at: string | null;
+  };
+  const usageRows: UsageRow[] = [];
+  const USAGE_PAGE = 1000;
+  for (let from = 0; ; from += USAGE_PAGE) {
+    const { data: page } = await admin
+      .from("ai_token_usage")
+      .select("model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, purpose, ticket_id, created_at")
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since)
+      .order("created_at", { ascending: true })
+      .range(from, from + USAGE_PAGE - 1);
+    if (!page || page.length === 0) break;
+    usageRows.push(...(page as UsageRow[]));
+    if (page.length < USAGE_PAGE) break;
+  }
 
   const byModel: Record<string, { tokens: number; cost_cents: number; calls: number }> = {};
   const byDay: Record<string, { cost_cents: number; tokens: number }> = {};
@@ -144,6 +163,20 @@ export async function GET(
   let sonnetTickets = 0;
   const ticketModelMap = new Map<string, "opus" | "sonnet">();
 
+  // Cache utilization — the lever the orchestrator pre-context split targets.
+  // A healthy cache shows most input-side tokens as cheap cache READS, not
+  // re-paid creation/raw input.
+  let rawInputTokens = 0, cacheCreationTokens = 0, cacheReadTokens = 0, outputTokens = 0;
+
+  // Today vs yesterday, in Central time (matches the ROAS / ad dashboards).
+  const ctDate = (d: string | number): string =>
+    new Date(d).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const todayCT = ctDate(Date.now());
+  const yesterdayCT = ctDate(Date.now() - 24 * 60 * 60 * 1000);
+  type Period = { cost: number; rawIn: number; cacheCreate: number; cacheRead: number; output: number; tickets: Map<string, number>; model: Map<string, "opus" | "sonnet"> };
+  const mkPeriod = (): Period => ({ cost: 0, rawIn: 0, cacheCreate: 0, cacheRead: 0, output: 0, tickets: new Map(), model: new Map() });
+  const periodAcc: Record<"today" | "yesterday", Period> = { today: mkPeriod(), yesterday: mkPeriod() };
+
   for (const r of usageRows || []) {
     const tokens = (r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_creation_tokens || 0) + (r.cache_read_tokens || 0);
     const cost = usageCostCents(r.model, {
@@ -154,6 +187,24 @@ export async function GET(
     });
     totalCostCents += cost;
     totalTokens += tokens;
+    rawInputTokens += r.input_tokens || 0;
+    cacheCreationTokens += r.cache_creation_tokens || 0;
+    cacheReadTokens += r.cache_read_tokens || 0;
+    outputTokens += r.output_tokens || 0;
+
+    const rowDay = ctDate(r.created_at || Date.now());
+    const period = rowDay === todayCT ? periodAcc.today : rowDay === yesterdayCT ? periodAcc.yesterday : null;
+    if (period) {
+      period.cost += cost;
+      period.rawIn += r.input_tokens || 0;
+      period.cacheCreate += r.cache_creation_tokens || 0;
+      period.cacheRead += r.cache_read_tokens || 0;
+      period.output += r.output_tokens || 0;
+      if (r.ticket_id) period.tickets.set(r.ticket_id, (period.tickets.get(r.ticket_id) || 0) + cost);
+      if (r.purpose?.startsWith("orchestrator-decision:") && r.ticket_id && !period.model.has(r.ticket_id)) {
+        period.model.set(r.ticket_id, r.purpose.startsWith("orchestrator-decision:opus") ? "opus" : "sonnet");
+      }
+    }
 
     const m = byModel[r.model] || { tokens: 0, cost_cents: 0, calls: 0 };
     m.tokens += tokens; m.cost_cents += cost; m.calls += 1;
@@ -190,6 +241,28 @@ export async function GET(
 
   const ticketCount = ticketCostMap.size;
   const avgPerTicketCents = ticketCount ? totalCostCents / ticketCount : 0;
+
+  const inputSideTotal = rawInputTokens + cacheCreationTokens + cacheReadTokens;
+  const cacheReadRatioPct = inputSideTotal ? Math.round((cacheReadTokens / inputSideTotal) * 100) : 0;
+
+  const summarizePeriod = (p: Period) => {
+    const tickets = p.tickets.size;
+    const inputSide = p.rawIn + p.cacheCreate + p.cacheRead;
+    let opusT = 0, sonnetT = 0;
+    for (const m of p.model.values()) { if (m === "opus") opusT++; else sonnetT++; }
+    return {
+      cost_cents: Math.round(p.cost * 100) / 100,
+      tickets,
+      avg_per_ticket_cents: tickets ? Math.round((p.cost / tickets) * 100) / 100 : 0,
+      raw_input_tokens: p.rawIn,
+      cache_creation_tokens: p.cacheCreate,
+      cache_read_tokens: p.cacheRead,
+      output_tokens: p.output,
+      cache_read_ratio_pct: inputSide ? Math.round((p.cacheRead / inputSide) * 100) : 0,
+      opus_tickets: opusT,
+      sonnet_tickets: sonnetT,
+    };
+  };
   const dailyCosts = Object.entries(byDay)
     .map(([date, v]) => ({ date, cost_cents: Math.round(v.cost_cents * 100) / 100, tokens: v.tokens }))
     .sort((a, b) => a.date.localeCompare(b.date));
@@ -222,6 +295,13 @@ export async function GET(
       by_model: Object.fromEntries(Object.entries(byModel).map(([k, v]) => [k, { ...v, cost_cents: Math.round(v.cost_cents * 100) / 100 }])),
       by_purpose: Object.fromEntries(Object.entries(byPurpose).map(([k, v]) => [k, { ...v, cost_cents: Math.round(v.cost_cents * 100) / 100 }])),
       daily: dailyCosts,
+      cache: {
+        raw_input_tokens: rawInputTokens,
+        cache_creation_tokens: cacheCreationTokens,
+        cache_read_tokens: cacheReadTokens,
+        output_tokens: outputTokens,
+        read_ratio_pct: cacheReadRatioPct,
+      },
       orchestrator_split: {
         opus_calls: opusCalls,
         sonnet_calls: sonnetOrchestratorCalls,
@@ -229,6 +309,10 @@ export async function GET(
         sonnet_tickets: sonnetTickets,
         opus_pct: (opusTickets + sonnetTickets) ? Math.round((opusTickets / (opusTickets + sonnetTickets)) * 100) : 0,
       },
+    },
+    periods: {
+      today: summarizePeriod(periodAcc.today),
+      yesterday: summarizePeriod(periodAcc.yesterday),
     },
   });
 }
