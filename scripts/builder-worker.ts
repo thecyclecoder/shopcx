@@ -36,19 +36,23 @@ const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_CONCURRENT = 5; // real ceiling is Max rate limits, not the box
 
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
+type JobKind = "build" | "plan";
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec";
   summary: string;
   cmd?: string;
   preview?: string;
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
+  specSlug?: string; // type='spec': the slug the plan-job authors on approval
 }
 interface Job {
   id: string;
-  spec_slug: string;
+  workspace_id: string;
+  spec_slug: string; // build job: spec slug · plan job: GOAL slug
   spec_branch: string | null;
+  kind: JobKind;
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -189,6 +193,9 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
   const done: string[] = [];
   for (const a of actions) {
     if (a.status !== "approved") continue;
+    // 'spec' branches (plan jobs) are NOT shell commands — the resumed claude session authors the
+    // spec file. Leave them 'approved' so the resume prompt lists them; they're marked done after.
+    if (a.type === "spec") continue;
     try {
       if (a.type === "merge_pr") {
         const r = await gh("PUT", `/repos/${REPO}/pulls/${job.pr_number}/merge`, { merge_method: "squash" });
@@ -209,6 +216,40 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
     done.push(`${a.summary} → ${a.status}`);
   }
   return { actions, summary: done.join("; ") };
+}
+
+// After a PLAN job's author-resume pass writes the approved specs, queue a build for each (the worker
+// is the only component with DB creds) and mark the matching 'spec' actions done. Skips a slug that
+// already has an active build. Reuses the existing build pipeline → each spec opens its own claude/* PR.
+async function queuePlanBuilds(job: Job, authored: string[]): Promise<PendingAction[]> {
+  const actions = (job.pending_actions || []).map((a) => ({ ...a }));
+  for (const slug of authored) {
+    if (!/^[a-z0-9-]+$/i.test(slug)) continue;
+    const { data: existing } = await db
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", job.workspace_id)
+      .eq("spec_slug", slug)
+      .eq("kind", "build")
+      .in("status", ["queued", "claimed", "building", "needs_input", "queued_resume"])
+      .limit(1);
+    if (!existing || existing.length === 0) {
+      await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        kind: "build",
+        status: "queued",
+        instructions: `Auto-authored by the goal-decomposition plan of ${job.spec_slug}.`,
+      });
+    }
+    for (const a of actions) {
+      if (a.type === "spec" && a.specSlug === slug && a.status === "approved") {
+        a.status = "done";
+        a.result = "authored + build queued";
+      }
+    }
+  }
+  return actions;
 }
 
 async function runJob(job: Job) {
@@ -250,14 +291,38 @@ async function runJob(job: Job) {
     if ((job.answers || []).length) resumeBits.push(`Answers to your questions: ${JSON.stringify(job.answers)}`);
     if (executedSummary) resumeBits.push(`Gated actions executed: ${executedSummary}`);
 
-    const prompt = isResume
-      ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
-      : [
-          `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
-          ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
-          `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
-          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
+    let prompt: string;
+    if (job.kind === "plan") {
+      // PLAN job: decompose a GOAL (slug = goal slug) via the plan-goal skill, not build-spec.
+      if (isResume) {
+        const approved = (job.pending_actions || []).filter((a) => a.type === "spec" && a.status === "approved");
+        const declined = (job.pending_actions || []).filter((a) => a.type === "spec" && a.status === "declined");
+        prompt = [
+          ...(resumeBits.length ? [resumeBits.join(". ") + "."] : []),
+          `Resuming the plan-goal decomposition of docs/brain/goals/${slug}.md — AUTHOR pass (Pass B).`,
+          `The owner APPROVED these branches; author a spec file for EACH now: ${JSON.stringify(approved.map((a) => ({ specSlug: a.specSlug, summary: a.summary, intent: a.preview })))}.`,
+          declined.length ? `The owner DECLINED these — record each with ❌ in the goal doc's Decomposition so re-plan won't re-propose them; do NOT author them: ${JSON.stringify(declined.map((a) => a.specSlug))}.` : "",
+          `Per the plan-goal skill Pass B: write docs/brain/specs/{specSlug}.md for each approved branch (H1 + the **Owner:**/**Parent:** metadata line — owner + parent are mandatory, no orphans — phases ⏳, Safety, Completion criteria), and add a [[../specs/{specSlug}]] wikilink under its milestone in docs/brain/goals/${slug}.md. Do NOT build and do NOT run git/push.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…","authored":["spec-slug", …]} | {"status":"needs_input","questions":[{"id","q"}]}. "authored" lists exactly the spec slugs you wrote.`,
+        ].filter(Boolean).join("\n");
+      } else {
+        prompt = [
+          `Use the plan-goal skill to decompose the goal at docs/brain/goals/${slug}.md (cwd is the repo root). This is the PLAN pass (Pass A) — gap-analyze against the brain and PROPOSE a milestone → spec tree. Do NOT author specs and do NOT build in this pass.`,
+          ...(job.instructions ? [job.instructions] : []),
+          `Worker protocol: the harness owns version control — do NOT run git/push. You have NO prod credentials. Ground every "we have X"/"X is a gap" claim in a cited brain page. Every proposed spec MUST name an owner function + a parent (reject your own orphans).`,
+          `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","specSlug":"kebab-slug","summary":"Title — owner: {function} · parent: {mandate or goal milestone}","preview":"one-paragraph intent + the cited brain gap it closes"}]} | {"status":"needs_input","questions":[{"id","q"}]}. One action per proposed branch.`,
         ].join("\n");
+      }
+    } else {
+      prompt = isResume
+        ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
+        : [
+            `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
+            ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
+            `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
+            `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
+          ].join("\n");
+    }
 
     const { session, resultText, isError, raw } = await runClaude(prompt, job.claude_session_id, wt);
     const logTail = raw.slice(-2000);
@@ -283,14 +348,19 @@ async function runJob(job: Job) {
         : [];
       const pending: PendingAction[] = incoming.map((a, i) => {
         const cmd = typeof a.cmd === "string" ? a.cmd : undefined;
-        const type = a.type === "merge_pr" || a.type === "run_prod_script" ? (a.type as PendingAction["type"]) : "apply_migration";
+        const type =
+          a.type === "merge_pr" || a.type === "run_prod_script" || a.type === "spec"
+            ? (a.type as PendingAction["type"])
+            : "apply_migration";
+        const specSlug = type === "spec" && typeof a.specSlug === "string" ? a.specSlug : undefined;
         return {
           id: `a${Date.now().toString(36)}${i}`,
           type,
-          summary: String(a.summary || cmd || "gated action"),
+          summary: String(a.summary || specSlug || cmd || "gated action"),
           cmd,
           preview: typeof a.preview === "string" ? a.preview : cmd,
           status: "pending",
+          ...(specSlug ? { specSlug } : {}),
         };
       });
       if (sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()) {
@@ -336,7 +406,16 @@ async function runJob(job: Job) {
       await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
       return;
     }
-    await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
+    const completePatch: Record<string, unknown> = { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail };
+    if (job.kind === "plan") {
+      // Author-resume done → queue a build for each authored spec + mark its 'spec' action done.
+      const authored = Array.isArray((parsed as { authored?: unknown })?.authored)
+        ? ((parsed as { authored?: unknown }).authored as unknown[]).filter((s): s is string => typeof s === "string")
+        : [];
+      completePatch.pending_actions = await queuePlanBuilds(job, authored);
+      console.log(`${tag} ✓ plan authored ${authored.length} spec(s); builds queued`);
+    }
+    await update(job.id, completePatch);
     console.log(`${tag} ✓ completed → ${pr.url}`);
   } finally {
     // Always tear down the worktree — the branch is pushed, so a resume recreates one.

@@ -14,8 +14,14 @@ const nextConfig: NextConfig = {
   // brain markdown explicitly or the route renders empty on its own data in production.
   outputFileTracingIncludes: {
     "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md"],
-    "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md"],
-    "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md"],
+    // [slug] resolves [[../functions/x]] / [[../goals/x]] wikilinks, so it needs those dirs too.
+    "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/functions/**/*.md", "./docs/brain/goals/**/*.md"],
+    "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md", "./docs/brain/functions/**/*.md", "./docs/brain/goals/**/*.md"],
+    // The Goal Decomposition Engine surfaces — function homes + goal board/detail read functions/ + goals/
+    // (and specs/ for rollup). Vercel prunes docs/brain otherwise; see docs/brain/dashboard/roadmap.md.
+    "/dashboard/roadmap/functions/[slug]": ["./docs/brain/functions/**/*.md", "./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md"],
+    "/dashboard/roadmap/goals": ["./docs/brain/goals/**/*.md", "./docs/brain/specs/**/*.md"],
+    "/dashboard/roadmap/goals/[slug]": ["./docs/brain/goals/**/*.md", "./docs/brain/specs/**/*.md", "./docs/brain/functions/**/*.md"],
     "/dashboard/brain": ["./docs/brain/**/*.md"],
     "/dashboard/brain/[...slug]": ["./docs/brain/**/*.md"],
     // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into

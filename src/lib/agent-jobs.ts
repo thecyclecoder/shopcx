@@ -23,7 +23,9 @@ export interface JobQuestion {
   options?: string[];
 }
 
-export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr";
+// "spec" is the planner's proposed-branch action (Goal Decomposition Engine): approving it means
+// "author this spec + queue its build" — no shell command, the worker authors it on resume.
+export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr" | "spec";
 
 /** A prod-side-effect the build needs the owner to approve. `cmd` is the exact command the worker runs on approval (also shown as the preview). */
 export interface PendingAction {
@@ -34,13 +36,20 @@ export interface PendingAction {
   preview?: string;
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
+  /** For type "spec": the slug the worker will author as docs/brain/specs/{slug}.md on approval. */
+  specSlug?: string;
 }
+
+/** A build job builds a spec → PR; a plan job decomposes a goal → proposed spec tree. */
+export type JobKind = "build" | "plan";
 
 export interface AgentJob {
   id: string;
   workspace_id: string;
+  /** For a build job: the spec slug. For a plan job: the GOAL slug being decomposed. */
   spec_slug: string;
   spec_branch: string | null;
+  kind: JobKind;
   status: JobStatus;
   claude_session_id: string | null;
   questions: JobQuestion[];
@@ -76,6 +85,24 @@ export async function getLatestJobsBySlug(workspaceId: string): Promise<Record<s
     if (!map[j.spec_slug]) map[j.spec_slug] = j;
   }
   return map;
+}
+
+/**
+ * Latest PLAN job for a goal (Goal Decomposition Engine). Filtered by kind in JS (not a `.eq`) so
+ * it's safe before the `agent_jobs.kind` migration is applied — pre-migration rows have no kind, so
+ * none match and this returns null. A goal slug shares the spec_slug column; kind disambiguates.
+ */
+export async function getLatestPlanJob(workspaceId: string, goalSlug: string): Promise<AgentJob | null> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", goalSlug)
+    .order("created_at", { ascending: false })
+    .limit(20);
+  const rows = (data ?? []) as AgentJob[];
+  return rows.find((j) => j.kind === "plan") ?? null;
 }
 
 const GH_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
