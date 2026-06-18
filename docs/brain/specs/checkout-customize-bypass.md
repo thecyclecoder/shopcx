@@ -1,4 +1,4 @@
-# Checkout customize-bypass (straight PDP → checkout) ⏳
+# Checkout customize-bypass (straight PDP → checkout) ✅
 
 Status: 🚧 built (pending live verify) · owner: Dylan · created 2026-06-16
 
