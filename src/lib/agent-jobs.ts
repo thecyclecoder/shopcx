@@ -50,8 +50,9 @@ export interface PendingAction {
   spec?: ProposedSpec; // set when type==='spec' (planner proposal)
 }
 
-/** 'build' (default — build a spec to a PR) | 'plan' (run plan-goal against a goal → propose specs). */
-export type JobKind = "build" | "plan";
+/** 'build' (default — build a spec to a PR) | 'plan' (run plan-goal against a goal → propose specs)
+ * | 'fold' (batch fold-build — fold every pending-fold spec into the brain in one PR, fold-build-batching). */
+export type JobKind = "build" | "plan" | "fold";
 
 export interface AgentJob {
   id: string;
@@ -93,6 +94,42 @@ export async function getLatestPlanJob(workspaceId: string, goalSlug: string): P
     .limit(1)
     .maybeSingle();
   return (data as AgentJob) ?? null;
+}
+
+/** A spec the owner marked verified, awaiting (or mid-) a batch fold-build (fold-build-batching).
+ * `foldJob` is the kind='fold' job that will fold it (set once a job has claimed the batch). */
+export interface PendingFold {
+  spec_slug: string;
+  status: "pending" | "folding" | "folded" | "failed";
+  job_id: string | null;
+  foldJob: AgentJob | null;
+}
+
+/**
+ * Specs currently queued for / mid- a fold-build, keyed by spec slug. The board renders these as
+ * "Folding…" instead of the verify button — the spec's own (build) job no longer maps 1:1 to a fold
+ * (one fold PR retires N specs). Only live rows (pending|folding); folded/failed drop off.
+ */
+export async function getPendingFolds(workspaceId: string): Promise<Record<string, PendingFold>> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("pending_folds")
+    .select("spec_slug, status, job_id")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["pending", "folding"]);
+  const rows = (data ?? []) as { spec_slug: string; status: PendingFold["status"]; job_id: string | null }[];
+  if (!rows.length) return {};
+  const jobIds = [...new Set(rows.map((r) => r.job_id).filter(Boolean))] as string[];
+  const jobsById: Record<string, AgentJob> = {};
+  if (jobIds.length) {
+    const { data: jobs } = await admin.from("agent_jobs").select("*").in("id", jobIds);
+    for (const j of (jobs ?? []) as AgentJob[]) jobsById[j.id] = j;
+  }
+  const map: Record<string, PendingFold> = {};
+  for (const r of rows) {
+    map[r.spec_slug] = { spec_slug: r.spec_slug, status: r.status, job_id: r.job_id, foldJob: r.job_id ? jobsById[r.job_id] ?? null : null };
+  }
+  return map;
 }
 
 /** Latest job per spec for a workspace (newest wins) — drives the board's per-card status. */

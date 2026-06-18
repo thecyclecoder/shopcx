@@ -16,7 +16,7 @@ const nextConfig: NextConfig = {
     // The goal/function layer reads docs/brain/{goals,functions} too — trace them into every
     // roadmap route that resolves the taxonomy (board, map, spec/goal/function detail). Vercel
     // prunes docs/brain otherwise. See docs/brain/specs/goal-decomposition-engine.md.
-    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md", "./docs/brain/archive.d/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
     "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
     "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
     "/dashboard/roadmap/goals": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md"],

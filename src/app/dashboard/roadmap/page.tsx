@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { getRoadmap, getArchive, type Phase, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestJobsBySlug, reconcileMergedJobs, type AgentJob } from "@/lib/agent-jobs";
+import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
@@ -56,7 +56,7 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
+function Card({ spec, job, fold }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <Link href={`/dashboard/roadmap/${spec.slug}`} className="group flex items-start gap-2">
@@ -85,7 +85,7 @@ function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 flex items-center justify-between gap-2">
         <StatusControl slug={spec.slug} status={spec.status} />
-        <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} />
+        <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} />
       </div>
       <div className="mt-1.5 text-[11px] text-zinc-400">
         <code>specs/{spec.slug}.md</code>
@@ -97,7 +97,9 @@ function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
 export default async function RoadmapPage() {
   const [{ specs, tracks }, archive] = await Promise.all([getRoadmap(), getArchive()]);
   const workspaceId = await getActiveWorkspaceId();
-  const jobsBySlug = workspaceId ? await getLatestJobsBySlug(workspaceId) : {};
+  const [jobsBySlug, folds] = workspaceId
+    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId)])
+    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>];
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
   const byStatus = (s: Phase) => specs.filter((sp) => sp.status === s);
 
@@ -157,7 +159,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} />)
                   )}
                 </div>
               </div>
