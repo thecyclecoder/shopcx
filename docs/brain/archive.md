@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Parallel builds (worktree-isolated, 5 lanes)** · verified 2026-06-18 · → [[recipes/build-box-setup]]
 - **Appstle pricing heal + migration monitor** · verified 2026-06-18 · → [[lifecycles/subscription-billing]]
 
 ## Related
