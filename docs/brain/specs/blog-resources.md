@@ -1,5 +1,7 @@
 # Blog → Posts + Product Resources ✅ (MVP shipped 2026-06-10) · Storefront blog ✅ (2026-06-10)
 
+**Owner:** [[../functions/cmo]] · **Parent:** Cmo mandate "Organic content & SEO"
+
 > **Shipped:** all 36 Superfood Scoop articles imported → `posts` (35 resources, 1 blog-only), images migrated off Shopify (0 Shopify-hosted remaining), AI-classified (is_resource + product(s) + grouping), auto-published. Portal Resources UI live (search + product→grouping + reader). Import ran as a 36-agent workflow in ~78s. **Public storefront blog now live** (see § Storefront rendering). Remaining = RAG embedding + periodic re-sync (Future).
 
 **Goal:** import the 36 Shopify "Superfood Scoop" blog articles into our own `posts` object, migrate their images off Shopify onto our storage, and — during import — use AI to decide which posts are **product resources**, **which product(s)** they belong to (they're untagged, so infer from title + content), and which **grouping** they are (Recipes / How it works / How to use / …). Then surface the relevant ones in the portal **Resources** section with a search bar + product→grouping navigation. Storefront rendering of posts is a later phase.

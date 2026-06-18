@@ -1,5 +1,7 @@
 # Build Approval Gates + Execution Hardening ✅
 
+**Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
+
 Harden the [[roadmap-build-console]] executor so autonomous builds run with **minimal back-and-forth** (bypass mode — no per-tool prompts) while staying **safe**: the few irreversible / prod-mutating actions (apply a migration, run a prod-mutating script, merge to `main`) come back as **one-tap approvals on the spec/phase card**, executed by the *trusted worker*, not the sandboxed build. This extends [[../tables/agent_jobs]] — the live DB companion to the static brain — with an approval/action layer.
 
 **Business outcome:** Dylan fires a build from anywhere and it completes autonomously, pausing only for a genuine product question or a handful of consequential approvals (surfaced async on his phone). No terminal, no per-tool prompts, no unsafe prod access.

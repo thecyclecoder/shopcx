@@ -1,5 +1,7 @@
 # Storefront MVP — Amazing Coffee subscription funnel ✅ (one manual smoke test outstanding)
 
+**Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
+
 > **All 5 phases shipped 2026-06-09.** P1 internal-sub management · P2 chapter/scroll/CTA instrumentation · P3 Meta pixel + CAPI · P4 smart popup + quiz · P5 checkout hardening + lead-plumbing. The **only** outstanding item is a real live end-to-end subscribe purchase (manual — needs a live Braintree charge). Operational prerequisite for P3: create + activate a `meta_capi` event_sink (pixel_id + encrypted access_token) per workspace. When the smoke test passes, fold this spec into the lifecycle/table/library/inngest pages and delete it.
 
 **Goal:** stand up a paid-traffic funnel for Amazing Coffee that we **own end-to-end** — PDP → customize → checkout → thank-you → portal sub-management — so we stop sending ad traffic to Shopify, own the subscription on our internal rails, and instrument the whole thing for Meta (CAPI) + on-site conversion intelligence.

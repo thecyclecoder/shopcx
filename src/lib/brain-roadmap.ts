@@ -26,6 +26,8 @@ export interface SpecCard {
   summary: string;
   phases: SpecPhase[];
   counts: Record<Phase, number>;
+  owner?: string; // function slug (DRI) from the **Owner:** [[../functions/x]] line
+  parent?: string; // mandate or goal milestone from **Parent:**
 }
 
 export interface ProjectTrack {
@@ -129,6 +131,21 @@ function parseSpec(slug: string, raw: string): SpecCard {
   const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
   for (const p of phases) counts[p.status]++;
 
+  // Taxonomy: **Owner:** [[../functions/{slug}]] · **Parent:** {mandate or goal milestone}
+  let owner: string | undefined;
+  let parent: string | undefined;
+  for (const l of lines) {
+    if (!owner) {
+      const m = l.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
+      if (m) owner = m[1].replace(/^.*\//, "");
+    }
+    if (!parent) {
+      const m = l.match(/\*\*Parent:\*\*\s*(.+?)\s*$/);
+      if (m) parent = cleanInline(m[1]);
+    }
+    if (owner && parent) break;
+  }
+
   return {
     slug,
     title,
@@ -136,6 +153,8 @@ function parseSpec(slug: string, raw: string): SpecCard {
     summary: firstParagraph(lines),
     phases,
     counts,
+    owner,
+    parent,
   };
 }
 

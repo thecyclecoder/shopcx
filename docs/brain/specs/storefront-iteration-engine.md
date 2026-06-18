@@ -1,5 +1,7 @@
 # Storefront Iteration Engine ⏳
 
+**Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
+
 Summary: An autonomous, daily-running engine that assesses Superfoods Company's storefront (sessions/engagement per PDP and lander variant) against Meta ad performance, reasons over it as an expert direct-response marketer / offer designer / media buyer, and produces typed, approvable recommendations (e.g. "shift spend to variant X", "test benefit angle Y from product intelligence", "launch a new static adset"). On approval it fires existing ShopCX systems to build Meta objects as drafts (never active) and create new ad/lander assets, so social marketing iterates continuously while Dylan keeps final control by flipping drafts live in Meta. Business outcome: higher blended ROAS and faster creative/offer iteration without manual analysis. This spec is grounded against the existing Amazing Coffee data (product intelligence, PDP + variants, ShopCX-built ads, storefront sessions) and is intended to be refined with Opus once Phase 0 confirms exact Brain schema.
 
 ## Phase 0 — Brain access & schema discovery

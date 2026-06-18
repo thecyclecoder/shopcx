@@ -7,7 +7,7 @@ The brain isn't just reference docs — it's also where we plan + track work. Th
 Every spec belongs to something bigger; the parent chain terminates at the org chart.
 
 ```
-Function (Growth, CFO, CMO, Logistics, CS)        functions/{slug}.md — permanent owner
+Function (Growth, CMO, Retention, CFO, Logistics, CS, Platform/Eng)   functions/{slug}.md — permanent owner
   ├─ Mandate  (perpetual charter, metric-tracked, never "done")
   │     └─ Spec → Phase → Build
   └─ Goal     (finite BHAG, rolls up to 100% then closes)   goals/{slug}.md

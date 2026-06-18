@@ -1,5 +1,7 @@
 # Repo Skills Catalog — committed Claude Code skills for operating ShopCX 🚧
 
+**Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
+
 ShopCX's first repo-committed Claude Code skills now live in `.claude/skills/` (the P0 four — Phase 1). This spec is the catalog of skills that let an agent — the self-hosted box's headless `claude -p` builds ([[../recipes/build-box-setup]]) **or** an interactive session — build, maintain, and operate ShopCX reproducibly, in version control.
 
 **Architecture note (updated 2026-06-18):** builds run on the **box**, not a Claude Code Routine. The box runs `claude` as a *top-level* process, so `claude -p` is valid there (it was *not* inside a routine — a routine is itself a `claude` session and can't spawn one). Skills are the reusable procedures that top-level `claude -p` draws on; the box can use any skill committed to the repo.

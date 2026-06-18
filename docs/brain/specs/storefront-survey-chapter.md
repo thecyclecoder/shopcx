@@ -1,5 +1,7 @@
 # Storefront: survey chapter + converter-first PDP reorder
 
+**Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
+
 **Goal:** lift PDP engagement and price-step conversion by (1) making the lead-capture **survey a visible PDP chapter** (instead of a popup variant that never fires), (2) **reordering chapters converter-first** so the content that drives people to pricing comes before attention decays, and (3) relocating low-reach detail chapters **below the price table** as opt-in "learn more" content (not cut). Plus the analytics to measure it.
 
 Phase legend: ⏳ planned · 🚧 in progress · ✅ shipped

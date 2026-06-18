@@ -1,8 +1,10 @@
 # Goal Decomposition Engine ⏳
 
+**Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
+
 A layer **above** specs: write a huge company goal (a BHAG), and a planner agent does gap-analysis against the brain, proposes a milestone → spec tree, and — once you approve the branches — auto-authors the leaf specs and queues their builds. Same substrate as the Roadmap Build Console ([[roadmap-build-console]]), one altitude up: where `build-spec` turns a spec into a PR, the **planner** turns a goal into specs. The first goal it runs on is [[../goals/ceo-mode|CEO mode]] — and its first act is to surface the integrations/data we still need (Amazon, COGS/supplier, a metrics spine) as specs. Decomposition is **human-gated**: the planner proposes, you approve which branches to pursue before any spec is written or built.
 
-**No orphan specs.** Every spec belongs to something bigger, and the parent chain terminates at the org chart — the **functions** (CFO, Growth, CMO, Logistics, CS) from [[../goals/ceo-mode]]. A spec's parent is one of two kinds:
+**No orphan specs.** Every spec belongs to something bigger, and the parent chain terminates at the org chart — the **functions** (Growth, CMO, Retention, CFO, Logistics, CS — the CEO-mode directors — plus Platform/Eng, the build org) from [[../goals/ceo-mode]]. A spec's parent is one of two kinds:
 - a function **mandate** — a *perpetual* charter a function owns forever (e.g. Growth's "static-ad optimization"), measured by a metric trend, never "done"; or
 - a goal **milestone** — part of a *finite* initiative (e.g. CEO mode) that closes at 100%.
 
