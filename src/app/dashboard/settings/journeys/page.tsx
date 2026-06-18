@@ -52,10 +52,11 @@ interface JourneyDef {
   created_at: string;
 }
 
-const ALL_CHANNELS = ["email", "chat", "help_center", "meta_dm", "sms"] as const;
+const ALL_CHANNELS = ["email", "chat", "portal", "help_center", "meta_dm", "sms"] as const;
 const CHANNEL_LABELS: Record<string, string> = {
   email: "Email",
   chat: "Live Chat",
+  portal: "Customer Portal",
   help_center: "Help Center",
   meta_dm: "Meta DM",
   sms: "SMS",
@@ -100,7 +101,7 @@ export default function JourneysSettingsPage() {
         name: "Cancellation Flow",
         journey_type: "cancellation",
         config: CANCELLATION_JOURNEY_CONFIG,
-        channels: ["email", "chat", "help_center", "meta_dm", "sms"],
+        channels: ["email", "chat", "portal", "help_center", "meta_dm", "sms"],
         trigger_intent: "cancellation",
         description: "Guided cancellation flow with retention offers",
         match_patterns: ["cancel", "cancellation", "unsubscribe", "stop subscription"],

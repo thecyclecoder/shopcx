@@ -141,6 +141,7 @@ const CHANNEL_LABELS: Record<string, string> = {
   social_comments: "Social Comments",
   meta_dm: "Social DMs",
   sms: "SMS",
+  portal: "Customer Portal",
 };
 
 function ChannelBadge({ channel }: { channel: string }) {

@@ -308,7 +308,7 @@ const key = ws.shopify_access_token_encrypted ? decrypt(ws.shopify_access_token_
 
 - All credential columns end with `_encrypted` — AES-256-GCM. Decrypt via `src/lib/crypto.ts`.
 - `portal_config` JSONB holds cancel-flow reasons + portal branding. Edited in Settings → Cancel Flow / Portal.
-- `response_delays` JSONB controls per-channel outbound message delays (drives `pending_send_at`).
+- `response_delays` JSONB controls per-channel outbound message delays (drives `pending_send_at`). Keys: `email`, `chat`, `sms`, `meta_dm`, `help_center`, `social_comments`, `portal` (seconds), plus `skip_delay_for_members` (bool). A missing channel key falls back to the `email` delay. Edited at `/dashboard/settings/response-delay`.
 - FKs from many tables point here — most queries filter by `workspace_id` from the cookie.
 
 ---

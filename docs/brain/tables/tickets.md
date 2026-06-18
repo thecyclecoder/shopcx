@@ -160,7 +160,7 @@ const { data } = await admin.from("tickets")
 ## Gotchas
 
 - `status`: `"open"`, `"closed"`, `"archived"` (lowercase). **`pending` is NOT used in production data** — older docs claim it but no rows have it. Use `open` for "AI is awaiting customer reply"; `closed` for "resolved"; `archived` for "auto-archived after retention threshold."
-- `channel`: `"email"`, `"chat"`, `"help_center"`, `"social_comments"`, `"meta_dm"`, `"sms"`.
+- `channel`: `"email"`, `"chat"`, `"help_center"`, `"social_comments"`, `"meta_dm"`, `"sms"`, `"portal"`. `portal` = created via the customer-portal "Support" sidebar ([[../libraries/portal__handlers__support]]); behaves like `chat` for AI (short replies, HTML, personality, response delay) but **always delivers by email** with a threaded digest — see [[../libraries/portal__thread-email]]. (`help_center` is the older public help-center widget/form.)
 - `handled_by` is a free-text label — `"AI Agent"`, `"Workflow: order_tracking"`, `"Journey: cancel"`, or a display_name. Filter for the customer-reply-driven AI path with `LIKE 'Journey:%' OR ='AI Agent' OR LIKE 'Workflow:%'`.
 - `escalated_to` set when escalated to a human; `assigned_to` is the human owner.
 - `agent_intervened` flips true the moment a real human sends an outbound — AI must read this before generating.

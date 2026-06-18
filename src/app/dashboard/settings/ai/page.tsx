@@ -86,6 +86,7 @@ const CHANNEL_LABELS: Record<string, string> = {
   meta_dm: "Social DMs",
   help_center: "Help Center",
   social_comments: "Social Comments",
+  portal: "Customer Portal",
 };
 
 export default function AISettingsPage() {
