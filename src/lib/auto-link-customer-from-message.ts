@@ -254,6 +254,137 @@ async function resolveOrderOwner(
   return null;
 }
 
+// ── Identity normalization (name + address) ────────────────────────
+//
+// Same-person profiles routinely differ only in trivial ways the store
+// of record never normalized: "Pam" vs "Pamela", "5318 South Katy Road"
+// vs "5318 S Katy Road". A byte-for-byte compare misses them. These
+// helpers canonicalize so an exact-after-normalization match is what we
+// require — high precision, but tolerant of abbreviation/nickname.
+
+/** USPS-ish street + directional abbreviations, both directions folded to the short form. */
+const STREET_ABBR: Record<string, string> = {
+  north: "n", south: "s", east: "e", west: "w",
+  northeast: "ne", northwest: "nw", southeast: "se", southwest: "sw",
+  street: "st", avenue: "ave", road: "rd", drive: "dr", lane: "ln",
+  boulevard: "blvd", court: "ct", place: "pl", circle: "cir", trail: "trl",
+  parkway: "pkwy", highway: "hwy", terrace: "ter", square: "sq",
+  apartment: "apt", suite: "ste", building: "bldg", floor: "fl",
+};
+
+/** Canonicalize a street line: lowercase, strip punctuation, fold abbreviations. */
+function normAddr(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[.,#]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => STREET_ABBR[t] ?? t)
+    .join(" ")
+    .trim();
+}
+
+/** First 5 digits of a zip (drops zip+4 and stray formatting). */
+function normZip(s: string): string {
+  const digits = (s.match(/\d/g) || []).join("");
+  return digits.slice(0, 5);
+}
+
+/**
+ * First names are "the same" when identical, or when one is an exact
+ * prefix of the other and the shorter is ≥3 chars (so "Pam"→"Pamela",
+ * "Rob"→"Robert", but not "Al"→"Alexander" or any 1–2 char fragment).
+ * Both must be present — we never link on a missing first name.
+ */
+function firstNamesCompatible(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length >= 3 && long.startsWith(short);
+}
+
+/**
+ * Auto-link a ticket's customer to any OTHER profile in the workspace
+ * that is the same person by **exact-after-normalization name AND
+ * address**: identical last name, compatible first name (exact or
+ * nickname/prefix), and identical normalized street + 5-digit zip.
+ *
+ * The motivating case (ticket f64d979b): "Pam Bensley" (p_sb38@hotmail,
+ * 4 cancelled subs, no recent order) wrote in to cancel a renewal she
+ * didn't recognize. The renewal + active subscription actually live on
+ * "Pamela Bensley" (psb71us@outlook, same address "5318 S Katy Road").
+ * Until the two are linked, get_customer_account on the ticket profile
+ * shows nothing to cancel/refund and the refund playbook can't fire.
+ *
+ * Name+address is a high-confidence "same human" signal, so we link
+ * WITHOUT asking the customer — unlike the fuzzy suggestions surfaced in
+ * the agent UI, which require a human to confirm. Previously-rejected
+ * pairs (customer_link_rejections, either direction) are never re-linked.
+ *
+ * Best-effort, never throws.
+ */
+export async function autoLinkCustomerByIdentity(
+  admin: SupabaseClient,
+  workspaceId: string,
+  customerId: string,
+): Promise<AutoLinkResult> {
+  try {
+    const { data: me } = await admin
+      .from("customers")
+      .select("id, email, first_name, last_name, default_address")
+      .eq("id", customerId)
+      .single();
+    if (!me) return { linkedCount: 0, linkedEmails: [] };
+
+    const lastName = (me.last_name || "").trim();
+    const firstName = (me.first_name || "").trim().toLowerCase();
+    const myAddr = me.default_address as { address1?: string; zip?: string } | null;
+    // Require a full identity to match on: last + first name AND address.
+    if (lastName.length < 2 || !firstName || !myAddr?.address1 || !myAddr?.zip) {
+      return { linkedCount: 0, linkedEmails: [] };
+    }
+    const myAddrNorm = normAddr(myAddr.address1);
+    const myZip = normZip(myAddr.zip);
+    if (!myAddrNorm || myZip.length < 5) return { linkedCount: 0, linkedEmails: [] };
+
+    // Candidates: same last name (case-insensitive) in this workspace.
+    const { data: cands } = await admin
+      .from("customers")
+      .select("id, email, first_name, last_name, default_address")
+      .eq("workspace_id", workspaceId)
+      .ilike("last_name", lastName)
+      .neq("id", customerId)
+      .limit(50);
+    if (!cands?.length) return { linkedCount: 0, linkedEmails: [] };
+
+    // Previously-rejected pairs — honor rejections in EITHER direction.
+    const { data: rej } = await admin
+      .from("customer_link_rejections")
+      .select("customer_id, rejected_customer_id")
+      .or(`customer_id.eq.${customerId},rejected_customer_id.eq.${customerId}`);
+    const rejected = new Set<string>();
+    for (const r of rej || []) {
+      rejected.add(r.customer_id === customerId ? r.rejected_customer_id : r.customer_id);
+    }
+
+    const linked: string[] = [];
+    for (const c of cands) {
+      if (rejected.has(c.id)) continue;
+      if (!firstNamesCompatible(firstName, (c.first_name || "").trim().toLowerCase())) continue;
+      const cAddr = c.default_address as { address1?: string; zip?: string } | null;
+      if (!cAddr?.address1 || !cAddr?.zip) continue;
+      if (normAddr(cAddr.address1) !== myAddrNorm) continue;
+      if (normZip(cAddr.zip) !== myZip) continue;
+      if (await linkTwoCustomers(admin, workspaceId, customerId, c.id)) {
+        linked.push(c.email || c.id);
+      }
+    }
+    return { linkedCount: linked.length, linkedEmails: linked };
+  } catch {
+    return { linkedCount: 0, linkedEmails: [] };
+  }
+}
+
 export async function autoLinkCustomerFromMessage(
   admin: SupabaseClient,
   workspaceId: string,

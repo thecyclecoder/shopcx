@@ -1639,6 +1639,29 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       });
     }
 
+    // ── 3.9 AUTO-LINK BY IDENTITY (exact name + address) ──
+    // Same person, split across two profiles (e.g. a hotmail and an
+    // outlook address) where the active subscription / renewal order
+    // lives on the profile the ticket ISN'T linked to. The customer
+    // can't quote an order number or alternate email (they don't know
+    // it), so the inline scan above finds nothing. An exact-after-
+    // normalization name+address match is a high-confidence "same
+    // human" signal — link it without asking, so get_customer_account
+    // returns the merged set and refund/cancel playbooks can fire.
+    if (st.custId) {
+      await step.run("auto-link-by-identity", async () => {
+        const { autoLinkCustomerByIdentity } = await import("@/lib/auto-link-customer-from-message");
+        const result = await autoLinkCustomerByIdentity(admin, wsId, st.custId!);
+        if (result.linkedCount > 0) {
+          await sysNote(
+            admin,
+            tid,
+            `[System] Auto-linked ${result.linkedCount} account${result.linkedCount === 1 ? "" : "s"} by exact name + address match: ${result.linkedEmails.join(", ")}`,
+          );
+        }
+      });
+    }
+
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.
