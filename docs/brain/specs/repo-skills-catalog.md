@@ -1,8 +1,10 @@
 # Repo Skills Catalog — committed Claude Code skills for operating ShopCX 🚧
 
-ShopCX has **zero** repo-committed Claude Code skills (`.claude/skills/` and `.claude/commands/` don't exist; the whole `.claude/` dir is untracked). That means a **routine** — which can only use skills committed to the cloned repo — has no reusable procedures to draw on, and every dev session re-derives the same operational recipes from scratch. This spec defines the skill catalog that lets an agent (routine *or* interactive) build, maintain, and operate ShopCX reproducibly, in version control.
+ShopCX's first repo-committed Claude Code skills now live in `.claude/skills/` (the P0 four — Phase 1). This spec is the catalog of skills that let an agent — the self-hosted box's headless `claude -p` builds ([[../recipes/build-box-setup]]) **or** an interactive session — build, maintain, and operate ShopCX reproducibly, in version control.
 
-**Why now:** the [[roadmap-build-console]] vision (describe → spec → autonomous build → PR) depends on the routine having a `build-spec` skill, and the routine can't shell out to `claude`/`/goal` (nested-session guard) — so the build procedure *must* live as a committed repo skill. The same is true for the ~230 operational scripts: they encode a handful of repeatable patterns that should be skills, not copy-paste.
+**Architecture note (updated 2026-06-18):** builds run on the **box**, not a Claude Code Routine. The box runs `claude` as a *top-level* process, so `claude -p` is valid there (it was *not* inside a routine — a routine is itself a `claude` session and can't spawn one). Skills are the reusable procedures that top-level `claude -p` draws on; the box can use any skill committed to the repo.
+
+**Why now:** [[roadmap-build-console]] (describe → spec → autonomous build → PR) is shipped end-to-end. The build procedure should live as the committed `build-spec` skill so it's reproducible across the box worker *and* interactive sessions. The same is true for the ~230 operational scripts: they encode a handful of repeatable patterns that should be skills, not copy-paste.
 
 ## Two layers (don't conflate)
 
@@ -17,9 +19,9 @@ All 230 `scripts/*.ts` run via `npx tsx scripts/<name>.ts`, load `.env.local` in
 
 ## Phase 1 — P0 skills (the unblockers) 🚧
 
-Scaffolded this session as drafts; need a real validation pass + refinement before the routine relies on them.
+Committed to the repo as drafts. They need a validation pass + to be wired into the box worker's build before they're load-bearing.
 
-- 🚧 **build-spec** (`.claude/skills/build-spec/`) — read `docs/brain/specs/{slug}.md` → implement every phase → `npx tsc --noEmit` gate → stop-and-surface open questions in the PR → open a `claude/*` PR via the GitHub REST API. **Encodes the core invariant: the routine builds it itself; never shells out to `claude`.** Maps to `agent-todos/system-execute.ts` + [[roadmap-build-console]].
+- 🚧 **build-spec** (`.claude/skills/build-spec/`) — read `docs/brain/specs/{slug}.md` → implement every phase → `npx tsc --noEmit` gate → stop-and-surface open questions → `claude/*` PR. The build itself runs as a **top-level `claude -p` on the box** (Max-billed); this skill is the canonical recipe it follows. **Today the box worker (`scripts/builder-worker.ts`) drives builds with an inline prompt that embodies this skill** + owns git/PR; wiring the worker to invoke the skill directly (and letting it own the PR) is a DRY follow-up. Invariant: native tools only — never spawn a *nested* `claude` (recursion).
 - 🚧 **probe-db** (`.claude/skills/probe-db/`) — read-only schema/data/enum inspection before assuming anything ("the database is the spec"). Maps to the ~16 `_probe-*`/`_check-*`/`inspect-*` scripts.
 - 🚧 **write-migration** (`.claude/skills/write-migration/`) — author `supabase/migrations/YYYYMMDDNNNNNN_*.sql` (idempotent) + an apply-script (pooler `:6543`, `BEGIN/COMMIT` for backfills, **never run during Inngest syncs**). Maps to recipe `write-a-migration-apply-script` + 24 `apply-*-migration.ts`.
 - 🚧 **customer-remedy** (`.claude/skills/customer-remedy/`) — scaffold an end-to-end one-customer fix: resolve by **UUID** → fetch state → plan gated steps → execute through `directActionHandlers` → log each gate → idempotent, dry-run-first. Maps to ~40 scripts (`_jay-*`, `_michelle-*`, `cheryl-*`, `brad-*`, `run-refund-playbook`, `setup-mary-recovery-sub`).
@@ -47,7 +49,7 @@ Scaffolded this session as drafts; need a real validation pass + refinement befo
 
 ## Safety / invariants
 
-- **build-spec never shells out to `claude`** (nested-session guard) — native tools only. Mirrors [[roadmap-build-console]]'s core invariant.
+- **build-spec uses native tools; never spawns a *nested* `claude`.** On the box the build *is* a top-level `claude -p` (that's the executor); the skill runs inside it and must not spawn another `claude` (recursion / the `CLAUDECODE=1` guard). Max-billed: no `ANTHROPIC_API_KEY` in the build env (`env -u ANTHROPIC_API_KEY`).
 - **probe-db is read-only** — no mutations, ever. Throwaway probes use the `_`-prefix naming convention.
 - **write-migration / backfill / customer-remedy are idempotent + dry-run-first.** Never run schema/backfill scripts during active Inngest syncs.
 - **Internal joins use UUIDs, never `shopify_*_id`** (customer-remedy especially).
@@ -56,7 +58,7 @@ Scaffolded this session as drafts; need a real validation pass + refinement befo
 
 ## Completion criteria
 
-- The P0 four exist as validated `.claude/skills/*/SKILL.md`, committed, and a routine can invoke `build-spec` on a real spec → CI-passing `claude/*` PR.
+- The P0 four are committed `.claude/skills/*/SKILL.md`. The box worker builds a spec → CI-passing `claude/*` PR (✅ proven 2026-06-18 via the smoke test). Remaining: wire the worker to invoke the `build-spec` skill directly (DRY), and exercise probe-db / write-migration / customer-remedy inside a real build.
 - Each skill cross-links its source recipe(s)/script pattern, and the catalog is folded into [[../recipes/README]] when stable.
 
 ## Related
