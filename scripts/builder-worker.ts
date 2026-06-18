@@ -69,11 +69,22 @@ function ensureGitIdentity() {
   sh("git", ["config", "user.name", "ShopCX Build Worker"]);
 }
 
+// Secrets stripped from the BUILD's env so a bypass build can't reach prod. The worker keeps
+// these in its own env (from the systemd EnvironmentFile) to execute APPROVED actions.
+const SECRET_RE = /SERVICE_ROLE|PASSWORD|SECRET|_TOKEN|PRIVATE|BRAINTREE|TWILIO|RESEND|AVALARA|EASYPOST|KLAVIYO|META_|ANTHROPIC|OPENAI|SUPABASE_DB/i;
+
 function runClaude(prompt: string, sessionId: string | null) {
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // belt-and-suspenders: stay on Max
+  // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k === "ANTHROPIC_API_KEY") continue;
+    if (/^NEXT_PUBLIC_/.test(k)) { env[k] = v; continue; }
+    if (SECRET_RE.test(k)) continue;
+    env[k] = v;
+  }
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--permission-mode", "acceptEdits", "--output-format", "json"];
+  // bypass = no per-tool prompts (valid because the worker runs as the non-root `builder` user).
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = spawnSync("claude", args, { cwd: REPO_DIR, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: BUILD_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
