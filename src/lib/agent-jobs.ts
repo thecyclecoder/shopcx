@@ -10,6 +10,7 @@ export type JobStatus =
   | "claimed"
   | "building"
   | "needs_input"
+  | "needs_approval"
   | "queued_resume"
   | "completed"
   | "failed"
@@ -21,6 +22,19 @@ export interface JobQuestion {
   options?: string[];
 }
 
+export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr";
+
+/** A prod-side-effect the build needs the owner to approve. `cmd` is the exact command the worker runs on approval (also shown as the preview). */
+export interface PendingAction {
+  id: string;
+  type: GatedActionType;
+  summary: string;
+  cmd?: string;
+  preview?: string;
+  status: "pending" | "approved" | "declined" | "done" | "failed";
+  result?: string;
+}
+
 export interface AgentJob {
   id: string;
   workspace_id: string;
@@ -30,6 +44,7 @@ export interface AgentJob {
   claude_session_id: string | null;
   questions: JobQuestion[];
   answers: { id: string; answer: string }[];
+  pending_actions: PendingAction[];
   pr_url: string | null;
   pr_number: number | null;
   log_tail: string | null;

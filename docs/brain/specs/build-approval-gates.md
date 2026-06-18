@@ -1,4 +1,4 @@
-# Build Approval Gates + Execution Hardening ⏳
+# Build Approval Gates + Execution Hardening 🚧
 
 Harden the [[roadmap-build-console]] executor so autonomous builds run with **minimal back-and-forth** (bypass mode — no per-tool prompts) while staying **safe**: the few irreversible / prod-mutating actions (apply a migration, run a prod-mutating script, merge to `main`) come back as **one-tap approvals on the spec/phase card**, executed by the *trusted worker*, not the sandboxed build. This extends [[../tables/agent_jobs]] — the live DB companion to the static brain — with an approval/action layer.
 
@@ -15,20 +15,20 @@ Harden the [[roadmap-build-console]] executor so autonomous builds run with **mi
 - ⏳ Run builds as a **non-root `builder` user** (the dangerous flag is refused as root; non-root also limits OS blast radius). One-time Claude `/login` as `builder` so it bills to **Max** (or share a `CLAUDE_CODE_OAUTH_TOKEN`).
 - ⏳ **Strip prod-write creds from the build env** + trim the repo `.env.local` the build reads, by moving the worker's prod secrets into a `systemd` `EnvironmentFile` (`/root/shopcx-worker.env`, root-only). The build inherits none of: `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_PASSWORD`, Braintree, etc.
 
-## Phase 2 — Approval-gate state on agent_jobs ⏳
+## Phase 2 — Approval-gate state on agent_jobs ✅
 - ⏳ Migration: add `needs_approval` to the status enum + `pending_actions` jsonb (`[{id, type, summary, preview, status}]`) + `approvals` jsonb. Gated `type`s: `apply_migration`, `run_prod_script`, `merge_pr`.
 - ⏳ Worker: when the build requests a gated action, the worker records a `pending_action`, sets `needs_approval`, and pauses — reusing the existing `needs_input` pause/resume plumbing (Phase 5 of [[roadmap-build-console]]).
 
-## Phase 3 — Approval API + card buttons ⏳
+## Phase 3 — Approval API + card buttons 🚧
 - ⏳ `POST /api/roadmap/approve` — owner-gated `{ jobId, actionId, decision }` → marks the action approved/declined; on approve, flip the job to `queued_resume`.
 - ⏳ `BuildButton` renders `pending_actions` as buttons with a **preview** of what's being approved: "Approve & apply migration" (show the SQL), "Approve: run `<script>`".
 - ⏳ "**Squash & merge**" button on the card once the PR is ready (reuse `POST /api/branches/[number]/merge`), so merge is a card action too.
 
-## Phase 4 — Worker = trusted executor ⏳
+## Phase 4 — Worker = trusted executor 🚧
 - ⏳ On `queued_resume` with an approved action, the **worker** (the only component with prod creds) executes it — apply the migration via its apply-script, run the prod script, or merge the PR — records the result on the job, then `claude --resume`s the build to verify/continue.
 - ⏳ The build process itself never executes prod actions (it has no creds to).
 
-## Phase 5 — DRY: worker invokes the build-spec skill 🚧
+## Phase 5 — DRY: worker invokes the build-spec skill ✅
 - 🚧 Worker prompt references the **`build-spec` skill** instead of an inline copy (single source of truth) — staged in `scripts/builder-worker.ts`.
 - ⏳ Align the `build-spec` skill: author migrations (don't apply), the worker owns git/PR + approvals.
 

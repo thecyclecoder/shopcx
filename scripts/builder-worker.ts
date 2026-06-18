@@ -31,7 +31,16 @@ const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN
 const POLL_MS = 5000;
 const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 
-type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "queued_resume" | "completed" | "failed" | "needs_attention";
+type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
+interface PendingAction {
+  id: string;
+  type: "apply_migration" | "run_prod_script" | "merge_pr";
+  summary: string;
+  cmd?: string;
+  preview?: string;
+  status: "pending" | "approved" | "declined" | "done" | "failed";
+  result?: string;
+}
 interface Job {
   id: string;
   spec_slug: string;
@@ -40,6 +49,8 @@ interface Job {
   claude_session_id: string | null;
   instructions: string | null;
   answers: { id: string; answer: string }[];
+  pending_actions: PendingAction[];
+  pr_number: number | null;
 }
 
 async function admin() {
@@ -142,6 +153,35 @@ async function update(id: string, patch: Record<string, unknown>) {
   await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
 }
 
+// Execute owner-approved gated actions. The worker is the ONLY component with prod creds;
+// it runs exactly the command the owner approved (shown to them as the preview).
+async function executeApprovedActions(job: Job): Promise<{ actions: PendingAction[]; summary: string }> {
+  const actions = (job.pending_actions || []).map((a) => ({ ...a }));
+  const done: string[] = [];
+  for (const a of actions) {
+    if (a.status !== "approved") continue;
+    try {
+      if (a.type === "merge_pr") {
+        const r = await gh("PUT", `/repos/${REPO}/pulls/${job.pr_number}/merge`, { merge_method: "squash" });
+        a.status = r.ok ? "done" : "failed";
+        a.result = r.ok ? "merged" : `merge failed ${r.status}`;
+      } else if (a.cmd) {
+        const r = sh("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000 });
+        a.status = r.code === 0 ? "done" : "failed";
+        a.result = (r.out + r.err).slice(-500);
+      } else {
+        a.status = "failed";
+        a.result = "no command to run";
+      }
+    } catch (e) {
+      a.status = "failed";
+      a.result = e instanceof Error ? e.message : String(e);
+    }
+    done.push(`${a.summary} → ${a.status}`);
+  }
+  return { actions, summary: done.join("; ") };
+}
+
 async function runJob(job: Job) {
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
@@ -159,13 +199,26 @@ async function runJob(job: Job) {
     sh("git", ["checkout", branch!]);
   }
 
+  // On an approval-resume, execute the owner-approved gated actions FIRST (worker has prod creds), then resume.
+  let executedSummary = "";
+  if (isResume && (job.pending_actions || []).some((a) => a.status === "approved")) {
+    const { actions, summary } = await executeApprovedActions(job);
+    await update(job.id, { pending_actions: actions });
+    executedSummary = summary;
+    console.log(`${tag} executed approved actions: ${summary}`);
+  }
+
+  const resumeBits: string[] = [];
+  if ((job.answers || []).length) resumeBits.push(`Answers to your questions: ${JSON.stringify(job.answers)}`);
+  if (executedSummary) resumeBits.push(`Gated actions executed: ${executedSummary}`);
+
   const prompt = isResume
-    ? `Here are answers to your open questions: ${JSON.stringify(job.answers)}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
+    ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
     : [
         `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
         ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
-        `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations as code via the write-migration skill, but do NOT apply them to prod (that's a deliberate post-merge step). Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
-        `When finished, output ONLY a JSON object as your final message: {"status":"completed","summary":"<one line>"} OR {"status":"needs_input","questions":[{"id":"q1","q":"<question>"}]}.`,
+        `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
+        `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
       ].join("\n");
 
   const { session, resultText, isError, raw } = runClaude(prompt, job.claude_session_id);
@@ -185,6 +238,38 @@ async function runJob(job: Job) {
     await update(job.id, {
       status: "needs_input",
       questions: parsed.questions ?? [],
+      log_tail: logTail,
+      pr_url: pr?.url ?? null,
+      pr_number: pr?.number ?? null,
+    });
+    return;
+  }
+
+  if (parsed?.status === "needs_approval") {
+    const incoming: Array<Record<string, unknown>> = Array.isArray((parsed as Record<string, unknown>).actions)
+      ? ((parsed as Record<string, unknown>).actions as Array<Record<string, unknown>>)
+      : [];
+    const pending: PendingAction[] = incoming.map((a, i) => {
+      const cmd = typeof a.cmd === "string" ? a.cmd : undefined;
+      const type = a.type === "merge_pr" || a.type === "run_prod_script" ? (a.type as PendingAction["type"]) : "apply_migration";
+      return {
+        id: `a${Date.now().toString(36)}${i}`,
+        type,
+        summary: String(a.summary || cmd || "gated action"),
+        cmd,
+        preview: typeof a.preview === "string" ? a.preview : cmd,
+        status: "pending",
+      };
+    });
+    if (sh("git", ["status", "--porcelain"]).out.trim()) {
+      sh("git", ["add", "-A"]);
+      sh("git", ["commit", "-m", `wip: ${slug} (needs approval)`]);
+      sh("git", ["push", "-u", "origin", branch!]);
+    }
+    const pr = await ensurePr(branch!, slug, true);
+    await update(job.id, {
+      status: "needs_approval",
+      pending_actions: pending,
       log_tail: logTail,
       pr_url: pr?.url ?? null,
       pr_number: pr?.number ?? null,

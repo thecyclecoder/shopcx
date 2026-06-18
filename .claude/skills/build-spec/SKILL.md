@@ -26,7 +26,8 @@ Do the build with **your own native tools** (`Read`/`Edit`/`Bash`/`Grep`). The b
 - Branch from the default branch; never commit to `main` directly.
 - Internal joins use UUIDs, never `shopify_*_id`. DB writes go through `createAdminClient()`.
 - Don't push during active Inngest syncs (Vercel deploy kills running functions).
-- A build always **terminates** — "done" or "done what I could + open questions." It never blocks waiting for input.
+- **Gated prod actions:** under the box worker you have **no prod credentials**. To apply a migration or run a prod-mutating script, author it as code first (write-migration skill), then emit `{"status":"needs_approval","actions":[{"type":"apply_migration","summary":"…","cmd":"npx tsx scripts/apply-X-migration.ts"}]}` and stop — the worker runs it on the owner's one-tap approval and resumes you. (Locally/interactively you may apply directly.)
+- A build always **terminates** with one status — `completed`, `needs_input` (product questions), or `needs_approval` (gated prod actions). It never blocks waiting for input.
 
 ## Related
 `docs/brain/specs/{slug}.md` · skills: `probe-db`, `write-migration`, `write-brain-page`, `fold-to-brain` · `docs/brain/lifecycles/agent-todo-system.md` (PR plumbing) · `src/lib/agent-todos/system-execute.ts`
