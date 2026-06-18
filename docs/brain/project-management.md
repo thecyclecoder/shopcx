@@ -2,6 +2,26 @@
 
 The brain isn't just reference docs — it's also where we plan + track work. This page explains how features move from idea → spec → in-progress → shipped, and where each state lives.
 
+## The work hierarchy — no orphan specs
+
+Every spec belongs to something bigger; the parent chain terminates at the org chart.
+
+```
+Function (Growth, CFO, CMO, Logistics, CS)        functions/{slug}.md — permanent owner
+  ├─ Mandate  (perpetual charter, metric-tracked, never "done")
+  │     └─ Spec → Phase → Build
+  └─ Goal     (finite BHAG, rolls up to 100% then closes)   goals/{slug}.md
+        └─ Milestone
+              └─ Spec → Phase → Build
+```
+
+- **Functions** (`docs/brain/functions/`) are the **permanent skeleton** — one per org-chart director. Each owns perpetual mandates and the specs/goals under them. A function doc doubles as the CEO-mode director-agent's charter ([[goals/ceo-mode]]).
+- **Two kinds of parent.** A **mandate** is *perpetual* — a standing charter a function owns forever (e.g. Growth's "static-ad optimization"); it never finishes, is measured by a metric trend, and keeps emitting specs. A **goal** (`docs/brain/goals/`) is *finite* — it has a finish line, decomposes into milestones, and closes at 100%. Don't model a perpetual charter as a goal.
+- **Every spec declares an `owner` + `parent`.** Owner = exactly one function (the DRI — single-threaded ownership, even for shared work, with optional "contributes-to" links). Parent = a function mandate or a goal milestone. A metadata line under the spec's H1: `**Owner:** [[../functions/{slug}]] · **Parent:** {mandate or goal-milestone}`.
+- **No orphans.** A spec with no owner/parent is incomplete. The [[specs/goal-decomposition-engine|goal-decomposition engine]] enforces this when the planner proposes specs; a board lint flags any existing orphan. Worked example: [[functions/growth]] owns [[specs/winning-static-creative-finder]] under its static-ad mandate.
+
+This hierarchy is operationalized by the [[specs/goal-decomposition-engine|goal-decomposition engine]]: write a goal (or point at a mandate), the planner gap-analyzes against the brain and proposes owner/parent-tagged specs, you approve the branches, and the existing build pipeline ships them.
+
 ## The four states
 
 ```
