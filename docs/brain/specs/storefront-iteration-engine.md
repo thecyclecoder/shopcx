@@ -1,4 +1,4 @@
-# Storefront Iteration Engine ⏳
+# Storefront Iteration Engine 🚧
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
 
