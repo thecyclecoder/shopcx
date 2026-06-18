@@ -39,6 +39,14 @@ cd /root/shopcx && git checkout main && git pull --ff-only origin main && system
 - **`tsx` wasn't installed** → the worker was fetched via `npx` each boot. Installed globally so `systemd` runs it reliably.
 - **`pkill -f builder-worker.ts` matches its own shell** (the pattern is in the command's argv) — kill by process group / pidfile, or let `systemd` manage it.
 
+## Non-root builder + sandboxed builds (build-approval-gates, 2026-06-18)
+
+`shopcx-builder` now runs as the **non-root `builder` user** from `/home/builder/shopcx` (its own clone + `/home/builder/.claude` Max login), so builds run `--dangerously-skip-permissions` (refused as root) with no per-tool prompts. Prod stays safe via two secret stores:
+- **`/root/shopcx-worker.env`** (root-only `0600`, systemd `EnvironmentFile=`) holds the worker's prod creds (Supabase service role, DB password, `GITHUB_TOKEN`, …); systemd injects them into the worker process.
+- The builder repo has **no `.env.local`**, and the worker **strips secrets from the spawned build's env** (`SECRET_RE` in `builder-worker.ts`) — so the `claude -p` build can't reach prod. The worker (which holds the creds) executes only **owner-approved** gated actions.
+
+Update worker code: `sudo -u builder git -C /home/builder/shopcx pull --ff-only origin main && systemctl restart shopcx-builder`.
+
 ## Related
 
-[[../specs/roadmap-build-console]] · [[../tables/agent_jobs]] · [[../dashboard/branches]] · [[../dashboard/roadmap]] · [[write-a-migration-apply-script]]
+[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../tables/agent_jobs]] · [[../dashboard/branches]] · [[../dashboard/roadmap]] · [[write-a-migration-apply-script]]
