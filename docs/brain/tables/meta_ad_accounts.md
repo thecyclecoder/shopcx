@@ -29,6 +29,10 @@ Meta Ads accounts connected to the workspace.
 **In (others → this):**
 
 - [[daily_meta_ad_spend]].`meta_ad_account_id`
+- [[meta_campaigns]].`meta_ad_account_id`
+- [[meta_adsets]].`meta_ad_account_id`
+- [[meta_ads]].`meta_ad_account_id`
+- [[meta_insights_daily]].`meta_ad_account_id`
 
 ## Common queries
 

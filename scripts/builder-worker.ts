@@ -176,6 +176,23 @@ async function ensurePr(branch: string, title: string, draft: boolean): Promise<
   return null;
 }
 
+// A build that paused (needs_input/needs_approval) opened its PR as a DRAFT. On completion the PR is
+// reused, so mark it ready-for-review or it stays unmergeable. REST can't un-draft a PR; GraphQL can.
+async function markReady(prNumber: number) {
+  try {
+    const pr = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
+    const nodeId = (pr.json as { node_id?: string })?.node_id;
+    if (!nodeId) return;
+    await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: `mutation { markPullRequestReadyForReview(input: { pullRequestId: "${nodeId}" }) { pullRequest { isDraft } } }` }),
+    });
+  } catch {
+    /* non-fatal — the PR exists; it may just need a manual "Ready for review" */
+  }
+}
+
 let db: Awaited<ReturnType<typeof admin>>;
 
 async function update(id: string, patch: Record<string, unknown>) {
@@ -336,6 +353,7 @@ async function runJob(job: Job) {
       await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
       return;
     }
+    await markReady(pr.number); // un-draft if this PR was opened during an earlier needs_input/needs_approval pause
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
   } finally {
