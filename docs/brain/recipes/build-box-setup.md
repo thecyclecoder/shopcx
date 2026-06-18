@@ -20,8 +20,8 @@ ssh root@100.75.99.7
 systemctl status shopcx-builder          # health
 journalctl -u shopcx-builder -f          # live logs
 systemctl restart shopcx-builder         # restart
-# update the worker after merging worker changes to main:
-cd /root/shopcx && git checkout main && git pull --ff-only origin main && systemctl restart shopcx-builder
+# update the worker after merging worker changes to main (deploy when the queue is IDLE — a restart kills in-flight lanes):
+sudo -u builder git -C /home/builder/shopcx fetch origin && sudo -u builder git -C /home/builder/shopcx reset --hard origin/main && systemctl restart shopcx-builder
 ```
 
 ## Provisioning (how it was built — to reproduce)
@@ -45,7 +45,19 @@ cd /root/shopcx && git checkout main && git pull --ff-only origin main && system
 - **`/root/shopcx-worker.env`** (root-only `0600`, systemd `EnvironmentFile=`) holds the worker's prod creds (Supabase service role, DB password, `GITHUB_TOKEN`, …); systemd injects them into the worker process.
 - The builder repo has **no `.env.local`**, and the worker **strips secrets from the spawned build's env** (`SECRET_RE` in `builder-worker.ts`) — so the `claude -p` build can't reach prod. The worker (which holds the creds) executes only **owner-approved** gated actions.
 
-Update worker code: `sudo -u builder git -C /home/builder/shopcx pull --ff-only origin main && systemctl restart shopcx-builder`.
+Update worker code: `sudo -u builder git -C /home/builder/shopcx fetch origin && git reset --hard origin/main && systemctl restart shopcx-builder`.
+
+## Parallel builds — 5 worktree-isolated lanes (parallel-builds, shipped 2026-06-18)
+
+The worker runs **up to `MAX_CONCURRENT = 5` builds at once**, each in its own **git worktree** under `/home/builder/builds/{job-id}` (isolated dir + branch) so concurrent builds never clobber each other. The pool claims (`claim_agent_job()`) up to 5 jobs per poll tick and tops up as lanes free; a resume recreates a worktree on the job's pushed branch, and every worktree is torn down (`git worktree remove --force`) on any outcome. Cap = **5** because the real ceiling is **Max rate limits**, not the 8-core box (tune `MAX_CONCURRENT`).
+
+**Three gotchas that bit us in bring-up (permanent notes):**
+- **Async exec is mandatory.** `runClaude` / `tsc` / approved-action `bash` use `shAsync` (`spawn`, non-blocking), **not `spawnSync`**. `spawnSync` blocks Node's event loop for the *entire* (up to 30-min) build → the 5-lane pool silently collapses to ~1 real lane. Any new long-running step must use `shAsync`.
+- **`node_modules` is gitignored** → absent in a fresh worktree → `tsc` fails. The worker force-symlinks the main clone's `node_modules` into each worktree (`ln -sfn`).
+- **`.env.local` is absent on the box** (secrets come from the `EnvironmentFile`) → an apply-script that hard-reads it crashes with ENOENT and the migration silently "fails" through the approval gate. The `write-migration` skill now guards the read (`existsSync`) + falls back to `process.env`.
+- **Draft-PR trap:** a build that paused (needs_input/needs_approval) opens its PR as a **draft**; on completion the worker now calls `markReady` (GraphQL `markPullRequestReadyForReview`) or it stays unmergeable.
+
+**Recovery / fleet ops:** [[manage-the-build-queue]] (`queue-control`) — pause by stopping the worker, `reset-all` to a clean slate, `requeue-stale` after a restart orphans in-flight lanes.
 
 ## Related
 
