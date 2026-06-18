@@ -1,4 +1,4 @@
-# Homepage rebuild — direct-response, Tabs-led
+# Homepage rebuild — direct-response, Tabs-led ✅
 
 **Goal:** rebuild the Shopify homepage as a direct-response trust-and-routing engine for its two audiences — (1) ad-aware brand searchers (saw a Meta ad → Googled us → need scent-match + trust + a fast path to product), and (2) repeat customers reordering (need a fast shop/reorder lane). Built end-to-end by ShopCX via the theme pipeline ([[shopify-theme-via-shopcx]]), staged on a preview theme, **zero manual uploads or customizer work from Dylan.**
 
