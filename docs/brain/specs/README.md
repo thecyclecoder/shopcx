@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** ShopCX has zero repo-committed Claude Code skills, so routines have no reusable procedures and every session re-derives the operational recipes. This catalogs the skills an agent needs to build/operate ShopCX (mapped to the 29 recipes + 230 scripts) and prioritizes them. P0 four scaffolded this session: `build-spec`, `probe-db`, `write-migration`, `customer-remedy` (`.claude/skills/`). Prereq for [[roadmap-build-console]] — the routine can't shell out to `/goal`, so the build procedure must live as a committed `build-spec` skill.
 
+## Active project — Build Approval Gates + Execution Hardening ⏳
+
+**Spec:** [[build-approval-gates]]
+
+**Why this matters:** lets autonomous builds run with no per-tool back-and-forth (bypass) while staying safe — irreversible/prod actions (apply migration, run prod script, merge) come back as one-tap approvals on the spec/phase card, executed by the trusted worker (the build itself has no prod creds). Extends [[../tables/agent_jobs]] (the live DB companion to the static brain) with a `needs_approval` layer; builds run non-root under [[../recipes/build-box-setup]].
+
 ## Active project 1 — Storefront 🚧
 
 **Lifecycle:** [[../lifecycles/storefront-checkout]]
