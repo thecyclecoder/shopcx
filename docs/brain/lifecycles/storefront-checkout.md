@@ -34,7 +34,7 @@ Subsequent events on the same page:
 
 - `pdp_engaged` — first of: CTA click, scroll past 50%, 30s+ on page.
 - `pack_selected` — customer chose a tier or bundle (variant + qty + mode + frequency).
-- `add_to_cart` — fired at the **same** pack-select → /customize moment (the real add-to-cart). Distinct event name so analytics + Meta CAPI (AddToCart) key off it directly.
+- `add_to_cart` — fired at the **same** pack-select moment (the real add-to-cart), BEFORE the `/api/cart` POST + navigation. Distinct event name so analytics + Meta CAPI (AddToCart) key off it directly. Independent of where pack-select navigates next, so the customize-bypass (Phase 3) does NOT drop it.
 
 ### Phase 2 on-site instrumentation (chapter / scroll / CTA)
 
@@ -77,9 +77,15 @@ Customer clicks "Add to cart" / "Subscribe" → browser POSTs to `/api/cart` wit
 
 Same endpoint handles `PUT` updates (qty change, line add/remove). Server re-validates every time.
 
-## Phase 3 — customize page
+## Phase 3 — customize page (opt-in since 2026-06-16)
 
 `/customize?token=...` reads the draft. Customer adds upsells, removes items, changes frequency. Each mutation re-hits `/api/cart` for server-validated pricing.
+
+**Customize-bypass funnel.** When `workspaces.storefront_skip_customize` is true (on for Superfoods, A/B-toggleable without a deploy), **pack-select navigates straight to `/checkout`** and customize becomes an opt-in escape hatch — not a default funnel step. The worksheet is non-load-bearing: every choice (variant by position, `subscribe` mode, default frequency from `pricing_rules.available_frequencies[].default`) already has a sensible default baked in by `/api/cart` at cart-create, so most buyers don't need it.
+
+- **Nav gate:** `StorefrontPixelInit.tsx` picks `dest = skipCustomize ? "/checkout" : "/customize"` on cart-create success (`render-page.tsx` → `_lib/page-data.ts` surface the flag to the PDP; `checkout/page.tsx` passes `skip_customize` to `CheckoutClient`).
+- **Opt-in editor:** with the bypass on, `CheckoutClient` renders an obvious **"Customize your order"** button under the cart-items summary (→ `/customize?token=…`); off, it's the subtle "Make changes" link. The customize page already loads standalone by token and its "Continue" returns to `/checkout?token=…`, so the round-trip works unchanged.
+- **`customize_view` becomes a rare event** on the default path (fires only for opt-in users) — acceptable; the [[../dashboard/storefront__funnel]] treats chapters/steps as optional.
 
 Events fired:
 
@@ -88,7 +94,7 @@ Events fired:
 
 ## Phase 4 — checkout page
 
-`/checkout?token=...` loads the draft and renders:
+`/checkout?token=...` loads the draft and renders. `checkout_view` (→ Meta `InitiateCheckout`) fires on mount, **guarded once per cart token** via `sessionStorage` (`cx_checkout_view_{token}`): with the customize-bypass on, checkout is both the first page AND the return target from the opt-in customize round-trip, so the guard stops a round-trip from double-counting `InitiateCheckout`.
 
 - Email / phone (if not already attached).
 - Shipping address.
@@ -217,10 +223,12 @@ The identity stitch mechanism — see [[customer-link-confirmation]] for the bro
 | `src/lib/identity-stitch.ts` | Anonymous-id backfill |
 | `src/lib/cart-gifts.ts` | Free-gift logic |
 | `src/lib/shortlink-slug.ts` | Customer short_code resolution |
-| `src/app/(storefront)/_lib/render-page.tsx` | PDP composition |
-| `src/app/(storefront)/_lib/page-data.ts` | PDP data fetch |
-| `src/app/(storefront)/customize/page.tsx` | Customization page |
-| `src/app/(storefront)/checkout/page.tsx` | Checkout page |
+| `src/app/(storefront)/_components/StorefrontPixelInit.tsx` | Pack-select cart-create + nav (`/checkout` vs `/customize` gated on `skipCustomize`) |
+| `src/app/(storefront)/_lib/render-page.tsx` | PDP composition (passes `skipCustomize`) |
+| `src/app/(storefront)/_lib/page-data.ts` | PDP data fetch (surfaces `storefront_skip_customize`) |
+| `src/app/(storefront)/customize/page.tsx` | Customization page (opt-in editor) |
+| `src/app/(storefront)/checkout/page.tsx` | Checkout page (passes `skip_customize` to client) |
+| `src/app/(storefront)/checkout/_components/CheckoutClient.tsx` | "Customize your order" button + `checkout_view` once-per-token guard |
 | `src/app/(storefront)/thank-you/page.tsx` | Confirmation + rich order_placed |
 | `src/lib/inngest/storefront-events-fanout.ts` | CAPI fan-out router |
 | `src/lib/inngest/sinks/meta-capi.ts` | Meta CAPI sink |
@@ -231,11 +239,12 @@ The identity stitch mechanism — see [[customer-link-confirmation]] for the bro
 
 ## Status / open work
 
-**Shipped:** All seven phases — PDP pixel, cart create + server validation, customize, checkout (Braintree Hosted Fields + Avalara tax quote), **OTP gate (Phase 4.5)**, **subscription choice card (Phase 4.6)**, submit (vault + charge + order + commit tax), thank-you, CAPI fan-out. OTP gate is wired at `/api/checkout/otp/{start,verify,resend}` and triggered for matched customers with order history or active subs. Subscription choice card at `/api/checkout/existing-subs` shows three options when authenticated + subscribe items + active internal sub.
+**Shipped:** All seven phases — PDP pixel, cart create + server validation, customize, checkout (Braintree Hosted Fields + Avalara tax quote), **OTP gate (Phase 4.5)**, **subscription choice card (Phase 4.6)**, submit (vault + charge + order + commit tax), thank-you, CAPI fan-out. OTP gate is wired at `/api/checkout/otp/{start,verify,resend}` and triggered for matched customers with order history or active subs. Subscription choice card at `/api/checkout/existing-subs` shows three options when authenticated + subscribe items + active internal sub. **Customize-bypass** (`workspaces.storefront_skip_customize`, on for Superfoods): pack-select goes straight to `/checkout`, customize is an opt-in "Customize your order" button on checkout, `add_to_cart`/CAPI unchanged (fires at pack-select), `checkout_view`/`InitiateCheckout` guarded once-per-token. A/B-toggleable without a deploy — verified in production 2026-06-18.
 
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- `checkout-customize-bypass` Pack-select → `/checkout` bypass (customize opt-in), gated on `workspaces.storefront_skip_customize`; `checkout_view` once-per-token guard (verified 2026-06-18)
 - `6b83532f` (PR #31) Storefront PDP enhancements: guarantee bar + trust modal, As-Seen-On press row, trust-chip fix, menu chapter nav, variant chapter parity, benefit-bar lead-in, **survey recommender rebuild**, per-cup banners, and the **cross-product quantity-break checkout fix** (card ↔ checkout now agree)
 - `aeb8b074` Checkout: free-gift image fix, identity stitch, guarantee badge
 - `6b85f4b5` Braintree direct refunds + quantity-reduction positive-close fix
