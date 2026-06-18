@@ -17,6 +17,9 @@ const nextConfig: NextConfig = {
     "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md"],
     "/dashboard/brain": ["./docs/brain/**/*.md"],
     "/dashboard/brain/[...slug]": ["./docs/brain/**/*.md"],
+    // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into
+    // its Opus system prompt for grounding; trace the markdown into its bundle.
+    "/api/roadmap/chat": ["./docs/brain/**/*.md"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>
