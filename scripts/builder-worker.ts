@@ -38,6 +38,7 @@ interface Job {
   spec_branch: string | null;
   status: JobStatus;
   claude_session_id: string | null;
+  instructions: string | null;
   answers: { id: string; answer: string }[];
 }
 
@@ -162,6 +163,7 @@ async function runJob(job: Job) {
     ? `Here are answers to your open questions: ${JSON.stringify(job.answers)}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
     : [
         `You are an autonomous build agent. Implement the spec at docs/brain/specs/${slug}.md by editing files in this repo (cwd is the repo root).`,
+        ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
         `- Do the work with your own tools; match existing code style. Update the spec's phase emojis (⏳→🚧→✅) as you finish phases.`,
         `- Do NOT run git, push, or open a PR — the harness handles version control.`,
         `- If you hit a product decision the spec does not cover, do NOT guess.`,

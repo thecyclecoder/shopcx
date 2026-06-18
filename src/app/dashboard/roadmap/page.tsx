@@ -5,6 +5,7 @@ import { getLatestJobsBySlug, type AgentJob } from "@/lib/agent-jobs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
+import PhaseList from "./PhaseList";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 export const dynamic = "force-dynamic";
@@ -63,24 +64,10 @@ function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
         <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{spec.summary}</p>
       )}
       <CountPills counts={spec.counts} />
-      {spec.phases.length > 0 && (
-        <details className="mt-2 group">
-          <summary className="cursor-pointer list-none text-[11px] font-medium text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200">
-            <span className="inline-block transition-transform group-open:rotate-90">▸</span> {spec.phases.length} phases
-          </summary>
-          <ul className="mt-1.5 space-y-1 border-l border-zinc-100 pl-3 dark:border-zinc-800">
-            {spec.phases.map((p, i) => (
-              <li key={i} className="flex items-start gap-2 text-xs text-zinc-600 dark:text-zinc-300">
-                <span className={`mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full ${DOT[p.status]}`} />
-                <span>{p.title}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 flex items-center justify-between gap-2">
         <StatusControl slug={spec.slug} status={spec.status} />
-        <BuildButton slug={spec.slug} initialJob={job} />
+        <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} />
       </div>
       <div className="mt-1.5 text-[11px] text-zinc-400">
         <code>specs/{spec.slug}.md</code>

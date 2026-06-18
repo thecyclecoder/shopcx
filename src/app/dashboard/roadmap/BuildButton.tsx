@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import type { AgentJob, JobStatus } from "@/lib/agent-jobs";
+import type { Phase } from "@/lib/brain-roadmap";
 
 const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "queued_resume"];
 
@@ -28,7 +29,7 @@ const CHIP: Record<JobStatus, string> = {
   needs_attention: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
-export default function BuildButton({ slug, initialJob }: { slug: string; initialJob: AgentJob | null }) {
+export default function BuildButton({ slug, initialJob, specStatus }: { slug: string; initialJob: AgentJob | null; specStatus: Phase }) {
   const workspace = useWorkspace();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
   const [busy, setBusy] = useState(false);
@@ -131,7 +132,7 @@ export default function BuildButton({ slug, initialJob }: { slug: string; initia
             {showAnswers ? "Cancel" : "Answer"}
           </button>
         )}
-        {!active && (
+        {!active && specStatus !== "shipped" && (
           <button
             type="button"
             onClick={build}

@@ -45,8 +45,25 @@ function setH1Status(md: string, status: Status): string {
   return lines.join("\n");
 }
 
+/** Rewrite the Nth "## Phase …" heading's status emoji (0-based, matches the board parser order). */
+function setPhaseStatus(md: string, idx: number, status: Status): string {
+  const lines = md.split("\n");
+  let seen = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##\s+Phase\b/.test(lines[i])) {
+      seen++;
+      if (seen === idx) {
+        const cleaned = lines[i].replace(/[⏳🚧✅]/g, "").replace(/\s+$/, "");
+        lines[i] = `${cleaned} ${EMOJI[status]}`;
+        break;
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; status?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; status?: unknown; phaseIndex?: unknown };
   const { slug, status } = body;
   if (typeof slug !== "string" || !/^[a-z0-9-]+$/i.test(slug)) {
     return NextResponse.json({ error: "bad slug" }, { status: 400 });
@@ -83,11 +100,12 @@ export async function POST(request: Request) {
 
   const sha = get.json.sha as string;
   const current = Buffer.from(String(get.json.content || "").replace(/\s/g, ""), "base64").toString("utf8");
-  const updated = setH1Status(current, status);
+  const idx = typeof body.phaseIndex === "number" ? body.phaseIndex : null;
+  const updated = idx !== null ? setPhaseStatus(current, idx, status) : setH1Status(current, status);
   if (updated === current) return NextResponse.json({ ok: true, status, unchanged: true });
 
   const put = await gh("PUT", `/repos/${REPO}/contents/${encodeURIComponent(filePath).replace(/%2F/g, "/")}`, {
-    message: `roadmap: set ${slug} → ${status}`,
+    message: `roadmap: set ${slug}${idx !== null ? ` phase ${idx}` : ""} → ${status}`,
     content: Buffer.from(updated, "utf8").toString("base64"),
     sha,
     branch: "main",
