@@ -13,23 +13,35 @@ for (const line of readFileSync(envPath, "utf8").split("\n")) {
 }
 
 const password = process.env.SUPABASE_DB_PASSWORD!;
-const host = process.env.SUPABASE_DB_HOST || "aws-1-us-east-1.pooler.supabase.com";
-const PROJECT_REF = "urjbhjbygyxffrfkarqn";
-const connectionString = `postgres://postgres.${PROJECT_REF}:${encodeURIComponent(password)}@${host}:6543/postgres`;
+const cs = `postgres://postgres.urjbhjbygyxffrfkarqn:${encodeURIComponent(password)}@aws-1-us-east-1.pooler.supabase.com:6543/postgres`;
 
 const MIGRATIONS = ["20260618140000_meta_performance_tables.sql"];
+const TABLES = ["meta_campaigns", "meta_adsets", "meta_ads", "meta_insights_daily"];
 
 async function main() {
-  const client = new Client({ connectionString });
-  await client.connect();
+  const c = new Client({ connectionString: cs });
+  await c.connect();
   try {
-    for (const f of MIGRATIONS) {
-      const sql = readFileSync(resolve(__dirname, "../supabase/migrations", f), "utf8");
-      await client.query(sql);
-      console.log(`✓ applied ${f}`);
+    // Wrap in a transaction so a partial failure rolls back cleanly (idempotent re-run).
+    await c.query("begin");
+    for (const file of MIGRATIONS) {
+      const sql = readFileSync(resolve(__dirname, "../supabase/migrations", file), "utf8");
+      await c.query(sql);
+      console.log(`✓ applied ${file}`);
     }
+    await c.query("commit");
+    for (const t of TABLES) {
+      const { rows } = await c.query(
+        "select count(*)::int as n from information_schema.columns where table_schema='public' and table_name=$1",
+        [t],
+      );
+      console.log(`✓ public.${t} has ${rows[0].n} columns`);
+    }
+  } catch (e) {
+    await c.query("rollback").catch(() => {});
+    throw e;
   } finally {
-    await client.end();
+    await c.end();
   }
 }
 
