@@ -27,7 +27,7 @@ Every Appstle **mutation** (portal action, ticket handler, orchestrator, cron) r
 
 ## Identifier discipline: UUID internally, contract id only at the Appstle edge
 
-A subscription's canonical key is its **UUID** (`subscriptions.id`). `shopify_contract_id` is an *external* detail — numeric for Appstle-billed subs, `internal-<hex>` for subs flipped to internal billing ([[../specs/storefront-mvp]] § 1c migration). It exists only to talk to Appstle.
+A subscription's canonical key is its **UUID** (`subscriptions.id`). `shopify_contract_id` is an *external* detail — numeric for Appstle-billed subs, `internal-<hex>` for subs flipped to internal billing ([[subscription-billing]] § Migration path). It exists only to talk to Appstle.
 
 Every write handler resolves the sub through **`resolveSub(admin, workspaceId, rawId, loggedInShopifyCustomerId)`** in [[../libraries/portal__helpers]]:
 - Accepts the UUID **or** the legacy contract-id shape (transitional — both frontends still send `contract.id`).
