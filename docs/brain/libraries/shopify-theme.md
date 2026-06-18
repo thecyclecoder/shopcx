@@ -35,4 +35,4 @@ Types: `ThemeFile`, `FileChange`, `ThemeTarget`.
 
 ## Related
 
-[[../integrations/shopify]] · [[../recipes/edit-shopify-theme]] · [[../specs/shopify-theme-via-shopcx]]
+[[../integrations/shopify]] · [[../recipes/edit-shopify-theme]] · [[../archive]] (verified + retired spec)

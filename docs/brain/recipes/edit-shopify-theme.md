@@ -1,6 +1,6 @@
 # Edit the Shopify theme (chat → build → deploy)
 
-Short-term bridge until the in-house storefront retires Shopify. Dylan chats; Claude builds the change and ships it to the live store via a GitHub commit. See [[../specs/shopify-theme-via-shopcx]] and `src/lib/shopify-theme.ts`.
+Short-term bridge until the in-house storefront retires Shopify. Dylan chats; Claude builds the change and ships it to the live store via a GitHub commit. See [[../libraries/shopify-theme]] (`src/lib/shopify-theme.ts`); the feature spec is verified + retired ([[../archive]]).
 
 ## Model
 
@@ -35,4 +35,4 @@ await commitThemeFiles(target, [{ path: "sections/main-product.liquid", content:
 
 ## Related
 
-[[../integrations/shopify]] · [[../specs/shopify-theme-via-shopcx]] · [[../lifecycles/storefront-checkout]]
+[[../integrations/shopify]] · [[../libraries/shopify-theme]] · [[../lifecycles/storefront-checkout]]

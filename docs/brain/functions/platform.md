@@ -16,7 +16,7 @@ Idea → spec → autonomous build → merged PR, phone-first, on the Max subscr
 
 ### Store tech / Shopify
 AI-driven management of the live Shopify store + theme from inside ShopCX.
-- **Specs:** [[../specs/shopify-theme-via-shopcx]] ⏳
+- **Specs:** Shopify theme management via ShopCX ✅ verified + archived 2026-06-18 ([[../archive]]) → folded into [[../libraries/shopify-theme]] · [[../recipes/edit-shopify-theme]] · [[../integrations/shopify]] § Theme management
 
 ### Infra & DevOps / reliability
 The "actually improve the system" work — the build box + worker ([[../recipes/build-box-setup]]), deploys, CI/tsc gates, and reliability of the platform itself. (Folded into Platform rather than a separate function; promote to its own function only if the surface grows.)
