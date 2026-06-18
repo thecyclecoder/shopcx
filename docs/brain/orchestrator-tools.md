@@ -16,6 +16,7 @@ Sonnet decides which to call based on the customer message. Minimal pre-context 
 | `get_customer_account` | Account questions (subs, orders, billing, loyalty) | Subscriptions, last 3 orders, loyalty points + unused coupons, linked accounts, grandfathered-pricing detection |
 | `get_customer_timeline` | "When did X happen?" / sequence-of-events questions | Chronological `customer_events` log — portal actions, sub mutations, journey responses |
 | `get_product_knowledge` | Product / policy questions | Product catalog + descriptions, all macros with body text, KB article matches via RAG |
+| `check_inventory` | **Missing item / "didn't receive X" / "is X in stock" / before promising a reship** | Per-variant on-hand qty + in-stock vs OUT OF STOCK for matches, plus a full out-of-stock list with restock dates (`crisis_events`). Treats qty ≤ 0 as OOS even if Shopify's `available` flag is stale. **Covers single-SKU products that `get_product_knowledge` hides** (it skips the variant list for 1-variant products). Excludes virtual products (shipping protection). |
 | `get_returns` | Return / exchange / refund status | Return requests with status, items, tracking, refund amount |
 | `get_fraud_cases` | Fraud-flag questions or when behavior looks suspicious | Fraud case rows, severity, rule that triggered |
 | `get_crisis_status` | Crisis tags on ticket or OOS mentions | Crisis tier responses, swap options, coupon info, pause/remove status |
@@ -27,6 +28,8 @@ Sonnet decides which to call based on the customer message. Minimal pre-context 
 Pre-loaded context (no tool call needed): customer name + email, ticket tags (includes crisis tags), conversation history (last 8 messages + action completion notes), available handler names (journeys, playbooks, workflows), AI personality.
 
 Two-bucket reasoning: account question → `get_customer_account` first; product/policy question → `get_product_knowledge` first. If first bucket doesn't have the answer → try the other. If neither → escalate (genuine knowledge gap).
+
+**Missing-item triage:** for "an item is missing from my order" / "I didn't receive X", call `check_inventory` before offering a reship — an out-of-stock item is omitted from fulfillment (and not charged), so the right answer is to *explain that*, not promise to "make it right." This was added after a missing **ACV Gummies** ticket got a hollow acknowledge-and-close: the product is a single-SKU item at qty 0, which `get_product_knowledge` never surfaced (it skips the variant list for 1-variant products). `check_inventory` exists precisely to close that blind spot.
 
 ## Direct actions — what Sonnet can do
 

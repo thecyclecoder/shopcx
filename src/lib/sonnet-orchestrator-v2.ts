@@ -114,6 +114,15 @@ function buildToolDefinitions() {
       },
     },
     {
+      name: "check_inventory",
+      description: "Check CURRENT stock levels for products/variants. Returns each matching variant's on-hand quantity and in-stock vs OUT OF STOCK status, plus a full list of every out-of-stock item in the catalog and any expected restock dates. CALL THIS whenever a customer says an item is MISSING from their order, they DIDN'T RECEIVE a product, asks 'is X in stock / available', or before promising a reship/replacement — an out-of-stock item is omitted from fulfillment (and not charged), so confirm stock before saying you'll 'make it right'. Covers single-SKU products that get_product_knowledge hides. Pass the product name from the customer's order (e.g. 'Apple Cider Vinegar Gummies').",
+      input_schema: {
+        type: "object" as const,
+        properties: { query: { type: "string", description: "Product or variant name to check (e.g. 'ACV Gummies', 'Mixed Berry'). Omit to list everything currently out of stock." } },
+        required: [] as string[],
+      },
+    },
+    {
       name: "get_returns",
       description: "Get customer's returns AND replacement orders with status, items, tracking, and refund details. Use when customer asks about a return, replacement, exchange, or refund status.",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
@@ -464,6 +473,8 @@ export async function executeToolCall(
       }
       case "get_product_knowledge":
         return await getProductKnowledge(admin, workspaceId, (input?.query as string) || "");
+      case "check_inventory":
+        return await checkInventory(admin, workspaceId, (input?.query as string) || "");
       case "get_returns":
         return await getReturns(admin, workspaceId, customerId);
       case "get_fraud_cases":
@@ -913,6 +924,95 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
   if (!ragResults.macros?.length && !ragResults.chunks?.length) {
     parts.push("\nNo matching macros or KB articles found for this query.");
   }
+
+  return parts.join("\n");
+}
+
+/**
+ * Live-ish stock levels for missing-item / availability triage.
+ *
+ * Why this exists separate from get_product_knowledge: that tool skips
+ * the variant list for single-SKU products, so a single-variant item at
+ * qty 0 (e.g. Apple Cider Vinegar Gummies) is invisible — the orchestrator
+ * promised "I'll make it right" on a missing ACV Gummies with no way to
+ * see it was out of stock (ticket 2875cde1). This always reports per-SKU
+ * stock AND a full out-of-stock list, so the AI can confirm OOS before
+ * offering a reship.
+ *
+ * In stock = `available !== false` AND (qty is untracked OR qty > 0). So
+ * qty 0 reads as OUT OF STOCK even when Shopify's `available` flag is
+ * still true (continue-selling policy). Inventory syncs hourly
+ * ([[inngest/sync-inventory]]).
+ */
+async function checkInventory(admin: Admin, wsId: string, query: string): Promise<string> {
+  const [{ data: products }, { data: variants }, { data: crises }, { data: ws }] = await Promise.all([
+    admin.from("products").select("id, title, inventory_updated_at").eq("workspace_id", wsId).eq("status", "active"),
+    admin.from("product_variants")
+      .select("product_id, title, option1, sku, inventory_quantity, available, position")
+      .eq("workspace_id", wsId).order("position"),
+    admin.from("crisis_events")
+      .select("affected_product_title, affected_variant_id, affected_sku, expected_restock_date")
+      .eq("workspace_id", wsId).eq("status", "active"),
+    admin.from("workspaces").select("shipping_protection_title").eq("id", wsId).maybeSingle(),
+  ]);
+
+  // Exclude virtual / non-shippable products (shipping protection) — they
+  // carry junk negative inventory and are never a "missing item".
+  const spTitle = (ws?.shipping_protection_title || "Shipping protection").toLowerCase();
+  const isVirtual = (title: string) => {
+    const t = title.toLowerCase();
+    return t === spTitle || t.includes("shipping protection");
+  };
+  const titleById = new Map((products || []).map((p) => [p.id, p.title as string]));
+  const isInStock = (v: { available?: boolean | null; inventory_quantity?: number | null }) =>
+    v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0);
+  const restockFor = (productTitle: string, sku: string | null) => {
+    const c = (crises || []).find((c) =>
+      (sku && c.affected_sku && c.affected_sku === sku) ||
+      (c.affected_product_title && productTitle && c.affected_product_title.toLowerCase() === productTitle.toLowerCase()));
+    return c?.expected_restock_date ? ` (expected restock: ${c.expected_restock_date})` : "";
+  };
+  const fmt = (productTitle: string, v: { title?: string | null; option1?: string | null; sku?: string | null; inventory_quantity?: number | null; available?: boolean | null }) => {
+    const variantName = (v.title || v.option1 || "").toString();
+    const label = variantName && variantName !== "Default Title" ? `${productTitle} — ${variantName}` : productTitle;
+    const qty = v.inventory_quantity == null ? "untracked" : `${v.inventory_quantity}`;
+    const status = isInStock(v) ? "in stock" : "OUT OF STOCK";
+    return `- ${label}: ${status} (qty ${qty})${isInStock(v) ? "" : restockFor(productTitle, (v.sku as string | null) || null)}`;
+  };
+
+  // Tokenized match: any token (≥3 chars) hits the product OR variant name/sku.
+  const tokens = (query || "").toLowerCase().split(/\s+/).filter((t) => t.length >= 3);
+  const matches = (productTitle: string, v: { title?: string | null; option1?: string | null; sku?: string | null }) => {
+    if (!tokens.length) return false;
+    const hay = `${productTitle} ${v.title || ""} ${v.option1 || ""} ${v.sku || ""}`.toLowerCase();
+    return tokens.some((t) => hay.includes(t));
+  };
+
+  const parts: string[] = [];
+
+  const real = (variants || []).filter((v) => !isVirtual(titleById.get(v.product_id) || ""));
+
+  if (tokens.length) {
+    const matched = real.filter((v) => matches(titleById.get(v.product_id) || "", v));
+    parts.push(`MATCHES for "${query}":`);
+    if (matched.length) {
+      for (const v of matched) parts.push(fmt(titleById.get(v.product_id) || "Product", v));
+    } else {
+      parts.push("- (no product/variant matched that name — see the out-of-stock list below)");
+    }
+    parts.push("");
+  }
+
+  const oos = real.filter((v) => !isInStock(v));
+  if (oos.length) {
+    parts.push("ALL CURRENTLY OUT-OF-STOCK ITEMS:");
+    for (const v of oos) parts.push(fmt(titleById.get(v.product_id) || "Product", v));
+  } else {
+    parts.push("Every active product is currently in stock.");
+  }
+
+  const synced = (products || []).map((p) => p.inventory_updated_at).filter(Boolean).sort().pop();
+  if (synced) parts.push(`\n(Inventory syncs hourly from Shopify — last update ${new Date(synced as string).toISOString()}.)`);
 
   return parts.join("\n");
 }
