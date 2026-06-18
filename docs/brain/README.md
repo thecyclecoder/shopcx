@@ -15,10 +15,12 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 25 + README |
 | [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 43 + 39 settings |
-| [specs/](specs/) | Roadmap specs for in-flight or planned features. When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 0 |
+| [functions/](functions/) | One page per org-chart function (Growth, CFO, CMO, Logistics, CS) — the permanent owner of work. Lists its perpetual mandates + the specs/goals it owns. Doubles as the CEO-mode director-agent charter. | 1 |
+| [goals/](goals/) | One page per finite company goal / BHAG (e.g. CEO mode) — outcome, success metric, and the milestone → spec decomposition. Rolls up to 100% then closes. | 1 |
+| [specs/](specs/) | Roadmap specs for in-flight or planned features. Every spec declares an **owner** (one function) + **parent** (a function mandate or a goal milestone). When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 0 |
 | (root) | Cross-cutting reference: [customer-voice.md](customer-voice.md), [operational-rules.md](operational-rules.md), [ui-conventions.md](ui-conventions.md), [orchestrator-tools.md](orchestrator-tools.md), [project-management.md](project-management.md) | 5 |
 
-**How project management works in the brain** → see [project-management.md](project-management.md). Specs go in `specs/`, phases use ⏳ 🚧 ✅ emoji, lifecycle pages carry "Status / open work" blocks for shipped state. Spawn a session: `/goal do everything in docs/brain/specs/{slug}.md`.
+**How project management works in the brain** → see [project-management.md](project-management.md). The work hierarchy is **Function → (Mandate | Goal) → Spec → Phase → Build** — no orphan specs. Specs go in `specs/`, phases use ⏳ 🚧 ✅ emoji, lifecycle pages carry "Status / open work" blocks for shipped state. Spawn a session: `/goal do everything in docs/brain/specs/{slug}.md`.
 
 ## Tables (`tables/`)
 

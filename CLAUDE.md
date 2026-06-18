@@ -18,10 +18,11 @@ The retention operating system for Superfoods Company. Replaces Gorgias + Siena 
 | `journeys/` + `playbooks/` | Per-row in `journey_definitions` / `playbooks` tables |
 | `lifecycles/` | Long-form end-to-end traces of major flows |
 | `recipes/` | How-to pages for common operational tasks |
+| `functions/` + `goals/` | Org-chart functions (permanent owners + mandates) and finite company goals/BHAGs. The work hierarchy: **Function → (Mandate \| Goal) → Spec**. See [project-management.md](docs/brain/project-management.md). |
 
 **Hard rule:** every new feature / table / Inngest function / integration / library file must land in `docs/brain/` in the same PR. Code without a brain page is incomplete.
 
-**Planning + tracking work also lives in the brain.** Specs for in-flight features go in `docs/brain/specs/{slug}.md` with phase emojis (⏳ planned · 🚧 in progress · ✅ shipped). Start a build session with `/goal do everything in docs/brain/specs/{slug}.md`. When a spec is fully shipped, its content folds into the relevant lifecycle/table/library/inngest/integration/dashboard/recipe pages, and the spec file is deleted. Lifecycle pages carry a "Status / open work" block at the bottom showing shipped state. Full workflow: [docs/brain/project-management.md](docs/brain/project-management.md).
+**Planning + tracking work also lives in the brain.** Specs for in-flight features go in `docs/brain/specs/{slug}.md` with phase emojis (⏳ planned · 🚧 in progress · ✅ shipped). Every spec declares an **owner** (one `functions/` function — the DRI) + a **parent** (a function mandate or a goal milestone) — no orphan specs. Start a build session with `/goal do everything in docs/brain/specs/{slug}.md`. When a spec is fully shipped, its content folds into the relevant lifecycle/table/library/inngest/integration/dashboard/recipe pages, and the spec file is deleted. Lifecycle pages carry a "Status / open work" block at the bottom showing shipped state. Full workflow: [docs/brain/project-management.md](docs/brain/project-management.md).
 
 ## Local conventions
 
