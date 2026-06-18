@@ -12,7 +12,7 @@ The permanent owner of **the build system and the product engineering itself** �
 ### Autonomous build platform
 Idea → spec → autonomous build → merged PR, phone-first, on the Max subscription — and keep making that loop faster, safer, and more capable.
 - **Metric:** idea→merge cycle time, build success rate, human-touch per build trending down.
-- **Specs:** [[../specs/roadmap-build-console]] ✅ · [[../specs/build-approval-gates]] ✅ · [[../specs/goal-decomposition-engine]] ⏳ · [[../specs/repo-skills-catalog]] 🚧 · [[../specs/spec-lifecycle-and-archival]] ⏳
+- **Specs:** [[../specs/roadmap-build-console]] ✅ · [[../specs/build-approval-gates]] ✅ · [[../specs/goal-decomposition-engine]] ✅ · [[../specs/repo-skills-catalog]] 🚧 · [[../specs/spec-lifecycle-and-archival]] ⏳
 
 ### Store tech / Shopify
 AI-driven management of the live Shopify store + theme from inside ShopCX.

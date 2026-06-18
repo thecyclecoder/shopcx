@@ -68,9 +68,12 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
                 {spec.card.owner && (
                   <div className="flex items-center gap-1.5">
                     <span className="text-zinc-400">Owner</span>
-                    <span className="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-300">
+                    <Link
+                      href={`/dashboard/roadmap/functions/${spec.card.owner}`}
+                      className="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:hover:bg-violet-900/50"
+                    >
                       {spec.card.owner}
-                    </span>
+                    </Link>
                   </div>
                 )}
                 {spec.card.parent && (

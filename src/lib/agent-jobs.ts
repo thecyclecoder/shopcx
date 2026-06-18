@@ -23,9 +23,22 @@ export interface JobQuestion {
   options?: string[];
 }
 
-export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr";
+// 'spec' is the planner's proposed-branch action (goal-decomposition-engine): the owner approves it,
+// the worker authors docs/brain/specs/{slug}.md + queues its build. The others are gated prod side-effects.
+export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr" | "spec";
 
-/** A prod-side-effect the build needs the owner to approve. `cmd` is the exact command the worker runs on approval (also shown as the preview). */
+/** A planner-proposed spec branch — carried on a `type:'spec'` PendingAction so the worker can author it on approval. */
+export interface ProposedSpec {
+  slug: string;
+  title: string;
+  owner: string; // function slug (DRI)
+  parent: string; // a function mandate or a goal milestone (e.g. "M1 — Metrics spine + COGS")
+  milestone?: string; // the goal milestone id this branch attaches under (for the goal-doc wikilink)
+  intent: string; // one-paragraph intent
+  gap?: string; // the brain page/gap this closes (grounding citation)
+}
+
+/** A prod-side-effect (or proposed spec) the build/plan needs the owner to approve. `cmd` is the exact command the worker runs on approval (also shown as the preview). */
 export interface PendingAction {
   id: string;
   type: GatedActionType;
@@ -34,13 +47,18 @@ export interface PendingAction {
   preview?: string;
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
+  spec?: ProposedSpec; // set when type==='spec' (planner proposal)
 }
+
+/** 'build' (default — build a spec to a PR) | 'plan' (run plan-goal against a goal → propose specs). */
+export type JobKind = "build" | "plan";
 
 export interface AgentJob {
   id: string;
   workspace_id: string;
-  spec_slug: string;
+  spec_slug: string; // for plan jobs this holds the GOAL slug being planned
   spec_branch: string | null;
+  kind: JobKind;
   status: JobStatus;
   claude_session_id: string | null;
   questions: JobQuestion[];
@@ -55,11 +73,26 @@ export interface AgentJob {
   updated_at: string;
 }
 
-/** Statuses where a build is live (no new build should be queued for the same spec). */
-export const ACTIVE_STATUSES: JobStatus[] = ["queued", "claimed", "building", "needs_input", "queued_resume"];
+/** Statuses where a job is live (no new job should be queued for the same spec/goal). */
+export const ACTIVE_STATUSES: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
 export function isActive(status: JobStatus): boolean {
   return ACTIVE_STATUSES.includes(status);
+}
+
+/** Latest plan job for a goal (newest wins) — drives the goal page's Plan/Re-plan control. */
+export async function getLatestPlanJob(workspaceId: string, goalSlug: string): Promise<AgentJob | null> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "plan")
+    .eq("spec_slug", goalSlug)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data as AgentJob) ?? null;
 }
 
 /** Latest job per spec for a workspace (newest wins) — drives the board's per-card status. */

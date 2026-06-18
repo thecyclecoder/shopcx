@@ -36,22 +36,36 @@ const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_CONCURRENT = 5; // real ceiling is Max rate limits, not the box
 
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
+// A planner-proposed spec branch, carried on a type:'spec' action (goal-decomposition-engine).
+interface ProposedSpec {
+  slug: string;
+  title: string;
+  owner: string;
+  parent: string;
+  milestone?: string;
+  intent: string;
+  gap?: string;
+}
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec";
   summary: string;
   cmd?: string;
   preview?: string;
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
+  spec?: ProposedSpec;
 }
 interface Job {
   id: string;
-  spec_slug: string;
+  workspace_id: string;
+  spec_slug: string; // for kind='plan' this is the GOAL slug
   spec_branch: string | null;
+  kind: "build" | "plan";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
+  created_by: string | null;
   answers: { id: string; answer: string }[];
   pending_actions: PendingAction[];
   pr_number: number | null;
@@ -228,7 +242,214 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
   return { actions, summary: done.join("; ") };
 }
 
+// Commit a single file straight to main via the GitHub Contents API — the chat/finalize authoring
+// pattern (a spec is docs, already gated by the approve-tree step). Race-free for the build jobs we
+// queue next: the build pipeline bases every new build on origin/main, so the spec must be there.
+async function putFileMain(filePath: string, content: string, message: string) {
+  const get = await gh("GET", `/repos/${REPO}/contents/${filePath}?ref=main`);
+  const sha = get.ok ? (get.json as { sha?: string }).sha : undefined;
+  return gh("PUT", `/repos/${REPO}/contents/${filePath}`, {
+    message,
+    content: Buffer.from(content, "utf8").toString("base64"),
+    sha,
+    branch: "main",
+  });
+}
+
+// Re-plan hygiene: record declined proposals as ❌ in the goal doc so re-plan never re-proposes them.
+// Best-effort append under a "## Declined branches" section (created if absent).
+async function recordDeclined(goalSlug: string, declined: ProposedSpec[]) {
+  if (!declined.length) return;
+  const filePath = `docs/brain/goals/${goalSlug}.md`;
+  const get = await gh("GET", `/repos/${REPO}/contents/${filePath}?ref=main`);
+  if (!get.ok) return;
+  const sha = (get.json as { sha?: string }).sha;
+  let md = Buffer.from(String((get.json as { content?: string }).content || "").replace(/\s/g, ""), "base64").toString("utf8");
+  const lines = declined.map((d) => `- ❌ ${d.slug} — ${d.title} (declined; not re-proposed)`).join("\n");
+  if (/##\s+Declined branches/i.test(md)) {
+    md = md.replace(/(##\s+Declined branches[^\n]*\n)/i, `$1${lines}\n`);
+  } else {
+    md = `${md.trimEnd()}\n\n## Declined branches\n\n${lines}\n`;
+  }
+  await gh("PUT", `/repos/${REPO}/contents/${filePath}`, {
+    message: `plan: ${goalSlug} → record ${declined.length} declined branch(es)`,
+    content: Buffer.from(md, "utf8").toString("base64"),
+    sha,
+    branch: "main",
+  });
+}
+
+// A kind='plan' job. First run: the plan-goal skill proposes a milestone→spec tree → needs_approval
+// (no files written, no PR). Resume (after the owner approves branches): author the approved specs +
+// wikilink them into the goal doc (committed to main), record declines (❌), and queue their builds.
+async function runPlanJob(job: Job) {
+  const goalSlug = job.spec_slug;
+  const isResume = !!job.claude_session_id;
+  const tag = `[plan:${goalSlug}]`;
+  const wt = join(BUILDS_DIR, job.id);
+  console.log(`${tag} ${isResume ? "resuming (authoring approved specs)" : "planning"} (job ${job.id})`);
+
+  sh("git", ["fetch", "origin"]);
+  let branch = job.spec_branch;
+  sh("git", ["worktree", "remove", "--force", wt]);
+  if (!branch) {
+    branch = `claude/plan-${goalSlug}-${Date.now().toString(36)}`;
+    await update(job.id, { spec_branch: branch });
+  }
+  const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]); // scratch worktree (read brain / write spec files locally)
+  if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  try {
+    if (!isResume) {
+      // PROPOSE — run the plan-goal skill. The planner writes nothing; it emits a tree for approval.
+      const prompt = [
+        `Use the plan-goal skill to plan the goal docs/brain/goals/${goalSlug}.md (cwd is the repo root).`,
+        ...(job.instructions ? [`Extra planning guidance: ${job.instructions}`] : []),
+        `You are PROPOSING only — do NOT author specs, do NOT queue builds, do NOT run git. Read the goal + the brain, gap-analyze, and emit the proposed tree. Every proposed spec MUST carry an owner + parent (reject your own orphans).`,
+        `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","summary":"<title>","preview":"<intent>\\n\\nGap: <brain citation>","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…"}}]} | {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id":"q1","q":"…"}]}.`,
+      ].join("\n");
+      const { session, resultText, isError } = await runClaude(prompt, null, wt);
+      if (session) await update(job.id, { claude_session_id: session });
+      const parsed = parseStatus(resultText);
+      console.log(`${tag} planner finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+      if (parsed?.status === "needs_input") {
+        await update(job.id, { status: "needs_input", questions: parsed.questions ?? [] });
+        return;
+      }
+      if (parsed?.status === "needs_approval") {
+        const incoming: Array<Record<string, unknown>> = Array.isArray((parsed as Record<string, unknown>).actions)
+          ? ((parsed as Record<string, unknown>).actions as Array<Record<string, unknown>>)
+          : [];
+        const pending: PendingAction[] = [];
+        incoming.forEach((a, i) => {
+          const sp = (a.spec as Record<string, unknown>) || {};
+          // No-orphan rule: drop any proposal missing slug/owner/parent — the planner rejects its own orphans.
+          if (typeof sp.slug !== "string" || typeof sp.owner !== "string" || typeof sp.parent !== "string") return;
+          pending.push({
+            id: `s${Date.now().toString(36)}${i}`,
+            type: "spec",
+            summary: String(a.summary || sp.title || sp.slug),
+            preview: typeof a.preview === "string" ? a.preview : String(sp.intent || ""),
+            status: "pending",
+            spec: {
+              slug: sp.slug,
+              title: String(sp.title || a.summary || sp.slug),
+              owner: sp.owner,
+              parent: sp.parent,
+              milestone: typeof sp.milestone === "string" ? sp.milestone : undefined,
+              intent: String(sp.intent || a.preview || ""),
+              gap: typeof sp.gap === "string" ? sp.gap : undefined,
+            },
+          });
+        });
+        if (!pending.length) {
+          await update(job.id, { status: "completed", log_tail: "planner proposed no valid (owner+parent) specs" });
+          return;
+        }
+        await update(job.id, { status: "needs_approval", pending_actions: pending });
+        return;
+      }
+      await update(job.id, { status: "completed", log_tail: parsed?.summary ? String(parsed.summary) : "no proposals" });
+      return;
+    }
+
+    // RESUME — author APPROVED specs, wikilink into the goal doc, record declines, queue builds.
+    const actions = job.pending_actions || [];
+    const approved = actions.filter((a) => a.type === "spec" && a.status === "approved" && a.spec);
+    const declined = actions.filter((a) => a.type === "spec" && a.status === "declined" && a.spec);
+    if (!approved.length) {
+      await recordDeclined(goalSlug, declined.map((a) => a.spec!));
+      const acted = actions.map((a) => (a.status === "declined" ? { ...a, status: "done" as const, result: "recorded ❌" } : a));
+      await update(job.id, { status: "completed", pending_actions: acted, log_tail: "no branches approved" });
+      return;
+    }
+
+    const specList = approved
+      .map((a, i) => {
+        const s = a.spec!;
+        return `${i + 1}. slug=${s.slug} · title="${s.title}" · owner=${s.owner} · parent="${s.parent}"${s.milestone ? ` · milestone=${s.milestone}` : ""}\n   intent: ${s.intent}${s.gap ? `\n   gap: ${s.gap}` : ""}`;
+      })
+      .join("\n");
+    const declinedNote = declined.length
+      ? `\n\nDECLINED branches (record as ❌ under a "## Declined branches" section in the goal doc so re-plan never re-proposes them): ${declined.map((a) => a.spec!.slug).join(", ")}.`
+      : "";
+    const prompt = [
+      `Author the owner-APPROVED specs for goal docs/brain/goals/${goalSlug}.md (cwd is the repo root). Do NOT build anything; do NOT run git. Only write files under docs/brain/specs/ and edit docs/brain/goals/${goalSlug}.md.`,
+      `For EACH approved spec below, create docs/brain/specs/{slug}.md as a real, concrete build spec: an H1 "# {Title} ⏳"; directly under it the metadata line \`**Owner:** [[../functions/{owner}]] · **Parent:** {parent}\`; a one-paragraph summary tied to the goal's success metric; concrete "## Phase N — name" sections (each first bullet "- ⏳ planned") grounded in the brain (read pages to cite real table/library names + the gap); a "## Safety / invariants" section; a "## Completion criteria" section. Match the style of existing docs/brain/specs/*.md.`,
+      `Then update docs/brain/goals/${goalSlug}.md: under the matching milestone in "## Decomposition", add a wikilink to each new spec, e.g. "[[../specs/{slug}]] ⏳ — {one-line}".${declinedNote}`,
+      ``,
+      `Approved specs:\n${specList}`,
+      ``,
+      `Final message = ONLY {"status":"completed","summary":"authored N specs: …"} (or {"status":"needs_input","questions":[…]} only if a spec is genuinely under-specified).`,
+    ].join("\n");
+
+    const { session, resultText, isError } = await runClaude(prompt, job.claude_session_id, wt);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = parseStatus(resultText);
+    console.log(`${tag} authoring finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (parsed?.status === "needs_input") {
+      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [] });
+      return;
+    }
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "plan authoring errored" });
+      return;
+    }
+
+    // Commit authored docs straight to main (specs/ + the goal doc only) so queued builds find them.
+    const changed = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()
+      .split("\n").map((l) => l.trim().split(/\s+/).pop() || "").filter(Boolean);
+    const docFiles = changed.filter((f) => f.startsWith("docs/brain/specs/") || f === `docs/brain/goals/${goalSlug}.md`);
+    let committed = 0;
+    for (const f of docFiles) {
+      try {
+        const content = readFileSync(join(wt, f), "utf8");
+        const r = await putFileMain(f, content, `plan: ${goalSlug} → ${f.replace("docs/brain/", "")}`);
+        if (r.ok) committed++;
+        else console.error(`${tag} commit failed for ${f}: ${r.status}`);
+      } catch (e) {
+        console.error(`${tag} read/commit ${f}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+
+    // Queue a build for each approved spec — the existing pipeline takes over (its own claude/* PR).
+    const queuedSlugs: string[] = [];
+    for (const a of approved) {
+      const s = a.spec!;
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: s.slug,
+        kind: "build",
+        status: "queued",
+        instructions: `Authored by the goal planner for ${goalSlug} (${s.parent}).`,
+        created_by: job.created_by,
+      });
+      if (!error) queuedSlugs.push(s.slug);
+    }
+
+    const acted = actions.map((a) =>
+      a.type === "spec" && a.status === "approved"
+        ? { ...a, status: "done" as const, result: queuedSlugs.includes(a.spec!.slug) ? "authored + build queued" : "authored" }
+        : a.type === "spec" && a.status === "declined"
+          ? { ...a, status: "done" as const, result: "recorded ❌" }
+          : a,
+    );
+    await update(job.id, {
+      status: "completed",
+      pending_actions: acted,
+      log_tail: `committed ${committed} docs to main; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}`,
+    });
+    console.log(`${tag} ✓ authored ${approved.length} specs → queued ${queuedSlugs.length} builds`);
+  } finally {
+    sh("git", ["worktree", "remove", "--force", wt]);
+  }
+}
+
 async function runJob(job: Job) {
+  if (job.kind === "plan") return runPlanJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
