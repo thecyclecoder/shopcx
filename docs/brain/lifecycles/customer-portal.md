@@ -15,7 +15,7 @@ After editing `shopify-extension/portal-src/` files, **always run `node scripts/
 
 ## Appstle pricing heal-on-touch
 
-Every Appstle **mutation** (portal action, ticket handler, orchestrator, cron) routes through a heal guard ([[../libraries/appstle-pricing]] `healOnTouch`/`appstleMutate`) that repairs `pricingPolicy: null` subs — the flat baked-price subs Appstle's original migration left behind — *before* acting. It writes a proper base + 25% S&S cycle that **preserves the customer's charge**, so the legacy portal applies the discount on modification and our migration reads clean `basePrice`. Idempotent (no-op once structured), non-fatal. Cancel + migration skip it (migration is heal-by-migration). See [[../specs/appstle-pricing-heal-and-migration-monitor]].
+Every Appstle **mutation** (portal action, ticket handler, orchestrator, cron) routes through a heal guard ([[../libraries/appstle-pricing]] `healOnTouch`/`appstleMutate`) that repairs `pricingPolicy: null` subs — the flat baked-price subs Appstle's original migration left behind — *before* acting. It writes a proper base + 25% S&S cycle that **preserves the customer's charge**, so the legacy portal applies the discount on modification and our migration reads clean `basePrice`. Idempotent (no-op once structured), non-fatal. Cancel + migration skip it (migration is heal-by-migration). See [[subscription-billing]] § Migration path.
 
 ## Shipping address — one source of truth
 

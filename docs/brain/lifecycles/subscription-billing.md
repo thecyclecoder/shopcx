@@ -205,17 +205,18 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 
 **Shipped:** Both paths functional. Internal scheduler (hourly cron, line-item resolution, Avalara tax quote, Braintree charge, order create). Legacy Appstle path (webhook-driven, state mirroring, our subscription mutations dispatch on `is_internal`). Pause/resume/skip unified. Dunning integration. Tax void/adjust on refund.
 
+**Appstle → internal migration is LIVE** (heal + smart-migration + monitor, verified 2026-06-18). Triggered on payment-method capture / portal load. Migrations are **born healed** (`inferAppstleLineBase`, [[appstle-pricing]]); every Appstle mutation heals `pricingPolicy: null` lines first via the `appstleMutate` gateway; each migration is verified by an 8-check audit ([[migration-audit]] → [[../tables/migration_audits]]), surfaced on [[../dashboard/migrations]], re-checked by [[../inngest/migration-audit-retry]] (10-min) and back-filled by [[../inngest/migration-integrity-sweep]] (daily).
+
 **Known gaps / not yet shipped:**
-- **Appstle → internal migration not activated.** Documented as the long-term plan; requires Braintree vault-import for Card-on-File migration off Shopify Payments. No live migration jobs running.
+- **Phase 1b — consolidate stray direct Appstle fetches onto real wrappers.** The ~9 direct-`fetch` sites currently carry a `healOnTouch` guard (functional chokepoint); the cleaner end state is one literal path through `appstleMutate`. Deferred (touches dunning/journey-complete/action-executor); dunning's strays fold into the separate dunning rework. See [[appstle-pricing]].
 - Per `feedback_no_double_billing_framing` memory: customer comms must not frame parallel-sub charges as "double billing." That rule lives in sonnet_prompts, not in this lifecycle — but flag it for anyone touching billing UX.
 
 **Recent activity:**
 - `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents (touches transactions)
 - `49cfd939` Orchestrator: add bill_now action + auto-fallback in change_next_date
 
-**Open questions:**
-- Trigger for starting the Appstle → internal migration: blocked on Braintree vault import or a policy decision?
+**Open questions:** None.
 
 ## Related
 
-[[storefront-checkout]] · [[dunning]] · [[return-pipeline]] · [[chargeback-pipeline]] · [[../integrations/appstle]] · [[../integrations/braintree]] · [[../integrations/avalara]] · [[../tables/subscriptions]] · [[../tables/orders]] · [[../tables/transactions]] · [[../tables/dunning_cycles]] · [[../inngest/internal-subscription-renewals]] · [[../inngest/portal-auto-resume]]
+[[storefront-checkout]] · [[dunning]] · [[return-pipeline]] · [[chargeback-pipeline]] · [[../integrations/appstle]] · [[../integrations/braintree]] · [[../integrations/avalara]] · [[../libraries/appstle-pricing]] · [[../libraries/migration-audit]] · [[../tables/subscriptions]] · [[../tables/orders]] · [[../tables/transactions]] · [[../tables/dunning_cycles]] · [[../tables/migration_audits]] · [[../dashboard/migrations]] · [[../inngest/internal-subscription-renewals]] · [[../inngest/portal-auto-resume]] · [[../inngest/migration-audit-retry]] · [[../inngest/migration-integrity-sweep]]
