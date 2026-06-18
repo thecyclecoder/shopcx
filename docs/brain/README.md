@@ -6,15 +6,15 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 146 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 159 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 54 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 14 |
-| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 183 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 21 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 204 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 28 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 25 + README |
-| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 44 + 39 settings |
+| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 53 + 38 settings |
 | [functions/](functions/) | One page per org-chart function (Growth, CMO, Retention, CFO, Logistics, CS — the CEO-mode directors — plus Platform/Eng, the build org) — the permanent owner of work. Lists its perpetual mandates + the specs/goals it owns. Doubles as the CEO-mode director-agent charter. | 4 |
 | [goals/](goals/) | One page per finite company goal / BHAG (e.g. CEO mode) — outcome, success metric, and the milestone → spec decomposition. Rolls up to 100% then closes. | 1 |
 | [specs/](specs/) | Roadmap specs for in-flight or planned features. Every spec declares an **owner** (one function) + **parent** (a function mandate or a goal milestone). When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 0 |
@@ -189,6 +189,8 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/cart_drafts]] — Server-side cart state for the custom storefront. Token-bound, server-validated pricing, lifecycle: pending → converted/abandoned. See [[../lifecycles/storefront-checkout]].
 - [[tables/event_dispatches]] — Per-(event, sink) dispatch state for the CAPI clearinghouse — pending/sent/failed/dlq. See [[../lifecycles/storefront-checkout]].
 - [[tables/event_sinks]] — Downstream destinations for storefront events — meta_capi, tiktok_events, google_enhanced, klaviyo, custom. Encrypted credentials.
+- [[tables/posts]] — Blog/resource object (imported Superfood Scoop + AI-generated). `is_resource` + `grouping` drive the public blog + portal Resources. See [[lifecycles/storefront-blog]].
+- [[tables/post_products]] — Join: a resource [[tables/posts]] row → the [[tables/products]] it's a resource for (many-to-many).
 - [[tables/pricing_rules]] — Storefront pricing rules — tier qty, mode (subscription vs one-time), frequency, discount %, line-item price.
 - [[tables/shipping_rates]] — Storefront shipping rates per (region, weight) — referenced by orders + subscriptions.
 - [[tables/storefront_events]] — Append-only storefront event log (pdp_view, pack_selected, order_placed, etc.). PK is client-generated UUID for CAPI dedup. 90d retention.
@@ -354,6 +356,7 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 - [[lifecycles/social-comment-moderation]] — Webhook → ingest → pass-1 classify → pass-2 generate → action.
 - [[lifecycles/fraud-detection]] — Order create → rules → fraud_cases → hold orders → confirmed_fraud → orchestrator gate.
 - [[lifecycles/storefront-checkout]] — PDP → cart → tax-quote → Braintree vault + sale → order create → CAPI fan-out.
+- [[lifecycles/storefront-blog]] — Shopify articles → import + AI-classify → `posts` → public SSG blog + portal Resources + dashboard.
 - [[lifecycles/subscription-billing]] — In-house billing-tick cron → renewal quote → tax → Braintree → orders → dunning on failure.
 - [[lifecycles/customer-link-confirmation]] — Meta sender → fuzzy match → agent confirms → `meta_sender_customer_links` → backfill.
 - [[lifecycles/chargeback-pipeline]] — Shopify dispute → `chargeback_events` → fraud classification → auto-cancel subs → `chargeback_subscription_actions`.

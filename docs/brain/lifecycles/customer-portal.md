@@ -128,6 +128,10 @@ The portal **login page only** mounts the same anonymous live-chat widget the st
 
 A "Help Center" sidebar item (`_sections/HelpCenterSection.tsx`) surfaces all published KB articles in-portal, searchable, without leaving. Reuses the public help APIs: list via `GET /api/help/{help_slug}?search=` (title+content ilike), inline reader via `GET /api/widget/{workspaceId}/articles/{id}` (`content_html` in a `prose` wrapper). `help` is whitelisted in the middleware `PORTAL_SECTIONS` set for a clean `/help` URL. Distinct from **Support** (ticket submission) and **Resources** (blog product guides).
 
+## Resources section
+
+A "Resources" sidebar item (`_sections/ResourcesSection.tsx`, `/resources`) surfaces the **blog product guides** ([[../tables/posts]] where `is_resource`) — recipes, how-it-works, how-to-use, and the science — for the products the customer owns. Hits `/api/portal?route=resources` (`src/lib/portal/handlers/resources.ts`): the **default** view resolves owned products from the customer's active/paused subscriptions across linked accounts and returns posts grouped **product → grouping**; a **search bar** (`?q=`) queries title/`content_text` across all published resources (discovery, including products not yet owned); clicking a card opens an in-portal reader (`resourcePost?id=` → `content_html` in a `prose` wrapper, images already on our storage). The full import → classify → render flow lives in [[storefront-blog]]. Distinct from **Help Center** (KB articles) and **Support** (tickets).
+
 ### Host-rewrite nav model (the prefix gotcha)
 
 The mini-site runs on a **custom domain** (`portal.{brand}.com`). `src/proxy.ts` middleware (`updateSession`) rewrites `/portal/{slug}/*` → `/*` for that host **only**, so on the live domain every internal path is root-relative (`/`, `/logout`, `/subscriptions`). On **localhost and path-based `shopcx.ai/portal/{slug}`** there is NO rewrite — the portal lives under `/portal/{slug}` and a bare root path (`/`, `/logout`) escapes the portal and hits the **admin app**, which bounces to its own `/login`. This bit us twice (post-OTP redirect, and the Sign-out link).
