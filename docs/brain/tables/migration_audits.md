@@ -29,8 +29,9 @@ Run by `verifyMigration` in [[../libraries/migration-audit]]:
 ## Lifecycle
 
 - **Written** by [[migrate-to-internal]] — `recordMigrationAudit` (pending) then `verifyMigration` inline after each flip.
-- **Re-verified** by the `migration-audit-retry` Inngest cron (every 10 min) — pending rows only; flips to `passed`/`failed`.
-- **Read** by `/api/migrations` → the `/dashboard/migrations` monitor (owner-only).
+- **Re-verified** by the [[../inngest/migration-audit-retry]] cron (every 10 min) — pending rows only; flips to `passed`/`failed`.
+- **Back-filled** by the [[../inngest/migration-integrity-sweep]] cron (daily) — seeds a one-off audit for any internal sub never audited.
+- **Read** by `/api/migrations` → the [[../dashboard/migrations]] monitor (owner-only).
 
 ## Common queries
 
@@ -48,4 +49,4 @@ const { data } = await admin.from("migration_audits")
 
 ---
 
-[[../README]] · [[../specs/appstle-pricing-heal-and-migration-monitor]] · [[../../CLAUDE]]
+[[../README]] · [[../lifecycles/subscription-billing]] · [[../libraries/migration-audit]] · [[../dashboard/migrations]] · [[../archive]] · [[../../CLAUDE]]

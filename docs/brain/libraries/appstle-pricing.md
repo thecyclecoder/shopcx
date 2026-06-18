@@ -2,7 +2,7 @@
 
 `src/lib/appstle-pricing.ts` — the Appstle pricing **heal** + the single mutation **gateway**. Fixes the `pricingPolicy: null` subs Appstle's original migration left behind (flat baked price, no structured S&S discount), which break on legacy-portal modification and are a double-discount landmine for our [[pricing]] engine.
 
-See [[../specs/appstle-pricing-heal-and-migration-monitor]] for the full design.
+Full flow: [[../lifecycles/subscription-billing]] § Migration path (verified + archived — see [[../archive]]).
 
 ## Exports
 

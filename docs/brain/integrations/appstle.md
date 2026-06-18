@@ -35,6 +35,7 @@ Base: `https://subscription-admin.appstle.com/api/external/v2`
 | `/subscription-contracts/{id}/send-payment-update-email` | POST | Trigger Appstle's payment-update email |
 | `/subscription-contract-details/replace-variants-v3` | POST | **Batch line-item mutation** — add / remove / swap multiple variants in one call. See below. |
 | `/subscription-contracts-update-shipping-address?contractId={id}` | PUT (JSON body) | Update shipping address (countryCode/provinceCode required) |
+| `/subscription-contracts-update-line-item-pricing-policy?contractId&lineId&basePrice` | PUT | **Heal** a `pricingPolicy: null` line — set `basePrice` + a cycle-discount array (max 2) so the line regains structured S&S pricing without changing the charge. Per-line (`lineId` required). See [[../libraries/appstle-pricing]]. |
 
 ### `replace-variants-v3` body
 
@@ -56,6 +57,8 @@ Base: `https://subscription-admin.appstle.com/api/external/v2`
 Returns `200` with updated contract JSON. `lines` may be absent if processed async — re-fetch via `contract-raw-response` if you need to confirm.
 
 Internal-subscription guard: `isInternalSubscription()` short-circuits these calls and updates Postgres directly. See `src/lib/internal-subscription.ts`.
+
+**Heal-on-touch gateway:** every Appstle **mutation** routes through `healOnTouch`/`appstleMutate` ([[../libraries/appstle-pricing]]) first, which heals any `pricingPolicy: null` line (via the pricing-policy endpoint above) before the mutation lands. No new code may call `subscription-admin.appstle.com` to mutate a contract without that guard. Cancel + migration skip the heal (the sub is being killed / re-homed).
 
 ## Response shape conventions
 
@@ -90,7 +93,8 @@ Drives [[../tables/billing_forecast_events]] (sub created, cancelled, paused, fr
 - `src/lib/appstle.ts` — All endpoint helpers
 - `src/lib/appstle-discount.ts` — `applyDiscountWithReplace()` (remove old → apply new in one atomic flow)
 - `src/lib/appstle-call-log.ts` — `loggedAppstleFetch()` wrapper
+- `src/lib/appstle-pricing.ts` — pricing heal + the `appstleMutate` mutation gateway
 
 ## Related
 
-[[../tables/subscriptions]] · [[../tables/appstle_api_calls]] · [[../tables/billing_forecast_events]] · [[../tables/dunning_cycles]] · [[../tables/payment_failures]] · [[../tables/coupon_mappings]] · [[../tables/remedies]] · [[../inngest/dunning]] · [[../inngest/import-subscriptions]] · [[../inngest/internal-subscription-renewals]]
+[[../tables/subscriptions]] · [[../tables/appstle_api_calls]] · [[../tables/billing_forecast_events]] · [[../tables/dunning_cycles]] · [[../tables/payment_failures]] · [[../tables/coupon_mappings]] · [[../tables/remedies]] · [[../libraries/appstle-pricing]] · [[../inngest/dunning]] · [[../inngest/import-subscriptions]] · [[../inngest/internal-subscription-renewals]]
