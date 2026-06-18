@@ -1,15 +1,15 @@
 ---
 name: build-spec
-description: Use to implement a ShopCX brain spec end-to-end — read docs/brain/specs/{slug}.md, build every phase, gate on tsc, and open a claude/* PR. Triggered by "build the {slug} spec", a spec_build todo, or a /goal-style "do everything in docs/brain/specs/{slug}.md". Designed to run inside a Claude Code Routine OR a local/box session.
+description: Use to implement a ShopCX brain spec end-to-end — read docs/brain/specs/{slug}.md, build every phase, gate on tsc, and open a claude/* PR. Triggered by "build the {slug} spec", a spec_build todo, or a /goal-style "do everything in docs/brain/specs/{slug}.md". Designed to run as the box worker's headless claude -p build OR a local/interactive session.
 ---
 
 # build-spec
 
-Execute a brain spec to a reviewable PR. This is the procedure a routine runs for the [[roadmap-build-console]] vision and that a `/goal` session runs locally.
+Execute a brain spec to a reviewable PR. This is the procedure the box worker's `claude -p` build follows for [[roadmap-build-console]], and that an interactive session runs locally.
 
-## 🔒 Core invariant — never shell out to `claude`
+## 🔒 Core invariant — native tools; never spawn a *nested* `claude`
 
-Do the build with **your own native tools** (`Read`/`Edit`/`Bash`/`Grep`). **Never** spawn a nested `claude` CLI (`claude -p …`) or use the Agent SDK to do the build — inside a routine you are already in a `claude` session (`CLAUDECODE=1`) and a nested CLI exits 1. You *are* the builder.
+Do the build with **your own native tools** (`Read`/`Edit`/`Bash`/`Grep`). The build already runs as a **top-level `claude -p` on the build box** (the worker spawns it, Max-billed) — or your interactive session. You *are* the builder. **Never** spawn another `claude` CLI (`claude -p …`) or use the Agent SDK inside it: that recursion hits the nested-session guard (`CLAUDECODE=1`) and exits 1. (Builds run on the box, not a Claude Code Routine — a routine couldn't run `claude -p` at all.)
 
 ## Procedure
 
@@ -19,7 +19,7 @@ Do the build with **your own native tools** (`Read`/`Edit`/`Bash`/`Grep`). **Nev
 4. **Update the spec emojis as you go** — `⏳`→`🚧`→`✅` on each phase, in the same change.
 5. **Gate on types.** Run `npx tsc --noEmit`. If it fails, fix it; **never open a PR on a failing build.**
 6. **Stop-and-surface, never guess.** If you hit a product decision the spec doesn't cover, do NOT guess — record it under an "Open questions" section in the PR body and stop *that* work item. Finish everything else.
-7. **Open a `claude/*` PR.** Branch `claude/{slug}-{short}`. Use the **GitHub REST API** (the routine sandbox has no `gh` CLI). PR body = what landed + open questions + which completion criteria are met. Code **never** auto-merges — the owner squash-merges from `/dashboard/branches`.
+7. **Open a `claude/*` PR.** Branch `claude/{slug}-{short}`, via the **GitHub REST API** (no `gh` CLI on the box). PR body = what landed + open questions + which completion criteria are met. Code **never** auto-merges — the owner squash-merges from `/dashboard/branches`. *(When the box worker is driving the build, the worker owns branch/commit/PR — you just make the edits and emit your final status JSON; it handles git.)*
 
 ## Guardrails
 
