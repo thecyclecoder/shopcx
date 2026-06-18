@@ -1,0 +1,46 @@
+# meta_adsets
+
+Local mirror of Meta ad set structure + budget + status. Populated by the
+Storefront Iteration Engine's Phase 1 performance ingest ([[../inngest/meta-performance]]).
+
+**Primary key:** `id`
+
+## Columns
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
+| `workspace_id` | `uuid` | — | → [[workspaces]].id |
+| `meta_ad_account_id` | `uuid` | — | → [[meta_ad_accounts]].id |
+| `meta_adset_id` | `text` | — | Meta's adset id (natural key) |
+| `meta_campaign_id` | `text` | ✓ | parent campaign (Meta id) → [[meta_campaigns]].meta_campaign_id |
+| `name` | `text` | ✓ |  |
+| `status` | `text` | ✓ | configured: ACTIVE \| PAUSED \| ARCHIVED \| DELETED |
+| `effective_status` | `text` | ✓ | Meta's computed status |
+| `optimization_goal` | `text` | ✓ |  |
+| `daily_budget_cents` | `int8` | ✓ | ABO adset-level budget; null under CBO |
+| `lifetime_budget_cents` | `int8` | ✓ |  |
+| `meta_created_time` | `timestamptz` | ✓ |  |
+| `meta_updated_time` | `timestamptz` | ✓ |  |
+| `synced_at` | `timestamptz` | — | default: `now()` |
+| `created_at` | `timestamptz` | — | default: `now()` |
+| `updated_at` | `timestamptz` | — | default: `now()` |
+
+**Unique:** `(workspace_id, meta_adset_id)` — idempotent upsert key.
+
+## Foreign keys
+
+**Out (this → others):**
+
+- `meta_ad_account_id` → [[meta_ad_accounts]].`id`
+- `workspace_id` → [[workspaces]].`id`
+
+## Gotchas
+
+- Budgets in **cents** (Meta returns minor units already — no ×100).
+- `meta_campaign_id` links to [[meta_campaigns]] by **text Meta id**, not uuid FK.
+- Either `daily_budget_cents` (here, ABO) or [[meta_campaigns]]`.daily_budget_cents` (CBO) is set, not both.
+
+---
+
+[[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
