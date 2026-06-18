@@ -44,6 +44,13 @@ interface Data {
     by_model: Record<string, { tokens: number; cost_cents: number; calls: number }>;
     by_purpose: Record<string, { tokens: number; cost_cents: number; calls: number }>;
     daily: { date: string; cost_cents: number; tokens: number }[];
+    cache?: {
+      raw_input_tokens: number;
+      cache_creation_tokens: number;
+      cache_read_tokens: number;
+      output_tokens: number;
+      read_ratio_pct: number;
+    };
     orchestrator_split: {
       opus_calls: number;
       sonnet_calls: number;
@@ -52,6 +59,20 @@ interface Data {
       opus_pct: number;
     };
   };
+  periods?: { today: PeriodSummary; yesterday: PeriodSummary };
+}
+
+interface PeriodSummary {
+  cost_cents: number;
+  tickets: number;
+  avg_per_ticket_cents: number;
+  raw_input_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  output_tokens: number;
+  cache_read_ratio_pct: number;
+  opus_tickets: number;
+  sonnet_tickets: number;
 }
 
 const DECISION_LABELS: Record<string, string> = {
@@ -126,15 +147,30 @@ export default function AiAnalyticsPage() {
         <Stat label="Escalation rate" value={`${data.totals.escalation_rate_pct}%`} hint={`${data.totals.escalated} of ${data.totals.ai_tickets}`} />
       </div>
 
+      {/* Yesterday vs Today */}
+      {data.periods && (
+        <Section title="Yesterday vs today" subtitle="Live day-over-day — watch cache hit climb and per-ticket cost fall (Central time)">
+          <DayCompare yesterday={data.periods.yesterday} today={data.periods.today} />
+        </Section>
+      )}
+
       {/* Cost / token usage */}
       {data.cost && data.cost.total_tokens > 0 && (
         <Section
           title="Token usage & cost"
           subtitle={`${data.cost.total_tokens.toLocaleString()} tokens over ${data.days}d · ${data.cost.tickets_with_usage} ticket${data.cost.tickets_with_usage === 1 ? "" : "s"} attributed`}
         >
-          <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label={`Total ${data.days}d`} value={fmtCost(data.cost.total_cents)} hint={`~${fmtCost(data.cost.total_cents / Math.max(1, data.days))}/day`} />
             <Stat label="Per ticket" value={fmtCost(data.cost.avg_per_ticket_cents)} hint="avg cost / ticket" />
+            {data.cost.cache && (
+              <Stat
+                label="Cache hit"
+                value={`${data.cost.cache.read_ratio_pct}%`}
+                hint={`${(data.cost.cache.cache_read_tokens / 1e6).toFixed(1)}M read · ${(data.cost.cache.cache_creation_tokens / 1e6).toFixed(1)}M written`}
+                valueClassName={data.cost.cache.read_ratio_pct >= 60 ? "text-emerald-600" : data.cost.cache.read_ratio_pct >= 40 ? "text-amber-600" : "text-rose-600"}
+              />
+            )}
             <Stat
               label="Opus share"
               value={`${data.cost.orchestrator_split.opus_pct}%`}
@@ -146,6 +182,9 @@ export default function AiAnalyticsPage() {
               hint="extrapolated"
             />
           </div>
+          <p className="mb-4 text-xs text-zinc-500">
+            <span className="font-medium">Cache hit</span> = share of input-side tokens served from cache (cheap reads) vs re-paid. Higher is better — it&apos;s the lever the orchestrator pre-context split tunes to lower per-ticket cost.
+          </p>
 
           <div className="grid gap-4 md:grid-cols-2">
             <div>
@@ -273,6 +312,39 @@ export default function AiAnalyticsPage() {
         )}
       </Section>
     </div>
+  );
+}
+
+function DayCompare({ yesterday, today }: { yesterday: PeriodSummary; today: PeriodSummary }) {
+  type Row = { label: string; y: string; t: string; better?: "up" | "down"; yNum?: number; tNum?: number };
+  const rows: Row[] = [
+    { label: "Cost", y: fmtCost(yesterday.cost_cents), t: fmtCost(today.cost_cents), better: "down", yNum: yesterday.cost_cents, tNum: today.cost_cents },
+    { label: "Per ticket", y: fmtCost(yesterday.avg_per_ticket_cents), t: fmtCost(today.avg_per_ticket_cents), better: "down", yNum: yesterday.avg_per_ticket_cents, tNum: today.avg_per_ticket_cents },
+    { label: "Cache hit", y: `${yesterday.cache_read_ratio_pct}%`, t: `${today.cache_read_ratio_pct}%`, better: "up", yNum: yesterday.cache_read_ratio_pct, tNum: today.cache_read_ratio_pct },
+    { label: "Tickets", y: String(yesterday.tickets), t: String(today.tickets) },
+    { label: "Opus / Sonnet tickets", y: `${yesterday.opus_tickets} / ${yesterday.sonnet_tickets}`, t: `${today.opus_tickets} / ${today.sonnet_tickets}` },
+  ];
+  const trendClass = (r: Row): string => {
+    if (!r.better || r.yNum == null || r.tNum == null || r.yNum === r.tNum) return "text-zinc-900 dark:text-zinc-100";
+    const improved = r.better === "down" ? r.tNum < r.yNum : r.tNum > r.yNum;
+    return improved ? "text-emerald-600" : "text-rose-600";
+  };
+  return (
+    <>
+      <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+        <div className="grid grid-cols-3 bg-zinc-50 px-4 py-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-900/60">
+          <div>Metric</div><div className="text-right">Yesterday</div><div className="text-right">Today</div>
+        </div>
+        {rows.map((r) => (
+          <div key={r.label} className="grid grid-cols-3 border-t border-zinc-100 px-4 py-2.5 text-sm dark:border-zinc-800">
+            <div className="text-zinc-600 dark:text-zinc-300">{r.label}</div>
+            <div className="text-right tabular-nums text-zinc-500">{r.y}</div>
+            <div className={`text-right font-medium tabular-nums ${trendClass(r)}`}>{r.t}</div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-zinc-500">Today is in progress — totals (cost, tickets) accrue through the day; <span className="font-medium">cache hit %</span> is a rate, so it&apos;s comparable mid-day.</p>
+    </>
   );
 }
 
