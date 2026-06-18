@@ -1,4 +1,4 @@
-# Worker smoke test 🚧
+# Worker smoke test ✅
 
 Throwaway spec to validate the box build worker end-to-end (queue → claim → `claude -p` on Max → tsc → `claude/*` PR). Delete after the loop is proven.
 
