@@ -133,6 +133,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
     collapsible: true,
     items: [
       { href: "/dashboard/roadmap", label: "Roadmap", icon: "M9 4.5v15m6-15v15m-10.875 0h15.75c.621 0 1.125-.504 1.125-1.125V5.625c0-.621-.504-1.125-1.125-1.125H4.125C3.504 4.5 3 5.004 3 5.625v12.75c0 .621.504 1.125 1.125 1.125z" },
+      { href: "/dashboard/brain", label: "Brain", icon: ICONS.knowledge },
       { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
     ],
   },

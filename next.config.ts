@@ -15,6 +15,8 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md"],
     "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md"],
+    "/dashboard/brain": ["./docs/brain/**/*.md"],
+    "/dashboard/brain/[...slug]": ["./docs/brain/**/*.md"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>

@@ -46,6 +46,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Spec lifecycle + archival ⏳
+
+**Spec:** [[spec-lifecycle-and-archival]]
+
+**Why this matters:** adds a **Verified** gate (distinct from Shipped) + clean archival so shipped specs don't sit on the board forever. Verify → fold into the brain + an archive-index entry + `git rm` the spec (git is the immutable archive) → re-hydratable into a fresh spec from the current brain. Changes the [[../project-management]] convention. Pairs with the new [[../dashboard/brain]] reader.
+
 ## Active project 1 — Storefront 🚧
 
 **Lifecycle:** [[../lifecycles/storefront-checkout]]
