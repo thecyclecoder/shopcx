@@ -2,7 +2,7 @@
 
 `src/lib/migration-audit.ts` — the **migration verification monitor**. After an Appstle→internal migration, runs a per-sub checklist and records it in [[../tables/migration_audits]]. North star: after `status='passed'`, the sub is guaranteed to bill on its next renewal; a `failed` row is a renewal at risk.
 
-See [[../specs/appstle-pricing-heal-and-migration-monitor]] § Phase 3.
+Full flow: [[../lifecycles/subscription-billing]] § Migration path (verified + archived — see [[../archive]]).
 
 ## Exports
 
@@ -22,9 +22,10 @@ See [[../specs/appstle-pricing-heal-and-migration-monitor]] § Phase 3.
 ## Flow
 
 - [[migrate-to-internal]] calls `recordMigrationAudit` (capturing the live Appstle pre-migration charge) then `verifyMigration` inline after each flip; `isRecovery` threads from the payment-recovery flow.
-- The `migration-audit-retry` Inngest cron (every 10 min) re-verifies `pending` rows so transient failures (Appstle cancel propagation, a settling recovery charge) self-heal before flagging `failed`.
-- `/api/migrations` → `/dashboard/migrations` (owner-only) surfaces failed/pending with their failing checks.
+- The [[../inngest/migration-audit-retry]] cron (every 10 min) re-verifies `pending` rows so transient failures (Appstle cancel propagation, a settling recovery charge) self-heal before flagging `failed`.
+- The [[../inngest/migration-integrity-sweep]] cron (daily) back-audits internal subs that were never audited (old-logic migrations).
+- `/api/migrations` → [[../dashboard/migrations]] (owner-only) surfaces failed/pending with their failing checks.
 
 ---
 
-[[../README]] · [[../tables/migration_audits]] · [[migrate-to-internal]] · [[appstle-pricing]]
+[[../README]] · [[../tables/migration_audits]] · [[migrate-to-internal]] · [[appstle-pricing]] · [[../inngest/migration-audit-retry]] · [[../inngest/migration-integrity-sweep]] · [[../dashboard/migrations]]

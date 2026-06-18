@@ -13,7 +13,7 @@ The permanent owner of **subscriptions and everything that keeps people subscrib
 ### Subscription continuity & billing integrity
 Keep every subscriber billed correctly and on-plan — the subscription engine never drops, double-charges, or loses a customer's grandfathered price; the Appstle→in-house migration preserves each customer's charge.
 - **Metric:** billing-error rate → 0; grandfathered-price preservation across migration.
-- **Specs:** [[../specs/appstle-pricing-heal-and-migration-monitor]] ✅
+- **Specs:** Appstle pricing heal + migration monitor — ✅ verified + archived (folded → [[../lifecycles/subscription-billing]] § Migration path · [[../archive]]).
 
 ### Churn prevention & win-back
 Reduce voluntary + involuntary churn via the cancel-flow, dunning recovery, and reactivation. (Currently shipped as lifecycles; future specs land here.)
@@ -25,4 +25,4 @@ Reduce voluntary + involuntary churn via the cancel-flow, dunning recovery, and 
 
 ## Status
 
-Charter doc. First owned spec: [[../specs/appstle-pricing-heal-and-migration-monitor]].
+Charter doc. First owned spec: Appstle pricing heal + migration monitor — ✅ verified + archived ([[../archive]]).
