@@ -31,6 +31,19 @@ The storefront is a conversion surface — continuously lift PDP engagement and 
 - **Metric:** PDP engagement, price-step conversion, sessions→subscription rate.
 - **Specs:** [[../specs/storefront-mvp]] ✅ · [[../specs/homepage-rebuild]] ✅ · [[../specs/checkout-customize-bypass]] ✅ · [[../specs/storefront-survey-chapter]] ⏳ · [[../specs/storefront-iteration-engine]] ⏳ (the perpetual-CRO engine itself).
 
+## The Growth agent supervises its tools (worked example)
+
+The Growth specs are **tools**; the Growth role agent **owns the objective** and supervises them (see [[../goals/ceo-mode]] § "Role agents own the objective"). Concretely:
+
+The [[../specs/storefront-iteration-engine]] is a controller with a setpoint — "scale winners, pause/down-scale losers to keep ROAS above target." When **no creative is winning**, its rules drive ad budget toward **~0**: locally correct (don't burn money on bad ROAS), globally catastrophic (revenue stops, our objective is destroyed). That budget→0 is **not an acceptable outcome — it's an alarm.**
+
+The Growth agent, holding the real objective (profitable growth at CAC ≤ target, spend ≥ a revenue floor), catches it and:
+1. **Guardrails the tool** — hold a budget floor / don't fully pause a proven product while we fix the root cause (operational, gated/auto-exec).
+2. **Diagnoses root cause** — *why* is nothing winning? creative fatigue, targeting, landers, or offer.
+3. **Spawns the upstream fix** — "we have no winning ads, improve CPA" becomes work: better creative ([[../specs/winning-static-creative-finder]]), a landing-page experiment harness, a targeting test — new specs under Growth's mandates.
+
+So the tool's degenerate state is the **trigger** for the agent's highest-value work. This is why tools here must surface their reasoning + rails (the iteration engine emits *why* it's down-scaling) and respect agent-set guardrails — a silent optimizer is invisible to its supervisor.
+
 ## Owned / contributed goals
 
 - Contributes to [[../goals/ceo-mode]] › **M2 — Growth Director** (first director prototype: ROAS/CAC analyst → CEO).
