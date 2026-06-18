@@ -1,33 +1,38 @@
 # dashboard/roadmap
 
-Project-manager board that reads the brain and shows what's **planned / in progress / shipped** — the read-only Phase 1 of [[../specs/roadmap-build-console]]. Owner-only (under the **Developer** sidebar section, alongside [[branches]]).
+The project-manager board + build console for the brain. Reads `docs/brain/specs/` to show **planned / in progress / shipped**, and (owner-only) lets you edit status, author/refine specs with Opus, dispatch autonomous builds on the box, answer build questions, approve prod actions, and squash-merge — all phone-friendly. Full end-to-end: [[../lifecycles/roadmap-build-console]].
 
-**Routes:** `/dashboard/roadmap` (board) + `/dashboard/roadmap/[slug]` (spec detail) — both server components, `dynamic = "force-dynamic"`.
-**Parser:** `src/lib/brain-roadmap.ts` → `getRoadmap()` (board), `getSpec(slug)` + `listSpecSlugs()` (detail).
-**Detail render:** `marked` → `prose` (`@tailwindcss/typography`); `[[wikilinks]]` to specs become links to their detail pages, other brain links render as plain text.
-**Status editing:** `StatusControl.tsx` (owner-only client control) → `POST /api/roadmap/status` rewrites the H1 emoji in `specs/{slug}.md` and **commits straight to main** via the GitHub Contents API (owner-gated, mirrors [[branches]]). The brain markdown stays the source of truth — no DB overrides. Optimistic UI; each save is a commit → a Vercel deploy.
-**Sidebar:** **Developer** section (owner-only) → **Roadmap** + **Branches**.
+**Routes:** `/dashboard/roadmap` (board) + `/dashboard/roadmap/[slug]` (spec detail). Server components, `dynamic = "force-dynamic"`.
+**Sidebar:** **Developer** section (owner-only) → **Roadmap** + [[branches]].
 
-## Data source — the markdown is the spec
+## Surfaces
 
-No DB. `getRoadmap()` reads `docs/brain/specs/*.md` (+ `specs/README.md` for project tracks, + `lifecycles/*.md` reserved for shipped status) at request time and derives status from the `⏳ planned · 🚧 in progress · ✅ shipped` phase emojis. Editing a spec — or a build flipping a phase emoji — updates the board with zero drift.
+- **Board** — `src/lib/brain-roadmap.ts` `getRoadmap()` parses specs (+ `README.md` track chips). Three columns from each spec's status (`⏳ planned · 🚧 in progress · ✅ shipped`; phases can also be `❌ cut`). Cards show summary, phase count pills, and live build status.
+- **Detail page** — `marked` → `prose`; `[[wikilinks]]` to other specs become links. **Refine with Opus** button.
+- **Editable status** (owner) — `StatusControl.tsx` (card: Planned/Doing/Shipped) and `PhaseList.tsx` (per-phase dots incl. **Cut**, + a per-phase **build**). Each click commits the emoji to the brain markdown on `main` via `POST /api/roadmap/status` (`phaseIndex` targets the Nth `## Phase`). The markdown stays the source of truth — no DB overrides.
+- **Authoring chat** — `AuthoringChat.tsx` + `POST /api/roadmap/chat` (Opus `claude-opus-4-8`, Anthropic API). **✨ New feature** (board header) writes a new `specs/{slug}.md`; **Refine with Opus** (detail page) edits an existing one. Finalize commits the spec to `main` (+ optional **Save & build** queues a job).
+- **Build dispatch** — `BuildButton.tsx`: **Build/Rebuild** (hidden on shipped specs), per-phase **build**, and **Report issue** (queues a scoped *fix-build* via `instructions` — works on shipped specs, no spec edit). All hit `POST /api/roadmap/build` → inserts an [[../tables/agent_jobs]] row (one active per spec). The chip polls `GET /api/roadmap/build?slug=` until terminal.
+- **Build feedback** — when a build pauses: `needs_input` shows an **answer form** (`POST /api/roadmap/answer`); `needs_approval` shows **Approve & apply** cards with the command preview (`POST /api/roadmap/approve`). Both flip the job to `queued_resume` so the box worker resumes it. Completed builds show **Squash & merge** (reuses `POST /api/branches/[number]/merge`).
 
-Per spec card: `title` (H1, emoji stripped), overall `status` (from the H1 emoji, else derived from phases), `summary` (first plain paragraph), and `phases[]` (each `## Phase …` heading + its status, read from the heading emoji or the first bullet under it). `specs/README.md` `## Active project …` headings become the project-track chips.
+## Data sources
 
-## Render
+- **Brain markdown** (board + detail) — `docs/brain/specs/*.md`, read at request time. The static, canonical layer.
+- **`agent_jobs`** (live build state) — read via `getLatestJobsBySlug(workspaceId)` (admin client) for initial render; `BuildButton` polls the API for updates. The live, actionable layer.
 
-Three columns (Planned / In progress / Shipped) grouped from the spec cards; each card has a status dot, summary, count pills, and a native `<details>` phase breakdown. A track-chip strip (from `README.md`) sits above the columns.
+## Billing
+
+Authoring chat → Anthropic API (cheap). Builds → **Max** (box `claude -p`, no API key). See [[../lifecycles/roadmap-build-console]] § Billing.
 
 ## Vercel gotcha
 
-The route reads files under `docs/brain/`, which Vercel's file tracer would otherwise prune (nothing imports them). `next.config.ts` → `outputFileTracingIncludes["/dashboard/roadmap"]` ships the markdown into the function bundle. Without it the board renders empty in production.
+The board/detail read files under `docs/brain/`, which Vercel's tracer would prune. `next.config.ts` → `outputFileTracingIncludes` ships the spec/lifecycle markdown into the `/dashboard/roadmap` + `/dashboard/roadmap/[slug]` function bundles. Without it the board renders empty in prod. (The chat/build/status/approve API routes read the brain from **GitHub** at request time, so they don't need tracing.)
 
 ## Status / open work
 
-**Shipped:** Phase 1 board (parser + columns + track chips + nav); clickable spec **detail pages** (`marked` → `prose`, wikilinks→links); owner **status editing** (segmented control → emoji commit to main).
+**Shipped:** board, detail pages, editable card + per-phase status (incl. Cut), authoring chat (new + refine), build dispatch + per-phase build + report-issue fix-builds, answer loop, approval gates, squash-merge. The box worker runs builds on Max ([[../recipes/build-box-setup]]).
 
-**Not yet (later phases of [[../specs/roadmap-build-console]]):** spec-authoring chat (Opus), the `agent_jobs` queue + "Build" button, the box `systemd` worker that runs the build on Max, and the per-card live build status + questions loop. Possible polish: skip the Vercel deploy for status-only commits + read status live (the "no churn" option we deferred); auto-sync the README track emoji when a spec's status flips.
+**Open:** instant card re-bucket on status change (currently reflects on reload); README track-emoji auto-sync; the `needs_input`/`needs_approval` round-trips await their first real-build exercise.
 
 ## Related
 
-[[../specs/roadmap-build-console]] · [[../specs/repo-skills-catalog]] · [[branches]] · [[../project-management]] · [[../lifecycles/agent-todo-system]]
+[[../lifecycles/roadmap-build-console]] · [[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../tables/agent_jobs]] · [[branches]] · [[../recipes/build-box-setup]] · [[../project-management]]

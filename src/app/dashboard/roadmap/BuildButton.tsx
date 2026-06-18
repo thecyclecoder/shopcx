@@ -41,6 +41,9 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState(false);
+  const [showIssue, setShowIssue] = useState(false);
+  const [issueText, setIssueText] = useState("");
+  const [reporting, setReporting] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -148,6 +151,26 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
     }
   }
 
+  async function reportIssue() {
+    if (reporting || !issueText.trim()) return;
+    setReporting(true);
+    try {
+      const res = await fetch("/api/roadmap/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, instructions: `Fix this reported issue — do ONLY this, do not rebuild the whole spec:\n\n${issueText.trim()}` }),
+      });
+      const d = await res.json();
+      if (d.job) {
+        setJob(d.job);
+        setShowIssue(false);
+        setIssueText("");
+      }
+    } finally {
+      setReporting(false);
+    }
+  }
+
   const needsInput = job?.status === "needs_input";
   const needsApproval = job?.status === "needs_approval";
   const canMerge = !!job?.pr_number && job.status === "completed" && !merged;
@@ -175,6 +198,15 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
             className="rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700"
           >
             {showAnswers ? "Cancel" : "Answer"}
+          </button>
+        )}
+        {!active && (
+          <button
+            type="button"
+            onClick={() => setShowIssue((v) => !v)}
+            className="rounded-md border border-zinc-200 px-2 py-0.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            {showIssue ? "Cancel" : "Report issue"}
           </button>
         )}
         {!active && specStatus !== "shipped" && (
@@ -230,6 +262,27 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {showIssue && !active && (
+        <div className="mt-2 space-y-2 rounded-md border border-zinc-200 bg-zinc-50/60 p-2 text-left dark:border-zinc-700 dark:bg-zinc-900">
+          <label className="block text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+            Describe the issue or fix — queues a scoped fix-build (the spec stays as-is):
+          </label>
+          <textarea
+            rows={2}
+            value={issueText}
+            onChange={(e) => setIssueText(e.target.value)}
+            className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+          />
+          <button
+            type="button"
+            onClick={reportIssue}
+            disabled={reporting || !issueText.trim()}
+            className="rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {reporting ? "Queuing…" : "Queue fix"}
+          </button>
         </div>
       )}
     </div>

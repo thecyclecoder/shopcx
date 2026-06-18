@@ -17,6 +17,7 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 | `claude_session_id` | `text?` | captured from `claude -p` stream; used for `claude --resume` |
 | `questions` | `jsonb` | `[{id,q,options?}]` surfaced when `needs_input` · default `[]` |
 | `answers` | `jsonb` | `[{id,q,answer}]` the owner submitted · default `[]` |
+| `pending_actions` | `jsonb` | gated actions awaiting approval: `[{id,type,summary,cmd,preview,status}]`, type = `apply_migration｜run_prod_script｜merge_pr` · default `[]` |
 | `pr_url` / `pr_number` | `text?` / `int?` | the opened `claude/*` PR |
 | `log_tail` | `text?` | last ~2 KB of the build output (debugging) |
 | `error` | `text?` | failure reason |
@@ -26,7 +27,7 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 
 ## `status` enum
 
-`queued` → `building` (claimed) → `completed` (PR open) · or → `needs_input` (paused with questions) → `queued_resume` (owner answered) → `building` … · terminal failures: `failed`, `needs_attention` (pushed but PR failed). Active = `queued|claimed|building|needs_input|queued_resume` (one active build per spec).
+`queued` → `building` (claimed) → `completed` (PR open) · or pauses at → `needs_input` (product questions) / `needs_approval` (gated prod actions in `pending_actions`) → `queued_resume` (owner answered/approved; worker executes approved actions then `--resume`s) → `building` … · terminal failures: `failed`, `needs_attention` (pushed but PR failed). Active = `queued|claimed|building|needs_input|needs_approval|queued_resume` (one active build per spec).
 
 ## `claim_agent_job()`
 
@@ -45,8 +46,8 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 
 ## Migration
 
-`supabase/migrations/20260618120000_agent_jobs.sql`
+`supabase/migrations/20260618120000_agent_jobs.sql` + `20260618130000_agent_jobs_pending_actions.sql`
 
 ## Related
 
-[[../specs/roadmap-build-console]] · [[../recipes/build-box-setup]] · [[../dashboard/roadmap]] · [[../dashboard/branches]] · [[agent_todos]]
+[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../lifecycles/roadmap-build-console]] · [[../recipes/build-box-setup]] · [[../dashboard/roadmap]] · [[../dashboard/branches]] · [[agent_todos]]
