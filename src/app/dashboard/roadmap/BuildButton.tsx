@@ -5,13 +5,14 @@ import { useWorkspace } from "@/lib/workspace-context";
 import type { AgentJob, JobStatus } from "@/lib/agent-jobs";
 import type { Phase } from "@/lib/brain-roadmap";
 
-const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "queued_resume"];
+const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
 const LABEL: Record<JobStatus, string> = {
   queued: "Queued",
   claimed: "Starting…",
   building: "Building…",
   needs_input: "Needs input",
+  needs_approval: "Needs approval",
   queued_resume: "Resuming…",
   completed: "Built",
   failed: "Failed",
@@ -23,6 +24,7 @@ const CHIP: Record<JobStatus, string> = {
   claimed: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   building: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   needs_input: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
+  needs_approval: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   queued_resume: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   completed: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   failed: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
@@ -36,6 +38,9 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
   const [showAnswers, setShowAnswers] = useState(false);
   const [answerMap, setAnswerMap] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [merging, setMerging] = useState(false);
+  const [merged, setMerged] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -116,13 +121,53 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
     }
   }
 
+  async function decide(actionId: string, decision: "approve" | "decline") {
+    if (!job || approvingId) return;
+    setApprovingId(actionId);
+    try {
+      const res = await fetch("/api/roadmap/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: job.id, actionId, decision }),
+      });
+      const d = await res.json();
+      if (d.job) setJob(d.job);
+    } finally {
+      setApprovingId(null);
+    }
+  }
+
+  async function mergeJob() {
+    if (!job?.pr_number || merging) return;
+    setMerging(true);
+    try {
+      const res = await fetch(`/api/branches/${job.pr_number}/merge`, { method: "POST" });
+      if (res.ok) setMerged(true);
+    } finally {
+      setMerging(false);
+    }
+  }
+
   const needsInput = job?.status === "needs_input";
+  const needsApproval = job?.status === "needs_approval";
+  const canMerge = !!job?.pr_number && job.status === "completed" && !merged;
 
   return (
     <div className="w-full">
       <div className="flex items-center justify-end gap-2">
         {chip}
         {prLink}
+        {merged && <span className="text-[11px] text-emerald-600">merged ✓</span>}
+        {canMerge && (
+          <button
+            type="button"
+            onClick={mergeJob}
+            disabled={merging}
+            className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {merging ? "Merging…" : "Squash & merge"}
+          </button>
+        )}
         {needsInput && (
           <button
             type="button"
@@ -164,6 +209,27 @@ export default function BuildButton({ slug, initialJob, specStatus }: { slug: st
           >
             {submitting ? "Sending…" : "Submit & resume"}
           </button>
+        </div>
+      )}
+      {needsApproval && (job!.pending_actions || []).some((a) => a.status === "pending") && (
+        <div className="mt-2 space-y-2 rounded-md border border-amber-200 bg-amber-50/40 p-2 text-left dark:border-amber-900/40 dark:bg-amber-950/20">
+          <div className="text-[11px] font-medium text-amber-800 dark:text-amber-300">Needs your approval before continuing:</div>
+          {(job!.pending_actions || []).filter((a) => a.status === "pending").map((a) => (
+            <div key={a.id} className="rounded border border-amber-100 bg-white p-2 dark:border-amber-900/30 dark:bg-zinc-900">
+              <div className="text-[11px] font-medium text-zinc-800 dark:text-zinc-200">{a.summary}</div>
+              {(a.preview || a.cmd) && (
+                <pre className="mt-1 max-h-32 overflow-auto rounded bg-zinc-100 p-1.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">{a.preview || a.cmd}</pre>
+              )}
+              <div className="mt-1.5 flex gap-2">
+                <button type="button" onClick={() => decide(a.id, "approve")} disabled={approvingId !== null} className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+                  {approvingId === a.id ? "…" : "Approve & apply"}
+                </button>
+                <button type="button" onClick={() => decide(a.id, "decline")} disabled={approvingId !== null} className="rounded-md border border-zinc-200 px-2 py-0.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300">
+                  Decline
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
