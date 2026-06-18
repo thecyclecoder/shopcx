@@ -12,7 +12,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
-const EMOJI = { planned: "⏳", in_progress: "🚧", shipped: "✅" } as const;
+const EMOJI = { planned: "⏳", in_progress: "🚧", shipped: "✅", rejected: "❌" } as const;
 type Status = keyof typeof EMOJI;
 
 function ghToken(): string | undefined {
@@ -68,7 +68,7 @@ export async function POST(request: Request) {
   if (typeof slug !== "string" || !/^[a-z0-9-]+$/i.test(slug)) {
     return NextResponse.json({ error: "bad slug" }, { status: 400 });
   }
-  if (status !== "planned" && status !== "in_progress" && status !== "shipped") {
+  if (status !== "planned" && status !== "in_progress" && status !== "shipped" && status !== "rejected") {
     return NextResponse.json({ error: "bad status" }, { status: 400 });
   }
 

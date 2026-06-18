@@ -8,9 +8,10 @@ const DOT: Record<Phase, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
   shipped: "bg-emerald-500",
+  rejected: "bg-rose-400",
 };
-const ORDER: Phase[] = ["planned", "in_progress", "shipped"];
-const LABEL: Record<Phase, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped" };
+const ORDER: Phase[] = ["planned", "in_progress", "shipped", "rejected"];
+const LABEL: Record<Phase, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", rejected: "Cut" };
 
 /**
  * Collapsible phase list. Owners can set each phase's status (commits the phase emoji to the
@@ -85,8 +86,8 @@ export default function PhaseList({ slug, phases }: { slug: string; phases: Spec
             ) : (
               <span className={`mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full ${DOT[statuses[i]]}`} />
             )}
-            <span className="flex-1">{p.title}</span>
-            {isOwner && (
+            <span className={`flex-1 ${statuses[i] === "rejected" ? "text-zinc-400 line-through" : ""}`}>{p.title}</span>
+            {isOwner && statuses[i] !== "rejected" && (
               <button
                 type="button"
                 onClick={() => buildPhase(i)}

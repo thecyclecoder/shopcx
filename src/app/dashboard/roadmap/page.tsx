@@ -20,12 +20,14 @@ const DOT: Record<Phase, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
   shipped: "bg-emerald-500",
+  rejected: "bg-rose-400",
 };
 
 const HEADER_ACCENT: Record<Phase, string> = {
   planned: "text-zinc-500",
   in_progress: "text-amber-600",
   shipped: "text-emerald-600",
+  rejected: "text-rose-600",
 };
 
 function CountPills({ counts }: { counts: SpecCard["counts"] }) {
@@ -33,6 +35,7 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
     { key: "in_progress", n: counts.in_progress },
     { key: "planned", n: counts.planned },
     { key: "shipped", n: counts.shipped },
+    { key: "rejected", n: counts.rejected },
   ];
   const items = all.filter((i) => i.n > 0);
   if (items.length === 0) return null;
