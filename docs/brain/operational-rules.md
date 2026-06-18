@@ -2,6 +2,23 @@
 
 Code + operational invariants that apply across the codebase. Migrated from agent memory's `feedback_*` entries that aren't customer-messaging-voice (those live in [[customer-voice]]).
 
+## ⭐ North star — supervisable autonomy
+
+**The single rule every autonomous tool/agent we build answers to.** Every autonomous tool optimizes a **proxy** (a metric, a rule, a setpoint), so every tool can reach a **degenerate state** that satisfies the proxy while destroying the real objective (Goodhart's law — e.g. the [[specs/storefront-iteration-engine|storefront iteration engine]] scaling ad budget to ~0 when nothing wins: ROAS "fixed," revenue gone).
+
+So the top-level invariant:
+
+> **A tool optimizes a bounded proxy. A role agent owns the objective and supervises the tool. The CEO owns company objectives.** Three nested control loops, each slower and wiser than the one below — CEO → role agent → tool.
+
+Every autonomous tool/agent MUST be **supervisable**:
+1. **Surface its reasoning** — emit *why* it acted + the trigger conditions; never act silently. A silent optimizer is invisible to its supervisor.
+2. **Expose its rails** — respect the guardrails its supervising agent sets (floors, caps, never-touch lists). Hitting a rail = **escalate, not execute**.
+3. **Answer to an objective-owner** — a role agent (or, until those exist, Dylan) who owns the *real objective*, not the proxy, and can override / re-tune / circuit-break the tool.
+
+A tool hitting a rail is **not an outcome — it's the trigger for the supervising agent's highest-value work** (diagnose root cause → set a guardrail + spawn the upstream fix). Same shape everywhere: ads down-scaling to zero, dunning over-dunning good customers, a content tool flooding low-quality posts, an autonomous build running an irreversible prod action ([[specs/build-approval-gates]]). Each needs an objective-owner above it.
+
+Full treatment: [[goals/ceo-mode]] § "Role agents own the objective"; worked example: [[functions/growth]].
+
 ## Database join discipline
 
 - **Internal joins use the UUID.** Every `shopify_*_id`, `appstle_*_id`, etc. is a boundary field — only for crossing into the external API, never for joining between our tables. Shopify is being sunset; every `shopify_contract_id`, `shopify_customer_id`, `shopify_order_id` will be deprecated.

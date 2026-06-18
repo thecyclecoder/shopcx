@@ -28,6 +28,7 @@ The retention operating system for Superfoods Company. Replaces Gorgias + Siena 
 
 These can't live in a wiki page — they're project-wide invariants:
 
+- **⭐ North star — supervisable autonomy.** Every autonomous tool optimizes a proxy and can reach a degenerate state that destroys the real objective (Goodhart). So: a tool optimizes a bounded proxy; a role agent owns the objective and supervises the tool; the CEO owns company objectives (CEO → role agent → tool). Every autonomous tool MUST surface its reasoning, respect its supervisor's guardrails (hitting a rail = escalate, not execute), and answer to an objective-owner — never a silent proxy-optimizer. See [operational-rules.md § North star](docs/brain/operational-rules.md).
 - **Database is the spec.** Status enums, column shapes — probe before assuming. See [Probing technique](docs/brain/README.md#probing-technique).
 - **Internal joins use UUIDs**, never `shopify_*_id`. Shopify is being sunset.
 - **All writes go through `createAdminClient()`** (service role). Never client-side.
