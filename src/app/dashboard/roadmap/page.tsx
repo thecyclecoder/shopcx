@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { getRoadmap, type Phase, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestJobsBySlug, type AgentJob } from "@/lib/agent-jobs";
+import { getLatestJobsBySlug, reconcileMergedJobs, type AgentJob } from "@/lib/agent-jobs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
@@ -93,6 +93,7 @@ export default async function RoadmapPage() {
   const { specs, tracks } = await getRoadmap();
   const workspaceId = await getActiveWorkspaceId();
   const jobsBySlug = workspaceId ? await getLatestJobsBySlug(workspaceId) : {};
+  if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
   const byStatus = (s: Phase) => specs.filter((sp) => sp.status === s);
 
   return (

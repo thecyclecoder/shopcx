@@ -15,6 +15,7 @@ const LABEL: Record<JobStatus, string> = {
   needs_approval: "Needs approval",
   queued_resume: "Resuming…",
   completed: "Built",
+  merged: "Merged ✓",
   failed: "Failed",
   needs_attention: "Needs attention",
 };
@@ -27,6 +28,7 @@ const CHIP: Record<JobStatus, string> = {
   needs_approval: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   queued_resume: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   completed: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  merged: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   failed: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
   needs_attention: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };

@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { ACTIVE_STATUSES, getLatestJobsBySlug, type AgentJob } from "@/lib/agent-jobs";
+import { ACTIVE_STATUSES, getLatestJobsBySlug, reconcileMergedJobs, type AgentJob } from "@/lib/agent-jobs";
 
 async function ctx() {
   const supabase = await createClient();
@@ -28,6 +28,7 @@ export async function GET(request: Request) {
   if ("error" in c) return c.error;
   const slug = new URL(request.url).searchParams.get("slug");
   const map = await getLatestJobsBySlug(c.workspaceId);
+  await reconcileMergedJobs(Object.values(map));
   if (slug) return NextResponse.json({ job: map[slug] ?? null });
   return NextResponse.json({ jobs: map });
 }
