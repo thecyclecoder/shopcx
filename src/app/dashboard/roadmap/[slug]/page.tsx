@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { marked } from "marked";
-import { getSpec, listSpecSlugs, type Phase } from "@/lib/brain-roadmap";
+import { getSpec, listSpecSlugs, listGoalSlugs, listFunctionSlugs, type Phase } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug } from "@/lib/agent-jobs";
 import StatusControl from "../StatusControl";
@@ -19,26 +19,35 @@ const STATUS_BADGE: Record<Phase, string> = {
   rejected: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
-/** [[spec-slug]] / [[../lifecycles/x|alias]] → a link to the spec detail page if it's a spec, else plain text. */
-function preprocessWikilinks(md: string, specSlugs: string[]): string {
+/** [[wikilink]] → a link to the spec / goal / function detail page when it resolves, else plain text. */
+function preprocessWikilinks(md: string, specSlugs: string[], goalSlugs: string[], fnSlugs: string[]): string {
   return md.replace(/\[\[([^\]]+)\]\]/g, (_m, inner: string) => {
     const [targetRaw, alias] = inner.split("|");
     const base = targetRaw.trim().replace(/^.*\//, "").replace(/\.md$/, "");
     const label = (alias || base).trim();
-    return specSlugs.includes(base) ? `[${label}](/dashboard/roadmap/${base})` : label;
+    if (specSlugs.includes(base)) return `[${label}](/dashboard/roadmap/${base})`;
+    if (goalSlugs.includes(base)) return `[${label}](/dashboard/roadmap/goals/${base})`;
+    if (fnSlugs.includes(base)) return `[${label}](/dashboard/roadmap/functions/${base})`;
+    return label;
   });
 }
 
 export default async function SpecDetailPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const [spec, specSlugs, workspaceId] = await Promise.all([getSpec(slug), listSpecSlugs(), getActiveWorkspaceId()]);
+  const [spec, specSlugs, goalSlugs, fnSlugs, workspaceId] = await Promise.all([
+    getSpec(slug),
+    listSpecSlugs(),
+    listGoalSlugs(),
+    listFunctionSlugs(),
+    getActiveWorkspaceId(),
+  ]);
   if (!spec) notFound();
 
   const jobsBySlug = workspaceId ? await getLatestJobsBySlug(workspaceId) : {};
   const job = jobsBySlug[slug] ?? null;
 
   // Trusted internal content (our own brain markdown), owner-only page → marked → prose.
-  const html = await marked.parse(preprocessWikilinks(spec.raw, specSlugs));
+  const html = await marked.parse(preprocessWikilinks(spec.raw, specSlugs, goalSlugs, fnSlugs));
 
   return (
     <div className="mx-auto w-full max-w-6xl p-6">
@@ -68,9 +77,9 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
                 {spec.card.owner && (
                   <div className="flex items-center gap-1.5">
                     <span className="text-zinc-400">Owner</span>
-                    <span className="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-300">
+                    <Link href={`/dashboard/roadmap/functions/${spec.card.owner}`} className="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-200 dark:bg-violet-900/30 dark:text-violet-300">
                       {spec.card.owner}
-                    </span>
+                    </Link>
                   </div>
                 )}
                 {spec.card.parent && (

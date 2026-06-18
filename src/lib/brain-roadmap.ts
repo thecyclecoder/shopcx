@@ -345,3 +345,279 @@ export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCa
     return null;
   }
 }
+
+// ── Functions + Goals + Mandates layer (the altitude above specs) ──
+// Markdown-first: docs/brain/functions/{slug}.md (the permanent org skeleton) and
+// docs/brain/goals/{slug}.md (finite initiatives). Specs declare an owner (a function,
+// the DRI) + a parent (a function mandate or a goal milestone) — the no-orphan rule.
+// See docs/brain/specs/goal-decomposition-engine.md.
+
+const FUNCTIONS_DIR = path.join(process.cwd(), "docs", "brain", "functions");
+const GOALS_DIR = path.join(process.cwd(), "docs", "brain", "goals");
+
+/** Pull every [[wikilink]] target on a line, collapse to the last path segment, drop .md. */
+function wikilinkSlugs(line: string): string[] {
+  const out: string[] = [];
+  for (const m of line.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
+    out.push(m[1].trim().replace(/^.*\//, "").replace(/\.md$/, ""));
+  }
+  return out;
+}
+
+/** A perpetual charter a function owns forever — metric-tracked, never "done" (no %). */
+export interface Mandate {
+  name: string;
+  metric?: string;
+  specSlugs: string[];
+}
+export interface FunctionCard {
+  slug: string;
+  title: string;
+  summary: string; // first paragraph (the charter one-liner)
+  mandates: Mandate[];
+  goalSlugs: string[]; // owned / contributed goals
+  specSlugs: string[]; // every spec wikilinked anywhere in the doc (deduped)
+}
+
+/** A finite initiative's sub-goal — rolls up to 100% then closes. */
+export interface GoalMilestone {
+  id: string; // "M0", "M1"… if labelled, else ""
+  title: string;
+  status: Phase;
+  specSlugs: string[];
+}
+export interface GoalCard {
+  slug: string;
+  title: string;
+  summary: string; // the outcome line / first paragraph
+  successMetric?: string;
+  target?: string;
+  milestones: GoalMilestone[];
+  specSlugs: string[]; // every spec wikilinked under a milestone (deduped)
+}
+
+function parseFunction(slug: string, raw: string): FunctionCard {
+  const lines = raw.split("\n");
+  const titleLine = lines.find((l) => l.startsWith("# "));
+  const title = titleLine ? cleanInline(titleLine.slice(2)).replace(/\s*\(function\)\s*$/i, "") : functionLabel(slug);
+
+  const mandates: Mandate[] = [];
+  const goalSlugs = new Set<string>();
+  const allSpecs = new Set<string>();
+
+  // Sections: walk H2s. `## Mandates` holds `### {name}` mandates; `## Owned / contributed goals` holds goal links.
+  let section: "" | "mandates" | "goals" = "";
+  let cur: Mandate | null = null;
+  for (const l of lines) {
+    for (const s of wikilinkSlugs(l)) allSpecs.add(s); // collected then filtered to real specs by the caller
+    const h2 = l.match(/^##\s+(.*)/);
+    if (h2) {
+      cur = null;
+      const h = h2[1].toLowerCase();
+      section = h.startsWith("mandate") ? "mandates" : /owned|contributed|goal/.test(h) ? "goals" : "";
+      continue;
+    }
+    if (section === "mandates") {
+      const h3 = l.match(/^###\s+(.*)/);
+      if (h3) {
+        cur = { name: cleanInline(h3[1]), metric: undefined, specSlugs: [] };
+        mandates.push(cur);
+        continue;
+      }
+      if (cur) {
+        const met = l.match(/\*\*Metric:\*\*\s*(.+?)\s*$/);
+        if (met && !cur.metric) cur.metric = cleanInline(met[1]);
+        for (const sp of wikilinkSlugs(l)) cur.specSlugs.push(sp);
+      }
+    } else if (section === "goals") {
+      for (const g of wikilinkSlugs(l)) goalSlugs.add(g);
+    }
+  }
+  return {
+    slug,
+    title,
+    summary: firstParagraph(lines),
+    mandates,
+    goalSlugs: [...goalSlugs],
+    specSlugs: [...allSpecs],
+  };
+}
+
+function parseGoal(slug: string, raw: string): GoalCard {
+  const lines = raw.split("\n");
+  const titleLine = lines.find((l) => l.startsWith("# "));
+  const title = titleLine ? cleanInline(titleLine.slice(2)) : slug;
+
+  let successMetric: string | undefined;
+  let target: string | undefined;
+  const milestones: GoalMilestone[] = [];
+  const allSpecs = new Set<string>();
+
+  let inDecomp = false;
+  for (const l of lines) {
+    if (!successMetric) {
+      const m = l.match(/\*\*Success metric:\*\*\s*(.+?)\s*$/);
+      if (m) successMetric = cleanInline(m[1]);
+    }
+    if (!target) {
+      const m = l.match(/\*\*Target:\*\*\s*(.+?)\s*$/);
+      if (m) target = cleanInline(m[1]);
+    }
+    const h2 = l.match(/^##\s+(.*)/);
+    if (h2) {
+      inDecomp = /decomposition/i.test(h2[1]);
+      continue;
+    }
+    if (inDecomp) {
+      // Top-level milestone bullets: `- **M0 — title.** desc … ⏳` (the `[[spec]]` wikilinks may
+      // be inline here once approved, or appear on nested lines until the planner wires them).
+      const b = l.match(/^[-*]\s+(.*)/);
+      if (b) {
+        const idm = b[1].match(/\*\*(M\d+)\b[\s—–:-]*([^*]*)\*\*/);
+        const id = idm ? idm[1] : "";
+        const mtitle = cleanInline(idm ? idm[2] || b[1] : b[1]).replace(/\.$/, "");
+        milestones.push({ id, title: mtitle, status: statusFromText(l) ?? "planned", specSlugs: wikilinkSlugs(l) });
+      } else if (milestones.length) {
+        // continuation / nested line under the last milestone → its spec links
+        const last = milestones[milestones.length - 1];
+        for (const sp of wikilinkSlugs(l)) last.specSlugs.push(sp);
+      }
+    }
+  }
+  for (const ms of milestones) for (const s of ms.specSlugs) allSpecs.add(s);
+  return { slug, title, summary: firstParagraph(lines), successMetric, target, milestones, specSlugs: [...allSpecs] };
+}
+
+/**
+ * Per-spec completion fraction (0..1) for goal rollup. Shipped = 1; otherwise weight
+ * in-progress phases as half-done. A linked spec we can't resolve is treated as shipped
+ * (1.0): the only way a wikilinked spec leaves docs/brain/specs/ is verify→fold→archive,
+ * i.e. it's fully done — so rollup advances (never regresses) as leaves ship + archive.
+ */
+function specCompletion(card: SpecCard | undefined): number {
+  if (!card) return 1;
+  if (card.status === "shipped") return 1;
+  const total = card.counts.planned + card.counts.in_progress + card.counts.shipped;
+  if (total === 0) return 0;
+  return (card.counts.shipped + card.counts.in_progress * 0.5) / total;
+}
+
+export interface MilestoneView {
+  milestone: GoalMilestone;
+  specs: SpecCard[];
+  rollup: number; // 0..1 over this milestone's linked specs
+}
+export interface ResolvedGoal {
+  goal: GoalCard;
+  rollup: number; // 0..1 weighted (equal-weight) avg over all linked specs
+  milestoneViews: MilestoneView[];
+  specs: SpecCard[]; // resolved linked specs (those still in specs/)
+}
+
+/** Join a goal's linked spec slugs to live SpecCards and compute the rollup %. */
+function resolveGoal(goal: GoalCard, specsBySlug: Map<string, SpecCard>): ResolvedGoal {
+  const rollupOf = (slugs: string[]): number => {
+    if (!slugs.length) return 0;
+    const sum = slugs.reduce((acc, s) => acc + specCompletion(specsBySlug.get(s)), 0);
+    return sum / slugs.length;
+  };
+  const milestoneViews: MilestoneView[] = goal.milestones.map((m) => ({
+    milestone: m,
+    specs: m.specSlugs.map((s) => specsBySlug.get(s)).filter((x): x is SpecCard => !!x),
+    rollup: rollupOf(m.specSlugs),
+  }));
+  return {
+    goal,
+    rollup: rollupOf(goal.specSlugs),
+    milestoneViews,
+    specs: goal.specSlugs.map((s) => specsBySlug.get(s)).filter((x): x is SpecCard => !!x),
+  };
+}
+
+async function readDir(dir: string): Promise<string[]> {
+  try {
+    return (await fs.readdir(dir)).filter((f) => f.endsWith(".md") && f !== "README.md");
+  } catch {
+    return [];
+  }
+}
+
+/** Slugs of every functions/ doc — for wikilink resolution ([[function-slug]] → /functions/{slug}). */
+export async function listFunctionSlugs(): Promise<string[]> {
+  return (await readDir(FUNCTIONS_DIR)).map((f) => f.replace(/\.md$/, ""));
+}
+/** Slugs of every goals/ doc — for wikilink resolution ([[goal-slug]] → /goals/{slug}). */
+export async function listGoalSlugs(): Promise<string[]> {
+  return (await readDir(GOALS_DIR)).map((f) => f.replace(/\.md$/, ""));
+}
+
+/** All function cards + their owned-spec breakdown (live status from the specs themselves). */
+export async function getFunctions(): Promise<Array<FunctionCard & { active: number; counts: Record<Phase, number> }>> {
+  const files = await readDir(FUNCTIONS_DIR);
+  const { specs } = await getRoadmap();
+  const bySlug = new Map(specs.map((s) => [s.slug, s] as const));
+  const cards = await Promise.all(
+    files.map(async (f) => parseFunction(f.replace(/\.md$/, ""), await fs.readFile(path.join(FUNCTIONS_DIR, f), "utf8"))),
+  );
+  const ord = (fn: string) => { const i = FUNCTION_ORDER.indexOf(fn); return i < 0 ? 99 : i; };
+  return cards
+    .sort((a, b) => ord(a.slug) - ord(b.slug) || a.title.localeCompare(b.title))
+    .map((c) => {
+      const owned = specs.filter((s) => s.owner === c.slug);
+      const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
+      for (const s of owned) counts[s.status]++;
+      // "Active" specs under this function = not yet shipped/cut (the live work).
+      const active = owned.filter((s) => s.status === "planned" || s.status === "in_progress").length;
+      return { ...c, active, counts, specSlugs: c.specSlugs.filter((s) => bySlug.has(s)) };
+    });
+}
+
+/** One function doc (raw + card + the live specs it owns, grouped by mandate), or null. */
+export async function getFunction(slug: string): Promise<
+  | { raw: string; card: FunctionCard; ownedSpecs: SpecCard[]; mandateSpecs: Array<{ mandate: Mandate; specs: SpecCard[]; active: number }> }
+  | null
+> {
+  if (!/^[a-z0-9-]+$/i.test(slug)) return null;
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(FUNCTIONS_DIR, `${slug}.md`), "utf8");
+  } catch {
+    return null;
+  }
+  const card = parseFunction(slug, raw);
+  const { specs } = await getRoadmap();
+  const bySlug = new Map(specs.map((s) => [s.slug, s] as const));
+  const ownedSpecs = specs.filter((s) => s.owner === slug);
+  const mandateSpecs = card.mandates.map((m) => {
+    const resolved = m.specSlugs.map((s) => bySlug.get(s)).filter((x): x is SpecCard => !!x);
+    return { mandate: m, specs: resolved, active: resolved.filter((s) => s.status !== "shipped" && s.status !== "rejected").length };
+  });
+  return { raw, card, ownedSpecs, mandateSpecs };
+}
+
+/** All goal cards with their rollup % (advances as linked specs ship). */
+export async function getGoals(): Promise<ResolvedGoal[]> {
+  const files = await readDir(GOALS_DIR);
+  const { specs } = await getRoadmap();
+  const bySlug = new Map(specs.map((s) => [s.slug, s] as const));
+  const goals = await Promise.all(
+    files.map(async (f) => parseGoal(f.replace(/\.md$/, ""), await fs.readFile(path.join(GOALS_DIR, f), "utf8"))),
+  );
+  return goals
+    .map((g) => resolveGoal(g, bySlug))
+    .sort((a, b) => a.rollup - b.rollup || a.goal.title.localeCompare(b.goal.title));
+}
+
+/** One goal doc (raw + resolved rollup), or null. */
+export async function getGoal(slug: string): Promise<{ raw: string; resolved: ResolvedGoal } | null> {
+  if (!/^[a-z0-9-]+$/i.test(slug)) return null;
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(GOALS_DIR, `${slug}.md`), "utf8");
+  } catch {
+    return null;
+  }
+  const { specs } = await getRoadmap();
+  const bySlug = new Map(specs.map((s) => [s.slug, s] as const));
+  return { raw, resolved: resolveGoal(parseGoal(slug, raw), bySlug) };
+}

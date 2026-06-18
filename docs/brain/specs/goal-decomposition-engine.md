@@ -1,4 +1,4 @@
-# Goal Decomposition Engine ⏳
+# Goal Decomposition Engine 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
 
@@ -18,7 +18,7 @@ Either way a spec declares an **owner** (exactly one function — the DRI) and a
 - **Missing:** any layer ABOVE a spec. Today `specs/README.md` "Active project" tracks are read-only groupings with no rollup and no planner. This spec adds the **functions + goals + mandates** layers + the planner + the no-orphan rule.
 
 ## Phase 1 — Functions + Goals + Mandates data layer + parser
-- ⏳ planned
+- ✅ shipped — `brain-roadmap.ts`: `parseFunction`/`parseGoal`, `getFunctions`/`getFunction`, `getGoals`/`getGoal`, `FunctionCard`/`GoalCard`/`Mandate`/`GoalMilestone`/`ResolvedGoal` types, goal rollup (weighted avg of linked specs' completion; unresolved link = shipped), `listGoalSlugs`/`listFunctionSlugs`. Added `functions/{cfo,logistics,cs}.md` (growth/cmo/retention/platform already existed). Spec owner/parent parsing already existed.
 - **Functions** — `docs/brain/functions/{slug}.md`, one per director (growth, cfo, cmo, logistics, cs). The permanent skeleton. Sections: scope + owned metrics; `## Mandates` (each a perpetual charter with a tracked metric + `[[spec-slug]]` wikilinks); `## Owned goals` (finite initiatives this function leads or contributes to). Doubles as the CEO-mode director charter ([[../goals/ceo-mode]]). See [[../functions/growth]].
 - **Goals** — `docs/brain/goals/{slug}.md` (seed: [[../goals/ceo-mode]]). Frontmatter-free, markdown-first. Sections: outcome + **success metric** + target date; `## Current state`; `## Decomposition` (milestones, each with its own metric + `[[spec-slug]]` wikilinks); `## Status` (rolled up).
 - **Specs gain owner + parent.** A metadata line near the H1: `**Owner:** [[../functions/{slug}]] · **Parent:** {goal-milestone or function-mandate}`. Exactly one owner-function (DRI); shared work gets one owner + "contributes-to" links.
@@ -26,7 +26,7 @@ Either way a spec declares an **owner** (exactly one function — the DRI) and a
 - `listGoalSlugs()`/`listFunctionSlugs()` for wikilink resolution; `[[goal-slug]]`→`/dashboard/roadmap/goals/{slug}`, `[[function-slug]]`→`/dashboard/roadmap/functions/{slug}`.
 
 ## Phase 2 — Functions + Goals board + detail UI
-- ⏳ planned
+- ✅ shipped — `/dashboard/roadmap/goals` (cards: success metric + rollup bar + counts) + `/goals/[slug]` (markdown + milestone→spec tree + Plan), `/functions/[slug]` (charter + mandates with owned specs + goals). The `map` view already grouped Function→Mandate/Goal→Spec (kept as the grouped toggle; flat board unchanged) — now links function headers + adds a Goals nav; orphan-spec lint already present. Spec card/detail owner chip links to its function; goal/function wikilinks resolve to their pages. `next.config.ts` traces `docs/brain/goals/**` + `functions/**` into the roadmap bundles.
 - The roadmap board can now **group by Function → (Mandate | Goal) → Spec** instead of the flat Planned/In-progress/Shipped list (keep the flat view as a toggle).
 - `/dashboard/roadmap/functions/[slug]` — the director's home: charter + mandates (each with its metric + owned specs) + owned/contributed goals.
 - `/dashboard/roadmap/goals` + `/dashboard/roadmap/goals/[slug]` — goal board cards (success metric, rollup % bar, milestone count) + detail (rendered markdown + milestone tree with each leaf spec's live status). Owner-only "Plan"/"Re-plan" per goal (Phase 3 wires it).
@@ -34,19 +34,19 @@ Either way a spec declares an **owner** (exactly one function — the DRI) and a
 - `next.config.ts` `outputFileTracingIncludes` must include `docs/brain/goals/**` and `docs/brain/functions/**` (Vercel prunes `docs/brain` otherwise; see [[../dashboard/roadmap]]).
 
 ## Phase 3 — Planner job kind + skill
-- ⏳ planned
+- 🚧 in progress — code landed: migration `20260618140000_agent_jobs_kind.sql` (+ apply-script) adds `kind text not null default 'build'`; `agent-jobs.ts` types (`kind`, `'spec'` action type, plan `{slug,owner,parent}` on `PendingAction`); `POST /api/roadmap/plan`; worker `runPlanJob` (branches on `kind`); `.claude/skills/plan-goal/`. **Awaiting prod:** the migration must be applied (needs owner approval — no prod creds in the box build).
 - Add `kind text not null default 'build'` to [[../tables/agent_jobs]] (`'build' | 'plan'`); migration + apply-script ([[write-migration]]). `claim_agent_job` is kind-agnostic (worker branches on `kind`).
 - New `.claude/skills/plan-goal/` skill. Procedure: read `goals/{slug}.md` (or a `functions/{slug}.md` mandate) + the **brain** (the current-state model) → for the success metric, identify what capabilities/data/integrations exist (cite brain pages) vs. are missing → produce a **proposed milestone tree** where each leaf is either an existing `[[spec]]` or a NEW spec to author (title + one-paragraph intent + which brain gap it closes + **owner function + parent**). Every proposed spec MUST name an owner + parent — the planner rejects its own orphans. The planner does NOT write specs or build in this pass — it emits the tree for approval.
 - Box worker (`scripts/builder-worker.ts`): when it claims a `kind='plan'` job, run the plan-goal skill instead of build-spec. The proposed tree comes back as the job's `pending_actions` (one action per proposed branch: `{id, type:'spec', summary, preview: intent, status:'pending'}`) → job goes `needs_approval`. Reuse the existing draft-PR + pause mechanics.
 
 ## Phase 4 — Approve tree → auto-author specs → queue builds
-- ⏳ planned
+- 🚧 in progress — code landed: `/api/roadmap/approve` reused for plan jobs (each `type:'spec'` branch approve/decline → all decided flips to `queued_resume`); worker `runPlanJob` resume authors the approved specs via `claude --resume`, commits ONE planning PR, updates the goal doc, and inserts a `kind='build'` job per authored spec; `PlanButton.tsx` renders the approve/decline cards. Awaiting the same prod migration + first live run.
 - Reuse `/api/roadmap/approve` for plan jobs: approving a branch marks that action approved. When all branches have a decision, job → `queued_resume`.
 - Worker resumes the plan job: for each **approved** branch, author `docs/brain/specs/{slug}.md` (reuse the `chat/finalize` authoring path / the same Opus prompt), commit it, insert a `kind='build'` `agent_jobs` row (so the existing build pipeline takes over), and update `goals/{slug}.md` `## Decomposition` to wikilink the new spec under its milestone. Declined branches are recorded (❌) so re-plan doesn't re-propose them.
 - One PR for the planning output (new spec files + goal-doc update); builds then open their own `claude/*` PRs as usual.
 
 ## Phase 5 — Rollup + re-plan loop
-- ⏳ planned
+- 🚧 in progress — code landed: goal page shows the live rollup % (advances as leaf specs flip ✅, no extra action — `resolveGoal`/`specCompletion`); "Re-plan" is just another `POST /api/roadmap/plan` once no active plan exists, and the `plan-goal` skill's re-plan rules propose only newly-revealed gaps + skip the goal's `## Declined` note. Awaiting first live re-plan run.
 - Goal page shows live rollup; as leaf specs ship (✅) the goal % advances with no extra action.
 - "Re-plan" re-runs the planner with current state (specs that shipped, data that changed) → proposes only the **newly-revealed** gaps (e.g. once the metrics spine ships, CEO-mode's analyst-loop spec becomes proposable). Re-plan never touches already-approved/in-flight branches.
 

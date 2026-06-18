@@ -13,9 +13,14 @@ const nextConfig: NextConfig = {
   // request time. Vercel's file tracer prunes files nothing imports, so include the
   // brain markdown explicitly or the route renders empty on its own data in production.
   outputFileTracingIncludes: {
-    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md"],
-    "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md"],
-    "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md"],
+    // The goal-decomposition layer (functions/ + goals/) reads two more brain folders; Vercel
+    // prunes docs/brain otherwise → the board/map/goal/function pages render empty in prod.
+    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/goals": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md"],
+    "/dashboard/roadmap/goals/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/functions/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
     "/dashboard/brain": ["./docs/brain/**/*.md"],
     "/dashboard/brain/[...slug]": ["./docs/brain/**/*.md"],
     // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into

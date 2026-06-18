@@ -23,7 +23,9 @@ export interface JobQuestion {
   options?: string[];
 }
 
-export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr";
+// `spec` is a PLAN job's proposed branch: a NEW spec to author + build (no prod side-effect,
+// gated on DIRECTION not a prod write). The others are build-job prod side-effects.
+export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr" | "spec";
 
 /** A prod-side-effect the build needs the owner to approve. `cmd` is the exact command the worker runs on approval (also shown as the preview). */
 export interface PendingAction {
@@ -34,13 +36,19 @@ export interface PendingAction {
   preview?: string;
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
+  // Plan jobs (type 'spec'): the proposed spec the worker authors on approval-resume.
+  slug?: string;
+  owner?: string; // owner function slug
+  parent?: string; // mandate name or goal milestone
 }
 
 export interface AgentJob {
   id: string;
   workspace_id: string;
+  // For a build job: the spec slug. For a plan job (kind='plan'): the GOAL slug.
   spec_slug: string;
   spec_branch: string | null;
+  kind: "build" | "plan";
   status: JobStatus;
   claude_session_id: string | null;
   questions: JobQuestion[];

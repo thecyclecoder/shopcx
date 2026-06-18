@@ -2,6 +2,8 @@
 
 The build queue for the [[../specs/roadmap-build-console]] "do it" button. One row per build of a spec. The dashboard inserts a `queued` row; the box worker ([[../recipes/build-box-setup]]) claims it via `claim_agent_job()`, runs `claude -p` on Max, and drives it to a `claude/*` PR. Distinct from [[agent_todos]] (the ticket-driven queue) — same shape, different driver.
 
+**Two kinds (`kind`).** `'build'` (default) builds one spec → PR. `'plan'` runs the **goal-decomposition planner** ([[../specs/goal-decomposition-engine]]) one altitude up: the `plan-goal` skill decomposes a goal into a proposed milestone → spec tree (the tree rides in `pending_actions` as `type:'spec'` branches), pauses `needs_approval`, and on approval-resume authors the approved specs + queues a `kind='build'` job for each. For a `'plan'` job, **`spec_slug` carries the GOAL slug** (`docs/brain/goals/{slug}.md`) — one active plan per goal, same guard as one active build per spec. `claim_agent_job()` is kind-agnostic; the worker branches on `kind` (`runPlanJob` vs the build path).
+
 **Primary key:** `id`
 
 ## Columns
@@ -10,14 +12,15 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 |---|---|---|
 | `id` | `uuid` | PK · `gen_random_uuid()` |
 | `workspace_id` | `uuid` | → [[workspaces]].id · ON DELETE CASCADE |
-| `spec_slug` | `text` | the `docs/brain/specs/{slug}.md` to build |
-| `spec_branch` | `text?` | `claude/{slug}-{rand}` the worker creates / reuses on resume |
+| `kind` | `text` | `'build'` (default) ｜ `'plan'` — build a spec vs. plan a goal |
+| `spec_slug` | `text` | build: the `docs/brain/specs/{slug}.md` to build · plan: the `docs/brain/goals/{slug}.md` to decompose |
+| `spec_branch` | `text?` | `claude/{slug}-{rand}` (build) / `claude/plan-{slug}-{rand}` (plan), reused on resume |
 | `instructions` | `text?` | optional extra build instructions |
 | `status` | `text` | enum below · default `queued` |
 | `claude_session_id` | `text?` | captured from `claude -p` stream; used for `claude --resume` |
 | `questions` | `jsonb` | `[{id,q,options?}]` surfaced when `needs_input` · default `[]` |
 | `answers` | `jsonb` | `[{id,q,answer}]` the owner submitted · default `[]` |
-| `pending_actions` | `jsonb` | gated actions awaiting approval: `[{id,type,summary,cmd,preview,status}]`, type = `apply_migration｜run_prod_script｜merge_pr` · default `[]` |
+| `pending_actions` | `jsonb` | gated actions awaiting approval: `[{id,type,summary,cmd,preview,status}]`, type = `apply_migration｜run_prod_script｜merge_pr｜spec` · default `[]`. `spec` (plan jobs) also carries `{slug,owner,parent}` — a proposed branch to author on approval |
 | `pr_url` / `pr_number` | `text?` / `int?` | the opened `claude/*` PR |
 | `log_tail` | `text?` | last ~2 KB of the build output (debugging) |
 | `error` | `text?` | failure reason |
@@ -46,8 +49,8 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 
 ## Migration
 
-`supabase/migrations/20260618120000_agent_jobs.sql` + `20260618130000_agent_jobs_pending_actions.sql`
+`supabase/migrations/20260618120000_agent_jobs.sql` + `20260618130000_agent_jobs_pending_actions.sql` + `20260618140000_agent_jobs_kind.sql` (adds `kind`)
 
 ## Related
 
-[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../lifecycles/roadmap-build-console]] · [[../recipes/build-box-setup]] · [[../dashboard/roadmap]] · [[../dashboard/branches]] · [[agent_todos]]
+[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../specs/goal-decomposition-engine]] · [[../lifecycles/roadmap-build-console]] · [[../recipes/build-box-setup]] · [[../dashboard/roadmap]] · [[../dashboard/branches]] · [[agent_todos]]

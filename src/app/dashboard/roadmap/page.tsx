@@ -71,9 +71,9 @@ function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
       {(spec.owner || spec.parent) && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           {spec.owner && (
-            <span className="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-300">
+            <Link href={`/dashboard/roadmap/functions/${spec.owner}`} className="inline-flex items-center rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-200 dark:bg-violet-900/30 dark:text-violet-300">
               {spec.owner}
-            </span>
+            </Link>
           )}
           {spec.parent && <span className="truncate text-[10px] text-zinc-400">↳ {spec.parent}</span>}
         </div>
@@ -103,6 +103,9 @@ export default async function RoadmapPage() {
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Roadmap</h1>
         <div className="flex items-center gap-3">
+          <Link href="/dashboard/roadmap/goals" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+            Goals →
+          </Link>
           <Link href="/dashboard/roadmap/map" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
             Map view →
           </Link>
