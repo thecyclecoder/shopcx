@@ -13,17 +13,25 @@ Author a migration + the script that applies it. ShopCX applies migrations via s
 2. **Make it idempotent** — `create table if not exists`, `add column if not exists`, `create index if not exists`, `insert … on conflict do nothing`. Re-running must be safe.
 3. **Write the apply-script** `scripts/apply-{name}-migration.ts`:
    ```ts
-   import { readFileSync } from "fs";
+   import { readFileSync, existsSync } from "fs";
    import { resolve } from "path";
    import { Client } from "pg";
+   // Load .env.local IF present (local dev). On the BUILD BOX there is NONE — secrets come from the
+   // process env (systemd EnvironmentFile). GUARD the read with existsSync, or the apply crashes
+   // with ENOENT before it connects and the migration silently "fails" through the approval gate.
    const envPath = resolve(__dirname, "../.env.local");
-   for (const line of readFileSync(envPath, "utf8").split("\n")) {
-     const t = line.trim(); if (!t || t.startsWith("#")) continue;
-     const eq = t.indexOf("="); if (eq < 0) continue;
-     const k = t.slice(0, eq); if (!process.env[k]) process.env[k] = t.slice(eq + 1);
+   if (existsSync(envPath)) {
+     for (const line of readFileSync(envPath, "utf8").split("\n")) {
+       const t = line.trim(); if (!t || t.startsWith("#")) continue;
+       const eq = t.indexOf("="); if (eq < 0) continue;
+       const k = t.slice(0, eq); if (!process.env[k]) process.env[k] = t.slice(eq + 1);
+     }
    }
-   const password = process.env.SUPABASE_DB_PASSWORD!;
-   const cs = `postgres://postgres.<project-ref>:${encodeURIComponent(password)}@<region>.pooler.supabase.com:6543/postgres`;
+   const password = process.env.SUPABASE_DB_PASSWORD;
+   const cs =
+     process.env.SUPABASE_DB_URL ||
+     process.env.DATABASE_URL ||
+     `postgres://postgres.<project-ref>:${encodeURIComponent(password!)}@<region>.pooler.supabase.com:6543/postgres`;
    const MIGRATIONS = ["YYYYMMDDNNNNNN_description.sql"]; // in order
    const c = new Client({ connectionString: cs });
    await c.connect();
@@ -40,6 +48,7 @@ Author a migration + the script that applies it. ShopCX applies migrations via s
 
 ## Guardrails
 
+- **⚠️ `.env.local` is ABSENT on the build box.** The worker runs as `builder` from `/home/builder/shopcx` with **no `.env.local`** — `SUPABASE_DB_PASSWORD` is injected into the process env via the systemd EnvironmentFile. So **always guard the `.env.local` read with `existsSync`** and rely on `process.env`. An unguarded `readFileSync('.env.local')` throws ENOENT and the migration silently fails through the approval gate (the #1 cause of a "needs_approval that won't clear").
 - **Pooler port is `6543`** (transaction pooler), not 5432. Auth is the **DB password** (`SUPABASE_DB_PASSWORD`), not the service-role JWT.
 - **For backfills**, wrap in explicit `BEGIN`/`COMMIT` and prefer `UPDATE … WHERE col IS NULL` / `INSERT … ON CONFLICT` so partial re-runs are safe.
 - **Never run during active Inngest syncs** — a long migration blocks writes and the deploy can kill running functions.
