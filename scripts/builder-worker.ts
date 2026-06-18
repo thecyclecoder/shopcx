@@ -1,16 +1,18 @@
 /**
  * builder-worker — the box-side build worker for the Roadmap Build Console.
  *
- * Runs on the self-hosted box (Hetzner CCX33, tailnet-locked). Polls the agent_jobs
- * queue OUTBOUND (no inbound port), claims a job via claim_agent_job(), runs the spec
- * build as a headless `claude -p` on the Max subscription (ANTHROPIC_API_KEY stripped),
- * gates on tsc, and opens a claude/* PR. Pauses with structured questions on needs_input
- * and resumes the same session once answered.  See docs/brain/specs/roadmap-build-console.md.
+ * Runs on the self-hosted box (Hetzner CCX33, tailnet-locked, non-root `builder`). Polls the
+ * agent_jobs queue OUTBOUND, claims jobs via claim_agent_job(), and runs each build in its OWN
+ * git worktree (isolated dir + branch) as a headless `claude -p` on Max (ANTHROPIC_API_KEY +
+ * prod secrets stripped). Up to MAX_CONCURRENT builds run in PARALLEL. Gates on tsc, opens a
+ * claude/* PR. Pauses on needs_input (questions) / needs_approval (gated prod actions) and
+ * resumes the same session once answered/approved.
+ * See docs/brain/specs/roadmap-build-console.md + parallel-builds.md.
  *
- * Run:  cd /root/shopcx && npx tsx scripts/builder-worker.ts
+ * Run: cd /home/builder/shopcx && npx tsx scripts/builder-worker.ts   (via systemd shopcx-builder)
  */
-import { readFileSync, existsSync } from "fs";
-import { resolve } from "path";
+import { readFileSync, existsSync, mkdirSync } from "fs";
+import { resolve, join } from "path";
 import { spawnSync } from "child_process";
 
 const envPath = resolve(__dirname, "../.env.local");
@@ -26,10 +28,12 @@ if (existsSync(envPath)) {
 }
 
 const REPO_DIR = resolve(__dirname, "..");
+const BUILDS_DIR = resolve(REPO_DIR, "../builds"); // each build gets its own worktree here
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN || "";
 const POLL_MS = 5000;
 const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_CONCURRENT = 5; // real ceiling is Max rate limits, not the box
 
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
 interface PendingAction {
@@ -58,12 +62,12 @@ async function admin() {
   return createAdminClient();
 }
 
-function sh(cmd: string, args: string[], opts: { timeout?: number } = {}) {
-  const r = spawnSync(cmd, args, { cwd: REPO_DIR, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: opts.timeout });
+function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string } = {}) {
+  const r = spawnSync(cmd, args, { cwd: opts.cwd || REPO_DIR, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: opts.timeout });
   return { code: r.status ?? -1, out: r.stdout || "", err: r.stderr || "" };
 }
 
-// A fresh box has no git identity → `git commit` errors. Set it (repo-local) so the worker is self-contained.
+// A fresh box has no git identity → `git commit` errors. Repo-local config is shared across worktrees.
 function ensureGitIdentity() {
   sh("git", ["config", "user.email", "builder@shopcx.ai"]);
   sh("git", ["config", "user.name", "ShopCX Build Worker"]);
@@ -73,7 +77,7 @@ function ensureGitIdentity() {
 // these in its own env (from the systemd EnvironmentFile) to execute APPROVED actions.
 const SECRET_RE = /SERVICE_ROLE|PASSWORD|SECRET|_TOKEN|PRIVATE|BRAINTREE|TWILIO|RESEND|AVALARA|EASYPOST|KLAVIYO|META_|ANTHROPIC|OPENAI|SUPABASE_DB/i;
 
-function runClaude(prompt: string, sessionId: string | null) {
+function runClaude(prompt: string, sessionId: string | null, cwd: string) {
   // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -83,9 +87,8 @@ function runClaude(prompt: string, sessionId: string | null) {
     env[k] = v;
   }
   const base = sessionId ? ["--resume", sessionId] : [];
-  // bypass = no per-tool prompts (valid because the worker runs as the non-root `builder` user).
   const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = spawnSync("claude", args, { cwd: REPO_DIR, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: BUILD_TIMEOUT_MS });
+  const r = spawnSync("claude", args, { cwd, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: BUILD_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
   let isError = r.status !== 0;
@@ -150,7 +153,6 @@ async function ensurePr(branch: string, title: string, draft: boolean): Promise<
     draft,
   });
   if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number };
-  // already exists?
   const existing = await gh("GET", `/repos/${REPO}/pulls?head=${owner}:${branch}&state=open`);
   if (existing.ok && Array.isArray(existing.json) && existing.json.length) {
     return { url: existing.json[0].html_url as string, number: existing.json[0].number as number };
@@ -164,9 +166,9 @@ async function update(id: string, patch: Record<string, unknown>) {
   await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
 }
 
-// Execute owner-approved gated actions. The worker is the ONLY component with prod creds;
-// it runs exactly the command the owner approved (shown to them as the preview).
-async function executeApprovedActions(job: Job): Promise<{ actions: PendingAction[]; summary: string }> {
+// Execute owner-approved gated actions in the build's worktree. The worker is the ONLY component
+// with prod creds; it runs exactly the command the owner approved (shown to them as the preview).
+async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions: PendingAction[]; summary: string }> {
   const actions = (job.pending_actions || []).map((a) => ({ ...a }));
   const done: string[] = [];
   for (const a of actions) {
@@ -177,7 +179,7 @@ async function executeApprovedActions(job: Job): Promise<{ actions: PendingActio
         a.status = r.ok ? "done" : "failed";
         a.result = r.ok ? "merged" : `merge failed ${r.status}`;
       } else if (a.cmd) {
-        const r = sh("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000 });
+        const r = sh("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd });
         a.status = r.code === 0 ? "done" : "failed";
         a.result = (r.out + r.err).slice(-500);
       } else {
@@ -197,150 +199,157 @@ async function runJob(job: Job) {
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
-  console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id})`);
+  const wt = join(BUILDS_DIR, job.id); // isolated worktree — parallel builds never collide
+  console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
 
+  // Set up the worktree (its own dir + branch).
+  sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
+  sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
   if (!isResume) {
     branch = `claude/${slug}-${Date.now().toString(36)}`;
-    sh("git", ["fetch", "origin"]);
-    const co = sh("git", ["checkout", "-B", branch, "origin/main"]);
-    if (co.code !== 0) throw new Error(`git checkout failed: ${co.err.slice(0, 300)}`);
+    const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
+    if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
     await update(job.id, { spec_branch: branch });
   } else {
-    sh("git", ["checkout", branch!]);
+    let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
+    if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
+    if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
   }
+  // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
+  if (!existsSync(join(wt, "node_modules"))) sh("ln", ["-s", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
 
-  // On an approval-resume, execute the owner-approved gated actions FIRST (worker has prod creds), then resume.
-  let executedSummary = "";
-  if (isResume && (job.pending_actions || []).some((a) => a.status === "approved")) {
-    const { actions, summary } = await executeApprovedActions(job);
-    await update(job.id, { pending_actions: actions });
-    executedSummary = summary;
-    console.log(`${tag} executed approved actions: ${summary}`);
-  }
-
-  const resumeBits: string[] = [];
-  if ((job.answers || []).length) resumeBits.push(`Answers to your questions: ${JSON.stringify(job.answers)}`);
-  if (executedSummary) resumeBits.push(`Gated actions executed: ${executedSummary}`);
-
-  const prompt = isResume
-    ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
-    : [
-        `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
-        ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
-        `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
-        `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
-      ].join("\n");
-
-  const { session, resultText, isError, raw } = runClaude(prompt, job.claude_session_id);
-  const logTail = raw.slice(-2000);
-  if (session) await update(job.id, { claude_session_id: session });
-
-  const parsed = parseStatus(resultText);
-  console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
-
-  if (parsed?.status === "needs_input") {
-    if (sh("git", ["status", "--porcelain"]).out.trim()) {
-      sh("git", ["add", "-A"]);
-      sh("git", ["commit", "-m", `wip: ${slug} (needs input)`]);
-      sh("git", ["push", "-u", "origin", branch!]);
+  try {
+    // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.
+    let executedSummary = "";
+    if (isResume && (job.pending_actions || []).some((a) => a.status === "approved")) {
+      const { actions, summary } = await executeApprovedActions(job, wt);
+      await update(job.id, { pending_actions: actions });
+      executedSummary = summary;
+      console.log(`${tag} executed approved actions: ${summary}`);
     }
-    const pr = await ensurePr(branch!, slug, true);
-    await update(job.id, {
-      status: "needs_input",
-      questions: parsed.questions ?? [],
-      log_tail: logTail,
-      pr_url: pr?.url ?? null,
-      pr_number: pr?.number ?? null,
-    });
-    return;
-  }
 
-  if (parsed?.status === "needs_approval") {
-    const incoming: Array<Record<string, unknown>> = Array.isArray((parsed as Record<string, unknown>).actions)
-      ? ((parsed as Record<string, unknown>).actions as Array<Record<string, unknown>>)
-      : [];
-    const pending: PendingAction[] = incoming.map((a, i) => {
-      const cmd = typeof a.cmd === "string" ? a.cmd : undefined;
-      const type = a.type === "merge_pr" || a.type === "run_prod_script" ? (a.type as PendingAction["type"]) : "apply_migration";
-      return {
-        id: `a${Date.now().toString(36)}${i}`,
-        type,
-        summary: String(a.summary || cmd || "gated action"),
-        cmd,
-        preview: typeof a.preview === "string" ? a.preview : cmd,
-        status: "pending",
-      };
-    });
-    if (sh("git", ["status", "--porcelain"]).out.trim()) {
-      sh("git", ["add", "-A"]);
-      sh("git", ["commit", "-m", `wip: ${slug} (needs approval)`]);
-      sh("git", ["push", "-u", "origin", branch!]);
+    const resumeBits: string[] = [];
+    if ((job.answers || []).length) resumeBits.push(`Answers to your questions: ${JSON.stringify(job.answers)}`);
+    if (executedSummary) resumeBits.push(`Gated actions executed: ${executedSummary}`);
+
+    const prompt = isResume
+      ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
+      : [
+          `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
+          ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
+          `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
+        ].join("\n");
+
+    const { session, resultText, isError, raw } = runClaude(prompt, job.claude_session_id, wt);
+    const logTail = raw.slice(-2000);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = parseStatus(resultText);
+    console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (parsed?.status === "needs_input") {
+      if (sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()) {
+        sh("git", ["add", "-A"], { cwd: wt });
+        sh("git", ["commit", "-m", `wip: ${slug} (needs input)`], { cwd: wt });
+        sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+      }
+      const pr = await ensurePr(branch!, slug, true);
+      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      return;
     }
-    const pr = await ensurePr(branch!, slug, true);
-    await update(job.id, {
-      status: "needs_approval",
-      pending_actions: pending,
-      log_tail: logTail,
-      pr_url: pr?.url ?? null,
-      pr_number: pr?.number ?? null,
-    });
-    return;
-  }
 
-  if (isError && !parsed) {
-    await update(job.id, { status: "failed", error: "claude run errored", log_tail: logTail });
-    return;
-  }
+    if (parsed?.status === "needs_approval") {
+      const incoming: Array<Record<string, unknown>> = Array.isArray((parsed as Record<string, unknown>).actions)
+        ? ((parsed as Record<string, unknown>).actions as Array<Record<string, unknown>>)
+        : [];
+      const pending: PendingAction[] = incoming.map((a, i) => {
+        const cmd = typeof a.cmd === "string" ? a.cmd : undefined;
+        const type = a.type === "merge_pr" || a.type === "run_prod_script" ? (a.type as PendingAction["type"]) : "apply_migration";
+        return {
+          id: `a${Date.now().toString(36)}${i}`,
+          type,
+          summary: String(a.summary || cmd || "gated action"),
+          cmd,
+          preview: typeof a.preview === "string" ? a.preview : cmd,
+          status: "pending",
+        };
+      });
+      if (sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()) {
+        sh("git", ["add", "-A"], { cwd: wt });
+        sh("git", ["commit", "-m", `wip: ${slug} (needs approval)`], { cwd: wt });
+        sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+      }
+      const pr = await ensurePr(branch!, slug, true);
+      await update(job.id, { status: "needs_approval", pending_actions: pending, log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      return;
+    }
 
-  // completed path: gate on tsc
-  const tsc = sh("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000 });
-  if (tsc.code !== 0) {
-    await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
-    return;
-  }
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "claude run errored", log_tail: logTail });
+      return;
+    }
 
-  const dirty = sh("git", ["status", "--porcelain"]).out.trim();
-  if (!dirty) {
-    await update(job.id, { status: "completed", log_tail: "no file changes; nothing to commit" });
-    return;
+    // completed path: gate on tsc (in the worktree)
+    const tsc = sh("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    if (tsc.code !== 0) {
+      await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
+      return;
+    }
+
+    const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
+    if (!dirty) {
+      await update(job.id, { status: "completed", log_tail: "no file changes; nothing to commit" });
+      return;
+    }
+    sh("git", ["add", "-A"], { cwd: wt });
+    const commit = sh("git", ["commit", "-m", `build: ${slug}\n\n${parsed?.summary ?? ""}`], { cwd: wt });
+    if (commit.code !== 0) {
+      await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
+      return;
+    }
+    const push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+    if (push.code !== 0) {
+      await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
+      return;
+    }
+    const pr = await ensurePr(branch!, slug, false);
+    if (!pr) {
+      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
+      return;
+    }
+    await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
+    console.log(`${tag} ✓ completed → ${pr.url}`);
+  } finally {
+    // Always tear down the worktree — the branch is pushed, so a resume recreates one.
+    sh("git", ["worktree", "remove", "--force", wt]);
   }
-  sh("git", ["add", "-A"]);
-  const commit = sh("git", ["commit", "-m", `build: ${slug}\n\n${parsed?.summary ?? ""}`]);
-  if (commit.code !== 0) {
-    await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
-    return;
-  }
-  const push = sh("git", ["push", "-u", "origin", branch!]);
-  if (push.code !== 0) {
-    await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
-    return;
-  }
-  const pr = await ensurePr(branch!, slug, false);
-  if (!pr) {
-    await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
-    return;
-  }
-  await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
-  console.log(`${tag} ✓ completed → ${pr.url}`);
 }
 
 async function main() {
   if (!GH_TOKEN) throw new Error("GITHUB_TOKEN not set");
   db = await admin();
   ensureGitIdentity();
-  console.log(`builder-worker up — repo ${REPO} at ${REPO_DIR}, polling every ${POLL_MS}ms`);
+  mkdirSync(BUILDS_DIR, { recursive: true });
+  sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
+  console.log(`builder-worker up — repo ${REPO}, up to ${MAX_CONCURRENT} parallel builds, polling every ${POLL_MS}ms`);
+
+  const active = new Map<string, Promise<void>>();
   for (;;) {
     try {
-      const { data } = await db.rpc("claim_agent_job");
-      const job = (Array.isArray(data) ? data[0] : data) as Job | null;
-      if (job && job.id) {
-        try {
-          await runJob(job);
-        } catch (e) {
-          console.error(`[${job.spec_slug}] failed:`, e);
-          await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
-        }
+      while (active.size < MAX_CONCURRENT) {
+        const { data } = await db.rpc("claim_agent_job");
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break; // queue empty
+        console.log(`claimed ${job.spec_slug} → ${active.size + 1}/${MAX_CONCURRENT} lanes`);
+        const p = runJob(job)
+          .catch(async (e) => {
+            console.error(`[${job.spec_slug}] failed:`, e);
+            await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+          })
+          .finally(() => active.delete(job.id));
+        active.set(job.id, p);
       }
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
