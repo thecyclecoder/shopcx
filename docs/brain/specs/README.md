@@ -40,6 +40,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** lets autonomous builds run with no per-tool back-and-forth (bypass) while staying safe — irreversible/prod actions (apply migration, run prod script, merge) come back as one-tap approvals on the spec/phase card, executed by the trusted worker (the build itself has no prod creds). Extends [[../tables/agent_jobs]] (the live DB companion to the static brain) with a `needs_approval` layer; builds run non-root under [[../recipes/build-box-setup]].
 
+## Active project — Goal Decomposition Engine ⏳
+
+**Spec:** [[goal-decomposition-engine]]
+
+**Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
+
 ## Active project 1 — Storefront 🚧
 
 **Lifecycle:** [[../lifecycles/storefront-checkout]]
