@@ -1,4 +1,4 @@
-# Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app ⏳
+# Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app 🚧
 
 > **🔒 CORE INVARIANTS**
 > 1. **Max-billing.** Builds run as `env -u ANTHROPIC_API_KEY claude -p …` on the build box. The box's shell env and repo `.env.local` must **never** expose `ANTHROPIC_API_KEY` — auth precedence would silently flip builds to metered API. Claude is authed to **Max** via `~/.claude` on the box (verified: headless `claude -p` runs with no API key present).
@@ -30,21 +30,21 @@ A phone-first console on the dashboard that closes the loop from *idea* to *merg
 
 ---
 
-## Phase 1 — Roadmap board (read-only) ⏳
+## Phase 1 — Roadmap board (read-only) ✅
 
 - ⏳ Route `src/app/dashboard/roadmap/page.tsx` (+ sidebar link). Server component.
 - ⏳ Parser: read `docs/brain/specs/*.md` + `specs/README.md`; extract `⏳ / 🚧 / ✅` against `## Phase`/heading/bullet lines; also read the `## Status / open work` block from `lifecycles/*.md`. (Markdown is the source of truth — never drifts.)
 - ⏳ Three columns — **Planned / In progress / Shipped** — grouped by project track. Each card = a spec; expand to its phases + live build status.
 - ⏳ Runtime file access on Vercel: trace `docs/brain/**` into the function bundle (or parse at build time).
 
-## Phase 2 — Spec-authoring chat (Opus via API) ⏳
+## Phase 2 — Spec-authoring chat (Opus via API) 🚧
 
 - ⏳ Chat UI on `/dashboard/roadmap` ("New feature" → conversational panel). Phone-first.
 - ⏳ Backend `POST /api/roadmap/chat` streams Opus (Anthropic API / Vercel AI Gateway). System prompt loads the spec template ([[../project-management]] § Writing a spec) + brain context so the spec is grounded in real tables/libs.
 - ⏳ "Finalize" → model produces the full spec markdown. App (a) commits `docs/brain/specs/{slug}.md` to a `claude/*` branch via GitHub REST, (b) inserts an `agent_jobs` row (`status='queued'`).
 - ⏳ New spec shows on the board as ⏳ planned immediately.
 
-## Phase 3 — `agent_jobs` queue + dispatch ⏳
+## Phase 3 — `agent_jobs` queue + dispatch ✅
 
 The bridge from an on-demand phone tap to the (tailnet-only, no-inbound) box. The box can't be reached from Vercel, so the box reaches **out** to this queue.
 
@@ -52,7 +52,7 @@ The bridge from an on-demand phone tap to the (tailnet-only, no-inbound) box. Th
 - ⏳ Board **"Build"** button → owner-gated → inserts/updates an `agent_jobs` row to `status='queued'`. (No inbound call to the box — just a DB write.)
 - ⏳ Status + PR url surface on the board card by reading the job row (poll, simplest for v1).
 
-## Phase 4 — Build box + `systemd` worker (the executor) ⏳
+## Phase 4 — Build box + `systemd` worker (the executor) ✅
 
 - ⏳ A `systemd` service `shopcx-builder.service` on the box runs a **worker loop** (a Node/tsx script): poll Supabase every few seconds (or Supabase Realtime) for `status='queued'` / `'queued_resume'`, **atomically claim** one, run the build, write status back. Always-on → survives reboots/disconnects (this is the "session persistence" — **no tmux needed**).
 - ⏳ A fresh build runs:
@@ -64,7 +64,7 @@ The bridge from an on-demand phone tap to the (tailnet-only, no-inbound) box. Th
 - ⏳ Worker parses the `stream-json` stream for: the `claude_session_id` (store it — needed for resume), terminal status, and any structured questions block (Phase 5). The `build-spec` skill opens the `claude/*` PR via GitHub REST with the token in `.env.local`.
 - ⏳ Concurrency 1–2 to start (8 cores can do more, but **Max rate limits** are the real ceiling). `--max-turns` + a wall-clock timeout guard runaway → `needs_attention` with `log_tail`.
 
-## Phase 5 — Build feedback / questions loop ⏳ (the answer to "builds have questions")
+## Phase 5 — Build feedback / questions loop 🚧 (the answer to "builds have questions")
 
 A build is a **multi-turn conversation spread across separate headless invocations.** The `agent_jobs` row carries questions/answers between turns; Claude's **on-disk transcript** (`~/.claude/projects/`) carries the context. The worker is the durable process; the *job* waits, never a live process — so no tmux, no held-open SSH.
 
@@ -83,7 +83,7 @@ A build is a **multi-turn conversation spread across separate headless invocatio
 
 This is the same conversational pattern as the Phase-2 authoring chat, just at execution time. (Future: a custom `request_input` MCP tool would be cleaner than the JSON-block convention, but the convention needs zero extra infra.)
 
-## Phase 6 — Review + merge from phone ⏳
+## Phase 6 — Review + merge from phone ✅
 
 - ✅ (exists) `/dashboard/branches` lists the `claude/*` PR with CI status + mergeability; owner **Squash & merge** works from the phone. Confirm `spec_build` PRs surface (head ref is `claude/*` → they do).
 - ⏳ Cross-link the board card → its PR; only show "ready to merge" once the job is `completed` (PR un-drafted).

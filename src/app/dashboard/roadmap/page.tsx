@@ -4,6 +4,7 @@ import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, type AgentJob } from "@/lib/agent-jobs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
+import AuthoringChat from "./AuthoringChat";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 export const dynamic = "force-dynamic";
@@ -96,7 +97,10 @@ export default async function RoadmapPage() {
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl p-6">
-      <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Roadmap</h1>
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Roadmap</h1>
+        <AuthoringChat triggerLabel="✨ New feature" />
+      </div>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
         Live view of <code>docs/brain/specs/</code> — the markdown is the source of truth, so this never drifts.
         Status comes from the <span className="font-medium">⏳ planned · 🚧 in progress · ✅ shipped</span> phase emojis.

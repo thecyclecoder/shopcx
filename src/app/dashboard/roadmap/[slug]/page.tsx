@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { marked } from "marked";
 import { getSpec, listSpecSlugs, type Phase } from "@/lib/brain-roadmap";
 import StatusControl from "../StatusControl";
+import AuthoringChat from "../AuthoringChat";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,7 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
         </span>
         <code className="text-xs text-zinc-400">docs/brain/specs/{slug}.md</code>
         <StatusControl slug={slug} status={spec.card.status} />
+        <AuthoringChat slug={slug} triggerLabel="Refine with Opus" />
       </div>
       <article
         className="prose prose-sm prose-zinc mt-5 max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs"
