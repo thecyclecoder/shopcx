@@ -90,14 +90,46 @@ export const metaCapiDispatchCron = inngest.createFunction(
           );
         };
 
+        // Renewals must never reach Meta as a Purchase — they're recurring
+        // subscription billing, not ad conversions, and are already excluded
+        // from ROAS on our side via bucketOrder ("recurring" = source_name
+        // contains "subscription"; see libraries/order-bucketing). Today
+        // order_placed is only emitted by the storefront checkout for NEW
+        // orders, so this is defense-in-depth: drop any order_placed whose
+        // order is a renewal before it can seed a CAPI dispatch (e.g. a future
+        // immediate "order now" charge or renewal-via-storefront path).
+        const dropRenewalPurchases = async (
+          rows: Array<{ id: string; event_type?: string | null; meta?: Record<string, unknown> | null }>,
+        ): Promise<string[]> => {
+          const orderId = (r: { meta?: Record<string, unknown> | null }) =>
+            ((r.meta as { order_id?: string } | null)?.order_id) || "";
+          const orderIds = [...new Set(
+            rows.filter((r) => r.event_type === "order_placed").map(orderId).filter(Boolean),
+          )];
+          if (orderIds.length === 0) return rows.map((r) => r.id);
+          const { data: ords } = await admin
+            .from("orders").select("id, source_name").in("id", orderIds);
+          const renewalIds = new Set(
+            (ords || [])
+              .filter((o) => (((o.source_name as string | null) || "").toLowerCase()).includes("subscription"))
+              .map((o) => o.id as string),
+          );
+          if (renewalIds.size === 0) return rows.map((r) => r.id);
+          const dropped = rows.filter((r) => r.event_type === "order_placed" && renewalIds.has(orderId(r)));
+          if (dropped.length) {
+            console.log(`[meta-capi] skipped ${dropped.length} renewal order_placed event(s) — not a Purchase`);
+          }
+          return rows.filter((r) => !(r.event_type === "order_placed" && renewalIds.has(orderId(r)))).map((r) => r.id);
+        };
+
         const { data: recentEvents } = await admin
           .from("storefront_events")
-          .select("id")
+          .select("id, event_type, meta")
           .eq("workspace_id", sinkRow.workspace_id)
           .in("event_type", mappedTypes)
           .gte("created_at", sinceIso)
           .limit(1000);
-        await seedMissing((recentEvents || []).map((e) => e.id as string));
+        await seedMissing(await dropRenewalPurchases(recentEvents || []));
 
         // ── 1b. Safety net for order_placed (the money event) ────────
         // The 20-minute lookback above permanently skips any order_placed
@@ -110,12 +142,12 @@ export const metaCapiDispatchCron = inngest.createFunction(
           const capiWindowIso = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
           const { data: purchases } = await admin
             .from("storefront_events")
-            .select("id")
+            .select("id, meta")
             .eq("workspace_id", sinkRow.workspace_id)
             .eq("event_type", "order_placed")
             .gte("created_at", capiWindowIso)
             .limit(1000);
-          await seedMissing((purchases || []).map((e) => e.id as string));
+          await seedMissing(await dropRenewalPurchases((purchases || []).map((p) => ({ ...p, event_type: "order_placed" }))));
         }
 
         // ── 2. Pull pending + retryable-failed dispatches ────────────
