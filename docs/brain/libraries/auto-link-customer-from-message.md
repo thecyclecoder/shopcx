@@ -1,6 +1,6 @@
 # libraries/auto-link-customer-from-message
 
-Scan a customer's recent inbound messages for emails / order numbers that point at a different customer profile → auto-link them before Sonnet runs.
+Auto-link a different customer profile that is the same person, before Sonnet runs — two strategies: identifiers in the message (email / order number) **and** an exact-after-normalization name+address match.
 
 **File:** `src/lib/auto-link-customer-from-message.ts`
 
@@ -19,6 +19,20 @@ Two identifier kinds:
 
 Linking pre-Sonnet lets `get_customer_account` return the merged set so the orchestrator routes straight to the right journey.
 
+### Identity match (exact name + address) — `autoLinkCustomerByIdentity`
+
+Some same-person splits have **no shared identifier in the message** — the customer can't quote the order number or the other email because they don't know it. A split across two email providers is the common shape: the active subscription / renewal order lives on the profile the ticket *isn't* linked to.
+
+Motivating case — ticket f64d979b: "Pam Bensley" (`p_sb38@hotmail.com`, 4 cancelled subs, no recent order) wrote in to cancel a renewal she didn't recognize. The renewal (`SC132642`) + active sub actually live on "Pamela Bensley" (`psb71us@outlook.com`, same address "5318 S Katy Road"). Until linked, `get_customer_account` on the ticket profile showed nothing to cancel/refund and the refund playbook couldn't fire.
+
+A name+address match is a high-confidence "same human" signal, so it links **without asking the customer** (unlike the fuzzy suggestions in the agent UI, which need human confirm). Match rule:
+
+- **Last name** identical (case-insensitive).
+- **First name** identical, or one an exact prefix of the other with the shorter ≥3 chars (`Pam`→`Pamela`, `Rob`→`Robert`; never `Al`→`Alexander`). Both must be present.
+- **Address** `address1` identical after normalization (lowercase, strip `.,#`, fold USPS street/directional abbreviations: `south`→`s`, `road`→`rd`, …) **and** first-5 of `zip` identical.
+
+Honors [[../tables/customers]] `customer_link_rejections` in **either direction** — a previously-rejected pair is never re-linked.
+
 ## Exports
 
 ### `autoLinkCustomerFromMessage` — function
@@ -29,9 +43,17 @@ async function autoLinkCustomerFromMessage(admin: SupabaseClient, workspaceId: s
 // linkedEmails entries are labels, e.g. "kzcosmetiks@gmail.com (order SC132076)"
 ```
 
+### `autoLinkCustomerByIdentity` — function
+
+```ts
+async function autoLinkCustomerByIdentity(admin: SupabaseClient, workspaceId: string, customerId: string): Promise<AutoLinkResult>
+// Links every same-workspace profile that matches by exact-normalized name + address.
+// No ticketId — keys off the customer's own name/default_address, not message text.
+```
+
 ## Callers
 
-- [[../inngest/unified-ticket-handler]] — `auto-link-from-inbound` step (before the Sonnet orchestrator).
+- [[../inngest/unified-ticket-handler]] — `auto-link-from-inbound` step (`autoLinkCustomerFromMessage`) and `auto-link-by-identity` step (`autoLinkCustomerByIdentity`), both before the Sonnet orchestrator.
 
 ## Gotchas
 
@@ -40,6 +62,7 @@ async function autoLinkCustomerFromMessage(admin: SupabaseClient, workspaceId: s
 - **Bare numerics only match in an explicit "order #…" context** — keeps phone numbers / zips / dollar amounts from triggering Shopify lookups.
 - **Never throws** — order resolution (incl. the Shopify call) is wrapped; a linking miss never blocks the orchestrator.
 - **Phone extraction is not implemented** despite older docs — emails + order numbers only.
+- **Identity match needs a full identity** — last name (≥2 chars) **and** first name **and** `default_address.address1`+`zip`. A profile missing any of these is skipped (won't auto-link on last-name+address alone — too easy to merge a parent/child or roommate). Address-exact + 5-digit-zip is what keeps same-name-different-people apart.
 
 ---
 
