@@ -2,16 +2,17 @@
 
 Summary: An autonomous, daily-running engine that assesses Superfoods Company's storefront (sessions/engagement per PDP and lander variant) against Meta ad performance, reasons over it as an expert direct-response marketer / offer designer / media buyer, and produces typed, approvable recommendations (e.g. "shift spend to variant X", "test benefit angle Y from product intelligence", "launch a new static adset"). On approval it fires existing ShopCX systems to build Meta objects as drafts (never active) and create new ad/lander assets, so social marketing iterates continuously while Dylan keeps final control by flipping drafts live in Meta. Business outcome: higher blended ROAS and faster creative/offer iteration without manual analysis. This spec is grounded against the existing Amazing Coffee data (product intelligence, PDP + variants, ShopCX-built ads, storefront sessions) and is intended to be refined with Opus once Phase 0 confirms exact Brain schema.
 
-## Phase 0 — Brain access & schema discovery
+## Phase 0 — Brain access & schema discovery ✅
 Goal: give the build agent (and the Opus refinement pass) confirmed read access to docs/brain/ and produce a discovery doc that grounds all later phases in real tables/columns. No production code in this phase.
-- ⏳ Confirm build agent can read docs/brain/ at execution time
-- ⏳ Locate and read Brain docs for the four anchor areas; record exact file paths + key table/column names into a new doc docs/brain/research/iteration-engine-grounding.md
-- ⏳ Product intelligence shape (benefits, angles, claims, ingredients) for products like Amazing Coffee — OPEN: filename TBD
-- ⏳ Sessions / engagement model and grain (per-variant counts, add-to-cart, conversions) — OPEN: filename TBD
-- ⏳ Attribution model: session/order → ad/campaign (UTMs or click IDs) and → PDP/lander variant — OPEN: filename TBD
-- ⏳ Meta connection structure (OAuth tokens, account IDs, any mirrored campaign/adset/ad entities) — OPEN: filename TBD
-- ⏳ Document the existing ad-build → Meta publish path (create ad → generate AI copy → select ad account/campaign/adset → publish) and identify the internal function/endpoint that performs the publish, so Phase 6 can invoke a drafts-only variant
-- ⏳ Produce a "schema gaps" list (what exists vs. must be built) to feed the Opus refinement of Phases 1–6
+Grounding doc: [docs/brain/research/iteration-engine-grounding.md](../research/iteration-engine-grounding.md).
+- ✅ Confirm build agent can read docs/brain/ at execution time
+- ✅ Locate and read Brain docs for the four anchor areas; record exact file paths + key table/column names into a new doc docs/brain/research/iteration-engine-grounding.md
+- ✅ Product intelligence shape (benefits, angles, claims, ingredients) for products like Amazing Coffee — benefit-angle string lives in `product_benefit_selections.benefit_name`, bridged to ads via `product_ad_angles.lead_benefit_anchor`
+- ✅ Sessions / engagement model and grain (per-variant counts, add-to-cart, conversions) — `storefront_sessions`/`storefront_events`; variant parsed from `landing_url` (no first-class variant column), events 90d retention
+- ✅ Attribution model: session/order → ad/campaign (UTMs or click IDs) and → PDP/lander variant — UTMs/click ids on `storefront_sessions`, `orders.attributed_utm_*`; session→ad join is convention-based (`utm_content`≈meta_ad_id) via `ad_publish_jobs`; no real Meta object keys on sessions/orders
+- ✅ Meta connection structure (OAuth tokens, account IDs, any mirrored campaign/adset/ad entities) — `meta_connections`/`meta_ad_accounts`; only `daily_meta_ad_spend` account rollup exists, NO `meta_campaigns/adsets/ads` tables
+- ✅ Document the existing ad-build → Meta publish path (create ad → generate AI copy → select ad account/campaign/adset → publish) and identify the internal function/endpoint that performs the publish, so Phase 6 can invoke a drafts-only variant — publish via `adToolPublishToMeta` (Inngest) → `createAd()` in `src/lib/meta-ads.ts`; drafts-only ALREADY exists (`ad_publish_jobs.publish_active=false` → PAUSED)
+- ✅ Produce a "schema gaps" list (what exists vs. must be built) to feed the Opus refinement of Phases 1–6
 
 ## Phase 1 — Meta performance ingestion
 Goal: store Meta campaign/adset/ad structure plus daily insights, since performance data is currently not stored anywhere.
