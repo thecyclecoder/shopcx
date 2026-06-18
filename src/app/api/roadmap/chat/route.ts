@@ -214,7 +214,7 @@ export async function POST(request: Request) {
     : `${BASE_SYSTEM}${grounding}`;
 
   if (body.action !== "finalize") {
-    const reply = await askOpus(system, messages, 2000);
+    const reply = await askOpus(system, messages, 8000);
     return NextResponse.json({ reply });
   }
 
@@ -223,7 +223,7 @@ export async function POST(request: Request) {
     ...messages,
     { role: "user", content: "Output ONLY the complete spec markdown file content now — no preamble, no code fences, no commentary. Begin with '# <Title> <status emoji>'." },
   ];
-  let markdown = await askOpus(system, finalizeMsgs, 8000);
+  let markdown = await askOpus(system, finalizeMsgs, 16000);
   markdown = markdown.replace(/^```(?:markdown)?\s*/i, "").replace(/```\s*$/i, "").trim();
   if (!markdown.startsWith("#")) return NextResponse.json({ error: "model did not return a spec" }, { status: 502 });
 
