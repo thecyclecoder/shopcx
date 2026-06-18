@@ -1,4 +1,4 @@
-# Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app 🚧
+# Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app ✅
 
 > **🔒 CORE INVARIANTS**
 > 1. **Max-billing.** Builds run as `env -u ANTHROPIC_API_KEY claude -p …` on the build box. The box's shell env and repo `.env.local` must **never** expose `ANTHROPIC_API_KEY` — auth precedence would silently flip builds to metered API. Claude is authed to **Max** via `~/.claude` on the box (verified: headless `claude -p` runs with no API key present).
@@ -37,7 +37,7 @@ A phone-first console on the dashboard that closes the loop from *idea* to *merg
 - ⏳ Three columns — **Planned / In progress / Shipped** — grouped by project track. Each card = a spec; expand to its phases + live build status.
 - ⏳ Runtime file access on Vercel: trace `docs/brain/**` into the function bundle (or parse at build time).
 
-## Phase 2 — Spec-authoring chat (Opus via API) 🚧
+## Phase 2 — Spec-authoring chat (Opus via API) ✅
 
 - ⏳ Chat UI on `/dashboard/roadmap` ("New feature" → conversational panel). Phone-first.
 - ⏳ Backend `POST /api/roadmap/chat` streams Opus (Anthropic API / Vercel AI Gateway). System prompt loads the spec template ([[../project-management]] § Writing a spec) + brain context so the spec is grounded in real tables/libs.
@@ -64,7 +64,7 @@ The bridge from an on-demand phone tap to the (tailnet-only, no-inbound) box. Th
 - ⏳ Worker parses the `stream-json` stream for: the `claude_session_id` (store it — needed for resume), terminal status, and any structured questions block (Phase 5). The `build-spec` skill opens the `claude/*` PR via GitHub REST with the token in `.env.local`.
 - ⏳ Concurrency 1–2 to start (8 cores can do more, but **Max rate limits** are the real ceiling). `--max-turns` + a wall-clock timeout guard runaway → `needs_attention` with `log_tail`.
 
-## Phase 5 — Build feedback / questions loop 🚧 (the answer to "builds have questions")
+## Phase 5 — Build feedback / questions loop ✅ (the answer to "builds have questions")
 
 A build is a **multi-turn conversation spread across separate headless invocations.** The `agent_jobs` row carries questions/answers between turns; Claude's **on-disk transcript** (`~/.claude/projects/`) carries the context. The worker is the durable process; the *job* waits, never a live process — so no tmux, no held-open SSH.
 
