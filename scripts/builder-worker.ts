@@ -13,7 +13,7 @@
  */
 import { readFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, join } from "path";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -67,6 +67,22 @@ function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string 
   return { code: r.status ?? -1, out: r.stdout || "", err: r.stderr || "" };
 }
 
+// Async (NON-blocking) exec — REQUIRED for the long-running claude/tsc/apply steps so concurrent
+// build lanes actually overlap. spawnSync freezes the whole event loop and would serialize lanes.
+function shAsync(cmd: string, args: string[], opts: { timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ code: number; out: string; err: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd: opts.cwd || REPO_DIR, env: opts.env || process.env });
+    let out = "";
+    let err = "";
+    const cap = 64 * 1024 * 1024;
+    child.stdout?.on("data", (d) => { out += d.toString(); if (out.length > cap) out = out.slice(-cap); });
+    child.stderr?.on("data", (d) => { err += d.toString(); if (err.length > cap) err = err.slice(-cap); });
+    const timer = opts.timeout ? setTimeout(() => child.kill("SIGKILL"), opts.timeout) : null;
+    child.on("close", (code) => { if (timer) clearTimeout(timer); resolve({ code: code ?? -1, out, err }); });
+    child.on("error", (e) => { if (timer) clearTimeout(timer); resolve({ code: -1, out, err: err + String(e) }); });
+  });
+}
+
 // A fresh box has no git identity → `git commit` errors. Repo-local config is shared across worktrees.
 function ensureGitIdentity() {
   sh("git", ["config", "user.email", "builder@shopcx.ai"]);
@@ -77,7 +93,7 @@ function ensureGitIdentity() {
 // these in its own env (from the systemd EnvironmentFile) to execute APPROVED actions.
 const SECRET_RE = /SERVICE_ROLE|PASSWORD|SECRET|_TOKEN|PRIVATE|BRAINTREE|TWILIO|RESEND|AVALARA|EASYPOST|KLAVIYO|META_|ANTHROPIC|OPENAI|SUPABASE_DB/i;
 
-function runClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runClaude(prompt: string, sessionId: string | null, cwd: string) {
   // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -88,19 +104,19 @@ function runClaude(prompt: string, sessionId: string | null, cwd: string) {
   }
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = spawnSync("claude", args, { cwd, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: BUILD_TIMEOUT_MS });
+  const r = await shAsync("claude", args, { cwd, env, timeout: BUILD_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
-  let isError = r.status !== 0;
+  let isError = r.code !== 0;
   try {
-    const obj = JSON.parse((r.stdout || "").trim());
+    const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
   } catch {
-    resultText = (r.stdout || "") + (r.stderr || "");
+    resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.stdout || "") + (r.stderr || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
 }
 
 function parseStatus(text: string): { status: string; questions?: unknown[]; summary?: string } | null {
@@ -179,7 +195,7 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
         a.status = r.ok ? "done" : "failed";
         a.result = r.ok ? "merged" : `merge failed ${r.status}`;
       } else if (a.cmd) {
-        const r = sh("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd });
+        const r = await shAsync("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd });
         a.status = r.code === 0 ? "done" : "failed";
         a.result = (r.out + r.err).slice(-500);
       } else {
@@ -217,7 +233,8 @@ async function runJob(job: Job) {
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
   }
   // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
-  if (!existsSync(join(wt, "node_modules"))) sh("ln", ["-s", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+  // Force (-sfn) so a leftover/broken link from a prior run is always replaced.
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
 
   try {
     // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.
@@ -242,7 +259,7 @@ async function runJob(job: Job) {
           `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
         ].join("\n");
 
-    const { session, resultText, isError, raw } = runClaude(prompt, job.claude_session_id, wt);
+    const { session, resultText, isError, raw } = await runClaude(prompt, job.claude_session_id, wt);
     const logTail = raw.slice(-2000);
     if (session) await update(job.id, { claude_session_id: session });
 
@@ -292,7 +309,7 @@ async function runJob(job: Job) {
     }
 
     // completed path: gate on tsc (in the worktree)
-    const tsc = sh("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
     if (tsc.code !== 0) {
       await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
       return;
