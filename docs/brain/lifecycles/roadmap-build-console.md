@@ -14,7 +14,7 @@ Describe a feature → spec → autonomous build on the **Max subscription** →
 
 ## End-to-end trace
 
-1. **Author.** `/dashboard/roadmap` → **✨ New feature** opens the Opus authoring chat (`POST /api/roadmap/chat`, Anthropic API — the only sanctioned API spend). Talk it through → **Save spec** (commits `docs/brain/specs/{slug}.md` to `main` via GitHub API) or **Save & build** (also queues a job). **Refine with Opus** on a spec's detail page does the same for an *existing* spec. (Hand-written specs work too.)
+1. **Author.** `/dashboard/roadmap` → **✨ New feature** opens the Opus authoring chat (`POST /api/roadmap/chat`, Anthropic API — the only sanctioned API spend). The chat is **grounded in the brain** ([[../specs/authoring-chat-grounding]]): the system prompt carries a compact brain index (`getBrainTree()` → `slug — title` for every page), and Opus has two read-only tools — `read_brain_page(slug)` (GitHub API) and `grep_repo(query)` (GitHub code search, brain-first fallback) — so it drafts against real tables/libraries/lifecycles instead of emitting `OPEN: …TBD`. Same grounding applies on finalize, and the emitted spec carries the `**Owner:** / **Parent:**` taxonomy line. Talk it through → **Save spec** (commits `docs/brain/specs/{slug}.md` to `main` via GitHub API) or **Save & build** (also queues a job). **Refine with Opus** on a spec's detail page does the same for an *existing* spec. (Hand-written specs work too.)
 2. **Dispatch.** **Build** on a card → `POST /api/roadmap/build` → inserts `agent_jobs` (`queued`). One active build per spec. Variants: per-phase **build** ([[../dashboard/roadmap]] PhaseList) and **Report issue** both queue a build scoped via `instructions` (no spec edit, spec stays ✅).
 3. **Claim.** The worker calls `claim_agent_job()` (atomic, `FOR UPDATE SKIP LOCKED`) → `building`. It runs `claude -p --dangerously-skip-permissions` (bypass, no prompts) via the **`build-spec` skill**, as `builder`, with prod-write secrets **stripped from the build env** and no `ANTHROPIC_API_KEY` (stays on Max).
 4. **Outcomes** (the build emits one final-status JSON):
@@ -38,14 +38,14 @@ Bypass is safe because of four things, not prompts: (1) **PR-gate** — code nev
 
 - Board + detail: `src/app/dashboard/roadmap/{page,[slug]/page}.tsx`; parser `src/lib/brain-roadmap.ts`.
 - Components: `BuildButton.tsx` (build · status · answer · approve · squash-merge · report-issue), `StatusControl.tsx`, `PhaseList.tsx` (per-phase status + cut + build), `AuthoringChat.tsx` (new + refine).
-- APIs: `src/app/api/roadmap/{build,status,answer,approve,chat}/route.ts`; merge reuses `/api/branches/[number]/merge`.
+- APIs: `src/app/api/roadmap/{build,status,answer,approve,chat}/route.ts`; merge reuses `/api/branches/[number]/merge`. The chat route's brain grounding uses `getBrainTree()` from `src/lib/brain-tree.ts` (index) + the GitHub API (read_brain_page / grep_repo tools); `docs/brain/**/*.md` is file-traced into the chat route's bundle in `next.config.ts`.
 - Queue: [[../tables/agent_jobs]] + `src/lib/agent-jobs.ts` + `claim_agent_job()`.
 - Worker: `scripts/builder-worker.ts` (box). Box runbook: [[../recipes/build-box-setup]].
 - Skill: `.claude/skills/build-spec/`.
 
 ## Status / open work
 
-**Shipped (2026-06-18):** the full loop — authoring chat (new + refine), board with editable status + per-phase status/cut, build dispatch + per-phase build + report-issue fix-builds, the box worker (non-root, bypass, sandboxed, Max), `needs_input` answer loop, `needs_approval` approval gates, and phone-merge. Box hardening (Phase 1 of build-approval-gates) live-proven via a real bypass-as-builder build.
+**Shipped (2026-06-18):** the full loop — authoring chat (new + refine), board with editable status + per-phase status/cut, build dispatch + per-phase build + report-issue fix-builds, the box worker (non-root, bypass, sandboxed, Max), `needs_input` answer loop, `needs_approval` approval gates, and phone-merge. Box hardening (Phase 1 of build-approval-gates) live-proven via a real bypass-as-builder build. The authoring chat is now **brain-grounded** ([[../specs/authoring-chat-grounding]]): brain index in the system prompt + read_brain_page / grep_repo tool loop, applied to both chat and finalize.
 
 **Awaiting first real exercise:** the `needs_input` and `needs_approval` round-trips are fully wired + deployed but haven't been triggered by a real build yet (the smoke build completed without needing either). The next migration-requiring build (e.g., finishing a stalled spec) will exercise the approval gate live.
 
