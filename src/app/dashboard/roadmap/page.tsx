@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getRoadmap, type Phase, type SpecCard } from "@/lib/brain-roadmap";
+import { getRoadmap, getArchive, type Phase, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, reconcileMergedJobs, type AgentJob } from "@/lib/agent-jobs";
 import StatusControl from "./StatusControl";
@@ -13,7 +13,9 @@ export const dynamic = "force-dynamic";
 const COLUMNS: { key: Phase; label: string }[] = [
   { key: "planned", label: "Planned" },
   { key: "in_progress", label: "In progress" },
-  { key: "shipped", label: "Shipped" },
+  // "Shipped" = built + deployed but NOT yet owner-verified in prod. Verifying folds + archives the
+  // spec, so this column stays a short, real to-do list. See docs/brain/project-management.md.
+  { key: "shipped", label: "Shipped — awaiting verification" },
 ];
 
 const DOT: Record<Phase, string> = {
@@ -90,7 +92,7 @@ function Card({ spec, job }: { spec: SpecCard; job: AgentJob | null }) {
 }
 
 export default async function RoadmapPage() {
-  const { specs, tracks } = await getRoadmap();
+  const [{ specs, tracks }, archive] = await Promise.all([getRoadmap(), getArchive()]);
   const workspaceId = await getActiveWorkspaceId();
   const jobsBySlug = workspaceId ? await getLatestJobsBySlug(workspaceId) : {};
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
@@ -104,6 +106,7 @@ export default async function RoadmapPage() {
           <Link href="/dashboard/roadmap/map" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
             Map view →
           </Link>
+          <AuthoringChat seed triggerLabel="🧠 New spec from brain" />
           <AuthoringChat triggerLabel="✨ New feature" />
         </div>
       </div>
@@ -155,6 +158,37 @@ export default async function RoadmapPage() {
             );
           })}
         </div>
+      )}
+
+      {archive.length > 0 && (
+        <details className="mt-6 rounded-lg border border-zinc-200 bg-white/60 dark:border-zinc-800 dark:bg-zinc-900/40">
+          <summary className="cursor-pointer select-none px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-zinc-500 marker:text-zinc-400 dark:text-zinc-400">
+            Archived — verified &amp; retired
+            <span className="ml-2 tabular-nums text-zinc-400">{archive.length}</span>
+          </summary>
+          <div className="border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+            <p className="mb-3 text-xs text-zinc-400">
+              Shipped + owner-verified in production, folded into the brain, and removed from{" "}
+              <code>specs/</code>. Reads <code>docs/brain/archive.md</code>. Re-hydrate any of these into a fresh spec.
+            </p>
+            <ul className="space-y-1.5">
+              {archive.map((e, i) => (
+                <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                  <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
+                  <Link href={`/dashboard/brain/${e.link}`} className="font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400">
+                    {e.title}
+                  </Link>
+                  {e.date && <span className="text-zinc-400">verified {e.date}</span>}
+                  <span className="text-zinc-300 dark:text-zinc-600">·</span>
+                  <Link href={`/dashboard/brain/${e.link}`} className="text-teal-600 hover:underline dark:text-teal-400">
+                    {e.label} ↗
+                  </Link>
+                  <AuthoringChat seed seedSlug={e.link} triggerLabel="New spec from brain" />
+                </li>
+              ))}
+            </ul>
+          </div>
+        </details>
       )}
     </div>
   );

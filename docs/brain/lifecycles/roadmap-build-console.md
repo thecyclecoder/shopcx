@@ -24,6 +24,8 @@ Describe a feature → spec → autonomous build on the **Max subscription** →
    - `failed` / `needs_attention` → surfaced with `error` + `log_tail`.
 5. **Review + merge.** The card's **Squash & merge** (or [[../dashboard/branches]]) merges the `claude/*` PR — owner-only, server-revalidated.
 6. **Status reflects reality.** Spec emojis drive the board columns; `agent_jobs` drives the live per-card build chip + buttons.
+7. **Verify → fold → archive.** **Shipped (✅)** = built + deployed (automated). The owner-only, human gate **Verified** comes after: once Dylan confirms a shipped feature works in prod, **Mark verified & archive** (`BuildButton`) queues a **fold-build** (`POST /api/roadmap/build` `{ verify: true }` → canonical fold instructions in the build route, not a spec rebuild). The build folds the spec into its permanent brain homes, appends a one-line entry to [[../archive]], `git rm`s `specs/{slug}.md`, and opens a PR. Merge → the spec leaves the board into the collapsed **Archived** section (reads `archive.md`). The Shipped column is relabeled **"Shipped — awaiting verification"** so it stays a short, real to-do list. Convention: `shipped → verified → fold + delete + archive-index` ([[../project-management]]). Nothing is lost — knowledge in the brain, pointer in the archive, spec `git show`-recoverable.
+8. **Re-hydrate (New spec from brain).** Revisiting an archived (or any reference) feature doesn't reactivate the stale spec: **New spec from brain** seeds the authoring chat with the *current* brain page (`POST /api/roadmap/chat` `{ seedSlug }`) and Opus drafts a *fresh* spec to extend/fix it → normal Build flow. The authoring chat in reverse.
 
 ## Safety model
 
@@ -36,9 +38,9 @@ Bypass is safe because of four things, not prompts: (1) **PR-gate** — code nev
 
 ## Code map
 
-- Board + detail: `src/app/dashboard/roadmap/{page,[slug]/page}.tsx`; parser `src/lib/brain-roadmap.ts`.
-- Components: `BuildButton.tsx` (build · status · answer · approve · squash-merge · report-issue), `StatusControl.tsx`, `PhaseList.tsx` (per-phase status + cut + build), `AuthoringChat.tsx` (new + refine).
-- APIs: `src/app/api/roadmap/{build,status,answer,approve,chat}/route.ts`; merge reuses `/api/branches/[number]/merge`. The chat route's brain grounding uses `getBrainTree()` from `src/lib/brain-tree.ts` (index) + the GitHub API (read_brain_page / grep_repo tools); `docs/brain/**/*.md` is file-traced into the chat route's bundle in `next.config.ts`.
+- Board + detail: `src/app/dashboard/roadmap/{page,[slug]/page}.tsx`; parser `src/lib/brain-roadmap.ts` (`getRoadmap` + `getArchive` for the Archived section).
+- Components: `BuildButton.tsx` (build · status · answer · approve · squash-merge · report-issue · **mark verified & archive**), `StatusControl.tsx`, `PhaseList.tsx` (per-phase status + cut + build), `AuthoringChat.tsx` (new + refine + **seed / re-hydrate**).
+- APIs: `src/app/api/roadmap/{build,status,answer,approve,chat}/route.ts` (build accepts `{ verify: true }` → fold-build; chat accepts `{ seedSlug }` → re-hydrate); merge reuses `/api/branches/[number]/merge`. Archive index: `docs/brain/archive.md`. The chat route's brain grounding uses `getBrainTree()` from `src/lib/brain-tree.ts` (index) + the GitHub API (read_brain_page / grep_repo tools); `docs/brain/**/*.md` is file-traced into the chat route's bundle in `next.config.ts`.
 - Queue: [[../tables/agent_jobs]] + `src/lib/agent-jobs.ts` + `claim_agent_job()`.
 - Worker: `scripts/builder-worker.ts` (box). Box runbook: [[../recipes/build-box-setup]].
 - Skill: `.claude/skills/build-spec/`.
@@ -49,8 +51,10 @@ Bypass is safe because of four things, not prompts: (1) **PR-gate** — code nev
 
 **Awaiting first real exercise:** the `needs_input` and `needs_approval` round-trips are fully wired + deployed but haven't been triggered by a real build yet (the smoke build completed without needing either). The next migration-requiring build (e.g., finishing a stalled spec) will exercise the approval gate live.
 
-**Known gaps / future:** worker concurrency vs Max rate limits (start 1–2); "commit without deploy" for status-only edits (deferred); fold the two source specs into this lifecycle + delete them on a housekeeping pass.
+**Shipped (2026-06-18, lifecycle + archival):** the **Verified** gate — Mark verified & archive on shipped cards queues a fold-build (`{ verify: true }`) that folds + appends to [[../archive]] + `git rm`s the spec + opens a PR; the Shipped column relabeled "Shipped — awaiting verification"; the collapsed **Archived** section (reads `archive.md`); and **New spec from brain** re-hydration (`AuthoringChat seed` → chat route `{ seedSlug }` seeds Opus with the current brain page). No schema change — reuses `agent_jobs` + the build pipeline.
+
+**Known gaps / future:** worker concurrency vs Max rate limits (start 1–2); "commit without deploy" for status-only edits (deferred); fold the source specs into this lifecycle + delete them on a housekeeping pass; the **New spec from brain** picker is a typed brain-slug (no autocomplete over ~600 pages yet); the `fold-to-brain` skill ([[../specs/repo-skills-catalog]], P1) is still pending — the fold-build uses self-contained canonical instructions in the build route until it lands.
 
 ## Related
 
-[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../specs/repo-skills-catalog]] · [[../dashboard/roadmap]] · [[../dashboard/branches]] · [[../tables/agent_jobs]] · [[../recipes/build-box-setup]] · [[agent-todo-system]]
+[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../specs/repo-skills-catalog]] · [[../dashboard/roadmap]] · [[../dashboard/branches]] · [[../archive]] · [[../tables/agent_jobs]] · [[../recipes/build-box-setup]] · [[../project-management]] · [[agent-todo-system]]

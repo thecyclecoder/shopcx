@@ -13,7 +13,7 @@ const nextConfig: NextConfig = {
   // request time. Vercel's file tracer prunes files nothing imports, so include the
   // brain markdown explicitly or the route renders empty on its own data in production.
   outputFileTracingIncludes: {
-    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md"],
+    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md"],
     "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md"],
     "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md"],
     "/dashboard/brain": ["./docs/brain/**/*.md"],

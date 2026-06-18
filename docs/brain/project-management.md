@@ -22,15 +22,15 @@ Function (Growth, CMO, Retention, CFO, Logistics, CS, Platform/Eng)   functions/
 
 This hierarchy is operationalized by the [[specs/goal-decomposition-engine|goal-decomposition engine]]: write a goal (or point at a mandate), the planner gap-analyzes against the brain and proposes owner/parent-tagged specs, you approve the branches, and the existing build pipeline ships them.
 
-## The four states
+## The five states
 
 ```
-   ┌──────────┐    ┌──────────┐    ┌─────────────┐    ┌──────────┐
-   │  IDEA    │ →  │ PLANNED  │ →  │ IN PROGRESS │ →  │ SHIPPED  │
-   │ (memory) │    │  spec/   │    │   spec/     │    │ folded   │
-   │          │    │          │    │ + checkmarks│    │ + spec   │
-   │          │    │          │    │             │    │ deleted  │
-   └──────────┘    └──────────┘    └─────────────┘    └──────────┘
+   ┌──────────┐   ┌──────────┐   ┌─────────────┐   ┌──────────┐   ┌──────────┐
+   │  IDEA    │ → │ PLANNED  │ → │ IN PROGRESS │ → │ SHIPPED  │ → │ VERIFIED │
+   │ (memory) │   │  spec/   │   │   spec/     │   │ built +  │   │ folded + │
+   │          │   │  all ⏳  │   │ phases 🚧   │   │ deployed │   │ archived │
+   │          │   │          │   │             │   │  (✅)    │   │ spec rm  │
+   └──────────┘   └──────────┘   └─────────────┘   └──────────┘   └──────────┘
 ```
 
 | State | Where it lives | How you change it |
@@ -38,7 +38,14 @@ This hierarchy is operationalized by the [[specs/goal-decomposition-engine|goal-
 | **Idea** | An informal note in agent memory or a chat — not yet committed | Write a spec to promote it |
 | **Planned** | `docs/brain/specs/{slug}.md` with all phases marked ⏳ | git add + commit the spec |
 | **In progress** | Same spec file, phases marked 🚧 as they're picked up | Update the phase checkboxes as work lands |
-| **Shipped** | Content folded into the relevant `lifecycles/`, `tables/`, `libraries/`, `inngest/`, `integrations/`, `recipes/`, or `dashboard/` pages. The "Status / open work" block on the lifecycle reads `Shipped:`. Spec file deleted from `specs/` | Delete the spec, update the affected pages |
+| **Shipped** | All phases ✅ in `specs/{slug}.md` — **built + deployed**, stamped automatically by the build pipeline. The spec **stays** in `specs/` (the board's "Shipped — awaiting verification" column). Not yet folded. | Mark phases ✅ as builds land |
+| **Verified** | Spec content folded into the relevant `lifecycles/`/`tables/`/`libraries/`/`inngest/`/`integrations/`/`recipes/`/`dashboard/` pages, a one-line entry appended to [[archive]], spec file `git rm`'d. The "Status / open work" block on the lifecycle reads `Shipped:`. | **Owner** clicks **Mark verified & archive** → fold-build → merge |
+
+### Shipped vs Verified — why the extra gate
+
+**Shipped (✅)** = the build pipeline ran and deployed the code — *automated*. **Verified** = the owner tested it in production and it actually works — a *human, owner-only gate* that never automates. The gap matters: "Shipped" should be a short, honest to-do list of "live but not yet prod-verified," not a graveyard of done work. On **Verify**, durable knowledge folds into the brain (it should already be there from ship time), [[archive]] gets a browsable one-line pointer, and the spec is deleted — git history is the immutable archive. **Nothing is ever lost:** the knowledge lives in the brain pages, the archive index keeps a pointer, and a deleted spec is always `git show`-recoverable.
+
+To revisit an archived feature, don't reactivate the stale spec — use **New spec from brain** (re-hydration): the authoring chat seeds Opus with the *current* brain page and drafts a *fresh* spec to extend or fix it. See [[dashboard/roadmap]] + [[lifecycles/roadmap-build-console]].
 
 ## Writing a spec
 
@@ -76,9 +83,9 @@ Once the spec is in `specs/`, start a new Claude Code session and fire:
 
 The session reads the spec, executes the phases, and stops when the completion criteria are met. As phases land, the agent commits AND updates the spec's phase emojis from ⏳ → 🚧 → ✅. Each commit is its own PR-equivalent so progress is visible in git history too.
 
-## Folding a shipped spec into the brain
+## Folding a shipped spec into the brain (on Verify)
 
-When all phases hit ✅ AND the completion criteria are met:
+This is the **Verified** transition — `shipped → verified → fold + delete + archive-index`. It fires when the **owner** marks a shipped spec **verified** (Mark verified & archive on the board), which queues a **fold-build**. When all phases hit ✅, the completion criteria are met, AND the owner has confirmed it works in production:
 
 1. **Fold the content into existing brain pages** — every concept the spec introduced gets a permanent home:
    - New tables → `tables/{name}.md`
@@ -91,8 +98,9 @@ When all phases hit ✅ AND the completion criteria are met:
    - Cross-cutting rules → `customer-voice.md` / `operational-rules.md` / `ui-conventions.md` / `orchestrator-tools.md`
 2. **Cross-link** — every new page wikilinks 3-5 related pages and is wikilinked FROM at least one existing page (so the brain stays navigable).
 3. **Update the README** — `README.md` folder counts + the Core/Tickets/AI/etc. category lists if any table moved into them.
-4. **Delete the spec file** — `git rm docs/brain/specs/{slug}.md`. The content lives in its permanent homes now; keeping the spec around invites drift.
-5. **One PR / commit** — fold + delete + commit together. Don't leave the spec lingering "just in case." Git history is the archive.
+4. **Append to the archive index** — add one line to [[archive]]'s `## Index` list (newest-first): `- **{Title}** · verified {YYYY-MM-DD} · → [[lifecycles/{slug}]]`. This is the browsable pointer the board's **Archived** section reads.
+5. **Delete the spec file** — `git rm docs/brain/specs/{slug}.md`. The content lives in its permanent homes now; keeping the spec around invites drift.
+6. **One PR / commit** — fold + archive-index + delete + commit together. Don't leave the spec lingering "just in case." Git history is the immutable archive; a deleted spec is always `git show`-recoverable.
 
 ## The "Status / open work" pattern on lifecycle pages
 
@@ -138,4 +146,4 @@ That triplet answers "what's done, what's next, what's blocked" without Dylan ha
 
 ## Related
 
-[[README]] · [[customer-voice]] · [[operational-rules]] · [[lifecycles/ai-learning]] (example of a shipped + folded spec)
+[[README]] · [[archive]] · [[dashboard/roadmap]] · [[lifecycles/roadmap-build-console]] · [[customer-voice]] · [[operational-rules]] · [[lifecycles/ai-learning]] (example of a shipped + folded spec)
