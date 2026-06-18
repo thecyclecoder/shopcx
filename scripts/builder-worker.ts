@@ -51,6 +51,12 @@ function sh(cmd: string, args: string[], opts: { timeout?: number } = {}) {
   return { code: r.status ?? -1, out: r.stdout || "", err: r.stderr || "" };
 }
 
+// A fresh box has no git identity → `git commit` errors. Set it (repo-local) so the worker is self-contained.
+function ensureGitIdentity() {
+  sh("git", ["config", "user.email", "builder@shopcx.ai"]);
+  sh("git", ["config", "user.name", "ShopCX Build Worker"]);
+}
+
 function runClaude(prompt: string, sessionId: string | null) {
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // belt-and-suspenders: stay on Max
@@ -172,9 +178,11 @@ async function runJob(job: Job) {
   console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
   if (parsed?.status === "needs_input") {
-    sh("git", ["add", "-A"]);
-    sh("git", ["commit", "-m", `wip: ${slug} (needs input)`]);
-    sh("git", ["push", "-u", "origin", branch!]);
+    if (sh("git", ["status", "--porcelain"]).out.trim()) {
+      sh("git", ["add", "-A"]);
+      sh("git", ["commit", "-m", `wip: ${slug} (needs input)`]);
+      sh("git", ["push", "-u", "origin", branch!]);
+    }
     const pr = await ensurePr(branch!, slug, true);
     await update(job.id, {
       status: "needs_input",
@@ -204,20 +212,29 @@ async function runJob(job: Job) {
     return;
   }
   sh("git", ["add", "-A"]);
-  sh("git", ["commit", "-m", `build: ${slug}\n\n${parsed?.summary ?? ""}`]);
+  const commit = sh("git", ["commit", "-m", `build: ${slug}\n\n${parsed?.summary ?? ""}`]);
+  if (commit.code !== 0) {
+    await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
+    return;
+  }
   const push = sh("git", ["push", "-u", "origin", branch!]);
   if (push.code !== 0) {
     await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
     return;
   }
   const pr = await ensurePr(branch!, slug, false);
-  await update(job.id, { status: "completed", pr_url: pr?.url ?? null, pr_number: pr?.number ?? null, log_tail: logTail });
-  console.log(`${tag} ✓ completed → ${pr?.url ?? "(no PR)"}`);
+  if (!pr) {
+    await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
+    return;
+  }
+  await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
+  console.log(`${tag} ✓ completed → ${pr.url}`);
 }
 
 async function main() {
   if (!GH_TOKEN) throw new Error("GITHUB_TOKEN not set");
   db = await admin();
+  ensureGitIdentity();
   console.log(`builder-worker up — repo ${REPO} at ${REPO_DIR}, polling every ${POLL_MS}ms`);
   for (;;) {
     try {
