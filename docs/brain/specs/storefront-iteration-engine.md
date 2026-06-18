@@ -24,14 +24,14 @@ Grounding doc: [docs/brain/research/iteration-engine-grounding.md](../research/i
 - ✅ Ad-build → Meta publish path — `ad-tool/publish-to-meta` (Inngest) → `createAd()` in `src/lib/meta-ads.ts`; drafts-only ALREADY native (`ad_publish_jobs.publish_active=false` → PAUSED)
 - ✅ Schema-gaps list produced to feed refinement
 
-## Phase 1 — Meta performance ingestion ⏳
+## Phase 1 — Meta performance ingestion ✅
 Goal: store Meta campaign/adset/ad structure + daily insights (none stored today).
-- ⏳ New tables: `meta_campaigns`, `meta_adsets`, `meta_ads` (structure + status + parent ids + budget), `meta_insights_daily` (spend, impressions, clicks, CTR, CPC, purchases, revenue, ROAS, frequency — keyed `(workspace_id, meta_object_id, level, snapshot_date)`, `level` ∈ campaign|adset|ad)
-- ⏳ Map ShopCX-built ads to Meta ids via existing `ad_publish_jobs.meta_ad_id`/`meta_adset_id`/`meta_campaign_id` (no new column needed)
-- ⏳ Insights pull: Graph v21.0 `GET /act_{meta_account_id}/insights` per level; account id bare on `meta_ad_accounts.meta_account_id` (client prefixes `act_`); token via `getMetaUserToken(workspaceId)` in `src/lib/meta-ads.ts` (handles decrypt + workspace fallback)
-- ⏳ Idempotent upsert on `(workspace_id, meta_object_id, level, snapshot_date)`
-- ⏳ Backfill last 90 days on first run, then incremental daily
-- ⏳ Sanity check: reconcile `meta_insights_daily` account-total spend vs. existing `daily_meta_ad_spend`; flag drift beyond tolerance
+- ✅ New tables: `meta_campaigns`, `meta_adsets`, `meta_ads` (structure + status + parent ids + budget), `meta_insights_daily` (spend, impressions, clicks, CTR, CPC, purchases, revenue, ROAS, frequency — keyed `(workspace_id, meta_object_id, level, snapshot_date)`, `level` ∈ campaign|adset|ad) — migration `20260618140000_meta_performance_tables.sql`
+- ✅ Map ShopCX-built ads to Meta ids via existing `ad_publish_jobs.meta_ad_id`/`meta_adset_id`/`meta_campaign_id` (no new column needed) — documented on `meta_ads` brain page
+- ✅ Insights pull: Graph v21.0 `GET /act_{meta_account_id}/insights` per level (`src/lib/meta/performance.ts`); account id bare on `meta_ad_accounts.meta_account_id` (client prefixes `act_`); token via `getMetaUserToken(workspaceId)` in `src/lib/meta-ads.ts` (handles decrypt + workspace fallback)
+- ✅ Idempotent upsert on `(workspace_id, meta_object_id, level, snapshot_date)`
+- ✅ Backfill last 90 days on first run, then incremental daily (`ingestMetaPerformance`; daily cron `meta-performance-daily` in `src/lib/inngest/meta-performance.ts`)
+- ✅ Sanity check: reconcile `meta_insights_daily` account-total spend vs. existing `daily_meta_ad_spend` (`reconcileInsightsVsSpend`); flag drift beyond tolerance (>$1 AND >2%), surfaced via `console.warn` (Phase 5 will route to run-records/alerts)
 
 ## Phase 2 — Attribution & variant linkage ⏳
 Goal: tie ad spend → session → PDP/lander variant → order so per-variant unit economics exist.

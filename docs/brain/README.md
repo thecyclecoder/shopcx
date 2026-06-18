@@ -84,7 +84,11 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/email_events]] — Universal email tracking — sent, delivered, opened, clicked, bounced. Joined by `resend_email_id`.
 - [[tables/email_filters]] — Per-workspace inbound-email rules (spam/auto-replies to ignore).
 - [[tables/meta_ad_accounts]] — Meta Ads accounts connected to the workspace.
+- [[tables/meta_ads]] — Local mirror of Meta ad structure + status (iteration engine Phase 1).
+- [[tables/meta_adsets]] — Local mirror of Meta ad set structure + budget + status (iteration engine Phase 1).
+- [[tables/meta_campaigns]] — Local mirror of Meta campaign structure + budget + status (iteration engine Phase 1).
 - [[tables/meta_connections]] — Per-workspace Meta OAuth state + connected page/instagram accounts.
+- [[tables/meta_insights_daily]] — Daily Meta performance insights at campaign/adset/ad grain (iteration engine Phase 1).
 - [[tables/meta_pages]] — Meta Pages connected for inbound DM + comment management.
 - [[tables/meta_post_cache]] — Cached Meta post/ad metadata for comment context (text, image, ad attribution).
 - [[tables/meta_sender_customer_links]] — Meta-sender-id ↔ internal customer_id mapping. Built from Conversations API on DM.
@@ -296,6 +300,7 @@ Every background job, webhook fan-out, and cron lives here. Each page lists trig
 - [[inngest/marketing-coupon-cron]] — Auto-disables expired SMS-campaign coupons.
 - [[inngest/marketing-text]] — SMS campaign send pipeline (schedule + 5-min send tick).
 - [[inngest/meta-historical-comments-sync]] — Backfills `social_comments` from historical posts/ads.
+- [[inngest/meta-performance]] — Meta campaign/adset/ad structure + daily insights ingest (iteration engine Phase 1).
 - [[inngest/meta-sync]] — Per-workspace Meta Page + Instagram sync.
 - [[inngest/monthly-revenue-snapshot]] — Month-end revenue rollup.
 - [[inngest/order-address-fallback]] — Backfills missing ship/bill via `Customer.defaultAddress`.
