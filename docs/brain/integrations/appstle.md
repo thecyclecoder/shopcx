@@ -18,8 +18,8 @@ Base: `https://subscription-admin.appstle.com/api/external/v2`
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/subscription-contracts/{id}?cancellationFeedback={reason}&cancellationNote={note}` | DELETE | Cancel a sub. Reasons: `fraud`, `chargeback`, `customer_request`, etc. |
-| `/subscription-contracts-update-status?contractId={id}&status=PAUSED\|ACTIVE` | PUT | Pause / resume |
+| `/subscription-contracts/{id}?cancellationFeedback={reason}&cancellationNote={note}` | DELETE | Cancel a sub. Reasons: `fraud`, `chargeback`, `customer_request`, etc. **Not a hard delete** — reversible via the update-status PUT below. |
+| `/subscription-contracts-update-status?contractId={id}&status=PAUSED\|ACTIVE` | PUT | Pause (`PAUSED`) / resume + **reactivate** (`ACTIVE`). `status=ACTIVE` un-cancels a cancelled contract, not just an unpause. |
 | `/subscription-contracts-apply-discount?contractId={id}&discountCode={code}` | PUT | Apply a coupon |
 | `/subscription-contracts-remove-discount?contractId={id}&discountId={id}` | PUT | Remove a coupon |
 | `/subscription-contracts-skip?contractId={id}` | PUT | Skip next order |
@@ -81,6 +81,7 @@ Drives [[../tables/billing_forecast_events]] (sub created, cancelled, paused, fr
 ## Gotchas
 
 - **`DELETE` for cancel is required.** PUT to PAUSED ≠ cancel; PUT to CANCELLED won't carry the `cancellationFeedback` that Appstle expects.
+- **Cancel is reversible — it is NOT a hard delete.** A cancelled contract is reactivated by the update-status PUT with `status=ACTIVE` — the same call as resume-from-paused. In code this is `appstleSubscriptionAction(ws, contractId, "resume")`, which sets the contract back to `ACTIVE` and the local row to `active`. Used to undo erroneous fraud cancellations and for win-back restarts (see `scripts/restart-brad-coffee-sub-d31f8183.ts`, step 1). After reactivating, re-check the next billing date — a reactivated contract may carry a stale/past `nextBillingDate` and bill immediately; reschedule via `update-billing-date` if needed. Full how-to: [[../lifecycles/subscription-billing]] § Reactivating a cancelled subscription.
 - **Internal subscriptions bypass Appstle entirely.** Helpers check `is_internal` first; new code must too — `appstleSubscriptionAction()` shows the pattern.
 - **Built-in retries + skip-after-X-failures must be DISABLED** in Appstle settings — our dunning engine owns that logic. See Phase 5 in CLAUDE.md.
 - **Cancellation note carries who+why:** include the operator's display_name (`"Cancelled by Dylan on ShopCX.ai — fraud"`) so it shows up in Appstle's UI for any human review.

@@ -4,16 +4,25 @@ import { addOrderTags } from "@/lib/shopify-order-tags";
 import { zipDistance, extractZip } from "@/lib/geo-distance";
 import { normalizeReseller } from "@/lib/known-resellers";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import freemailDomains from "@/lib/freemail-domains.json";
 
-// Mainstream consumer email providers. A *custom* domain (anything not here)
-// reused against a confirmed-fraud order is a strong signal — rings spin up
-// fresh local parts on a throwaway domain (e.g. @safelywater.com) to beat
-// exact-email matching.
+// Public / shared email providers — freemail, ISP, and disposable domains that
+// *unrelated strangers legitimately share*. Used as an EXCLUSION set: a domain
+// here is NOT treated as a ring signal. A *custom* domain (anything not here)
+// reused against a confirmed-fraud order, or spun up across many fresh accounts,
+// is the real signal — rings register fresh local parts on a throwaway domain
+// they control (e.g. @safelywater.com) to beat exact-email matching.
+//
+// Sourced from the `free-email-domains` list (~12.3k domains, includes legacy
+// providers like netscape.net that a hand-seeded set missed and that caused a
+// false-positive ring on 4 unrelated @netscape.net customers — see
+// docs/brain/lifecycles/fraud-detection.md). Vendored as JSON (no runtime dep);
+// refresh by re-downloading domains.json and re-running the build step. The small
+// inline supplement covers anything the upstream list lacks.
 const FREEMAIL_DOMAINS = new Set<string>([
-  "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com", "hotmail.com",
-  "live.com", "msn.com", "icloud.com", "me.com", "mac.com", "aol.com", "protonmail.com",
-  "proton.me", "gmx.com", "gmx.us", "zoho.com", "yandex.com", "mail.com", "comcast.net",
-  "verizon.net", "att.net", "sbcglobal.net", "cox.net", "charter.net", "bellsouth.net",
+  ...(freemailDomains as string[]),
+  // Supplement — keep additions the upstream list may miss:
+  "netscape.com",
 ]);
 
 /** Two names overlap if one's first-name token contains the other's (≥4 chars),
