@@ -12,7 +12,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 
-export type Phase = "planned" | "in_progress" | "shipped";
+export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
 export interface SpecPhase {
   title: string;
@@ -45,9 +45,11 @@ const SPECS_DIR = path.join(process.cwd(), "docs", "brain", "specs");
 const PLANNED = "⏳";
 const IN_PROGRESS = "🚧";
 const SHIPPED = "✅";
+const REJECTED = "❌";
 
 /** Map a line's status emoji to a phase. A single marker wins; in-progress beats the rest. */
 function statusFromText(s: string): Phase | null {
+  if (s.includes(REJECTED)) return "rejected";
   if (s.includes(IN_PROGRESS)) return "in_progress";
   if (s.includes(PLANNED)) return "planned";
   if (s.includes(SHIPPED)) return "shipped";
@@ -55,7 +57,7 @@ function statusFromText(s: string): Phase | null {
 }
 
 function stripEmoji(s: string): string {
-  return s.replace(/[⏳🚧✅]/g, "").trim();
+  return s.replace(/[⏳🚧✅❌]/g, "").trim();
 }
 
 /** Strip bold markers + collapse [[wikilink|alias]] / [[wikilink]] to plain text for display. */
@@ -67,10 +69,11 @@ function cleanInline(s: string): string {
 }
 
 function deriveStatus(counts: Record<Phase, number>, titleStatus: Phase | null): Phase {
-  if (titleStatus) return titleStatus;
+  // A whole spec is never "rejected"; rejection is a phase-level state. Cut phases don't block shipped.
+  if (titleStatus && titleStatus !== "rejected") return titleStatus;
   if (counts.in_progress > 0) return "in_progress";
   if (counts.planned > 0) return "planned";
-  if (counts.shipped > 0) return "shipped";
+  if (counts.shipped > 0 || counts.rejected > 0) return "shipped";
   return "planned";
 }
 
@@ -123,7 +126,7 @@ function parseSpec(slug: string, raw: string): SpecCard {
     phases.push({ title: cleanInline(m[1]), status: st ?? "planned" });
   }
 
-  const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0 };
+  const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
   for (const p of phases) counts[p.status]++;
 
   return {
@@ -173,7 +176,7 @@ async function readSpecs(): Promise<SpecCard[]> {
       .map(async (f) => parseSpec(f.replace(/\.md$/, ""), await fs.readFile(path.join(SPECS_DIR, f), "utf8"))),
   );
   // newest-feeling first: in-progress, then planned, then shipped; stable by title
-  const rank: Record<Phase, number> = { in_progress: 0, planned: 1, shipped: 2 };
+  const rank: Record<Phase, number> = { in_progress: 0, planned: 1, shipped: 2, rejected: 4 };
   return cards.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
 }
 

@@ -7,11 +7,12 @@ import AuthoringChat from "../AuthoringChat";
 
 export const dynamic = "force-dynamic";
 
-const STATUS_LABEL: Record<Phase, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped" };
+const STATUS_LABEL: Record<Phase, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", rejected: "Cut" };
 const STATUS_BADGE: Record<Phase, string> = {
   planned: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
   in_progress: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   shipped: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  rejected: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
 /** [[spec-slug]] / [[../lifecycles/x|alias]] → a link to the spec detail page if it's a spec, else plain text. */
