@@ -32,6 +32,9 @@ export default function BuildButton({ slug, initialJob }: { slug: string; initia
   const workspace = useWorkspace();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
   const [busy, setBusy] = useState(false);
+  const [showAnswers, setShowAnswers] = useState(false);
+  const [answerMap, setAnswerMap] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -92,19 +95,75 @@ export default function BuildButton({ slug, initialJob }: { slug: string; initia
     }
   }
 
+  async function submitAnswers() {
+    if (!job || submitting) return;
+    setSubmitting(true);
+    try {
+      const answers = (job.questions || []).map((q) => ({ id: q.id, q: q.q, answer: answerMap[q.id] || "" }));
+      const res = await fetch("/api/roadmap/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: job.id, answers }),
+      });
+      const d = await res.json();
+      if (d.job) {
+        setJob(d.job);
+        setShowAnswers(false);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const needsInput = job?.status === "needs_input";
+
   return (
-    <div className="flex items-center gap-2">
-      {chip}
-      {prLink}
-      {!active && (
-        <button
-          type="button"
-          onClick={build}
-          disabled={busy}
-          className="rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {busy ? "…" : job ? "Rebuild" : "Build"}
-        </button>
+    <div className="w-full">
+      <div className="flex items-center justify-end gap-2">
+        {chip}
+        {prLink}
+        {needsInput && (
+          <button
+            type="button"
+            onClick={() => setShowAnswers((v) => !v)}
+            className="rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700"
+          >
+            {showAnswers ? "Cancel" : "Answer"}
+          </button>
+        )}
+        {!active && (
+          <button
+            type="button"
+            onClick={build}
+            disabled={busy}
+            className="rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {busy ? "…" : job ? "Rebuild" : "Build"}
+          </button>
+        )}
+      </div>
+      {needsInput && showAnswers && (
+        <div className="mt-2 space-y-2 rounded-md border border-indigo-200 bg-indigo-50/40 p-2 text-left dark:border-indigo-900/40 dark:bg-indigo-950/20">
+          {(job!.questions || []).map((q) => (
+            <div key={q.id}>
+              <label className="block text-[11px] font-medium text-zinc-700 dark:text-zinc-300">{q.q}</label>
+              <textarea
+                rows={2}
+                value={answerMap[q.id] || ""}
+                onChange={(e) => setAnswerMap((m) => ({ ...m, [q.id]: e.target.value }))}
+                className="mt-1 w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+              />
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={submitAnswers}
+            disabled={submitting}
+            className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {submitting ? "Sending…" : "Submit & resume"}
+          </button>
+        </div>
       )}
     </div>
   );
