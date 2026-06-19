@@ -31,8 +31,11 @@ The Engine (`src/lib/inngest/product-intelligence.ts`) is sound but unreliable a
 ## Supervision (North star)
 Auto-publishing still answers to a supervisor: each run posts a **summary + the box's reasoning**, every output is **editable in the Engine UI** (the override surface), and the whole run is **re-runnable/replayable**. The box optimizes the bounded proxy (a complete product); the owner owns the objective via the Engine UI.
 
-## Products to complete
-`Ashwavana Guru Focus`, `Ashwavana Zen Relax`, `Creatine Prime` (all `intelligence_status='none'`; variant photos + media already exist); `Amazing Creamer` + `Superfood Tabs` (partial). **Amazing Coffee** = the done reference (`published`).
+## Products to complete (canonical targets, by Shopify handle)
+The box resolves each via `products.handle` → fetches `superfoodscompany.com/products/{handle}` for the ingredient chapter:
+- `ashwavana-guru-focus` · `ashwavana-zen-relax` · `amazing-coffee-pods` · `amazing-creamer` · `creatine-prime`
+
+(`ashwavana-guru-focus`/`zen-relax`/`creatine-prime` probed at `intelligence_status='none'`; variant photos + media already exist. **Amazing Coffee** — the non-pods original — is the done reference, `published`.)
 
 ## Tested feasibility (2026-06-19)
 - ✅ PDP ingredient chapter readable via plain fetch (server-rendered HTML).
