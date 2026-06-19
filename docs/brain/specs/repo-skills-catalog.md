@@ -1,4 +1,4 @@
-# Repo Skills Catalog — committed Claude Code skills for operating ShopCX 🚧
+# Repo Skills Catalog — committed Claude Code skills for operating ShopCX ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
 
@@ -51,9 +51,12 @@ Committed to the repo as `.claude/skills/{name}/SKILL.md` drafts (same shape as 
 - ✅ **run-orchestrator-action** (`.claude/skills/run-orchestrator-action/`) — drive `directActionHandlers` via `executeSonnetDecision` from a script (the layer-1 bridge; `apply-coupon-via-executor.ts`).
 - ✅ **fire-inngest-event** (`.claude/skills/fire-inngest-event/`) — `inngest.send` with exact event names, JSON-only payloads, idempotent, batched (recipe).
 
-## Phase 4 — P3 skills ⏳
+## Phase 4 — P3 skills ✅
 
-- ⏳ **render-static** / **generate-ad** — Remotion render + ad pipeline (benefit-traceability, safe-core, cost cap). Mostly UI-driven today; lowest skill priority. Maps to 8 `render-*` + ad recipes.
+Committed to the repo as `.claude/skills/{name}/SKILL.md` drafts (same shape as the P0–P2 skills — each carries a `## Related` cross-link to its source recipe(s)/script pattern). Like the earlier phases, they accrue load-bearing validation as real ad-render work exercises them.
+
+- ✅ **render-static** (`.claude/skills/render-static/`) — design-led Remotion **still** templates (legacy review/offer/benefit_authority + the cold-50+ killer archetypes) across 1:1/4:5/9:16: edit a `remotion/Static*.tsx` template → render local samples (the `bundle`+`selectComposition`+`renderStill` shape) → redeploy the Lambda site. Invariants: never product-on-white (isolated cutout only), reuse-if-present imagery (no repeat Gemini spend), SafeImg, Meta safe-zone insets. Maps to the 8 `render-*` scripts + [[../lifecycles/ad-static]].
+- ✅ **generate-ad** (`.claude/skills/generate-ad/`) — the avatar→angle→script→hero→talking-head→b-roll→render-4-formats video pipeline + the one-beat re-launch refresh. Invariants: benefit-traceability (every claim traces to a tier-1/2 benefit), Meta safe-core, $10 cost cap, NSFW-surfaces. Mostly UI-driven today; the skill is the procedure + invariants behind the studio. Maps to the [[../recipes/generate-ad]] + [[../recipes/ad-relaunch-refresh]] recipes.
 
 ## Safety / invariants
 
@@ -71,6 +74,16 @@ Committed to the repo as `.claude/skills/{name}/SKILL.md` drafts (same shape as 
 - ✅ Skill foundation committed: `scripts/_bootstrap.ts` + the `script-conventions` skill.
 - ⏳ Remaining: exercise probe-db / write-migration / customer-remedy inside a real build (empirical — accrues as specs that touch the DB get built).
 - ✅ Each skill cross-links its source recipe(s)/script pattern (every SKILL.md has a `## Related`). The catalog folds into [[../recipes/README]] when stable.
+- ✅ Phase 4 P3 skills committed (`render-static`, `generate-ad`) — the catalog now covers every layer-2 build/ops pattern (P0–P3).
+
+## Verification
+
+- On `.claude/skills/`, list the directory → expect both `render-static/SKILL.md` and `generate-ad/SKILL.md` present alongside the P0–P2 skills.
+- In a Claude Code session in this repo, type `/render-static` and `/generate-ad` → expect each to appear in the user-invocable skills list with the frontmatter `description` shown (skills must be committed or the harness can't see them).
+- Open each new `SKILL.md` → expect valid `---`-fenced frontmatter (`name` matching the directory, a one-line `description` starting "Use to…/Use when…"), a `## Guardrails` section, and a `## Related` section cross-linking its source recipe(s)/script pattern (`render-statics-deck.ts`/`render-advertorial-*.ts` for render-static; `recipes/generate-ad.md` + `ad-relaunch-refresh.md` for generate-ad).
+- Read `render-static`'s guardrails → expect the load-bearing invariants surfaced verbatim from the lifecycle: never product-on-white (isolated cutout only), SafeImg + fresh signed URLs, redeploy the Lambda site after editing `remotion/`.
+- Read `generate-ad`'s guardrails → expect benefit-traceability (every claim traces to a tier-1/2 benefit), Meta safe-core (Reels 35% bottom strictest), and the $10 `ad_tool_settings.cost_cap_cents` cap.
+- Run `npx tsc --noEmit` → expect no new errors (this phase is docs/skills only — no TS touched).
 
 ## Related
 
