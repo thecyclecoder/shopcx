@@ -24,6 +24,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { AgentJob } from "@/lib/agent-jobs";
 import { ACTIONS, buildAnswerModal, buildNeedsApprovalMessage } from "@/lib/slack-roadmap";
 import { HOME, buildHomeView, publishHome, noticeModal } from "@/lib/slack-home";
+import { syncRoadmapList } from "@/lib/slack-list";
 
 export const maxDuration = 60;
 
@@ -213,6 +214,8 @@ async function handleHomeBuild(
   // Re-publish the Home view so the row reflects the new (queued / already-active) state right away.
   const view = await buildHomeView(workspaceId);
   await publishHome(token, slackUserId, view);
+  // Phase 3: the board state just changed → reconcile the Slack List mirror. Best-effort, non-throwing.
+  await syncRoadmapList(workspaceId);
   return ack();
 }
 
