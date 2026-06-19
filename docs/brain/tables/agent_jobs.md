@@ -20,7 +20,7 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 | `claude_session_id` | `text?` | captured from `claude -p` stream; used for `claude --resume` |
 | `questions` | `jsonb` | `[{id,q,options?}]` surfaced when `needs_input` · default `[]` |
 | `answers` | `jsonb` | `[{id,q,answer}]` the owner submitted · default `[]` |
-| `pending_actions` | `jsonb` | gated actions awaiting approval: `[{id,type,summary,cmd,preview,status,spec?}]`, type = `apply_migration｜run_prod_script｜merge_pr｜spec` · default `[]`. `type:'spec'` is a planner-proposed branch carrying `spec:{slug,title,owner,parent,milestone,intent,gap}`; the worker authors it on approval |
+| `pending_actions` | `jsonb` | gated actions awaiting approval: `[{id,type,summary,cmd,preview,status,spec?,autoSettled?}]`, type = `apply_migration｜run_prod_script｜merge_pr｜spec` · default `[]`. `type:'spec'` is a planner-proposed branch carrying `spec:{slug,title,owner,parent,milestone,intent,gap}`; the worker authors it on approval. `autoSettled` (int) counts how many times a resume re-requested an already-`done` action (the [[../specs/build-lifecycle-hardening]] dedup backstop) |
 | `pr_url` / `pr_number` | `text?` / `int?` | the opened `claude/*` PR |
 | `log_tail` | `text?` | last ~2 KB of the build output (debugging) |
 | `error` | `text?` | failure reason |
@@ -56,6 +56,8 @@ A `kind='plan'` job runs the `plan-goal` skill in `runPlanJob`:
 - **One active build per spec / one active plan per goal** — `POST /api/roadmap/build` and `/api/roadmap/plan` refuse a new job if an active one (`queued|claimed|building|needs_input|needs_approval|queued_resume`) exists for that slug.
 - **Status changes don't move the card live** on the board until reload; `BuildButton` polls `/api/roadmap/build?slug=` while active.
 - A build that pauses (`needs_input`) keeps `claude_session_id`; answering (`/api/roadmap/answer`) sets `queued_resume` and the worker resumes that exact session.
+- **Un-draft on completion is hardened** ([[../specs/build-lifecycle-hardening]]): a paused build opens its PR as a **draft**; on the resume→`completed` path the worker's `markReady` (GraphQL `markPullRequestReadyForReview`) fetches the PR `node_id` fresh **after the final push**, confirms the mutation returned non-draft, **logs + retries once** on failure (no longer swallows), and the completion path does a final `isDraft` re-check before flipping to `completed`. Fixes PR#75/#76 staying draft.
+- **No re-request of an already-applied gated action** ([[../specs/build-lifecycle-hardening]]): the resume prompt lists `Gated actions executed: …` **and** `Already-applied gated actions … do NOT re-request`, so the build treats them as settled. Worker backstop — if a resumed build re-emits a `needs_approval` whose `cmd` matches one already `done` on the job, it auto-marks it settled (carried in `pending_actions` with an `autoSettled` count) instead of re-pausing the owner; if that leaves no genuinely-new action it sets `queued_resume` and the build finishes. A repeat past `AUTO_SETTLE_MAX` (2) trips a loop guard → `needs_attention`. `build-spec`/`write-migration` also `probe-db` before requesting a migration and skip if the change already exists.
 
 ## Migration
 

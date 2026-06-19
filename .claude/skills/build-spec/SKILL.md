@@ -27,6 +27,8 @@ Do the build with **your own native tools** (`Read`/`Edit`/`Bash`/`Grep`). The b
 - Internal joins use UUIDs, never `shopify_*_id`. DB writes go through `createAdminClient()`.
 - Don't push during active Inngest syncs (Vercel deploy kills running functions).
 - **Gated prod actions:** under the box worker you have **no prod credentials**. To apply a migration or run a prod-mutating script, author it as code first (write-migration skill), then emit `{"status":"needs_approval","actions":[{"type":"apply_migration","summary":"…","cmd":"npx tsx scripts/apply-X-migration.ts"}]}` and stop — the worker runs it on the owner's one-tap approval and resumes you. (Locally/interactively you may apply directly.)
+- **Don't re-request a settled action.** On a **resume**, the prompt reports what already ran — `Gated actions executed: …` and/or `Already-applied gated actions — treat as SETTLED, do NOT re-request them: …`. Treat anything listed there as **done**: do NOT re-emit it in a new `needs_approval`. Re-requesting an already-applied migration is what caused the approval **loop** this guardrail exists to stop. (The worker also auto-settles an exact-`cmd` re-request as a backstop, but rely on this, not the backstop.)
+- **Probe before requesting a migration.** Before emitting an `apply_migration` approval, use `probe-db` to check whether the change already exists (table/column/index/enum present). If it's already there, **skip the request** and continue — apply-scripts are idempotent, so the goal is to stop the needless pause, not the apply.
 - A build always **terminates** with one status — `completed`, `needs_input` (product questions), or `needs_approval` (gated prod actions). It never blocks waiting for input.
 
 ## Related
