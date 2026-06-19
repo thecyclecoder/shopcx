@@ -62,6 +62,8 @@ async function listChannels(token: string) : Promise<{ id; name; is_private }[]>
 
 Merges **`conversations.list`** (`public_channel`) **+ `users.conversations`** (`public_channel,private_channel` — the bot's own memberships), deduped by id. The `users.conversations` half is required because **`conversations.list` does not return a bot's PRIVATE channels** even with `groups:read` + the bot invited (verified 2026-06-19) — that quirk previously made [[../inngest/slack-roadmap-notify]] never find a private `#roadmap`. Used by the Slack settings channel dropdown, ticket-share, and `findChannelByName`.
 
+> **Gotcha — Slack webhook endpoints must be in middleware `PUBLIC_ROUTES`.** Slack POSTs to `/api/slack/interactions` (Block Kit buttons / modals) and `/api/slack/events` (e.g. `app_home_opened`) **server-to-server with no session cookie**. The auth is the **signing-secret verification inside each route**, not a web session — so they must be listed in `PUBLIC_ROUTES` (`src/lib/supabase/middleware.ts`). Omitting them makes the middleware **307-redirect to `/login`**, which Slack surfaces as **"This app responded with Status Code 405"** (verified 2026-06-19 on the Squash & merge button). The OAuth `/api/slack/callback` does *not* need it — the browser carries the session there.
+
 ### `autoMapTeamMembers` — function
 
 ```ts

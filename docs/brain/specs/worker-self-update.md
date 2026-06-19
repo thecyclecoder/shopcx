@@ -1,4 +1,4 @@
-# Worker self-update — the build box redeploys its own code when idle 🚧
+# Worker self-update — the build box redeploys its own code when idle ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
 
