@@ -1,0 +1,1 @@
+- **Slack Home detail — make the App Home a destination, retire the List** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
