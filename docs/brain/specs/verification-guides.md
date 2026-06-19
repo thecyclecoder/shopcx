@@ -18,6 +18,10 @@ The [[spec-lifecycle-and-archival|verify gate]] asks the owner to confirm a ship
 - ⏳ Owner-only **"Generate test plan"** button on any spec lacking `## Verification`. It seeds the Opus authoring path ([[roadmap-build-console]] chat, brain-grounded) with the spec + its **folded brain homes** (lifecycles/dashboards/tables it references) + recent code, and produces a concrete `## Verification` section → commits it to `specs/{slug}.md` (same GitHub-commit path as the authoring chat). For already-archived specs, generate the guide against the current brain page instead.
 - ⏳ Reuses the existing chat/`POST /api/roadmap/chat` infra — no new LLM surface.
 
+## Phase 4 — Backfill the current shipped backlog (one pass) ⏳
+- ⏳ When this ships, run a **single batched backfill**: for every spec currently `✅` shipped in `specs/` **without** a `## Verification` section, generate one (the Phase 3 path, looped) → **one PR** adds test plans across the whole backlog. So the existing shipped specs (e.g. `build-approval-gates`, `roadmap-build-console`, `killer-statics`, `fold-build-batching`, `parallel-builds`, `worker-self-update`, …) become verifiable **immediately, with no per-spec clicking**.
+- ⏳ Already-archived features (spec deleted) get a guide appended to their brain home page instead, surfaced from the Archived section.
+
 ## Safety / invariants
 - Verification steps must be **concrete + reproducible by a human** (route + action + expected result), never "verify it works."
 - The spec markdown stays source of truth; the section lives there (folds into the brain on archive like the rest).
@@ -27,6 +31,7 @@ The [[spec-lifecycle-and-archival|verify gate]] asks the owner to confirm a ship
 - New specs ship with a concrete `## Verification` section (the build writes it).
 - The detail page renders it as a prominent card beside **Mark verified & archive**.
 - A shipped spec with no test plan offers **Generate test plan** → produces concrete, followable steps.
+- **The existing shipped backlog is backfilled in one pass** — every currently-shipped spec has a `## Verification` section after this lands.
 
 ## Related
 [[spec-lifecycle-and-archival]] · [[roadmap-build-console]] · [[../dashboard/roadmap]] · [[../project-management]] · [[build-lifecycle-hardening]]
