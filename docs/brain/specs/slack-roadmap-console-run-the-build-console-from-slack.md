@@ -1,4 +1,4 @@
-# Slack Roadmap Console — run the build console from Slack ⏳
+# Slack Roadmap Console — run the build console from Slack ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
 
@@ -18,7 +18,7 @@ A second front-end over the [[../lifecycles/roadmap-build-console]] backend, liv
 
 ---
 
-## Phase 1 — Slack inbound (signature-verified) ⏳
+## Phase 1 — Slack inbound (signature-verified) ✅
 
 The one genuinely new piece: an inbound surface. Today `slack.ts` only posts.
 
@@ -28,20 +28,20 @@ The one genuinely new piece: an inbound surface. Today `slack.ts` only posts.
 - ⏳ Resolve the workspace from the Slack `team_id` (reverse-lookup over the saved Slack connection).
 - ⏳ `SLACK_SIGNING_SECRET` added to env + Slack app config (Interactivity + Events Request URLs → these two routes).
 
-## Phase 2 — Identity → owner gate ⏳
+## Phase 2 — Identity → owner gate ✅
 
 - ⏳ `src/lib/slack-identity.ts` — `resolveSlackActor(workspaceId, slackUserId)`: map Slack user → ShopCX `workspace_members` row via the saved team mapping (`autoMapTeamMembers` / `lookupUserByEmail` bridge). Returns `{ userId, role } | null`.
 - ⏳ All mutating handlers (build, merge, approve, answer) resolve the actor first; non-owner → `postEphemeral` "owner-only" and stop. **The called `/api/roadmap/*` + `/api/branches/*` routes still enforce their own owner gate** — Slack identity is a UX filter, not the security boundary.
 - ⏳ Calls into existing routes execute server-side as the resolved owner (internal service call carrying the workspace + owner user id), never trusting the button payload's claimed identity.
 
-## Phase 3 — Read surface: `/roadmap` board ⏳
+## Phase 3 — Read surface: `/roadmap` board ✅
 
 - ⏳ Slash command `/roadmap` → `getRoadmap(workspaceId)` → Block Kit message: **Planned / In progress / Shipped — awaiting verification** sections, each card = a spec with its live `agent_jobs` chip (`getLatestJobsBySlug`) and a status emoji. Pending-fold specs show "Folding…" (`getPendingFolds`).
 - ⏳ Each card carries a context overflow / buttons: **Build**, **View PR** (if `pr_url`), **Squash & merge** (if `completed` + PR un-drafted). Cards with `needs_input` / `needs_approval` show a ⚠️ chip linking to the open prompt.
 - ⏳ `/roadmap <slug>` → single-spec detail (phases + current build state + buttons).
 - ⏳ Render is read-only and costs no tokens (pure DB + brain-markdown parse).
 
-## Phase 4 — Action buttons → existing APIs ⏳
+## Phase 4 — Action buttons → existing APIs ✅
 
 Each maps 1:1 to a dashboard action; all owner-gated (Phase 2) + server-revalidated.
 
@@ -52,7 +52,7 @@ Each maps 1:1 to a dashboard action; all owner-gated (Phase 2) + server-revalida
 - ⏳ **Squash & merge** — on a `completed` card → `POST /api/branches/[number]/merge` (resolve `pr_number` from the job row).
 - ⏳ After each action, `updateMessage` to reflect the new state (button disabled / chip updated) so the channel stays a live to-do list.
 
-## Phase 5 — Status push (Vercel watcher) ⏳
+## Phase 5 — Status push (Vercel watcher) ✅
 
 The **Vercel app** watches `agent_jobs` and posts to `#roadmap` (all Slack logic stays in the app; the box stays Slack-unaware).
 

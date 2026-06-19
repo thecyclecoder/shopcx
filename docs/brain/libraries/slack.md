@@ -36,6 +36,21 @@ async function postMessage(token: string, channel: string, blocks: unknown[], te
 async function lookupUserByEmail(token: string, email: string) : Promise<string | null>
 ```
 
+### Inbound helpers — Slack Roadmap Console
+
+Added for the [[../integrations/slack-roadmap-console]] (the first inbound Slack surface).
+
+```ts
+function verifySlackSignature(rawBody: string, signature: string | null, timestamp: string | null) : boolean
+async function resolveWorkspaceByTeamId(teamId: string) : Promise<string | null>
+async function findChannelByName(token: string, name: string) : Promise<string | null>
+async function openModal(token: string, triggerId: string, view: unknown) : Promise<boolean>
+async function postEphemeral(token: string, channel: string, user: string, blocks: unknown[], text: string) : Promise<boolean>
+async function updateMessage(token: string, channel: string, ts: string, blocks: unknown[], text: string) : Promise<boolean>
+```
+
+`verifySlackSignature` — HMAC-SHA256 over `v0:{ts}:{body}` keyed by `SLACK_SIGNING_SECRET`, rejecting > 5 min timestamp skew (replay guard). Pass the **raw** unparsed body.
+
 ### `listChannels` — function
 
 ```ts
@@ -120,11 +135,16 @@ function buildNewTicketMessage(data: { ticketId: string; ticketNumber?: string; 
 - `src/app/api/slack/channels/route.ts`
 - `src/app/api/slack/disconnect/route.ts`
 - `src/app/api/slack/sync-members/route.ts`
-- `src/lib/slack-notify.ts`
+- `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` ([[../integrations/slack-roadmap-console]])
+- `src/lib/slack-notify.ts` · `src/lib/slack-roadmap.ts` · `src/lib/slack-identity.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
 
 ## Gotchas
 
-_None documented._
+- **Inbound signature verification needs the raw body.** Read `await request.text()` and verify **before** parsing — verifying a re-serialized body fails the HMAC.
+
+## Related
+
+[[../integrations/slack-roadmap-console]] · [[slack-roadmap]] · [[slack-identity]] · [[slack-notify]]
 
 ---
 

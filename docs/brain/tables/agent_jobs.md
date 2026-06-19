@@ -25,6 +25,7 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 | `log_tail` | `text?` | last ~2 KB of the build output (debugging) |
 | `error` | `text?` | failure reason |
 | `claimed_at` | `timestamptz?` | set by `claim_agent_job()` |
+| `slack_notified_status` | `text?` | marker for the [[../inngest/slack-roadmap-notify]] watcher — the last `status` already posted to `#roadmap`; the cron posts only when `status != slack_notified_status` ([[../integrations/slack-roadmap-console]]) |
 | `created_by` | `uuid?` | owner who clicked Build |
 | `created_at` / `updated_at` | `timestamptz` | |
 
@@ -61,7 +62,7 @@ A `kind='plan'` job runs the `plan-goal` skill in `runPlanJob`:
 
 ## Migration
 
-`supabase/migrations/20260618120000_agent_jobs.sql` + `20260618130000_agent_jobs_pending_actions.sql` + `20260618150000_agent_jobs_kind.sql` (adds `kind`) + `20260618160000_fold_batching.sql` (kind-aware `claim_agent_job`, `enqueue_fold`, `agent_jobs_one_queued_fold_idx`, [[pending_folds]])
+`supabase/migrations/20260618120000_agent_jobs.sql` + `20260618130000_agent_jobs_pending_actions.sql` + `20260618150000_agent_jobs_kind.sql` (adds `kind`) + `20260618160000_fold_batching.sql` (kind-aware `claim_agent_job`, `enqueue_fold`, `agent_jobs_one_queued_fold_idx`, [[pending_folds]]) + `20260619120000_agent_jobs_slack_notified_status.sql` (adds `slack_notified_status` for the [[../integrations/slack-roadmap-console|Slack]] watcher)
 
 ## Related
 

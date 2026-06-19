@@ -1,5 +1,6 @@
 // Slack API client — bot token per workspace, Block Kit message builders
 
+import { createHmac, timingSafeEqual } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt, decrypt } from "@/lib/crypto";
 
@@ -54,6 +55,91 @@ export async function postMessage(
     return false;
   }
   return true;
+}
+
+/** Open a modal (views.open). `view` is a Block Kit view object. Returns ok. */
+export async function openModal(token: string, triggerId: string, view: unknown): Promise<boolean> {
+  const result = await slackApi(token, "views.open", { trigger_id: triggerId, view });
+  if (!result.ok) {
+    console.error("[Slack] openModal error:", result.error);
+    return false;
+  }
+  return true;
+}
+
+/** Post an ephemeral message visible only to `user` in `channel` (chat.postEphemeral). */
+export async function postEphemeral(
+  token: string,
+  channel: string,
+  user: string,
+  blocks: unknown[],
+  text: string,
+): Promise<boolean> {
+  // Slack rejects an empty `blocks` array — send text-only when there are no blocks.
+  const body = blocks.length ? { channel, user, blocks, text } : { channel, user, text };
+  const result = await slackApi(token, "chat.postEphemeral", body);
+  if (!result.ok) {
+    console.error("[Slack] postEphemeral error:", result.error);
+    return false;
+  }
+  return true;
+}
+
+/** Replace an existing message in place (chat.update) so the channel stays a live to-do list. */
+export async function updateMessage(
+  token: string,
+  channel: string,
+  ts: string,
+  blocks: unknown[],
+  text: string,
+): Promise<boolean> {
+  const result = await slackApi(token, "chat.update", { channel, ts, blocks, text });
+  if (!result.ok) {
+    console.error("[Slack] updateMessage error:", result.error);
+    return false;
+  }
+  return true;
+}
+
+// ── Inbound: signature verification + workspace resolution ──
+
+/**
+ * Verify a Slack request's HMAC signature (X-Slack-Signature / X-Slack-Request-Timestamp).
+ * Slack signs `v0:{timestamp}:{rawBody}` with HMAC-SHA256 keyed by SLACK_SIGNING_SECRET.
+ * Rejects when the secret is unset, the timestamp skews > 5 min (replay), or the digest mismatches.
+ * `rawBody` MUST be the exact unparsed request body.
+ */
+export function verifySlackSignature(rawBody: string, signature: string | null, timestamp: string | null): boolean {
+  const secret = process.env.SLACK_SIGNING_SECRET;
+  if (!secret || !signature || !timestamp) return false;
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts)) return false;
+  // Replay guard: reject requests older than 5 minutes.
+  if (Math.abs(Date.now() / 1000 - ts) > 60 * 5) return false;
+  const expected = `v0=${createHmac("sha256", secret).update(`v0:${timestamp}:${rawBody}`).digest("hex")}`;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(signature);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/** Reverse-lookup the ShopCX workspace that owns a Slack `team_id` (saved at OAuth connect). */
+export async function resolveWorkspaceByTeamId(teamId: string): Promise<string | null> {
+  if (!teamId) return null;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("workspaces")
+    .select("id")
+    .eq("slack_team_id", teamId)
+    .maybeSingle();
+  return data?.id ?? null;
+}
+
+/** Find a channel id by (case-insensitive) name — used to resolve the #roadmap channel for the watcher. */
+export async function findChannelByName(token: string, name: string): Promise<string | null> {
+  const target = name.replace(/^#/, "").toLowerCase();
+  const channels = await listChannels(token);
+  return channels.find((c) => c.name.toLowerCase() === target)?.id ?? null;
 }
 
 export async function lookupUserByEmail(token: string, email: string): Promise<string | null> {

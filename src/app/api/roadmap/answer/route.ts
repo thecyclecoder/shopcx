@@ -7,8 +7,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import type { AgentJob } from "@/lib/agent-jobs";
+import { answerRoadmapBuild } from "@/lib/roadmap-actions";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -18,39 +17,12 @@ export async function POST(request: Request) {
   const workspaceId = cookieStore.get("workspace_id")?.value;
   if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
 
-  const admin = createAdminClient();
-  const { data: member } = await admin
-    .from("workspace_members")
-    .select("role")
-    .eq("workspace_id", workspaceId)
-    .eq("user_id", user.id)
-    .single();
-  if (!member || member.role !== "owner") {
-    return NextResponse.json({ error: "Only the workspace owner can answer a build" }, { status: 403 });
-  }
-
   const body = (await request.json().catch(() => ({}))) as { jobId?: unknown; answers?: unknown };
-  if (typeof body.jobId !== "string" || !Array.isArray(body.answers)) {
-    return NextResponse.json({ error: "bad payload" }, { status: 400 });
-  }
 
-  const { data: job } = await admin
-    .from("agent_jobs")
-    .select("*")
-    .eq("id", body.jobId)
-    .eq("workspace_id", workspaceId)
-    .maybeSingle();
-  if (!job) return NextResponse.json({ error: "job not found" }, { status: 404 });
-  if ((job as AgentJob).status !== "needs_input") {
-    return NextResponse.json({ error: "job is not awaiting input" }, { status: 409 });
-  }
-
-  const { data: updated, error } = await admin
-    .from("agent_jobs")
-    .update({ answers: body.answers, status: "queued_resume", updated_at: new Date().toISOString() })
-    .eq("id", body.jobId)
-    .select("*")
-    .single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ job: updated as AgentJob });
+  const result = await answerRoadmapBuild(workspaceId, user.id, {
+    jobId: typeof body.jobId === "string" ? body.jobId : "",
+    answers: body.answers as { id: string; answer: string }[],
+  });
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+  return NextResponse.json({ job: result.job });
 }

@@ -10,8 +10,8 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { ACTIVE_STATUSES, getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, type AgentJob } from "@/lib/agent-jobs";
+import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs } from "@/lib/agent-jobs";
+import { queueRoadmapBuild } from "@/lib/roadmap-actions";
 
 async function ctx() {
   const supabase = await createClient();
@@ -38,64 +38,14 @@ export async function POST(request: Request) {
   if ("error" in c) return c.error;
   const { user, workspaceId } = c;
 
-  const admin = createAdminClient();
-  const { data: member } = await admin
-    .from("workspace_members")
-    .select("role")
-    .eq("workspace_id", workspaceId)
-    .eq("user_id", user.id)
-    .single();
-  if (!member) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  if (member.role !== "owner") {
-    return NextResponse.json({ error: "Only the workspace owner can start a build" }, { status: 403 });
-  }
-
   const body = (await request.json().catch(() => ({}))) as { slug?: unknown; instructions?: unknown; verify?: unknown };
-  const slug = body.slug;
-  if (typeof slug !== "string" || !/^[a-z0-9-]+$/i.test(slug)) {
-    return NextResponse.json({ error: "bad slug" }, { status: 400 });
-  }
 
-  // "Mark verified & archive" → mark the spec pending-fold and coalesce into ONE batch fold-build:
-  // enqueue_fold() atomically reuses an already-queued kind='fold' job (the spec joins that batch) or
-  // opens one. The worker's fold lane (concurrency 1) folds every pending-fold spec in a single PR, so
-  // N verifies produce ONE PR, not N. See docs/brain/specs/fold-build-batching.md + project-management.md.
-  if (body.verify === true) {
-    const { data: foldData, error: foldErr } = await admin.rpc("enqueue_fold", {
-      p_workspace: workspaceId,
-      p_slug: slug,
-      p_user: user.id,
-    });
-    if (foldErr) return NextResponse.json({ error: foldErr.message }, { status: 500 });
-    const job = (Array.isArray(foldData) ? foldData[0] : foldData) as AgentJob;
-    return NextResponse.json({ job, fold: true });
-  }
-
-  const instructions = typeof body.instructions === "string" ? body.instructions : null;
-
-  // One active build per spec.
-  const { data: existing } = await admin
-    .from("agent_jobs")
-    .select("*")
-    .eq("workspace_id", workspaceId)
-    .eq("spec_slug", slug)
-    .in("status", ACTIVE_STATUSES)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (existing) return NextResponse.json({ job: existing as AgentJob, alreadyActive: true });
-
-  const { data: job, error } = await admin
-    .from("agent_jobs")
-    .insert({
-      workspace_id: workspaceId,
-      spec_slug: slug,
-      status: "queued",
-      instructions,
-      created_by: user.id,
-    })
-    .select("*")
-    .single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ job: job as AgentJob });
+  // Shared, owner-gated, server-revalidated logic (also called by the Slack Roadmap Console).
+  const result = await queueRoadmapBuild(workspaceId, user.id, {
+    slug: typeof body.slug === "string" ? body.slug : "",
+    instructions: typeof body.instructions === "string" ? body.instructions : null,
+    verify: body.verify === true,
+  });
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+  return NextResponse.json({ job: result.job, alreadyActive: result.alreadyActive, fold: result.fold });
 }
