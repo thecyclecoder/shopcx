@@ -1,0 +1,1 @@
+- **Build-box status view — live lanes on the roadmap** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]

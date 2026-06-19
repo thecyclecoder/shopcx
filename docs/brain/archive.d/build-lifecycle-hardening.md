@@ -1,0 +1,1 @@
+- **Build-lifecycle hardening — auto-un-draft on completion + no migration re-request loops** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
