@@ -64,6 +64,21 @@ Merges **`conversations.list`** (`public_channel`) **+ `users.conversations`** (
 
 > **Gotcha — Slack webhook endpoints must be in middleware `PUBLIC_ROUTES`.** Slack POSTs to `/api/slack/interactions` (Block Kit buttons / modals) and `/api/slack/events` (e.g. `app_home_opened`) **server-to-server with no session cookie**. The auth is the **signing-secret verification inside each route**, not a web session — so they must be listed in `PUBLIC_ROUTES` (`src/lib/supabase/middleware.ts`). Omitting them makes the middleware **307-redirect to `/login`**, which Slack surfaces as **"This app responded with Status Code 405"** (verified 2026-06-19 on the Squash & merge button). The OAuth `/api/slack/callback` does *not* need it — the browser carries the session there.
 
+### Slack Lists — native PM table (roadmap mirror)
+
+Added for [[../specs/slack-roadmap-home]] Phase 3. Thin wrappers over the **Slack Lists API** (a typed, file-backed `F…` table). We only ever use `text` + `number` cells; text cells are written/read as Block Kit `rich_text`. Driven by [[slack-list]] (`syncRoadmapList`). Scopes: **`lists:read`** (reads) + **`lists:write`** (create/update/delete).
+
+```ts
+function slackListCell(columnId: string, type: "text" | "number", value: string | number) : Record<string, unknown>
+async function createSlackList(token: string, name: string, schema: SlackListColumn[]) : Promise<{ listId: string; schema: SlackListSchemaCol[] } | null>
+async function listSlackListItems(token: string, listId: string) : Promise<SlackListItem[]>
+async function createSlackListItem(token: string, listId: string, cells: Record<string, unknown>[]) : Promise<string | null>
+async function updateSlackListItem(token: string, listId: string, rowId: string, cells: Record<string, unknown>[]) : Promise<boolean>
+async function deleteSlackListItem(token: string, listId: string, rowId: string) : Promise<boolean>
+```
+
+`createSlackList` (`slackLists.create`) returns the new list id + its schema (each column carries the **generated column id** you must address cells by). `slackLists.items.{list,create,update,delete}` map to the four CRUD wrappers; `updateSlackListItem` stamps every cell with `row_id`. All return-on-error (`null`/`false`/`[]`), never throw.
+
 ### `autoMapTeamMembers` — function
 
 ```ts
@@ -143,7 +158,7 @@ function buildNewTicketMessage(data: { ticketId: string; ticketNumber?: string; 
 - `src/app/api/slack/disconnect/route.ts`
 - `src/app/api/slack/sync-members/route.ts`
 - `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` ([[../integrations/slack-roadmap-console]])
-- `src/lib/slack-notify.ts` · `src/lib/slack-roadmap.ts` · `src/lib/slack-home.ts` · `src/lib/slack-identity.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
+- `src/lib/slack-notify.ts` · `src/lib/slack-roadmap.ts` · `src/lib/slack-home.ts` · `src/lib/slack-list.ts` · `src/lib/slack-identity.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
 
 ## Gotchas
 
@@ -151,7 +166,7 @@ function buildNewTicketMessage(data: { ticketId: string; ticketNumber?: string; 
 
 ## Related
 
-[[../integrations/slack-roadmap-console]] · [[slack-roadmap]] · [[slack-home]] · [[slack-identity]] · [[slack-notify]]
+[[../integrations/slack-roadmap-console]] · [[slack-roadmap]] · [[slack-home]] · [[slack-list]] · [[slack-identity]] · [[slack-notify]]
 
 ---
 

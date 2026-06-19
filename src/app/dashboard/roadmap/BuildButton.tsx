@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import type { AgentJob, JobStatus, PendingFold } from "@/lib/agent-jobs";
 import type { Phase } from "@/lib/brain-roadmap";
@@ -35,6 +36,7 @@ const CHIP: Record<JobStatus, string> = {
 
 export default function BuildButton({ slug, initialJob, specStatus, initialFold }: { slug: string; initialJob: AgentJob | null; specStatus: Phase; initialFold?: PendingFold | null }) {
   const workspace = useWorkspace();
+  const router = useRouter();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
   const [fold, setFold] = useState<PendingFold | null>(initialFold ?? null);
   const [busy, setBusy] = useState(false);
@@ -109,7 +111,13 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
         body: JSON.stringify({ slug }),
       });
       const d = await res.json();
-      if (d.job) setJob(d.job);
+      if (d.job) {
+        setJob(d.job);
+        // The job is now an active row; refresh the server board so the live overlay re-buckets this
+        // card into "In progress" right away (instant feedback, well before the 4s poll), using real
+        // DB state — not a client guess that could drift.
+        router.refresh();
+      }
     } catch {
       /* surfaced via no state change; user can retry */
     } finally {
@@ -178,6 +186,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
         setJob(d.job);
         setShowIssue(false);
         setIssueText("");
+        router.refresh();
       }
     } finally {
       setReporting(false);
@@ -198,6 +207,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
         // Verify coalesces into a batch fold job — flip to "Folding…" immediately; poll refreshes it.
         setFold({ spec_slug: slug, status: "pending", job_id: d.job.id ?? null, foldJob: d.job });
         setConfirmVerify(false);
+        router.refresh();
       }
     } finally {
       setVerifying(false);

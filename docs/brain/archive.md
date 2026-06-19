@@ -12,7 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
-- **Build Approval Gates + Execution Hardening** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
+- **Authoring chat persistence — save + resume Opus chats (cross-device)** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
 - **Appstle pricing heal + migration monitor** · verified 2026-06-18 · → [[lifecycles/subscription-billing]]
 - **Authoring chat grounding — give the Roadmap Opus chat live brain access** · verified 2026-06-18 · → [[lifecycles/roadmap-build-console]]
 - **Blog → Posts + Product Resources (portal Resources + public storefront blog)** · verified 2026-06-18 · → [[lifecycles/blog-resources]]

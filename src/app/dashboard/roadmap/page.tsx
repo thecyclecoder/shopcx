@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { getRoadmap, getArchive, type Phase, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
+import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
@@ -102,7 +102,15 @@ export default async function RoadmapPage() {
     ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId)])
     : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>];
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
-  const byStatus = (s: Phase) => specs.filter((sp) => sp.status === s);
+  // Live overlay: a Planned spec with an active build job shows as In progress immediately (tapping Build
+  // inserts the job, so the card jumps columns within one render), reverting to its markdown status once
+  // the job is terminal. Only ever *promotes* planned→in_progress — never demotes a Shipped spec.
+  const effectiveStatus = (sp: SpecCard): Phase => {
+    const job = jobsBySlug[sp.slug];
+    if (sp.status === "planned" && job && isActive(job.status)) return "in_progress";
+    return sp.status;
+  };
+  const byStatus = (s: Phase) => specs.filter((sp) => effectiveStatus(sp) === s);
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl p-6">
