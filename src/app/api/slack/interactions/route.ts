@@ -17,14 +17,15 @@ import {
   postEphemeral,
   updateMessage,
   openModal,
+  updateModal,
 } from "@/lib/slack";
 import { resolveSlackActor, isOwner } from "@/lib/slack-identity";
 import { queueRoadmapBuild, approveRoadmapAction, mergeClaudePr, answerRoadmapBuild } from "@/lib/roadmap-actions";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { AgentJob } from "@/lib/agent-jobs";
+import { getSpec } from "@/lib/brain-roadmap";
+import { getLatestJobsBySlug, getPendingFolds, type AgentJob } from "@/lib/agent-jobs";
 import { ACTIONS, buildAnswerModal, buildNeedsApprovalMessage } from "@/lib/slack-roadmap";
-import { HOME, buildHomeView, publishHome, noticeModal } from "@/lib/slack-home";
-import { syncRoadmapList } from "@/lib/slack-list";
+import { HOME, buildHomeView, publishHome, noticeModal, buildSpecModal, buildSpecConfirmModal } from "@/lib/slack-home";
 
 export const maxDuration = 60;
 
@@ -40,6 +41,7 @@ interface BlockActionsPayload {
   team?: { id: string };
   channel?: { id: string };
   message?: { ts: string };
+  view?: { id?: string }; // set when the action fired from inside a modal (so we can views.update it)
   trigger_id: string;
   actions: { action_id: string; value?: string }[];
 }
@@ -101,8 +103,19 @@ async function handleBlockActions(p: BlockActionsPayload, workspaceId: string, t
   // URL buttons (View PR / dashboard links / Home "Open") need no server work.
   if (action.action_id === ACTIONS.viewPr || action.action_id.startsWith(HOME.open)) return ack();
 
-  // App Home tab build buttons — these carry no `channel`, so feedback is a modal, not an ephemeral.
-  if (action.action_id.startsWith(HOME.build) || action.action_id.startsWith(HOME.buildPhase)) {
+  // App Home: tapping a spec's Details opens the in-Slack detail modal (anyone may view; the build/
+  // verify actions inside it are owner-gated). Uses the block_actions trigger_id to views.open.
+  if (action.action_id.startsWith(HOME.details)) {
+    return handleHomeDetails(p, action.action_id, value, workspaceId, token);
+  }
+
+  // App Home build / per-phase / verify buttons (Home row OR inside the modal) — these carry no
+  // `channel`, so feedback is a modal, not an ephemeral.
+  if (
+    action.action_id.startsWith(HOME.build) ||
+    action.action_id.startsWith(HOME.buildPhase) ||
+    action.action_id.startsWith(HOME.verify)
+  ) {
     return handleHomeBuild(p, action.action_id, value, workspaceId, token);
   }
 
@@ -174,12 +187,43 @@ async function handleBlockActions(p: BlockActionsPayload, workspaceId: string, t
   }
 }
 
-// ── App Home build buttons (Build all / Build N) ──
+// ── App Home: open the spec-detail modal ──
 
 /**
- * Queue a build (whole spec or one phase) from the App Home tab, then re-publish the Home view so the
- * status chip flips to "queued/building" immediately. Owner-gated (UX) here; roadmap-actions re-checks
- * server-side. Home interactions have no channel → we surface non-owner / error states via a modal.
+ * Open the in-Slack spec-detail modal for a tapped spec row (slack-home-detail Phase 2). Anyone may
+ * view it (read-only review); the build/verify buttons inside are rendered only for the owner and
+ * re-checked server-side. Rebuilt from getSpec() so it never drifts from the brain.
+ */
+async function handleHomeDetails(
+  p: BlockActionsPayload,
+  actionId: string,
+  value: Record<string, unknown>,
+  workspaceId: string,
+  token: string,
+) {
+  const slug = String(value.slug || actionId.slice(HOME.details.length));
+  const found = await getSpec(slug);
+  if (!found) {
+    await openModal(token, p.trigger_id, noticeModal("Not found", `No spec \`${slug}\` — it may have been archived.`));
+    return ack();
+  }
+  const [jobs, folds, actor] = await Promise.all([
+    getLatestJobsBySlug(workspaceId),
+    getPendingFolds(workspaceId),
+    resolveSlackActor(workspaceId, p.user.id),
+  ]);
+  const view = buildSpecModal(found.card, found.raw, jobs[slug] ?? null, folds[slug] ?? null, isOwner(actor));
+  await openModal(token, p.trigger_id, view);
+  return ack();
+}
+
+// ── App Home build / verify buttons (Build all / Build N / Mark verified & archive) ──
+
+/**
+ * Queue a build (whole spec or one phase) or a verify-and-fold from the App Home tab — from a row OR
+ * from inside the spec-detail modal. Owner-gated (UX) here; roadmap-actions re-checks server-side.
+ * Home interactions have no channel, so feedback is a modal (a fresh notice, or an in-place update of
+ * the modal the action fired from). Always re-publishes the Home view so the row chip flips at once.
  */
 async function handleHomeBuild(
   p: BlockActionsPayload,
@@ -189,14 +233,31 @@ async function handleHomeBuild(
   token: string,
 ) {
   const slackUserId = p.user.id;
+  const fromModal = !!p.view?.id;
+  // Feedback goes in-place when the action came from the modal, else as a fresh notice modal.
+  const notice = async (title: string, text: string) => {
+    if (fromModal) await updateModal(token, p.view!.id!, buildSpecConfirmModal(title, text));
+    else await openModal(token, p.trigger_id, noticeModal(title, text));
+    return ack();
+  };
+
   const actor = await resolveSlackActor(workspaceId, slackUserId);
   if (!isOwner(actor)) {
-    await openModal(token, p.trigger_id, noticeModal("Owners only", "Building is reserved for the workspace owner. You can view the roadmap, but not start builds."));
-    return ack();
+    return notice("Owners only", "Building is reserved for the workspace owner. You can review the roadmap, but not start builds.");
+  }
+
+  const isVerify = actionId.startsWith(HOME.verify);
+  const isPhase = actionId.startsWith(HOME.buildPhase);
+
+  if (isVerify) {
+    const slug = String(value.slug || actionId.slice(HOME.verify.length));
+    const result = await queueRoadmapBuild(workspaceId, actor!.userId, { slug, verify: true });
+    if (!result.ok) return notice("Couldn't verify", `Couldn't queue the fold-build for \`${slug}\`: ${result.error}`);
+    await republishHome(workspaceId, token, slackUserId);
+    return notice("Verified", `✅ Marked \`${slug}\` verified — queued a fold-build to archive it into the brain.`);
   }
 
   // slug (+ optional phase) is encoded in both the action_id and the button value; value wins for the title.
-  const isPhase = actionId.startsWith(HOME.buildPhase);
   const slug = String(value.slug || (isPhase ? actionId.slice(HOME.buildPhase.length).replace(/:\d+$/, "") : actionId.slice(HOME.build.length)));
   let instructions: string | null = null;
   if (isPhase) {
@@ -206,17 +267,19 @@ async function handleHomeBuild(
   }
 
   const result = await queueRoadmapBuild(workspaceId, actor!.userId, { slug, instructions });
-  if (!result.ok) {
-    await openModal(token, p.trigger_id, noticeModal("Couldn't build", `Couldn't queue \`${slug}\`: ${result.error}`));
-    return ack();
-  }
+  if (!result.ok) return notice("Couldn't build", `Couldn't queue \`${slug}\`: ${result.error}`);
 
-  // Re-publish the Home view so the row reflects the new (queued / already-active) state right away.
+  await republishHome(workspaceId, token, slackUserId);
+  const msg = result.alreadyActive
+    ? `\`${slug}\` already has an active build (${result.job.status}). One build per spec.`
+    : `🛠️ Queued a build for \`${slug}\`.`;
+  return notice(result.alreadyActive ? "Already building" : "Queued", msg);
+}
+
+/** Re-publish the Home view so a row's status chip reflects a just-queued build/verify immediately. */
+async function republishHome(workspaceId: string, token: string, slackUserId: string): Promise<void> {
   const view = await buildHomeView(workspaceId);
   await publishHome(token, slackUserId, view);
-  // Phase 3: the board state just changed → reconcile the Slack List mirror. Best-effort, non-throwing.
-  await syncRoadmapList(workspaceId);
-  return ack();
 }
 
 // ── view_submission (answer modal) ──

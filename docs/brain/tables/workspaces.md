@@ -68,7 +68,6 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `slack_team_id` | `text` | ✓ |  |
 | `slack_team_name` | `text` | ✓ |  |
 | `slack_connected_at` | `timestamptz` | ✓ |  |
-| `slack_roadmap_list` | `jsonb` | ✓ | Cached handle for the native Slack List roadmap mirror: `{ "id": "F…", "cols": { "<schema key>": "<generated column id>" } }`. Null = not yet created (next sync creates it). See [[../libraries/slack-list]] · [[../specs/slack-roadmap-home]]. |
 | `shopify_multipass_secret_encrypted` | `text` | ✓ | AES-256-GCM |
 | `amplifier_api_key_encrypted` | `text` | ✓ | AES-256-GCM |
 | `amplifier_order_source_code` | `text` | ✓ |  |

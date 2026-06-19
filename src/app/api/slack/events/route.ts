@@ -19,7 +19,6 @@ import { getRoadmap, getSpec } from "@/lib/brain-roadmap";
 import { getLatestJobsBySlug, getPendingFolds } from "@/lib/agent-jobs";
 import { buildBoardBlocks, buildSpecDetailBlocks } from "@/lib/slack-roadmap";
 import { buildHomeView, publishHome } from "@/lib/slack-home";
-import { syncRoadmapList } from "@/lib/slack-list";
 
 export const maxDuration = 60;
 
@@ -81,9 +80,6 @@ async function publishHomeForUser(teamId: string, slackUserId: string): Promise<
   if (!token) return;
   const view = await buildHomeView(workspaceId);
   await publishHome(token, slackUserId, view);
-  // Phase 3: mirror the board into the native Slack List too. Best-effort + non-throwing — a Lists
-  // failure (e.g. lists:* scopes not yet granted) never affects the Home view the user just opened.
-  await syncRoadmapList(workspaceId);
 }
 
 async function handleRoadmap(workspaceId: string, text: string) {
