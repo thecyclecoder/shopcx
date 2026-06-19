@@ -1,0 +1,1 @@
+- **Brain index refresh — keep archive.md + README counts fresh out-of-band** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
