@@ -37,6 +37,9 @@ const MAX_CONCURRENT = 5; // build/plan pool — real ceiling is Max rate limits
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
+// Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
+// SAME already-applied action before we stop the loop and surface it for a human. Normally 0–1.
+const AUTO_SETTLE_MAX = 2;
 
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
 // A planner-proposed spec branch, carried on a type:'spec' action (goal-decomposition-engine).
@@ -58,6 +61,7 @@ interface PendingAction {
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
   spec?: ProposedSpec;
+  autoSettled?: number; // worker safety net: times a resumed build re-requested this already-`done` cmd
 }
 interface Job {
   id: string;
@@ -195,18 +199,43 @@ async function ensurePr(branch: string, title: string, draft: boolean, body?: st
 
 // A build that paused (needs_input/needs_approval) opened its PR as a DRAFT. On completion the PR is
 // reused, so mark it ready-for-review or it stays unmergeable. REST can't un-draft a PR; GraphQL can.
-async function markReady(prNumber: number) {
+// One attempt: fetch the PR's node_id FRESH (must be after the final push), run the mutation, and
+// confirm the result is non-draft. Returns ok=false (with a reason) rather than swallowing — PR#75/#76
+// stayed draft because the old catch hid a GraphQL error/timing race.
+async function markReadyOnce(prNumber: number): Promise<{ ok: boolean; isDraft: boolean | null; detail: string }> {
+  const pr = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
+  const node = pr.json as { node_id?: string; draft?: boolean };
+  if (!node?.node_id) return { ok: false, isDraft: null, detail: `GET pull failed (${pr.status})` };
+  if (node.draft === false) return { ok: true, isDraft: false, detail: "already ready-for-review" };
+  const res = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${GH_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ query: `mutation { markPullRequestReadyForReview(input: { pullRequestId: "${node.node_id}" }) { pullRequest { isDraft } } }` }),
+  });
+  const text = await res.text();
+  let body: { data?: { markPullRequestReadyForReview?: { pullRequest?: { isDraft?: boolean } } }; errors?: unknown } = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { /* keep raw text in detail */ }
+  if (!res.ok) return { ok: false, isDraft: null, detail: `graphql HTTP ${res.status}: ${text.slice(0, 200)}` };
+  if (body.errors) return { ok: false, isDraft: null, detail: `graphql errors: ${JSON.stringify(body.errors).slice(0, 300)}` };
+  const after = body.data?.markPullRequestReadyForReview?.pullRequest?.isDraft;
+  return { ok: after === false, isDraft: typeof after === "boolean" ? after : null, detail: after === false ? "marked ready" : "mutation returned still-draft" };
+}
+
+// Un-draft a PR, logging (never swallowing) failures and retrying once. Returns true once the PR is
+// confirmed non-draft. The build completion path adds a belt-and-suspenders re-check before flipping
+// the job to `completed` (see runJob).
+async function markReady(prNumber: number): Promise<boolean> {
   try {
-    const pr = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
-    const nodeId = (pr.json as { node_id?: string })?.node_id;
-    if (!nodeId) return;
-    await fetch("https://api.github.com/graphql", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${GH_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ query: `mutation { markPullRequestReadyForReview(input: { pullRequestId: "${nodeId}" }) { pullRequest { isDraft } } }` }),
-    });
-  } catch {
-    /* non-fatal — the PR exists; it may just need a manual "Ready for review" */
+    let r = await markReadyOnce(prNumber);
+    if (!r.ok) {
+      console.error(`[markReady] PR#${prNumber} attempt 1 failed: ${r.detail} — retrying once`);
+      r = await markReadyOnce(prNumber);
+      if (!r.ok) console.error(`[markReady] PR#${prNumber} attempt 2 failed: ${r.detail} — may need a manual "Ready for review"`);
+    }
+    return r.ok;
+  } catch (e) {
+    console.error(`[markReady] PR#${prNumber} threw: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
   }
 }
 
@@ -630,6 +659,7 @@ async function runJob(job: Job) {
     let executedSummary = "";
     if (isResume && (job.pending_actions || []).some((a) => a.status === "approved")) {
       const { actions, summary } = await executeApprovedActions(job, wt);
+      job.pending_actions = actions; // keep in-memory state in sync — the dedup safety net below reads it
       await update(job.id, { pending_actions: actions });
       executedSummary = summary;
       console.log(`${tag} executed approved actions: ${summary}`);
@@ -638,6 +668,14 @@ async function runJob(job: Job) {
     const resumeBits: string[] = [];
     if ((job.answers || []).length) resumeBits.push(`Answers to your questions: ${JSON.stringify(job.answers)}`);
     if (executedSummary) resumeBits.push(`Gated actions executed: ${executedSummary}`);
+    // Phase 2: explicitly remind the resumed build which gated actions are already settled so it does
+    // not re-request them (the #1 cause of a needs_approval loop).
+    const settledActions = (job.pending_actions || []).filter(
+      (a) => a.status === "done" && a.cmd && (a.type === "apply_migration" || a.type === "run_prod_script"),
+    );
+    if (settledActions.length) {
+      resumeBits.push(`Already-applied gated actions — treat as SETTLED, do NOT re-request them: ${settledActions.map((a) => a.cmd).join("; ")}`);
+    }
 
     const prompt = isResume
       ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
@@ -670,25 +708,68 @@ async function runJob(job: Job) {
       const incoming: Array<Record<string, unknown>> = Array.isArray((parsed as Record<string, unknown>).actions)
         ? ((parsed as Record<string, unknown>).actions as Array<Record<string, unknown>>)
         : [];
-      const pending: PendingAction[] = incoming.map((a, i) => {
+
+      // Worker safety net (build-lifecycle-hardening Phase 2): a resumed build sometimes re-requests an
+      // action it already had executed → a needs_approval loop the owner had to clear by hand. Auto-settle
+      // any incoming action whose cmd matches one already `done` on the job, instead of re-pausing.
+      const priorDone = new Map<string, PendingAction>();
+      for (const a of job.pending_actions || []) if (a.status === "done" && a.cmd) priorDone.set(a.cmd, a);
+
+      const pending: PendingAction[] = [];
+      let autoSettled = 0;
+      let loopGuardTripped = false;
+      incoming.forEach((a, i) => {
         const cmd = typeof a.cmd === "string" ? a.cmd : undefined;
         const type = a.type === "merge_pr" || a.type === "run_prod_script" ? (a.type as PendingAction["type"]) : "apply_migration";
-        return {
+        const prior = cmd ? priorDone.get(cmd) : undefined;
+        if (prior) {
+          prior.autoSettled = (prior.autoSettled ?? 0) + 1;
+          if (prior.autoSettled > AUTO_SETTLE_MAX) loopGuardTripped = true;
+          autoSettled++;
+          console.log(`${tag} auto-settled re-requested action (already done): ${cmd}`);
+          return;
+        }
+        pending.push({
           id: `a${Date.now().toString(36)}${i}`,
           type,
           summary: String(a.summary || cmd || "gated action"),
           cmd,
           preview: typeof a.preview === "string" ? a.preview : cmd,
           status: "pending",
-        };
+        });
       });
-      if (sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()) {
-        sh("git", ["add", "-A"], { cwd: wt });
-        sh("git", ["commit", "-m", `wip: ${slug} (needs approval)`], { cwd: wt });
-        sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+
+      // Carry the prior (settled) actions forward so the dedup set persists across resume rounds.
+      const carried = [...(job.pending_actions || []), ...pending];
+      const commitWip = (msg: string) => {
+        if (sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()) {
+          sh("git", ["add", "-A"], { cwd: wt });
+          sh("git", ["commit", "-m", msg], { cwd: wt });
+          sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+        }
+      };
+
+      // Every requested action was already applied → don't re-pause the owner; auto-resume so the build finishes.
+      if (!pending.length && autoSettled) {
+        if (loopGuardTripped) {
+          // The build keeps re-requesting an already-applied action despite being told it's settled —
+          // stop the bounce loop and surface for a human rather than auto-resuming forever.
+          commitWip(`wip: ${slug} (auto-settle loop guard)`);
+          const pr = await ensurePr(branch!, slug, true);
+          await update(job.id, { status: "needs_attention", pending_actions: carried, error: "build re-requested already-applied action(s) repeatedly", log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+          console.error(`${tag} auto-settle loop guard tripped → needs_attention`);
+          return;
+        }
+        commitWip(`wip: ${slug} (auto-resume; actions already applied)`);
+        await update(job.id, { status: "queued_resume", pending_actions: carried, log_tail: logTail });
+        console.log(`${tag} all ${autoSettled} requested action(s) already applied → auto-resuming`);
+        return;
       }
+
+      // Genuinely-new gated action(s) remain → pause for the owner as before.
+      commitWip(`wip: ${slug} (needs approval)`);
       const pr = await ensurePr(branch!, slug, true);
-      await update(job.id, { status: "needs_approval", pending_actions: pending, log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      await update(job.id, { status: "needs_approval", pending_actions: carried, log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
       return;
     }
 
@@ -725,7 +806,17 @@ async function runJob(job: Job) {
       await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
       return;
     }
-    await markReady(pr.number); // un-draft if this PR was opened during an earlier needs_input/needs_approval pause
+    // Un-draft if this PR was opened during an earlier needs_input/needs_approval pause.
+    const ready = await markReady(pr.number);
+    if (!ready) {
+      // Belt-and-suspenders: confirm the draft state directly and retry once more before completing —
+      // a non-draft, mergeable PR is the whole point (PR#75/#76 had to be un-drafted by hand).
+      const check = await gh("GET", `/repos/${REPO}/pulls/${pr.number}`);
+      if ((check.json as { draft?: boolean })?.draft === true) {
+        console.error(`${tag} PR#${pr.number} still draft after markReady — final retry before completing`);
+        await markReady(pr.number);
+      }
+    }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
   } finally {
