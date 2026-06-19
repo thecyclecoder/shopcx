@@ -7,6 +7,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { ingestMetaPerformance } from "@/lib/meta/performance";
+import { refreshVariantAttribution } from "@/lib/meta/attribution";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -44,6 +45,48 @@ export const metaSyncPerformance = inngest.createFunction(
         JSON.stringify(result.reconcile.drift),
       );
     }
+
+    // Phase 2 — refresh variant attribution now that insights are fresh (the
+    // ad-level spend it allocates was just upserted above). Phase 5 will fold this
+    // into the full daily orchestration; firing it here keeps the data current.
+    await step.run("attribution-refresh", async () => {
+      await inngest.send({
+        name: "meta/attribution-refresh",
+        data: { workspace_id, ad_account_id },
+      });
+    });
+
+    return { status: "complete", ...result };
+  },
+);
+
+// ── meta/attribution-refresh — Phase 2 per-(meta_ad_id, variant, day) rollup ──
+export const metaAttributionRefresh = inngest.createFunction(
+  {
+    id: "meta-attribution-refresh",
+    retries: 2,
+    concurrency: [{ limit: 1, key: "event.data.ad_account_id" }],
+    triggers: [{ event: "meta/attribution-refresh" }],
+  },
+  async ({ event, step }) => {
+    const { workspace_id, ad_account_id, incremental_days } = event.data as {
+      workspace_id: string;
+      ad_account_id: string;
+      incremental_days?: number;
+    };
+
+    const result = await step.run("compute", async () => {
+      return refreshVariantAttribution(
+        { workspaceId: workspace_id, adAccountId: ad_account_id },
+        { incrementalDays: incremental_days },
+      );
+    });
+
+    // Surface the coverage metric loudly (Phase 5 will route to run-records/alerts).
+    console.log(
+      `[meta-attribution] account ${ad_account_id} variant_attribution_coverage=${result.coverage.variant_attribution_coverage}`,
+      JSON.stringify(result.coverage),
+    );
 
     return { status: "complete", ...result };
   },

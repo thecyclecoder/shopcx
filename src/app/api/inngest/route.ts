@@ -43,7 +43,7 @@ import { portalAutoResume, portalAutoResumeCron } from "@/lib/inngest/portal-aut
 import { amazonSyncOrders, amazonSyncAsins, amazonDailySyncCron } from "@/lib/inngest/amazon-sync";
 import { monthlyRevenueSnapshot } from "@/lib/inngest/monthly-revenue-snapshot";
 import { metaSyncSpend, metaDailySyncCron } from "@/lib/inngest/meta-sync";
-import { metaSyncPerformance, metaPerformanceDailyCron } from "@/lib/inngest/meta-performance";
+import { metaSyncPerformance, metaPerformanceDailyCron, metaAttributionRefresh } from "@/lib/inngest/meta-performance";
 import { todaySyncCron } from "@/lib/inngest/today-sync";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/review-tagging";
@@ -151,6 +151,7 @@ export const { GET, POST, PUT } = serve({
     metaDailySyncCron,
     metaSyncPerformance,
     metaPerformanceDailyCron,
+    metaAttributionRefresh,
     todaySyncCron,
     ticketAutoArchive,
     tagCancelRelevanceBulk,
