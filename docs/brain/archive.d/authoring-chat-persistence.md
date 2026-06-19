@@ -1,0 +1,1 @@
+- **Authoring chat persistence — save + resume Opus chats (cross-device)** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]

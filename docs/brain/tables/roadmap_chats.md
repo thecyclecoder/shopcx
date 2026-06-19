@@ -44,4 +44,4 @@ The DB-backed home for the Roadmap **authoring chat** ([[../lifecycles/roadmap-b
 
 ## Related
 
-[[../specs/authoring-chat-persistence]] · [[../lifecycles/roadmap-build-console]] · [[../specs/roadmap-build-console]] · [[../specs/authoring-chat-grounding]] · [[../dashboard/roadmap]] · [[agent_jobs]]
+[[../lifecycles/roadmap-build-console]] · [[../libraries/roadmap-chats]] · [[../dashboard/roadmap]] · [[agent_jobs]]
