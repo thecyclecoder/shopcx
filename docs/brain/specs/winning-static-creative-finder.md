@@ -1,4 +1,4 @@
-# Winning Static-Creative Finder ⏳
+# Winning Static-Creative Finder 🚧
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Static-ad optimization"
 
