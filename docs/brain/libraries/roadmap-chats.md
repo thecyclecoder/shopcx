@@ -46,4 +46,4 @@ Recent `active` sessions for the user's workspace (resume list), newest first.
 
 ## Related
 
-[[../tables/roadmap_chats]] · [[../specs/authoring-chat-persistence]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]]
+[[../tables/roadmap_chats]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]]
