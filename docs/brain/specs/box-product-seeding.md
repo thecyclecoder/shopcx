@@ -12,7 +12,7 @@ The Engine (`src/lib/inngest/product-intelligence.ts`) is sound but unreliable a
 ## Mechanism (reuse the box queue)
 - New `agent_jobs.kind='product-seed'` claimed via `claim_agent_job(['product-seed'])` into its own lane; `runProductSeedJob(job)` branch in `scripts/builder-worker.ts` (alongside `runJob`/`runPlanJob`/`runFoldJob`).
 - Enqueued from `/dashboard/products/[id]/intelligence` ("Auto-populate" button) with just `{ product_id, angle_override? }` — `angle_override` is optional; omitted by default (the box infers the angle from the PDP).
-- **Reuse the Engine logic** — factor the four worker bodies out of their Inngest `step.run` wrappers into plain async functions the box calls directly (no nested Inngest, no nested `claude`). Same code path the UI uses; just driven sequentially on the box.
+- **🚨 The box's LLM work runs on Max via `claude -p` — NEVER the Anthropic API, NEVER Inngest.** The worker launches a **top-level `claude -p` on Max** for the seed job (`env -u ANTHROPIC_API_KEY`, **web search enabled**, like a build — top-level, so not a "nested claude"), running a **seed-product skill**. The box's Claude does the work agentically: **ingredient/benefit research by *searching the web*** (clinical studies, ingredient science, dosages), reads the workspace reviews, triangulates benefits, writes the content, drives the Gemini hero, self-QAs, and publishes — **all on Max, no `ANTHROPIC_API_KEY` on the box, no per-token API spend.** Deterministic I/O (PDP fetch, Drive via the SA, the Gemini image API, DB reads/writes) are tools/helpers the skill calls. **This is NOT the in-process Sonnet-API engine** — the Inngest/UI Engine keeps its own API generation as a *separate* path; the box path is Max + web. (PR #106 built it as in-process API calls — corrected by the follow-up build.)
 
 ## Input (near-zero — just hit Populate)
 - **Ingredients: auto-extracted from the live PDP.** Tested 2026-06-19: the "Clinically Studied Ingredients" chapter is server-rendered HTML at `superfoodscompany.com/products/{handle}` (18 ingredients + descriptions for Ashwavana Guru Focus). The box fetches the page + extracts names/dosages → `product_ingredients`. (Theme access via [[../recipes/..|reconcile-shopify-theme]] is the fallback.) Manual entry still possible if no chapter exists.
@@ -22,7 +22,7 @@ The Engine (`src/lib/inngest/product-intelligence.ts`) is sound but unreliable a
 
 ## Pipeline (the Engine, run to completion on the box)
 1. **Extract ingredients** from the PDP → `product_ingredients` → `intelligence_status='ingredients_added'`.
-2. **`researchIngredients`** (reuse) → `product_ingredient_research` (mechanism, clinical benefits, citations, dosage, contraindications) — fault-isolated per ingredient → `research_complete`. Surfaces *all* proven benefits; the **inferred angle weights/prioritizes** which to foreground.
+2. **Ingredient research — the box's Claude searches the web** (Max). For each ingredient it researches clinical studies + mechanism + effective dosage + contraindications via **web search**, writing `product_ingredient_research` with real citations → `research_complete`. Surfaces *all* proven benefits; the **inferred angle weights/prioritizes** which to foreground.
 3. **`analyzeReviews`** (reuse) over `product_reviews` (workspace DB), **4–5★ only, weighting `featured`/`smart_featured` first** (already the Engine's behavior), map-reduce chunks → `product_review_analysis` → `reviews_complete`.
 4. **Auto benefit-selection — triangulate three sources, pick the best** (replaces the manual UI step). Synthesize across: (a) **our existing framing** (the PDP angle — an *anchor*, not a ceiling), (b) the **benefits implied by clinical studies** (`product_ingredient_research` → `science_confirmed`), and (c) the **benefits implied by reviews** (`product_review_analysis` → `customer_confirmed`). Choose the lead + supporting benefits that are **strongest across all three** — favoring benefits where clinical evidence and real customer language **converge**, and surfacing a *better* benefit than the current framing when the data supports it (don't just rubber-stamp the existing angle). Each pick carries its evidence (`review IDs` + `ingredient_research IDs`). → `product_benefit_selections` → `benefits_selected`.
 5. **`generateContent`** (reuse) → `product_page_content` (hero, mechanism, ingredient cards, comparison, FAQ, guarantee, expectation timeline, endorsements, KB article, support macros) + `product_how_it_works` → `content_generated`.
@@ -54,8 +54,8 @@ The box resolves each via `products.handle` → fetches `superfoodscompany.com/p
 - ✅ Engine pipeline + the 7 tables + `intelligence_status` enum all exist — only the host changes.
 
 ## Safety / invariants
-- **Reuse the Engine logic verbatim** — do not fork the research/review/content logic; factor it to shared functions both the UI (Inngest) and the box call.
-- **Box rules:** native tools only, no nested `claude`; Max-billed (no `ANTHROPIC_API_KEY` in env).
+- **🚨 Box LLM = Max `claude -p` + web search, NEVER the Anthropic API.** Research is done by the box's own Claude **searching the web** — not in-process Sonnet API calls, not Inngest. **No `ANTHROPIC_API_KEY` anywhere on the box** (builds AND seeds stay on Max — zero per-token spend). The UI/Inngest Engine is a *separate* API-based path; do not route the box through it.
+- **Box rules:** the worker launches the seed job as a top-level `claude -p` (not nested); native tools only.
 - **Reviews:** workspace `product_reviews` only, 4–5★, featured-weighted.
 - **Images:** workspace Gemini key (decrypt via `crypto.ts`); never commit keys.
 - Re-runnable/replayable; every output editable in the Engine UI.
