@@ -1,6 +1,6 @@
 # Ad creative rules (statics + advertorials)
 
-Durable brand-creative conventions for the ad tool. These outlive any single spec — the [[specs/killer-statics]] and [[specs/advertorial-landers]] specs reference this page, and fold INTO it (not over it) when they ship. Audience context: Superfoods' paid social skews **cold 50+** (good CPM from creative-audience congruence).
+Durable brand-creative conventions for the ad tool. These outlive any single spec — the [[specs/killer-statics]] spec + the shipped [[lifecycles/advertorial-landers]] flow reference this page, and fold INTO it (not over it) when they ship. Audience context: Superfoods' paid social skews **cold 50+** (good CPM from creative-audience congruence).
 
 ## Angle anchoring (what buyers actually want)
 Anchor every angle to the product's **core desires**, never to functional/secondary benefits:
@@ -42,12 +42,12 @@ Anchor every angle to the product's **core desires**, never to functional/second
 
 ## Landing routing (ad → page scent-match)
 - **Testimonial · Authority · Big-claim → existing PDP.**
-- **Advertorial → advertorial lander** ([[specs/advertorial-landers]]).
-- **Before/After → before/after lander** (before/after hero + weight-loss testimonials + rest of PDP — [[specs/advertorial-landers]]).
+- **Advertorial → advertorial lander** ([[lifecycles/advertorial-landers]]).
+- **Before/After → before/after lander** (before/after hero + weight-loss testimonials + rest of PDP — [[lifecycles/advertorial-landers]]).
 
 ## Meta policy
 - **Before/after IS publishable for this ad account** (Dylan, 2026-06-15 — his account is cleared for it). Treat Before/After like any other archetype: publishable Meta ad → routes to the before/after lander. (Meta's general before/after restriction does not apply here; don't re-add it as a blocker.)
 - **No specific weight-loss numbers as ad claims/headlines** ("32 lbs in 9 weeks") — keep those inside real testimonial quotes, not as the ad's own claim.
 
 ## Related
-[[lifecycles/ad-static]] · [[lifecycles/ad-render]] · [[lifecycles/ad-publish]] · [[specs/killer-statics]] · [[specs/advertorial-landers]] · [[customer-voice]] · [[tables/product_ad_angles]]
+[[lifecycles/ad-static]] · [[lifecycles/ad-render]] · [[lifecycles/ad-publish]] · [[specs/killer-statics]] · [[lifecycles/advertorial-landers]] · [[customer-voice]] · [[tables/product_ad_angles]]

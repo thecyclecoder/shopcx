@@ -7,10 +7,10 @@ System-level reference covering everything an agent needs to navigate the codeba
 | Folder | Contents | Count |
 |---|---|---|
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 165 |
-| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 59 |
+| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 60 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 16 |
-| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 205 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 28 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 209 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 29 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 30 + README |
@@ -193,7 +193,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/cart_drafts]] — Server-side cart state for the custom storefront. Token-bound, server-validated pricing, lifecycle: pending → converted/abandoned. See [[../lifecycles/storefront-checkout]].
 - [[tables/event_dispatches]] — Per-(event, sink) dispatch state for the CAPI clearinghouse — pending/sent/failed/dlq. See [[../lifecycles/storefront-checkout]].
 - [[tables/event_sinks]] — Downstream destinations for storefront events — meta_capi, tiktok_events, google_enhanced, klaviyo, custom. Encrypted credentials.
-- [[tables/posts]] — Imported blog/resource object (Superfood Scoop) — self-hosted images, AI-classified is_resource + grouping. Rendered on the public storefront blog + portal Resources. See [[lifecycles/blog-resources]].
+- [[tables/posts]] — Blog/resource object — imported (Superfood Scoop) or auto-generated ([[lifecycles/auto-blog-generation]]); self-hosted images, AI-classified is_resource + grouping. Rendered on the public storefront blog + portal Resources. See [[lifecycles/blog-resources]].
 - [[tables/post_products]] — Join: a [[tables/posts|post]] → many [[tables/products]] (a recipe shows under each product it uses).
 - [[tables/pricing_rules]] — Storefront pricing rules — tier qty, mode (subscription vs one-time), frequency, discount %, line-item price.
 - [[tables/shipping_rates]] — Storefront shipping rates per (region, weight) — referenced by orders + subscriptions.
@@ -280,6 +280,7 @@ Every background job, webhook fan-out, and cron lives here. Each page lists trig
 - [[inngest/amazon-sync]] — Pulls Amazon SP-API order + ASIN data.
 - [[inngest/amplifier-webhooks]] — Amplifier (3PL) `order_received` / `order_shipped` → updates `orders.amplifier_*`.
 - [[inngest/auto-archive]] — Archives closed tickets older than threshold.
+- [[inngest/auto-blog]] — Daily cron — auto-generates a human-voiced, intelligence-grounded blog post per eligible workspace + auto-publishes.
 - [[inngest/chargeback-processing]] — Shopify dispute pipeline: classify → auto-cancel sub OR review → won/lost.
 - [[inngest/client]] — SDK client init (not a function).
 - [[inngest/crisis-campaign]] — Daily crisis-campaign cron. Tier advancement + auto-swap.
@@ -362,6 +363,7 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 - [[lifecycles/fraud-detection]] — Order create → rules → fraud_cases → hold orders → confirmed_fraud → orchestrator gate.
 - [[lifecycles/storefront-checkout]] — PDP → cart → tax-quote → Braintree vault + sale → order create → CAPI fan-out.
 - [[lifecycles/blog-resources]] — Shopify blog import → AI classify → [[tables/posts]] → public storefront blog + portal Resources.
+- [[lifecycles/auto-blog-generation]] — Daily engine: product intelligence + web research → human-voiced post → branded NBP imagery → auto-published [[tables/posts]].
 - [[lifecycles/subscription-billing]] — In-house billing-tick cron → renewal quote → tax → Braintree → orders → dunning on failure.
 - [[lifecycles/customer-link-confirmation]] — Meta sender → fuzzy match → agent confirms → `meta_sender_customer_links` → backfill.
 - [[lifecycles/chargeback-pipeline]] — Shopify dispute → `chargeback_events` → fraud classification → auto-cancel subs → `chargeback_subscription_actions`.

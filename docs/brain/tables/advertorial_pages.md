@@ -10,8 +10,8 @@ One row per (product, ad angle, variant) = the generated editorial **TOP** of a 
 | `workspace_id` / `product_id` | uuid → workspaces / products | cascade |
 | `angle_id` | uuid → [[product_ad_angles]] | the angle this lander matches (nullable) |
 | `campaign_id` | uuid → [[ad_campaigns]] | the campaign whose assets seeded it (nullable) |
-| `slug` | text | URL `?angle={slug}` — `{hook_slug}-{angle_id[:8]}` (before/after appends `-ba`) |
-| `variant` | text | `advertorial` \| `beforeafter` |
+| `slug` | text | URL `?angle={slug}` — `{hook_slug}-{angle_id[:8]}` (before/after appends `-ba`, reasons appends `-reasons`) |
+| `variant` | text | `advertorial` \| `beforeafter` \| `reasons` |
 | `publication` | text | brand-owned masthead (never a real outlet) |
 | `sponsor_label` | text | "SPONSORED" honesty label |
 | `headline` / `dek` | text | editorial serif hero headline + standfirst |
@@ -20,6 +20,7 @@ One row per (product, ad angle, variant) = the generated editorial **TOP** of a 
 | `hero_caption` | text | italic photo caption |
 | `chapter_heading` | text | chapter-1 heading |
 | `chapter_paragraphs` | jsonb | chapter-1 paragraphs (string[]) |
+| `reasons` | jsonb | the **"8 Reasons Why"** list for `variant='reasons'` — `[{n, heading, body}]` (migration `20260616120000_advertorial_pages_reasons.sql`); null for other variants |
 | `status` | text | `draft` \| `ready` |
 | `created_at` / `updated_at` | timestamptz | |
 
@@ -28,4 +29,5 @@ One row per (product, ad angle, variant) = the generated editorial **TOP** of a 
 ## Gotchas
 - **Per angle, reused across campaigns/ads of that angle** — not per campaign.
 - **Hero is a path, not a URL** — only re-signable `ad-tool` paths are stored; expiring signed URLs are dropped (the reader re-signs fresh, 1h TTL). Ingredient/before-after heroes are null here and resolve from `product_media` at render.
+- **The `reasons` variant generates + stores its OWN hero** — `ensureReasonsHero()` composites the real isolated pouch into a lifestyle scene (Nano Banana Pro → WebP), stored as a **public** `product-media/.../landers/{handle}/reasons-hero.webp` URL in `hero_storage_path` (passes straight through the reader, no re-sign). See [[../lifecycles/advertorial-landers]] § "8 Reasons Why".
 - **Generated top only** — ingredients/pricing/reviews/checkout are the live PDP, never copied into this row.

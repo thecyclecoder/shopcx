@@ -1,6 +1,6 @@
 # Blog → Posts + Product Resources
 
-The end-to-end flow that turns the 36 Shopify "Superfood Scoop" articles into a self-hosted, AI-classified [[../tables/posts]] object rendered in two surfaces: the **public storefront blog** (SEO/LLM-optimized) and the in-house portal **Resources** section. Replaces a Shopify-locked, untagged blog with content we own — images on our storage, product + grouping classification, searchable.
+The end-to-end flow that turns the 36 Shopify "Superfood Scoop" articles into a self-hosted, AI-classified [[../tables/posts]] object rendered in two surfaces: the **public storefront blog** (SEO/LLM-optimized) and the in-house portal **Resources** section. Replaces a Shopify-locked, untagged blog with content we own — images on our storage, product + grouping classification, searchable. The sibling [[auto-blog-generation]] lifecycle *generates* net-new `posts` daily into these same surfaces (this page is import + render; that one is generation).
 
 ## Why
 
@@ -67,7 +67,7 @@ The public blog is SSG'd + edge-served exactly like the PDP (no `headers()`/`coo
 **Known gaps / not yet shipped:**
 - RAG embedding — embed `content_text` into [[../tables/kb_chunks]] so the AI agent can cite a study/recipe in a ticket reply (reuse the `kb/document.updated` pipeline).
 - Periodic re-sync (cron) to pick up new/edited Shopify articles.
-- Per-post author/byline (no author column on `posts` yet — JSON-LD uses the workspace Organization).
+- ✅ Per-post author/byline — shipped via `posts.author_slug` + the [[../libraries/blog__authors]] registry for **AI-generated** posts ([[auto-blog-generation]]); imported Shopify posts still render the workspace Organization (no author in the Shopify payload).
 
 **Recent activity:**
 - `94c9fadf` storefront-survey-chapter (#71) — adjacent storefront work
@@ -77,4 +77,4 @@ The public blog is SSG'd + edge-served exactly like the PDP (no `headers()`/`coo
 
 ## Related
 
-[[customer-portal]] · [[storefront-checkout]] · [[../tables/posts]] · [[../tables/post_products]] · [[../libraries/posts__import-article]] · [[../integrations/shopify]] · [[../dashboard/storefront__blog]] · [[../tables/products]] · [[../tables/kb_chunks]]
+[[customer-portal]] · [[storefront-checkout]] · [[auto-blog-generation]] · [[../tables/posts]] · [[../tables/post_products]] · [[../libraries/posts__import-article]] · [[../integrations/shopify]] · [[../dashboard/storefront__blog]] · [[../tables/products]] · [[../tables/kb_chunks]]

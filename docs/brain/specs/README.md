@@ -10,12 +10,6 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
-## Active project — Auto-generated blog posts (scheduled) ⏳
-
-**Spec:** [[auto-blog-generation]]
-
-**Why this matters:** a daily engine that turns [[../lifecycles/product-intelligence|product intelligence]] (ingredients, benefits, SEO keywords, real citations) + web research into genuinely useful, human-voiced blog posts with original branded imagery (Nano Banana Pro hero composites the real product pouch). Goals: rank on target keywords, give value to buyers, reinforce value for considerers. A working end-to-end prototype already renders live (`why-people-add-mushrooms-to-their-coffee`). Big design pillar: posts must read human (E-E-A-T: real authors, proprietary data, original imagery, anti-AI voice rules) so search engines don't dismiss them as scaled AI content. Open questions in the spec.
-
 ## Active project — Automated Organic Social Scheduler ⏳
 
 **Spec:** [[automated-social-scheduler]]
@@ -80,8 +74,8 @@ Single source of truth for what's being built next, what's parked, and what just
 ---
 
 **Cross-cutting (storefront × ad builder):**
-- ✅ **Ad & Lander Quality Scorecard** — shipped 2026-06-17, folded into [[../dashboard/storefront__ad-scorecard]]. Ranks ad creatives (by `utm_campaign`/`utm_content`) and lander variants (by `landing_url` variant/angle) on traffic quality — engaged/ATC/lead/purchase rates, revenue, CVR, composite score — the feedback instrument for [[killer-statics]] + [[advertorial-landers]]. Future roadmap (Meta spend/ROAS, ad×lander cross-tab, lander-id persistence) tracked in that dashboard page's "Future / open work".
-- 🚧 **Auto-generated advertorial landers** — [[advertorial-landers]] (P1–P4 code-complete on branch `advertorial-landers`; lifecycle [[../lifecycles/advertorial-landers]]). When an ad campaign hits `ready`, auto-generate a matched advertorial landing page (per ad *angle*) reusing the ad's assets (angle, hero image, script) + the PDP's working sections (ingredients, price table, checkout). Zero manual design; scent-match by construction. Targets the proven 86%→24% hero cliff (funnel data in the spec). Auto-design scope = editorial hero + chapter 1 only; everything below is the existing PDP reused. `product_id` attribution on checkout/order shipped. Remaining: migration apply + Inngest sync + A/B.
+- ✅ **Ad & Lander Quality Scorecard** — shipped 2026-06-17, folded into [[../dashboard/storefront__ad-scorecard]]. Ranks ad creatives (by `utm_campaign`/`utm_content`) and lander variants (by `landing_url` variant/angle) on traffic quality — engaged/ATC/lead/purchase rates, revenue, CVR, composite score — the feedback instrument for [[killer-statics]] + [[../lifecycles/advertorial-landers]]. Future roadmap (Meta spend/ROAS, ad×lander cross-tab, lander-id persistence) tracked in that dashboard page's "Future / open work".
+- ✅ **Auto-generated advertorial landers** — verified + archived 2026-06-18 ([[../archive]]). When an ad campaign hits `ready`, auto-generates a matched lander (per ad *angle*, three variants: advertorial · before/after · "8 Reasons Why") reusing the ad's assets + the PDP's working sections; zero manual design, scent-match by construction; targets the 86%→24% hero cliff. Canonical home: [[../lifecycles/advertorial-landers]] + [[../tables/advertorial_pages]].
 
 ## Active project 2 — Customer portal 🚧
 
