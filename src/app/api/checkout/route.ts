@@ -1012,12 +1012,19 @@ export async function POST(request: NextRequest) {
   try {
     const { data: sessions } = await admin
       .from("storefront_sessions")
-      .select("utm_source, utm_medium, utm_campaign, utm_content, utm_term, landing_url, referrer, first_seen_at")
+      .select("utm_source, utm_medium, utm_campaign, utm_content, utm_term, landing_url, referrer, first_seen_at, advertorial_page_id, ad_campaign_id")
       .eq("workspace_id", cart.workspace_id)
       .eq("customer_id", customer.id)
       .order("first_seen_at", { ascending: true });
     const firstTouch = (sessions || []).find((s) => s.utm_source) || (sessions || [])[0];
     if (firstTouch) {
+      // Phase 2b: persist the resolved lander identity on the order so attribution
+      // survives cross-session conversion without re-parsing landing_url. Prefer the
+      // first-touch session's id; if that session didn't land on an advertorial, fall
+      // back to the earliest session that did (the lander touch may be a later visit).
+      const landerSession = firstTouch.advertorial_page_id
+        ? firstTouch
+        : (sessions || []).find((s) => s.advertorial_page_id) || null;
       await admin.from("orders").update({
         attributed_utm_source: firstTouch.utm_source ?? null,
         attributed_utm_medium: firstTouch.utm_medium ?? null,
@@ -1026,6 +1033,8 @@ export async function POST(request: NextRequest) {
         attributed_utm_term: firstTouch.utm_term ?? null,
         landing_site: firstTouch.landing_url ?? null,
         referring_site: firstTouch.referrer ?? null,
+        advertorial_page_id: landerSession?.advertorial_page_id ?? null,
+        ad_campaign_id: landerSession?.ad_campaign_id ?? null,
       }).eq("id", order.id);
     }
   } catch (err) {

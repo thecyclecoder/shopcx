@@ -42,12 +42,13 @@ Library `src/lib/meta/attribution.ts` (`computeVariantAttribution` / `refreshVar
 - ✅ **Coverage metric (named, not silent):** each run reports `variant_attribution_coverage` (resolved ÷ total Meta-attributed revenue); the unresolved bucket (anonymous click → later direct-session conversion) is surfaced both as a row and in the run's coverage payload (`meta_orders_without_ad` counted too)
 - OPEN (none — v1 join path confirmed)
 
-## Phase 2b — Attribution hardening (fast-follow) ⏳
+## Phase 2b — Attribution hardening (fast-follow) ✅
 Goal: stop depending on URL parsing; make attribution survive cross-session conversion.
-- ⏳ Migration: add `advertorial_page_id uuid` (+ resolved `ad_campaign_id uuid`) to `storefront_sessions` and `orders`
-- ⏳ Populate `advertorial_page_id` at pixel time on the session and at checkout on the order
-- ⏳ Scorecard logic prefers the persisted column; falls back to the URL-parse join (Phase 2) when null
-- ⏳ Track migration of coverage upward as persisted ids populate
+Migration `20260619180000_attribution_persisted_ids.sql` (apply: `scripts/apply-attribution-persisted-ids-migration.ts`).
+- ✅ Migration: add `advertorial_page_id uuid` + resolved `ad_campaign_id uuid` to `storefront_sessions` and `orders` (both nullable, FK `on delete set null`, partial indexes)
+- ✅ Populate at pixel time on the session — `resolveLanderIds()` in `src/app/api/pixel/route.ts` resolves `?angle={slug}` → `advertorial_pages` on session INSERT (first-touch, alongside `landing_url`); at checkout on the order — `src/app/api/checkout/route.ts` copies the first-touch (or earliest lander) session's persisted ids onto the order
+- ✅ Attribution logic (`src/lib/meta/attribution.ts`, feeds Phase 3 scorecards) prefers the persisted column (`resolveByPersistedId`); falls back to the URL-parse join (Phase 2 `resolveLander`) when null — for sessions, the converting order's own id, and the first-touch session
+- ✅ Track migration of coverage upward — run coverage payload reports `meta_orders_resolved_via_persisted` (resolved off a persisted id vs URL parse); climbs as the columns populate on new traffic
 
 ## Phase 3 — Metrics rollups / scorecards ⏳
 Goal: deterministic daily metrics the controller reads (engine never queries raw tables directly). Primary grain is adset/campaign; ad is an input roll-up.
@@ -133,6 +134,14 @@ Goal: execute decisions; manage live objects autonomously, create new spend line
 - Dylan can review the active policy + a daily list of autonomous actions and pending recommendations, edit/approve a policy version, and see autonomous management plus draft creation happen without anything going live unintentionally.
 
 ## Verification
+
+### Phase 2b — Attribution hardening (shipped)
+- Apply the migration: `npx tsx scripts/apply-attribution-persisted-ids-migration.ts` → expect `✓ applied 20260619180000_attribution_persisted_ids.sql` then four `✓ public.{storefront_sessions|orders}.{advertorial_page_id|ad_campaign_id} present` lines.
+- In Supabase SQL editor, confirm the columns + FKs: `select column_name from information_schema.columns where table_name='storefront_sessions' and column_name in ('advertorial_page_id','ad_campaign_id');` → expect both rows. Same for `orders`.
+- New-session capture: visit a lander URL carrying `?variant=advertorial&angle={a real advertorial_pages.slug}` so the pixel fires, then `select advertorial_page_id, ad_campaign_id from storefront_sessions order by first_seen_at desc limit 1;` → expect the matching `advertorial_pages.id` and its `campaign_id` (non-null). A non-lander landing (no `?angle=`) → expect both null.
+- New-order capture: place a storefront order from a customer whose first-touch (or earliest lander) session resolved a lander → `select advertorial_page_id, ad_campaign_id from orders where id='<order id>';` → expect the persisted ids copied from that session.
+- Fallback intact: a session/order predating the migration (null `advertorial_page_id`) still resolves a variant via the URL parse — run `meta/attribution-refresh` and confirm pre-migration days still produce resolved variants (coverage unchanged), while post-migration traffic resolves off the persisted id.
+- Coverage migration metric: in the `meta-attribution-refresh` result, `coverage.meta_orders_resolved_via_persisted` is 0 before any persisted ids exist and climbs (≤ `meta_orders_resolved`) as new attributed orders carry the column.
 
 ### Phase 2 — Attribution & variant linkage (shipped)
 - Apply the migration: `npx tsx scripts/apply-meta-attribution-migration.ts` → expect `✓ applied 20260619140000_meta_attribution_daily.sql` and `✓ public.meta_attribution_daily has N columns`.

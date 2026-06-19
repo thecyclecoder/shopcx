@@ -37,6 +37,8 @@ One row per anonymous_id. Device fingerprint, UTMs, click IDs, _fbp/_fbc cookies
 | `ttclid` | `text` | ✓ |  |
 | `fbp` | `text` | ✓ |  |
 | `fbc` | `text` | ✓ |  |
+| `advertorial_page_id` | `uuid` | ✓ | → [[advertorial_pages]].id · FK `on delete set null`. Phase 2b — resolved lander identity stamped at pixel time (first-touch, on INSERT only, alongside `landing_url`). `/api/pixel` `resolveLanderIds()` parses `?angle={slug}` from `landing_url` → `advertorial_pages` (slug is unique per workspace+product, suffix-encodes variant). Null for non-lander landings. |
+| `ad_campaign_id` | `uuid` | ✓ | → [[ad_campaigns]].id · FK `on delete set null`. Phase 2b — the resolved page's `campaign_id`, stamped alongside `advertorial_page_id`. |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
 
@@ -44,6 +46,8 @@ One row per anonymous_id. Device fingerprint, UTMs, click IDs, _fbp/_fbc cookies
 
 **Out (this → others):**
 
+- `advertorial_page_id` → [[advertorial_pages]].`id` (on delete set null)
+- `ad_campaign_id` → [[ad_campaigns]].`id` (on delete set null)
 - `customer_id` → [[customers]].`id`
 - `workspace_id` → [[workspaces]].`id`
 

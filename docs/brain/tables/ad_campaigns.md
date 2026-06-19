@@ -44,6 +44,8 @@ A single ad concept: product × variant × [[product_ad_angles|angle]] × [[ad_a
 
 - [[ad_videos]].`campaign_id`
 - [[ad_jobs]].`campaign_id`
+- [[storefront_sessions]].`ad_campaign_id` (Phase 2b)
+- [[orders]].`ad_campaign_id` (Phase 2b)
 
 ## Common queries
 

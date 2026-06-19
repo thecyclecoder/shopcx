@@ -206,6 +206,40 @@ interface PersistParams {
   sessionContext: SessionContext;
 }
 
+/**
+ * Resolve the persisted lander identity from a first-touch landing_url.
+ *
+ * Storefront Iteration Engine Phase 2b: instead of re-parsing `?angle={slug}`
+ * out of landing_url at rollup time, we stamp `advertorial_page_id` (+ its
+ * `ad_campaign_id`) onto the session at pixel time. The `?angle=` param already
+ * carries the variant (slug is unique per workspace+product, with `-ba`/`-reasons`
+ * suffixes), so a single (workspace_id, slug) lookup fully identifies the lander.
+ * Returns nulls for non-lander landings — most traffic. Best-effort.
+ */
+async function resolveLanderIds(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  landingUrl: string | null | undefined,
+): Promise<{ advertorial_page_id: string | null; ad_campaign_id: string | null }> {
+  const none = { advertorial_page_id: null, ad_campaign_id: null };
+  if (!landingUrl) return none;
+  let slug: string | null = null;
+  try {
+    slug = new URL(landingUrl).searchParams.get("angle");
+  } catch {
+    return none;
+  }
+  if (!slug) return none;
+  const { data } = await admin
+    .from("advertorial_pages")
+    .select("id, campaign_id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (data) return { advertorial_page_id: data.id, ad_campaign_id: data.campaign_id ?? null };
+  return none;
+}
+
 async function persistEvents({
   request,
   workspaceId,
@@ -270,6 +304,9 @@ async function persistEvents({
       .update(updates)
       .eq("id", sessionId);
   } else {
+    // Phase 2b: stamp the resolved lander identity at first touch (alongside
+    // landing_url, which is likewise INSERT-only / never overwritten).
+    const landerIds = await resolveLanderIds(admin, workspaceId, sessionContext.landing_url);
     const { data: inserted, error } = await admin
       .from("storefront_sessions")
       .insert({
@@ -278,6 +315,8 @@ async function persistEvents({
         customer_id: customerId,
         is_internal: isInternal,
         is_bot: isBot,
+        advertorial_page_id: landerIds.advertorial_page_id,
+        ad_campaign_id: landerIds.ad_campaign_id,
         user_agent: ua || null,
         device_type: deviceType,
         os,
