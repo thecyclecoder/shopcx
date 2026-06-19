@@ -20,9 +20,32 @@ ssh root@100.75.99.7
 systemctl status shopcx-builder          # health
 journalctl -u shopcx-builder -f          # live logs
 systemctl restart shopcx-builder         # restart
-# update the worker after merging worker changes to main (deploy when the queue is IDLE — a restart kills in-flight lanes):
+# Manual worker redeploy — RARELY NEEDED now (the worker self-updates when idle, below). Still the
+# escape hatch if self-update is wedged. Deploy when the queue is IDLE — a restart kills in-flight lanes:
 sudo -u builder git -C /home/builder/shopcx fetch origin && sudo -u builder git -C /home/builder/shopcx reset --hard origin/main && systemctl restart shopcx-builder
 ```
+
+## Worker self-update (worker-self-update, shipped 2026-06-19)
+
+The worker keeps **its own code** current — a merged worker fix goes live within one idle cycle, **zero manual redeploy** (closes the gap that left #77's `markReady` fix inert until a human ran the command above, so PRs kept coming out draft).
+
+- **Idle self-update loop.** Each poll tick, **only when `active.size === 0`** (no build/fold lane — in-flight work is sacrosanct), the worker `git fetch origin main` and compares local `HEAD` to `origin/main`. If behind: `git reset --hard origin/main`, `npm ci` **if `package-lock.json` changed**, then `process.exit(0)` — `systemd Restart=always` relaunches on the fresh `builder-worker.ts`. A clean exit + restart is the safe re-exec (never hot-reload in-process). Worktrees live in the sibling `/home/builder/builds/`, so resetting the main repo never touches a running build. The journal logs the `from→to` short SHA.
+- **No thrash.** Self-update only fires when `HEAD != origin/main`, at most once per `SELF_UPDATE_MIN_INTERVAL_MS` (60s).
+- **Crash-loop guard.** A per-SHA startup counter persists in `/home/builder/.worker-startup.json`. If a freshly-pulled worker keeps dying on startup (same SHA, ≥ `CRASH_LOOP_MAX = 3`), it writes a `needs_attention` [[../tables/worker_heartbeats|heartbeat]] (the breadcrumb) and `exit(1)`s so systemd's `StartLimit` stops the flapping instead of churning a broken commit. The counter zeroes on the first clean poll tick. **Falls back to manual redeploy** (above).
+- **Heartbeat.** Every tick the worker upserts [[../tables/worker_heartbeats]] (running SHA · `active_builds` · `last_poll_at`); [[../dashboard/branches]] shows a **Build box** banner so "is the box behind?" is answerable from the UI.
+
+**Required systemd config for the crash-loop guard** (in `/etc/systemd/system/shopcx-builder.service`): `Restart=always` (relaunch on the self-update `exit(0)`) **plus** a start-limit so a flapping worker is eventually parked rather than restarted forever:
+
+```ini
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
+[Service]
+Restart=always
+RestartSec=5
+```
+
+**Bootstrapping:** self-update ships in `builder-worker.ts` itself, so the **one last manual redeploy** (the command above) activates it; every redeploy after that is automatic.
 
 ## Provisioning (how it was built — to reproduce)
 
@@ -31,7 +54,7 @@ sudo -u builder git -C /home/builder/shopcx fetch origin && sudo -u builder git 
 3. **Stack.** Node 24 (`curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs`), `build-essential`, Claude Code (`npm i -g @anthropic-ai/claude-code`), `npm i -g tsx`.
 4. **Auth Claude → Max.** `claude` → `/login` → sign in with the Max account. Creds persist in `/root/.claude`. **Do not** set `ANTHROPIC_API_KEY`.
 5. **Repo + secrets.** Clone with a token (`git clone https://x-access-token:$GITHUB_TOKEN@github.com/thecyclecoder/shopcx.git /root/shopcx`), `npm install`, drop in `.env.local` (prod secrets + `GITHUB_TOKEN`) **with `ANTHROPIC_API_KEY` commented out**.
-6. **Service.** `/etc/systemd/system/shopcx-builder.service` → `ExecStart=/usr/bin/tsx scripts/builder-worker.ts`, `WorkingDirectory=/root/shopcx`, `Environment=HOME=/root`, `Restart=always`. Then `systemctl enable --now shopcx-builder`.
+6. **Service.** `/etc/systemd/system/shopcx-builder.service` → `ExecStart=/usr/bin/tsx scripts/builder-worker.ts`, `WorkingDirectory=/root/shopcx`, `Environment=HOME=/root`, `Restart=always`, **plus `StartLimitIntervalSec=300` / `StartLimitBurst=5`** (so the self-update crash-loop guard can park a flapping worker — see § Worker self-update). Then `systemctl enable --now shopcx-builder`.
 
 ## Gotchas (learned in the live bring-up 2026-06-18)
 
@@ -61,4 +84,4 @@ The worker runs **up to `MAX_CONCURRENT = 5` builds at once**, each in its own *
 
 ## Related
 
-[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../tables/agent_jobs]] · [[../dashboard/branches]] · [[../dashboard/roadmap]] · [[write-a-migration-apply-script]]
+[[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../specs/worker-self-update]] · [[../tables/agent_jobs]] · [[../tables/worker_heartbeats]] · [[../dashboard/branches]] · [[../dashboard/roadmap]] · [[write-a-migration-apply-script]]

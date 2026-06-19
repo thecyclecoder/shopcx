@@ -53,8 +53,26 @@ export async function GET() {
   const workspaceId = cookieStore.get("workspace_id")?.value;
   if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
 
+  // Box worker health (worker-self-update Phase 3): running SHA + last poll, so "is the box behind?"
+  // is answerable here instead of over SSH. Best-effort — the row is absent until the worker first ticks.
+  const adminEarly = createAdminClient();
+  const { data: hb } = await adminEarly
+    .from("worker_heartbeats")
+    .select("id, running_sha, status, active_builds, detail, last_poll_at")
+    .eq("id", "box")
+    .maybeSingle();
+  const worker = hb
+    ? {
+        running_sha: hb.running_sha as string | null,
+        status: hb.status as string,
+        active_builds: hb.active_builds as number,
+        detail: hb.detail as string | null,
+        last_poll_at: hb.last_poll_at as string | null,
+      }
+    : null;
+
   if (!ghToken()) {
-    return NextResponse.json({ configured: false, branches: [], total: 0 });
+    return NextResponse.json({ configured: false, branches: [], total: 0, worker });
   }
 
   let pulls: GhPull[] = [];
@@ -66,7 +84,7 @@ export async function GET() {
   }
 
   // Match each PR to the todo that created it (execution_result.pr_url).
-  const admin = createAdminClient();
+  const admin = adminEarly;
   const { data: todos } = await admin
     .from("agent_todos")
     .select("id, summary, action_type, execution_result")
@@ -134,5 +152,5 @@ export async function GET() {
     }),
   );
 
-  return NextResponse.json({ configured: true, branches, total: branches.length });
+  return NextResponse.json({ configured: true, branches, total: branches.length, worker });
 }

@@ -11,7 +11,7 @@
  *
  * Run: cd /home/builder/shopcx && npx tsx scripts/builder-worker.ts   (via systemd shopcx-builder)
  */
-import { readFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, join } from "path";
 import { spawn, spawnSync } from "child_process";
 
@@ -40,6 +40,24 @@ const MAX_FOLD = 1;
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
 // SAME already-applied action before we stop the loop and surface it for a human. Normally 0–1.
 const AUTO_SETTLE_MAX = 2;
+
+// ── Self-update (worker-self-update) ────────────────────────────────────────
+// The worker keeps its OWN code current: when fully idle it fetches origin/main and, if behind,
+// resets the main repo to it and exits — systemd Restart=always relaunches the fresh builder-worker.ts.
+const WORKER_BOX_ID = process.env.WORKER_BOX_ID || "box"; // singleton heartbeat key (supports >1 box later)
+const SELF_UPDATE_MIN_INTERVAL_MS = 60 * 1000; // don't thrash: at most one self-update check per minute
+// Crash-loop guard: if the freshly-pulled worker keeps dying on startup we stop flapping and leave a
+// needs_attention heartbeat for a human instead of churning forever. Counter persists across restarts.
+const CRASH_FILE = resolve(REPO_DIR, "../.worker-startup.json");
+const CRASH_LOOP_MAX = 3; // consecutive startup crashes on the SAME sha before we give up + alert
+const RUNNING_SHA = (() => {
+  try {
+    return spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO_DIR, encoding: "utf8" }).stdout?.trim() || "";
+  } catch {
+    return "";
+  }
+})();
+let lastSelfUpdateCheck = 0;
 
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
 // A planner-proposed spec branch, carried on a type:'spec' action (goal-decomposition-engine).
@@ -243,6 +261,100 @@ let db: Awaited<ReturnType<typeof admin>>;
 
 async function update(id: string, patch: Record<string, unknown>) {
   await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+}
+
+// ── Heartbeat + self-update (worker-self-update) ─────────────────────────────
+// Upsert the singleton worker_heartbeats row so the dashboard can show "worker: <sha>, healthy Ns ago"
+// (and surface a crash-loop) without SSH. Best-effort: a heartbeat write must never break the poll loop.
+const WORKER_STARTED_AT = new Date().toISOString();
+async function writeHeartbeat(activeBuilds: number, status: string, detail?: string) {
+  try {
+    await db.from("worker_heartbeats").upsert({
+      id: WORKER_BOX_ID,
+      running_sha: RUNNING_SHA,
+      status,
+      active_builds: activeBuilds,
+      detail: detail ?? null,
+      started_at: WORKER_STARTED_AT,
+      last_poll_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("[heartbeat] write failed:", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// Idle self-update: ONLY when no build/fold lane is running (active === 0 — in-flight work is sacrosanct).
+// Fetch origin, and if local HEAD is behind origin/main, hard-reset the MAIN repo (worktrees live in a
+// sibling dir, so this never touches a running build), npm ci if deps changed, then exit(0) — systemd
+// Restart=always relaunches the worker on the fresh builder-worker.ts. A clean exit + restart is the
+// safe re-exec; never hot-reload in-process. Returns true when it has triggered an exit path.
+async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
+  if (activeBuilds !== 0) return; // never self-update mid-build/fold
+  const now = Date.now();
+  if (now - lastSelfUpdateCheck < SELF_UPDATE_MIN_INTERVAL_MS) return; // don't thrash
+  lastSelfUpdateCheck = now;
+
+  const fetched = sh("git", ["fetch", "origin", "main"]);
+  if (fetched.code !== 0) {
+    console.error(`[self-update] git fetch failed: ${fetched.err.slice(0, 200)}`);
+    return;
+  }
+  const local = sh("git", ["rev-parse", "HEAD"]).out.trim();
+  const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
+  if (!local || !remote || local === remote) return; // current → no-op (no thrash)
+
+  const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
+  console.log(`[self-update] behind origin/main (${fromTo}) — updating worker code`);
+  // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
+  const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
+
+  const reset = sh("git", ["reset", "--hard", "origin/main"]);
+  if (reset.code !== 0) {
+    console.error(`[self-update] git reset failed: ${reset.err.slice(0, 200)}`);
+    return;
+  }
+  if (depsChanged) {
+    console.log("[self-update] package-lock.json changed → npm ci");
+    const ci = sh("npm", ["ci"], { timeout: 10 * 60 * 1000 });
+    if (ci.code !== 0) console.error(`[self-update] npm ci failed (continuing): ${ci.err.slice(-300)}`);
+  }
+  await writeHeartbeat(0, "updating", `self-update ${fromTo}`);
+  console.log(`[self-update] reset to ${remote.slice(0, 8)} → exiting for systemd restart`);
+  process.exit(0);
+}
+
+// Crash-loop guard (worker-self-update Phase 2): persist a per-sha startup-attempt counter. If the
+// freshly-pulled worker keeps dying on startup (same sha, ≥ CRASH_LOOP_MAX times) we leave a
+// needs_attention breadcrumb and exit non-zero so systemd's StartLimit can stop the flapping, instead
+// of silently churning. clearStartupCrashCounter() runs once the worker reaches a healthy steady state.
+function readCrashFile(): { sha: string; count: number; alerted: boolean } {
+  try {
+    if (existsSync(CRASH_FILE)) {
+      const o = JSON.parse(readFileSync(CRASH_FILE, "utf8"));
+      return { sha: String(o.sha || ""), count: Number(o.count) || 0, alerted: !!o.alerted };
+    }
+  } catch { /* treat a corrupt file as a fresh start */ }
+  return { sha: "", count: 0, alerted: false };
+}
+function writeCrashFile(o: { sha: string; count: number; alerted: boolean }) {
+  try { writeFileSync(CRASH_FILE, JSON.stringify(o)); } catch { /* best-effort */ }
+}
+// Returns true if we're in a crash loop on the current sha and should give up (caller alerts + exits).
+function recordStartupAttempt(): boolean {
+  const prev = readCrashFile();
+  if (prev.sha === RUNNING_SHA) {
+    const next = { sha: RUNNING_SHA, count: prev.count + 1, alerted: prev.alerted };
+    writeCrashFile(next);
+    return next.count >= CRASH_LOOP_MAX;
+  }
+  // New sha (a self-update or manual deploy moved us) → reset the counter to this attempt.
+  writeCrashFile({ sha: RUNNING_SHA, count: 1, alerted: false });
+  return false;
+}
+function clearStartupCrashCounter() {
+  // Reached steady state — this sha is healthy. Zero the counter so a LATER crash starts fresh.
+  writeCrashFile({ sha: RUNNING_SHA, count: 0, alerted: false });
 }
 
 // Execute owner-approved gated actions in the build's worktree. The worker is the ONLY component
@@ -851,10 +963,24 @@ async function runJob(job: Job) {
 async function main() {
   if (!GH_TOKEN) throw new Error("GITHUB_TOKEN not set");
   db = await admin();
+
+  // Crash-loop guard (worker-self-update Phase 2): if a freshly self-updated worker keeps dying on
+  // startup, stop flapping — leave a needs_attention heartbeat once and exit non-zero so systemd's
+  // StartLimit can give up instead of churning on a broken commit.
+  if (recordStartupAttempt()) {
+    const crash = readCrashFile();
+    if (!crash.alerted) {
+      await writeHeartbeat(0, "needs_attention", `worker crash-loop on ${RUNNING_SHA || "unknown"} (${crash.count} startup failures) — manual redeploy needed`);
+      writeCrashFile({ ...crash, alerted: true });
+    }
+    console.error(`[crash-loop] worker has failed startup ${crash.count}× on ${RUNNING_SHA} — giving up; left needs_attention heartbeat`);
+    process.exit(1);
+  }
+
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold lane, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold lane, polling every ${POLL_MS}ms`);
 
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
@@ -870,6 +996,7 @@ async function main() {
       .finally(() => active.delete(job.id));
   };
 
+  let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
   for (;;) {
     try {
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
@@ -888,6 +1015,12 @@ async function main() {
         console.log(`claimed ${job.spec_slug} → ${countOf("other") + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
       }
+      // First clean tick → this sha is healthy; zero the crash-loop counter.
+      if (!steady) { clearStartupCrashCounter(); steady = true; }
+
+      // Heartbeat for the dashboard, then self-update if fully idle (never mid-build).
+      await writeHeartbeat(active.size, "healthy");
+      await maybeSelfUpdate(active.size); // exits the process (→ systemd restart) when behind origin/main
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
     }

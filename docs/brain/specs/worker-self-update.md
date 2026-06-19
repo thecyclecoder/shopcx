@@ -1,4 +1,4 @@
-# Worker self-update — the build box redeploys its own code when idle ⏳
+# Worker self-update — the build box redeploys its own code when idle 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform"
 
@@ -6,18 +6,18 @@ The box worker ([[../recipes/build-box-setup]]) runs `scripts/builder-worker.ts`
 
 **Business outcome:** merge a worker improvement → it's live within one idle cycle, zero manual steps. The last structural gap in "describe → build → merge → it just works."
 
-## Phase 1 — Idle self-update loop ⏳
-- ⏳ Each poll tick, **only when `active.size === 0`** (no build/fold lane running — never kill in-flight work): `git -C <REPO_DIR> fetch origin` and compare local `HEAD` to `origin/main`.
-- ⏳ If behind, `git reset --hard origin/main`, then **`process.exit(0)`** — `systemd Restart=always` relaunches the worker with the fresh `builder-worker.ts`. (Don't hot-reload in-process; a clean exit + systemd restart is the safe re-exec.) Worktrees live in a sibling dir, so resetting the main repo is safe.
-- ⏳ Log the update (`from→to` short SHA) so the journal shows when/what it picked up.
+## Phase 1 — Idle self-update loop ✅
+- ✅ Each poll tick, **only when `active.size === 0`** (no build/fold lane running — never kill in-flight work): `git -C <REPO_DIR> fetch origin main` and compare local `HEAD` to `origin/main`. (`maybeSelfUpdate()` in `scripts/builder-worker.ts`.)
+- ✅ If behind, `git reset --hard origin/main`, then **`process.exit(0)`** — `systemd Restart=always` relaunches the worker with the fresh `builder-worker.ts`. (Don't hot-reload in-process; a clean exit + systemd restart is the safe re-exec.) Worktrees live in a sibling dir, so resetting the main repo is safe.
+- ✅ Log the update (`from→to` short SHA) so the journal shows when/what it picked up.
 
-## Phase 2 — Dependency + safety guards ⏳
-- ⏳ If `package-lock.json` changed in the pulled diff, run `npm ci` (or `npm install`) **before** the exit so the new code's deps are present.
-- ⏳ Crash-loop guard: rely on `systemd` `StartLimitIntervalSec`/`Restart=on-failure` backoff; if the freshly-pulled worker exits non-zero on startup repeatedly, stop + leave a `needs_attention` breadcrumb (an `agent_jobs`/heartbeat row) so a human is alerted instead of silent flapping.
-- ⏳ Don't thrash: only update when `HEAD != origin/main` (no-op when current); a short min-interval between self-updates.
+## Phase 2 — Dependency + safety guards ✅
+- ✅ If `package-lock.json` changed in the pulled diff (`git diff --name-only local remote`), run `npm ci` **before** the exit so the new code's deps are present.
+- ✅ Crash-loop guard: per-SHA startup counter persisted in `/home/builder/.worker-startup.json`; ≥ `CRASH_LOOP_MAX` (3) startup failures on the same SHA → write a `needs_attention` [[../tables/worker_heartbeats|heartbeat]] breadcrumb + `exit(1)` so systemd's `StartLimitIntervalSec`/`StartLimitBurst` parks the flapping worker (config documented in [[../recipes/build-box-setup]]). Counter zeroes on the first clean poll tick.
+- ✅ Don't thrash: only update when `HEAD != origin/main` (no-op when current); `SELF_UPDATE_MIN_INTERVAL_MS` (60s) min-interval between checks.
 
-## Phase 3 — Heartbeat / visibility ⏳
-- ⏳ The worker writes a lightweight heartbeat (running SHA + last-poll time) the dashboard can read, so [[../dashboard/roadmap]] / [[../dashboard/branches]] can show "worker: `<sha>`, healthy Ns ago" — making "is the box behind?" answerable from the UI instead of SSH.
+## Phase 3 — Heartbeat / visibility ✅
+- ✅ The worker upserts a lightweight heartbeat ([[../tables/worker_heartbeats]] — running SHA · `active_builds` · `last_poll_at`) each poll tick; `GET /api/branches` returns it and [[../dashboard/branches]] shows a **Build box** banner ("worker `<sha>`, healthy/idle, last poll Ns ago"; red when stale or `needs_attention`) — making "is the box behind?" answerable from the UI instead of SSH.
 
 ## Safety / invariants
 - **Never self-update mid-build** — gate strictly on `active.size === 0`. An in-flight build/fold is sacrosanct.

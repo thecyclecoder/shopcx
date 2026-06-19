@@ -5,6 +5,9 @@ Single surface for every open `claude/*` PR the To-Do routine has created (from 
 **Route:** `/dashboard/branches` · **File:** `src/app/dashboard/branches/page.tsx` · **API:** `GET /api/branches`
 **Sidebar:** top-level **Branches** (owner only), bubble = number of open `claude/*` PRs.
 
+## Build box banner
+At the top, a **Build box** health banner ([[../specs/worker-self-update]] Phase 3) from the [[../tables/worker_heartbeats]] singleton (`GET /api/branches` returns a `worker` object): `worker <sha> · healthy/idle/building/self-updating · last poll Ns ago`. Green when the last poll is < 90s old, **red** when stale (box down) or `status='needs_attention'` (crash-loop guard tripped). Answers "is the box behind / healthy?" without SSH. Absent until the worker first ticks.
+
 ## List
 Queries the GitHub REST API for open PRs whose head ref starts with `claude/`. Columns: Title (+ branch + file count) · Source todo (links back via `execution_result.pr_url` match) · Age · CI status (combined status of the head sha: passing/failing/pending) · Mergeability · **Squash & merge** / **Open in GitHub**.
 
@@ -24,4 +27,4 @@ Needs a GitHub token in env: `GITHUB_TOKEN` (or `AGENT_TODO_GITHUB_TOKEN`); repo
 - **CI gate** — the routine runs `npx tsc --noEmit` before pushing. On failure no PR opens and the todo is `failed` with the compile error in `execution_result.error`. No broken PRs reach this surface.
 
 ## Related
-[[tickets__todos__id]] · [[../tables/agent_todos]] · [[../inngest/agent-todo-routine]] · [[../lifecycles/agent-todo-system]]
+[[tickets__todos__id]] · [[../tables/agent_todos]] · [[../tables/worker_heartbeats]] · [[../specs/worker-self-update]] · [[../recipes/build-box-setup]] · [[../inngest/agent-todo-routine]] · [[../lifecycles/agent-todo-system]]

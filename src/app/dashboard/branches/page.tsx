@@ -19,6 +19,14 @@ interface Branch {
   action_type: string | null;
 }
 
+interface Worker {
+  running_sha: string | null;
+  status: string;
+  active_builds: number;
+  detail: string | null;
+  last_poll_at: string | null;
+}
+
 const CI_BADGE: Record<string, string> = {
   success: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
@@ -34,9 +42,59 @@ function age(s: string): string {
   return `${Math.floor(h / 24)}d`;
 }
 
+// Compact "Ns/Nm/Nh ago" for the worker's last poll — finer-grained than age() (which floors to hours).
+function ago(s: string): string {
+  const ms = Date.now() - new Date(s).getTime();
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
+// Healthy only if the last poll is recent (the worker ticks every ~5s); a stale heartbeat ⇒ box down.
+function workerHealthy(w: Worker): boolean {
+  if (w.status !== "healthy" && w.status !== "updating") return false;
+  if (!w.last_poll_at) return false;
+  return Date.now() - new Date(w.last_poll_at).getTime() < 90_000;
+}
+
+function WorkerBanner({ worker }: { worker: Worker | null }) {
+  if (!worker) return null;
+  const healthy = workerHealthy(worker);
+  const cls = healthy
+    ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-300"
+    : "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900/40 dark:bg-rose-900/20 dark:text-rose-300";
+  const last = worker.last_poll_at ? ago(worker.last_poll_at) : "never";
+  const state = healthy
+    ? worker.active_builds > 0
+      ? `building (${worker.active_builds} lane${worker.active_builds === 1 ? "" : "s"})`
+      : worker.status === "updating"
+        ? "self-updating"
+        : "idle"
+    : worker.status === "needs_attention"
+      ? "needs attention"
+      : "unreachable";
+  return (
+    <div className={`mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-xs ${cls}`}>
+      <span className="font-medium">Build box</span>
+      <span>·</span>
+      <span>
+        worker <code className="font-mono">{worker.running_sha || "?"}</code>
+      </span>
+      <span>·</span>
+      <span>{healthy ? "healthy" : "⚠ "}{state}</span>
+      <span>·</span>
+      <span>last poll {last}</span>
+      {worker.detail ? <span className="opacity-80">· {worker.detail}</span> : null}
+    </div>
+  );
+}
+
 export default function BranchesPage() {
   const workspace = useWorkspace();
   const [branches, setBranches] = useState<Branch[]>([]);
+  const [worker, setWorker] = useState<Worker | null>(null);
   const [configured, setConfigured] = useState(true);
   const [loading, setLoading] = useState(true);
   const [merging, setMerging] = useState<number | null>(null);
@@ -48,6 +106,7 @@ export default function BranchesPage() {
       .then((r) => r.json())
       .then((d) => {
         setBranches(d.branches || []);
+        setWorker(d.worker ?? null);
         setConfigured(d.configured !== false);
       })
       .finally(() => setLoading(false));
@@ -76,6 +135,8 @@ export default function BranchesPage() {
         Open <code>claude/*</code> PRs the To-Do routine has opened. Owners can squash &amp; merge here when a PR is
         conflict-free; otherwise review in GitHub. Code never auto-merges.
       </p>
+
+      <WorkerBanner worker={worker} />
 
       {error && (
         <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-900/40 dark:bg-rose-900/20 dark:text-rose-300">
