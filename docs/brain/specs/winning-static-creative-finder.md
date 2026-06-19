@@ -2,37 +2,46 @@
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Static-ad optimization"
 
-Continuously source **proven winning static ad creative** — from **competitors / the health-&-wellness category** (the real signal) and from **our own** top performers — into an **ideas bin**, so the team always has a pipeline of references to turn into more killer statics. First concrete spec under Growth's static-ad-optimization mandate; feeds the variant-generation specs after it.
+**Reverse-engineer the STRUCTURE of winning ads — never copy the creative.** Pull long-running ads in our categories (inflammation / energy / longevity / weight-loss / anti-aging), strip each to its **skeleton** (hook → mechanism claim → proof → offer), and mine the **patterns that repeat across multiple *independent* brands** into a **test matrix**. Repetition across independent winners is the real signal — not any single ad. The output isn't an asset bin; it's a continuously-refreshed **structural pattern library + test matrix** that feeds variant-generation. First concrete spec under Growth's static-ad-optimization mandate.
+
+**Strategist frameworks to detect/score against:** Hook → Promise → Proof · Problem → Pivot → Payoff (and variants). The engine should recognize which skeleton a winner uses and which slots repeat across brands.
 
 ## Source feasibility (tested 2026-06-19)
-- ✅ **AdLibrary.com API — TESTED, works, no KYC. This is the external source.** `POST https://adlibrary.com/api/search`, `Authorization: Bearer ${ADLIBRARY_API_KEY}` (Business plan; key in `.env.local` + Vercel env). Body: `{ keyword, appType:"3" (e-commerce), geo:["USA"], daysBack, pageSize }`. Per-ad returns: creative (`preview_img_url`, `resource_urls[].image_url`), copy (`title`/`body`), advertiser (`advertiser_name`, `ecom_advertiser_id` = domain), and **winning signals** — scale (`all_exposure_value`, `impression`, `heat`, `new_week_exposure_value`) + longevity (`first_seen`, `last_seen`, `days_count`, `resume_advertising_flag`). Costs **1 credit/search**, **10/min, 10k/day**. Covers 7 networks → filter `platform` to Meta + image statics. (Quirk: `total` may read `0` while `results` is populated — page off `results`.)
-- ✅ **Our own ads** — `meta_campaigns/adsets/ads/insights_daily` ([[storefront-iteration-engine]]); we have spend/ROAS/longevity → a true winner signal.
-- ⛔ **Meta Ad Library API (`ads_archive`)** — blocked: requires the `facebook.com/ID` identity confirmation (verified — app + user token both `code 10 / 2332002`; it's a blanket API gate, not political-ads-specific, and not an app-permission). Becomes a *free* alternative only if the owner completes that KYC. AdLibrary.com is the path until/unless that's done.
+- ✅ **AdLibrary.com API works, no KYC.** `POST https://adlibrary.com/api/search`, `Authorization: Bearer ${ADLIBRARY_API_KEY}` (Business). Body: `{ keyword, appType:"3", geo:["USA"], daysBack, pageSize }`. Returns advertiser, `title`, scale (`all_exposure_value`/`impression`/`heat`) + longevity (`first_seen`/`last_seen`/`days_count`/`resume_advertising_flag`) + creative URLs. 1 credit/search, 10/min, 10k/day.
+- ⚠️ **`body` copy is thin/empty → VISION IS MANDATORY.** The real skeleton lives in the creative image, not the text fields. Proven: an Everyday Dose ad had a blank `body` but vision extracted format+hook+mechanism+proof+offer cleanly.
+- ⚠️ **Creative fetch needs the Bearer key** — `preview_img_url`/`resource_urls` (`adlibrary.com/api/media?u=…`) 403 without `Authorization: Bearer ${KEY}`; 200 with it.
+- ⚠️ **Static vs video is detectable at pull time → route at ingestion.** `video_duration` (0 = static, >0 = video), corroborated by `ads_type` (1=image, 2=video) + `resource_urls[].type` (1/2). Statics → vision directly (Phase 3); video → frames+transcript (Phase 6). Note: several competitors are **video-heavy** (tested: all 12 Everyday Dose pulls were video, 53–115s), so Phase 6 carries real weight even though v1 is static-first.
+- ✅ **Query by `keyword` only** — `/explore` UI's `niche`/`brand` filters are NOT in the API (tested: `brand` ignored). Per-competitor = `keyword`=brand name (tested: `onnit`→15 ads).
+- ⛔ **Meta Ad Library API** — blocked behind `facebook.com/ID` identity confirmation (verified); a free alt only if the owner completes that KYC. AdLibrary is the path until then.
 
-## Phase 1 — Ideas bin + ingestion model ⏳
-- ⏳ `creative_ideas` table — card: `source` (`adlibrary | own | manual`), `image_url` (ref/screenshot, never a lifted asset), `advertiser`, `headline/body`, `why_it_won` (signal + value), `dedup_key` (AdLibrary `ad_key`), `first_seen`/`days_running`, `tags`, `status` (`new | shortlisted | in_production | shipped`). Migration via [[write-migration]].
-- ⏳ A source-agnostic `addIdea()` so AdLibrary / own / manual all land in the same shape.
+## Phase 1 — Skeleton store ⏳
+- ⏳ `creative_skeletons` table — one row per analyzed winner: `source`, `dedup_key` (AdLibrary `ad_key`), `advertiser`, `image_url`, `format` (ugc | studio | text-card | before/after | demo | …), `framework` (hook-promise-proof | problem-pivot-payoff | …), and the four slots: `hook`, `mechanism_claim`, `proof`, `offer`; plus `days_running`, `heat`, `status`. (Reference/inspiration only — store the *structure* + image link, never a lifted asset.)
 
-## Phase 2 — External discovery (AdLibrary.com — primary) ⏳
-- ⏳ `src/lib/adlibrary.ts` adapter — `searchAds({ keyword, appType:'3', geo:['USA'], daysBack, pageSize })` → `POST /api/search`. **Query by `keyword` ONLY** — the `/explore` UI's `niche`/`brand` filters are **NOT exposed in the API** (tested 2026-06-19: a `brand` body param is ignored → returns unrelated ads). So: (a) **category sweep** = keyword per category term (mushroom coffee, superfood coffee, functional coffee, weight-loss coffee, adaptogen coffee, …); (b) **per-competitor** = `keyword` = the brand name (tested: `keyword:"onnit"` → 15 Onnit FB/IG ads). Validated: a category sweep + advertiser aggregation surfaces the real competitors ranked by exposure.
-- ⏳ **Competitor seed list** (curated + data-surfaced 2026-06-19), each searched by brand keyword: **Amazing Coffee** (functional/superfood coffee) → `everydaydose`, `ryze`, `lifeboost`, `urthlabs`/`erthlabs` (anti-aging angle = our match), `leanjoebean` (weight-loss angle = our match), `atlascoffeeclub`, `piquelife`; **Ashwavana** (adaptogen/nootropic) → `onnit`; **superfood/greens (cross)** → `bloom` (bloomnu). The daily category sweep auto-promotes *new* heavy advertisers onto this list.
-- ⏳ Filter to **Meta image statics** (`platform` ~ facebook/instagram; image creative present; skip video). Rank by a **winning score** = scale (`all_exposure_value`/`heat`) × longevity (`last_seen − first_seen` days, `resume_advertising_flag`). Top N → `creative_ideas` (`source='adlibrary'`, `why_it_won` = "running {days_count}d · exposure {heat}").
-- ⏳ Scheduled sweep (daily Inngest) within credit limits (dedup by `ad_key`; cache so a re-seen ad doesn't burn a credit/duplicate).
+## Phase 2 — Discovery (AdLibrary.com) ⏳
+- ⏳ `src/lib/adlibrary.ts` — `searchAds({ keyword, appType:'3', geo:['USA'], daysBack, pageSize })`; `fetchCreative(url)` sends the Bearer key. Pull **long-runners** (high `days_count` + `resume_advertising_flag`) by (a) category keywords and (b) per-competitor brand keyword.
+- ⏳ **Competitor seed list** (curated + data-surfaced): **Amazing Coffee** → `everydaydose`, `ryze`, `lifeboost`, `urthlabs`/`erthlabs` (anti-aging = our match), `leanjoebean` (weight-loss = our match), `atlascoffeeclub`, `piquelife`, `mudwtr`; **Ashwavana** → `onnit`; **superfood/greens (cross)** → `bloom` (bloomnu). Daily category sweep auto-promotes new heavy advertisers.
 
-## Phase 3 — Surface + workflow ⏳
-- ⏳ Dashboard **Ideas bin** — browse / filter (source, tag, days-running, advertiser) / shortlist / promote to production. Sort by the winning score.
-- ⏳ Hook for the next mandate spec (variant generation) to pull from `shortlisted`.
+## Phase 3 — Vision deconstruction ⏳
+- ⏳ For each long-running creative: fetch the image (Bearer key) → **Claude vision** → extract the skeleton `{ format, framework, hook, mechanism_claim, proof, offer }` → write `creative_skeletons`. Dedup by `ad_key` (don't re-vision/re-spend).
+
+## Phase 4 — Pattern matrix (the deliverable) ⏳
+- ⏳ Aggregate skeletons → surface **slot patterns repeating across ≥N _independent_ brands** (e.g. "5 of 8 winners open on a UGC kitchen hook"; "6 brands lead mechanism with 'no jitters / clarity'"). Independent-brand repetition is the score, not single-ad performance.
+- ⏳ Emit a **test matrix**: hook × mechanism × proof × offer combinations worth testing, ranked by cross-brand repetition + longevity of the ads exhibiting them. This is what feeds variant-generation.
+
+## Phase 5 — Surface + workflow ⏳
+- ⏳ Dashboard view: the **pattern matrix** (repeating slots, with the supporting independent winners + their images) + browse/shortlist. Hook for the variant-generation spec to pull shortlisted patterns.
+
+## Phase 6 — Video (follow-on) ⏳
+- ⏳ For `video_duration`>0: download → ffmpeg keyframes (dense in first ~3s) + transcribe audio → vision frames + transcript → same skeleton schema (literal first-2s hook = opening frame + first spoken line). Heavier pipeline (download + transcription cost) — separate phase.
 
 ## Safety / invariants
-- **External creative is reference/inspiration, never lifted** — store the concept + image link for analysis; never republish a competitor's asset.
-- **Secrets:** `ADLIBRARY_API_KEY` lives in env (`.env.local` dev + Vercel), never committed. Respect rate limits (10/min, 10k/day) + credits.
-- Own = real ROAS; external = scale+longevity signal (no true spend) — don't conflate.
+- **Structure, not creative.** Reverse-engineer skeletons; store structure + an image link for analysis. Never republish or lift a competitor's asset.
+- **Signal = repetition across independent brands**, never a single ad's metrics.
+- `ADLIBRARY_API_KEY` in env (`.env.local` + Vercel), never committed; respect credits + rate limits (dedup by `ad_key`).
 - No-orphan: owner = [[../functions/growth]], parent = the static-ad-optimization mandate.
 
 ## Completion criteria
-- A daily sweep lands ranked competitor + category winning statics (AdLibrary) in the ideas bin, deduped, with image + why-it-won.
-- Our own winners auto-added (ROAS+longevity).
-- Browsable/shortlistable/promotable from the dashboard; the bin feeds variant-generation.
+- A daily sweep pulls long-running competitor + category ads (seed list + discovery), vision-deconstructs each into a skeleton, and produces a **test matrix of slot-patterns repeating across multiple independent brands** — browsable on the dashboard and consumable by variant-generation. Video handled in Phase 6.
 
 ## Related
 [[storefront-iteration-engine]] · [[killer-statics]] · [[advertorial-landers]] · [[../functions/growth]] · [[../integrations/meta]]
