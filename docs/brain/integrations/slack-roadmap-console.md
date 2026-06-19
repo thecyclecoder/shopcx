@@ -8,8 +8,8 @@ Outbound Slack ([[../libraries/slack]], [[../libraries/slack-notify]]) already e
 
 | Route | Handles |
 |---|---|
-| `POST /api/slack/events` | Slash commands `/roadmap`, `/build`, `/bug` + the Events API `url_verification` challenge |
-| `POST /api/slack/interactions` | `block_actions` (button taps) + `view_submission` (answer modal) |
+| `POST /api/slack/events` | Slash commands `/roadmap`, `/build`, `/bug` + the Events API `url_verification` challenge + `app_home_opened` (publishes the [[../libraries/slack-home\|App Home]] roadmap view) |
+| `POST /api/slack/interactions` | `block_actions` (button taps, incl. Home **Build all** / **Build N**) + `view_submission` (answer modal) |
 
 Both call `verifySlackSignature(rawBody, X-Slack-Signature, X-Slack-Request-Timestamp)` ([[../libraries/slack]]) — HMAC-SHA256 over `v0:{ts}:{body}` keyed by `SLACK_SIGNING_SECRET`, **rejecting timestamp skew > 5 min** (replay guard). Workspace is resolved from the Slack `team_id` (`resolveWorkspaceByTeamId`).
 
@@ -19,6 +19,7 @@ Both call `verifySlackSignature(rawBody, X-Slack-Signature, X-Slack-Request-Time
 - **`/build <slug> [instructions]`** → `queueRoadmapBuild` (one active build per spec; refusal surfaced as an ephemeral).
 - **`/bug <slug> <desc>`** → fix-build (`instructions` scoped; spec stays ✅, no spec edit).
 - **Buttons:** Build · View PR (URL) · Answer (opens modal → `view_submission` → `answerRoadmapBuild` → `queued_resume`) · Approve & apply / Decline (`approveRoadmapAction`) · Squash & merge (`mergeClaudePr`). After a mutation the handler `updateMessage`s the source message (single-purpose messages only — never the shared board).
+- **App Home tab** ([[../libraries/slack-home]]) — the roadmap mirrored onto the app's persistent Block Kit surface (not a message): specs grouped In progress / Planned / Shipped with live chips + **Build all** (`roadmap_build:{slug}`) / per-phase **Build N** (`roadmap_build_phase:{slug}:{n}`) / **Open** buttons. Owner-gated (non-owners get an "owners only" modal — Home interactions carry no channel for an ephemeral); after queueing, the view is **re-published** so the chip flips immediately. Rebuilt from `getRoadmap()` each open (no drift).
 
 ## Identity & owner gate (twice)
 
@@ -32,7 +33,8 @@ The [[../inngest/slack-roadmap-notify]] cron (Vercel, every minute) posts transi
 ## Slack app config
 
 - **Interactivity & Shortcuts** Request URL → `https://shopcx.ai/api/slack/interactions`
-- **Event Subscriptions** Request URL → `https://shopcx.ai/api/slack/events` (answers `url_verification`)
+- **Event Subscriptions** Request URL → `https://shopcx.ai/api/slack/events` (answers `url_verification`); subscribe to **`app_home_opened`** for the Home tab.
+- **App Home** → enable the **Home Tab** (one-time, in the Slack app config).
 - **Slash Commands** `/roadmap`, `/build`, `/bug` → `https://shopcx.ai/api/slack/events`
 - **Env:** `SLACK_SIGNING_SECRET` (new) + the existing per-workspace bot token (encrypted on [[../tables/workspaces]]). Connection persisted by `src/app/api/slack/{callback,channels,disconnect,sync-members}/route.ts`.
 
@@ -46,7 +48,7 @@ The [[../inngest/slack-roadmap-notify]] cron (Vercel, every minute) posts transi
 
 ## Related
 
-[[../lifecycles/roadmap-build-console]] · [[../libraries/slack]] · [[../libraries/slack-roadmap]] · [[../libraries/slack-identity]] · [[../libraries/roadmap-actions]] · [[../inngest/slack-roadmap-notify]] · [[../tables/agent_jobs]] · [[../dashboard/roadmap]] · [[../dashboard/branches]]
+[[../lifecycles/roadmap-build-console]] · [[../libraries/slack]] · [[../libraries/slack-roadmap]] · [[../libraries/slack-home]] · [[../libraries/slack-identity]] · [[../libraries/roadmap-actions]] · [[../inngest/slack-roadmap-notify]] · [[../tables/agent_jobs]] · [[../dashboard/roadmap]] · [[../dashboard/branches]]
 
 ---
 

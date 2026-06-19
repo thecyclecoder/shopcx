@@ -31,6 +31,9 @@ const nextConfig: NextConfig = {
     // getSpec) inside the slash-command + Inngest-watcher bundles. Trace the specs in or they
     // render empty in prod. See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md.
     "/api/slack/events": ["./docs/brain/specs/**/*.md"],
+    // The interactions handler builds the App Home roadmap view (slack-home → getRoadmap) after a
+    // queued build, so it reads the brain specs too. See docs/brain/specs/slack-roadmap-home.md.
+    "/api/slack/interactions": ["./docs/brain/specs/**/*.md"],
     "/api/inngest": ["./docs/brain/specs/**/*.md"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for

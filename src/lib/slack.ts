@@ -67,6 +67,16 @@ export async function openModal(token: string, triggerId: string, view: unknown)
   return true;
 }
 
+/** Publish an App Home tab view for a user (views.publish). `view` is a Block Kit `home` view. Returns ok. */
+export async function publishHomeView(token: string, slackUserId: string, view: unknown): Promise<boolean> {
+  const result = await slackApi(token, "views.publish", { user_id: slackUserId, view });
+  if (!result.ok) {
+    console.error("[Slack] publishHomeView error:", result.error);
+    return false;
+  }
+  return true;
+}
+
 /** Post an ephemeral message visible only to `user` in `channel` (chat.postEphemeral). */
 export async function postEphemeral(
   token: string,

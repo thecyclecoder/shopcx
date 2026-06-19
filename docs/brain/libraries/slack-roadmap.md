@@ -7,7 +7,7 @@ Block Kit builders for the [[../integrations/slack-roadmap-console|Slack Roadmap
 ## Exports
 
 - `ACTIONS` — the interaction `action_id` constants (`roadmap_build`, `roadmap_view_pr`, `roadmap_merge`, `roadmap_answer_open`, `roadmap_approve`, `roadmap_decline`, `roadmap_answer_submit`).
-- `jobChip(job, fold)` — short live status chip (`🛠️ building`, `⚠️ needs input`, `✅ built — PR open`, `🗂️ Folding…`, …).
+- `jobChip(job, fold)` — short live status chip (`🛠️ building`, `⚠️ needs input`, `✅ built — PR open`, `🗂️ Folding…`, …). Reused by [[slack-home]] for the App Home tab.
 - `buildBoardBlocks({ specs, jobs, folds })` — the `/roadmap` board: **In progress / Planned / Shipped — awaiting verification** sections, one card per spec with phase emoji + chip + Build / View PR / Answer / Squash & merge buttons. Capped at 16 cards (Slack's 50-block ceiling) with a "+N more" note.
 - `buildSpecDetailBlocks(spec, job, fold)` — `/roadmap <slug>` single-spec detail (phases + state + buttons).
 - `buildNeedsInputMessage` / `buildNeedsApprovalMessage` / `buildCompletedMessage` / `buildFailedMessage` — per-job push/update messages.
@@ -21,11 +21,11 @@ Block Kit builders for the [[../integrations/slack-roadmap-console|Slack Roadmap
 
 ## Callers
 
-- `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
+- `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` · `src/lib/slack-home.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
 
 ## Related
 
-[[../integrations/slack-roadmap-console]] · [[slack]] · [[roadmap-actions]] · [[brain-roadmap]] · [[../tables/agent_jobs]]
+[[../integrations/slack-roadmap-console]] · [[slack]] · [[slack-home]] · [[roadmap-actions]] · [[brain-roadmap]] · [[../tables/agent_jobs]]
 
 ---
 
