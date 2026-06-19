@@ -11,19 +11,19 @@ The Engine (`src/lib/inngest/product-intelligence.ts`) is sound but unreliable a
 
 ## Mechanism (reuse the box queue)
 - New `agent_jobs.kind='product-seed'` claimed via `claim_agent_job(['product-seed'])` into its own lane; `runProductSeedJob(job)` branch in `scripts/builder-worker.ts` (alongside `runJob`/`runPlanJob`/`runFoldJob`).
-- Enqueued from `/dashboard/products/[id]/intelligence` ("Auto-populate" button) with `{ product_id, core_desires }`.
+- Enqueued from `/dashboard/products/[id]/intelligence` ("Auto-populate" button) with just `{ product_id, angle_override? }` — `angle_override` is optional; omitted by default (the box infers the angle from the PDP).
 - **Reuse the Engine logic** — factor the four worker bodies out of their Inngest `step.run` wrappers into plain async functions the box calls directly (no nested Inngest, no nested `claude`). Same code path the UI uses; just driven sequentially on the box.
 
-## Input (minimal — the whole point)
+## Input (near-zero — just hit Populate)
 - **Ingredients: auto-extracted from the live PDP.** Tested 2026-06-19: the "Clinically Studied Ingredients" chapter is server-rendered HTML at `superfoodscompany.com/products/{handle}` (18 ingredients + descriptions for Ashwavana Guru Focus). The box fetches the page + extracts names/dosages → `product_ingredients`. (Theme access via [[../recipes/..|reconcile-shopify-theme]] is the fallback.) Manual entry still possible if no chapter exists.
-- **Core desires:** the owner sets 2–3 per product (e.g. "focus · calm · no-crash") — the single strategic input; anchors benefit-selection + content.
+- **Angle/positioning: INFERRED from the PDP — no required input.** The page encodes the angle (headline, ingredient-description framing, benefit language — e.g. Guru Focus's ingredients all cluster on focus/cortisol/cognition → a focus/stress angle). The box infers the lead angle from the PDP + ingredient research; the owner can pass an optional `angle_override` to steer, but the default is zero input.
 - **Variant photo:** already present (`product_media`/`product_variants` exist for the targets); the hero packshot source for Nano Banana.
 
 ## Pipeline (the Engine, run to completion on the box)
 1. **Extract ingredients** from the PDP → `product_ingredients` → `intelligence_status='ingredients_added'`.
 2. **`researchIngredients`** (reuse) → `product_ingredient_research` (mechanism, clinical benefits, citations, dosage, contraindications) — fault-isolated per ingredient → `research_complete`.
 3. **`analyzeReviews`** (reuse) over `product_reviews` (workspace DB), **4–5★ only, weighting `featured`/`smart_featured` first** (already the Engine's behavior), map-reduce chunks → `product_review_analysis` → `reviews_complete`.
-4. **Auto benefit-selection** (replaces the manual UI step): pick lead + supporting benefits aligned to `core_desires`, using the existing `science_confirmed` (from ingredient research/clinical) + `customer_confirmed` (from review analysis) flags + evidence (`review IDs` + `ingredient_research IDs`) → `product_benefit_selections` → `benefits_selected`.
+4. **Auto benefit-selection** (replaces the manual UI step): pick lead + supporting benefits aligned to the **PDP-inferred angle** (or `angle_override` if given), using the existing `science_confirmed` (from ingredient research/clinical) + `customer_confirmed` (from review analysis) flags + evidence (`review IDs` + `ingredient_research IDs`) → `product_benefit_selections` → `benefits_selected`.
 5. **`generateContent`** (reuse) → `product_page_content` (hero, mechanism, ingredient cards, comparison, FAQ, guarantee, expectation timeline, endorsements, KB article, support macros) + `product_how_it_works` → `content_generated`.
 6. **Nano Banana imagery** (reuse `src/lib/gemini.ts` `getGeminiCredentials(workspaceId)` → `workspaces.gemini_api_key_encrypted`): **hero packshot** (from the variant photo) + **lifestyle** + **ingredient-callout** images → `product_media`, attached to the PDP blocks.
 7. **Auto-publish** → `intelligence_status='published'` (owner's choice — no draft gate). Every stage stays re-runnable (`raw_ai_response` + `*_at` preserved).
