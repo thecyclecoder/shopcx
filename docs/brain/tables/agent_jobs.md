@@ -2,7 +2,7 @@
 
 The build queue for the [[../specs/roadmap-build-console]] "do it" button. One row per job. The dashboard inserts a `queued` row; the box worker ([[../recipes/build-box-setup]]) claims it via `claim_agent_job()`, runs `claude -p` on Max, and drives it to a `claude/*` PR. Distinct from [[agent_todos]] (the ticket-driven queue) — same shape, different driver.
 
-**Three `kind`s off one queue + RPC:** `'build'` (default — build a spec to a PR), `'plan'` (the [[../specs/goal-decomposition-engine|goal-decomposition engine]] — run the `plan-goal` skill against a goal → propose a milestone→spec tree → on approval, auto-author the specs + queue their builds), and `'fold'` (the [[../specs/fold-build-batching|fold-build batcher]] — fold **every** [[pending_folds|pending-fold]] spec for the workspace into the brain in **one** PR). The worker branches on `kind` (`runJob` / `runPlanJob` / `runFoldJob`). For a plan job, `spec_slug` holds the **goal** slug; for a fold job it's the `'fold-batch'` sentinel (the real spec list lives in [[pending_folds]]).
+**Four `kind`s off one queue + RPC:** `'build'` (default — build a spec to a PR), `'plan'` (the [[../specs/goal-decomposition-engine|goal-decomposition engine]] — run the `plan-goal` skill against a goal → propose a milestone→spec tree → on approval, auto-author the specs + queue their builds), `'fold'` (the [[../specs/fold-build-batching|fold-build batcher]] — fold **every** [[pending_folds|pending-fold]] spec for the workspace into the brain in **one** PR), and `'product-seed'` (the [[../specs/box-product-seeding|box product-seeding]] pipeline — re-hosts the [[../lifecycles/product-intelligence]] Engine on the box to drive ONE product `none → published` **in-process**, no worktree/`claude -p`/PR; `spec_slug` = the `product_id`, `instructions` = JSON `{product_id, angle_override?}`). The worker branches on `kind` (`runJob` / `runPlanJob` / `runFoldJob` / `runProductSeedJob`). For a plan job, `spec_slug` holds the **goal** slug; for a fold job it's the `'fold-batch'` sentinel (the real spec list lives in [[pending_folds]]).
 
 **Primary key:** `id`
 
@@ -12,8 +12,8 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 |---|---|---|
 | `id` | `uuid` | PK · `gen_random_uuid()` |
 | `workspace_id` | `uuid` | → [[workspaces]].id · ON DELETE CASCADE |
-| `kind` | `text` | `build` (default) ｜ `plan` ｜ `fold` — the job kind the worker branches on |
-| `spec_slug` | `text` | for `build`: the `docs/brain/specs/{slug}.md` to build · for `plan`: the `docs/brain/goals/{slug}.md` to plan |
+| `kind` | `text` | `build` (default) ｜ `plan` ｜ `fold` ｜ `product-seed` — the job kind the worker branches on |
+| `spec_slug` | `text` | for `build`: the `docs/brain/specs/{slug}.md` to build · for `plan`: the `docs/brain/goals/{slug}.md` to plan · for `product-seed`: the `product_id` |
 | `spec_branch` | `text?` | `claude/{slug}-{rand}` the worker creates / reuses on resume |
 | `instructions` | `text?` | optional extra build/plan instructions |
 | `status` | `text` | enum below · default `queued` |
@@ -35,7 +35,7 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 
 ## `claim_agent_job(p_kinds text[] default null)`
 
-`returns public.agent_jobs`. Grabs the oldest `queued`/`queued_resume` row `FOR UPDATE SKIP LOCKED`, flips it to `building`, returns it — atomic claim safe for concurrent workers. `p_kinds` filters by kind (NULL = any). The worker runs **per-kind concurrency** ([[../specs/fold-build-batching]] Phase 2): it claims `['build','plan']` into a 5-lane pool and `['fold']` into a **concurrency-1** lane, so a fold never races a feature build on the (now generated) index files. Replaced the old zero-arg overload (dropped first — a defaulted overload would be ambiguous on a no-arg call).
+`returns public.agent_jobs`. Grabs the oldest `queued`/`queued_resume` row `FOR UPDATE SKIP LOCKED`, flips it to `building`, returns it — atomic claim safe for concurrent workers. `p_kinds` filters by kind (NULL = any). The worker runs **per-kind concurrency** ([[../specs/fold-build-batching]] Phase 2): it claims `['build','plan']` into a 5-lane pool, `['fold']` into a **concurrency-1** lane (so a fold never races a feature build on the now-generated index files), and `['product-seed']` into its own **2-lane** in-process lane ([[../specs/box-product-seeding]] — Engine runs, not code builds). Replaced the old zero-arg overload (dropped first — a defaulted overload would be ambiguous on a no-arg call).
 
 ## `enqueue_fold(p_workspace, p_slug, p_user)`
 

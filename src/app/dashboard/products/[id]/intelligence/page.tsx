@@ -187,6 +187,54 @@ function ConfidenceBadge({ value }: { value: number }) {
   return <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>{pct}% confidence</span>;
 }
 
+// One-click "Auto-populate": enqueues a box `product-seed` job that drives the
+// product none → published (PDP ingredients → research → reviews → benefits →
+// content → Nano Banana hero → self-QA → publish), unattended. See
+// docs/brain/specs/box-product-seeding.md.
+function AutoPopulateButton({
+  workspaceId,
+  productId,
+  onQueued,
+  setError,
+}: {
+  workspaceId: string;
+  productId: string;
+  onQueued: () => void;
+  setError: (e: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [queued, setQueued] = useState(false);
+
+  const run = async () => {
+    if (!confirm("Auto-populate this product? The build box will extract ingredients from the live PDP, research them, analyze reviews, pick benefits, generate page content + hero imagery, self-QA, and publish — unattended.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/seed`, { method: "POST" });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || "Failed to queue");
+      }
+      setQueued(true);
+      onQueued();
+    } catch (err) {
+      setError(String(err));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <button
+      onClick={run}
+      disabled={busy}
+      title="Enqueue a box job that drives this product none → published"
+      className="shrink-0 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+    >
+      {busy ? "Queuing…" : queued ? "Queued ✓" : "Auto-populate"}
+    </button>
+  );
+}
+
 export default function ProductIntelligenceEnginePage() {
   const workspace = useWorkspace();
   const { id: productId } = useParams<{ id: string }>();
@@ -262,6 +310,7 @@ export default function ProductIntelligenceEnginePage() {
             </div>
           </div>
         </div>
+        <AutoPopulateButton workspaceId={workspace.id} productId={productId} onQueued={load} setError={setError} />
       </div>
 
       {error && (

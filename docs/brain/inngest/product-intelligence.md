@@ -4,6 +4,8 @@ The four Sonnet workers that drive the Product Intelligence Engine pipeline. End
 
 **File:** `src/lib/inngest/product-intelligence.ts`
 
+> **Shared core (no fork) — [[../specs/box-product-seeding]].** The research/review/content logic now lives in [[../libraries/product-intelligence-seed|`src/lib/product-intelligence/engine.ts`]]; these Inngest functions call the shared functions (`researchOneIngredient`, `analyzeReviewChunk`/`reduceReviewAnalysis`/`persistReviewAnalysis`, `generateContentCore`) **inside** their `step.run` wrappers. The build box (`agent_jobs.kind='product-seed'` → `runProductSeedJob`) runs the SAME functions in-process to completion — same code path, different host.
+
 ## Functions
 
 ### `intelligence-research-ingredients`
