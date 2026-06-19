@@ -50,14 +50,15 @@ Migration `20260619180000_attribution_persisted_ids.sql` (apply: `scripts/apply-
 - ✅ Attribution logic (`src/lib/meta/attribution.ts`, feeds Phase 3 scorecards) prefers the persisted column (`resolveByPersistedId`); falls back to the URL-parse join (Phase 2 `resolveLander`) when null — for sessions, the converting order's own id, and the first-touch session
 - ✅ Track migration of coverage upward — run coverage payload reports `meta_orders_resolved_via_persisted` (resolved off a persisted id vs URL parse); climbs as the columns populate on new traffic
 
-## Phase 3 — Metrics rollups / scorecards ⏳
+## Phase 3 — Metrics rollups / scorecards ✅
 Goal: deterministic daily metrics the controller reads (engine never queries raw tables directly). Primary grain is adset/campaign; ad is an input roll-up.
-- ⏳ `iteration_scorecards_daily` keyed by `(workspace_id, level, object_id, snapshot_date)`, `level` ∈ ad|adset|campaign|variant|angle
-- ⏳ Adset/campaign scorecard (primary): spend, ROAS, CVR, revenue, CTR, frequency, days live, `creatives_live` count, trend vs. prior period, fatigue signals (CTR decline, rising frequency)
-- ⏳ Per-ad scorecard (input): spend, ROAS, CTR, frequency, days live — rolls up into adset
-- ⏳ Per-variant scorecard: sessions, ATC rate, CVR, revenue, attributed spend, ROAS, trend, `variant_attribution_coverage`
-- ⏳ Per-angle scorecard: ad → `ad_campaigns.angle_id` → `product_ad_angles.lead_benefit_anchor` → `product_benefit_selections.benefit_name` (filter `role='lead' AND science_confirmed=true`, `is_active`); aggregate performance
-- ⏳ Persist for traceability; recommendation + policy actions cite scorecard rows by id
+Library `src/lib/meta/scorecards.ts` (`computeScorecards` / `refreshScorecards`) → table `iteration_scorecards_daily`; Inngest `meta-scorecards-refresh` fires after each `meta-attribution-refresh`. Migration `20260619230000_iteration_scorecards_daily.sql` (apply: `scripts/apply-iteration-scorecards-migration.ts`).
+- ✅ `iteration_scorecards_daily` keyed by `(workspace_id, level, object_id, snapshot_date)`, `level` ∈ ad|adset|campaign|variant|angle. Each row is a trailing-window rollup (default 7d) ending at `snapshot_date`, with the prior equal-length window persisted for trend/fatigue.
+- ✅ Adset/campaign scorecard (primary): spend, ROAS, CVR, revenue, CTR, frequency, days live, `creatives_live` (ACTIVE child-ad count), trend vs. prior period (`*_delta_pct`), fatigue signals (`ctr_declining`, `frequency_rising`, `fatigue_score`) — from `meta_insights_daily` + `meta_*` structure
+- ✅ Per-ad scorecard (input): spend, ROAS, CTR, frequency, days live; carries `parent_adset_id`/`parent_campaign_id` so it rolls up into adset/campaign
+- ✅ Per-variant scorecard: sessions, ATC rate (`storefront_events` add_to_cart → session → variant), CVR (orders/sessions), revenue, attributed spend, ROAS, trend, `variant_attribution_coverage` — from `meta_attribution_daily`
+- ✅ Per-angle scorecard: attribution aggregated by `angle_id`; benefit resolved `angle_id` → `product_ad_angles.lead_benefit_anchor` → `product_benefit_selections.benefit_name` (filter `role='lead' AND science_confirmed=true`); archived (`is_active=false`) angles skipped
+- ✅ Persist for traceability; every row has a stable `id` so Phase 4/6 recommendations + policy actions cite scorecard rows by id. Idempotent upsert; engine reads this table only, never the raw tables.
 
 ## Phase 4 — Decision engine (two outputs, hybrid) ⏳
 Goal: turn scorecards + active policy into actions. Two distinct outputs.
@@ -134,6 +135,19 @@ Goal: execute decisions; manage live objects autonomously, create new spend line
 - Dylan can review the active policy + a daily list of autonomous actions and pending recommendations, edit/approve a policy version, and see autonomous management plus draft creation happen without anything going live unintentionally.
 
 ## Verification
+
+### Phase 3 — Metrics rollups / scorecards (shipped)
+- Apply the migration: `npx tsx scripts/apply-iteration-scorecards-migration.ts` → expect `✓ applied 20260619230000_iteration_scorecards_daily.sql` then `✓ public.iteration_scorecards_daily has N columns`.
+- In Supabase SQL editor, confirm the table + check constraint: `select column_name from information_schema.columns where table_name='iteration_scorecards_daily';` → expect the columns above; `select distinct level from public.iteration_scorecards_daily;` after a run → a subset of `ad|adset|campaign|variant|angle`.
+- Trigger a run from the Inngest dev/prod UI: send event `meta/scorecards-refresh` with `{ "workspace_id": "<ws>", "ad_account_id": "<meta_ad_accounts.id uuid>" }` → expect the function `meta-scorecards-refresh` to complete and return `{ status:"complete", snapshotDate, windowDays:7, rows, counts:{ad,adset,campaign,variant,angle}, variant_attribution_coverage }`, and a log line `[meta-scorecards] account <id> <date> rows=<n> coverage=<0..1>`.
+- Or run the upstream chain: send `meta/sync-performance` (or wait for the `meta-performance-daily` cron `30 11 * * *`) → expect it to fire `meta/attribution-refresh`, which in turn fires `meta/scorecards-refresh` as its final step.
+- Per-level sanity in `iteration_scorecards_daily` (one account, latest `snapshot_date`):
+  - `select level, count(*) from iteration_scorecards_daily where meta_ad_account_id='<id>' and snapshot_date=(select max(snapshot_date) from iteration_scorecards_daily) group by level;` → expect rows at `ad`/`adset`/`campaign` (when Meta insights exist) and `variant`/`angle` (when attribution exists).
+  - Adset/campaign rows carry `creatives_live` ≥ 0, `days_live` ≥ 0, and `roas_delta_pct`/`ctr_delta_pct` populated (null only when the prior window was empty); `ctr_declining`/`frequency_rising`/`fatigue_score` set.
+  - Variant rows carry `sessions`, `atc`, `atc_rate` (≤ 1.0), `cvr` = orders/sessions, and a non-null `variant_attribution_coverage` (matches the upstream `meta-attribution-refresh` coverage for the window).
+  - Angle rows carry `angle_id` + `lead_benefit_anchor`; `benefit_name` is non-null exactly when the anchor matches a `product_benefit_selections` row with `role='lead' AND science_confirmed=true`; no row exists for an `is_active=false` angle.
+- Idempotency: re-send `meta/scorecards-refresh` for the same account + `snapshot_date` → row count stable (same `(workspace_id, level, object_id, snapshot_date)` keys re-upserted, no duplicates).
+- Engine-reads-scorecards invariant: confirm the new library/Inngest reads attribution + insights (not the engine) — `iteration_scorecards_daily` is the only metrics table Phases 4/6 will query.
 
 ### Phase 2b — Attribution hardening (shipped)
 - Apply the migration: `npx tsx scripts/apply-attribution-persisted-ids-migration.ts` → expect `✓ applied 20260619180000_attribution_persisted_ids.sql` then four `✓ public.{storefront_sessions|orders}.{advertorial_page_id|ad_campaign_id} present` lines.
