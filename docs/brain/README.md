@@ -84,6 +84,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/email_events]] — Universal email tracking — sent, delivered, opened, clicked, bounced. Joined by `resend_email_id`.
 - [[tables/email_filters]] — Per-workspace inbound-email rules (spam/auto-replies to ignore).
 - [[tables/meta_ad_accounts]] — Meta Ads accounts connected to the workspace.
+- [[tables/meta_attribution_daily]] — Per-(meta_ad_id, variant, day) attributed spend + revenue (iteration engine Phase 2).
 - [[tables/meta_ads]] — Local mirror of Meta ad structure + status (iteration engine Phase 1).
 - [[tables/meta_adsets]] — Local mirror of Meta ad set structure + budget + status (iteration engine Phase 1).
 - [[tables/meta_campaigns]] — Local mirror of Meta campaign structure + budget + status (iteration engine Phase 1).

@@ -33,12 +33,13 @@ Goal: store Meta campaign/adset/ad structure + daily insights (none stored today
 - ✅ Backfill last 90 days on first run, then incremental daily (`ingestMetaPerformance`; daily cron `meta-performance-daily` in `src/lib/inngest/meta-performance.ts`)
 - ✅ Sanity check: reconcile `meta_insights_daily` account-total spend vs. existing `daily_meta_ad_spend` (`reconcileInsightsVsSpend`); flag drift beyond tolerance (>$1 AND >2%), surfaced via `console.warn` (Phase 5 will route to run-records/alerts)
 
-## Phase 2 — Attribution & variant linkage ⏳
+## Phase 2 — Attribution & variant linkage ✅
 Goal: tie ad spend → session → PDP/lander variant → order so per-variant unit economics exist.
-- ⏳ Ad grain off the order directly: `orders.attributed_utm_content` ≈ meta_ad_id, `attributed_utm_campaign` ≈ campaign name (first-touch, backfilled since 2026-06-14)
-- ⏳ Variant/angle resolution (v1, deterministic join): `orders` → `storefront_sessions` (by `customer_id`, first-touch with `utm_source='meta'`) → parse `?angle={slug}` from `landing_url` → match `advertorial_pages.slug` → resolve `(advertorial_page_id, angle_id, variant, campaign_id)`; `variant` (advertorial|beforeafter) read from the resolved `advertorial_pages` row
-- ⏳ Persist attributed spend + revenue at the `(meta_ad_id, variant, snapshot_date)` grain
-- ⏳ **Coverage metric (named, not silent):** each run report % of attributed Meta revenue resolvable to a variant; surface the `(direct)`/unresolved bucket (anonymous click → later direct-session conversion loses ad + variant) as `variant_attribution_coverage`
+Library `src/lib/meta/attribution.ts` (`computeVariantAttribution` / `refreshVariantAttribution`) → table `meta_attribution_daily`; Inngest `meta-attribution-refresh` fires after each `meta-sync-performance`. Migration `20260619140000_meta_attribution_daily.sql`.
+- ✅ Ad grain off the order directly: `orders.attributed_utm_content` ≈ meta_ad_id (`attributed_utm_source='meta'`, first-touch, backfilled since 2026-06-14)
+- ✅ Variant/angle resolution (v1, deterministic join): `orders` → `storefront_sessions` (by `customer_id`, first-touch with `utm_source='meta'`) → parse `?angle={slug}` from `landing_url` → match `advertorial_pages.slug` → resolve `(advertorial_page_id, angle_id, variant, campaign_id)`; `variant` read from the resolved `advertorial_pages` row
+- ✅ Persist attributed spend + revenue at the `(meta_ad_id, variant, snapshot_date)` grain (`meta_attribution_daily`). **Spend allocated by SESSION share** across the variants an ad drove (revenue-proportional split would flatten per-variant ROAS); spend/revenue with no resolvable variant conserved in a `variant='(unresolved)'` bucket
+- ✅ **Coverage metric (named, not silent):** each run reports `variant_attribution_coverage` (resolved ÷ total Meta-attributed revenue); the unresolved bucket (anonymous click → later direct-session conversion) is surfaced both as a row and in the run's coverage payload (`meta_orders_without_ad` counted too)
 - OPEN (none — v1 join path confirmed)
 
 ## Phase 2b — Attribution hardening (fast-follow) ⏳
@@ -130,3 +131,14 @@ Goal: execute decisions; manage live objects autonomously, create new spend line
 - At least one autonomous adapter (e.g. scale-down or pause) executes within policy, logs to `iteration_actions`, and self-corrects on a subsequent run (Phase 6a).
 - At least one approval-gated adapter creates a correctly-tagged Meta draft on approval and records external IDs back (Phase 6b).
 - Dylan can review the active policy + a daily list of autonomous actions and pending recommendations, edit/approve a policy version, and see autonomous management plus draft creation happen without anything going live unintentionally.
+
+## Verification
+
+### Phase 2 — Attribution & variant linkage (shipped)
+- Apply the migration: `npx tsx scripts/apply-meta-attribution-migration.ts` → expect `✓ applied 20260619140000_meta_attribution_daily.sql` and `✓ public.meta_attribution_daily has N columns`.
+- In Supabase SQL editor, `select count(*) from public.meta_attribution_daily;` after a run → expect rows for Amazing Coffee's account once attribution has run.
+- Trigger a run from the Inngest dev/prod UI: send event `meta/attribution-refresh` with `{ "workspace_id": "<ws>", "ad_account_id": "<meta_ad_accounts.id uuid>" }` → expect the function `meta-attribution-refresh` to complete and return `{ status:"complete", rows, coverage:{ variant_attribution_coverage, … } }`.
+- Or run the upstream chain: send `meta/sync-performance` (or wait for the `meta-performance-daily` cron `30 11 * * *`) → expect it to fire `meta/attribution-refresh` as its final step, and the function logs `[meta-attribution] account <id> variant_attribution_coverage=<0..1>`.
+- In `meta_attribution_daily`, `select variant, sum(attributed_spend_cents), sum(revenue_cents) from meta_attribution_daily where meta_ad_account_id='<id>' group by variant;` → expect resolved variants (`advertorial`/`beforeafter`/`reasons`) plus a `(unresolved)` bucket; per ad+day, the sum of `attributed_spend_cents` across variants equals that ad's `meta_insights_daily` ad-level spend (spend is conserved).
+- Coverage sanity: the function's `coverage.variant_attribution_coverage` = `meta_revenue_resolved_cents / meta_revenue_total_cents`, between 0 and 1 (null only when there's no Meta revenue in the window); `meta_orders_without_ad` reports Meta orders with no `attributed_utm_content`.
+- Idempotency: re-send `meta/attribution-refresh` for the same account → expect no duplicate rows (same `(workspace_id, meta_ad_id, variant, snapshot_date)` keys upserted, row count stable).
