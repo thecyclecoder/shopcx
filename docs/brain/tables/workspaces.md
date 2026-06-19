@@ -66,6 +66,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `portal_config` | `jsonb` | — | default: `'{}'` |
 | `slack_bot_token_encrypted` | `text` | ✓ | AES-256-GCM |
 | `slack_team_id` | `text` | ✓ |  |
+| `google_drive_sa_json_encrypted` | `text` | ✓ | AES-256-GCM — GCP service-account JSON key for headless Drive API access ([[../specs/box-product-seeding]]) |
 | `slack_team_name` | `text` | ✓ |  |
 | `slack_connected_at` | `timestamptz` | ✓ |  |
 | `shopify_multipass_secret_encrypted` | `text` | ✓ | AES-256-GCM |
