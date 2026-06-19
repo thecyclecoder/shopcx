@@ -623,7 +623,7 @@ function foldBatchPrompt(slugs: string[]): string {
     `3. \`git rm docs/brain/specs/{slug}.md\` — git history is the immutable archive; a deleted spec is always \`git show\`-recoverable.`,
     ``,
     `Then ONCE for the whole batch:`,
-    `4. Run \`node scripts/brain-index.mjs\` — it regenerates docs/brain/archive.md's Index from docs/brain/archive.d/ and refreshes docs/brain/README.md's folder counts. Do NOT hand-edit archive.md or the README count lines.`,
+    `4. Do NOT run brain-index.mjs, and do NOT modify docs/brain/archive.md or docs/brain/README.md. The board reads docs/brain/archive.d/ directly (getArchive), so committing the regenerated aggregates inside a fold PR is needless AND the #1 cause of fold PRs going Dirty — every fold re-edits the same archive.md/README lines, so a second fold conflicts the moment the first merges. Your PR should touch ONLY: the per-spec docs/brain/archive.d/{slug}.md file(s), the git-rm'd spec file(s), and any brain pages you folded into. The aggregates are refreshed out-of-band.`,
     `5. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
     ``,
     `If you cannot determine where a spec's knowledge belongs (no obvious lifecycle/brain home), do NOT guess: still fold the others, and surface that one as a needs_input question naming the slug.`,
