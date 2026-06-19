@@ -1,6 +1,6 @@
 # posts
 
-The canonical blog/resource object — imported from the Shopify "Superfood Scoop" blog, AI-classified, and rendered in two places: the **public storefront blog** (`/blog`) and the in-house portal **Resources** section. See [[../lifecycles/blog-resources]].
+The canonical blog/resource object — either **imported** from the Shopify "Superfood Scoop" blog ([[../lifecycles/blog-resources]]) or **auto-generated** by the daily blog engine ([[../lifecycles/auto-blog-generation]]) — AI-classified, and rendered in two places: the **public storefront blog** (`/blog`) and the in-house portal **Resources** section.
 
 ## Summary
 
@@ -12,7 +12,7 @@ One row per blog article. Self-hosted (images migrated off Shopify onto our `pro
 |---|---|---|
 | `id` | uuid | PK |
 | `workspace_id` | uuid | FK → [[workspaces]] |
-| `shopify_article_id` | text | **import idempotency key** — UNIQUE per workspace (upsert target) |
+| `shopify_article_id` | text | **idempotency key** — UNIQUE per workspace (upsert target). NOT NULL; AI posts use the synthetic **`ai:{handle}`** convention to satisfy it |
 | `blog_handle` | text | source blog (`superfood-scoop`) |
 | `handle` | text | article slug — the `/blog/{handle}` URL segment |
 | `title` | text | |
@@ -25,7 +25,9 @@ One row per blog article. Self-hosted (images migrated off Shopify onto our `pro
 | `is_resource` | bool | AI: product resource vs blog-only |
 | `grouping` | text | fixed vocab (`recipes` · `how_it_works` · `how_to_use` · `science` · `general`); null when not a resource |
 | `published` | bool | + `published_at` (timestamptz) |
-| `source` | text | `shopify_blog` |
+| `source` | text | `shopify_blog` (imported) \| `ai_generated` (daily auto-blog engine) |
+| `author_slug` | text | byline persona for AI posts ([[../libraries/blog__authors]] registry); null on imports → render the workspace Organization. Migration `20260610200000_blog_author_social.sql` |
+| `social_image_url` | text | 4:5 portrait crop (1080×1350) the organic social scheduler posts; never shown on the blog. Falls back to `featured_image_url`. Same migration |
 | `created_at`, `updated_at` | timestamptz | |
 
 ## Foreign keys
@@ -55,4 +57,4 @@ const { data } = await admin
 
 ## Related
 
-[[post_products]] · [[../lifecycles/blog-resources]] · [[../libraries/posts__import-article]] · [[products]] · [[../integrations/shopify]] · [[kb_chunks]]
+[[post_products]] · [[../lifecycles/blog-resources]] · [[../lifecycles/auto-blog-generation]] · [[../libraries/posts__import-article]] · [[../libraries/blog__authors]] · [[products]] · [[../integrations/shopify]] · [[kb_chunks]]

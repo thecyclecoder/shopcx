@@ -98,7 +98,7 @@ erth.labs-style poster Dylan approved: chunky Fraunces headline + a **split-bag 
 ## Open questions
 - Replace the old `StaticReview`/`StaticOffer`/`StaticBenefitAuthority` (`remotion/StaticAds.tsx`) with the new archetypes, or keep both? Lean: supersede — the new set is the cold-50+ system.
 - One canonical lifestyle/expert face per product, or a small rotation? Lean: small reusable set, angle picks the fit.
-- Does the advertorial copy generator share `generateAdvertorialNarrative(angle)` with [[advertorial-landers]]? Lean: yes — one angle → ad caption + lander + advertorial static.
+- Does the advertorial copy generator share `generateAdvertorialNarrative(angle)` with [[../lifecycles/advertorial-landers]]? Lean: yes — one angle → ad caption + lander + advertorial static.
 
 ## Related
-[[../lifecycles/ad-static]] · [[../lifecycles/ad-render]] · [[../lifecycles/ad-publish]] · [[advertorial-landers]] · [[../integrations/remotion-lambda]] · [[../libraries/ad-angles]] · [[../libraries/ad-validator]] · [[../libraries/gemini]] · [[../tables/ad_videos]] · [[../tables/product_ad_angles]]
+[[../lifecycles/ad-static]] · [[../lifecycles/ad-render]] · [[../lifecycles/ad-publish]] · [[../lifecycles/advertorial-landers]] · [[../integrations/remotion-lambda]] · [[../libraries/ad-angles]] · [[../libraries/ad-validator]] · [[../libraries/gemini]] · [[../tables/ad_videos]] · [[../tables/product_ad_angles]]

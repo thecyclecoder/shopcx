@@ -20,4 +20,4 @@ Before/after rows use the `{base-slug}-ba` slug (variant + slug both filter the 
 - Sidebar: under **Marketing** (`src/app/dashboard/sidebar.tsx`), between Ads and Social.
 
 ## Related
-[[../lifecycles/advertorial-landers]] · [[../tables/advertorial_pages]] · [[../specs/advertorial-landers]] · [[../ad-creative-rules]]
+[[../lifecycles/advertorial-landers]] · [[../tables/advertorial_pages]] · [[../ad-creative-rules]]

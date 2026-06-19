@@ -21,7 +21,7 @@
 |---|---|---|---|
 | **CFO** | P&L, margin, cash, LTV:CAC, unit economics | orders, Braintree, Avalara | COGS/supplier, metrics spine |
 | **Growth** | paid ads + landing-page CRO, CAC, ROAS | Meta + Google Ads, storefront analytics | LP experiment harness |
-| **CMO** | email/SMS/organic/blog/site content | Klaviyo, Twilio, social, [[../specs/auto-blog-generation\|auto-blog]] | content→revenue attribution |
+| **CMO** | email/SMS/organic/blog/site content | Klaviyo, Twilio, social, [[../lifecycles/auto-blog-generation\|auto-blog]] | content→revenue attribution |
 | **Retention** | subscriptions, dunning, cancel-flow, win-back — keeping people subscribed | [[../tables/subscriptions]], [[../lifecycles/cancel-flow]], [[../lifecycles/dunning]] | churn modeling |
 | **Logistics** | inventory, 3PL, suppliers, stockouts | `product_variants` ([[../inngest/sync-inventory]]), Amplifier | supplier lead times, Amazon |
 | **CS Manager** | ticket volume, CSAT, churn, refund/return rate, the AI's own performance | tickets, analyses, CSAT | — (rich already) |

@@ -24,7 +24,7 @@ Continuously find, test, and scale **winning static creative**, and kill losers 
 ### Ad-matched landing pages
 Every ad has a scent-matched lander (advertorial / before-after) so paid traffic converts.
 - **Metric:** lander conversion rate by campaign; ad→lander scent-match coverage.
-- **Specs:** [[../specs/advertorial-landers]] ✅
+- **Specs:** **advertorial-landers** ✅ (verified + archived → [[../lifecycles/advertorial-landers]])
 
 ### Storefront CRO
 The storefront is a conversion surface — continuously lift PDP engagement and price-step conversion across the Amazing Coffee funnel.
