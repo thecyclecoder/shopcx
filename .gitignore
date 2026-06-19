@@ -52,3 +52,5 @@ remotion/public/adbuild/
 
 # scratch / one-off debug scripts
 scripts/_*
+# ...except the shared, committed bootstrap (the foundation every script imports)
+!scripts/_bootstrap.ts
