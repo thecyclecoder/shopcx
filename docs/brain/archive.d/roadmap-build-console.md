@@ -1,0 +1,1 @@
+- **Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
