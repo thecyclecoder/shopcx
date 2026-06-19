@@ -111,6 +111,110 @@ export async function updateMessage(
   return true;
 }
 
+// ── Slack Lists (native PM table — roadmap mirror, slack-roadmap-home Phase 3) ──
+//
+// A Slack List is a typed, file-backed table (F… id). We only ever use plain `text` + `number`
+// cells. Text cells are written/read as Block Kit rich_text; number cells as a 1-element array.
+// Requires bot scopes lists:read (reads) + lists:write (create/update/delete). See slack-list.ts.
+
+/** A column definition for slackLists.create — we only mirror with text + number columns. */
+export interface SlackListColumn {
+  key: string;
+  name: string;
+  type: "text" | "number";
+  is_primary_column?: boolean;
+}
+
+/** A schema column as returned by slackLists.create (key + the GENERATED column id we must address cells by). */
+export interface SlackListSchemaCol {
+  id?: string;
+  column_id?: string;
+  key?: string;
+  name?: string;
+  type?: string;
+}
+
+/** A returned List row (slackLists.items.list) — its id + cells, each carrying its column_id + value/text. */
+export interface SlackListItem {
+  id: string;
+  fields: { column_id: string; key?: string; value?: unknown; text?: string }[];
+}
+
+/** Wrap a plain string as the Block Kit rich_text value a text cell expects. */
+function richTextValue(text: string): Record<string, unknown>[] {
+  return [{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text }] }] }];
+}
+
+/** Encode one cell payload for a create/update by column type (text → rich_text, number → [n]). */
+export function slackListCell(columnId: string, type: "text" | "number", value: string | number): Record<string, unknown> {
+  if (type === "number") return { column_id: columnId, number: [Number(value)] };
+  return { column_id: columnId, rich_text: richTextValue(String(value)) };
+}
+
+/** Create a standalone List owned by the bot (slackLists.create). Returns its id + schema, or null. Scope: lists:write. */
+export async function createSlackList(
+  token: string,
+  name: string,
+  schema: SlackListColumn[],
+): Promise<{ listId: string; schema: SlackListSchemaCol[] } | null> {
+  const result = await slackApi(token, "slackLists.create", { name, schema });
+  if (!result.ok || !result.list_id) {
+    console.error("[Slack] createSlackList error:", result.error);
+    return null;
+  }
+  const meta = result.list_metadata as { schema?: SlackListSchemaCol[] } | undefined;
+  return { listId: result.list_id as string, schema: meta?.schema || [] };
+}
+
+/** Every row in a List (slackLists.items.list, paginated). Scope: lists:read. */
+export async function listSlackListItems(token: string, listId: string): Promise<SlackListItem[]> {
+  const out: SlackListItem[] = [];
+  let cursor: string | undefined;
+  do {
+    const body: Record<string, unknown> = { list_id: listId, limit: 200 };
+    if (cursor) body.cursor = cursor;
+    const result = await slackApi(token, "slackLists.items.list", body);
+    if (!result.ok) {
+      console.error("[Slack] listSlackListItems error:", result.error);
+      break;
+    }
+    for (const it of (result.items as SlackListItem[]) || []) out.push(it);
+    cursor = (result.response_metadata as { next_cursor?: string })?.next_cursor || undefined;
+  } while (cursor);
+  return out;
+}
+
+/** Add a row (slackLists.items.create) with initial cell values. Returns the new row id, or null. Scope: lists:write. */
+export async function createSlackListItem(token: string, listId: string, cells: Record<string, unknown>[]): Promise<string | null> {
+  const result = await slackApi(token, "slackLists.items.create", { list_id: listId, initial_fields: cells });
+  if (!result.ok) {
+    console.error("[Slack] createSlackListItem error:", result.error);
+    return null;
+  }
+  return (result.item as { id?: string })?.id || null;
+}
+
+/** Update cells of an existing row (slackLists.items.update); each cell is stamped with row_id. Scope: lists:write. */
+export async function updateSlackListItem(token: string, listId: string, rowId: string, cells: Record<string, unknown>[]): Promise<boolean> {
+  const withRow = cells.map((c) => ({ ...c, row_id: rowId }));
+  const result = await slackApi(token, "slackLists.items.update", { list_id: listId, cells: withRow });
+  if (!result.ok) {
+    console.error("[Slack] updateSlackListItem error:", result.error);
+    return false;
+  }
+  return true;
+}
+
+/** Delete a row (slackLists.items.delete). Scope: lists:write. */
+export async function deleteSlackListItem(token: string, listId: string, rowId: string): Promise<boolean> {
+  const result = await slackApi(token, "slackLists.items.delete", { list_id: listId, id: rowId });
+  if (!result.ok) {
+    console.error("[Slack] deleteSlackListItem error:", result.error);
+    return false;
+  }
+  return true;
+}
+
 // ── Inbound: signature verification + workspace resolution ──
 
 /**
