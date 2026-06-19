@@ -1,22 +1,16 @@
 /**
- * Product Intelligence Engine — shared core (host-agnostic).
+ * Product Intelligence Engine — the Inngest/UI API path.
  *
- * The four heavy Engine bodies (ingredient research, review analysis, content
- * generation) live HERE as plain async functions so BOTH hosts run identical
- * logic:
- *   - the UI path (`src/lib/inngest/product-intelligence.ts`) wraps each call
- *     in an Inngest `step.run` for durability/resumability, and
- *   - the box path (`src/lib/product-intelligence/seed.ts`, driven by
- *     `runProductSeedJob` in `scripts/builder-worker.ts`) calls them directly,
- *     sequentially, to completion — no Inngest step limits, no deploy-kills.
+ * These bodies (ingredient research, review analysis, content generation) back
+ * the UI/Inngest Engine (`src/lib/inngest/product-intelligence.ts`), which wraps
+ * each call in an Inngest `step.run` for durability/resumability. All Claude
+ * calls here go through the Anthropic Messages API with
+ * `process.env.ANTHROPIC_API_KEY` — this is the API path.
  *
- * Reuse, never fork: there is exactly ONE copy of every prompt + parser +
- * reduce + row-shaper. See docs/brain/specs/box-product-seeding.md.
- *
- * All Claude calls go through the Anthropic Messages API with
- * `process.env.ANTHROPIC_API_KEY`. The build box's worker PROCESS keeps that
- * key (only the spawned `claude -p` build sandbox strips it), so the in-process
- * seed pipeline can call Sonnet directly.
+ * 🚨 The BOX product-seed path is SEPARATE and does NOT use this file. It runs a
+ * top-level `claude -p` on Max (the `seed-product` skill) with web search — no
+ * Anthropic API, no per-token spend — driving the deterministic tools in
+ * `src/lib/product-intelligence/seed-tools.ts`. See docs/brain/specs/box-product-seeding.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SONNET_MODEL } from "@/lib/ai-models";
@@ -52,54 +46,6 @@ export async function callSonnet(
   });
   if (!res.ok) {
     throw new Error(`Anthropic error: ${res.status} ${await res.text().catch(() => "")}`);
-  }
-  const data = await res.json();
-  const text =
-    (data.content as AnthropicContentBlock[])
-      ?.map((b) => (b.type === "text" ? b.text || "" : ""))
-      .join("")
-      .trim() || "";
-  return { text, raw: data };
-}
-
-/**
- * Vision Sonnet call — same Messages API, but the user turn carries image
- * blocks (base64). Used by the box's self-QA gate to vision-confirm a generated
- * hero matches the locked composition before publishing.
- */
-export async function callSonnetVision(
-  system: string,
-  user: string,
-  images: Array<{ mediaType: string; base64: string }>,
-  maxTokens: number,
-  temperature: number,
-): Promise<{ text: string; raw: unknown } | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
-  const content: unknown[] = [
-    ...images.map((im) => ({
-      type: "image",
-      source: { type: "base64", media_type: im.mediaType, data: im.base64 },
-    })),
-    { type: "text", text: user },
-  ];
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: SONNET,
-      max_tokens: maxTokens,
-      temperature,
-      system,
-      messages: [{ role: "user", content }],
-    }),
-  });
-  if (!res.ok) {
-    throw new Error(`Anthropic vision error: ${res.status} ${await res.text().catch(() => "")}`);
   }
   const data = await res.json();
   const text =

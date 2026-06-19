@@ -33,13 +33,17 @@ const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN || "";
 const POLL_MS = 5000;
 const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
+// Product-seed runs the full Engine to completion on Max (per-ingredient web
+// research + ~2000-review analysis + content + imagery) — give it a long ceiling.
+const SEED_TIMEOUT_MS = 90 * 60 * 1000;
 const MAX_CONCURRENT = 5; // build/plan pool — real ceiling is Max rate limits, not the box
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
-// Product-seed jobs (box-product-seeding) run IN-PROCESS in their own lane so a
-// long seed (per-ingredient research + ~2000-review map-reduce + imagery) never
-// occupies a feature-build lane. They're async/IO-bound, so a small cap is fine.
+// Product-seed jobs (box-product-seeding) run as a top-level Max `claude -p`
+// (seed-product skill) in their own lane so a long seed (per-ingredient web
+// research + ~2000-review analysis + imagery) never occupies a feature-build
+// lane. Each is one long-running claude session, so a small cap is right.
 const MAX_SEED = 2;
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
 // SAME already-applied action before we stop the loop and surface it for a human. Normally 0–1.
@@ -148,6 +152,34 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string) 
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: BUILD_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+// Box product-seed runner (box-product-seeding): launch a TOP-LEVEL `claude -p`
+// on Max for a seed job. Web search stays available (research). ANTHROPIC_API_KEY
+// is UNSET (`env -u ANTHROPIC_API_KEY`) so ALL LLM is Max-billed, zero per-token
+// spend — but UNLIKE a feature-build sandbox we KEEP the DB/crypto/Gemini/Drive
+// secrets, because the seed-product skill's deterministic tools must write the
+// workspace DB + storage and decrypt the per-workspace Gemini/Drive keys. This is
+// a trusted, fixed skill driving fixed tools (it never edits repo code), so it
+// runs at the same trust level as the old in-process seed.
+async function runSeedClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: SEED_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
@@ -757,13 +789,17 @@ async function runFoldJob(job: Job) {
 }
 
 // ── Box-driven product seeding (box-product-seeding) ─────────────────────────
-// A kind='product-seed' job re-hosts the Product Intelligence Engine on the box:
-// it drives ONE product none → published IN-PROCESS (no worktree, no claude -p,
-// no PR — this mutates DB + storage, not the repo). The worker process keeps
-// ANTHROPIC_API_KEY + the service role + the encryption key (only the spawned
-// build sandbox strips them), so the Engine runs directly. Params are carried on
-// the job: spec_slug = product_id; instructions = JSON {product_id, angle_override?}.
-// See docs/brain/specs/box-product-seeding.md.
+// A kind='product-seed' job re-hosts the Product Intelligence Engine on the box,
+// ON MAX: it launches a TOP-LEVEL `claude -p` (web search enabled, no
+// ANTHROPIC_API_KEY) running the `seed-product` skill, which drives ONE product
+// none → published. The skill does ALL the LLM work agentically (ingredient/
+// benefit research by SEARCHING THE WEB, review analysis, benefit triangulation,
+// content authoring, hero vision-QA) and reaches the DB / Drive / Gemini ONLY
+// through the deterministic CLI scripts/seed-product-tools.ts. NEVER the Anthropic
+// API, NEVER Inngest (the Inngest/UI Engine is a SEPARATE API path). No worktree
+// / PR — this mutates DB + storage, not the repo, so it runs in the main repo dir.
+// Params are carried on the job: spec_slug = product_id; instructions = JSON
+// {product_id, workspace_id?, angle_override?}. See docs/brain/specs/box-product-seeding.md.
 async function runProductSeedJob(job: Job) {
   const tag = `[seed:${job.id.slice(0, 8)}]`;
   let params: { product_id?: string; angle_override?: string | null } = {};
@@ -777,32 +813,41 @@ async function runProductSeedJob(job: Job) {
     await update(job.id, { status: "failed", error: "product-seed job missing product_id" });
     return;
   }
-  console.log(`${tag} seeding product ${productId} (job ${job.id})`);
+  const isResume = !!job.claude_session_id;
+  console.log(`${tag} ${isResume ? "resuming" : "seeding"} product ${productId} on Max (job ${job.id})`);
+
+  const prompt = isResume
+    ? `Resuming. Continue the product-seed for product_id=${productId} (workspace_id=${job.workspace_id}) and finish. Same rules and the same final JSON output protocol as before.`
+    : [
+        `Use the seed-product skill to drive product_id=${productId} (workspace_id=${job.workspace_id}) from intelligence_status none → published (cwd is the repo root).`,
+        `Params: { "product_id": "${productId}", "workspace_id": "${job.workspace_id}"${params.angle_override ? `, "angle_override": ${JSON.stringify(params.angle_override)}` : ""} }`,
+        `You are on Max with web search enabled and NO ANTHROPIC_API_KEY — do the ingredient/benefit research by SEARCHING THE WEB (with real citations), and reach the DB / Drive / Gemini ONLY through scripts/seed-product-tools.ts. Never call the Anthropic API; never spawn a nested claude.`,
+        `Self-QA before publishing; if QA fails or required data is missing, HOLD (do NOT publish) and surface why. Approved heroes (Amazing Coffee / pods / Creamer) are never overwritten — skip their image gen.`,
+        `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_attention","summary":"…"}.`,
+      ].join("\n");
+
   try {
-    const { runProductSeed } = await import("../src/lib/product-intelligence/seed");
-    const r = await runProductSeed({
-      workspace_id: job.workspace_id,
-      product_id: productId,
-      angle_override: params.angle_override ?? null,
-    });
-    // Supervision hook: post the run summary + the box's reasoning back on the job.
-    const logTail = [
-      `${r.title} → ${r.final_status}${r.published ? " (published)" : ""}`,
-      `Steps: ${r.steps.join(" · ")}`,
-      `Reasoning: ${r.reasoning.join(" ")}`,
-      r.held_reason ? `HELD: ${r.held_reason}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n")
-      .slice(-2000);
-    // Published → completed. Held (no publish, but no crash) → needs_attention so
-    // the owner sees the surfaced QA/data issue. The Engine UI is the override surface.
-    if (r.published) {
+    const { session, resultText, isError, raw } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = parseStatus(resultText);
+    const summary = parsed && typeof parsed.summary === "string" ? parsed.summary : "";
+    // Supervision hook: post the skill's run summary + reasoning back on the job.
+    const logTail = (summary || raw).slice(-2000);
+    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (parsed?.status === "completed") {
       await update(job.id, { status: "completed", log_tail: logTail, error: null });
+    } else if (parsed?.status === "needs_attention") {
+      // Held (QA fail / missing data / publish error) — surface for the owner;
+      // the Engine UI is the override surface. Not a crash.
+      await update(job.id, { status: "needs_attention", log_tail: logTail, error: summary || "held before publish" });
+    } else if (isError) {
+      await update(job.id, { status: "failed", error: "seed run errored", log_tail: raw.slice(-2000) });
     } else {
-      await update(job.id, { status: "needs_attention", log_tail: logTail, error: r.held_reason || "held before publish" });
+      // No recognizable status — surface rather than assume published.
+      await update(job.id, { status: "needs_attention", log_tail: logTail, error: "seed ended without a completed/needs_attention status" });
     }
-    console.log(`${tag} ✓ ${r.final_status}${r.published ? " (published)" : r.held_reason ? ` — held: ${r.held_reason}` : ""}`);
+    console.log(`${tag} ✓ ${parsed?.status ?? "(no status)"}`);
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -1076,7 +1121,7 @@ async function main() {
         console.log(`claimed fold ${job.id.slice(0, 8)} → ${countFold() + 1}/${MAX_FOLD} fold lane`);
         launch(job);
       }
-      // Fill the product-seed lane (in-process Engine runs; box-product-seeding).
+      // Fill the product-seed lane (Max `claude -p` seed-product skill; box-product-seeding).
       while (countSeed() < MAX_SEED) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["product-seed"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
