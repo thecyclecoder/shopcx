@@ -60,8 +60,14 @@ The box resolves each via `products.handle` → fetches `superfoodscompany.com/p
 - **Images:** workspace Gemini key (decrypt via `crypto.ts`); never commit keys.
 - Re-runnable/replayable; every output editable in the Engine UI.
 
+## Product relationships (NOT auto-seeded — configured separately, "just yet")
+The box seeds everything Amazing Coffee has **except linked products + bundles** (`product_link_groups` / `product_link_members`); those are set up separately (dashboard / a follow-on), not part of the auto-seed pipeline yet. Intended relationships to configure:
+- **Linked products** (sibling SKUs of one line — like Amazing Coffee instant ↔ K-Cups): **Ashwavana Guru Focus ↔ Ashwavana Zen Relax** (focus/productivity/caffeinated ↔ relaxation/recovery/caffeine-free). Superfood Tabs + Creatine Prime have **no** linked products.
+- **Bundle offers** (cross-sell): **Superfood Tabs + Ashwavana Zen Relax** · **Creatine Prime + Ashwavana Zen Relax** · **Ashwavana Guru Focus + Ashwavana Zen Relax** (the two Ashwavanas bundle with each other).
+
 ## Completion criteria
-- One "Auto-populate" action on a product → a `product-seed` box job that drives it `none → published`: PDP-extracted ingredients, research, review analysis, core-desire-aligned benefit selections (science+customer confirmed), page content, and Nano Banana hero/lifestyle/ingredient media — unattended. The four target products complete this way; the path matches Amazing Coffee's done state.
+- **Amazing Coffee is the proof-of-correctness benchmark** — every seeded page is validated against its `published` done state (structure + completeness), the only intentional gaps being **linked products + bundles** (above).
+- One "Auto-populate" action on a product → a `product-seed` box job that drives it `none → published`: PDP-extracted ingredients, research, review analysis, triangulated benefit selections (framing + research ∩ reviews, evidence-backed), page content + KB + macros + SEO, and Nano Banana Pro hero/lifestyle/ingredient media — unattended, QA-gated. The target products complete this way, matching Amazing Coffee minus relationships.
 
 ## Related
 [[../lifecycles/product-intelligence]] · [[../inngest/product-intelligence]] · [[../libraries/gemini]] · [[../tables/products]] · [[../tables/product_ingredients]] · [[../tables/product_reviews]] · [[../tables/product_media]] · [[../tables/agent_jobs]] · [[roadmap-build-console]] · [[../recipes/build-box-setup]]
