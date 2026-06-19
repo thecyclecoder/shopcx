@@ -131,7 +131,7 @@ interface MessageRow {
  * Build the grader system prompt. Includes the static rubric + any
  * approved grader_prompts (calibration rules learned from admin overrides).
  */
-async function buildGraderSystemPrompt(admin: Admin, workspaceId: string): Promise<string> {
+export async function buildGraderSystemPrompt(admin: Admin, workspaceId: string): Promise<string> {
   const [{ data: rules }, { data: policies }] = await Promise.all([
     admin.from("grader_prompts")
       .select("title, content")
@@ -209,7 +209,7 @@ OUTPUT (JSON only, no prose around it):
  * Format ticket messages for grading. Strips HTML, distinguishes AI from
  * human-agent messages by author_type.
  */
-function formatMessagesForGrading(msgs: MessageRow[]): string {
+export function formatMessagesForGrading(msgs: MessageRow[]): string {
   return msgs.map(m => {
     const role = m.direction === "inbound"
       ? "customer"
