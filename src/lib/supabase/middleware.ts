@@ -9,7 +9,11 @@ const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula"
   "/customize", "/checkout", "/thank-you", "/policies",
   // Shortlink redirector — sprfd.co/ABC123 hits this via middleware
   // rewrite; the handler returns a 302 to the campaign target URL.
-  "/api/sl/"];
+  "/api/sl/",
+  // Slack webhooks — Slack POSTs server-to-server with NO session; the auth is the
+  // signing-secret verification inside each route, so they must bypass session auth.
+  // Without this the middleware 307-redirects them to /login → buttons fail with 405.
+  "/api/slack/interactions", "/api/slack/events"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
