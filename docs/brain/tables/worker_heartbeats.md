@@ -15,6 +15,9 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 | `status` | `text` | `healthy` (default) ｜ `updating` (mid self-update, about to exit→restart) ｜ `needs_attention` (crash-loop guard tripped) |
 | `active_builds` | `int` | lanes busy at the last tick (`active.size`) · `0` = idle |
 | `detail` | `text?` | last note: `self-update <from>→<to>`, crash-loop reason, … |
+| `build_lanes` | `int?` | total build/plan lanes (`MAX_CONCURRENT`) — the pool ceiling ([[../specs/build-box-status-view]]) |
+| `fold_lanes` | `int?` | total fold lanes (`MAX_FOLD`, concurrency-1) |
+| `lanes` | `jsonb` | default `'[]'` — `[{ kind, job_id, spec_slug, since }]` for every in-flight lane this tick |
 | `started_at` | `timestamptz?` | when this worker process booted |
 | `last_poll_at` | `timestamptz?` | heartbeat — set every poll tick (~5s); a stale value ⇒ box down |
 | `updated_at` | `timestamptz` | default `now()` |
@@ -23,6 +26,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 
 - **Writer:** the box worker, every poll tick (`writeHeartbeat()`), plus a one-off `status='updating'` just before a self-update exit and a one-off `status='needs_attention'` when the crash-loop guard gives up. Service role (the worker holds the creds).
 - **Reader:** [[../dashboard/branches]] via `GET /api/branches` (returns a `worker` object). The page renders a **Build box** banner — `worker <sha> · healthy/idle · last poll Ns ago` — green when the last poll is < 90s old, red when stale or `needs_attention`. Any authenticated workspace member can read (box infra is global, not workspace-scoped).
+- **Reader:** [[../dashboard/roadmap]] `/dashboard/roadmap/box` via `GET /api/roadmap/box` (returns `worker` + open `agent_jobs` split into `queue`/`paused`). The **live build-box view** ([[../specs/build-box-status-view]]): health + SHA, the lane grid (`build_lanes`/`fold_lanes` cells, each in-use cell from a `lanes` row), queue depth, and a paused callout — plus a compact lane/health **chip** on the roadmap board header. Polls ~5s (chip ~10s).
 
 ## Gotchas
 
@@ -33,6 +37,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 ## Migration
 
 `supabase/migrations/20260619140000_worker_heartbeats.sql` (table + RLS) · apply: `scripts/apply-worker-heartbeats-migration.ts`
+`supabase/migrations/20260619150000_worker_heartbeats_lanes.sql` (lane detail: `build_lanes`/`fold_lanes`/`lanes`) · apply: `scripts/apply-worker-heartbeats-lanes-migration.ts` ([[../specs/build-box-status-view]])
 
 ## Related
 

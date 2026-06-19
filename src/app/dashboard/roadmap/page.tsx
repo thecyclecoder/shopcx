@@ -6,6 +6,7 @@ import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
+import BoxChip from "./BoxChip";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 export const dynamic = "force-dynamic";
@@ -108,6 +109,7 @@ export default async function RoadmapPage() {
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Roadmap</h1>
         <div className="flex items-center gap-3">
+          <BoxChip />
           <Link href="/dashboard/roadmap/goals" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
             Goals →
           </Link>
