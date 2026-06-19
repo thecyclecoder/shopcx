@@ -597,7 +597,14 @@ async function runFoldJob(job: Job) {
     if (!dirty) {
       // Nothing changed — likely already folded. Treat as done so specs don't loop.
       await setFoldRows(job.id, "folding", { status: "folded" });
-      await update(job.id, { status: "completed", log_tail: "no file changes; specs already folded" });
+      // A fold can pause on needs_input → draft PR; un-draft it on a no-new-change resume (same gap as runJob).
+      const pr = await ensurePr(branch!, slugs[0] || "fold", false);
+      if (pr) {
+        await markReady(pr.number);
+        await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR" });
+      } else {
+        await update(job.id, { status: "completed", log_tail: "no file changes; specs already folded" });
+      }
       return;
     }
     sh("git", ["add", "-A"], { cwd: wt });
@@ -787,7 +794,23 @@ async function runJob(job: Job) {
 
     const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
     if (!dirty) {
-      await update(job.id, { status: "completed", log_tail: "no file changes; nothing to commit" });
+      // No NEW changes — typically because the build committed everything during a needs_approval/needs_input
+      // pause and the resume only had the worker apply a migration. A draft PR already exists from that pause,
+      // so we must STILL ensure it's ready-for-review + linked, or the job completes stuck as a draft (PR#80).
+      const pr = await ensurePr(branch!, slug, false);
+      if (pr) {
+        const ready = await markReady(pr.number);
+        if (!ready) {
+          const check = await gh("GET", `/repos/${REPO}/pulls/${pr.number}`);
+          if ((check.json as { draft?: boolean })?.draft === true) {
+            console.error(`${tag} PR#${pr.number} still draft after markReady (no-change path) — final retry`);
+            await markReady(pr.number);
+          }
+        }
+        await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR" });
+      } else {
+        await update(job.id, { status: "completed", log_tail: "no file changes; nothing to commit" });
+      }
       return;
     }
     sh("git", ["add", "-A"], { cwd: wt });
