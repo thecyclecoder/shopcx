@@ -267,7 +267,10 @@ async function update(id: string, patch: Record<string, unknown>) {
 // Upsert the singleton worker_heartbeats row so the dashboard can show "worker: <sha>, healthy Ns ago"
 // (and surface a crash-loop) without SSH. Best-effort: a heartbeat write must never break the poll loop.
 const WORKER_STARTED_AT = new Date().toISOString();
-async function writeHeartbeat(activeBuilds: number, status: string, detail?: string) {
+// One in-flight lane, surfaced on the heartbeat so the dashboard can show what each lane is building
+// right now (build-box-status-view). job_id ties back to agent_jobs; since = when the lane started.
+interface LaneRow { kind: Job["kind"]; job_id: string; spec_slug: string; since: string }
+async function writeHeartbeat(activeBuilds: number, status: string, detail?: string, lanes: LaneRow[] = []) {
   try {
     await db.from("worker_heartbeats").upsert({
       id: WORKER_BOX_ID,
@@ -275,6 +278,9 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       status,
       active_builds: activeBuilds,
       detail: detail ?? null,
+      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling)
+      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane)
+      lanes, // [{ kind, job_id, spec_slug, since }] for every in-flight lane this tick
       started_at: WORKER_STARTED_AT,
       last_poll_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -984,10 +990,14 @@ async function main() {
 
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
-  const active = new Map<string, "fold" | "other">();
-  const countOf = (k: "fold" | "other") => [...active.values()].filter((v) => v === k).length;
+  // Per-lane detail (build-box-status-view): the value carries what the lane is building + when it
+  // started, so each heartbeat tick can publish the full lane picture (kind/spec_slug/since).
+  interface LaneInfo { kind: Job["kind"]; spec_slug: string; since: string }
+  const active = new Map<string, LaneInfo>();
+  const countFold = () => [...active.values()].filter((v) => v.kind === "fold").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold").length;
   const launch = (job: Job) => {
-    active.set(job.id, job.kind === "fold" ? "fold" : "other");
+    active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
       .catch(async (e) => {
         console.error(`[${job.spec_slug}] failed:`, e);
@@ -1000,26 +1010,27 @@ async function main() {
   for (;;) {
     try {
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
-      while (countOf("fold") < MAX_FOLD) {
+      while (countFold() < MAX_FOLD) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
-        console.log(`claimed fold ${job.id.slice(0, 8)} → ${countOf("fold") + 1}/${MAX_FOLD} fold lane`);
+        console.log(`claimed fold ${job.id.slice(0, 8)} → ${countFold() + 1}/${MAX_FOLD} fold lane`);
         launch(job);
       }
       // Fill the build/plan pool.
-      while (countOf("other") < MAX_CONCURRENT) {
+      while (countOther() < MAX_CONCURRENT) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
-        console.log(`claimed ${job.spec_slug} → ${countOf("other") + 1}/${MAX_CONCURRENT} build lanes`);
+        console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
       }
       // First clean tick → this sha is healthy; zero the crash-loop counter.
       if (!steady) { clearStartupCrashCounter(); steady = true; }
 
       // Heartbeat for the dashboard, then self-update if fully idle (never mid-build).
-      await writeHeartbeat(active.size, "healthy");
+      const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since }));
+      await writeHeartbeat(active.size, "healthy", undefined, lanes);
       await maybeSelfUpdate(active.size); // exits the process (→ systemd restart) when behind origin/main
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
