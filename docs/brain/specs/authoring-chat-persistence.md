@@ -34,5 +34,11 @@ The Roadmap authoring chat ([[../lifecycles/roadmap-build-console]] Phase 2) kee
 - Start a chat, navigate away (or refresh, or switch device), reopen → the conversation is **restored** and you can keep going.
 - Finalizing marks the session finalized and links its `spec_slug`.
 
+## Verification
+- On `/dashboard/roadmap/{any-spec}`, open **Refine with Opus**, send one message, **close** the modal, then reopen it → expect a **"Resume chat"** banner showing your in-progress thread (N messages, last-updated time); tap Resume → the prior messages are restored and you can keep typing.
+- Start a **New feature** chat from the board header, type a message, close it, then reopen the New-feature chat (or load the board on a second device) → expect the chat in the **recent-chats** resume list.
+- In a resumed chat tap **Save spec** (or **Save & build**) → expect the success card, and that the session no longer appears as an active resume candidate for that slug (it's marked `finalized`).
+- (Optional DB check) probe `public.roadmap_chats` → expect one row per chat with `messages` jsonb populated and `status` flipping `active` → `finalized` on save.
+
 ## Related
 [[roadmap-build-console]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../tables/agent_jobs]] · [[../project-management]]

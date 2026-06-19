@@ -100,5 +100,11 @@ erth.labs-style poster Dylan approved: chunky Fraunces headline + a **split-bag 
 - One canonical lifestyle/expert face per product, or a small rotation? Lean: small reusable set, angle picks the fit.
 - Does the advertorial copy generator share `generateAdvertorialNarrative(angle)` with [[../lifecycles/advertorial-landers]]? Lean: yes — one angle → ad caption + lander + advertorial static.
 
+## Verification
+- On an Amazing Coffee campaign page (`/dashboard/marketing/ads/[id]`) → expect the **killer-archetype picker** offering advertorial · testimonial · authority · big-claim · before/after · ingredient-breakdown; generate one → expect **both 4:5 + 9:16** outputs to render successfully on Lambda (no static-on-Lambda failure), grouped as `format_variant_of_id` pairs.
+- Open the rendered advertorial → expect the **editorial serif** (Playfair, un-ad look), a "Sponsored" label, and review counts shown as **real + 10,000** (Amazing Coffee → 12,291) — never product-on-white.
+- On a seeded killer-statics campaign (`scripts/seed-killer-statics.ts`), click **Publish** → expect the static to publish to Meta as an **image creative** (`object_story_spec.image_data`, not video-only) routed to its mapped `landing_url` (advertorial → advertorial lander, before/after → before/after lander, others → PDP).
+- (DB) confirm each archetype wrote `ad_videos` rows with `media_kind='static'` + `meta.archetype` for both formats.
+
 ## Related
 [[../lifecycles/ad-static]] · [[../lifecycles/ad-render]] · [[../lifecycles/ad-publish]] · [[../lifecycles/advertorial-landers]] · [[../integrations/remotion-lambda]] · [[../libraries/ad-angles]] · [[../libraries/ad-validator]] · [[../libraries/gemini]] · [[../tables/ad_videos]] · [[../tables/product_ad_angles]]

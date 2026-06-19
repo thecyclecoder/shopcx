@@ -363,6 +363,35 @@ export async function getArchive(): Promise<ArchiveEntry[]> {
   return entries;
 }
 
+/**
+ * Pull the body of a top-level "## {heading}" section out of spec markdown (everything between
+ * the heading and the next "## " / EOF). Returns the trimmed body, or null if the heading is absent.
+ * Used to lift the "## Verification" test plan out of a spec for the detail page's verify card.
+ */
+export function extractSpecSection(raw: string, heading: string): string | null {
+  const lines = raw.split("\n");
+  const re = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "i");
+  const start = lines.findIndex((l) => re.test(l));
+  if (start === -1) return null;
+  const body: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) break;
+    body.push(lines[i]);
+  }
+  return body.join("\n").trim();
+}
+
+/** Same locating logic as extractSpecSection, but returns the markdown with that section removed. */
+export function stripSpecSection(raw: string, heading: string): string {
+  const lines = raw.split("\n");
+  const re = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "i");
+  const start = lines.findIndex((l) => re.test(l));
+  if (start === -1) return raw;
+  let end = start + 1;
+  while (end < lines.length && !/^##\s/.test(lines[end])) end++;
+  return [...lines.slice(0, start), ...lines.slice(end)].join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
 /** Raw markdown + parsed card for one spec, or null if it doesn't exist. Slug is path-guarded. */
 export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;

@@ -167,9 +167,38 @@ function kebab(s: string): string {
   return s.replace(/[⏳🚧✅]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "untitled-spec";
 }
 
+// verification-guides — Opus authors a "## Verification" test plan for a spec. Concrete + prod-facing
+// so the owner can actually verify shipped work before archiving it.
+const VERIFY_SYSTEM = `You are writing ONLY the "## Verification" section for a ShopCX spec — a concrete, prod-facing test checklist the OWNER follows to confirm the feature actually works in production before archiving it.
+
+Rules:
+- Output ONLY the section. Start with the literal line "## Verification". No preamble, no code fences, no other "##" sections.
+- 3-7 bullets. Each is a single concrete, human-reproducible step: the exact route (e.g. /dashboard/roadmap/box), Slack action, or CLI command — the input — and the OBSERVABLE expected result. Shape: "- On {where}, {do what} → expect {observable result}."
+- Use the REAL routes / tables / Slack actions / files the spec touched. You have the spec below plus read_brain_page + grep_repo — look up real names, never invent them.
+- NEVER write vague steps like "verify it works" or "check the feature". Every bullet names a concrete place and a concrete expected observation.
+- Only live-app prod paths — no unit-test / CI / "run the test suite" instructions.`;
+
+/** Insert or replace a "## Verification" section in spec markdown — before "## Related" if present, else appended. */
+function upsertVerification(markdown: string, section: string): string {
+  const body = section.trim();
+  const lines = markdown.split("\n");
+  const isH2 = (i: number) => /^##\s/.test(lines[i]);
+  const start = lines.findIndex((l) => /^##\s+Verification\b/i.test(l));
+  if (start !== -1) {
+    let end = start + 1;
+    while (end < lines.length && !isH2(end)) end++;
+    return [...lines.slice(0, start), body, "", ...lines.slice(end)].join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n";
+  }
+  const rel = lines.findIndex((l) => /^##\s+Related\b/i.test(l));
+  if (rel !== -1) {
+    return [...lines.slice(0, rel), body, "", ...lines.slice(rel)].join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n";
+  }
+  return markdown.replace(/\s+$/, "") + "\n\n" + body + "\n";
+}
+
 const BASE_SYSTEM = `You are a senior engineer + PM helping Dylan (founder of Superfoods Company) shape a build spec for ShopCX. Specs live in docs/brain/specs/{slug}.md and are executed by an autonomous build agent, so they must be concrete.
 
-A good spec has: a metadata line directly under the H1 — \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\` (every spec declares exactly one owner function + a parent; no orphans — see docs/brain/project-management.md); a one-paragraph summary tied to a business outcome; concrete "## Phase N — name" sections with file paths / schema / tasks, each line-tagged with ⏳ planned · 🚧 in progress · ✅ shipped; a "## Safety / invariants" section; and "## Completion criteria".
+A good spec has: a metadata line directly under the H1 — \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\` (every spec declares exactly one owner function + a parent; no orphans — see docs/brain/project-management.md); a one-paragraph summary tied to a business outcome; concrete "## Phase N — name" sections with file paths / schema / tasks, each line-tagged with ⏳ planned · 🚧 in progress · ✅ shipped; a "## Safety / invariants" section; "## Completion criteria"; and a "## Verification" section — a concrete, prod-facing test checklist (exact route/Slack action/CLI + input + observable expected result, e.g. "- On /dashboard/roadmap/box, queue a build → expect that lane to show the slug + elapsed timer"), never vague "test it works".
 
 Ground every spec in what ShopCX ACTUALLY has. You have a brain index below (the curated map of every table/library/lifecycle/integration) plus read-only tools: read_brain_page(slug) to read a full brain page, and grep_repo(query) to search the codebase when the brain lacks the detail. Brain-first (read docs/brain/ before grepping src/). Use them while drafting to resolve real table/column/function names — NEVER emit "OPEN: …TBD" placeholders for anything you can look up; look it up. Ask clarifying questions only for genuine product decisions. Keep phases small and verifiable. Be concise, plain text, no markdown fluff in your chat replies.`;
 
@@ -192,7 +221,7 @@ export async function POST(request: Request) {
     messages?: Msg[];
     slug?: string;
     seedSlug?: string;
-    action?: "chat" | "finalize";
+    action?: "chat" | "finalize" | "generate_verification";
     queueBuild?: boolean;
   };
   const messages = Array.isArray(body.messages) ? body.messages.slice(-30) : [];
@@ -228,6 +257,25 @@ export async function POST(request: Request) {
     : seedSlug
     ? `${BASE_SYSTEM}${grounding}\n\nYou are drafting a NEW spec by RE-HYDRATING from the current brain page docs/brain/${seedSlug}.md (an already-shipped feature or a reference page). Read it below as the source of truth for what exists TODAY, then help Dylan shape a fresh spec that EXTENDS or FIXES it — never just restate it, and never reactivate a stale snapshot. Inherit the owner/parent taxonomy from the page where sensible. All new phases start ⏳. Current page content:\n\n${seedContent}`
     : `${BASE_SYSTEM}${grounding}`;
+
+  // verification-guides Phase 3 — generate a "## Verification" test plan for an existing spec and commit it.
+  if (body.action === "generate_verification") {
+    if (!refineSlug) return NextResponse.json({ error: "slug required" }, { status: 400 });
+    if (!current) return NextResponse.json({ error: `spec not found: ${refineSlug}` }, { status: 404 });
+    const verifySystem = `${VERIFY_SYSTEM}${grounding}\n\nThe spec you are writing verification steps for (docs/brain/specs/${refineSlug}.md):\n\n${current}`;
+    let section = await askOpus(verifySystem, [{ role: "user", content: "Write the ## Verification section for this spec now." }], 4000);
+    section = section.replace(/^```(?:markdown)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    if (!/^##\s+Verification\b/i.test(section)) section = `## Verification\n${section}`;
+    const updated = upsertVerification(current, section);
+    const put = await gh("PUT", `/repos/${REPO}/contents/docs/brain/specs/${refineSlug}.md`, {
+      message: `verification-guides: generate test plan for ${refineSlug}`,
+      content: Buffer.from(updated, "utf8").toString("base64"),
+      sha: currentSha,
+      branch: "main",
+    });
+    if (!put.ok) return NextResponse.json({ error: "commit failed", status: put.status }, { status: 502 });
+    return NextResponse.json({ slug: refineSlug, generated: true });
+  }
 
   if (body.action !== "finalize") {
     const reply = await askOpus(system, messages, 8000);

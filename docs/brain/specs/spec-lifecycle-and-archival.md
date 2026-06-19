@@ -35,5 +35,11 @@ Refine the spec lifecycle so shipped specs don't pile up in "Shipped" forever, a
 - The board's "Shipped" column only shows shipped-not-yet-verified specs; an Archived section lists verified ones.
 - "New spec from brain" drafts a fresh spec from a chosen brain page.
 
+## Verification
+- On `/dashboard/roadmap`, the Shipped column is labeled **"Shipped — awaiting verification"** and only lists shipped-not-yet-verified specs; a shipped card shows the owner-only **Mark verified & archive** button.
+- Tap **Mark verified & archive** on a shipped spec → expect a fold-build PR that folds it into its brain pages, appends an [[../archive]] index entry, and `git rm`s `specs/{slug}.md`; merging it removes the card from the board.
+- Expand the board's **Archived** `<details>` → expect the just-verified feature listed (newest-first), linking to its lifecycle/brain page (`getArchive()`).
+- From the board header **New spec from brain** (or an archived entry), pick a brain page slug → expect Opus to draft a **fresh** spec from the *current* page content (not the stale snapshot), ready to Save / build.
+
 ## Related
 [[roadmap-build-console]] · [[build-approval-gates]] · [[repo-skills-catalog]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../dashboard/brain]] · [[../project-management]]

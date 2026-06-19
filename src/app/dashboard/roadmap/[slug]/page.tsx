@@ -1,13 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { marked } from "marked";
-import { getSpec, listSpecSlugs, type Phase } from "@/lib/brain-roadmap";
+import { getSpec, listSpecSlugs, extractSpecSection, stripSpecSection, type Phase } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import StatusControl from "../StatusControl";
 import AuthoringChat from "../AuthoringChat";
 import BuildButton from "../BuildButton";
 import PhaseList from "../PhaseList";
+import VerificationCard from "../VerificationCard";
 
 export const dynamic = "force-dynamic";
 
@@ -40,8 +41,15 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const job = jobsBySlug[slug] ?? null;
   const fold = folds[slug] ?? null;
 
+  // The "## Verification" test plan (verification-guides) is lifted out of the body and shown as a
+  // prominent card beside the verify button; strip it from the article so it isn't rendered twice.
+  const verification = extractSpecSection(spec.raw, "Verification");
+  const verificationHtml = verification
+    ? await marked.parse(preprocessWikilinks(verification, specSlugs))
+    : null;
+
   // Trusted internal content (our own brain markdown), owner-only page → marked → prose.
-  const html = await marked.parse(preprocessWikilinks(spec.raw, specSlugs));
+  const html = await marked.parse(preprocessWikilinks(stripSpecSection(spec.raw, "Verification"), specSlugs));
 
   return (
     <div className="mx-auto w-full max-w-6xl p-6">
@@ -90,6 +98,9 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
 
             <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
               <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} initialFold={fold} />
+              <div className="mt-3">
+                <VerificationCard slug={slug} html={verificationHtml} />
+              </div>
             </div>
 
             {spec.card.phases.length > 0 && (

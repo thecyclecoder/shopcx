@@ -27,5 +27,11 @@ The worker now writes a heartbeat ([[worker-self-update]] → `worker_heartbeats
 - `/dashboard/roadmap/box` shows, live: box health + SHA, N/5 build lanes + N/1 fold lane in use, and the spec each busy lane is building, plus queue depth.
 - The board header chip reflects lane usage + health and goes stale/red if the box stops heartbeating.
 
+## Verification
+- On `/dashboard/roadmap/box` → expect a **health header** (healthy/stale, `running_sha` linking to the commit, uptime), a **lane grid** of N build lanes + 1 fold lane, and a queue-depth count.
+- Queue a build (Build on any spec) → within ~5s expect one build lane to fill with that **spec_slug**, a `build` kind chip, and a **live elapsed** timer counting up.
+- On the `/dashboard/roadmap` board header → expect the **"Build box · N/5 lanes · healthy"** chip linking to the box view.
+- Stop the worker (or wait for a heartbeat gap) → within ~30s expect the header chip + box health to go **stale/red** (`last_poll_at` aged out).
+
 ## Related
 [[worker-self-update]] · [[parallel-builds]] · [[fold-build-batching]] · [[roadmap-build-console]] · [[../dashboard/roadmap]] · [[../tables/agent_jobs]] · [[../recipes/build-box-setup]]
