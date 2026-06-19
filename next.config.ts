@@ -34,7 +34,9 @@ const nextConfig: NextConfig = {
     // The interactions handler builds the App Home roadmap view (slack-home → getRoadmap) after a
     // queued build, so it reads the brain specs too. See docs/brain/specs/slack-roadmap-home.md.
     "/api/slack/interactions": ["./docs/brain/specs/**/*.md"],
-    "/api/inngest": ["./docs/brain/specs/**/*.md"],
+    // slack-roadmap-notify reads specs; brain-index-refresh regenerates archive.md (← archive.d/) and
+    // the README folder counts (← the whole tree), so the cron bundle needs all of docs/brain.
+    "/api/inngest": ["./docs/brain/**/*.md"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>
