@@ -99,6 +99,7 @@ import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 import { foundervipFollowupGate } from "@/lib/inngest/foundervip-followup-gate";
 import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
+import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 
 // 800s (Fluid Compute max) — single Inngest steps can run a long Sonnet call
 // (per-ingredient research, per-chunk review analysis). 300s timed those out
@@ -209,5 +210,6 @@ export const { GET, POST, PUT } = serve({
     portalActionHealer,
     foundervipFollowupGate,
     slackRoadmapNotify,
+    brainIndexRefresh,
   ],
 });

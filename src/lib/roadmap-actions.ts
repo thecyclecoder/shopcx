@@ -9,6 +9,7 @@
  * this is the security boundary. See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { inngest } from "@/lib/inngest/client";
 import { ACTIVE_STATUSES, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
 
 export type ActionResult<T> =
@@ -227,6 +228,13 @@ export async function mergeClaudePr(
     }
   }
   if (head) await gh("DELETE", `/repos/${REPO}/git/refs/heads/${head}`).catch(() => {});
+
+  // A merged fold just wrote a new archive.d/{slug}.md but (by design) NOT archive.md/README — kick the
+  // single-writer regen so the human-readable aggregates catch up within minutes instead of up-to-a-day.
+  // See docs/brain/inngest/brain-index-refresh.md (Phase 3).
+  if (head?.startsWith("claude/fold-")) {
+    await inngest.send({ name: "brain/index.refresh", data: { reason: "fold-merge", prNumber } }).catch(() => {});
+  }
 
   return { ok: true, merged: true, sha: merge.json.sha };
 }
