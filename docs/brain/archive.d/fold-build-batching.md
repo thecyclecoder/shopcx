@@ -1,0 +1,1 @@
+- **Fold-build batching + conflict-proof brain indexes** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
