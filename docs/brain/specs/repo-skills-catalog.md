@@ -40,14 +40,16 @@ Committed to the repo as `.claude/skills/{name}/SKILL.md` drafts (same as the P0
 - ✅ **audit-reconcile** (`.claude/skills/audit-reconcile/`) — dry-run manifest → `--apply` fix; resumable. Maps to 9 `audit-*`/`reconcile-*`.
 - ✅ **deploy** (`.claude/skills/deploy/`) — `tsc` before commit · don't push during Inngest syncs · branch-not-main. Maps to [[../operational-rules]].
 
-## Phase 3 — P2 skills ⏳
+## Phase 3 — P2 skills ✅
 
-- ⏳ **regenerate-brain** — run the `_gen-brain-*.ts` code→docs generators (4).
-- ⏳ **verify-schema** — assert DB enums/columns match brain claims (`_verify-*-schema.ts`).
-- ⏳ **edit-shopify-theme** — GitHub source of truth · preview-first · reconcile (recipe + `reconcile-shopify-theme.ts`).
-- ⏳ **build-portals** — `node scripts/build-all-portals.js` after editing `shopify-extension/portal-src/`.
-- ⏳ **run-orchestrator-action** — invoke `directActionHandlers` from a script (the layer-1 bridge; `apply-coupon-via-executor.ts`).
-- ⏳ **fire-inngest-event** — `inngest.send` with exact event names, idempotent, batched (recipe).
+Committed to the repo as `.claude/skills/{name}/SKILL.md` drafts (same shape as the P0/P1 skills — each carries a `## Related` cross-link to its source recipe(s)/script pattern). Like the earlier phases, they accrue load-bearing validation as real builds/ops exercise them.
+
+- ✅ **regenerate-brain** (`.claude/skills/regenerate-brain/`) — run the `_gen-brain-*.ts` code→docs generators (4: tables/inngest/libraries/dashboard), `_dump-schema.ts` first for tables, then `brain:index` reconcile.
+- ✅ **verify-schema** (`.claude/skills/verify-schema/`) — read-only assert that a table's live columns/indexes/policies match brain/migration claims (`_verify-*-schema.ts`).
+- ✅ **edit-shopify-theme** (`.claude/skills/edit-shopify-theme/`) — GitHub source of truth · preview-first · reconcile (recipe + `reconcile-shopify-theme.ts`).
+- ✅ **build-portals** (`.claude/skills/build-portals/`) — `node scripts/build-all-portals.js` after editing `shopify-extension/portal-src/`.
+- ✅ **run-orchestrator-action** (`.claude/skills/run-orchestrator-action/`) — drive `directActionHandlers` via `executeSonnetDecision` from a script (the layer-1 bridge; `apply-coupon-via-executor.ts`).
+- ✅ **fire-inngest-event** (`.claude/skills/fire-inngest-event/`) — `inngest.send` with exact event names, JSON-only payloads, idempotent, batched (recipe).
 
 ## Phase 4 — P3 skills ⏳
 
