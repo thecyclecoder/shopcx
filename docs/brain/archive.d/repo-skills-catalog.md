@@ -1,0 +1,1 @@
+- **Repo Skills Catalog — committed Claude Code skills for operating ShopCX** · verified 2026-06-19 · → [[recipes/README]]

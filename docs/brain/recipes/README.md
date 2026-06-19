@@ -51,6 +51,21 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[fire-an-inngest-event]] — `inngest.send({name, data})`
 - [[write-a-migration-apply-script]] — `scripts/apply-*.ts` pattern using `pg` client
 
+## Build & ops skills (committed Claude Code skills)
+
+The recipes above document **runtime orchestrator actions** — what the AI does live during customer service (pause/refund/return/coupon/loyalty…), exposed as `directActionHandlers` in [[../libraries/action-executor]]. **Don't conflate** those with **Claude Code skills**: the reusable *build/ops* procedures a Claude agent draws on — the box's headless top-level `claude -p` builds ([[build-box-setup]]) **or** an interactive session. Skills live in `.claude/skills/{name}/SKILL.md` (committed, or the harness can't see them) and each carries a `## Related` cross-link to the source recipe(s)/script genre that proves the pattern is real. Many of the recipes above are the source pattern behind a skill.
+
+**Shared foundation:** all ~230 `scripts/*.ts` run via `npx tsx`, load `.env.local`, and use `createAdminClient()`. The committed `script-conventions` skill documents this, backed by `scripts/_bootstrap.ts` (`loadEnv()` / `createAdminClient()` / `pgClient()` / `poolerConnectionString()` — replacing ~150 hand-copied env-loader blocks; the `.env.local` read is `existsSync`-guarded so it's a no-op on the box, where secrets come from the `EnvironmentFile`).
+
+The committed catalog, by tier:
+
+- **P0 (the unblockers):** `build-spec` (read `specs/{slug}.md` → implement → `tsc` gate → `claude/*` PR — the procedure the box worker's `runBuild` invokes directly, [[../lifecycles/roadmap-build-console]]), `probe-db` (read-only "database is the spec" inspection), `write-migration` ([[write-a-migration-apply-script]]), `customer-remedy` (UUID-keyed, dry-run-first one-customer fix through `directActionHandlers`).
+- **P1:** `fold-to-brain` (shipped spec → fold + `git rm`, [[../project-management]]), `write-brain-page`, `backfill` (26 `backfill-*` scripts), `audit-reconcile` (9 `audit-*`/`reconcile-*`), `deploy` ([[../operational-rules]]).
+- **P2:** `regenerate-brain` (the `_gen-brain-*.ts` generators), `verify-schema`, `edit-shopify-theme` ([[edit-shopify-theme]]), `build-portals`, `run-orchestrator-action` (`apply-coupon-via-executor.ts`), `fire-inngest-event` ([[fire-an-inngest-event]]).
+- **P3:** `render-static` ([[../lifecycles/ad-static]]), `generate-ad` ([[generate-ad]]). _(Later additions `plan-goal` follow the same shape.)_
+
+**Invariants:** `build-spec` uses native tools only — never spawns a *nested* `claude` (recursion / the `CLAUDECODE=1` guard); on the box it *is* the top-level `claude -p`, Max-billed (no `ANTHROPIC_API_KEY` in the build env). `probe-db` is read-only, always. `write-migration`/`backfill`/`customer-remedy` are idempotent + dry-run-first, never run during active Inngest syncs. Internal joins use UUIDs, never `shopify_*_id`. All DB writes go through `createAdminClient()`.
+
 ## Related
 
 [[../README]] · [[../libraries]] · [[../lifecycles/return-pipeline]] · [[../lifecycles/cancel-flow]] · [[../lifecycles/dunning]]
