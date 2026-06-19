@@ -13,9 +13,11 @@ ShopCX's first repo-committed Claude Code skills now live in `.claude/skills/` (
 1. **Runtime orchestrator actions** — what the AI does live during customer service (pause/resume/refund/return/coupon/loyalty/cancel-via-journey/meta-moderation/replies). These already exist as `directActionHandlers` in [[../libraries/action-executor]] + Sonnet data tools; the ~20 customer-action [[../recipes/README|recipes]] *document* them. **Not** Claude Code skills — do not skill-ify each one.
 2. **Claude Code skills** — what a build/ops agent needs. **This is the gap this spec fills.** Each maps to existing recipes/scripts that prove the pattern is real.
 
-## Skill foundation (every script shares it)
+## Skill foundation (every script shares it) ✅
 
-All 230 `scripts/*.ts` run via `npx tsx scripts/<name>.ts`, load `.env.local` into `process.env`, and use `createAdminClient()` from `src/lib/supabase/admin.ts`. Migrations connect raw via `pg.Client` to the pooler (`:6543`, `SUPABASE_DB_PASSWORD`). A committed `script-conventions` skill + a shared `scripts/_bootstrap.ts` should standardize this.
+All 230 `scripts/*.ts` run via `npx tsx scripts/<name>.ts`, load `.env.local` into `process.env`, and use `createAdminClient()` from `src/lib/supabase/admin.ts`. Migrations connect raw via `pg.Client` to the pooler (`:6543`, `SUPABASE_DB_PASSWORD`).
+
+✅ **Shipped:** a shared `scripts/_bootstrap.ts` (exports `loadEnv()` / `createAdminClient()` / `pgClient()` / `poolerConnectionString()`, replacing the ~150 hand-copied env-loader blocks; `.env.local` read is `existsSync`-guarded so it's a no-op on the box) + a committed `script-conventions` skill (`.claude/skills/script-conventions/SKILL.md`) that documents the foundation, the box `.env.local`-absent gotcha, and the `_`-prefix convention. New scripts import `_bootstrap`; the back catalogue is left as-is (no bulk rewrite).
 
 ---
 
@@ -23,7 +25,7 @@ All 230 `scripts/*.ts` run via `npx tsx scripts/<name>.ts`, load `.env.local` in
 
 Committed to the repo as drafts. They need a validation pass + to be wired into the box worker's build before they're load-bearing.
 
-- 🚧 **build-spec** (`.claude/skills/build-spec/`) — read `docs/brain/specs/{slug}.md` → implement every phase → `npx tsc --noEmit` gate → stop-and-surface open questions → `claude/*` PR. The build itself runs as a **top-level `claude -p` on the box** (Max-billed); this skill is the canonical recipe it follows. **Today the box worker (`scripts/builder-worker.ts`) drives builds with an inline prompt that embodies this skill** + owns git/PR; wiring the worker to invoke the skill directly (and letting it own the PR) is a DRY follow-up. Invariant: native tools only — never spawn a *nested* `claude` (recursion).
+- 🚧 **build-spec** (`.claude/skills/build-spec/`) — read `docs/brain/specs/{slug}.md` → implement every phase → `npx tsc --noEmit` gate → stop-and-surface open questions → `claude/*` PR. The build itself runs as a **top-level `claude -p` on the box** (Max-billed); this skill is the canonical recipe it follows. ✅ **DRY follow-up done:** the box worker (`scripts/builder-worker.ts`, `runBuild` prompt ~L808) now invokes the skill directly — its build prompt is `Use the build-spec skill to implement the spec at docs/brain/specs/{slug}.md` plus a worker-protocol overlay (harness owns git/PR; no prod creds → request approval). Invariant: native tools only — never spawn a *nested* `claude` (recursion).
 - 🚧 **probe-db** (`.claude/skills/probe-db/`) — read-only schema/data/enum inspection before assuming anything ("the database is the spec"). Maps to the ~16 `_probe-*`/`_check-*`/`inspect-*` scripts.
 - 🚧 **write-migration** (`.claude/skills/write-migration/`) — author `supabase/migrations/YYYYMMDDNNNNNN_*.sql` (idempotent) + an apply-script (pooler `:6543`, `BEGIN/COMMIT` for backfills, **never run during Inngest syncs**). Maps to recipe `write-a-migration-apply-script` + 24 `apply-*-migration.ts`.
 - 🚧 **customer-remedy** (`.claude/skills/customer-remedy/`) — scaffold an end-to-end one-customer fix: resolve by **UUID** → fetch state → plan gated steps → execute through `directActionHandlers` → log each gate → idempotent, dry-run-first. Maps to ~40 scripts (`_jay-*`, `_michelle-*`, `cheryl-*`, `brad-*`, `run-refund-playbook`, `setup-mary-recovery-sub`).
@@ -60,8 +62,11 @@ Committed to the repo as drafts. They need a validation pass + to be wired into 
 
 ## Completion criteria
 
-- The P0 four are committed `.claude/skills/*/SKILL.md`. The box worker builds a spec → CI-passing `claude/*` PR (✅ proven 2026-06-18 via the smoke test). Remaining: wire the worker to invoke the `build-spec` skill directly (DRY), and exercise probe-db / write-migration / customer-remedy inside a real build.
-- Each skill cross-links its source recipe(s)/script pattern, and the catalog is folded into [[../recipes/README]] when stable.
+- ✅ The P0 four are committed `.claude/skills/*/SKILL.md`. The box worker builds a spec → CI-passing `claude/*` PR (✅ proven 2026-06-18 via the smoke test).
+- ✅ The worker invokes the `build-spec` skill directly (DRY) — `scripts/builder-worker.ts` `runBuild` prompt, not an inline copy of the procedure.
+- ✅ Skill foundation committed: `scripts/_bootstrap.ts` + the `script-conventions` skill.
+- ⏳ Remaining: exercise probe-db / write-migration / customer-remedy inside a real build (empirical — accrues as specs that touch the DB get built).
+- ✅ Each skill cross-links its source recipe(s)/script pattern (every SKILL.md has a `## Related`). The catalog folds into [[../recipes/README]] when stable.
 
 ## Related
 
