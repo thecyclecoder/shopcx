@@ -45,9 +45,12 @@ function verifySlackSignature(rawBody: string, signature: string | null, timesta
 async function resolveWorkspaceByTeamId(teamId: string) : Promise<string | null>
 async function findChannelByName(token: string, name: string) : Promise<string | null>
 async function openModal(token: string, triggerId: string, view: unknown) : Promise<boolean>
+async function publishHomeView(token: string, slackUserId: string, view: unknown) : Promise<boolean>
 async function postEphemeral(token: string, channel: string, user: string, blocks: unknown[], text: string) : Promise<boolean>
 async function updateMessage(token: string, channel: string, ts: string, blocks: unknown[], text: string) : Promise<boolean>
 ```
+
+`publishHomeView` — `views.publish` for a user's App **Home tab** (`view` is a `{ type: "home", blocks }` view). Used by [[slack-home]] for the roadmap Home tab.
 
 `verifySlackSignature` — HMAC-SHA256 over `v0:{ts}:{body}` keyed by `SLACK_SIGNING_SECRET`, rejecting > 5 min timestamp skew (replay guard). Pass the **raw** unparsed body.
 
@@ -138,7 +141,7 @@ function buildNewTicketMessage(data: { ticketId: string; ticketNumber?: string; 
 - `src/app/api/slack/disconnect/route.ts`
 - `src/app/api/slack/sync-members/route.ts`
 - `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` ([[../integrations/slack-roadmap-console]])
-- `src/lib/slack-notify.ts` · `src/lib/slack-roadmap.ts` · `src/lib/slack-identity.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
+- `src/lib/slack-notify.ts` · `src/lib/slack-roadmap.ts` · `src/lib/slack-home.ts` · `src/lib/slack-identity.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
 
 ## Gotchas
 
@@ -146,7 +149,7 @@ function buildNewTicketMessage(data: { ticketId: string; ticketNumber?: string; 
 
 ## Related
 
-[[../integrations/slack-roadmap-console]] · [[slack-roadmap]] · [[slack-identity]] · [[slack-notify]]
+[[../integrations/slack-roadmap-console]] · [[slack-roadmap]] · [[slack-home]] · [[slack-identity]] · [[slack-notify]]
 
 ---
 

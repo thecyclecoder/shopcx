@@ -23,6 +23,7 @@ import { queueRoadmapBuild, approveRoadmapAction, mergeClaudePr, answerRoadmapBu
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { AgentJob } from "@/lib/agent-jobs";
 import { ACTIONS, buildAnswerModal, buildNeedsApprovalMessage } from "@/lib/slack-roadmap";
+import { HOME, buildHomeView, publishHome, noticeModal } from "@/lib/slack-home";
 
 export const maxDuration = 60;
 
@@ -96,8 +97,13 @@ async function handleBlockActions(p: BlockActionsPayload, workspaceId: string, t
   const messageTs = p.message?.ts;
   const slackUserId = p.user.id;
 
-  // URL buttons (View PR / dashboard links) need no server work.
-  if (action.action_id === ACTIONS.viewPr) return ack();
+  // URL buttons (View PR / dashboard links / Home "Open") need no server work.
+  if (action.action_id === ACTIONS.viewPr || action.action_id.startsWith(HOME.open)) return ack();
+
+  // App Home tab build buttons — these carry no `channel`, so feedback is a modal, not an ephemeral.
+  if (action.action_id.startsWith(HOME.build) || action.action_id.startsWith(HOME.buildPhase)) {
+    return handleHomeBuild(p, action.action_id, value, workspaceId, token);
+  }
 
   const ephem = async (msg: string) => {
     if (channel) await postEphemeral(token, channel, slackUserId, [], msg);
@@ -165,6 +171,49 @@ async function handleBlockActions(p: BlockActionsPayload, workspaceId: string, t
     default:
       return ack();
   }
+}
+
+// ── App Home build buttons (Build all / Build N) ──
+
+/**
+ * Queue a build (whole spec or one phase) from the App Home tab, then re-publish the Home view so the
+ * status chip flips to "queued/building" immediately. Owner-gated (UX) here; roadmap-actions re-checks
+ * server-side. Home interactions have no channel → we surface non-owner / error states via a modal.
+ */
+async function handleHomeBuild(
+  p: BlockActionsPayload,
+  actionId: string,
+  value: Record<string, unknown>,
+  workspaceId: string,
+  token: string,
+) {
+  const slackUserId = p.user.id;
+  const actor = await resolveSlackActor(workspaceId, slackUserId);
+  if (!isOwner(actor)) {
+    await openModal(token, p.trigger_id, noticeModal("Owners only", "Building is reserved for the workspace owner. You can view the roadmap, but not start builds."));
+    return ack();
+  }
+
+  // slug (+ optional phase) is encoded in both the action_id and the button value; value wins for the title.
+  const isPhase = actionId.startsWith(HOME.buildPhase);
+  const slug = String(value.slug || (isPhase ? actionId.slice(HOME.buildPhase.length).replace(/:\d+$/, "") : actionId.slice(HOME.build.length)));
+  let instructions: string | null = null;
+  if (isPhase) {
+    const n = Number(value.n) || Number(actionId.slice(HOME.buildPhase.length).match(/:(\d+)$/)?.[1]) || 0;
+    const phaseTitle = String(value.phaseTitle || `Phase ${n}`);
+    instructions = `Build only ${phaseTitle} of this spec — do ONLY that phase, not the whole spec.`;
+  }
+
+  const result = await queueRoadmapBuild(workspaceId, actor!.userId, { slug, instructions });
+  if (!result.ok) {
+    await openModal(token, p.trigger_id, noticeModal("Couldn't build", `Couldn't queue \`${slug}\`: ${result.error}`));
+    return ack();
+  }
+
+  // Re-publish the Home view so the row reflects the new (queued / already-active) state right away.
+  const view = await buildHomeView(workspaceId);
+  await publishHome(token, slackUserId, view);
+  return ack();
 }
 
 // ── view_submission (answer modal) ──

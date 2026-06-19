@@ -12,12 +12,13 @@
  * See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md (Phases 1–4).
  */
 import { NextResponse } from "next/server";
-import { verifySlackSignature, resolveWorkspaceByTeamId } from "@/lib/slack";
+import { verifySlackSignature, resolveWorkspaceByTeamId, getSlackToken } from "@/lib/slack";
 import { resolveSlackActor, isOwner } from "@/lib/slack-identity";
 import { queueRoadmapBuild } from "@/lib/roadmap-actions";
 import { getRoadmap, getSpec } from "@/lib/brain-roadmap";
 import { getLatestJobsBySlug, getPendingFolds } from "@/lib/agent-jobs";
 import { buildBoardBlocks, buildSpecDetailBlocks } from "@/lib/slack-roadmap";
+import { buildHomeView, publishHome } from "@/lib/slack-home";
 
 export const maxDuration = 60;
 
@@ -41,9 +42,18 @@ export async function POST(request: Request) {
   // Events API delivers JSON (url_verification challenge / event_callback); slash commands are form-encoded.
   const contentType = request.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
-    const payload = JSON.parse(raw) as { type?: string; challenge?: string };
+    const payload = JSON.parse(raw) as {
+      type?: string;
+      challenge?: string;
+      team_id?: string;
+      event?: { type?: string; tab?: string; user?: string };
+    };
     if (payload.type === "url_verification") return NextResponse.json({ challenge: payload.challenge });
-    return NextResponse.json({ ok: true }); // event_callback — ack; the console drives off slash + interactions
+    // app_home_opened (Home tab) → (re)publish the roadmap Home view for that user. Other events: ack only.
+    if (payload.event?.type === "app_home_opened" && payload.event.tab === "home") {
+      await publishHomeForUser(payload.team_id || "", payload.event.user || "");
+    }
+    return NextResponse.json({ ok: true });
   }
 
   const form = new URLSearchParams(raw);
@@ -59,6 +69,17 @@ export async function POST(request: Request) {
   if (command === "/build") return handleBuild(workspaceId, slackUserId, text, false);
   if (command === "/bug") return handleBuild(workspaceId, slackUserId, text, true);
   return ephemeral(`Unknown command \`${command}\`.`);
+}
+
+/** Publish the App Home roadmap view for a user that just opened the Home tab. Best-effort, fast (<3s). */
+async function publishHomeForUser(teamId: string, slackUserId: string): Promise<void> {
+  if (!teamId || !slackUserId) return;
+  const workspaceId = await resolveWorkspaceByTeamId(teamId);
+  if (!workspaceId) return;
+  const token = await getSlackToken(workspaceId);
+  if (!token) return;
+  const view = await buildHomeView(workspaceId);
+  await publishHome(token, slackUserId, view);
 }
 
 async function handleRoadmap(workspaceId: string, text: string) {
