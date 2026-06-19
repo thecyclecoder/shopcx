@@ -30,13 +30,15 @@ Committed to the repo as drafts. They need a validation pass + to be wired into 
 - ✅ **write-migration** (`.claude/skills/write-migration/`) — author `supabase/migrations/YYYYMMDDNNNNNN_*.sql` (idempotent) + an apply-script (pooler `:6543`, `BEGIN/COMMIT` for backfills, **never run during Inngest syncs**). Maps to recipe `write-a-migration-apply-script` + 24 `apply-*-migration.ts`.
 - ✅ **customer-remedy** (`.claude/skills/customer-remedy/`) — scaffold an end-to-end one-customer fix: resolve by **UUID** → fetch state → plan gated steps → execute through `directActionHandlers` → log each gate → idempotent, dry-run-first. Maps to ~40 scripts (`_jay-*`, `_michelle-*`, `cheryl-*`, `brad-*`, `run-refund-playbook`, `setup-mary-recovery-sub`).
 
-## Phase 2 — P1 skills ⏳
+## Phase 2 — P1 skills ✅
 
-- ⏳ **fold-to-brain** — shipped spec → fold into lifecycle/table/lib/inngest pages, update README counts, `git rm` the spec ([[../project-management]]).
-- ⏳ **write-brain-page** — scaffold a brain page for any new table/inngest/library/integration (CLAUDE.md hard rule: code without a brain page is incomplete).
-- ⏳ **backfill** — chunked, cursor-paginated, resumable, two-phase `--apply`. Maps to 26 `backfill-*` scripts.
-- ⏳ **audit-reconcile** — dry-run manifest → `--apply` fix; resumable. Maps to 9 `audit-*`/`reconcile-*`.
-- ⏳ **deploy** — `tsc` before commit · don't push during Inngest syncs · branch-not-main. Maps to [[../operational-rules]].
+Committed to the repo as `.claude/skills/{name}/SKILL.md` drafts (same as the P0 four — each carries a `## Related` cross-link to its source recipe(s)/script pattern). Like Phase 1, they accrue load-bearing validation as real builds exercise them.
+
+- ✅ **fold-to-brain** (`.claude/skills/fold-to-brain/`) — shipped spec → fold into lifecycle/table/lib/inngest pages, update README counts, `git rm` the spec ([[../project-management]]).
+- ✅ **write-brain-page** (`.claude/skills/write-brain-page/`) — scaffold a brain page for any new table/inngest/library/integration (CLAUDE.md hard rule: code without a brain page is incomplete).
+- ✅ **backfill** (`.claude/skills/backfill/`) — chunked, cursor-paginated, resumable, two-phase `--apply`. Maps to 26 `backfill-*` scripts.
+- ✅ **audit-reconcile** (`.claude/skills/audit-reconcile/`) — dry-run manifest → `--apply` fix; resumable. Maps to 9 `audit-*`/`reconcile-*`.
+- ✅ **deploy** (`.claude/skills/deploy/`) — `tsc` before commit · don't push during Inngest syncs · branch-not-main. Maps to [[../operational-rules]].
 
 ## Phase 3 — P2 skills ⏳
 
