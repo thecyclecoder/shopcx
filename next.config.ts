@@ -27,6 +27,11 @@ const nextConfig: NextConfig = {
     // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into
     // its Opus system prompt for grounding; trace the markdown into its bundle.
     "/api/roadmap/chat": ["./docs/brain/**/*.md"],
+    // The Slack Roadmap Console renders the board/detail from the brain markdown (getRoadmap /
+    // getSpec) inside the slash-command + Inngest-watcher bundles. Trace the specs in or they
+    // render empty in prod. See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md.
+    "/api/slack/events": ["./docs/brain/specs/**/*.md"],
+    "/api/inngest": ["./docs/brain/specs/**/*.md"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>
