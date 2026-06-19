@@ -21,14 +21,14 @@ All 230 `scripts/*.ts` run via `npx tsx scripts/<name>.ts`, load `.env.local` in
 
 ---
 
-## Phase 1 — P0 skills (the unblockers) 🚧
+## Phase 1 — P0 skills (the unblockers) ✅
 
 Committed to the repo as drafts. They need a validation pass + to be wired into the box worker's build before they're load-bearing.
 
-- 🚧 **build-spec** (`.claude/skills/build-spec/`) — read `docs/brain/specs/{slug}.md` → implement every phase → `npx tsc --noEmit` gate → stop-and-surface open questions → `claude/*` PR. The build itself runs as a **top-level `claude -p` on the box** (Max-billed); this skill is the canonical recipe it follows. ✅ **DRY follow-up done:** the box worker (`scripts/builder-worker.ts`, `runBuild` prompt ~L808) now invokes the skill directly — its build prompt is `Use the build-spec skill to implement the spec at docs/brain/specs/{slug}.md` plus a worker-protocol overlay (harness owns git/PR; no prod creds → request approval). Invariant: native tools only — never spawn a *nested* `claude` (recursion).
-- 🚧 **probe-db** (`.claude/skills/probe-db/`) — read-only schema/data/enum inspection before assuming anything ("the database is the spec"). Maps to the ~16 `_probe-*`/`_check-*`/`inspect-*` scripts.
-- 🚧 **write-migration** (`.claude/skills/write-migration/`) — author `supabase/migrations/YYYYMMDDNNNNNN_*.sql` (idempotent) + an apply-script (pooler `:6543`, `BEGIN/COMMIT` for backfills, **never run during Inngest syncs**). Maps to recipe `write-a-migration-apply-script` + 24 `apply-*-migration.ts`.
-- 🚧 **customer-remedy** (`.claude/skills/customer-remedy/`) — scaffold an end-to-end one-customer fix: resolve by **UUID** → fetch state → plan gated steps → execute through `directActionHandlers` → log each gate → idempotent, dry-run-first. Maps to ~40 scripts (`_jay-*`, `_michelle-*`, `cheryl-*`, `brad-*`, `run-refund-playbook`, `setup-mary-recovery-sub`).
+- ✅ **build-spec** (`.claude/skills/build-spec/`) — read `docs/brain/specs/{slug}.md` → implement every phase → `npx tsc --noEmit` gate → stop-and-surface open questions → `claude/*` PR. The build itself runs as a **top-level `claude -p` on the box** (Max-billed); this skill is the canonical recipe it follows. ✅ **DRY follow-up done:** the box worker (`scripts/builder-worker.ts`, `runBuild` prompt ~L808) now invokes the skill directly — its build prompt is `Use the build-spec skill to implement the spec at docs/brain/specs/{slug}.md` plus a worker-protocol overlay (harness owns git/PR; no prod creds → request approval). Invariant: native tools only — never spawn a *nested* `claude` (recursion).
+- ✅ **probe-db** (`.claude/skills/probe-db/`) — read-only schema/data/enum inspection before assuming anything ("the database is the spec"). Maps to the ~16 `_probe-*`/`_check-*`/`inspect-*` scripts.
+- ✅ **write-migration** (`.claude/skills/write-migration/`) — author `supabase/migrations/YYYYMMDDNNNNNN_*.sql` (idempotent) + an apply-script (pooler `:6543`, `BEGIN/COMMIT` for backfills, **never run during Inngest syncs**). Maps to recipe `write-a-migration-apply-script` + 24 `apply-*-migration.ts`.
+- ✅ **customer-remedy** (`.claude/skills/customer-remedy/`) — scaffold an end-to-end one-customer fix: resolve by **UUID** → fetch state → plan gated steps → execute through `directActionHandlers` → log each gate → idempotent, dry-run-first. Maps to ~40 scripts (`_jay-*`, `_michelle-*`, `cheryl-*`, `brad-*`, `run-refund-playbook`, `setup-mary-recovery-sub`).
 
 ## Phase 2 — P1 skills ⏳
 
