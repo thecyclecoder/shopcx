@@ -7,6 +7,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { ctaButton } from "@/lib/label-cta";
 
 // ── Types ──
 
@@ -148,9 +149,8 @@ export interface ActionResult {
  * (table-based for Outlook compat) and the chat widget (which uses
  * dangerouslySetInnerHTML).
  */
-function ctaButton(url: string, label: string): string {
-  return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 16px 0;"><tr><td bgcolor="#0f766e" style="background-color:#0f766e;border-radius:8px;"><a href="${url}" style="display:inline-block;padding:14px 24px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">${label}</a></td></tr></table>`;
-}
+// ctaButton lives in label-cta.ts — single source shared with the
+// sendWithDelay sink's bare-URL safety net (see renderLabelUrlsAsButtons).
 
 /**
  * Substitute placeholders in an action's string params using results
@@ -964,6 +964,27 @@ export const directActionHandlers: Record<
   create_return: async (ctx, p) => {
     const { createFullReturn } = await import("@/lib/shopify-returns");
     const admin = createAdminClient();
+
+    // HARD INVARIANT: at most ONE return per ticket. We never issue more
+    // than a single return in one interaction — a second is a human
+    // decision, not an AI one. The orchestrator once read "one label per
+    // order" and created THREE returns in a single turn (3 EasyPost labels +
+    // 3× refund exposure) for a hospitalized customer with 3 unwanted
+    // shipments (Traci Studebaker, ticket 1b62b00f, 2026-06-19). Actions run
+    // sequentially, so the first create_return wins and any sibling/repeat
+    // attempt is blocked here and escalated. (Dylan, 2026-06-19.)
+    if (ctx.ticketId) {
+      const { data: existingReturns } = await admin.from("returns")
+        .select("id, order_id, status")
+        .eq("ticket_id", ctx.ticketId)
+        .neq("status", "cancelled");
+      if (existingReturns && existingReturns.length > 0) {
+        return {
+          success: false,
+          error: `A return already exists on this ticket (${existingReturns[0].id}). Policy: never more than one return per ticket — escalate any additional return to a human instead of creating it.`,
+        };
+      }
+    }
 
     // Look up order
     const { data: order } = await admin.from("orders")

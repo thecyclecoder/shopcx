@@ -411,6 +411,14 @@ async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string
     const deliveryCh = await getDeliveryChannel(tid, ch);
     if (deliveryCh === "email") effectiveCh = "email";
   }
+  // Safety net: convert any bare EasyPost return-label URL the AI pasted as
+  // plain text into a clickable CTA button. Catches every send-path so a
+  // customer never gets a raw "https://easypost-files.s3..." string in the
+  // body (Traci Studebaker, ticket 1b62b00f). Runs after translation so the
+  // button markup isn't mangled by the translator.
+  const { renderLabelUrlsAsButtons } = await import("@/lib/label-cta");
+  outboundBody = renderLabelUrlsAsButtons(outboundBody);
+
   const delay = await responseDelay(admin, wsId, effectiveCh, custEmail);
   await send(admin, wsId, tid, ch, outboundBody, sandbox, delay > 0, delay);
 }
