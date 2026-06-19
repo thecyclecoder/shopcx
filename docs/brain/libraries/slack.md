@@ -54,8 +54,10 @@ async function updateMessage(token: string, channel: string, ts: string, blocks:
 ### `listChannels` — function
 
 ```ts
-async function listChannels(token: string) : Promise<
+async function listChannels(token: string) : Promise<{ id; name; is_private }[]>
 ```
+
+Merges **`conversations.list`** (`public_channel`) **+ `users.conversations`** (`public_channel,private_channel` — the bot's own memberships), deduped by id. The `users.conversations` half is required because **`conversations.list` does not return a bot's PRIVATE channels** even with `groups:read` + the bot invited (verified 2026-06-19) — that quirk previously made [[../inngest/slack-roadmap-notify]] never find a private `#roadmap`. Used by the Slack settings channel dropdown, ticket-share, and `findChannelByName`.
 
 ### `autoMapTeamMembers` — function
 

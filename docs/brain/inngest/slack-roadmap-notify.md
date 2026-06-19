@@ -23,7 +23,8 @@ Status-push watcher for the [[../integrations/slack-roadmap-console|Slack Roadma
 
 ## Gotchas
 
-- The channel is resolved by **name** (`roadmap`) over the bot's channel list each tick — no stored channel id. Invite the bot to a private `#roadmap` channel or nothing posts.
+- The channel is resolved by **name** (`roadmap`) over the bot's channel list each tick — no stored channel id. The bot **must be invited** to `#roadmap`.
+- **`conversations.list` does NOT return a bot's PRIVATE channels** (verified 2026-06-19: even with `groups:read` + the bot invited, it returned only public channels — `#roadmap` was invisible → nothing posted). `listChannels` ([[../libraries/slack]]) therefore **merges `conversations.list` (public) + `users.conversations` (the bot's memberships, incl. private)** — the `users.conversations` half is what surfaces a private `#roadmap`. If channel resolution ever regresses, check that `listChannels` still queries `users.conversations`.
 - Reads `docs/brain/specs/*.md` (`getSpec`) for card titles — traced into the `/api/inngest` bundle in `next.config.ts`.
 
 ## Related
