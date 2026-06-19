@@ -17,6 +17,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
+import { cleanEmailBody } from "@/lib/email-cleaner";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -121,6 +122,7 @@ interface MessageRow {
   direction: string | null;
   author_type: string | null;
   body: string | null;
+  body_clean: string | null;
   created_at: string;
   visibility: string | null;
 }
@@ -391,7 +393,7 @@ export async function analyzeTicket(
 
   // Pull messages in the window
   const { data: msgsRaw } = await admin.from("ticket_messages")
-    .select("direction, author_type, body, visibility, created_at")
+    .select("direction, author_type, body, body_clean, visibility, created_at")
     .eq("ticket_id", ticketId)
     .gte("created_at", windowStart)
     .lte("created_at", windowEnd)
@@ -679,7 +681,14 @@ async function applySeverityActions(
   const hasSevereIssue = issues.some(i => SEVERE_ISSUE_TYPES.has(i.type));
   const customerThreat = msgs.some(m => {
     if (m.direction !== "inbound") return false;
-    const txt = (m.body || "").toLowerCase();
+    // Scan the CLEANED body, not the raw one. Inbound email replies quote
+    // the message they're replying to — including our own order-confirmation
+    // footer ("Join our Facebook group!"), whose "facebook" substring-matched
+    // a threat keyword and force-escalated a positively-closed ticket
+    // (Melissa Sachs, ticket 246163b4, score 9). body_clean already strips
+    // quoted history + signatures; fall back to live-cleaning for rows /
+    // channels without it.
+    const txt = (m.body_clean || cleanEmailBody(m.body || "")).toLowerCase();
     return CUSTOMER_ESCALATION_KEYWORDS.some(k => matchesEscalationKeyword(txt, k));
   });
 
