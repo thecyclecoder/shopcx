@@ -1,4 +1,4 @@
-# Box-driven Product Seeding ⏳
+# Box-driven Product Seeding ✅
 
 **Owner:** [[../functions/cmo]] · **Parent:** CMO mandate — owned product/website content (grounds [[../lifecycles/product-intelligence]])
 
@@ -69,5 +69,23 @@ The box seeds everything Amazing Coffee has **except linked products + bundles**
 - **Amazing Coffee is the proof-of-correctness benchmark** — every seeded page is validated against its `published` done state (structure + completeness), the only intentional gaps being **linked products + bundles** (above).
 - One "Auto-populate" action on a product → a `product-seed` box job that drives it `none → published`: PDP-extracted ingredients, research, review analysis, triangulated benefit selections (framing + research ∩ reviews, evidence-backed), page content + KB + macros + SEO, and Nano Banana Pro hero/lifestyle/ingredient media — unattended, QA-gated. The target products complete this way, matching Amazing Coffee minus relationships.
 
+## Build status (shipped)
+Every pipeline step landed. What was built:
+- **Engine factored** to `src/lib/product-intelligence/engine.ts` (one copy of research/review/content logic); [[../inngest/product-intelligence]] now calls the shared functions inside its `step.run` wrappers (no fork). → [[../libraries/product-intelligence-seed]].
+- **Box lane:** `agent_jobs.kind='product-seed'`, claimed `['product-seed']` into a 2-lane in-process lane; `runProductSeedJob` in `scripts/builder-worker.ts` calls `runProductSeed` directly (no worktree / `claude -p` / PR). Posts a run summary + reasoning back on the job (supervision hook).
+- **New box modules:** `extract-ingredients.ts` (PDP scrape → ingredients), `benefit-selection.ts` (3-source triangulation), `hero-imagery.ts` (Nano Banana Pro + vision-QA + `product_media`), `publish.ts` (shared publish core, also used by the publish route), `seed.ts` (orchestrator + self-QA gate + auto-publish).
+- **New integration:** [[../libraries/google-drive]] / [[../integrations/google-drive]] — headless SA Drive client (JWT→token, `files.list`/`files.get?alt=media`, packshot resolver).
+- **UI:** "Auto-populate" button on `/dashboard/products/[id]/intelligence` → `POST …/products/[productId]/seed` enqueues the job.
+
+**Runtime prerequisites (owner-side, not code):** the worker process must carry `ANTHROPIC_API_KEY` (it does — only the spawned build sandbox strips it); the workspace `gemini_api_key_encrypted` + `google_drive_sa_json_encrypted` must be set and the `Assets/Products` folder shared to the SA as Viewer. No migration needed (`kind` is free `text`; `claim_agent_job` already takes a kinds array; `intelligence_status` already has every value).
+
+## Verification
+- On `/dashboard/products/{id}/intelligence` for a `none` target (e.g. `ashwavana-guru-focus`), click **Auto-populate** → expect a `product-seed` row in `agent_jobs` (status `queued`) and the button to read "Queued ✓".
+- On the build box, `runProductSeedJob` claims it → expect `agent_jobs.status` to progress `building → completed` (published) or `→ needs_attention` (held), with `log_tail` carrying the step list + the box's reasoning.
+- After a successful run, on the intelligence page → expect `intelligence_status='published'`, ingredients populated from the PDP, research/review-analysis/benefit-selections present, a draft→published `product_page_content` version, and (for Guru Focus / Zen Relax / Creatine Prime) a `product_media` slot=`hero` row whose image matches the locked composition.
+- For **Amazing Coffee / Amazing Coffee pods / Amazing Creamer** → expect hero gen **skipped** (`log_tail` shows `hero: skipped (locked…)`) and their existing `product_media` heroes untouched.
+- Re-run Auto-populate on a published product → expect idempotent behavior (ingredients kept, hero not overwritten) and no duplicate in-flight job (the route reuses an active one).
+- Self-QA fail path: a benefit with no evidence or a missing disclaimer → expect the job to end `needs_attention`, the product held at `content_generated`, and the issue surfaced in `log_tail` (NOT published).
+
 ## Related
-[[../lifecycles/product-intelligence]] · [[../inngest/product-intelligence]] · [[../libraries/gemini]] · [[../tables/products]] · [[../tables/product_ingredients]] · [[../tables/product_reviews]] · [[../tables/product_media]] · [[../tables/agent_jobs]] · [[roadmap-build-console]] · [[../recipes/build-box-setup]]
+[[../lifecycles/product-intelligence]] · [[../inngest/product-intelligence]] · [[../libraries/product-intelligence-seed]] · [[../libraries/google-drive]] · [[../integrations/google-drive]] · [[../libraries/gemini]] · [[../tables/products]] · [[../tables/product_ingredients]] · [[../tables/product_reviews]] · [[../tables/product_media]] · [[../tables/agent_jobs]] · [[roadmap-build-console]] · [[../recipes/build-box-setup]]

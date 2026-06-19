@@ -37,6 +37,10 @@ const MAX_CONCURRENT = 5; // build/plan pool — real ceiling is Max rate limits
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
+// Product-seed jobs (box-product-seeding) run IN-PROCESS in their own lane so a
+// long seed (per-ingredient research + ~2000-review map-reduce + imagery) never
+// occupies a feature-build lane. They're async/IO-bound, so a small cap is fine.
+const MAX_SEED = 2;
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
 // SAME already-applied action before we stop the loop and surface it for a human. Normally 0–1.
 const AUTO_SETTLE_MAX = 2;
@@ -86,7 +90,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold";
+  kind: "build" | "plan" | "fold" | "product-seed";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -752,9 +756,63 @@ async function runFoldJob(job: Job) {
   }
 }
 
+// ── Box-driven product seeding (box-product-seeding) ─────────────────────────
+// A kind='product-seed' job re-hosts the Product Intelligence Engine on the box:
+// it drives ONE product none → published IN-PROCESS (no worktree, no claude -p,
+// no PR — this mutates DB + storage, not the repo). The worker process keeps
+// ANTHROPIC_API_KEY + the service role + the encryption key (only the spawned
+// build sandbox strips them), so the Engine runs directly. Params are carried on
+// the job: spec_slug = product_id; instructions = JSON {product_id, angle_override?}.
+// See docs/brain/specs/box-product-seeding.md.
+async function runProductSeedJob(job: Job) {
+  const tag = `[seed:${job.id.slice(0, 8)}]`;
+  let params: { product_id?: string; angle_override?: string | null } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* instructions weren't JSON — fall back to spec_slug as the product_id */
+  }
+  const productId = params.product_id || job.spec_slug;
+  if (!productId) {
+    await update(job.id, { status: "failed", error: "product-seed job missing product_id" });
+    return;
+  }
+  console.log(`${tag} seeding product ${productId} (job ${job.id})`);
+  try {
+    const { runProductSeed } = await import("../src/lib/product-intelligence/seed");
+    const r = await runProductSeed({
+      workspace_id: job.workspace_id,
+      product_id: productId,
+      angle_override: params.angle_override ?? null,
+    });
+    // Supervision hook: post the run summary + the box's reasoning back on the job.
+    const logTail = [
+      `${r.title} → ${r.final_status}${r.published ? " (published)" : ""}`,
+      `Steps: ${r.steps.join(" · ")}`,
+      `Reasoning: ${r.reasoning.join(" ")}`,
+      r.held_reason ? `HELD: ${r.held_reason}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+      .slice(-2000);
+    // Published → completed. Held (no publish, but no crash) → needs_attention so
+    // the owner sees the surfaced QA/data issue. The Engine UI is the override surface.
+    if (r.published) {
+      await update(job.id, { status: "completed", log_tail: logTail, error: null });
+    } else {
+      await update(job.id, { status: "needs_attention", log_tail: logTail, error: r.held_reason || "held before publish" });
+    }
+    console.log(`${tag} ✓ ${r.final_status}${r.published ? " (published)" : r.held_reason ? ` — held: ${r.held_reason}` : ""}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
+  if (job.kind === "product-seed") return runProductSeedJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -995,7 +1053,8 @@ async function main() {
   interface LaneInfo { kind: Job["kind"]; spec_slug: string; since: string }
   const active = new Map<string, LaneInfo>();
   const countFold = () => [...active.values()].filter((v) => v.kind === "fold").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold").length;
+  const countSeed = () => [...active.values()].filter((v) => v.kind === "product-seed").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
@@ -1015,6 +1074,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed fold ${job.id.slice(0, 8)} → ${countFold() + 1}/${MAX_FOLD} fold lane`);
+        launch(job);
+      }
+      // Fill the product-seed lane (in-process Engine runs; box-product-seeding).
+      while (countSeed() < MAX_SEED) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["product-seed"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed product-seed ${job.id.slice(0, 8)} → ${countSeed() + 1}/${MAX_SEED} seed lane`);
         launch(job);
       }
       // Fill the build/plan pool.

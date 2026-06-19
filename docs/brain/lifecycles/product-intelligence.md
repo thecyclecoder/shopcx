@@ -156,6 +156,7 @@ Every output table has a `raw_ai_response` column and an `*_at` timestamp. Re-ru
 
 **Shipped:**
 - Engine pipeline end-to-end: ingredients → research → review analysis → benefit selections → page content + KB article + macro list → publish.
+- **Box-driven seeding ([[../specs/box-product-seeding]]):** the Engine is factored into [[../libraries/product-intelligence-seed|`src/lib/product-intelligence/*`]] so it also runs on the build box ([[../tables/agent_jobs]] `kind='product-seed'` → `runProductSeedJob`, in-process — no Inngest step limits / deploy-kills). One "Auto-populate" click drives a product `none → published`: PDP-extracted ingredients → research → reviews → triangulated benefit selection → content → Nano Banana Pro hero ([[../libraries/google-drive]] packshots) → self-QA gate → auto-publish. Hero gen is locked-skip for Amazing Coffee / pods / Creamer.
 - `intelligence_status` enum drives UI tab gating.
 - Both list views (`/dashboard/products` and `/dashboard/storefront/products`) show intelligence-status pills.
 - Legacy ShopGrowth UI + API + macro-audit Inngest worker removed (2026-06-03).
