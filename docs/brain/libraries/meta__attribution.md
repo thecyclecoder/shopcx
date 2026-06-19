@@ -11,9 +11,13 @@ spend + revenue into [[../tables/meta_attribution_daily]], reporting the named
 
 - **Ad grain off the order:** [[../tables/orders]]`.attributed_utm_content` ≈ `meta_ad_id`,
   `attributed_utm_source='meta'` (first-touch, backfilled since 2026-06-14).
-- **Variant per order:** order → earliest `utm_source='meta'` [[../tables/storefront_sessions]]
-  for the `customer_id` → parse `?angle={slug}` from `landing_url` →
-  [[../tables/advertorial_pages]]`.slug` → that row's `variant` (+ `angle_id`, `campaign_id`, id).
+- **Variant per order (Phase 2b — persisted-id preferred):** prefer the persisted
+  [[../tables/orders]]`.advertorial_page_id` (set at checkout) and
+  [[../tables/storefront_sessions]]`.advertorial_page_id` (set at pixel time) → look the id
+  up in [[../tables/advertorial_pages]]. Fall back to the Phase 2 URL parse when null:
+  order → earliest `utm_source='meta'` session for the `customer_id` → parse `?angle={slug}`
+  from `landing_url` → `advertorial_pages.slug` → that row's `variant` (+ `angle_id`, `campaign_id`, id).
+  Coverage migrates upward as the persisted columns populate on new traffic.
 - **Spend allocation:** the ad's daily spend ([[../tables/meta_insights_daily]], `level='ad'`)
   is split across the variants it drove by the share of in-window Meta **sessions** per
   variant (not revenue — that would flatten ROAS). No resolvable sessions → spend to `(unresolved)`.
@@ -44,7 +48,8 @@ The sentinel variant for spend/revenue that can't be resolved to a lander varian
 
 ### Coverage shape
 
-`coverage: { meta_revenue_total_cents, meta_revenue_resolved_cents, variant_attribution_coverage (resolved ÷ total, null if no Meta revenue), meta_orders_total, meta_orders_resolved, meta_orders_without_ad }`.
+`coverage: { meta_revenue_total_cents, meta_revenue_resolved_cents, variant_attribution_coverage (resolved ÷ total, null if no Meta revenue), meta_orders_total, meta_orders_resolved, meta_orders_without_ad, meta_orders_resolved_via_persisted }`.
+`meta_orders_resolved_via_persisted` (Phase 2b) counts orders resolved off a persisted `advertorial_page_id` rather than the URL parse — it climbs as the new columns populate, tracking the migration off URL parsing.
 
 ## Callers
 

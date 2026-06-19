@@ -53,6 +53,8 @@ Synced from Shopify. line_items, fulfillments, financial/fulfillment status, att
 | `attributed_utm_campaign` | `text` | ✓ |  |
 | `attributed_utm_content` | `text` | ✓ |  |
 | `attributed_utm_term` | `text` | ✓ |  |
+| `advertorial_page_id` | `uuid` | ✓ | → [[advertorial_pages]].id · FK `on delete set null`. Phase 2b — resolved lander identity persisted at checkout from the first-touch (or earliest lander) `storefront_sessions` row (`/api/checkout` § 10b). Lets attribution survive cross-session conversion without re-parsing `landing_site`. |
+| `ad_campaign_id` | `uuid` | ✓ | → [[ad_campaigns]].id · FK `on delete set null`. Phase 2b — the resolved page's `campaign_id`, persisted alongside `advertorial_page_id`. |
 | `braintree_transaction_id` | `text` | ✓ |  |
 | `braintree_payment_method_token` | `text` | ✓ |  |
 | `braintree_customer_id` | `text` | ✓ |  |
@@ -69,6 +71,8 @@ Synced from Shopify. line_items, fulfillments, financial/fulfillment status, att
 
 **Out (this → others):**
 
+- `advertorial_page_id` → [[advertorial_pages]].`id` (on delete set null)
+- `ad_campaign_id` → [[ad_campaigns]].`id` (on delete set null)
 - `customer_id` → [[customers]].`id`
 - `shipping_rate_id` → [[shipping_rates]].`id`
 - `subscription_id` → [[subscriptions]].`id`
@@ -137,6 +141,7 @@ const { count } = await admin.from("orders")
 - `financial_status`: **mixed-case in production data** — both `"PAID"` (94% of rows, from Shopify webhook ingestion) and `"paid"` (6%, normalized) exist. Same for `"REFUNDED"`/`"refunded"`, `"PARTIALLY_REFUNDED"`/`"partially_refunded"`, `"PENDING"`/`"pending"`. Use `ILIKE` or `.in("financial_status", ["PAID","paid"])`. Don't use `.eq("financial_status", "paid")` — you'll miss 94% of rows.
 - `fulfillment_status`: `"fulfilled"`, `"partial"`, `"unfulfilled"`, or `null`. Probe before assuming lowercase.
 - **`attributed_utm_*` / `landing_site` / `referring_site` are populated by two paths.** Shopify-webhook orders parse them from `landing_site` (`extractOrderUtms` in `shopify-webhooks.ts`). **Native storefront orders** (`source_name='storefront'`, created in `/api/checkout`) had these NULL until 2026-06-14 — they now backfill **first-touch** from the visitor's `storefront_sessions` (earliest session carrying a `utm_source`, by `customer_id` after the identity stitch). So a Meta-sourced storefront sale now shows `attributed_utm_source='meta'` on the order itself, no `storefront_sessions` join needed. Caveat: first-touch only resolves across sessions the visitor was identified in (cross-anonymous_id stitching isn't done) — a pure-anonymous Meta click that converts in a later direct session still attributes `(direct)`.
+- **`advertorial_page_id` / `ad_campaign_id` (Phase 2b — Storefront Iteration Engine).** Set in the same `/api/checkout` § 10b backfill: the resolved lander identity is copied from the first-touch session (or the earliest session that landed on an advertorial, if first-touch didn't). Lets `meta_attribution_daily` resolve a variant off a persisted id instead of re-parsing `landing_site`, and survives cross-session conversion. Null for non-lander / pre-2026-06-19 orders; attribution falls back to the URL-parse join for those. See [[../libraries/meta__attribution]] and [[../specs/storefront-iteration-engine]] (Phase 2b).
 
 ---
 
