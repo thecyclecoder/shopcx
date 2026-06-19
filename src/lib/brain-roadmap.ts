@@ -74,6 +74,14 @@ function cleanInline(s: string): string {
 
 function deriveStatus(counts: Record<Phase, number>, titleStatus: Phase | null): Phase {
   // A whole spec is never "rejected"; rejection is a phase-level state. Cut phases don't block shipped.
+  const totalPhases = counts.planned + counts.in_progress + counts.shipped + counts.rejected;
+  // Phase consensus beats a stale title: when every phase has shipped (none ⏳/🚧) and the title
+  // isn't an explicit ❌ cut, the spec is shipped — a forgotten 🚧/⏳ in the H1 no longer overrides a
+  // done phase set (observed: worker-self-update). Title still wins for an explicit ❌ cut and when
+  // there are no phases at all.
+  if (totalPhases > 0 && counts.planned === 0 && counts.in_progress === 0 && titleStatus !== "rejected") {
+    return "shipped";
+  }
   if (titleStatus && titleStatus !== "rejected") return titleStatus;
   if (counts.in_progress > 0) return "in_progress";
   if (counts.planned > 0) return "planned";
