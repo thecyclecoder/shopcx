@@ -1,0 +1,452 @@
+/**
+ * Creative-skeleton deconstruction + pattern matrix — winning-static-creative-finder
+ * Phases 3 + 4.
+ *
+ * Phase 3 (vision): for each long-running static creative, fetch the image (Bearer
+ * key, via adlibrary.ts), run Claude vision, and extract the four-slot SKELETON
+ * { format, framework, hook, mechanism_claim, proof, offer } into creative_skeletons.
+ * The AdLibrary `body` copy is thin/empty — the real structure lives in the image,
+ * so vision is mandatory. Dedup by `ad_key` so we never re-vision/re-spend.
+ *
+ * Phase 4 (pattern matrix — the deliverable): aggregate skeletons → slot patterns
+ * that repeat across ≥N INDEPENDENT brands, and emit a ranked hook × mechanism ×
+ * proof × offer test matrix. Independent-brand repetition is the score — never a
+ * single ad's metrics. This is what feeds variant-generation.
+ *
+ * Safety: we reverse-engineer STRUCTURE + keep a link to the creative for analysis.
+ * We never re-host or republish a competitor's asset. The dashboard displays the
+ * creative through an authenticated proxy ([[../app/api/ads/creative-finder/media]]).
+ *
+ * See docs/brain/specs/winning-static-creative-finder.md.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { OPUS_MODEL } from "@/lib/ai-models";
+import { logAiUsage } from "@/lib/ai-usage";
+import {
+  searchAds,
+  fetchCreative,
+  isLongRunner,
+  type NormalizedAd,
+  type Seed,
+} from "@/lib/adlibrary";
+
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+export interface CreativeSkeleton {
+  format: string | null;
+  framework: string | null;
+  hook: string | null;
+  mechanism_claim: string | null;
+  proof: string | null;
+  offer: string | null;
+}
+
+const SUPPORTED_VISION_MEDIA = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
+const VISION_SYSTEM = `You are a direct-response creative strategist. You reverse-engineer the STRUCTURE of a winning paid-social ad — never to copy it, only to learn the repeatable skeleton.
+
+Given an ad creative (image), extract its skeleton as JSON. Recognize which strategist framework it uses:
+- "hook-promise-proof": opens on an attention hook, makes a promise/benefit, backs it with proof.
+- "problem-pivot-payoff": names a problem, pivots to the mechanism/insight, lands the payoff.
+(Use the closest of these or a clear variant.)
+
+Return ONLY a JSON object, no prose, with these keys:
+{
+  "format": one of "ugc" | "studio" | "text-card" | "before_after" | "demo" | "lifestyle" | "comparison" | "listicle" | "chat-screenshot" | "other",
+  "framework": "hook-promise-proof" | "problem-pivot-payoff" | a short variant label,
+  "hook": the opening attention grab, verbatim or tightly paraphrased,
+  "mechanism_claim": the core benefit/mechanism claim (e.g. "clean energy, no jitters"),
+  "proof": the proof element (reviews, badge, before/after, clinical, founder, social count) or null,
+  "offer": the offer/CTA (discount, subscribe & save, free shipping, trial) or null
+}
+Keep each slot concise (a phrase, not a paragraph). Use null for a slot that is genuinely absent.`;
+
+/** Run Claude vision on the creative bytes → the four-slot skeleton. */
+export async function visionDeconstruct(
+  workspaceId: string,
+  imageBuffer: Buffer,
+  contentType: string,
+): Promise<CreativeSkeleton | null> {
+  if (!ANTHROPIC_API_KEY) throw new Error("no_anthropic_key");
+  const mediaType = SUPPORTED_VISION_MEDIA.has(contentType) ? contentType : "image/jpeg";
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: OPUS_MODEL,
+      max_tokens: 1024,
+      system: VISION_SYSTEM,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: mediaType, data: imageBuffer.toString("base64") },
+            },
+            { type: "text", text: "Extract this ad's skeleton as JSON." },
+          ],
+        },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`vision_${res.status}`);
+  const json = await res.json();
+  if (json?.usage) {
+    try {
+      await logAiUsage({
+        workspaceId,
+        model: OPUS_MODEL,
+        usage: json.usage,
+        purpose: "creative_skeleton_vision",
+        ticketId: null,
+      });
+    } catch {}
+  }
+  const text: string = (json?.content?.[0]?.text || "").trim();
+  return parseSkeleton(text);
+}
+
+function parseSkeleton(text: string): CreativeSkeleton | null {
+  // The model is told to return ONLY JSON; defend against a stray fence/prefix.
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try {
+    const o = JSON.parse(m[0]) as Record<string, unknown>;
+    const str = (v: unknown) => {
+      if (v == null) return null;
+      const s = String(v).trim();
+      return s && s.toLowerCase() !== "null" ? s : null;
+    };
+    return {
+      format: str(o.format),
+      framework: str(o.framework),
+      hook: str(o.hook),
+      mechanism_claim: str(o.mechanism_claim),
+      proof: str(o.proof),
+      offer: str(o.offer),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export interface IngestResult {
+  searched: number;
+  longRunners: number;
+  inserted: number;
+  videos: number;
+  skippedExisting: number;
+  failed: number;
+}
+
+const EMPTY_RESULT = (): IngestResult => ({
+  searched: 0,
+  longRunners: 0,
+  inserted: 0,
+  videos: 0,
+  skippedExisting: 0,
+  failed: 0,
+});
+
+function toDate(s: string | null): string | null {
+  if (!s) return null;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
+/**
+ * Search ONE seed and ingest its long-runners into creative_skeletons.
+ * Statics are visioned now (status='analyzed'); videos are routed aside
+ * (status='video_pending') for the heavier Phase 6 pipeline. Dedup by `ad_key`.
+ */
+export async function sweepSeed(
+  workspaceId: string,
+  seed: Seed,
+  opts: { minDays?: number; maxPerSeed?: number; daysBack?: number; pageSize?: number } = {},
+): Promise<IngestResult> {
+  const admin = createAdminClient();
+  const result = EMPTY_RESULT();
+
+  const ads = await searchAds({
+    keyword: seed.keyword,
+    daysBack: opts.daysBack ?? 30,
+    pageSize: opts.pageSize ?? 30,
+  });
+  result.searched = ads.length;
+
+  const longRunners = ads.filter((a) => a.ad_key && isLongRunner(a, opts.minDays ?? 14));
+  result.longRunners = longRunners.length;
+  if (!longRunners.length) return result;
+
+  // Dedup: which ad_keys do we already have for this workspace+source?
+  const keys = longRunners.map((a) => a.ad_key);
+  const { data: existing } = await admin
+    .from("creative_skeletons")
+    .select("dedup_key")
+    .eq("workspace_id", workspaceId)
+    .eq("source", "adlibrary")
+    .in("dedup_key", keys);
+  const seen = new Set((existing || []).map((r) => r.dedup_key as string));
+
+  const fresh = longRunners.filter((a) => !seen.has(a.ad_key));
+  result.skippedExisting = longRunners.length - fresh.length;
+
+  const cap = opts.maxPerSeed ?? 10;
+  for (const ad of fresh.slice(0, cap)) {
+    try {
+      await ingestAd(workspaceId, ad, seed);
+      if (ad.media_type === "video") result.videos++;
+      else result.inserted++;
+    } catch (err) {
+      console.error(`[creative-finder] ingest failed for ${ad.ad_key}:`, err);
+      result.failed++;
+    }
+  }
+  return result;
+}
+
+/** Vision-deconstruct (statics) and persist one ad as a creative_skeletons row. */
+export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed): Promise<void> {
+  const admin = createAdminClient();
+
+  let skeleton: CreativeSkeleton | null = null;
+  let status: string = ad.media_type === "video" ? "video_pending" : "analyzed";
+  let visionedAt: string | null = null;
+
+  if (ad.media_type === "static" && ad.creative_url) {
+    try {
+      const { buffer, contentType } = await fetchCreative(ad.creative_url);
+      skeleton = await visionDeconstruct(workspaceId, buffer, contentType);
+      visionedAt = new Date().toISOString();
+      if (!skeleton) status = "failed";
+    } catch (err) {
+      console.error(`[creative-finder] vision failed for ${ad.ad_key}:`, err);
+      status = "failed";
+    }
+  }
+
+  const row = {
+    workspace_id: workspaceId,
+    source: "adlibrary",
+    dedup_key: ad.ad_key,
+    advertiser: ad.advertiser,
+    title: ad.title,
+    image_url: ad.creative_url,
+    media_type: ad.media_type,
+    format: skeleton?.format ?? null,
+    framework: skeleton?.framework ?? null,
+    hook: skeleton?.hook ?? null,
+    mechanism_claim: skeleton?.mechanism_claim ?? null,
+    proof: skeleton?.proof ?? null,
+    offer: skeleton?.offer ?? null,
+    days_running: ad.days_count,
+    heat: ad.heat,
+    first_seen: toDate(ad.first_seen),
+    last_seen: toDate(ad.last_seen),
+    resume_advertising: ad.resume_advertising_flag,
+    seed_keyword: seed.keyword,
+    seed_kind: seed.kind,
+    status,
+    raw: ad.raw,
+    visioned_at: visionedAt,
+    updated_at: new Date().toISOString(),
+  };
+
+  // Idempotent on (workspace_id, source, dedup_key).
+  const { error } = await admin
+    .from("creative_skeletons")
+    .upsert(row, { onConflict: "workspace_id,source,dedup_key" });
+  if (error) throw new Error(error.message);
+}
+
+// ── Phase 4 — the pattern matrix ─────────────────────────────────────────────
+
+export type Slot = "hook" | "mechanism_claim" | "proof" | "offer";
+export const SLOTS: Slot[] = ["hook", "mechanism_claim", "proof", "offer"];
+
+interface SkeletonRow {
+  advertiser: string | null;
+  hook: string | null;
+  mechanism_claim: string | null;
+  proof: string | null;
+  offer: string | null;
+  days_running: number | null;
+}
+
+export interface SlotPattern {
+  slot: Slot;
+  /** Canonical label for the repeated pattern (e.g. "no jitters / clean energy"). */
+  label: string;
+  /** Distinct INDEPENDENT brands exhibiting it — this is the score. */
+  brandCount: number;
+  brands: string[];
+  /** Max longevity among the ads exhibiting it (tiebreak / supporting signal). */
+  maxDaysRunning: number;
+  exampleValues: string[];
+}
+
+export interface TestMatrixRow {
+  hook: string;
+  mechanism_claim: string;
+  proof: string;
+  offer: string;
+  /** Sum of the per-slot brand counts — favors combos whose slots each repeat widely. */
+  score: number;
+}
+
+export interface PatternMatrix {
+  generatedFrom: number; // analyzed skeleton count
+  brandCount: number;
+  slotPatterns: SlotPattern[];
+  testMatrix: TestMatrixRow[];
+}
+
+/** Crude canonicalization: lowercase, strip punctuation, collapse whitespace. */
+function canon(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Group slot values across brands and surface the patterns that repeat across
+ * ≥minBrands INDEPENDENT brands. This is deterministic (token-overlap clustering)
+ * so the matrix is reproducible and cheap — no per-load LLM spend.
+ */
+export async function buildPatternMatrix(
+  workspaceId: string,
+  opts: { minBrands?: number } = {},
+): Promise<PatternMatrix> {
+  const admin = createAdminClient();
+  const minBrands = opts.minBrands ?? 2;
+  const { data } = await admin
+    .from("creative_skeletons")
+    .select("advertiser, hook, mechanism_claim, proof, offer, days_running")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["analyzed", "shortlisted"]);
+  const rows = (data || []) as SkeletonRow[];
+
+  const allBrands = new Set(rows.map((r) => r.advertiser).filter(Boolean) as string[]);
+
+  const slotPatterns: SlotPattern[] = [];
+  for (const slot of SLOTS) {
+    slotPatterns.push(...clusterSlot(rows, slot, minBrands));
+  }
+  // Rank by independent-brand repetition, then longevity.
+  slotPatterns.sort((a, b) => b.brandCount - a.brandCount || b.maxDaysRunning - a.maxDaysRunning);
+
+  return {
+    generatedFrom: rows.length,
+    brandCount: allBrands.size,
+    slotPatterns,
+    testMatrix: buildTestMatrix(slotPatterns),
+  };
+}
+
+/** Cluster one slot's values into patterns by greedy token-overlap. */
+function clusterSlot(rows: SkeletonRow[], slot: Slot, minBrands: number): SlotPattern[] {
+  interface Cluster {
+    tokens: Set<string>;
+    values: string[];
+    brands: Set<string>;
+    maxDays: number;
+  }
+  const clusters: Cluster[] = [];
+
+  for (const r of rows) {
+    const raw = r[slot];
+    const brand = r.advertiser;
+    if (!raw || !brand) continue;
+    const c = canon(raw);
+    if (!c) continue;
+    const tokens = new Set(c.split(" ").filter((t) => t.length > 2));
+    if (!tokens.size) continue;
+
+    // Find the best-overlapping existing cluster (Jaccard ≥ 0.34).
+    let best: Cluster | null = null;
+    let bestScore = 0;
+    for (const cl of clusters) {
+      const inter = [...tokens].filter((t) => cl.tokens.has(t)).length;
+      const union = new Set([...tokens, ...cl.tokens]).size;
+      const j = union ? inter / union : 0;
+      if (j > bestScore) {
+        bestScore = j;
+        best = cl;
+      }
+    }
+    if (best && bestScore >= 0.34) {
+      best.values.push(raw);
+      best.brands.add(brand);
+      best.maxDays = Math.max(best.maxDays, r.days_running ?? 0);
+      tokens.forEach((t) => best!.tokens.add(t));
+    } else {
+      clusters.push({
+        tokens,
+        values: [raw],
+        brands: new Set([brand]),
+        maxDays: r.days_running ?? 0,
+      });
+    }
+  }
+
+  return clusters
+    .filter((cl) => cl.brands.size >= minBrands)
+    .map((cl) => ({
+      slot,
+      label: shortestValue(cl.values),
+      brandCount: cl.brands.size,
+      brands: [...cl.brands],
+      maxDaysRunning: cl.maxDays,
+      exampleValues: cl.values.slice(0, 5),
+    }));
+}
+
+function shortestValue(values: string[]): string {
+  return values.slice().sort((a, b) => a.length - b.length)[0] || "";
+}
+
+/**
+ * Emit the cross-product test matrix: the top repeating pattern per slot combined
+ * into hook × mechanism × proof × offer combos, ranked by summed cross-brand
+ * repetition. This is the consumable hand-off for variant-generation.
+ */
+function buildTestMatrix(patterns: SlotPattern[]): TestMatrixRow[] {
+  const top = (slot: Slot, n: number) =>
+    patterns.filter((p) => p.slot === slot).slice(0, n);
+  const hooks = top("hook", 3);
+  const mechs = top("mechanism_claim", 3);
+  const proofs = top("proof", 2);
+  const offers = top("offer", 2);
+
+  // If a slot has no repeating pattern, fall back to a single empty placeholder so
+  // the combinatorics still produce rows for the slots that DO repeat.
+  const orNone = <T extends { label: string; brandCount: number }>(arr: T[]) =>
+    arr.length ? arr : ([{ label: "—", brandCount: 0 } as unknown as T]);
+
+  const rows: TestMatrixRow[] = [];
+  for (const h of orNone(hooks))
+    for (const m of orNone(mechs))
+      for (const p of orNone(proofs))
+        for (const o of orNone(offers))
+          rows.push({
+            hook: h.label,
+            mechanism_claim: m.label,
+            proof: p.label,
+            offer: o.label,
+            score: h.brandCount + m.brandCount + p.brandCount + o.brandCount,
+          });
+  rows.sort((a, b) => b.score - a.score);
+  return rows.slice(0, 25);
+}
