@@ -47,6 +47,8 @@ Sonnet sees the inbound message + the orchestrator's pre-context. The cancel-jou
 
 The customer-facing artifact is the mini-site at `/journey/{token}` — same render path as email. Steps are rebuilt live on every click, never persisted.
 
+**The orchestrator NEVER pre-binds a subscription for the cancel journey.** Subscription selection is code-driven: the builder shows the picker when the customer has >1 sub and auto-selects when there's exactly 1 (`cancel-journey-builder.ts`). For non-cancel journeys (pause, skip) the orchestrator may still resolve a `subscription_id` from the action's `contract_id`, but for cancel it deliberately passes none (`action-executor.ts` `handleJourney`, `isCancelJourney` guard). Pre-binding would skip the picker (`api/journey/[token]/route.ts:82`), and the old `find(a => a.contract_id)` grabbed the contract from *any* emitted action — including a side action (e.g. `remove_item`) on a *different* sub — which once silently ran a cancel against the wrong subscription (ticket 178ae5a7). Letting the AI choose the cancel target is a Goodhart trap; the code-driven picker owns it.
+
 ## Phase 3 — steps
 
 `src/lib/cancel-journey-builder.ts` is the single source of truth. Other code delegates here (see `src/lib/journey-step-builder.ts`).
@@ -210,6 +212,9 @@ All three produce the same [[../tables/ticket_messages]] rows + the same [[../ta
 - **Skip remedy 405.** `appstleSkipNextOrder` no longer calls Appstle's dead skip endpoint — it now reschedules `next_billing_date` forward one cycle (works for Appstle + internal). The "Skip next order" remedy was failing on every Appstle sub with a 405 (`customer_events.portal.error` → `remedy_action_failed`); now succeeds.
 - **Admin dashboard skip.** `appstleSkipUpcomingOrder` now delegates to internal subs.
 - **`subRemoveItem`** now checks internal *before* falling through to Appstle (a lineId-only call on an internal sub returns a clear error instead of hitting Appstle).
+
+**Fixed 2026-06-19 (ticket 178ae5a7):**
+- **Cancel journey no longer pre-binds a subscription.** `handleJourney` (`action-executor.ts`) now skips `subscription_id` resolution for cancel journeys (`isCancelJourney` guard) — selection is fully code-driven via the picker. Previously `find(a => a.contract_id)` could grab a side action's contract on a *different* sub, mis-bind the cancel session, and skip the picker. Jodi (ticket 178ae5a7) asked to cancel her Superfood Tabs sub but the journey bound to her Ashwavana sub (a concurrent `remove_item` was first in `actions[]`); she accepted a 20%-off save that landed on the wrong sub while the Tabs sub renewed full-price. Remedied: 20% refund on SC132928 + coupon removed from the Ashwavana sub.
 
 **Known gaps / open work:**
 - **Internal-sub billing/dunning not wired.** `appstleAttemptBilling` / dunning have no internal path (Braintree renewal scheduler not built — see `internal-subscription.ts` stubs). Internal subs don't generate Appstle billing attempts, so this isn't reached in normal flow, but bill-now / dunning admin paths assume Appstle.

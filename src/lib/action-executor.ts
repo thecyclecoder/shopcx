@@ -2328,12 +2328,25 @@ async function handleJourney(
   }
 
   // Resolve subscription_id from any of the actions Sonnet emitted that
-  // reference a contract (cancel, pause, etc.). Sonnet emits the Shopify
+  // reference a contract (pause, skip, etc.). Sonnet emits the Shopify
   // contract id in `contract_id`; we need our internal subscription UUID
   // for the journey_session row. If Sonnet didn't reference a contract,
   // pass null and the mini-site picker handles the choice.
+  //
+  // CANCEL is deliberately excluded: the cancel journey is code-driven and
+  // owns subscription selection (picker when >1 sub, auto when exactly 1 —
+  // see cancel-journey-builder.ts). Pre-binding here would SKIP that picker
+  // (journey route.ts:82), and `find(a => a.contract_id)` grabs the FIRST
+  // contract from ANY action — including a side action on a DIFFERENT sub
+  // (e.g. a remove_item alongside the cancel). That mis-bound Jodi's cancel
+  // to the wrong subscription and silently ran the flow against it
+  // (ticket 178ae5a7). Never let the AI preconfigure the cancel target.
+  const isCancelJourney = ["cancel", "cancel_subscription", "cancellation"]
+    .includes((journey.trigger_intent || "").toLowerCase());
   let subscriptionId: string | undefined;
-  const contractId = decision.actions?.find(a => a.contract_id)?.contract_id;
+  const contractId = isCancelJourney
+    ? undefined
+    : decision.actions?.find(a => a.contract_id)?.contract_id;
   if (contractId) {
     const { data: sub } = await ctx.admin.from("subscriptions")
       .select("id").eq("workspace_id", ctx.workspaceId)
