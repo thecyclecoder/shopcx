@@ -153,31 +153,32 @@ export async function lookupUserByEmail(token: string, email: string): Promise<s
 }
 
 export async function listChannels(token: string): Promise<{ id: string; name: string; is_private: boolean }[]> {
-  const channels: { id: string; name: string; is_private: boolean }[] = [];
-  let cursor: string | undefined;
+  const byId = new Map<string, { id: string; name: string; is_private: boolean }>();
 
-  do {
-    // conversations.list requires GET with query params, not JSON body
-    const params = new URLSearchParams({
-      types: "public_channel,private_channel",
-      exclude_archived: "true",
-      limit: "200",
-    });
-    if (cursor) params.set("cursor", cursor);
+  // Slack gotcha (verified 2026-06-19): `conversations.list` does NOT return a bot's PRIVATE channels,
+  // even with groups:read + the bot invited — it returns ~public only. The reliable source for the
+  // channels a bot can actually post to is `users.conversations` (the bot's own memberships, incl
+  // private). So merge: conversations.list for all PUBLIC channels (pickable before the bot joins) +
+  // users.conversations for everything the bot is a MEMBER of (this is what surfaces #roadmap etc.).
+  const collect = async (path: string, types: string) => {
+    let cursor: string | undefined;
+    do {
+      const params = new URLSearchParams({ types, exclude_archived: "true", limit: "200" });
+      if (cursor) params.set("cursor", cursor);
+      const res = await fetch(`${SLACK_API}/${path}?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+      const result = (await res.json()) as Record<string, unknown>;
+      if (!result.ok) break;
+      for (const c of (result.channels as { id: string; name: string; is_private: boolean }[]) || []) {
+        byId.set(c.id, { id: c.id, name: c.name, is_private: !!c.is_private });
+      }
+      cursor = (result.response_metadata as { next_cursor?: string })?.next_cursor || undefined;
+    } while (cursor);
+  };
 
-    const res = await fetch(`${SLACK_API}/conversations.list?${params}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const result = await res.json() as Record<string, unknown>;
-    if (!result.ok) break;
+  await collect("conversations.list", "public_channel");
+  await collect("users.conversations", "public_channel,private_channel");
 
-    const items = (result.channels as { id: string; name: string; is_private: boolean }[]) || [];
-    channels.push(...items.map((c) => ({ id: c.id, name: c.name, is_private: !!c.is_private })));
-
-    cursor = (result.response_metadata as { next_cursor?: string })?.next_cursor || undefined;
-  } while (cursor);
-
-  return channels;
+  return [...byId.values()];
 }
 
 // ── Team member auto-mapping ──
