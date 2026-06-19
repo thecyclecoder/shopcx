@@ -1,0 +1,1 @@
+- **Roadmap status accuracy — phase-consensus + live-job board status** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
