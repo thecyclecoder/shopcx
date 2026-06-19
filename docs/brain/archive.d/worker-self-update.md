@@ -1,0 +1,1 @@
+- **Worker self-update — the build box redeploys its own code when idle** · verified 2026-06-19 · → [[recipes/build-box-setup]]

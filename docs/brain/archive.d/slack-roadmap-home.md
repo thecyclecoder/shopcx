@@ -1,0 +1,1 @@
+- **Slack Roadmap Home — mirror the board to the App Home tab (view + build, not messages)** · verified 2026-06-19 · → [[libraries/slack-home]]

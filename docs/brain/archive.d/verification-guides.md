@@ -1,0 +1,1 @@
+- **Verification guides — "how to test this" on the spec detail page** · verified 2026-06-19 · → [[dashboard/roadmap]]
