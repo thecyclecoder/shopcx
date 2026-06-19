@@ -1,0 +1,1 @@
+- **Spec lifecycle + archival — verify → fold → archive → re-hydrate** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
