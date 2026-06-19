@@ -1,37 +1,70 @@
-# `src/lib/product-intelligence/*` — the Engine core + box seeding pipeline
+# `src/lib/product-intelligence/*` — the Engine core + box seeding tools
 
-The Product Intelligence Engine, factored out of its Inngest wrappers so **both hosts run identical logic** ([[../specs/box-product-seeding]]): the UI path ([[../inngest/product-intelligence]]) wraps each call in a `step.run`; the box path (`runProductSeedJob` in `scripts/builder-worker.ts`) calls them directly, in-process, to completion. **Reuse, never fork** — one copy of every prompt/parser/reduce/row-shaper.
+Two **separate** Product Intelligence paths ([[../specs/box-product-seeding]]):
 
-## `engine.ts` — shared Engine core
+1. **UI/Inngest Engine — the Anthropic API path.** `engine.ts` holds the heavy
+   bodies; [[../inngest/product-intelligence]] wraps each in a `step.run`. All
+   LLM via the Anthropic Messages API (`process.env.ANTHROPIC_API_KEY`).
+2. **Box product-seed — the Max path.** A `kind='product-seed'` job
+   (`runProductSeedJob` in `scripts/builder-worker.ts`) launches a **top-level
+   `claude -p` on Max** (web search, **no `ANTHROPIC_API_KEY`**) running the
+   **`seed-product` skill**. That Claude does ALL the reasoning agentically
+   (ingredient extraction, **web-search ingredient research**, review analysis,
+   benefit triangulation, content authoring, hero vision-QA) and reaches the
+   outside world ONLY through the deterministic tool CLI
+   `scripts/seed-product-tools.ts` → `seed-tools.ts`. **No Anthropic API on the
+   box, no per-token spend.**
+
+These do NOT share LLM code — only the deterministic `publish.ts`. (PR #106 first
+built the box path as in-process Anthropic-API calls; the follow-up moved it to
+Max + web search.)
+
+## `engine.ts` — UI/Inngest API path
 
 | Export | Notes |
 |---|---|
-| `callSonnet(system, user, maxTokens, temp)` | Anthropic Messages API (`process.env.ANTHROPIC_API_KEY`, model [[../libraries/ai-models\|SONNET]]). Worker process keeps the key; only the spawned build sandbox strips it |
-| `callSonnetVision(system, user, images[], maxTokens, temp)` | vision variant — base64 image blocks; used by the self-QA hero check |
+| `callSonnet(system, user, maxTokens, temp)` | Anthropic Messages API (`process.env.ANTHROPIC_API_KEY`, model [[../libraries/ai-models\|SONNET]]). Used ONLY by the Inngest Engine — never the box |
 | `extractJson<T>(text)` | tolerant JSON extraction (fences / substring salvage) |
 | `researchOneIngredient(admin, {…})` · `researchIngredientsCore(admin, {…})` | per-ingredient research → `product_ingredient_research`, fault-isolated |
 | `fetchReviewsForAnalysis` · `analyzeReviewChunk` · `reduceReviewAnalysis` · `persistReviewAnalysis` · `analyzeReviewsCore` | 4–5★, featured-weighted, 100-review map-reduce → `product_review_analysis` |
 | `generateContentCore(admin, {…})` | fetch context → Sonnet → insert a new draft `product_page_content` version |
 
-## `extract-ingredients.ts` — step 1 (PDP auto-extraction)
+## `seed-tools.ts` — box deterministic tools (🚨 NO Anthropic API)
 
-`seedIngredientsFromPdp(admin, {workspace_id, product_id, handle})` → fetches `superfoodscompany.com/products/{handle}`, strips HTML to text, Sonnet pulls the clinically-studied ingredient list → `product_ingredients`. **Idempotent:** keeps existing ingredients (manual entry wins).
+The I/O helpers the `seed-product` skill calls (via the CLI). Pure deterministic
+work — PDP fetch, DB reads/writes, Drive (SA) packshots, the Gemini image API,
+publish. The skill does the thinking; these do the I/O.
 
-## `benefit-selection.ts` — step 4 (triangulation)
+| Export | Step | Notes |
+|---|---|---|
+| `getProduct` / `setStatus` | — | product + variants (stock); `intelligence_status` writes |
+| `fetchPdpText(handle)` | 1 | live PDP → reduced text (ingredients + angle) |
+| `saveIngredients` / `getIngredients` | 1 | persist extracted ingredients (idempotent — keeps existing) |
+| `saveResearch` / `getResearch` | 2 | persist web-search research (real citations) → `product_ingredient_research`; per-ingredient clean-replace |
+| `getReviews` (paged) / `saveReviewAnalysis` / `getReviewAnalysis` | 3 | 4–5★ featured-first reviews; the skill analyzes, this persists → `product_review_analysis` |
+| `saveBenefits` / `getBenefits` | 4 | persist triangulated themes (validates evidence IDs) → `product_benefit_selections` |
+| `saveContent` / `getContent` | 5 | version + persist authored content (incl. `fda_disclaimer`) → `product_page_content` |
+| `heroStatus` | 6 | `{locked, exists}` — `LOCKED_HERO_HANDLES` (amazing-coffee, -pods, -creamer) + already-has-hero ⇒ skip |
+| `resolvePackshot` | 6 | [[google-drive]] front-facing packshot + `Hero Example` refs → storage URLs |
+| `generateImage` | 6 | [[gemini]] `generateNanoBananaProCombine` → a **local file** the skill Reads to vision-QA |
+| `saveMedia` | 6 | upload a vision-approved image → `product_media` |
+| `publish` | 8 | delegates to `publish.ts` |
 
-`selectBenefits(admin, {workspace_id, product_id, handle?, angle_override?})` → triangulates **(a)** the PDP angle (anchor, not ceiling) + **(b)** clinical evidence + **(c)** review language → `product_benefit_selections` with lead/supporting/skip roles + evidence IDs (`ingredient_research_ids`, `customer_review_ids`). Same theme shape as the UI's `reconcile-benefits` route.
+## `scripts/seed-product-tools.ts` — the tool CLI
 
-## `hero-imagery.ts` — step 6 (Nano Banana Pro)
+Thin argv dispatcher over `seed-tools.ts` (loads env via `_bootstrap`). Each
+subcommand prints ONE JSON object (or `{"error":…}` + exit 1); some read a JSON
+payload on stdin. The `seed-product` skill is its only caller.
 
-`generateHero(admin, {…})` → resolves the front-facing packshot ([[google-drive]]) + the `Hero Example` refs, calls [[gemini]] `generateNanoBananaProCombine` with the **locked composition** prompt, **vision-confirms** (correct variant / contained splash / right drink / no edge cutoffs) with one retry, then upserts a `product_media` slot=`hero` row. **🔒 Locked-aware:** `LOCKED_HERO_HANDLES` (amazing-coffee, amazing-coffee-pods, amazing-creamer) skip image gen; idempotent skip if a hero already exists.
+## `.claude/skills/seed-product/` — the Max skill
 
-## `publish.ts` — step 8 (shared publish)
+The agentic procedure the box's `claude -p` runs: pipeline steps 1–8, the locked
+hero rules (skip locked/approved; one in-stock variant; **Superfood Tabs → Peach
+Mango**), the self-QA gate, auto-publish, and the final supervision JSON.
 
-`publishProductContent(admin, {workspace_id, product_id, contentId})` → support macros (inactive) + KB article upsert + `status='published'` + `intelligence_status='published'`. Called by **both** the box and the `page-content/[id]/publish` route.
+## `publish.ts` — step 8 (shared, deterministic)
 
-## `seed.ts` — the orchestrator
-
-`runProductSeed({workspace_id, product_id, angle_override?})` drives steps 1–8 sequentially with status updates, a **self-QA gate** (benefit claims trace to evidence · FDA/DSHEA disclaimer present · hero vision-confirmed · "what it doesn't do" present), and **auto-publish only on QA pass**. Held runs stay `content_generated` and surface the issue. Returns `{steps, reasoning, hero, qa, …}` — the supervision summary the worker posts back on the job.
-
-## Related
-[[../lifecycles/product-intelligence]] · [[../inngest/product-intelligence]] · [[google-drive]] · [[gemini]] · [[../tables/agent_jobs]] · [[../tables/product_ingredients]] · [[../tables/product_media]] · [[../specs/box-product-seeding]]
+`publishProductContent(admin, {workspace_id, product_id, contentId})` → support
+macros (inactive) + KB article upsert + `status='published'` +
+`intelligence_status='published'`. Called by **both** the box (`seed-tools.publish`)
+and the `page-content/[id]/publish` route.

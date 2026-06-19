@@ -21,7 +21,7 @@ Headless Drive access for the build box. Sources isolated product packshots + th
 
 ## `resolveProductShots` ranking — the documented quirks
 
-Browses (never hardcodes) because subfolder structure varies per product (`Isolated Product Shots` vs `3D Renders`). Scores each candidate: **+variant match** (Pods ↔ K-Cups treated as interchangeable), **+front-facing**, **+bag** (the primary hero — stick packs/pods are alternates), **+isolated**, **−stick**. Best-first. The caller ([[product-intelligence-seed]] § hero-imagery) downloads the top candidate and **vision-confirms** it before use.
+Browses (never hardcodes) because subfolder structure varies per product (`Isolated Product Shots` vs `3D Renders`). Scores each candidate: **+variant match** (Pods ↔ K-Cups treated as interchangeable), **+front-facing**, **+bag** (the primary hero — stick packs/pods are alternates), **+isolated**, **−stick**. Best-first. The caller ([[product-intelligence-seed]] `seed-tools.resolvePackshot`) downloads the top candidate and the `seed-product` skill **vision-confirms** it (native Read) before use.
 
 ## Constants
 
@@ -31,7 +31,7 @@ Browses (never hardcodes) because subfolder structure varies per product (`Isola
 
 ## Callers
 
-- [[product-intelligence-seed]] (`hero-imagery.ts`) — packshot + Hero Example fetch for Nano Banana Pro.
+- [[product-intelligence-seed]] (`seed-tools.resolvePackshot`) — packshot + Hero Example fetch for the `seed-product` skill's Nano Banana Pro hero.
 
 ## Related
 [[../integrations/google-drive]] · [[gemini]] · [[crypto]] · [[google-search-console]] · [[../tables/workspaces]] · [[../specs/box-product-seeding]]

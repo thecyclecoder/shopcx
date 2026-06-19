@@ -35,7 +35,7 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 
 ## `claim_agent_job(p_kinds text[] default null)`
 
-`returns public.agent_jobs`. Grabs the oldest `queued`/`queued_resume` row `FOR UPDATE SKIP LOCKED`, flips it to `building`, returns it — atomic claim safe for concurrent workers. `p_kinds` filters by kind (NULL = any). The worker runs **per-kind concurrency** ([[../specs/fold-build-batching]] Phase 2): it claims `['build','plan']` into a 5-lane pool, `['fold']` into a **concurrency-1** lane (so a fold never races a feature build on the now-generated index files), and `['product-seed']` into its own **2-lane** in-process lane ([[../specs/box-product-seeding]] — Engine runs, not code builds). Replaced the old zero-arg overload (dropped first — a defaulted overload would be ambiguous on a no-arg call).
+`returns public.agent_jobs`. Grabs the oldest `queued`/`queued_resume` row `FOR UPDATE SKIP LOCKED`, flips it to `building`, returns it — atomic claim safe for concurrent workers. `p_kinds` filters by kind (NULL = any). The worker runs **per-kind concurrency** ([[../specs/fold-build-batching]] Phase 2): it claims `['build','plan']` into a 5-lane pool, `['fold']` into a **concurrency-1** lane (so a fold never races a feature build on the now-generated index files), and `['product-seed']` into its own **2-lane** pool, each a **top-level `claude -p` on Max** running the `seed-product` skill ([[../specs/box-product-seeding]] — drives DB/storage via deterministic tools, not a code build / PR). Replaced the old zero-arg overload (dropped first — a defaulted overload would be ambiguous on a no-arg call).
 
 ## `enqueue_fold(p_workspace, p_slug, p_user)`
 
