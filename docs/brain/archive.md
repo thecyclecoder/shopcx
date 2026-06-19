@@ -12,10 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Build Approval Gates + Execution Hardening** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
 - **Appstle pricing heal + migration monitor** · verified 2026-06-18 · → [[lifecycles/subscription-billing]]
 - **Authoring chat grounding — give the Roadmap Opus chat live brain access** · verified 2026-06-18 · → [[lifecycles/roadmap-build-console]]
-- **Auto-generated ad-matched landers (advertorial · before/after · "8 Reasons Why")** · verified 2026-06-18 · → [[lifecycles/advertorial-landers]]
-- **Auto-generated blog posts (scheduled)** · verified 2026-06-18 · → [[lifecycles/auto-blog-generation]]
 - **Blog → Posts + Product Resources (portal Resources + public storefront blog)** · verified 2026-06-18 · → [[lifecycles/blog-resources]]
 - **Homepage rebuild — direct-response, Tabs-led** · verified 2026-06-18 · → [[recipes/edit-shopify-theme]]
 - **Parallel builds (worktree-isolated, 5 lanes)** · verified 2026-06-18 · → [[recipes/build-box-setup]]

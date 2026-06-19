@@ -1,0 +1,1 @@
+- **Build Approval Gates + Execution Hardening** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
