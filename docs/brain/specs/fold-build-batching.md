@@ -25,5 +25,11 @@ Parallel builds collide on **shared index files**. Every "Mark verified & archiv
 - Marking N specs verified produces **one** fold PR, not N.
 - Two builds running concurrently never produce a `Dirty` PR from an index-file collision (verified: queue a fold + a feature build together → both merge clean).
 
+## Verification
+- On `/dashboard/roadmap`, mark **two or more** shipped specs verified (**Mark verified & archive**) in quick succession → expect **one** fold PR on `/dashboard/branches` covering all of them (not one per spec); each card shows **"Folding…"** until merge.
+- On `/dashboard/roadmap/box` → expect the **fold lane** (1) shown separately from the build lanes; a running fold never occupies a build lane.
+- Queue a fold and a feature build concurrently, merge both → expect **neither** PR goes `Dirty` from an `archive.md` / `README.md` collision (those index files are now generated per-spec from `archive.d/` via `npm run brain:index`).
+- After merge, expand the board's **Archived** section → expect the folded specs listed (read from `archive.d/{slug}.md`).
+
 ## Related
 [[parallel-builds]] · [[roadmap-build-console]] · [[../recipes/build-box-setup]] · [[../recipes/manage-the-build-queue]] · [[../dashboard/roadmap]] · [[../project-management]]

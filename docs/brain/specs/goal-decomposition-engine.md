@@ -69,3 +69,10 @@ Phase 4 says "one PR for the planning output," but a queued `build` job reads it
 - The board groups by Function → (Mandate | Goal) → Spec; the goal card shows a rollup % that advances as leaf specs ship; a mandate shows its metric + active spec count.
 - No orphan specs: the lint passes, and [[../functions/growth]] owns the [[winning-static-creative-finder]] spec under its static-ad mandate.
 - `goals/ceo-mode.md` runs end-to-end and its first plan surfaces the Amazon / COGS-supplier / metrics-spine gaps as proposed specs, each owned by a function.
+
+## Verification
+- On `/dashboard/roadmap/goals` → expect goal cards showing the success metric + a **rollup % bar**; open `/dashboard/roadmap/goals/ceo-mode` → expect the rendered goal doc + a **milestone tree** with each leaf spec's live status.
+- On `/dashboard/roadmap/map` → expect specs grouped **Function → (Mandate | Goal) → Spec**, and the **Orphan specs** panel empty (no-orphan lint passes — e.g. [[../functions/growth]] owns [[winning-static-creative-finder]]).
+- On a goal detail, tap **Plan** (owner) → expect a `kind='plan'` job to run and return a proposed milestone→spec tree as **Approve / Decline** branches, each carrying an owner + parent and a brain-cited gap.
+- Approve a subset of branches → expect exactly those specs authored (committed to main), wikilinked into the goal doc under their milestone, and their builds queued; **Re-plan** does not re-propose declined (❌) branches.
+- As leaf specs ship (✅), reload the goal → expect the rollup % to advance with no extra action.

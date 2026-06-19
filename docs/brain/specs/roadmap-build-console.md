@@ -117,6 +117,12 @@ This is the same conversational pattern as the Phase-2 authoring chat, just at e
 - **Concurrency vs Max rate limits:** start at 1–2; measure before raising.
 - **`.git/config` token:** the clone embedded the token in the remote URL — acceptable on a locked box; consider a credential helper later.
 
+## Verification
+- On a phone, open `/dashboard/roadmap` → expect **Planned / In progress / Shipped — awaiting verification** columns rendered from `docs/brain/specs/*.md`.
+- Tap **New feature**, describe something in the Opus chat, tap **Save & build** → expect a `docs/brain/specs/{slug}.md` committed and a `queued` `agent_jobs` row; the spec appears as ⏳ on the board.
+- Tap **Build** on a spec → expect the box worker to implement it on **Max** (Anthropic API console stays flat, Max usage moves) and a CI-passing `claude/*` PR to appear on `/dashboard/branches`.
+- Make a build raise a question → expect a **Needs input** chip + **Answer** affordance on the card; answer it → the same `claude_session_id` resumes and the build finishes → **Squash & merge** from the card merges it.
+
 ## Related
 
 [[repo-skills-catalog]] · [[../lifecycles/agent-todo-system]] · [[../tables/agent_todos]] · [[../dashboard/branches]] · [[../project-management]] · [[README]]

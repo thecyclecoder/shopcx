@@ -22,5 +22,10 @@ Two rough edges surfaced draining the 2026-06-18 backlog (see [[fold-build-batch
 - A build that pauses then completes opens a **non-draft, mergeable** PR with no manual un-draft.
 - A resumed build never re-pauses on an action it already had executed; an already-applied migration is detected and skipped.
 
+## Verification
+- Queue a build that **pauses** (`needs_input` or `needs_approval`) and then resolve it through to completion → on `/dashboard/branches` expect its PR to be **non-draft + mergeable** with no manual un-draft (the prior PR#75/#76 draft-stuck symptom is gone).
+- Resume a build that already had a migration applied → expect it does **not** re-emit the same `apply_migration` and does **not** re-pause into a `needs_approval` loop; the worker auto-settles an exact-`cmd` re-request.
+- (Edge) if a build keeps re-requesting the same action, expect the loop guard to trip it to **`needs_attention`** rather than pausing forever.
+
 ## Related
 [[fold-build-batching]] · [[parallel-builds]] · [[build-approval-gates]] · [[roadmap-build-console]] · [[../recipes/build-box-setup]] · [[../lifecycles/roadmap-build-console]]

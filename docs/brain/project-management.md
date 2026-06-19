@@ -69,9 +69,18 @@ business outcome.
 
 ## Completion criteria
 - Bulleted list of what must be true for the spec to be retired
+
+## Verification
+- A concrete, prod-facing test checklist the **owner** follows to confirm the shipped
+  feature actually works — the exact route / Slack action / CLI, the input, and the
+  **observable expected result**. Shape: `- On {where}, {do what} → expect {observable result}.`
+- e.g. `- On /dashboard/roadmap/box, queue a build → expect that lane to show the slug + a live elapsed timer.`
+- **Never** vague ("test it works"). Every bullet names a concrete place + a concrete expected observation.
 ```
 
 The phase emoji convention (⏳ 🚧 ✅) keeps progress visible at a glance — no separate Kanban needed. Anyone reading the spec sees what's done + what's next inline.
+
+The **`## Verification` section** is the "how do I test this?" checklist ([[specs/verification-guides]]). The build that ships a spec **writes it** from the routes/tables/actions it actually touched, so a shipped spec arrives test-ready — and the spec detail page renders it as a prominent card right beside **Mark verified & archive** (the [[dashboard/roadmap]] verify gate), where the owner needs it. A shipped spec missing the section offers an owner-only **Generate test plan** button (Opus drafts one, brain-grounded). It folds into the brain with the rest of the spec on archive.
 
 ## Kicking off a build session
 

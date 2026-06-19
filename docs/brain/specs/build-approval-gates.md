@@ -55,5 +55,11 @@ Harden the [[roadmap-build-console]] executor so autonomous builds run with **mi
 - **Preview generation** for `pending_actions` — how much to surface (full SQL, a diff, script path + args).
 - **Approval grouping** — per-action vs. "approve all pending for this build" once trust builds.
 
+## Verification
+- Queue a build whose spec needs a migration (e.g. via **Build** on `/dashboard/roadmap/{slug}`) → when it hits the gate the card's BuildButton flips to **"Needs approval"** and shows **Approve & apply** with the SQL `preview` in a code block.
+- Tap **Approve & apply** → expect the worker (not the build) to apply it, the job to go `queued_resume` → `building`, and the build to finish `completed` with a non-draft PR.
+- On a `completed` card with a PR → expect a **Squash & merge** button; tapping it merges via `POST /api/branches/[number]/merge`.
+- (Safety) confirm a build runs under the non-root `builder` user with `ANTHROPIC_API_KEY` stripped (Max billing holds — API console stays flat) and **cannot** reach prod without an approval — only the worker holds prod creds.
+
 ## Related
 [[roadmap-build-console]] · [[repo-skills-catalog]] · [[../recipes/build-box-setup]] · [[../tables/agent_jobs]] · [[../dashboard/branches]] · [[../dashboard/roadmap]]

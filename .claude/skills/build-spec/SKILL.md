@@ -17,9 +17,10 @@ Do the build with **your own native tools** (`Read`/`Edit`/`Bash`/`Grep`). The b
 2. **Probe before assuming.** Use the `probe-db` skill for any table/enum/column the spec touches — the database is the spec. Don't trust column shapes from prose.
 3. **Implement phase by phase.** Match surrounding code style. For schema changes use the `write-migration` skill. Every new table/inngest fn/library/integration also needs a brain page (CLAUDE.md hard rule) — use `write-brain-page`/`fold-to-brain`.
 4. **Update the spec emojis as you go** — `⏳`→`🚧`→`✅` on each phase, in the same change.
-5. **Gate on types.** Run `npx tsc --noEmit`. If it fails, fix it; **never open a PR on a failing build.**
-6. **Stop-and-surface, never guess.** If you hit a product decision the spec doesn't cover, do NOT guess — record it under an "Open questions" section in the PR body and stop *that* work item. Finish everything else.
-7. **Open a `claude/*` PR.** Branch `claude/{slug}-{short}`, via the **GitHub REST API** (no `gh` CLI on the box). PR body = what landed + open questions + which completion criteria are met. Code **never** auto-merges — the owner squash-merges from `/dashboard/branches`. *(When the box worker is driving the build, the worker owns branch/commit/PR — you just make the edits and emit your final status JSON; it handles git.)*
+5. **Write the `## Verification` section.** On completion, add (or refresh) a `## Verification` section to `specs/{slug}.md` — a concrete, prod-facing test checklist built from what you *actually* touched (the real routes / Slack actions / CLI / tables). Each bullet: the exact place, the input, and the **observable expected result** — shape `- On {where}, {do what} → expect {observable result}.` Never vague ("test it works"). This is what the owner follows to verify the feature before archiving ([[verification-guides]]); a shipped spec must arrive test-ready.
+6. **Gate on types.** Run `npx tsc --noEmit`. If it fails, fix it; **never open a PR on a failing build.**
+7. **Stop-and-surface, never guess.** If you hit a product decision the spec doesn't cover, do NOT guess — record it under an "Open questions" section in the PR body and stop *that* work item. Finish everything else.
+8. **Open a `claude/*` PR.** Branch `claude/{slug}-{short}`, via the **GitHub REST API** (no `gh` CLI on the box). PR body = what landed + open questions + which completion criteria are met. Code **never** auto-merges — the owner squash-merges from `/dashboard/branches`. *(When the box worker is driving the build, the worker owns branch/commit/PR — you just make the edits and emit your final status JSON; it handles git.)*
 
 ## Guardrails
 

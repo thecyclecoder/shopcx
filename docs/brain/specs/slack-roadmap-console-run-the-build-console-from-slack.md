@@ -88,6 +88,13 @@ The **Vercel app** watches `agent_jobs` and posts to `#roadmap` (all Slack logic
 - `/bug <slug> <desc>` queues a fix-build with the spec staying ✅.
 - Signature verification rejects an unsigned/replayed request.
 
+## Verification
+- In the private `#roadmap` Slack channel, run **`/roadmap`** → expect a Block Kit board (Planned / In progress / Shipped — awaiting verification) with each spec's live build chip + **Build / View PR / Squash & merge** buttons; `/roadmap <slug>` → single-spec detail.
+- Run **`/build <slug>`** (as the owner) → expect a `queued` `agent_jobs` row and the box to open a `claude/*` PR; running it again while one is active → expect an ephemeral "active build exists" notice.
+- As a **non-owner**, tap Build/Merge/Approve → expect an owner-only **ephemeral** and that nothing executes (server re-validates).
+- Drive a build to `needs_input` / `needs_approval` → expect the Vercel watcher to post to `#roadmap`; **Answer** (modal) resumes it, **Approve & apply** runs the migration via the worker, **Squash & merge** on a completed card merges the PR.
+- POST an unsigned or >5-min-stale request to `/api/slack/events` → expect a **signature rejection** (HMAC check).
+
 ## Related
 
 [[../lifecycles/roadmap-build-console]] · [[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../libraries/slack]] · [[../libraries/slack-notify]] · [[../tables/agent_jobs]] · [[../dashboard/roadmap]] · [[../dashboard/branches]] · [[../integrations/inngest]] · [[../project-management]]
