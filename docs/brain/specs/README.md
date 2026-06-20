@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Migration-Fix Agent ⏳
+
+**Spec:** [[migration-fix-agent]] · **Owner:** [[../functions/retention]]
+
+**Why this matters:** fixes internal subs stuck in Appstle→internal migration — the ones `verifyMigration`'s mechanical auto-heal can't repair and that land `failed` on `/dashboard/migrations` (a renewal at risk). Fires **on the failure event, not a cron**: a `migration_audits` row going `failed` spins up a `claude -p` Max session that diagnoses the failing checks + attempts the *judgment* fixes (pricing-mismatch reconcile, missing-variant backfill+remap, force-cancel lingering Appstle), gated for the billing mutations, then **re-verifies**. Unfixable → surfaced with a written diagnosis (+ stretch: a proposed code-fix spec). Box-agent family with [[box-escalation-triage]].
+
 ## Active project — Comp Subscriptions ⏳
 
 **Spec:** [[comp-subscriptions]] · **Owner:** [[../functions/retention]]
