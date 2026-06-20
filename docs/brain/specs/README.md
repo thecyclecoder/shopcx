@@ -40,6 +40,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a box agent that tests **shipped-but-unverified** specs against their own `## Verification` checklist and reports findings — runs the **non-destructive** checks on the box (repo/`tsc`, `gh` CI, `vercel` deploy+logs+env, DB reads, GET endpoints) and flags anything needing a human (visual/UX, or mutating tests). It **never** marks verified/archives (that owner gate stays) but applies its own **"Agent-tested ✅"** stamp. Reports in a new **Developer → Spec Tests** sidebar page + a board chip + inline on the VerificationCard. Box-agent family with [[box-spec-chat]] · [[box-ticket-improve]] · [[box-escalation-triage]].
 
+## Active project — Spec-Test on Ship ⏳
+
+**Spec:** [[spec-test-on-ship]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** we ship often, so the daily spec-test cron is too slow — this **fires the QA run the moment a card moves to Shipped** (hook `/api/roadmap/status` for manual flips + `reconcileMergedJobs` for build-driven ships), with a shared dedupe so a build-merge + status tweak + cron don't triple-run. The daily cron becomes a **backlog catch-all** for anything the event missed. Extends [[spec-test-agent]]. (Queue after spec-test-agent P2 merges to avoid a parallel-build conflict.)
+
 ## Active project — Improve Agent Account-Fix Actions ✅
 
 **Spec:** [[improve-account-fix-actions]] · **Owner:** [[../functions/platform]]
