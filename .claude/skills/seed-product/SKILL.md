@@ -50,9 +50,21 @@ stdin (pipe it). On error it prints `{"error":"…"}` and exits 1 — read it an
 | `get-content <ws> <pid>` | latest content (for QA) |
 | `hero-status <ws> <pid> <handle>` | `{locked, exists}` — skip image gen if either is true |
 | `resolve-packshot <ws> <pid> "<name>" "<kw1,kw2>"` | Drive front-facing packshot + Hero Example refs → URLs |
-| `generate-image <ws> <pid>` ← stdin `{prompt,imageUrls,slot,aspectRatio}` | Nano Banana Pro → LOCAL file path |
+| `generate-image <ws> <pid>` ← stdin `{prompt,imageUrls,slot,aspectRatio,width?,height?}` | Nano Banana Pro → LOCAL file path (pads to `width`×`height` on white when given) |
+| `pull-ingredient-images <ws> <pid> <handle>` | download REAL per-ingredient PDP CDN images, match by name → `product_media` slot=`ingredient_{name}` @400×400 |
 | `save-media <ws> <pid>` ← stdin `{slot,localPath,mimeType,altText}` | upload + persist product_media |
 | `publish <ws> <pid>` | publish content + KB + macros, flip to `published` |
+
+## Media-refresh mode
+
+If your prompt says **MEDIA-REFRESH mode** (params `"mode":"media-refresh"`), run
+**ONLY the image stages** — **step 6** (hero + lifestyle) and **step 6b**
+(ingredient images) — on an already-`published` product. **Skip** web research,
+review analysis, benefit selection, and content (steps 1–5), and **do NOT change
+`intelligence_status`** (no `set-status`). Still honor the locked-hero guard
+(never regenerate the 3 locked heroes; you *may* still add their
+`ingredient_{name}` images). Start with `product <ws> <pid>` for the variant list,
+then go straight to step 6. End with the same final JSON.
 
 ## Pipeline (run to completion)
 
@@ -155,13 +167,27 @@ front-facing bag). Build the hero prompt for the **locked composition**:
   black cherry / piña colada for Creatine Prime).
 Tell it: use the FIRST image as the exact package identity (don't redesign the
 label), the rest only for composition/style; ONE variant only.
-`generate-image` (slot `hero`, `imageUrls`=[packUrl, …refUrls], aspectRatio
-`1:1`) → it returns a **local file path**. **Read that file** and vision-confirm:
-correct in-stock variant (single flavor, not multiple), splash contained on
-white, correct drink type, no edge cutoffs. If it fails, re-`generate-image`
-with the issues called out (allow ~2 attempts). On pass → `save-media` (slot
-`hero`). Then, best-effort (failures never block publish), generate `lifestyle`
-and `ingredient` shots in the same style → `save-media`.
+`generate-image` (slot `hero`, `imageUrls`=[packUrl, …refUrls], **aspectRatio
+`4:3`, `width` 1800, `height` 1344** — the **landscape** gallery size; a square
+hero gets cut off in the storefront gallery, and the tool pads a near-aspect
+render to exactly 1800×1344 on white) → it returns a **local file path**. **Read
+that file** and vision-confirm: correct in-stock variant (single flavor, not
+multiple), splash contained on white, correct drink type, no edge cutoffs, proper
+landscape framing. If it fails, re-`generate-image` with the issues called out
+(allow ~2 attempts). On pass → `save-media` (slot `hero`). Then, best-effort
+(failures never block publish), generate a `lifestyle` shot in the same style
+(also landscape `4:3` / 1800×1344) → `save-media`.
+
+### 6b — Per-ingredient images FROM the PDP (real CDN images, NOT Gemini)
+The PDP's ingredient section serves real per-ingredient CDN images named by
+ingredient (e.g. `Ashwagandha_1.jpg`, `Beet_Root.jpg`, `Chlorella.jpg`,
+`Grape_Seed_Extract.jpg`, `D3_1.jpg`). **Do NOT generate these with Gemini** —
+pull the real ones: run `pull-ingredient-images <ws> <pid> <handle>`. It matches
+each PDP image to a `product_ingredient` by name, downloads it, normalizes to
+400×400, and writes `product_media` slot=`ingredient_{snake_name}` (matching
+Amazing Coffee). Read the returned `{matched, unmatched, pdp_images}` and note any
+`unmatched` ingredients in your final summary (a blank ingredient card is a known
+round-1 gap this step fixes). Best-effort — failures here never block publish.
 
 ### 7 — Self-QA gate (the rail before auto-publish)
 HOLD (do NOT publish; leave at `content_generated`) and report the issue if ANY:
