@@ -138,6 +138,25 @@ function parseSpec(slug: string, raw: string): SpecCard {
     phases.push({ title: cleanInline(m[1]), status: st ?? "planned" });
   }
 
+  // Fallback: specs that use a single "## Phases" section with per-phase BULLETS
+  // (`- ⏳ **P1:** …`) instead of one "## Phase N — name <emoji>" heading per phase.
+  // Many box-authored specs use this shape; without this they'd render zero phases on
+  // the board. Only fires when no heading-phases were found, only inside the `## Phases`
+  // section, and only for bullets that carry a phase emoji.
+  if (phases.length === 0) {
+    let inPhases = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^##\s+Phases?\s*$/i.test(lines[i])) { inPhases = true; continue; }
+      if (inPhases && lines[i].startsWith("## ")) break; // next section ends the block
+      if (!inPhases) continue;
+      const bm = lines[i].match(/^\s*[-*]\s+(.*\S)\s*$/);
+      if (!bm) continue;
+      const st = statusFromText(lines[i]);
+      if (!st) continue; // a phase bullet must carry ⏳/🚧/✅/❌
+      phases.push({ title: cleanInline(bm[1]), status: st });
+    }
+  }
+
   const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
   for (const p of phases) counts[p.status]++;
 
