@@ -37,6 +37,8 @@ async function generateMagicLinkURL(customerId: string, shopifyCustomerId: strin
 - `src/app/api/portal/magic-login/route.ts` — verifies the token, sets the session cookie.
 - `src/lib/portal/handlers/sso.ts` — Shopify App-Proxy SSO mints `generateMagicLinkURL` from the verified `logged_in_customer_id` and 302s into the portal. See [[portal__handlers__sso]].
 - `src/lib/inngest/*` payment-recovery — `generatePaymentRecoveryLink` (7-day token → `/payment-methods?recover=1`).
+- `src/lib/workflow-executor.ts` — the `account_login` workflow mints a 24h login link for the matched/linked customer.
+- `src/lib/improve-actions.ts` — the Improve `send_magic_link` action re-sends a 24h login link to the ticket's **current** on-file customer email (approval-gated; pairs after `reassign_ticket_customer`). See [[orchestrator-tools]] § Improve parity.
 
 ## Gotchas
 

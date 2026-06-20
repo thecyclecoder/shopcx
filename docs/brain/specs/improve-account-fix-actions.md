@@ -1,4 +1,4 @@
-# Improve Agent — Account-Fix Actions (reassign · magic link · link dupes) ⏳
+# Improve Agent — Account-Fix Actions (reassign · magic link · link dupes) 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[box-ticket-improve]] (the box Improve agent's action surface) + [[../functions/cs]]. Same approval-gate model — the box **proposes**, the founder/CX manager **approves**, the Improve route **executes** server-side.
 
@@ -32,7 +32,7 @@ No new tables. New `pending_plan.actions[].type` values + their executors in `ac
 - `link_customer_accounts` proposed only when one side is an empty shell; two real accounts → propose-for-review, never auto-merge.
 
 ## Phases
-- ⏳ **P1:** `reassign_ticket_customer` + `send_magic_link` (executor + skill + approval-card + orchestrator-tool docs).
+- ✅ **P1:** `reassign_ticket_customer` + `send_magic_link` (executor + skill + approval-card + orchestrator-tool docs). Executors are bespoke `customer_action` cases in [[../libraries/improve-actions]] (Improve-only; no Sonnet-runtime equivalent), routed through `runImproveActions`; the approval card renders them generically by `kind`+`label`. `send_magic_link` reuses `generateMagicLinkURL` + the `sendTicketReply` path and always targets the ticket's current on-file customer email. Shipped 2026-06-20.
 - ⏳ **P2:** `link_customer_accounts` (empty-shell heuristic, founder-gated) + the escalation-triage/grader detection of the duplicate-account pattern.
 
 ## Brain updates (same PR)
