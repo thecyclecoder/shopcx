@@ -103,6 +103,24 @@ export async function POST(request: Request) {
         sms_status_at: nowIso,
         updated_at: nowIso,
       }).eq("workspace_id", body.workspace_id).eq("customer_id", body.customer_id);
+      // Arm the SMS-delivery fallback: if this text never reaches `delivered`
+      // (stuck `queued`, carrier `undelivered`/`failed`), email the code as a
+      // backup after the delivery window — so a consented customer always gets
+      // it even if SMS silently fails (ticket 8e9e325e).
+      if (customer?.email) {
+        void import("@/lib/inngest/client").then(({ inngest }) =>
+          inngest.send({
+            name: "popup/sms-coupon-sent",
+            data: {
+              workspace_id: body.workspace_id,
+              customer_id: body.customer_id,
+              email: customer.email,
+              coupon_code: couponCode,
+              product_handle: body.product_handle || null,
+            },
+          }).catch(() => undefined),
+        );
+      }
     }
   } catch (e) {
     console.warn("[popup/claim] SMS send failed:", e instanceof Error ? e.message : e);
