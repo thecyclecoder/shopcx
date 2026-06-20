@@ -15,5 +15,7 @@
 - Force unparseable output → after one repair re-prompt it still fails → the run is `error` (not approved/empty), shows "retry" on the Developer page, and **Test now** re-runs.
 - Re-run the `improve-queue-mark-read` spec-test → it produces a parseable verdict with real checks.
 
-## Phase 1 — strict contract + parse-repair + error state ⏳
+## Phase 1 — strict contract + parse-repair + error state ✅
 Skill output contract + `runSpecTestJob` parse/repair/retry + the `error` terminal state + Developer-page "retry" rendering + summary-from-checks guard. Brain: [[spec-test-agent]] + the `spec-test` skill page + [[../tables/spec_test_runs]]. Fold on ship.
+
+**Built:** `spec-test` `SKILL.md` Step 3 now mandates JSON-only output (explicit schema + one-shot example). `scripts/builder-worker.ts` adds `extractSpecTestResult` (whole → last fenced → last balanced `{...}`), a one-shot repair re-prompt on the same session, and writes `agent_verdict='error'` (empty checks/summary) on still-unparseable output / agent-reported error / worker exception. `AgentVerdict` gains `error`; the `AgentTestedStamp` shows "Run errored — retry"; the Developer → Spec Tests page renders the error reason + raw output tail and suppresses the misleading 0-count chip; **Test now** re-runs. Summary/verdict already derive from `checks[]` so empty checks can't read as `approved`.
