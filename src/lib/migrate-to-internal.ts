@@ -133,9 +133,18 @@ async function appstleLinesToInternalItems(
       sku: (v.sku as string) || undefined,
       quantity,
     };
-    // Grandfathered (true base < catalog MSRP) → lock the base so the engine
-    // reproduces their price. Standard subs use the catalog (no override).
-    if (isGrandfathered && trueBaseCents > 0) item.price_override_cents = trueBaseCents;
+    // Grandfathered (true base STRICTLY BELOW catalog MSRP) → lock the base so the
+    // engine reproduces their price. Standard subs use the catalog (no override).
+    // INVARIANT (base ≤ MSRP): price_override_cents exists ONLY to preserve a base
+    // below MSRP. An at-or-above-MSRP override is a no-op at best and inflates the
+    // charge at worst — it feeds the −25% S&S + quantity-break math from too high a
+    // starting point (the Lisa Baker bug). The explicit `trueBaseCents < msrp` cap is
+    // belt-and-suspenders on top of `isGrandfathered` (also strict-below-MSRP): even
+    // if that flag's definition drifts, a base ≥ MSRP is never stored here.
+    // See docs/brain/specs/base-price-never-above-msrp.md.
+    if (isGrandfathered && trueBaseCents > 0 && trueBaseCents < msrp) {
+      item.price_override_cents = trueBaseCents;
+    }
     items.push(item);
   }
   return { items, shippingProtectionCents };

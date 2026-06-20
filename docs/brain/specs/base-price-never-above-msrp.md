@@ -1,4 +1,4 @@
-# Base Price Never Above MSRP (invariant + cap) ⏳
+# Base Price Never Above MSRP (invariant + cap) 🚧
 
 **Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" ([[../lifecycles/subscription-billing.md]]). The simple root fix behind stuck sub `fdc1d5e3` (Lisa Baker) — and the whole "baseline over-counted" class.
 
@@ -17,10 +17,10 @@
 The alternative (capture `pre_migration_charge_cents` from resolved pricing instead of the raw line sum) re-architects the audit baseline. This instead enforces one invariant — **base ≤ MSRP** — at every write + repairs violations. The engine already knows how to price correctly from an MSRP base; we just stop feeding it an impossible (above-MSRP) base.
 
 ## Verification
-- A migration whose `inferAppstleLineBase` yields a base ≥ MSRP → **no** `price_override_cents` stored; the engine prices from MSRP + rules; audit `pricing_preserved` passes on the first pass.
-- Lisa (`fdc1d5e3`): drop her over-MSRP override → engine subtotal = **$110.34** → row clears from `/dashboard/migrations`.
-- `price_reconcile` proposing an override > MSRP is rejected/clamped (the agent can't raise a sub above MSRP).
-- Negative: a genuine grandfathered base **below** MSRP is preserved unchanged (this only touches at-or-above-MSRP overrides).
+- **Write guard** (`src/lib/migrate-to-internal.ts` `appstleLinesToInternalItems`): a migration whose `inferAppstleLineBase` yields `trueBaseCents ≥ msrp` (the line's `product_variants.price_cents`) → the built item has **no** `price_override_cents` key (the `&& trueBaseCents < msrp` clause drops it). The engine prices from MSRP + rules → audit `pricing_preserved` passes on the first pass. Negative: a base **strictly below** MSRP still gets `price_override_cents = trueBaseCents` unchanged.
+- **price_reconcile clamp** (`src/lib/migration-fix.ts` `applyMigrationFix`): call with `fix_kind: "price_reconcile"` and an override whose `price_override_cents` exceeds that variant's `product_variants.price_cents` → the written `items[].price_override_cents` equals MSRP (clamped down), and the result `detail` includes `(clamped N to MSRP — above-MSRP base rejected)`. An override ≤ MSRP is written verbatim with no clamp note.
+- **Repair sweep** (`scripts/backfill-drop-over-msrp-overrides.ts`): run with no flag → DRY-RUN lists every internal sub with an `override > MSRP` line (Lisa's `fdc1d5e3` flagged `← Lisa`), drops nothing. Run with `--apply` → drops each over-MSRP override key, then re-runs `verifyMigration` on the sub's latest `migration_audits` row. Expect Lisa's sub to print `verifyMigration=passed`, engine product subtotal **$110.34 (11034¢)**, and her row to disappear from `/dashboard/migrations`. Idempotent: a second `--apply` finds 0 subs to fix.
+- **Negative / no-collateral**: comp subs (`price_override_cents = 0`) and genuine below-MSRP grandfathered overrides are never touched by the sweep (only strictly `> MSRP` lines drop).
 
-## Phase 1 — invariant on write + in price_reconcile + repair Lisa ⏳
+## Phase 1 — invariant on write + in price_reconcile + repair Lisa 🚧
 The `< MSRP` guard hardening in `migrate-to-internal.ts`; the `> MSRP` clamp/reject in `migration-fix.ts` `price_reconcile`; drop Lisa's over-MSRP override → re-verify. Brain: [[../libraries/migrate-to-internal]] + [[../libraries/migration-fix]] + [[../lifecycles/subscription-billing.md]] + [[migration-fix-agent]]. **Queue after [[migration-shipping-protection]] + [[migration-fix-remove-line]] merge** (all three touch `migrate-to-internal.ts` / `migration-fix.ts`). Fold on ship.
