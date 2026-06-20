@@ -143,7 +143,29 @@ export async function applyMigrationFix(
     }
     const sub = await loadSubItems(admin, subscriptionId);
     if (!sub) return { ok: false, detail: "price_reconcile: subscription not found" };
-    const byVariant = new Map(overrides.map((o) => [String(o.variant_id), o.price_override_cents]));
+    // INVARIANT (base ≤ MSRP): an override may only lock a base BELOW catalog MSRP —
+    // the agent can NEVER reconcile a sub UPWARD past list (an above-MSRP base feeds
+    // the −25% S&S + quantity-break math from too high a start and inflates the
+    // charge). Look up each line's MSRP (product_variants.price_cents) and clamp any
+    // proposed override DOWN to MSRP before writing. The base build's strict-below-MSRP
+    // guard prevents over-MSRP overrides being created in the first place; this is the
+    // matching gate on the fixer. See docs/brain/specs/base-price-never-above-msrp.md.
+    const variantIds = [...new Set(overrides.map((o) => String(o.variant_id)))];
+    const { data: variantRows } = await admin.from("product_variants").select("id, price_cents").in("id", variantIds);
+    const msrpByVariant = new Map((variantRows || []).map((v) => [String(v.id), Number(v.price_cents) || 0]));
+    const clampedVariants: string[] = [];
+    const byVariant = new Map(
+      overrides.map((o) => {
+        const vid = String(o.variant_id);
+        const msrp = msrpByVariant.get(vid) || 0;
+        let cents = o.price_override_cents;
+        if (msrp > 0 && cents > msrp) {
+          cents = msrp;
+          clampedVariants.push(vid);
+        }
+        return [vid, cents];
+      }),
+    );
     let touched = 0;
     const items = sub.items.map((i) => {
       const cents = byVariant.get(String(i.variant_id || ""));
@@ -154,7 +176,10 @@ export async function applyMigrationFix(
     if (!touched) return { ok: false, detail: "price_reconcile: no sub item matched the override variant ids" };
     const { error } = await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", subscriptionId);
     if (error) return { ok: false, detail: `price_reconcile: write failed — ${error.message}` };
-    return { ok: true, detail: `price_reconcile: set price_override_cents on ${touched} line(s)` };
+    return {
+      ok: true,
+      detail: `price_reconcile: set price_override_cents on ${touched} line(s)${clampedVariants.length ? ` (clamped ${clampedVariants.length} to MSRP — above-MSRP base rejected)` : ""}`,
+    };
   }
 
   if (action.fix_kind === "variant_backfill") {
