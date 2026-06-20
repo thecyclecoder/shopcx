@@ -137,6 +137,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/roadmap/goals", label: "Goals", icon: "M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" },
       { href: "/dashboard/roadmap/map", label: "Taxonomy map", icon: "M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.159.69.159 1.006 0z" },
       { href: "/dashboard/developer/spec-tests", label: "Spec Tests", icon: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" },
+      { href: "/dashboard/developer/spec-tests/human-queue", label: "Human-test queue", icon: "M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" },
       { href: "/dashboard/brain", label: "Brain", icon: ICONS.knowledge },
       { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
     ],
@@ -170,6 +171,7 @@ export default function Sidebar({
   const [rejectedCount, setRejectedCount] = useState(0); // "Rejected → me" pile
   const [branchesCount, setBranchesCount] = useState(0); // open claude/* PRs
   const [improveWaitingCount, setImproveWaitingCount] = useState(0); // Improve sessions waiting on you
+  const [humanTestCount, setHumanTestCount] = useState(0); // spec-test human checks + regressions waiting on you (owner)
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -241,6 +243,13 @@ export default function Sidebar({
         fetch(`/api/branches`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d?.total != null) setBranchesCount(d.total); })
+          .catch(() => {});
+      }
+      // Spec-test human-test queue: needs-human checks + regressions waiting on the owner.
+      if (workspace.role === "owner") {
+        fetch(`/api/developer/spec-test/human-queue`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.counts) setHumanTestCount((d.counts.waiting || 0) + (d.counts.regressions || 0)); })
           .catch(() => {});
       }
     };
@@ -377,6 +386,11 @@ export default function Sidebar({
                           {item.href === "/dashboard/branches" && branchesCount > 0 && (
                             <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                               {branchesCount > 99 ? "99+" : branchesCount}
+                            </span>
+                          )}
+                          {item.href === "/dashboard/developer/spec-tests/human-queue" && humanTestCount > 0 && (
+                            <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                              {humanTestCount > 99 ? "99+" : humanTestCount}
                             </span>
                           )}
                         </Link>

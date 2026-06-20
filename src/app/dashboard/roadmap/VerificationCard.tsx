@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import { AgentTestedStamp, CheckList, TestChip, type Check, type Summary } from "../developer/spec-tests/SpecTestView";
 import TestNowButton from "../developer/spec-tests/TestNowButton";
+import ProposeFixButton from "../developer/spec-tests/ProposeFixButton";
 
 /** The latest box spec-test run for this spec (spec-test-agent) — structural, no server import. */
 export interface SpecTestRunLite {
@@ -69,6 +70,14 @@ export default function VerificationCard({ slug, html, run }: { slug: string; ht
       <p className="mb-2 text-[11px] text-zinc-500 dark:text-zinc-400">
         The box checked the automatable parts — it never marks this verified. You still own the Verified &amp; archive gate.
       </p>
+      {run.agent_verdict === "issues" && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-rose-200 bg-rose-50/60 px-2 py-1.5 dark:border-rose-900/50 dark:bg-rose-950/20">
+          <span className="text-[11px] font-medium text-rose-700 dark:text-rose-400">
+            ⚠️ Shipped but failing its own spec-test — a likely regression.
+          </span>
+          {isOwner && <ProposeFixButton slug={slug} compact />}
+        </div>
+      )}
       {run.checks.length > 0 && <CheckList checks={run.checks} />}
       {humanChecks.length > 0 && (
         <div className="mt-2 border-t border-indigo-100 pt-2 dark:border-indigo-900/40">

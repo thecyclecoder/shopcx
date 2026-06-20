@@ -20,6 +20,8 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { saveChat, loadChat, markTurnThinking, type ChatMsg } from "@/lib/roadmap-chats";
+import { getLatestSpecTestRuns } from "@/lib/spec-test-runs";
+import { getRoadmap } from "@/lib/brain-roadmap";
 
 const isSlug = (s: unknown): s is string => typeof s === "string" && /^[a-z0-9-]+$/i.test(s);
 // A brain-relative seed slug (e.g. lifecycles/x) — path-guarded like the old read_brain_page.
@@ -82,7 +84,7 @@ export async function POST(request: Request) {
     messages?: ChatMsg[]; // legacy field — ignored now that the DB owns the transcript
     slug?: string;
     seedSlug?: string;
-    action?: "chat" | "retry" | "finalize" | "generate_verification";
+    action?: "chat" | "retry" | "finalize" | "generate_verification" | "propose_fix";
     queueBuild?: boolean;
   };
 
@@ -106,6 +108,47 @@ export async function POST(request: Request) {
       instructions: { mode: "verify" as SpecChatMode, slug: refineSlug },
     });
     return NextResponse.json({ queued: true });
+  }
+
+  // propose_fix — regression escalation (spec-test-agent Phase 2). A shipped spec FAILED its own
+  // spec-test (an auto-`fail`); seed a fresh authoring chat with the regression brief (the failing
+  // checks + evidence) and enqueue the first box turn, so the owner can review the box's proposed fix
+  // and finalize it into a fix spec. The owner triggers it + finalizes — the agent only proposes.
+  if (action === "propose_fix") {
+    if (!refineSlug) return NextResponse.json({ error: "slug required" }, { status: 400 });
+    const slug = refineSlug;
+    const [runs, { specs }] = await Promise.all([getLatestSpecTestRuns(workspaceId), getRoadmap()]);
+    const run = runs[slug];
+    const failing = (run?.checks ?? []).filter((c) => c.verdict === "fail");
+    if (!run || failing.length === 0) {
+      return NextResponse.json({ error: "no regression to fix — the latest spec-test has no failing checks" }, { status: 400 });
+    }
+    const title = specs.find((s) => s.slug === slug)?.title ?? slug;
+    const brief = [
+      `The shipped spec "${title}" (docs/brain/specs/${slug}.md) FAILED its own ## Verification when the box spec-test QA agent last ran it — a likely regression or an incomplete build.`,
+      "",
+      "Failing checks:",
+      ...failing.map((c, i) => `${i + 1}. ${c.text}${c.evidence ? `\n   evidence: ${c.evidence}` : ""}`),
+      "",
+      `Investigate each failure against the spec + the brain + the code, then propose a concise FIX spec: what's broken, what to change and where, and how to re-verify it. When we finalize, write it as a new spec under docs/brain/specs/ owned by [[../functions/platform]], parented under the same mandate/goal as the original where sensible.`,
+    ].join("\n");
+    const created = await saveChat({
+      id: undefined,
+      workspaceId,
+      userId: user.id,
+      specSlug: null,
+      title: `Fix: ${slug}`,
+      messages: [{ role: "user", content: brief }],
+    });
+    if (!created) return NextResponse.json({ error: "could not start fix chat" }, { status: 500 });
+    const session = await markTurnThinking(workspaceId, created.id);
+    await enqueueSpecChat(admin, {
+      workspaceId,
+      userId: user.id,
+      specSlug: created.id,
+      instructions: { mode: "turn" as SpecChatMode, chat_id: created.id },
+    });
+    return NextResponse.json({ queued: true, chatId: created.id, session });
   }
 
   // All other actions operate on a persisted thread. Resolve/create the roadmap_chats row.
