@@ -34,7 +34,7 @@ interface Regression {
   title: string;
   run_at: string;
   agent_verdict: string;
-  failing: { text: string; evidence?: string }[];
+  failing: { text: string; evidence?: string; check_key: string }[];
 }
 interface QueueData {
   items: QueueItem[];
@@ -107,7 +107,7 @@ export default function HumanTestQueuePage() {
   }, [load]);
 
   const resolve = useCallback(
-    async (item: QueueItem, resolution: Resolution | "clear") => {
+    async (item: { slug: string; check_key: string; text: string }, resolution: Resolution | "clear") => {
       const id = `${item.slug}:${item.check_key}`;
       setBusy((prev) => new Set(prev).add(id));
       try {
@@ -198,10 +198,19 @@ export default function HumanTestQueuePage() {
                           <li key={i} className="text-xs">
                             <div className="flex items-start gap-1.5">
                               <span className="mt-0.5 flex-shrink-0 font-medium text-rose-600 dark:text-rose-400">✗</span>
-                              <div className="min-w-0">
+                              <div className="min-w-0 flex-1">
                                 <span className="text-zinc-700 dark:text-zinc-300">{f.text}</span>
                                 {f.evidence && <Evidence text={f.evidence} />}
                               </div>
+                              <button
+                                type="button"
+                                disabled={busy.has(`${r.slug}:${f.check_key}`)}
+                                onClick={() => resolve({ slug: r.slug, check_key: f.check_key, text: f.text }, "dismissed")}
+                                className="shrink-0 rounded border border-rose-200 px-2 py-0.5 text-[11px] font-medium text-rose-600 hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900/50 dark:text-rose-300 dark:hover:bg-rose-900/30"
+                                title="Not a real regression (false positive / acknowledged) — clears it from this list"
+                              >
+                                {busy.has(`${r.slug}:${f.check_key}`) ? "…" : "Dismiss"}
+                              </button>
                             </div>
                           </li>
                         ))}

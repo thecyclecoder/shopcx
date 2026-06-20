@@ -219,7 +219,7 @@ export interface RegressionItem {
   title: string;
   run_at: string;
   agent_verdict: AgentVerdict;
-  failing: { text: string; evidence?: string }[];
+  failing: { text: string; evidence?: string; check_key: string }[];
 }
 
 export interface HumanTestQueue {
@@ -267,8 +267,16 @@ export async function getHumanTestQueue(workspaceId: string): Promise<HumanTestQ
         note: res?.note ?? null,
       });
     }
-    const failing = run.checks.filter((c) => c.verdict === "fail").map((c) => ({ text: c.text, evidence: c.evidence }));
-    if (run.agent_verdict === "issues" || failing.length > 0) {
+    // A regression is a `fail` the owner hasn't dismissed/resolved yet. Join the same
+    // spec_test_human_checks resolutions used for needs_human checks, and drop resolved fails —
+    // so the owner CAN dismiss a (e.g. false-positive) regression and have it clear. A run only
+    // counts as a regression while it has at least one UNRESOLVED fail (a stale `issues` verdict
+    // with every fail dismissed is no longer a regression).
+    const failing = run.checks
+      .filter((c) => c.verdict === "fail")
+      .map((c) => ({ text: c.text, evidence: c.evidence, check_key: checkKey(c.text) }))
+      .filter((c) => !(resolutions.get(`${slug}:${c.check_key}`)?.resolution));
+    if (failing.length > 0) {
       regressions.push({ slug, title, run_at: run.run_at, agent_verdict: run.agent_verdict, failing });
     }
   }
