@@ -30,15 +30,15 @@ A new page under the **Customers** sidebar: **Comp Subscriptions** — every `co
 - **Allowlist Zach** (`customers.comp_role='employee'`) and **migrate** him off Appstle (contract `27852472493`) → internal **comp** sub, item `price_override_cents=0`, `comp_note="employee"`, preserving items/cadence/next date. (His SC133080 charge is already refunded.) Confirm his next renewal **ships free** (a $0 order + Amplifier handoff, no charge, no dunning) and he appears under **Employees** on **Customers → Comp Subscriptions**.
 - Negative: a comp sub with no PM does NOT skip with `no_payment_method`; a comp renewal does NOT call Braintree and does NOT open dunning. **A `comp=true` sub whose customer is NOT allowlisted (`comp_role` null) → the $0 renewal FAILS** (no free shipment, surfaced) — fail-closed.
 
-## Phase 1 — allowlist + comp mode + renewal + migration + Zach 🚧
+## Phase 1 — allowlist + comp mode + renewal + migration + Zach ✅
 Migration (`customers.comp_role` enum + `comp_note`; `subscriptions.comp` + `comp_note`); renewal-path comp branch (**allowlist gate first — fail-closed if not allowlisted**, then no-PM, no-charge, still-fulfill, advance); `migrateToInternalComp` (no-PM Appstle→internal comp); allowlist + migrate Zach. Brain: [[../tables/customers]] (comp_role) + [[../tables/subscriptions]] + [[../lifecycles/subscription-billing.md]] + [[../libraries/migrate-to-internal]].
 
-**Code shipped** (🚧 → ✅ on the two gated prod ops below):
+**Shipped** (code + both gated prod ops applied):
 - ✅ Migration `supabase/migrations/20260620190000_comp_subscriptions.sql` (`comp_role` enum + `comp_note` on customers; `comp` + `comp_note` on subscriptions; partial indexes `idx_subscriptions_comp`, `idx_customers_comp_role`). Apply: `npx tsx scripts/apply-comp-subscriptions-migration.ts`.
 - ✅ Renewal comp branch in `src/lib/inngest/internal-subscription-renewals.ts` (`load-comp-context` → fail-closed gate → $0 order + Amplifier + `type='comp'` transaction + advance; no PM/Braintree/Avalara/shipping/dunning).
 - ✅ `migrateContractToInternalComp` in `src/lib/migrate-to-internal.ts` (no-PM Appstle→internal comp; sets `comp=true` + item `price_override_cents=0`).
 - ✅ Brain: tables/customers, tables/subscriptions, lifecycles/subscription-billing, libraries/migrate-to-internal (new page), inngest/internal-subscription-renewals.
-- ⏳ **Gated owner actions** (no prod creds in build): (1) apply the migration; (2) run `scripts/migrate-zach-comp-subscription.ts` to allowlist Zach (`comp_role='employee'`) + migrate contract `27852472493` → internal comp.
+- ✅ **Gated owner actions applied:** (1) migration applied via `scripts/apply-comp-subscriptions-migration.ts`; (2) `scripts/migrate-zach-comp-subscription.ts` ran — Zach allowlisted (`comp_role='employee'`) + contract `27852472493` flipped to internal comp. Run the [[#verification]] checklist to confirm his next renewal ships free.
 
 ## Phase 2 — Customers → Comp Subscriptions list ⏳
 The sidebar page + read view (+ stretch "mark/create comp" action). Brain: [[../dashboard]] customers section. (Deferred — separate build.)
