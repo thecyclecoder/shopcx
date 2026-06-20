@@ -153,6 +153,11 @@ async function main() {
       // for ingredients still missing a pulled PDP image. PDP pull stays preferred.
       return out(await T.generateIngredientImagesFallback(ws, pid, await jsonOptional<T.IngredientFallbackInput[]>([])));
 
+    case "get-media":
+      // get-media <ws> <pid> — existing product_media slots (with urls) so the
+      // skill knows which chapter images (lifestyle_1 / timeline_N) are missing.
+      return out(await T.getMedia(ws, pid));
+
     case "save-media": {
       // payload: { slot, localPath, mimeType, altText }
       const p = await json<{ slot: string; localPath: string; mimeType: string; altText: string }>();

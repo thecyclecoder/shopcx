@@ -53,6 +53,7 @@ stdin (pipe it). On error it prints `{"error":"…"}` and exits 1 — read it an
 | `generate-image <ws> <pid>` ← stdin `{prompt,imageUrls,slot,aspectRatio,width?,height?}` | Nano Banana Pro → LOCAL file path (pads to `width`×`height` on white when given) |
 | `pull-ingredient-images <ws> <pid> <handle>` | download REAL per-ingredient PDP CDN images, match by name → `product_media` slot=`ingredient_{name}` @400×400 |
 | `ingredient-images-fallback <ws> <pid>` ← optional stdin `[{name,visual_description}]` | Nano Banana Pro studio photo ONLY for ingredients still missing a pulled PDP image → `product_media` slot=`ingredient_{name}` @400×400 (PDP pull stays preferred) |
+| `get-media <ws> <pid>` | existing `product_media` slots (with urls) — to find which chapter images (lifestyle_1 / timeline_N) are missing |
 | `save-media <ws> <pid>` ← stdin `{slot,localPath,mimeType,altText}` | upload + persist product_media |
 | `publish <ws> <pid>` | publish content + KB + macros, flip to `published` |
 
@@ -67,6 +68,31 @@ review analysis, benefit selection, and content (steps 1–5), and **do NOT chan
 (never regenerate the 3 locked heroes; you *may* still add their
 `ingredient_{name}` images). Start with `product <ws> <pid>` for the variant list,
 then go straight to step 6. End with the same final JSON.
+
+## Content-refresh mode (round-3 lander refinements)
+
+If your prompt says **CONTENT-REFRESH mode** (params `"mode":"content-refresh"`),
+**keep** the existing research / reviews / benefit selections (do NOT redo steps
+1–4) and re-author the page content with the round-3 refinements, then refresh the
+chapter images. Steps:
+1. `product <ws> <pid>` (title/handle/variants) + `get-content`, `get-benefits`,
+   `get-research`, `get-review-analysis` to ground the rewrite in the existing
+   evidence (still cite it — do NOT invent new benefits).
+2. **Re-author content** (step 5) with the round-3 emphasis: a **punchier,
+   benefit-first `hero_headline`** (per the per-product direction), the right
+   **`comparison_competitor_label`** + matching `comparison_table_rows`, and
+   **`show_survey`** (`true` only for `amazing-coffee`/`amazing-coffee-pods`, else
+   `false`). Carry the rest of the content forward faithfully (benefit_bar,
+   ingredient_cards, faq, kb, **fda_disclaimer**, kb_what_it_doesnt_do,
+   endorsements, expectation_timeline). `save-content` writes a new draft version.
+3. **Refresh chapter images** (step 6 + "Missing chapter images") — hero (honor
+   the locked-hero guard), `lifestyle_1`, `timeline_N` (if the timeline renders),
+   and the `ingredient_{name}` set (step 6b pull + fallback). **Never** generate
+   endorsement avatar faces.
+4. **Self-QA** (step 7), then **`publish`** to promote the refreshed version (the
+   product is already published — this re-publishes the new content). Do NOT call
+   `set-status` yourself; `publish` handles it.
+End with the same final JSON.
 
 ## Pipeline (run to completion)
 
@@ -134,9 +160,17 @@ for `save-content`. Base the hero + benefit_bar on the **selected benefits**; us
 exact customer phrases for outcome language; tie every claim to evidence; never
 claim a benefit with confidence < 0.5 as primary. Plain outcome language, not
 clinical jargon. Include:
-`hero_headline, hero_subheadline, benefit_bar[4-6], mechanism_copy` (8th-grade,
+`hero_headline` (**tight, scannable, benefit-first** — lead with the ONE benefit
+the customer most wants, from the `lead` selections; match Amazing Coffee's style
+*"Brew. Sip. Shed Pounds & Fight Aging."* — short punchy clauses, not a sentence),
+`hero_subheadline, benefit_bar[4-6], mechanism_copy` (8th-grade,
 delivers on every benefit chip in order), `ingredient_cards, comparison_table_rows`
-(us vs generic — never name competitors), `faq_items[5-8], guarantee_copy,
+(us vs generic — never name a brand) + **`comparison_competitor_label`** (the rival
+*category* the comparison chapter compares against — pick the RIGHT one per the
+table below; null falls back to "Regular Coffee", correct only for coffee),
+**`show_survey`** (boolean — `true` ONLY for the coffee products
+`amazing-coffee` / `amazing-coffee-pods`; **`false` for everything else** — the
+survey chapter is hardcoded coffee-specific), `faq_items[5-8], guarantee_copy,
 knowledge_base_article` (markdown), `kb_what_it_doesnt_do` (explicit limits —
 **required**), **`fda_disclaimer`** (the DSHEA "These statements have not been
 evaluated by the FDA…" disclaimer — **required**), `support_macros`
@@ -145,6 +179,31 @@ nutritionists), `expectation_timeline`. Pipe to `save-content`. Then `set-status
 content_generated`. Validate against **Amazing Coffee** (the `published`
 benchmark) for structure/completeness — minus linked products + bundles, which
 are NOT auto-seeded.
+
+**`comparison_competitor_label` + contrast rows — compare against the RIGHT thing**
+(craft `comparison_table_rows` `us`/`competitor_generic` from these contrasts):
+- **Ashwavana Guru Focus** → **"Coffee & Energy Drinks"**: clinically-studied
+  adaptogens (Ashwagandha/Rhodiola) vs synthetic caffeine · calm no-jitters energy
+  vs spike-and-crash · supports mood + stress vs just a buzz · no sugar.
+- **Ashwavana Zen Relax** → **"Melatonin & Sleep Aids"**: adaptogens calm stress at
+  the root vs sedate · no morning grogginess · non-habit-forming · caffeine-free.
+- **Creatine Prime** → **"Plain Creatine"**: 5g creatine + Rhodiola (body + mind) vs
+  creatine alone · delicious Black Cherry vs chalky/flavorless · mixes clean, no
+  grit/bloat.
+- **Superfood Tabs** → **"Sugary Sports Drinks"**: real superfoods + cleanse vs sugar
+  + dyes · zero sugar · portable tablet vs bulky bottle.
+- **Amazing Creamer** → **"Regular Creamer"**: collagen + beauty actives vs sugar +
+  seed oils · supports skin/anti-aging · clean, no crash.
+- **Amazing Coffee / K-Cups** → keep "Regular Coffee" (set the label or leave null).
+
+**Hero headline direction per product** (craft the final copy from the real
+benefits/reviews — keep it short + benefit-first):
+- **Guru Focus**: razor focus + clean all-day energy, **zero jitters/crash**.
+- **Zen Relax**: melt stress + deep sleep + wake restored (**caffeine-free** wind-down).
+- **Creatine Prime**: stronger + sharper + **actually delicious** (5g creatine, no chalk).
+- **Superfood Tabs**: **cleansing hydration + energy** in one tablet.
+- **Amazing Creamer**: creamy coffee + **collagen beauty/glow**.
+- **Amazing Coffee / K-Cups**: keep the existing headline (already strong).
 
 ### 6 — Nano Banana Pro hero imagery
 `hero-status <ws> <pid> <handle>`. If `locked` (Amazing Coffee / Amazing Coffee
@@ -177,8 +236,29 @@ that file** and vision-confirm: correct in-stock variant (single flavor, not
 multiple), splash contained on white, correct drink type, no edge cutoffs, proper
 landscape framing. If it fails, re-`generate-image` with the issues called out
 (allow ~2 attempts). On pass → `save-media` (slot `hero`). Then, best-effort
-(failures never block publish), generate a `lifestyle` shot in the same style
-(also landscape `4:3` / 1800×1344) → `save-media`.
+(failures never block publish), generate a `lifestyle_1` shot in the same style
+— an **in-use lifestyle shot** of the prepared drink (this is the HowItWorks
+chapter image; the page reads slot **`lifestyle_1`**, not `lifestyle`), also
+landscape `4:3` / 1800×1344 → `save-media` (slot `lifestyle_1`).
+
+### 6 (cont.) — Missing chapter images (round 3)
+Some image-bearing chapters that APPLY render blank when their media slot is
+empty. Fill the MISSING ones from the same isolated packshot (consistent studio
+style). First `get-media <ws> <pid>` to see which slots already exist — **only
+generate the ones still missing** (idempotent). Generate, best-effort:
+- **`lifestyle_1`** — the HowItWorks in-use shot (covered just above; generate it
+  here if you skipped it / it's missing).
+- **`timeline_1..N`** — ONE per `expectation_timeline` milestone, **only if the
+  timeline renders** (you authored a non-empty `expectation_timeline`). Each is a
+  small square-ish bubble image evoking that milestone's moment with the product
+  (slot `timeline_{N}`, N = 1-based milestone index; `1:1`, ~400×400). Skip
+  entirely if there's no timeline.
+- **🚫 Do NOT generate `endorsement_*_avatar` faces** — fake AI expert headshots
+  are a misleading-endorsement risk. Leave them blank (they need real expert
+  photos — flag for the owner). Also **SKIP** `before`/`after` (weight-loss UGC,
+  coffee-only) and `survey_q*` (survey hidden for non-coffee).
+Use the same `generate-image` → `save-media` flow; vision-check each is on-brand
+before saving. All best-effort — failures never block publish.
 
 ### 6b — Per-ingredient images FROM the PDP (real CDN images, NOT Gemini)
 The PDP's ingredient section serves real per-ingredient CDN images named by

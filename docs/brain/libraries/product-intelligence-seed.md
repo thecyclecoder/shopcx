@@ -43,11 +43,12 @@ publish. The skill does the thinking; these do the I/O.
 | `saveResearch` / `getResearch` | 2 | persist web-search research (real citations) → `product_ingredient_research`; per-ingredient clean-replace |
 | `getReviews` (paged) / `saveReviewAnalysis` / `getReviewAnalysis` | 3 | 4–5★ featured-first reviews; the skill analyzes, this persists → `product_review_analysis` |
 | `saveBenefits` / `getBenefits` | 4 | persist triangulated themes (validates evidence IDs) → `product_benefit_selections` |
-| `saveContent` / `getContent` | 5 | version + persist authored content (incl. `fda_disclaimer`) → `product_page_content` |
+| `saveContent` / `getContent` | 5 | version + persist authored content (incl. `fda_disclaimer`, round-3 `comparison_competitor_label` + `show_survey`) → `product_page_content` |
 | `heroStatus` | 6 | `{locked, exists}` — `LOCKED_HERO_HANDLES` (amazing-coffee, -pods, -creamer) + already-has-hero ⇒ skip |
 | `resolvePackshot` | 6 | [[google-drive]] front-facing packshot + `Hero Example` refs → storage URLs |
 | `generateImage` | 6 | [[gemini]] `generateNanoBananaProCombine` → a **local file** the skill Reads to vision-QA; pads to `width`×`height` on white when given (heroes → `HERO_WIDTH`×`HERO_HEIGHT` = 1800×1344, `HERO_ASPECT` `4:3`) |
 | `saveMedia` | 6 | upload a vision-approved image → `product_media` (records `width`/`height`/`file_size` via sharp) |
+| `getMedia` | 6 | existing `product_media` slots (with urls) → `{slots, bySlot}` — the skill checks which round-3 chapter images (`lifestyle_1` / `timeline_N`) are still missing, so the fill is idempotent |
 | `pullIngredientImages` | 6b | pull REAL per-ingredient PDP CDN images (Ashwagandha_1.jpg…), match by name, normalize to `INGREDIENT_SIZE` 400×400 → `product_media` slot=`ingredient_{snake}`. NOT Gemini. Idempotent; `{matched, unmatched, pdp_images}`. The **preferred/default** ingredient-image source |
 | `generateIngredientImagesFallback` | 6b | **FALLBACK** for ingredients with NO PDP image — [[gemini]] Nano Banana Pro text-to-image studio photo (raw recognizable form, white bg) → 400×400 → `product_media` slot=`ingredient_{snake}`. ONLY for ingredients still missing a row after the pull (PDP wins; never overwrites). Optional `[{name,visual_description}]` from the skill; idempotent/best-effort; `{generated, skipped, failed}` |
 | `publish` | 8 | delegates to `publish.ts` |
@@ -94,7 +95,24 @@ best-effort (a failure never blocks publish); returns `{generated, skipped, fail
 ONLY the image stages (step 6 + 6b, including the ingredient fallback) on a
 published product — `runProductSeedJob` builds a media-refresh prompt; the skill
 skips research/reviews/content and never touches `intelligence_status` (still
-honoring the locked-hero guard).
+honoring the locked-hero guard). Step-6 lifestyle now targets slot **`lifestyle_1`**
+(the slot HowItWorks actually reads — the old `lifestyle` slot was dead).
+
+**Lander refinements (round 3):** `saveContent` persists two new
+`product_page_content` columns — **`comparison_competitor_label`** (the rival
+*category* the comparison chapter shows; null → "Regular Coffee" default in
+`ComparisonSection`) and **`show_survey`** (boolean — the coffee-only survey gate;
+`render-page` only renders `SurveyChapter` when true). Migration
+`20260620120000_product_page_content_survey_comparison.sql` adds them (default
+`show_survey=false`) + backfills `true` for the two coffee handles. New
+**`content-refresh` mode** (`agent_jobs` instructions
+`{product_id, mode:"content-refresh"}`) re-authors content (punchier benefit-first
+headline + comparison rows/label + survey flag) **and** refreshes chapter images
+while **keeping** research/reviews/benefits, then re-publishes — `runProductSeedJob`
+builds the content-refresh prompt. The skill fills the MISSING chapter images
+(`lifestyle_1`, `timeline_N` when the timeline renders) from the isolated packshot
+via Nano Banana Pro (`getMedia` makes it fill-blanks-only) but **never** generates
+`endorsement_*_avatar` faces (misleading-endorsement risk — flagged for real photos).
 
 ## `scripts/seed-product-tools.ts` — the tool CLI
 

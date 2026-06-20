@@ -118,6 +118,13 @@ export interface PageContent {
     us: string;
     competitor_generic: string;
   }>;
+  // The rival column label in the comparison chapter. Null → "Regular Coffee"
+  // (the coffee default). Non-coffee products set their real rival, e.g.
+  // "Coffee & Energy Drinks" / "Plain Creatine". (Lander refinements round 3.)
+  comparison_competitor_label: string | null;
+  // Whether the (coffee-specific) survey chapter renders. Default false — true
+  // ONLY for the coffee products until product-specific surveys exist.
+  show_survey: boolean;
   faq_items: Array<{ question: string; answer: string }>;
   guarantee_copy: string | null;
   fda_disclaimer: string;
@@ -507,7 +514,7 @@ export async function getPageData(
     admin
       .from("product_page_content")
       .select(
-        "id, hero_headline, hero_subheadline, benefit_bar, benefit_bar_intro, benefit_bar_transition, mechanism_copy, ingredient_cards, comparison_table_rows, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsements, expectation_timeline, status, version",
+        "id, hero_headline, hero_subheadline, benefit_bar, benefit_bar_intro, benefit_bar_transition, mechanism_copy, ingredient_cards, comparison_table_rows, comparison_competitor_label, show_survey, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsements, expectation_timeline, status, version",
       )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)

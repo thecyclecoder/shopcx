@@ -17,6 +17,10 @@ export function ComparisonSection({ data }: { data: PageData }) {
   if (rows.length === 0) return null;
 
   const productName = data.product.title;
+  // The rival column. Null → "Regular Coffee" (the coffee default — kept for
+  // Amazing Coffee / K-Cups); non-coffee products carry their real rival, e.g.
+  // "Coffee & Energy Drinks" / "Plain Creatine". (Lander refinements round 3.)
+  const competitorLabel = data.page_content?.comparison_competitor_label || "Regular Coffee";
   const lowestPrice = data.pricing_tiers.length
     ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
     : null;
@@ -41,7 +45,7 @@ export function ComparisonSection({ data }: { data: PageData }) {
             </div>
             <div className="bg-zinc-100 px-4 py-4 text-center text-zinc-600 sm:px-6 sm:py-5">
               <div className="text-base font-semibold uppercase tracking-wide sm:text-lg">
-                Regular Coffee
+                {competitorLabel}
               </div>
             </div>
 

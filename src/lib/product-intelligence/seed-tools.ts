@@ -370,6 +370,10 @@ export type GeneratedContent = {
   mechanism_copy?: string;
   ingredient_cards?: unknown[];
   comparison_table_rows?: unknown[];
+  // Round-3 lander refinements: the rival column label (null → "Regular Coffee"
+  // default in the renderer) + whether the coffee-specific survey chapter renders.
+  comparison_competitor_label?: string | null;
+  show_survey?: boolean;
   faq_items?: unknown[];
   guarantee_copy?: string;
   knowledge_base_article?: string;
@@ -408,6 +412,8 @@ export async function saveContent(
       mechanism_copy: content.mechanism_copy || null,
       ingredient_cards: Array.isArray(content.ingredient_cards) ? content.ingredient_cards : [],
       comparison_table_rows: Array.isArray(content.comparison_table_rows) ? content.comparison_table_rows : [],
+      comparison_competitor_label: content.comparison_competitor_label || null,
+      show_survey: content.show_survey === true,
       faq_items: Array.isArray(content.faq_items) ? content.faq_items : [],
       guarantee_copy: content.guarantee_copy || null,
       knowledge_base_article: content.knowledge_base_article || null,
@@ -589,6 +595,27 @@ export async function saveMedia(
     { onConflict: "workspace_id,product_id,slot,display_order" },
   );
   return { url };
+}
+
+/**
+ * List the product's existing `product_media` slots (with urls). The skill uses
+ * this to decide which chapter images are still MISSING — so the round-3
+ * chapter-image pass (lifestyle_1 / timeline_N) is idempotent and only fills
+ * blanks. Returns `{ slots, bySlot }` where `slots` is the present-with-url set.
+ */
+export async function getMedia(
+  workspace_id: string,
+  product_id: string,
+): Promise<{ slots: string[]; bySlot: Record<string, string> }> {
+  const { data } = await admin()
+    .from("product_media")
+    .select("slot, url")
+    .eq("workspace_id", workspace_id)
+    .eq("product_id", product_id)
+    .not("url", "is", null);
+  const bySlot: Record<string, string> = {};
+  for (const r of data || []) bySlot[r.slot as string] = r.url as string;
+  return { slots: Object.keys(bySlot), bySlot };
 }
 
 // ── 6b. Per-ingredient images FROM the Shopify PDP CDN (round 2) ──────────────
