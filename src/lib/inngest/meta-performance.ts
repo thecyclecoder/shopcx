@@ -9,6 +9,7 @@ import { getMetaUserToken } from "@/lib/meta-ads";
 import { ingestMetaPerformance } from "@/lib/meta/performance";
 import { refreshVariantAttribution } from "@/lib/meta/attribution";
 import { refreshScorecards } from "@/lib/meta/scorecards";
+import { runDecisionEngine } from "@/lib/meta/decision-engine";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -130,6 +131,54 @@ export const metaScorecardsRefresh = inngest.createFunction(
       `[meta-scorecards] account ${ad_account_id} ${result.snapshotDate} rows=${result.rows} ` +
         `coverage=${result.variant_attribution_coverage}`,
       JSON.stringify(result.counts),
+    );
+
+    // Phase 4 — run the decision engine now that scorecards are fresh. Phase 5
+    // folds this into the full daily orchestration (with the reconcile/reversal
+    // stage); firing it here keeps decisions current as soon as metrics land.
+    await step.run("decision-engine", async () => {
+      await inngest.send({
+        name: "meta/decision-engine",
+        data: { workspace_id, ad_account_id, snapshot_date: result.snapshotDate },
+      });
+    });
+
+    return { status: "complete", ...result };
+  },
+);
+
+// ── meta/decision-engine — Phase 4: scorecards + policy → two outputs ──
+// 4a autonomous policy actions (decided here, executed in Phase 6a) + 4b
+// approval-gated recommendations (persisted PAUSED to iteration_recommendations).
+// NO external (Meta) writes occur here. With no active policy, zero autonomous
+// actions are produced (the core safety invariant).
+export const metaDecisionEngine = inngest.createFunction(
+  {
+    id: "meta-decision-engine",
+    retries: 2,
+    concurrency: [{ limit: 1, key: "event.data.ad_account_id" }],
+    triggers: [{ event: "meta/decision-engine" }],
+  },
+  async ({ event, step }) => {
+    const { workspace_id, ad_account_id, snapshot_date } = event.data as {
+      workspace_id: string;
+      ad_account_id: string;
+      snapshot_date?: string;
+    };
+
+    const result = await step.run("decide", async () => {
+      return runDecisionEngine(
+        { workspaceId: workspace_id, adAccountId: ad_account_id },
+        { snapshotDate: snapshot_date },
+      );
+    });
+
+    console.log(
+      `[meta-decision] account ${ad_account_id} ${result.snapshotDate} ` +
+        `policy_active=${result.policy_active} actions=${result.autonomous.actions.length} ` +
+        `escalations=${result.autonomous.escalations.length} ` +
+        `recs=${result.recommendations.generated}/${result.recommendations.persisted}`,
+      JSON.stringify({ counts: result.autonomous.counts, byType: result.recommendations.byType }),
     );
 
     return { status: "complete", ...result };

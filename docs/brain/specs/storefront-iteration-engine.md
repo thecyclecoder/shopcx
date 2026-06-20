@@ -60,19 +60,21 @@ Library `src/lib/meta/scorecards.ts` (`computeScorecards` / `refreshScorecards`)
 - ✅ Per-angle scorecard: attribution aggregated by `angle_id`; benefit resolved `angle_id` → `product_ad_angles.lead_benefit_anchor` → `product_benefit_selections.benefit_name` (filter `role='lead' AND science_confirmed=true`); archived (`is_active=false`) angles skipped
 - ✅ Persist for traceability; every row has a stable `id` so Phase 4/6 recommendations + policy actions cite scorecard rows by id. Idempotent upsert; engine reads this table only, never the raw tables.
 
-## Phase 4 — Decision engine (two outputs, hybrid) ⏳
+## Phase 4 — Decision engine (two outputs, hybrid) ✅
 Goal: turn scorecards + active policy into actions. Two distinct outputs.
+Library `src/lib/meta/decision-engine.ts` (`runDecisionEngine` / `computeAutonomousActions` / `generateRecommendations` / `persistRecommendations`) → table `iteration_recommendations`; Inngest `meta-decision-engine` fires after each `meta-scorecards-refresh`. Migration `20260620140000_iteration_recommendations.sql` (apply: `scripts/apply-iteration-recommendations-migration.ts`). **Zero external (Meta) writes** — 4a decides (Phase 6a executes), 4b persists drafts.
 ### 4a — Autonomous policy actions (no per-action approval, bounded by active policy)
-- ⏳ Deterministic, policy-driven at adset/campaign grain: pause, scale up (≤ step cap), scale down, unpause, replenish thin adset with creative
-- ⏳ Triggers from active `iteration_policies` version: ROAS floor, scale-up step % + cap, scale-down trigger, pause trigger (ROAS + min-spend + window), unpause trigger (sales-after-pause + lookback), min-creatives-per-adset (replacement trigger), per-object cooldown
-- ⏳ Graduated failure response: a scaled adset dropping below floor scales budget back down first; pause only after a second consecutive bad window
-- ⏳ Every action stamps the authorizing policy version id + triggering scorecard snapshot
+- ✅ Deterministic, policy-driven at adset/campaign grain: pause, scale up (≤ step cap), scale down, unpause, replenish thin adset with creative (`computeAutonomousActions`, pure function)
+- ✅ Triggers from active `iteration_policies` version: ROAS floor, scale-up step % + cap, scale-down trigger, pause trigger (ROAS + min-spend + window), unpause trigger (sales-after-pause + lookback), min-creatives-per-adset (replacement trigger), per-object cooldown — typed `IterationPolicy` contract read via `loadActivePolicy` (**no active policy / no Phase 4c table ⇒ zero autonomous actions**)
+- ✅ Graduated failure response: a scaled adset dropping below floor scales budget back down first; pause only after a second consecutive bad window (current + prior window below floor)
+- ✅ Every action stamps the authorizing policy version id + triggering scorecard snapshot id; guardrail hits (budget floor, per-account daily delta ceiling, never-pause list) **escalate** (returned as `escalations`) instead of executing
+- ⏳ NOTE: 4a **decides** only — persisting actions to `iteration_actions` (Phase 4c) + Meta execution (Phase 6a) are out of this phase; actions are returned + logged
 ### 4b — Approval-gated recommendations (new live spend lines)
-- ⏳ LLM layer, three personas (direct-response marketer, offer designer, media buyer) reasons over scorecards + product intelligence
-- ⏳ Action enum: `new_static_adset`, `new_video_adset`, `new_campaign`, `test_benefit_angle`, `new_lander_variant`, `offer_test`
-- ⏳ Each recommendation carries: target object, rationale, source metrics, expected impact, confidence, persona
-- ⏳ Table: `iteration_recommendations` (status: pending | approved | rejected | executed | failed)
-- ⏳ Admin review surface to approve/reject (location finalized in build)
+- ✅ LLM layer ([[../libraries/ai-models]] `OPUS_MODEL`), three personas (direct-response marketer, offer designer, media buyer) reasons over scorecards + product intelligence (lead benefits + active angles)
+- ✅ Action enum: `new_static_adset`, `new_video_adset`, `new_campaign`, `test_benefit_angle`, `new_lander_variant`, `offer_test`
+- ✅ Each recommendation carries: target object, rationale, source metrics, expected impact, confidence, persona, cited scorecard ids
+- ✅ Table: `iteration_recommendations` (status: pending | approved | rejected | executed | failed); idempotent upsert on `(workspace_id, meta_ad_account_id, snapshot_date, action_type, dedup_key)`
+- ✅ Admin review surface to approve/reject: `GET /api/ads/iteration-recommendations` (list) + `POST /api/ads/iteration-recommendations/[id]` (`{ action: "approve" | "reject" }`); approval flips status only (Phase 6b executes)
 
 ## Phase 4c — Policy + action ledger tables ⏳
 Goal: the Growth Director's control surface + the engine's audit/idempotency/reversal substrate.
@@ -135,6 +137,17 @@ Goal: execute decisions; manage live objects autonomously, create new spend line
 - Dylan can review the active policy + a daily list of autonomous actions and pending recommendations, edit/approve a policy version, and see autonomous management plus draft creation happen without anything going live unintentionally.
 
 ## Verification
+
+### Phase 4 — Decision engine (shipped)
+- Apply the migration: `npx tsx scripts/apply-iteration-recommendations-migration.ts` → expect `✓ applied 20260620140000_iteration_recommendations.sql` then `✓ public.iteration_recommendations has N columns`.
+- In the Supabase SQL editor, confirm the table + CHECKs: `select column_name from information_schema.columns where table_name='iteration_recommendations';` → expect the columns on the [[../tables/iteration_recommendations]] page; `select conname from pg_constraint where conrelid='public.iteration_recommendations'::regclass and contype='c';` → CHECKs on `action_type`, `status`, `persona`, `target_object_level`.
+- Trigger a run from the Inngest dev/prod UI: send event `meta/decision-engine` with `{ "workspace_id": "<ws>", "ad_account_id": "<meta_ad_accounts.id uuid>" }` → expect the function `meta-decision-engine` to complete and return `{ status:"complete", snapshotDate, policy_active, policy_version_id, autonomous:{ actions, escalations, counts }, recommendations:{ generated, persisted, byType, byPersona } }`, and a log line `[meta-decision] account <id> <date> policy_active=<bool> actions=<n> escalations=<n> recs=<g>/<p>`.
+- Or run the upstream chain: send `meta/scorecards-refresh` (or wait for the `meta-performance-daily` cron) → expect it to fire `meta/decision-engine` as its final step.
+- **No active policy ⇒ zero autonomous actions (core invariant):** with no `iteration_policies` table/active row (Phase 4c not yet built), the run returns `policy_active:false` and `autonomous.actions` empty, while still generating 4b recommendations. Confirm in the function output.
+- **4b recommendations land:** `select action_type, status, persona, confidence from iteration_recommendations where meta_ad_account_id='<id>' order by created_at desc;` → expect `status='pending'` rows with a valid `action_type` ∈ the enum, a `persona`, and non-empty `rationale`; `source_scorecard_ids` reference real [[../tables/iteration_scorecards_daily]] ids.
+- **Idempotency:** re-send `meta/decision-engine` for the same account + `snapshot_date` → recommendation row count stable (same `(workspace_id, meta_ad_account_id, snapshot_date, action_type, dedup_key)` keys re-upserted, no duplicates).
+- **Review surface:** `GET /api/ads/iteration-recommendations?workspaceId=<ws>&status=pending` as an owner/admin → expect the pending rows as JSON. `POST /api/ads/iteration-recommendations/<id>` with `{ "workspaceId":"<ws>", "action":"approve" }` → expect `{ recommendation:{ status:"approved", reviewed_at } }`; a second POST on the same row → `409 Already approved`. `action:"reject"` → `status='rejected'`. A non-member → `403`.
+- **No external side effects:** confirm no Meta API calls and no `ad_publish_jobs`/`iteration_actions` writes occur during the run — Phase 4 only persists `iteration_recommendations` and logs the 4a decisions (Phase 6 executes).
 
 ### Phase 3 — Metrics rollups / scorecards (shipped)
 - Apply the migration: `npx tsx scripts/apply-iteration-scorecards-migration.ts` → expect `✓ applied 20260619230000_iteration_scorecards_daily.sql` then `✓ public.iteration_scorecards_daily has N columns`.
