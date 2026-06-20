@@ -34,11 +34,11 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
-## Active project — Improve Agent Account-Fix Actions ⏳
+## Active project — Improve Agent Account-Fix Actions 🚧
 
 **Spec:** [[improve-account-fix-actions]] · **Owner:** [[../functions/platform]]
 
-**Why this matters:** the box Improve agent could *diagnose* a typo'd-duplicate-account login mess (Mindy Freeman, ticket a89dcf76) but couldn't *fix* it — no action to re-point a ticket to the right customer or (re)send a magic login link, so a human did both by hand. Adds `reassign_ticket_customer` + `send_magic_link` (+ stretch `link_customer_accounts`) as approval-gated Improve actions (box proposes → approve → Improve route executes), and teaches the escalation-triage solver to catch the duplicate-account pattern. Extends [[box-ticket-improve]].
+**Why this matters:** the box Improve agent could *diagnose* a typo'd-duplicate-account login mess (Mindy Freeman, ticket a89dcf76) but couldn't *fix* it — no action to re-point a ticket to the right customer or (re)send a magic login link, so a human did both by hand. **P1 shipped ✅ (#129, 2026-06-20):** `reassign_ticket_customer` + `send_magic_link` as approval-gated Improve actions (box proposes → approve → Improve route executes). **P2 ⏳:** `link_customer_accounts` (founder-gated dupe-merge) + teaching the escalation-triage solver to auto-catch the duplicate-account pattern. Extends [[box-ticket-improve]].
 
 ## Active project — Improve Queue ⏳
 
