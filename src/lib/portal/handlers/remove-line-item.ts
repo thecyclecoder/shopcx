@@ -54,16 +54,34 @@ export const removeLineItem: RouteHandler = async ({ auth, route, req }) => {
   // Execute removal. Internal subs remove by variantId (internalSubRemoveItem
   // keys on it — passing only a lineGid would fall through to the Appstle path,
   // which has no contract for a migrated sub). Appstle subs prefer the precise
-  // lineGid. Fall back to the matched line's variant_id when the client omitted it.
-  const internalVariantId = variantId || (target?.variant_id ? String(target.variant_id) : null);
-  if (resolved.is_internal && !internalVariantId) {
+  // lineGid — but ONLY when the sent lineId is a *real* Appstle SubscriptionLine
+  // id. transform-subscription sets a line's portal `id` to `line_id || variant_id`,
+  // so an Appstle line that surfaced without a real line_id arrives here with
+  // id === variant_id; trusting that as a lineGid makes Appstle 400 with
+  // "Couldn't find LineId=gid://shopify/SubscriptionLine/<variantId>" (unrecoverable).
+  // When lineId doesn't match a real line_id on the resolved items, fall back to
+  // variantId resolution — appstleRemoveLineItem re-fetches the live contract and
+  // matches by variant id (src/lib/subscription-items.ts).
+  const effectiveVariantId = variantId || (target?.variant_id ? String(target.variant_id) : null);
+  if (resolved.is_internal && !effectiveVariantId) {
     return jsonErr({ error: "missing_variantId_for_internal_remove" }, 400);
   }
-  const removeArg = resolved.is_internal
-    ? { variantId: internalVariantId! }
-    : lineId ? { lineGid: lineId } : { variantId: variantId! };
+  const isRealLineGid = !!lineId && items.some(i =>
+    i.line_id && (String(i.line_id) === lineId || String(i.line_id) === rawLineId),
+  );
+  let removeArg: { variantId: string } | { lineGid: string };
+  if (resolved.is_internal) {
+    removeArg = { variantId: effectiveVariantId! };
+  } else if (isRealLineGid) {
+    removeArg = { lineGid: lineId! };
+  } else if (effectiveVariantId) {
+    removeArg = { variantId: effectiveVariantId };
+  } else {
+    // No real Appstle line id and no variant to resolve against — nothing to target.
+    return jsonErr({ error: "missing_variantId_for_remove" }, 400);
+  }
 
-  let result: { success: boolean; error?: string };
+  let result: { success: boolean; error?: string; alreadyAbsent?: boolean };
   try {
     result = await subRemoveItem(auth.workspaceId, contractId, removeArg);
   } catch (e) {
@@ -82,11 +100,13 @@ export const removeLineItem: RouteHandler = async ({ auth, route, req }) => {
     await logPortalAction({
       workspaceId: auth.workspaceId, customerId: customer.id,
       eventType: "portal.items.removed",
-      summary: "Customer removed item from subscription via portal",
-      properties: { shopify_contract_id: contractId, line_id: lineId, variant_id: variantId },
+      summary: result.alreadyAbsent
+        ? "Customer removed an item already absent from the subscription (idempotent)"
+        : "Customer removed item from subscription via portal",
+      properties: { shopify_contract_id: contractId, line_id: lineId, variant_id: variantId, already_absent: !!result.alreadyAbsent },
       createNote: true,
     });
   }
 
-  return jsonOk({ ok: true, route, contractId });
+  return jsonOk({ ok: true, route, contractId, alreadyRemoved: !!result.alreadyAbsent });
 };
