@@ -17,6 +17,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import sharp from "sharp";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 import { DriveClient, resolveProductShots, HERO_EXAMPLE_FOLDER_ID, type DriveFile } from "@/lib/google-drive";
 import { publishProductContent } from "@/lib/product-intelligence/publish";
@@ -24,6 +25,16 @@ import { publishProductContent } from "@/lib/product-intelligence/publish";
 type Admin = ReturnType<typeof createAdminClient>;
 
 export const PRODUCT_MEDIA_BUCKET = "product-media";
+
+// Hero gallery dimensions — landscape 1800×1344 (the Amazing Coffee hero size).
+// Square 1024×1024 heroes get cut off in the storefront gallery, so heroes are
+// rendered at this aspect (Nano Banana Pro `4:3`) and padded to exact size on
+// white. Ingredient thumbnails match Amazing Coffee at 400×400. See the
+// "Image refinements (round 2)" section of box-product-seeding.md.
+export const HERO_WIDTH = 1800;
+export const HERO_HEIGHT = 1344;
+export const HERO_ASPECT: NanoBananaAspect = "4:3"; // 1800/1344 ≈ 1.339, closest accepted ratio
+export const INGREDIENT_SIZE = 400;
 
 // Handles whose heroes are already perfect + locked — the box skips image gen
 // entirely (box-product-seeding §6). Non-image intelligence may still be seeded.
@@ -457,6 +468,26 @@ async function uploadImage(a: Admin, path: string, buffer: Buffer, contentType: 
 }
 
 /**
+ * Resize an image to EXACTLY width×height, centered on a white background
+ * (`fit: contain` → letterbox/pad, no crop). Used to force heroes to the exact
+ * 1800×1344 gallery size even when Nano Banana Pro returns a near-aspect, and to
+ * normalize PDP ingredient images to 400×400. Returns the encoded bytes + mime.
+ */
+async function fitOnWhite(
+  buffer: Buffer,
+  width: number,
+  height: number,
+  mimeType: string,
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const isJpeg = /jpe?g/i.test(mimeType);
+  let pipe = sharp(buffer)
+    .resize(width, height, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
+    .flatten({ background: { r: 255, g: 255, b: 255 } });
+  pipe = isJpeg ? pipe.jpeg({ quality: 90 }) : pipe.png();
+  return { buffer: await pipe.toBuffer(), mimeType: isJpeg ? "image/jpeg" : "image/png" };
+}
+
+/**
  * Resolve the isolated front-facing packshot from the workspace Drive (SA key)
  * plus the `Hero Example` reference set, upload them to storage, and return the
  * URLs to feed Nano Banana Pro. The skill chose `variantKeywords` (one variant).
@@ -499,12 +530,24 @@ export async function generateImage(
   imageUrls: string[],
   slot: string,
   aspectRatio: NanoBananaAspect = "1:1",
+  width?: number,
+  height?: number,
 ): Promise<{ localPath: string; mimeType: string }> {
   const gen = await generateNanoBananaProCombine({ workspaceId: workspace_id, prompt, imageUrls, aspectRatio });
-  const ext = gen.mimeType.includes("jpeg") ? "jpg" : "png";
+  let buffer = gen.buffer;
+  let mimeType = gen.mimeType;
+  // Force the exact gallery size on white when the caller asks (heroes →
+  // 1800×1344). Pads a near-aspect render rather than letting the storefront
+  // gallery crop a square.
+  if (width && height) {
+    const fitted = await fitOnWhite(buffer, width, height, mimeType);
+    buffer = fitted.buffer;
+    mimeType = fitted.mimeType;
+  }
+  const ext = mimeType.includes("jpeg") ? "jpg" : "png";
   const localPath = join(tmpdir(), `seed-${product_id}-${slot}-${Date.now()}.${ext}`);
-  writeFileSync(localPath, gen.buffer);
-  return { localPath, mimeType: gen.mimeType };
+  writeFileSync(localPath, buffer);
+  return { localPath, mimeType };
 }
 
 /**
@@ -526,6 +569,7 @@ export async function saveMedia(
   const ext = mimeType.includes("jpeg") ? "jpg" : "png";
   const storagePath = `${product_id}/${slot}.${ext}`;
   const url = await uploadImage(a, storagePath, buffer, mimeType);
+  const meta = await sharp(buffer).metadata().catch(() => null);
   await a.from("product_media").upsert(
     {
       workspace_id,
@@ -536,12 +580,165 @@ export async function saveMedia(
       storage_path: storagePath,
       alt_text: altText,
       mime_type: mimeType,
+      width: meta?.width ?? null,
+      height: meta?.height ?? null,
+      file_size: buffer.length,
       uploaded_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     },
     { onConflict: "workspace_id,product_id,slot,display_order" },
   );
   return { url };
+}
+
+// ── 6b. Per-ingredient images FROM the Shopify PDP CDN (round 2) ──────────────
+//
+// The PDP's ingredient section serves CDN images named by ingredient
+// (Ashwagandha_1.jpg, Beet_Root.jpg, Chlorella.jpg, Grape_Seed_Extract.jpg,
+// D3_1.jpg). We pull the REAL images (NOT Gemini), match each to a
+// product_ingredient by name, normalize to 400×400, and write product_media
+// slot=ingredient_{snake_name}. Round 1 left these blank → empty ingredient cards.
+
+/** Ingredient → `ingredient_{snake_name}` storage slot. */
+export function ingredientSlot(name: string): string {
+  return `ingredient_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
+}
+
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** Raw PDP HTML (NOT tag-stripped) so we can pull CDN image URLs from img/srcset. */
+async function fetchPdpHtml(handle: string): Promise<string | null> {
+  const res = await fetch(`${STOREFRONT_BASE}/products/${handle}`, {
+    headers: { "User-Agent": "ShopCX-box/1.0 (+product-seeding)" },
+  });
+  if (!res.ok) return null;
+  return res.text();
+}
+
+/** Strip the Shopify size transform (`_400x400`, `_600x`, `@2x`) + query → master file. */
+function cleanShopifyUrl(raw: string): string {
+  let u = raw.startsWith("//") ? `https:${raw}` : raw;
+  u = u.split("?")[0];
+  u = u.replace(/_\d+x\d*(@\dx)?(\.(?:jpe?g|png|webp))$/i, "$2");
+  return u;
+}
+
+/** The ingredient key a filename implies: drop ext + trailing `_1` index, normalize. */
+function fileIngredientKey(filename: string): string {
+  const noExt = filename.replace(/\.(?:jpe?g|png|webp)$/i, "");
+  const tokens = noExt.split(/[_\-\s]+/).filter((t) => t && !/^\d+$/.test(t)); // drop "_1"
+  return norm(tokens.join(""));
+}
+
+export type PdpImage = { cleanUrl: string; filename: string; key: string };
+
+/** Every distinct Shopify-CDN image on the PDP, keyed by its ingredient-name guess. */
+export function extractPdpImages(html: string): PdpImage[] {
+  const re = /(?:https:)?\/\/cdn\.shopify\.com\/[^\s"'\\)]+?\.(?:jpe?g|png|webp)(?:\?[^\s"'\\)]*)?/gi;
+  const seen = new Set<string>();
+  const out: PdpImage[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const cleanUrl = cleanShopifyUrl(m[0]);
+    if (seen.has(cleanUrl)) continue;
+    seen.add(cleanUrl);
+    const filename = decodeURIComponent(cleanUrl.split("/").pop() || "");
+    out.push({ cleanUrl, filename, key: fileIngredientKey(filename) });
+  }
+  return out;
+}
+
+/** A PDP image whose filename matches an ingredient name (exact, else containment ≥4 chars). */
+function matchIngredientImage(ingredientName: string, images: PdpImage[]): PdpImage | null {
+  const target = norm(ingredientName);
+  if (target.length < 2) return null;
+  const cands = images.filter((im) => {
+    if (im.key.length < 2) return false;
+    if (im.key === target) return true;
+    const [short, long] = im.key.length <= target.length ? [im.key, target] : [target, im.key];
+    if (short.length >= 4 && long.includes(short)) return true;
+    // Short codes: "D3" ↔ "Vitamin D3", "B12" ↔ "Vitamin B12", "Theanine" ↔ "L-Theanine".
+    return short.length >= 2 && long.endsWith(short);
+  });
+  if (cands.length === 0) return null;
+  // Prefer an exact key match; then the shortest filename (the clean `Name_1.jpg`).
+  cands.sort((a, b) => {
+    const ax = a.key === target ? 1 : 0;
+    const bx = b.key === target ? 1 : 0;
+    if (ax !== bx) return bx - ax;
+    return a.filename.length - b.filename.length;
+  });
+  return cands[0];
+}
+
+/**
+ * Pull per-ingredient images from the live PDP CDN, match by name, and write
+ * `product_media` slot=`ingredient_{snake_name}` at 400×400. Deterministic — NO
+ * Gemini. Idempotent (upserts the slot). Returns matched/unmatched per ingredient.
+ */
+export async function pullIngredientImages(
+  workspace_id: string,
+  product_id: string,
+  handle: string,
+): Promise<{
+  matched: Array<{ ingredient: string; slot: string; url: string; source: string }>;
+  unmatched: string[];
+  pdp_images: number;
+}> {
+  const a = admin();
+  const ingredients = await getIngredients(workspace_id, product_id);
+  if (ingredients.length === 0) return { matched: [], unmatched: [], pdp_images: 0 };
+
+  const html = await fetchPdpHtml(handle);
+  if (!html) throw new Error("pdp_fetch_failed");
+  const images = extractPdpImages(html);
+
+  const matched: Array<{ ingredient: string; slot: string; url: string; source: string }> = [];
+  const unmatched: string[] = [];
+
+  for (const ing of ingredients) {
+    const name = (ing.name as string) || "";
+    const pick = matchIngredientImage(name, images);
+    if (!pick) {
+      unmatched.push(name);
+      continue;
+    }
+    try {
+      const dl = await fetch(pick.cleanUrl, { headers: { "User-Agent": "ShopCX-box/1.0 (+product-seeding)" } });
+      if (!dl.ok) {
+        unmatched.push(name);
+        continue;
+      }
+      const raw = Buffer.from(await dl.arrayBuffer());
+      const fitted = await fitOnWhite(raw, INGREDIENT_SIZE, INGREDIENT_SIZE, dl.headers.get("content-type") || "image/jpeg");
+      const slot = ingredientSlot(name);
+      const ext = fitted.mimeType.includes("jpeg") ? "jpg" : "png";
+      const storagePath = `${product_id}/${slot}.${ext}`;
+      const url = await uploadImage(a, storagePath, fitted.buffer, fitted.mimeType);
+      await a.from("product_media").upsert(
+        {
+          workspace_id,
+          product_id,
+          slot,
+          display_order: 0,
+          url,
+          storage_path: storagePath,
+          alt_text: name,
+          mime_type: fitted.mimeType,
+          width: INGREDIENT_SIZE,
+          height: INGREDIENT_SIZE,
+          file_size: fitted.buffer.length,
+          uploaded_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "workspace_id,product_id,slot,display_order" },
+      );
+      matched.push({ ingredient: name, slot, url, source: pick.filename });
+    } catch {
+      unmatched.push(name);
+    }
+  }
+  return { matched, unmatched, pdp_images: images.length };
 }
 
 // ── 8. Publish ────────────────────────────────────────────────────────────────

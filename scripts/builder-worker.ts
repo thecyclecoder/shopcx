@@ -802,7 +802,7 @@ async function runFoldJob(job: Job) {
 // {product_id, workspace_id?, angle_override?}. See docs/brain/specs/box-product-seeding.md.
 async function runProductSeedJob(job: Job) {
   const tag = `[seed:${job.id.slice(0, 8)}]`;
-  let params: { product_id?: string; angle_override?: string | null } = {};
+  let params: { product_id?: string; angle_override?: string | null; mode?: string } = {};
   try {
     params = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -814,17 +814,30 @@ async function runProductSeedJob(job: Job) {
     return;
   }
   const isResume = !!job.claude_session_id;
-  console.log(`${tag} ${isResume ? "resuming" : "seeding"} product ${productId} on Max (job ${job.id})`);
+  // media-refresh: re-run ONLY the image stages (hero + lifestyle + ingredient
+  // images) on an already-published product, skipping web research/reviews/content.
+  const isMediaRefresh = params.mode === "media-refresh";
+  console.log(
+    `${tag} ${isResume ? "resuming" : isMediaRefresh ? "media-refreshing" : "seeding"} product ${productId} on Max (job ${job.id})`,
+  );
 
   const prompt = isResume
     ? `Resuming. Continue the product-seed for product_id=${productId} (workspace_id=${job.workspace_id}) and finish. Same rules and the same final JSON output protocol as before.`
-    : [
-        `Use the seed-product skill to drive product_id=${productId} (workspace_id=${job.workspace_id}) from intelligence_status none → published (cwd is the repo root).`,
-        `Params: { "product_id": "${productId}", "workspace_id": "${job.workspace_id}"${params.angle_override ? `, "angle_override": ${JSON.stringify(params.angle_override)}` : ""} }`,
-        `You are on Max with web search enabled and NO ANTHROPIC_API_KEY — do the ingredient/benefit research by SEARCHING THE WEB (with real citations), and reach the DB / Drive / Gemini ONLY through scripts/seed-product-tools.ts. Never call the Anthropic API; never spawn a nested claude.`,
-        `Self-QA before publishing; if QA fails or required data is missing, HOLD (do NOT publish) and surface why. Approved heroes (Amazing Coffee / pods / Creamer) are never overwritten — skip their image gen.`,
-        `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_attention","summary":"…"}.`,
-      ].join("\n");
+    : isMediaRefresh
+      ? [
+          `Use the seed-product skill in MEDIA-REFRESH mode for product_id=${productId} (workspace_id=${job.workspace_id}) (cwd is the repo root).`,
+          `Params: { "product_id": "${productId}", "workspace_id": "${job.workspace_id}", "mode": "media-refresh" }`,
+          `Re-run ONLY the image stages (step 6 hero + lifestyle + step 6b ingredient_{name} images). DO NOT re-do web research, reviews, benefits, or content, and do NOT change intelligence_status. Reach the DB / Drive / Gemini ONLY through scripts/seed-product-tools.ts. You are on Max — never call the Anthropic API; never spawn a nested claude.`,
+          `Honor the locked-hero guard: never regenerate amazing-coffee / amazing-coffee-pods / amazing-creamer heroes (still allowed to add their ingredient_{name} images). Vision-QA any hero you generate.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_attention","summary":"…"}.`,
+        ].join("\n")
+      : [
+          `Use the seed-product skill to drive product_id=${productId} (workspace_id=${job.workspace_id}) from intelligence_status none → published (cwd is the repo root).`,
+          `Params: { "product_id": "${productId}", "workspace_id": "${job.workspace_id}"${params.angle_override ? `, "angle_override": ${JSON.stringify(params.angle_override)}` : ""} }`,
+          `You are on Max with web search enabled and NO ANTHROPIC_API_KEY — do the ingredient/benefit research by SEARCHING THE WEB (with real citations), and reach the DB / Drive / Gemini ONLY through scripts/seed-product-tools.ts. Never call the Anthropic API; never spawn a nested claude.`,
+          `Self-QA before publishing; if QA fails or required data is missing, HOLD (do NOT publish) and surface why. Approved heroes (Amazing Coffee / pods / Creamer) are never overwritten — skip their image gen.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_attention","summary":"…"}.`,
+        ].join("\n");
 
   try {
     const { session, resultText, isError, raw } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR);

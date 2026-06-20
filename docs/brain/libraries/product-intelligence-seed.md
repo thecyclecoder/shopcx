@@ -46,9 +46,21 @@ publish. The skill does the thinking; these do the I/O.
 | `saveContent` / `getContent` | 5 | version + persist authored content (incl. `fda_disclaimer`) → `product_page_content` |
 | `heroStatus` | 6 | `{locked, exists}` — `LOCKED_HERO_HANDLES` (amazing-coffee, -pods, -creamer) + already-has-hero ⇒ skip |
 | `resolvePackshot` | 6 | [[google-drive]] front-facing packshot + `Hero Example` refs → storage URLs |
-| `generateImage` | 6 | [[gemini]] `generateNanoBananaProCombine` → a **local file** the skill Reads to vision-QA |
-| `saveMedia` | 6 | upload a vision-approved image → `product_media` |
+| `generateImage` | 6 | [[gemini]] `generateNanoBananaProCombine` → a **local file** the skill Reads to vision-QA; pads to `width`×`height` on white when given (heroes → `HERO_WIDTH`×`HERO_HEIGHT` = 1800×1344, `HERO_ASPECT` `4:3`) |
+| `saveMedia` | 6 | upload a vision-approved image → `product_media` (records `width`/`height`/`file_size` via sharp) |
+| `pullIngredientImages` | 6b | pull REAL per-ingredient PDP CDN images (Ashwagandha_1.jpg…), match by name, normalize to `INGREDIENT_SIZE` 400×400 → `product_media` slot=`ingredient_{snake}`. NOT Gemini. Idempotent; `{matched, unmatched, pdp_images}` |
 | `publish` | 8 | delegates to `publish.ts` |
+
+**Image refinements (round 2):** heroes render **landscape 1800×1344** (`HERO_ASPECT`
+`4:3` to Nano Banana Pro, then `fitOnWhite` pads a near-aspect render to exact
+size — square heroes were cut off in the storefront gallery). Per-ingredient
+images come **from the PDP**, not Gemini — `pullIngredientImages` extracts
+Shopify-CDN URLs (`extractPdpImages`), matches filenames to ingredient names, and
+writes `product_media` slot=`ingredient_{snake}` at 400×400. **`media-refresh`
+mode** (`agent_jobs` instructions `{product_id, mode:"media-refresh"}`) re-runs
+ONLY the image stages (step 6 + 6b) on a published product — `runProductSeedJob`
+builds a media-refresh prompt; the skill skips research/reviews/content and never
+touches `intelligence_status` (still honoring the locked-hero guard).
 
 ## `scripts/seed-product-tools.ts` — the tool CLI
 

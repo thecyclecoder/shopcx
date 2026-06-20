@@ -119,10 +119,23 @@ async function main() {
     }
 
     case "generate-image": {
-      // payload: { prompt, imageUrls:[], slot, aspectRatio? }
-      const p = await json<{ prompt: string; imageUrls: string[]; slot: string; aspectRatio?: NanoBananaAspect }>();
-      return out(await T.generateImage(ws, pid, p.prompt, p.imageUrls || [], p.slot || "hero", p.aspectRatio));
+      // payload: { prompt, imageUrls:[], slot, aspectRatio?, width?, height? }
+      // For the hero pass aspectRatio "4:3" + width 1800 + height 1344 (the
+      // landscape gallery size); the tool pads a near-aspect render to exact size.
+      const p = await json<{
+        prompt: string;
+        imageUrls: string[];
+        slot: string;
+        aspectRatio?: NanoBananaAspect;
+        width?: number;
+        height?: number;
+      }>();
+      return out(await T.generateImage(ws, pid, p.prompt, p.imageUrls || [], p.slot || "hero", p.aspectRatio, p.width, p.height));
     }
+
+    case "pull-ingredient-images":
+      // pull-ingredient-images <ws> <pid> <handle> — real PDP CDN images → product_media slot=ingredient_{name}
+      return out(await T.pullIngredientImages(ws, pid, rest[2]));
 
     case "save-media": {
       // payload: { slot, localPath, mimeType, altText }
