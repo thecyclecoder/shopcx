@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Base Price Never Above MSRP ⏳
+
+**Spec:** [[base-price-never-above-msrp]] · **Owner:** [[../functions/retention]]
+
+**Why this matters:** the simple root fix for the "baseline over-counted" class (Lisa Baker `fdc1d5e3`). **Base price** = the per-unit price *before* the 25% S&S discount + quantity breaks (`price_override_cents`); it must **never exceed MSRP**. `inferAppstleLineBase` sometimes infers a base above MSRP → the engine prices too high → `pricing_preserved` fails. Fix: enforce base ≤ MSRP on migration write + clamp/reject in `price_reconcile` + drop stranded over-MSRP overrides (Lisa → engine derives the correct $110.34 from an MSRP base). **Queue after migration-shipping-protection + migration-fix-remove-line merge.** Extends [[migration-fix-agent]].
+
 ## Active project — Migration-Fix: Remove a Line Item ⏳
 
 **Spec:** [[migration-fix-remove-line]] · **Owner:** [[../functions/retention]]
