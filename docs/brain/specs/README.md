@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Spec-Test Classification (no phantom regressions) ⏳
+
+**Spec:** [[spec-test-classification]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** the spec-test agent marked a check `fail` (→ phantom "Regression") when the feature was correct — the check just needed fault-injection it can't do read-only. Rule: `fail` requires **positive evidence of breakage**; checks needing forced failures / mutations / visual judgment are `needs_human`/`inconclusive`, never `fail`. Regressions + the `issues` verdict are driven only by evidence-backed fails. Extends [[spec-test-agent]].
+
 ## Active project — Migration-Fix Plain Question + Inline Answer ⏳
 
 **Spec:** [[migration-fix-human-input]] · **Owner:** [[../functions/retention]]
