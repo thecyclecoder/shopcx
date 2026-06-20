@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Migration-Fix Plain Question + Inline Answer ⏳
+
+**Spec:** [[migration-fix-human-input]] · **Owner:** [[../functions/retention]]
+
+**Why this matters:** when the migration-fix agent can't auto-fix, it dumps technical jargon and offers no way to respond. This makes it ask **one plain, actionable question** (`needs_input`) and lets the owner **type an answer inline** on `/dashboard/migrations` (reuses `/api/roadmap/answer` → resume → Approve & fix). Out-of-system cases get a one-line instruction. Extends [[migration-fix-agent]].
+
 ## Active project — Advertorial Attribution Fix ⏳
 
 **Spec:** [[advertorial-attribution-fix]] · **Owner:** [[../functions/cmo]]
