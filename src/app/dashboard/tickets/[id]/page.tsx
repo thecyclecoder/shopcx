@@ -260,13 +260,84 @@ export default function TicketDetailPage() {
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [showTagDropdown, setShowTagDropdown] = useState(false);
   // Improve tab state
-  const [improveMessages, setImproveMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  // Box-hosted Improve agent (box-ticket-improve): the ticket-bound, resumable Max session.
+  type ImprovePlanAction = { id: string; kind: string; label: string; detail?: string; status: string; result?: string };
+  type ImprovePlan = { summary: string; actions: ImprovePlanAction[] };
+  type ImproveSession = {
+    id: string;
+    messages: { role: "user" | "assistant"; content: string }[];
+    turn_status: "idle" | "thinking" | "error" | "awaiting_approval";
+    pending_plan: ImprovePlan | null;
+    last_error: string | null;
+    status: string;
+  };
+  const [improveSession, setImproveSession] = useState<ImproveSession | null>(null);
   const [improveInput, setImproveInput] = useState("");
-  const [improveLoading, setImproveLoading] = useState(false);
-  const [proposedPrompt, setProposedPrompt] = useState<{ title: string; content: string; category: string } | null>(null);
-  const [promptSaved, setPromptSaved] = useState(false);
-  const [proposedActions, setProposedActions] = useState<{ type: string; [key: string]: unknown }[] | null>(null);
-  const [actionsExecuted, setActionsExecuted] = useState(false);
+  const [improveSending, setImproveSending] = useState(false);
+  // Per-action include toggles for the approval card (default: every action approved → one-tap "do everything").
+  const [improveExcluded, setImproveExcluded] = useState<Record<string, boolean>>({});
+
+  // Load the ticket's Improve session on entering the tab, then self-reschedule: fast-poll while a box
+  // turn is thinking, slow-poll otherwise. The server session is the source of truth (the route appends
+  // the user message + sets turn_status), so we never need optimistic local message state.
+  useEffect(() => {
+    if (activeTab !== "improve") return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/tickets/${id}/improve`);
+        if (res.ok) {
+          const d = await res.json();
+          if (!alive) return;
+          setImproveSession(d.session ?? null);
+          timer = setTimeout(tick, d.session?.turn_status === "thinking" ? 3000 : 15000);
+          return;
+        }
+      } catch { /* transient — retry */ }
+      if (alive) timer = setTimeout(tick, 15000);
+    };
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [activeTab, id]);
+
+  const sendImprove = async () => {
+    const msg = improveInput.trim();
+    if (!msg || improveSending || improveSession?.turn_status === "thinking") return;
+    setImproveInput("");
+    setImproveSending(true);
+    try {
+      const res = await fetch(`/api/tickets/${id}/improve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "send", message: msg }),
+      });
+      if (res.ok) { const d = await res.json(); setImproveSession(d.session); }
+    } catch { /* the poll will recover */ } finally { setImproveSending(false); }
+  };
+
+  // Approve (run the included actions) or Decline (record all declined, clear the plan).
+  const executeImprove = async (mode: "approve" | "decline") => {
+    const plan = improveSession?.pending_plan;
+    if (!plan || improveSending) return;
+    setImproveSending(true);
+    const decisions: Record<string, "approve" | "decline"> = {};
+    for (const a of plan.actions) decisions[a.id] = mode === "decline" || improveExcluded[a.id] ? "decline" : "approve";
+    try {
+      const res = await fetch(`/api/tickets/${id}/improve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "execute", decisions }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setImproveSession(d.session);
+        setImproveExcluded({});
+        // Pull the freshly-posted internal/external messages into the thread.
+        fetch(`/api/tickets/${id}`).then((r) => r.json()).then((dd) => { if (dd.messages) setMessages(dd.messages); }).catch(() => {});
+      }
+    } catch { /* ignore */ } finally { setImproveSending(false); }
+  };
   const [availableWorkflows, setAvailableWorkflows] = useState<{ id: string; name: string; template: string; trigger_tag: string }[]>([]);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
@@ -1146,7 +1217,7 @@ export default function TicketDetailPage() {
             >
               History
             </button>
-            {["owner", "admin"].includes(workspace.role) && (
+            {["owner", "admin", "cs_manager"].includes(workspace.role) && (
               <button
                 onClick={() => setActiveTab("improve")}
                 className={`pb-2 text-sm font-medium transition-colors ${
@@ -1559,22 +1630,24 @@ export default function TicketDetailPage() {
             </div>
           )}
 
-          {/* Improve tab */}
-          {activeTab === "improve" && ["owner", "admin"].includes(workspace.role) && (
+          {/* Improve tab — box-hosted, ticket-bound Max session (box-ticket-improve) */}
+          {activeTab === "improve" && ["owner", "admin", "cs_manager"].includes(workspace.role) && (
             <div className="mt-4 flex flex-col" style={{ minHeight: 300 }}>
-              {/* Chat messages */}
+              {/* Transcript */}
               <div className="flex-1 space-y-3 overflow-y-auto" style={{ maxHeight: 400 }}>
-                {improveMessages.length === 0 && (
-                  <p className="py-8 text-center text-sm text-zinc-400">
-                    Chat with Sonnet about this ticket. You can:
+                {(!improveSession || improveSession.messages.length === 0) && (
+                  <div className="py-8 text-center text-sm text-zinc-400">
+                    Your CX co-pilot on Max — it already has this ticket, the customer, the brain, and the code loaded. You can:
                     <ul className="mt-2 space-y-1 text-left text-xs">
-                      <li>Improve future responses — "You should have paused instead of cancelling"</li>
-                      <li>Fix this ticket — "Refund the customer $30 and send them an apology"</li>
-                      <li>Investigate — "Did we double charge this customer?"</li>
+                      <li>Fix this ticket — &quot;Refund the last order, tell them it&apos;s done, and close it&quot;</li>
+                      <li>Calibrate — &quot;Tighten the rule that caused this&quot;</li>
+                      <li>Investigate — &quot;Did we double charge this customer?&quot;</li>
+                      <li>Spec a code fix — &quot;This needs a code change&quot; → a ticket-sourced spec on Roadmap</li>
                     </ul>
-                  </p>
+                    <span className="mt-2 block text-[11px] text-zinc-400">Replies run on the box and take a minute.</span>
+                  </div>
                 )}
-                {improveMessages.map((m, i) => (
+                {(improveSession?.messages || []).map((m, i) => (
                   <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
                     <div className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
                       m.role === "user"
@@ -1585,143 +1658,63 @@ export default function TicketDetailPage() {
                     </div>
                   </div>
                 ))}
-                {improveLoading && (
+                {improveSession?.turn_status === "thinking" && (
                   <div className="flex justify-start">
                     <div className="rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-800">
-                      Thinking...
+                      Thinking on the box… (takes a minute)
+                    </div>
+                  </div>
+                )}
+                {improveSession?.turn_status === "error" && (
+                  <div className="flex justify-start">
+                    <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                      {improveSession.last_error || "The box turn failed."} Send your message again to retry.
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Proposed prompt card */}
-              {proposedPrompt && !promptSaved && (
-                <div className="mt-3 rounded-lg border-2 border-indigo-400 bg-white p-3 dark:bg-zinc-900">
-                  <p className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Proposed Prompt Rule</p>
-                  <input
-                    type="text"
-                    value={proposedPrompt.title}
-                    onChange={(e) => setProposedPrompt({ ...proposedPrompt, title: e.target.value })}
-                    className="mt-2 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                    placeholder="Rule title"
-                  />
-                  <textarea
-                    value={proposedPrompt.content}
-                    onChange={(e) => setProposedPrompt({ ...proposedPrompt, content: e.target.value })}
-                    rows={3}
-                    className="mt-2 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                    placeholder="Rule content"
-                  />
-                  <div className="mt-2 flex items-center gap-2">
-                    <select
-                      value={proposedPrompt.category}
-                      onChange={(e) => setProposedPrompt({ ...proposedPrompt, category: e.target.value })}
-                      className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                    >
-                      <option value="rule">Rule</option>
-                      <option value="approach">Approach</option>
-                      <option value="knowledge">Knowledge</option>
-                      <option value="tool_hint">Tool Hint</option>
-                    </select>
-                    <button
-                      onClick={async () => {
-                        try {
-                          const res = await fetch(`/api/workspaces/${workspace.id}/sonnet-prompts`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              category: proposedPrompt.category,
-                              title: proposedPrompt.title,
-                              content: proposedPrompt.content,
-                            }),
-                          });
-                          if (res.ok) {
-                            setPromptSaved(true);
-                          }
-                        } catch {
-                          // ignore
-                        }
-                      }}
-                      className="rounded bg-indigo-600 px-3 py-1 text-sm font-medium text-white hover:bg-indigo-500"
-                    >
-                      Save to AI Prompts
-                    </button>
-                  </div>
-                </div>
-              )}
-              {promptSaved && (
-                <div className="mt-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-                  Prompt rule saved. It will apply to future AI responses.
-                </div>
-              )}
-
-              {/* Proposed actions card */}
-              {proposedActions && !actionsExecuted && (
+              {/* Approval card — the box proposed an action plan */}
+              {improveSession?.turn_status === "awaiting_approval" && improveSession.pending_plan && (
                 <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950">
-                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">Proposed Actions</p>
-                  <ul className="mt-2 space-y-1">
-                    {proposedActions.map((a, i) => (
-                      <li key={i} className="text-sm text-amber-700 dark:text-amber-300">
-                        {a.type === "partial_refund" && `Refund $${(((a.amount_cents as number) || 0) / 100).toFixed(2)} on order ${a.shopify_order_id}`}
-                        {a.type === "send_message" && `Send message: "${String(a.body || "").slice(0, 80)}..."`}
-                        {a.type === "reactivate" && `Reactivate subscription ${a.contract_id}`}
-                        {a.type === "close_ticket" && "Close this ticket"}
-                        {a.type === "reopen_ticket" && "Reopen this ticket"}
-                        {a.type === "skip_next_order" && `Skip next order on ${a.contract_id}`}
-                        {a.type === "crisis_pause" && `Pause subscription (crisis) ${a.contract_id}`}
-                        {a.type === "apply_coupon" && `Apply coupon ${a.code} to ${a.contract_id}`}
-                        {a.type === "update_line_item_price" && `Update base price to $${(((a.base_price_cents as number) || 0) / 100).toFixed(2)}`}
-                        {!["partial_refund", "send_message", "reactivate", "close_ticket", "reopen_ticket", "skip_next_order", "crisis_pause", "apply_coupon", "update_line_item_price"].includes(a.type) && JSON.stringify(a)}
+                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">Proposed plan</p>
+                  {improveSession.pending_plan.summary && (
+                    <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-300">{improveSession.pending_plan.summary}</p>
+                  )}
+                  <ul className="mt-2 space-y-1.5">
+                    {improveSession.pending_plan.actions.map((a) => (
+                      <li key={a.id} className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200">
+                        <input
+                          type="checkbox"
+                          checked={!improveExcluded[a.id]}
+                          onChange={(e) => setImproveExcluded((prev) => ({ ...prev, [a.id]: !e.target.checked }))}
+                          className="mt-0.5"
+                        />
+                        <span>
+                          <span className="rounded bg-amber-200 px-1 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-900 dark:bg-amber-800 dark:text-amber-100">{a.kind.replace(/_/g, " ")}</span>{" "}
+                          {a.label}
+                          {a.detail && <span className="block text-xs text-amber-600 dark:text-amber-400">{a.detail}</span>}
+                        </span>
                       </li>
                     ))}
                   </ul>
-                  <div className="mt-3 flex gap-2">
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
                     <button
-                      onClick={async () => {
-                        setImproveLoading(true);
-                        setImproveMessages(prev => [...prev, { role: "user", content: "Yes, execute those actions." }]);
-                        try {
-                          // Fast-path: send the previously-proposed actions
-                          // directly. Skips Opus to avoid losing context.
-                          const res = await fetch(`/api/tickets/${id}/improve`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              message: "Yes, execute those actions.",
-                              execute_actions: proposedActions,
-                            }),
-                          });
-                          if (res.ok) {
-                            const data = await res.json();
-                            setImproveMessages(prev => [...prev, { role: "assistant", content: data.message }]);
-                            if (data.action_results) {
-                              setActionsExecuted(true);
-                              setProposedActions(null);
-                              fetch(`/api/tickets/${id}`).then(r => r.json()).then(d => { if (d.messages) setMessages(d.messages); });
-                            }
-                          }
-                        } catch {
-                          setImproveMessages(prev => [...prev, { role: "assistant", content: "Something went wrong executing actions." }]);
-                        }
-                        setImproveLoading(false);
-                      }}
-                      disabled={improveLoading}
+                      onClick={() => executeImprove("approve")}
+                      disabled={improveSending}
                       className="rounded bg-amber-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
                     >
-                      {improveLoading ? "Executing..." : "Approve & Execute"}
+                      {improveSending ? "Working…" : "Approve all"}
                     </button>
                     <button
-                      onClick={() => setProposedActions(null)}
-                      className="rounded border border-zinc-300 px-3 py-1.5 text-sm text-zinc-600 dark:border-zinc-600 dark:text-zinc-400"
+                      onClick={() => executeImprove("decline")}
+                      disabled={improveSending}
+                      className="rounded border border-zinc-300 px-3 py-1.5 text-sm text-zinc-600 dark:border-zinc-600 dark:text-zinc-400 disabled:opacity-50"
                     >
-                      Cancel
+                      Decline
                     </button>
+                    <span className="text-xs text-amber-600 dark:text-amber-400">…or type a redirect below</span>
                   </div>
-                </div>
-              )}
-              {actionsExecuted && (
-                <div className="mt-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-                  Actions executed. Check the conversation for results.
                 </div>
               )}
 
@@ -1731,104 +1724,19 @@ export default function TicketDetailPage() {
                   type="text"
                   value={improveInput}
                   onChange={(e) => setImproveInput(e.target.value)}
-                  onKeyDown={async (e) => {
-                    if (e.key === "Enter" && !e.shiftKey && improveInput.trim() && !improveLoading) {
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      const msg = improveInput.trim();
-                      setImproveInput("");
-                      setImproveMessages((prev) => [...prev, { role: "user", content: msg }]);
-                      setImproveLoading(true);
-                      setPromptSaved(false);
-
-                      // If the user typed an approval word AND we have
-                      // proposed actions waiting, route to the fast-path
-                      // — skip Opus, dispatch the actions directly.
-                      const isApproval = /^(yes|approve|approved|do it|go ahead|execute|run( it)?|confirm)\b/i.test(msg);
-                      const useFastPath = isApproval && proposedActions && proposedActions.length > 0;
-
-                      try {
-                        const res = await fetch(`/api/tickets/${id}/improve`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(
-                            useFastPath
-                              ? { message: msg, execute_actions: proposedActions }
-                              : { message: msg, conversationHistory: improveMessages }
-                          ),
-                        });
-                        if (res.ok) {
-                          const data = await res.json();
-                          setImproveMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
-                          if (data.type === "prompt" && data.proposed_rule) {
-                            setProposedPrompt({
-                              title: data.proposed_rule.title,
-                              content: data.proposed_rule.content,
-                              category: data.proposed_rule.category || "rule",
-                            });
-                            setProposedActions(null);
-                          } else if (data.type === "action_proposal" && data.proposed_actions?.length) {
-                            setProposedActions(data.proposed_actions);
-                            setActionsExecuted(false);
-                            setProposedPrompt(null);
-                          } else if (data.type === "action_execute" && data.action_results) {
-                            setProposedActions(null);
-                            setActionsExecuted(true);
-                            setProposedPrompt(null);
-                            // Refresh ticket messages
-                            fetch(`/api/tickets/${id}`).then(r => r.json()).then(d => { if (d.messages) setMessages(d.messages); });
-                          } else {
-                            setProposedPrompt(null);
-                            setProposedActions(null);
-                          }
-                        }
-                      } catch {
-                        setImproveMessages((prev) => [...prev, { role: "assistant", content: "Something went wrong. Please try again." }]);
-                      } finally {
-                        setImproveLoading(false);
-                      }
+                      void sendImprove();
                     }
                   }}
-                  placeholder="Improve, fix, or investigate..."
-                  className="flex-1 rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  disabled={improveLoading}
+                  placeholder={improveSession?.turn_status === "awaiting_approval" ? "Approve above, or type a redirect…" : "Improve, fix, or investigate…"}
+                  className="flex-1 rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 disabled:opacity-50"
+                  disabled={improveSending || improveSession?.turn_status === "thinking"}
                 />
                 <button
-                  onClick={async () => {
-                    if (!improveInput.trim() || improveLoading) return;
-                    const msg = improveInput.trim();
-                    setImproveInput("");
-                    setImproveMessages((prev) => [...prev, { role: "user", content: msg }]);
-                    setImproveLoading(true);
-                    setPromptSaved(false);
-                    try {
-                      const res = await fetch(`/api/tickets/${id}/improve`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          message: msg,
-                          conversationHistory: improveMessages,
-                        }),
-                      });
-                      if (res.ok) {
-                        const data = await res.json();
-                        setImproveMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
-                        if (data.type === "prompt" && data.proposed_rule) {
-                          setProposedPrompt({
-                            title: data.proposed_rule.title,
-                            content: data.proposed_rule.content,
-                            category: data.proposed_rule.category || "rule",
-                          });
-                        } else {
-                          setProposedPrompt(null);
-                        }
-                      }
-                    } catch {
-                      setImproveMessages((prev) => [...prev, { role: "assistant", content: "Something went wrong. Please try again." }]);
-                    } finally {
-                      setImproveLoading(false);
-                    }
-                  }}
-                  disabled={!improveInput.trim() || improveLoading}
+                  onClick={() => void sendImprove()}
+                  disabled={!improveInput.trim() || improveSending || improveSession?.turn_status === "thinking"}
                   className="shrink-0 rounded bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                 >
                   Send
