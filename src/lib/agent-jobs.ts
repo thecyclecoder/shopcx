@@ -4,6 +4,7 @@
  * See docs/brain/specs/roadmap-build-console.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { deriveSpecStatus, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 
 export type JobStatus =
   | "queued"
@@ -156,6 +157,86 @@ function ghToken() {
 }
 
 /**
+ * Shared spec-test enqueue guard (spec-test-on-ship). Insert a `kind='spec-test'` agent_job for
+ * (workspaceId, slug) IFF the spec is shipped-but-not-archived AND not already covered — no in-flight
+ * spec-test job and no fresh `spec_test_runs` row (last ~20h). Idempotent + the single dedupe chokepoint
+ * shared by all three enqueue paths: the daily backlog cron (spec-test-cron), the manual status flip
+ * (/api/roadmap/status), and the build-merge reconcile (reconcileMergedJobs below). First caller wins;
+ * the rest no-op. Re-running is allowed once the spec changes again (a fresh ship state past the window).
+ *
+ * `knownStatus` lets a caller that already holds the freshly-derived status pass it in — the cron and the
+ * event paths know the spec is shipped without a disk re-read (the status route's local disk is even stale
+ * vs. the just-committed content). Omit it to derive shipped-but-not-archived from disk.
+ */
+export async function enqueueSpecTestIfDue(
+  workspaceId: string,
+  slug: string,
+  knownStatus?: Phase,
+): Promise<{ enqueued: boolean; reason?: string }> {
+  const admin = createAdminClient();
+
+  // Shipped-but-not-archived? Trust a caller-supplied status; otherwise derive from the brain markdown.
+  if (knownStatus !== undefined) {
+    if (knownStatus !== "shipped") return { enqueued: false, reason: "not-shipped" };
+  } else {
+    const [spec, archived] = await Promise.all([getSpec(slug), listArchivedSlugs()]);
+    if (!spec || spec.card.status !== "shipped") return { enqueued: false, reason: "not-shipped" };
+    if (archived.includes(slug)) return { enqueued: false, reason: "archived" };
+  }
+
+  // Dedupe — skip a (workspace, slug) that already has an in-flight spec-test job…
+  const { data: inflight } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "spec-test")
+    .in("status", ["queued", "queued_resume", "building", "claimed"])
+    .limit(1);
+  if (inflight && inflight.length) return { enqueued: false, reason: "in-flight" };
+
+  // …or a fresh run (tested in the last ~20h, matching the cron window).
+  const since = new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString();
+  const { data: recent } = await admin
+    .from("spec_test_runs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .gte("run_at", since)
+    .limit(1);
+  if (recent && recent.length) return { enqueued: false, reason: "fresh-run" };
+
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    spec_slug: slug,
+    kind: "spec-test",
+    status: "queued",
+    created_by: null,
+  });
+  if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
+  return { enqueued: true };
+}
+
+/** Fetch a spec's current markdown from `main` (post-merge content), independent of the deployed bundle's
+ * possibly-stale local disk. Used by reconcileMergedJobs to know whether a merge actually shipped the spec. */
+async function fetchSpecFromMain(slug: string): Promise<string | null> {
+  const tok = ghToken();
+  if (!tok || !/^[a-z0-9-]+$/i.test(slug)) return null;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/docs/brain/specs/${slug}.md?ref=main`, {
+      headers: { Authorization: `Bearer ${tok}`, Accept: "application/vnd.github+json" },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { content?: string };
+    if (!json.content) return null;
+    return Buffer.from(json.content.replace(/\s/g, ""), "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Self-heal: a `completed` job whose PR was merged/closed OUTSIDE the dashboard (e.g. merged on
  * GitHub directly) still shows a stale "Squash & merge" button. Check GitHub; if the PR is no
  * longer open, flip the job to `merged` (mutates the passed jobs in place + persists).
@@ -178,6 +259,18 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
         if (pr.merged || pr.state === "closed") {
           j.status = "merged";
           await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", j.id);
+          // spec-test-on-ship: a merged build PR may have flipped its spec's phases to ✅. If the spec is
+          // now shipped, enqueue a spec-test (shared dedupe no-ops if the cron/manual flip already did).
+          if (pr.merged && j.kind === "build") {
+            try {
+              const raw = await fetchSpecFromMain(j.spec_slug);
+              if (raw && deriveSpecStatus(raw) === "shipped") {
+                await enqueueSpecTestIfDue(j.workspace_id, j.spec_slug, "shipped");
+              }
+            } catch {
+              /* event missed → the daily backlog cron mops it up */
+            }
+          }
         }
       } catch {
         /* transient — try again next load */

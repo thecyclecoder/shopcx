@@ -10,6 +10,8 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { deriveSpecStatus } from "@/lib/brain-roadmap";
+import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const EMOJI = { planned: "⏳", in_progress: "🚧", shipped: "✅", rejected: "❌" } as const;
@@ -113,6 +115,16 @@ export async function POST(request: Request) {
   if (!put.ok) {
     return NextResponse.json({ error: "commit failed", status: put.status }, { status: 502 });
   }
+  // spec-test-on-ship: if this flip leaves the spec's derived status `shipped`, enqueue a spec-test now
+  // (over the just-committed content — local disk hasn't redeployed yet). Shared dedupe no-ops dupes.
+  if (deriveSpecStatus(updated) === "shipped") {
+    try {
+      await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
+    } catch {
+      /* never fail the status commit on enqueue trouble — the daily backlog cron mops it up */
+    }
+  }
+
   const commit = put.json.commit as { html_url?: string } | undefined;
   return NextResponse.json({ ok: true, status, commit: commit?.html_url });
 }
