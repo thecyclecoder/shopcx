@@ -13,7 +13,11 @@
  *   • dismiss — a user/UI validation error that can't be "completed" (not
  *               enough points, removing the only product). The UI should have
  *               blocked it; there's nothing to do but close it out.
- *   • human   — anything we don't recognize. Tag + leave open for an agent.
+ *   • human   — anything we don't recognize, auto-heal exhausted, no replay for
+ *               the route, or a non-transient error on retry. Escalate the
+ *               ticket to the workspace owner (sets escalated_to/escalated_at/
+ *               escalation_reason) so it lands in the escalation queue — a
+ *               needs-human tag alone was invisible to every human queue.
  *
  * The same `remediatePortalTicket()` is used by the manual one-off pass and the
  * `portal-action-healer` cron, so behaviour is identical.
@@ -274,6 +278,41 @@ async function addTag(admin: SupabaseClient, ticket: TicketRow, tag: string) {
   await admin.from("tickets").update({ tags: [...tags, tag] }).eq("id", ticket.id);
 }
 
+/**
+ * Resolve the workspace owner — escalations always route to the owner, mirroring
+ * src/app/api/todos/[id]/reject/route.ts.
+ */
+async function workspaceOwner(admin: SupabaseClient, workspaceId: string): Promise<string | null> {
+  const { data: owner } = await admin
+    .from("workspace_members")
+    .select("user_id")
+    .eq("workspace_id", workspaceId)
+    .eq("role", "owner")
+    .limit(1)
+    .maybeSingle();
+  return owner?.user_id ?? null;
+}
+
+/**
+ * Escalate a portal-action-failed ticket to a human. Sets `escalated_to` (the
+ * workspace owner), `escalated_at`, and `escalation_reason` so the ticket enters
+ * the escalation queue that `/api/escalated` and the `escalated=true` ticket
+ * filter surface — a needs-human tag alone was invisible to every human queue,
+ * so triaged tickets piled up unseen.
+ *
+ * Setting `escalated_to` also becomes the idempotency guard: the hand-off check
+ * at the top of `remediatePortalTicket()` short-circuits once it's set, so the
+ * cron never re-runs the action on an already-escalated ticket.
+ */
+async function escalate(admin: SupabaseClient, ticket: TicketRow, reason: string) {
+  const ownerId = await workspaceOwner(admin, ticket.workspace_id);
+  const now = new Date().toISOString();
+  await admin
+    .from("tickets")
+    .update({ escalated_to: ownerId, escalated_at: now, escalation_reason: reason, updated_at: now })
+    .eq("id", ticket.id);
+}
+
 export type RemediationOutcome =
   | { action: "healed"; detail: string }
   | { action: "dismissed"; reason: string }
@@ -289,21 +328,27 @@ export async function remediatePortalTicket(
   admin: SupabaseClient,
   ticket: TicketRow,
 ): Promise<RemediationOutcome> {
-  // A human has it — hands off.
+  // A human has it (assigned or already escalated) — hands off. The escalated_to
+  // check is also the idempotency guard for our own escalations below.
   if (ticket.assigned_to || ticket.escalated_to) {
     return { action: "skipped", reason: "human-assigned" };
   }
-  // Already triaged to a human (unrecognized error, exhausted retries, or a
-  // non-transient error surfaced on retry). Don't re-run the action every tick
-  // — that would hammer Appstle with a known-bad replay forever.
+  // Legacy backlog: before escalation existed, tickets triaged to a human were
+  // only tagged `needs-human` and never entered the escalation queue, so they
+  // piled up unseen. If we encounter one, escalate it now (it already needs a
+  // human) instead of re-running the action — then the guard above catches it on
+  // the next tick. New triage escalates directly (see the branches below).
   if ((ticket.tags || []).includes("needs-human")) {
-    return { action: "skipped", reason: "needs-human (already triaged)" };
+    await escalate(admin, ticket, "Previously triaged to a human but never escalated (needs-human backlog).");
+    return { action: "escalated", reason: "needs-human backlog" };
   }
 
   const ctx = await getFailureContext(admin, ticket);
   if (!ctx) {
-    await addTag(admin, ticket, "needs-human");
-    return { action: "skipped", reason: "no failure context" };
+    const reason = "Could not determine the portal failure context — needs a human to review.";
+    await sysNote(admin, ticket.id, `[Triage] ${reason}`);
+    await escalate(admin, ticket, reason);
+    return { action: "escalated", reason: "no failure context" };
   }
 
   const { disposition, reason } = classifyPortalFailure(ctx);
@@ -316,11 +361,9 @@ export async function remediatePortalTicket(
   }
 
   if (disposition === "human") {
-    if (!(ticket.tags || []).includes("needs-human")) {
-      await sysNote(admin, ticket.id, `[Triage] ${reason}\nAction: ${ctx.route} · Error: ${ctx.error}`);
-      await addTag(admin, ticket, "needs-human");
-    }
-    return { action: "skipped", reason: "needs-human" };
+    await sysNote(admin, ticket.id, `[Triage] ${reason}\nAction: ${ctx.route} · Error: ${ctx.error}`);
+    await escalate(admin, ticket, reason);
+    return { action: "escalated", reason: "needs human" };
   }
 
   // ── retry ──
@@ -347,10 +390,9 @@ export async function remediatePortalTicket(
   const attempt = (priorNotes?.length || 0) + 1;
 
   if (attempt > MAX_HEAL_ATTEMPTS) {
-    if (!(ticket.tags || []).includes("needs-human")) {
-      await sysNote(admin, ticket.id, `[Triage] Auto-heal exhausted after ${MAX_HEAL_ATTEMPTS} attempts — needs a human.\nAction: ${ctx.route} · Last error: ${ctx.error}`);
-      await addTag(admin, ticket, "needs-human");
-    }
+    const reason = `Auto-heal exhausted after ${MAX_HEAL_ATTEMPTS} attempts — needs a human.`;
+    await sysNote(admin, ticket.id, `[Triage] ${reason}\nAction: ${ctx.route} · Last error: ${ctx.error}`);
+    await escalate(admin, ticket, reason);
     return { action: "escalated", reason: "max attempts" };
   }
 
@@ -363,11 +405,10 @@ export async function remediatePortalTicket(
   }
 
   if (heal.unsupported) {
-    if (!(ticket.tags || []).includes("needs-human")) {
-      await sysNote(admin, ticket.id, `[Triage] Transient error but no automatic replay exists for "${ctx.route}" — needs a human to re-run it.\nError: ${ctx.error}`);
-      await addTag(admin, ticket, "needs-human");
-    }
-    return { action: "skipped", reason: "no replay for route" };
+    const reason = `Transient error but no automatic replay exists for "${ctx.route}" — needs a human to re-run it.`;
+    await sysNote(admin, ticket.id, `[Triage] ${reason}\nError: ${ctx.error}`);
+    await escalate(admin, ticket, reason);
+    return { action: "escalated", reason: "no replay for route" };
   }
 
   // Heal failed. Re-classify the *new* error — if it's now permanent, dispose
@@ -380,10 +421,9 @@ export async function remediatePortalTicket(
     return { action: "dismissed", reason: recheck.reason };
   }
   if (recheck.disposition === "human") {
-    if (!(ticket.tags || []).includes("needs-human")) {
-      await sysNote(admin, ticket.id, `[Triage] Retry surfaced a non-transient error — needs a human.\nError: ${heal.error}`);
-      await addTag(admin, ticket, "needs-human");
-    }
+    const reason = "Retry surfaced a non-transient error — needs a human.";
+    await sysNote(admin, ticket.id, `[Triage] ${reason}\nError: ${heal.error}`);
+    await escalate(admin, ticket, reason);
     return { action: "escalated", reason: "non-transient on retry" };
   }
 

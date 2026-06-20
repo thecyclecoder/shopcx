@@ -1,4 +1,4 @@
-# Portal-action-failure triage must escalate, not just tag needs-human ⏳
+# Portal-action-failure triage must escalate, not just tag needs-human ✅
 
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `11746b62-8e6b-4e18-9c39-498ee12401d6`
 
@@ -8,9 +8,13 @@ When the portal-action-failure remediator (src/lib/portal/remediation.ts) decide
 Portal-action-failed tickets (e.g. this one — Jessica Ollet's failed replacevariants) are created left open and, when triaged to a human, only get a needs-human tag — which isn't surfaced in any human-facing queue. They never set escalated_to, so they never enter the escalation queue and silently pile up unseen. The founder flagged that these need to be escalated, and that the needs-human tag is not helpful.
 
 ## Phases
-- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — implement the fix** — `src/lib/portal/remediation.ts`: added `escalate()` (resolves the `role='owner'` workspace member, sets `escalated_to`/`escalated_at`/`escalation_reason`) and replaced the `addTag('needs-human')` call in every human branch with it — `disposition==='human'`, no-failure-context, auto-heal exhausted, no-replay-for-route, non-transient-on-retry. Those branches now return `action:'escalated'` (matching the effect). A pre-existing `needs-human` ticket is escalated on its next pass (backlog migration) instead of skipped forever. `escalated_to` is the idempotency guard (top-of-fn hand-off check). Brain page refreshed. `npx tsc --noEmit` clean. No migration — `tickets.escalated_to/escalated_at/escalation_reason` already exist.
 
 ## Verification
-- Reproduce the ticket scenario → confirm the fixed behavior, and that the ticket that surfaced it would now be handled correctly.
+- On `/dashboard/tickets/escalated` (or `GET /api/escalated`), after the [[../inngest/portal-action-healer]] cron processes a `portal-action-failed` ticket with an unrecognized error → expect the ticket to appear in the escalation queue with `escalated_to` = the workspace owner, `escalated_at` set, and `escalation_reason` = "Unrecognized portal error — needs a human to review." (was: absent from the queue, only a `needs-human` tag).
+- On `GET /api/tickets?escalated=true` → expect the same ticket to be returned (the `escalated_to is not null` filter).
+- For the ticket that surfaced this (`11746b62`, Jessica Ollet's failed `replacevariants`): `replacevariants` has no replay in `healPortalAction` → classified transient? No — `replacevariants` reaches the human branch (unrecognized) or the no-replay branch → either way `escalate()` runs → expect it in the escalation queue routed to the owner, not silently tagged.
+- Re-run the cron a second time on an already-escalated ticket → expect `action:'skipped'` (`human-assigned`), no re-run of the Appstle action, no duplicate escalation (idempotent via `escalated_to`).
+- Backlog: an existing open `portal-action-failed` ticket already tagged `needs-human` with `escalated_to` null → on the next cron pass expect it escalated with `escalation_reason` = "Previously triaged to a human but never escalated (needs-human backlog)."
 
 > Authored by the box Improve agent from ticket `11746b62-8e6b-4e18-9c39-498ee12401d6`. Commission the build from the Roadmap board (owner = cs).
