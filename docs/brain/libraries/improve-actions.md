@@ -43,6 +43,7 @@ The subscription / refund / coupon / price / marketing direct-action cases deleg
 - `pause` (indefinite) — the registry `pause` handler only supports 30/60-day timed pauses; Improve allows an open-ended pause.
 - `cancel` — no registry direct handler (production routes cancellation through the cancel *journey*; for that, use an `orchestrator_action` with `action_type:"journey"`).
 - `send_message`, `propose_sonnet_prompt`, `propose_grader_rule`, `close_ticket`, `reopen_ticket` — not customer-subscription mutations.
+- `reassign_ticket_customer` `{to_customer_id, reason}` + `send_magic_link` `{}` — **Improve-only** account-repair pair (no Sonnet-runtime equivalent; the duplicate/typo'd-account login mess, Mindy Freeman `a89dcf76`). `reassign_ticket_customer` validates the target customer is in-workspace, re-points `tickets.customer_id`, and records a from→to internal note. `send_magic_link` mints a 24h link via `generateMagicLinkURL` for the ticket's **current** customer and emails it to that customer's **on-file address only** (no free-text recipient) — pair it *after* the reassign in one plan. See [[../specs/improve-account-fix-actions|account-fix spec]].
 
 For anything beyond a direct action (launch a journey/playbook/workflow/macro, escalate), the box uses the `orchestrator_action` plan kind instead → [[improve-plan-executor]] → `executeSonnetDecision`. See [[../orchestrator-tools]] § Improve parity.
 

@@ -68,6 +68,8 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 - `reject_account_link` — record a customer-rejected link suggestion (never re-offer)
 - `unsubscribe_email_marketing` / `unsubscribe_sms_marketing` / `unsubscribe_all_marketing` — marketing consent flips via Shopify
 - `marketing_signup` — sign up for email + SMS marketing
+- `reassign_ticket_customer` `{to_customer_id, reason}` — **Improve-only** (not a Sonnet runtime action). Re-points `tickets.customer_id` to the correct customer for the typo'd / duplicate-account case, recording a from→to internal note. See [[libraries/improve-actions]].
+- `send_magic_link` `{}` — **Improve-only**. Mints a portal login link via `generateMagicLinkURL` for the ticket's **current** customer and emails it to that customer's **on-file address only** (no free-text recipient — account access never goes to an arbitrary inbox). Pair it *after* `reassign_ticket_customer` in one plan so the link resolves to the corrected account. See [[libraries/magic-link]].
 
 ### Payment
 - `switch_payment_method` — change the default card on a sub
@@ -99,6 +101,8 @@ Per the [[operational-rules]] § Orchestrator discipline rule, the **confirmed-f
 ### Improve parity — the CX co-pilot uses the SAME executor
 
 The box-hosted ticket **Improve** tab can do **anything the orchestrator can** to a customer, through this exact `executeSonnetDecision` path — not a parallel executor. The box proposes an approval-gated `orchestrator_action` plan kind carrying a typed `SonnetDecision`; on approval [[libraries/improve-plan-executor]] builds an `ActionContext` from the ticket (`workspaceId`, `ticketId`, `customerId`, `channel` from `tickets.channel`) and calls `executeSonnetDecision`, so journeys/playbooks/workflows/macros/escalate + every direct action run with production-correct portal/email/chat/sms delivery ([[libraries/ticket-delivery]] is the per-channel sink — portal-aware, unlike the old `send_message`). The hand-rolled direct-action cases in [[libraries/improve-actions]] now delegate to the shared `directActionHandlers` registry — **one customer-action code path** (CLAUDE.md North star + "identical ticket messages"). Same path `scripts/apply-coupon-via-executor.ts` drives one-off. Built by `improve-orchestrator-action-parity` (2026-06-20).
+
+A few customer actions are **Improve-only** and live as bespoke cases in [[libraries/improve-actions]] (no Sonnet-runtime equivalent — the conversation orchestrator never re-points a ticket or re-sends a login link): `reassign_ticket_customer` and `send_magic_link` — the account-repair pair for the duplicate/typo'd-account login mess (Mindy Freeman `a89dcf76`). Same approval gate (the box **proposes** a `customer_action` plan, the founder/CX manager approves, the route executes). `send_magic_link` is account-access-sensitive, so it always targets the ticket's **current** on-file customer email and is meant to run *after* `reassign_ticket_customer` in the same plan. Built by `improve-account-fix-actions` P1 (2026-06-20).
 
 ## Related
 

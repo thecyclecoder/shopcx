@@ -63,10 +63,23 @@ state the ticket; never echo raw ids at them unless useful.
   `action.type` ∈ `partial_refund · create_return · swap_variant · remove_item · change_next_date ·
   change_frequency · update_shipping_address · apply_coupon · skip_next_order · crisis_pause ·
   pause_timed · pause · cancel · reactivate · update_line_item_price · unsubscribe_email_marketing ·
-  unsubscribe_sms_marketing · unsubscribe_all_marketing · marketing_signup · send_message`.
+  unsubscribe_sms_marketing · unsubscribe_all_marketing · marketing_signup · reassign_ticket_customer ·
+  send_magic_link · send_message`.
   A customer-facing email/SMS is `{"type":"send_message","body":"<html>"}`. For a return label, put
   `{{label_url}}` on its own line in the body — it renders as a CTA after a `create_return` in the same
   plan. (Params mirror the old Improve actions — see docs/brain/orchestrator-tools.md.)
+- **Account-fix actions** — for the wrong/duplicate-customer + login-link mess (the Mindy Freeman
+  `a89dcf76` case: a ticket sitting on a typo'd empty-shell account, so the magic link was minted for
+  the wrong record and emailed to the wrong address):
+  ```json
+  {"kind":"customer_action","label":"Re-point ticket to mindyfreeman7@gmail.com (real account, 22 orders)","action":{"type":"reassign_ticket_customer","to_customer_id":"<uuid>","reason":"on-file account is a typo'd empty shell; real account has the order history"}}
+  {"kind":"customer_action","label":"Email a fresh 24h login link to the ticket's customer","action":{"type":"send_magic_link"}}
+  ```
+  `reassign_ticket_customer {to_customer_id, reason}` re-points `tickets.customer_id` (records a from→to
+  internal note). `send_magic_link {}` mints a portal login link **for the ticket's CURRENT customer**
+  and emails it to **that customer's on-file address only** — no free-text recipient. Always pair
+  `send_magic_link` **after** `reassign_ticket_customer` in the same plan, so the link resolves to the
+  corrected account and lands in the right inbox.
 - **Orchestrator action** — anything the conversation orchestrator can do, driven through the EXACT
   production executor (`executeSonnetDecision`): a journey, playbook, workflow, macro, an escalation, or
   any direct action, with production-correct portal/email/chat/sms delivery. Use this when the founder
