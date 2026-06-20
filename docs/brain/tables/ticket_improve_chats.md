@@ -39,6 +39,16 @@ The DB-backed home for the **box-hosted ticket Improve agent** ([[../specs/box-t
 - `src/app/api/tickets/[id]/improve/route.ts` — `POST {action:'send'}` (append + enqueue a turn) / `POST {action:'execute'}` (run the approved plan via [[../libraries/improve-plan-executor]]) / `GET` (poll the session).
 - `scripts/builder-worker.ts` → `runTicketImproveJob` — claims the `ticket-improve` job, runs the box turn, writes `box_session_id` + the assistant message + `turn_status`/`pending_plan`.
 
+## Improve Queue surface
+
+A workspace-scoped, read-only view of this table powers the **Improve Queue** ([[../dashboard/tickets__improve]], `GET /api/tickets/improve-queue`): the founder / CX manager fire off several box Improve turns, walk away, and glance at which the box has answered. The route reads active rows (`status='active'`) joined to `tickets.subject` + `customers` (name), ordered `updated_at desc`, and derives a `queue_state`:
+
+- `awaiting_approval` → **Needs approval** · `error` → **Error** · `idle` **+ last `messages` entry is the assistant's** → **Answered** (these three = "Waiting on you", and feed the nav badge `counts.waiting`).
+- `thinking` → **Thinking…** ("In progress").
+- `idle` with no assistant-last message → not surfaced.
+
+The queue only *surfaces + links* (deep-link to the ticket's Improve tab); you still Approve / reply on the ticket. See [[../specs/improve-queue]].
+
 ## Gotchas
 
 - **Ticket-bound, one per ticket.** Pivoting to a different ticket = opening Improve on *that* ticket (its own row). The UNIQUE `ticket_id` index enforces it.

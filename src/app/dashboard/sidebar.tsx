@@ -168,6 +168,7 @@ export default function Sidebar({
   const [todoCount, setTodoCount] = useState(0); // items the current viewer can approve
   const [rejectedCount, setRejectedCount] = useState(0); // "Rejected → me" pile
   const [branchesCount, setBranchesCount] = useState(0); // open claude/* PRs
+  const [improveWaitingCount, setImproveWaitingCount] = useState(0); // Improve sessions waiting on you
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -229,6 +230,11 @@ export default function Sidebar({
       fetch(`/api/escalated`)
         .then(r => r.ok ? r.json() : null)
         .then(d => { if (d?.chips?.rejected_me != null) setRejectedCount(d.chips.rejected_me); })
+        .catch(() => {});
+      // Improve Queue: count of box Improve sessions waiting on you (Answered / Needs approval / Error).
+      fetch(`/api/tickets/improve-queue`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.counts?.waiting != null) setImproveWaitingCount(d.counts.waiting); })
         .catch(() => {});
       if (["owner", "admin"].includes(workspace.role)) {
         fetch(`/api/branches`)
@@ -463,6 +469,21 @@ export default function Sidebar({
                     {rejectedCount > 0 && (
                       <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-rose-600 dark:bg-rose-900/30 dark:text-rose-400">
                         {rejectedCount > 99 ? "99+" : rejectedCount}
+                      </span>
+                    )}
+                  </Link>
+                  <Link
+                    href="/dashboard/tickets/improve"
+                    className={`flex items-center justify-between rounded px-2 py-1 text-sm ${
+                      pathname.startsWith("/dashboard/tickets/improve")
+                        ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                        : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    }`}
+                  >
+                    <span>Improve</span>
+                    {improveWaitingCount > 0 && (
+                      <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400">
+                        {improveWaitingCount > 99 ? "99+" : improveWaitingCount}
                       </span>
                     )}
                   </Link>
