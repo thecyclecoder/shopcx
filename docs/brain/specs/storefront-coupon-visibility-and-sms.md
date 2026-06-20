@@ -37,9 +37,11 @@ Even with the data present, the orchestrator agreed to a customer's unverified "
 - `src/lib/sonnet-orchestrator-v2.ts` — a static **DISCOUNT-CLAIM VERIFICATION** block in the orchestrator system prompt: never agree-and-refund; check the order's applied `coupons` field first, then real eligibility (quantity break depends on cart unit count — a 1-unit order earns no multi-unit break; subscribe-% only on subscriptions; WELCOME is the one-time signup offer, not stackable); escalate if the math is ambiguous.
 - `docs/brain/operational-rules.md` § Orchestrator discipline — the durable sibling rule, with the ticket-`8e9e325e` worked example.
 
-## Issue 3 — WELCOME discount SMS stuck at `queued` 🚧 (email fallback ✅, Twilio root-cause = owner op task)
+## Issue 3 — WELCOME SMS `sms_status` frozen at `queued` (missing status callback) 🚧 → buildable
 
-Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup (`storefront_leads`, source `popup_discount`). The code `WELCOME-P2RJD` was issued and sent **by SMS** (`sms_message_sid` present, **`sms_status: "queued"`**) — and it **never advanced past `queued`**, with `fallback_emailed_at: null` (never emailed as backup). So the code was delivered to a customer who **never received the text** — he only got the discount because the storefront also auto-applies it on-page. Customers in this state assume the discount failed.
+Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup (`storefront_leads`, source `popup_discount`). The code `WELCOME-P2RJD` was issued and sent **by SMS** (`sms_message_sid` present, **`sms_status: "queued"`**) and never advanced past `queued`, with `fallback_emailed_at: null`.
+
+**🔑 ROOT CAUSE CORRECTED (2026-06-20, verified against the Twilio API):** the SMS was **actually `delivered`** — Twilio message `SM64a6d83a…` to `+15109176300` shows `status: "delivered"`, no error, sent 03:23:46 / delivered 03:23:47, billed. **Harvey received the text.** This was **never a deliverability problem.** The real bug: the popup send (`sendSMS` in `popup/claim/route.ts`) passes **no `StatusCallback`**, and the message goes **directly from short code `85041`** (`messaging_service_sid: null`), *not* through the marketing Messaging Service whose callback URL is configured — so **no delivery callback is ever fired**, and our `storefront_leads.sms_status` is frozen at the initial `queued` we wrote on send, even after Twilio delivers. The `marketing-status` webhook already knows how to update `storefront_leads` by `MessageSid` (its no-recipient branch) — Twilio is simply never told to call it. (Harvey's row was manually synced to `delivered` from the Twilio truth.)
 
 **Fix:**
 - Diagnose why WELCOME SMS sits at `queued` in Twilio (number/messaging-service config, A2P registration, carrier filtering) and confirm actual delivery.
@@ -52,8 +54,10 @@ Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup 
 - `src/app/api/popup/claim/route.ts` — fires `popup/sms-coupon-sent` after a successful coupon SMS send.
 - `src/lib/inngest/popup-coupon-fallback.ts` — refactored onto the shared helper; the two fallbacks now share `fallback_emailed_at` so a lead gets at most one fallback email total.
 
-**Still open (NOT code — owner operational task):**
-- **Twilio root-cause diagnosis** of *why* WELCOME SMS sits at `queued` (Messaging Service config, A2P 10DLC registration status, carrier filtering) requires Twilio console access and cannot be done from the build box. The email fallback above makes the customer impact non-blocking regardless, but the underlying SMS deliverability should be diagnosed by the owner.
+**Still open (BUILDABLE — supersedes the old "owner Twilio op task" framing, which was wrong):**
+- **Wire the status callback for popup SMS.** Pass a `StatusCallback` to `sendSMS` on the popup-coupon send (pointing at the `marketing-status` webhook, which already updates `storefront_leads.sms_status` by `MessageSid`), OR route the popup SMS through the Messaging Service that has the callback configured. Then `sms_status` advances `queued → sent → delivered` truthfully.
+- **Reconcile existing stuck rows.** A one-off (and/or cron) that polls the Twilio Messages API for `storefront_leads` with `sms_status='queued'` + a `sms_message_sid` and syncs the real status — covers every lead sent before the fix (Harvey was the manual proof).
+- **Fallback correctness depends on this.** The `popup-sms-delivery-fallback` timer fires when `sms_status != 'delivered'` after 10 min — but since the status never updates, it would email a code to customers who **already received the SMS** (false fallback). Fixing the status sync makes the fallback fire only on genuine non-delivery.
 - **Order-confirmation code surfacing** ("Consider…") deferred — the discount already appears in the order totals (`payment_details.discount_cents`), and the applied code now lives in `orders.discount_codes`; rendering the literal code on the thank-you page is a separate UI change, not required for the AI-visibility or delivery fixes.
 
 ## Evidence / pointers
@@ -78,6 +82,6 @@ Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup 
 🚧 **Issues 1 & 2 fully shipped; Issue 3 code shipped — one owner operational task remains.**
 - Issue 1 — ✅ shipped. Checkout write + orchestrator surfacing landed; the historical backfill **ran against prod** (owner-approved).
 - Issue 2 — ✅ shipped (system-prompt guardrail + operational-rules sibling). `npx tsc --noEmit` clean.
-- Issue 3 — email-fallback code shipped (new shared helper + `popup-sms-delivery-fallback` Inngest fn + event wiring + brain pages). The Twilio deliverability **root-cause diagnosis remains an owner operational task** (needs Twilio console access, not buildable from the box) — this is why the issue/title stays 🚧.
+- Issue 3 — email-fallback code shipped (new shared helper + `popup-sms-delivery-fallback` Inngest fn + event wiring + brain pages). **Root cause re-diagnosed 2026-06-20 against the Twilio API: NOT a deliverability problem — the SMS delivered; our `sms_status` is frozen at `queued` because the popup send sets no `StatusCallback` (and isn't on the Messaging Service whose callback is wired).** So the remaining work is **buildable, not an owner Twilio-console task**: (a) wire the popup-SMS `StatusCallback` → `storefront_leads` status sync, (b) a reconciliation backfill for stuck-`queued` rows. Stays 🚧 only until that ships — then ✅.
 
 Triggered by ticket 8e9e325e; remediated for the one customer manually. Fixes above are the durable work.
