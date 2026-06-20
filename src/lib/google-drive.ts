@@ -152,14 +152,24 @@ export class DriveClient {
   }
 }
 
+// The hero packshot comes ONLY from a product's standardized "Isolated Product
+// Shots" subfolder. NEVER from 3D Renders / Pickleball / UGC / Lifestyle — those
+// hold box/carton renders and scene shots; sourcing from them once gave a box
+// render (e.g. "AswaVANA Orange Passion IFC") as the Guru Focus hero instead of
+// the 30-count stand-up bag. See box-product-seeding.md (hero bug fix).
+const ISOLATED_FOLDER_KEYWORD = "isolated";
+const HERO_EXCLUDED_FOLDER_KEYWORDS = ["3d render", "render", "pickleball", "ugc", "lifestyle", "social"];
+
 /**
  * Resolve candidate isolated packshots for a product/variant, ranked.
  *
  * Handles the documented quirks (box-product-seeding spec):
- *  - subfolder structure varies per product (browse, don't hardcode);
+ *  - the hero source is the product's "Isolated Product Shots" subfolder ONLY
+ *    (never 3D Renders / Pickleball / UGC / Lifestyle);
  *  - files are per-variant/flavor — match the variant, prefer front-facing;
  *  - Pods ↔ K-Cups are interchangeable;
- *  - the front-facing BAG is the primary hero (stick packs/pods are alternates).
+ *  - the front-facing BAG/pouch (the multi-serving retail unit) is the primary
+ *    hero — stick packs / boxes / cartons / pods are demoted alternates.
  *
  * Returns ranked DriveFile candidates (best first). The caller downloads +
  * vision-confirms the top candidate before using it.
@@ -176,16 +186,20 @@ export async function resolveProductShots(
   // Prefer the closest name match.
   const target = folders[0];
 
-  // 2. Gather images from the product folder + one level of subfolders
-  //    (Isolated Product Shots / 3D Renders / …).
-  const images: DriveFile[] = [...(await drive.listImagesInFolder(target.id))];
+  // 2. Source the hero packshot ONLY from the "Isolated Product Shots" subfolder.
+  //    Fall back to the product-folder root images (never the excluded subfolders)
+  //    only if no isolated folder exists yet.
   const subs = await drive.listSubfolders(target.id);
-  for (const sub of subs) {
-    images.push(...(await drive.listImagesInFolder(sub.id)));
-  }
+  const isolated = subs.find((s) => s.name.toLowerCase().includes(ISOLATED_FOLDER_KEYWORD));
+  const images: DriveFile[] = isolated
+    ? await drive.listImagesInFolder(isolated.id)
+    : (await drive.listImagesInFolder(target.id)).filter(
+        (f) => !HERO_EXCLUDED_FOLDER_KEYWORDS.some((k) => f.name.toLowerCase().includes(k)),
+      );
   if (images.length === 0) return [];
 
-  // 3. Rank. Pods ↔ K-Cups interchangeable; front-facing + bag preferred.
+  // 3. Rank. Pods ↔ K-Cups interchangeable; front-facing BAG/pouch preferred,
+  //    stick-packs / boxes / cartons demoted (never the primary hero).
   const expanded = variantKeywords.flatMap((k) => {
     const kw = k.toLowerCase();
     if (kw.includes("pod")) return [kw, "k-cup", "kcup", "k cup"];
@@ -198,9 +212,10 @@ export async function resolveProductShots(
     let s = 0;
     if (expanded.some((k) => n.includes(k))) s += 6;
     if (n.includes("front")) s += 4;
-    if (preferBag && n.includes("bag")) s += 3;
+    if (preferBag && (n.includes("bag") || n.includes("pouch") || n.includes("stand"))) s += 5;
     if (n.includes("isolated")) s += 2;
-    if (n.includes("stick")) s -= 1; // alternate, not primary hero
+    if (/stick/.test(n)) s -= 4; // single-serve alternate, not the hero
+    if (/\bbox\b|carton|\bifc\b/.test(n)) s -= 6; // box/carton render, not the retail bag
     return s;
   };
 

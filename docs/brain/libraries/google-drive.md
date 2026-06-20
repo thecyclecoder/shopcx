@@ -17,11 +17,11 @@ Headless Drive access for the build box. Sources isolated product packshots + th
 | `drive.listImagesInFolder(folderId)` | `→ DriveFile[]` | image files directly in a folder |
 | `drive.listSubfolders(folderId)` | `→ DriveFile[]` | subfolders directly in a folder |
 | `drive.download(fileId)` | `→ { buffer, mimeType } \| null` | `files.get?alt=media` |
-| `resolveProductShots(drive, { productName, variantKeywords?, preferBag? })` | `→ DriveFile[]` (ranked) | finds the product folder, gathers images from it + one level of subfolders, ranks candidates |
+| `resolveProductShots(drive, { productName, variantKeywords?, preferBag? })` | `→ DriveFile[]` (ranked) | finds the product folder, sources candidates from its **`Isolated Product Shots` subfolder ONLY**, ranks them |
 
 ## `resolveProductShots` ranking — the documented quirks
 
-Browses (never hardcodes) because subfolder structure varies per product (`Isolated Product Shots` vs `3D Renders`). Scores each candidate: **+variant match** (Pods ↔ K-Cups treated as interchangeable), **+front-facing**, **+bag** (the primary hero — stick packs/pods are alternates), **+isolated**, **−stick**. Best-first. The caller ([[product-intelligence-seed]] `seed-tools.resolvePackshot`) downloads the top candidate and the `seed-product` skill **vision-confirms** it (native Read) before use.
+**Hero source is the `Isolated Product Shots` subfolder ONLY** (matched by name containing `isolated`). It **never** pulls from `3D Renders` / `Pickleball` / `UGC` / `Lifestyle` / `Social` — those hold box/carton renders + scene shots, and sourcing from them once gave a box render (`AswaVANA Orange Passion IFC`) as the Guru Focus hero instead of its 30-count stand-up **bag**. If a product has no `Isolated Product Shots` subfolder yet, it falls back to the product-folder **root** images (still filtering out any excluded-folder-keyword names), never traversing those subfolders. Scores each candidate: **+variant match** (Pods ↔ K-Cups interchangeable), **+front-facing**, **+bag/pouch/stand-up** (the multi-serving retail unit — the primary hero), **+isolated**, **−stick** (single-serve), **−box/carton/IFC** (not the retail bag). Best-first. The caller ([[product-intelligence-seed]] `seed-tools.resolvePackshot`) downloads the top candidate and the `seed-product` skill **vision-confirms** it (native Read) before use.
 
 ## Constants
 
