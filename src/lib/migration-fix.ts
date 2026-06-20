@@ -26,7 +26,7 @@ const MAX_OVERRIDE_CENTS = 100_000;
 const ACTIVE_JOB_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
 /** The judgment fixes the mechanical auto-heal punts (see [[migration-audit]] `autoHealMigration`). */
-export type MigrationFixKind = "price_reconcile" | "variant_backfill" | "appstle_cancel";
+export type MigrationFixKind = "price_reconcile" | "variant_backfill" | "appstle_cancel" | "shipping_protection_convert";
 
 /** Per-fix payloads — the box computes the concrete values read-only; the worker applies them verbatim. */
 export interface PriceReconcilePayload {
@@ -52,6 +52,14 @@ export interface AppstleCancelPayload {
   /** Optional override; defaults to the audit's old `appstle_contract_id`. */
   appstle_contract_id?: string;
   reason?: string;
+}
+export interface ShippingProtectionConvertPayload {
+  /** The Appstle protection line's charge → `subscriptions.shipping_protection_amount_cents`. */
+  amount_cents: number;
+  /** The product-only subtotal that the protection line inflated → corrected
+   * `migration_audits.pre_migration_charge_cents` baseline (engine compares this
+   * against `product_subtotal_cents`, which excludes protection). */
+  baseline_cents: number;
 }
 
 export interface MigrationFixApplyResult {
@@ -206,6 +214,46 @@ export async function applyMigrationFix(
     } catch (e) {
       return { ok: false, detail: `appstle_cancel: threw — ${e instanceof Error ? e.message : String(e)}` };
     }
+  }
+
+  if (action.fix_kind === "shipping_protection_convert") {
+    // Appstle billed shipping protection as a line item; internally it's a flag the
+    // engine bills separately. Convert it: set the flag + amount, drop the protection
+    // line from items[] (leaving real product lines + their overrides UNTOUCHED — we
+    // NEVER raise a product override), and correct the audit baseline the line
+    // inflated. Idempotent: re-running sets the same flag/amount and the filter is a
+    // no-op once the line is gone. See docs/brain/specs/migration-shipping-protection.md.
+    const payload = (action.payload || {}) as ShippingProtectionConvertPayload;
+    const amount = payload.amount_cents;
+    const baseline = payload.baseline_cents;
+    if (!Number.isInteger(amount) || amount <= 0 || amount > MAX_OVERRIDE_CENTS) {
+      return { ok: false, detail: `shipping_protection_convert: out-of-range amount_cents ${amount}` };
+    }
+    if (!Number.isInteger(baseline) || baseline <= 0 || baseline > MAX_OVERRIDE_CENTS) {
+      return { ok: false, detail: `shipping_protection_convert: out-of-range baseline_cents ${baseline}` };
+    }
+    const sub = await loadSubItems(admin, subscriptionId);
+    if (!sub) return { ok: false, detail: "shipping_protection_convert: subscription not found" };
+    // Remove ONLY the protection line (title match) — product lines + overrides stay verbatim.
+    const items = sub.items.filter((i) => !String(i.title || "").toLowerCase().includes("shipping protection"));
+    const { error: subErr } = await admin
+      .from("subscriptions")
+      .update({
+        items,
+        shipping_protection_added: true,
+        shipping_protection_amount_cents: amount,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", subscriptionId);
+    if (subErr) return { ok: false, detail: `shipping_protection_convert: sub write failed — ${subErr.message}` };
+    // Correct the audit baseline the protection line over-counted → product subtotal only.
+    const { error: auditErr } = await admin
+      .from("migration_audits")
+      .update({ pre_migration_charge_cents: baseline, updated_at: new Date().toISOString() })
+      .eq("id", String(audit.id || ""));
+    if (auditErr) return { ok: false, detail: `shipping_protection_convert: audit baseline write failed — ${auditErr.message}` };
+    const removed = sub.items.length - items.length;
+    return { ok: true, detail: `shipping_protection_convert: flag set (${amount}¢), removed ${removed} protection line(s), baseline → ${baseline}¢` };
   }
 
   return { ok: false, detail: `unknown fix_kind: ${(action as { fix_kind?: string }).fix_kind}` };

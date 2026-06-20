@@ -6,15 +6,16 @@
 
 - **`enqueueMigrationFixJob(admin, { auditId, subscriptionId, workspaceId }) → { enqueued, reason? }`** — insert a `kind='migration-fix'` [[../tables/agent_jobs]] row (`spec_slug = auditId`, `instructions = {audit_id, subscription_id}`). **Idempotent + best-effort:** no-op if an active migration-fix job already exists for the audit. Called inline by [[migration-audit]] `verifyMigration`→`finalize()` on the TRANSITION to `failed` (**event-driven — there is no migration-fix cron**).
 - **`applyMigrationFix(admin, audit, action) → { ok, detail }`** — run ONE owner-approved typed fix against prod. Idempotent where possible. The worker (`runMigrationFixJob`) calls it per `approved` action, then re-runs `verifyMigration(auditId)`.
-- Types: `MigrationFixKind = 'price_reconcile' | 'variant_backfill' | 'appstle_cancel'`; `PriceReconcilePayload` · `VariantBackfillPayload` · `AppstleCancelPayload`.
+- Types: `MigrationFixKind = 'price_reconcile' | 'variant_backfill' | 'appstle_cancel' | 'shipping_protection_convert'`; `PriceReconcilePayload` · `VariantBackfillPayload` · `AppstleCancelPayload` · `ShippingProtectionConvertPayload`.
 
-## The three fixes (the judgment auto-heal punts)
+## The four fixes (the judgment auto-heal punts)
 
 | `fix_kind` | Payload | What `applyMigrationFix` does |
 |---|---|---|
 | `price_reconcile` | `{ overrides: [{ variant_id (catalog UUID), price_override_cents }] }` | Sets `subscriptions.items[].price_override_cents` for each matched grandfathered line so the engine subtotal ≈ `pre_migration_charge_cents`. Validates each override is a positive int ≤ `MAX_OVERRIDE_CENTS` ($1000) — fail-closed on an absurd value (the real gate is the post-fix re-verify). |
 | `variant_backfill` | `{ variant: { product_id, shopify_variant_id, title?, sku?, price_cents?, option1-3? }, item_match: { shopify_variant_id?, sku? } }` | Inserts the missing [[../tables/product_variants]] row (idempotent — reuses an existing row for that Shopify id), then remaps the matched sub item onto the new UUID + `product_id`. **Never loosens the `items_on_uuids` check** — backfills the row. The fix the 2026-06-10 incident did by hand. |
 | `appstle_cancel` | `{ appstle_contract_id?, reason? }` | `appstleSubscriptionAction(workspaceId, <old contract id>, 'cancel', reason, 'ShopCX migration-fix')` — cancels the lingering Appstle contract (double-bill risk). |
+| `shipping_protection_convert` | `{ amount_cents, baseline_cents }` | Converts a migrated Appstle "Shipping Protection" line into the internal flag: sets `subscriptions.shipping_protection_added=true` + `shipping_protection_amount_cents=amount_cents`, removes the protection line from `items[]` (real product lines + their overrides left **untouched** — **never raises a product override**), and corrects the audit's `pre_migration_charge_cents` to `baseline_cents` (the product-only subtotal the line had inflated). Idempotent. The repair for subs migrated **before** [[migrate-to-internal]] learned to convert protection at migrate time — the `pricing_preserved` overage equals the protection line. First use: sub `4b831caa` (amount 375, baseline 6371→5996, Tabs override left at 5996). |
 
 `card_pinned` / no billable card has **no fix** — it's **out-of-system** (the customer must act), so the box surfaces terminal `human_needed` with a **one-line plain instruction** (never invents a card).
 
