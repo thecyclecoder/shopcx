@@ -1,4 +1,4 @@
-# Advertorial Attribution Fix (stamp advertorial_page_id from the angle) ⏳
+# Advertorial Attribution Fix (stamp advertorial_page_id from the angle) ✅
 
 **Owner:** [[../functions/cmo]] · **Parent:** CMO mandate — ad measurement integrity ([[../dashboard/ad-scorecard]] / [[../libraries/meta-scorecards]]). Found 2026-06-20 diagnosing the ad scorecard's landing-page breakdown.
 
@@ -15,10 +15,15 @@ The ad scorecard under-attributes advertorial/listicle traffic. The listicle ads
 3. **`meta_attribution_daily` consistency.** Ensure the rollup that feeds [[../libraries/meta-scorecards]] uses the same angle→page resolution (the scorecard's `parseAngle` becomes the source of truth, not just a fallback), so the daily attribution + the landing-page breakdown both reflect the corrected stamps.
 
 ## Verification
-- A Meta session landing on `/{handle}?angle={advertorial-slug}` whose first pixel row was created without the stamp → after the fix, a subsequent pixel hit (or the backfill) sets `advertorial_page_id`. Re-run the 2-day count: null-with-exact-angle drops to ~0.
-- The ad scorecard's landing-page breakdown shows advertorial ≈ angle-carrying-session count (~85% of recent Meta traffic), not ~37%.
-- A genuinely non-advertorial PDP visit (no angle) stays unattributed (no false advertorial stamps).
-- Spend/CPA/ROAS from Meta are unchanged (this only fixes session bucketing, not Meta's own purchase attribution).
+- **Ingestion re-resolve (set-when-null).** In `psql`/probe, pick a `storefront_sessions` row with `advertorial_page_id IS NULL` whose `landing_url` carries an `?angle=` that equals an `advertorial_pages.slug`. Fire `GET /api/pixel?ws={workspace_id}&aid={its anonymous_id}&eid={uuid}&et=pdp_view&l={url-encoded landing_url with the angle}` (or a POST batch with that `session_context.landing_url`) → expect the row's `advertorial_page_id` (+ `ad_campaign_id`) now set to that page; `landing_url` unchanged.
+- **Never-overwrite.** Repeat against a row that already has a *different* non-null `advertorial_page_id` → expect it unchanged (set-when-null only).
+- **No false stamps.** Fire a pixel for a bare-PDP session (no `?angle=`) → expect `advertorial_page_id` stays NULL.
+- **Backfill — recent.** `npx tsx scripts/backfill-advertorial-page-id.ts` prints `scanned / matched / distinct target pages` + sample matches; `… --apply` stamps them. Re-run dry-run → expect `matched` near 0 (idempotent, IS-NULL filter skips done rows).
+- **Backfill — all-time (gated owner action).** `npx tsx scripts/backfill-advertorial-page-id.ts --all-time --apply`. Re-run the 2-day probe count of `advertorial_page_id IS NULL AND landing_url ~ 'angle='` exact-match sessions → expect ~0.
+- **Scorecard.** After the rollup refresh (`meta-attribution-refresh` → `meta-scorecards-refresh`), the iteration scorecard's advertorial share ≈ angle-carrying-session count (~85% of recent Meta traffic), not ~37%. Resolution is uniform (persisted id → parse `?angle=`) across the pixel stamp, `src/lib/meta/attribution.ts`, and `src/lib/meta/scorecards.ts`, so the breakdown reflects corrected stamps even pre-backfill.
+- **Meta perf unchanged.** Spend/CPA/ROAS from Meta are unchanged (this only fixes session bucketing, not Meta's own purchase attribution).
 
-## Phase 1 — re-resolve + backfill + rollup consistency ⏳
-The set-when-null re-resolve in `src/app/api/pixel/route.ts` (`resolveLanderIds` caller); the backfill; the `meta_attribution_daily`/scorecard resolution alignment. Brain: [[../tables/storefront_sessions]] · [[../libraries/meta-scorecards]] · [[../dashboard/ad-scorecard]]. Fold on ship.
+## Phase 1 — re-resolve + backfill + rollup consistency ✅
+Shipped: the set-when-null re-resolve in `src/app/api/pixel/route.ts` (`resolveLanderIds` caller, existing-session branch); `scripts/backfill-advertorial-page-id.ts` (recent window default, `--all-time` gated, two-phase dry-run/`--apply`). Rollup consistency: `src/lib/meta/attribution.ts` (feeds `meta_attribution_daily`) and `src/lib/meta/scorecards.ts` already resolve a session's lander identically — prefer the persisted `advertorial_page_id`, else exact `?angle=`→slug match — so the landing-page breakdown reflects the corrected stamps; no rollup code change needed. No schema change (`advertorial_page_id`/`ad_campaign_id` shipped in Phase 2b). Brain: [[../tables/storefront_sessions]] · [[../libraries/meta__scorecards]] · [[../dashboard/storefront__ad-scorecard]]. Fold on ship.
+
+**Pending owner action:** run the backfill — recent window first (`scripts/backfill-advertorial-page-id.ts --apply`), then the gated all-time pass (`--all-time --apply`).

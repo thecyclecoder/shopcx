@@ -37,7 +37,7 @@ One row per anonymous_id. Device fingerprint, UTMs, click IDs, _fbp/_fbc cookies
 | `ttclid` | `text` | ✓ |  |
 | `fbp` | `text` | ✓ |  |
 | `fbc` | `text` | ✓ |  |
-| `advertorial_page_id` | `uuid` | ✓ | → [[advertorial_pages]].id · FK `on delete set null`. Phase 2b — resolved lander identity stamped at pixel time (first-touch, on INSERT only, alongside `landing_url`). `/api/pixel` `resolveLanderIds()` parses `?angle={slug}` from `landing_url` → `advertorial_pages` (slug is unique per workspace+product, suffix-encodes variant). Null for non-lander landings. |
+| `advertorial_page_id` | `uuid` | ✓ | → [[advertorial_pages]].id · FK `on delete set null`. Phase 2b — resolved lander identity stamped at pixel time. `/api/pixel` `resolveLanderIds()` parses `?angle={slug}` from `landing_url` → `advertorial_pages` (slug is unique per workspace+product, suffix-encodes variant). Stamped at first INSERT **and** re-resolved **set-when-null** on later pixel hits (advertorial-attribution-fix): a session whose first touch landed without a resolving angle is healed when a later hit carries the `?angle=`. Never overwrites a non-null; `landing_url` itself stays insert-only. Null for non-lander landings. Backfilled from `landing_url`'s `?angle=` by `scripts/backfill-advertorial-page-id.ts` (recent window, then all-time). |
 | `ad_campaign_id` | `uuid` | ✓ | → [[ad_campaigns]].id · FK `on delete set null`. Phase 2b — the resolved page's `campaign_id`, stamped alongside `advertorial_page_id`. |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
