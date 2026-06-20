@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Box-hosted Spec Chat ⏳
+
+**Spec:** [[box-spec-chat]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** moves the spec-authoring chat off the **Anthropic API** and onto the build box as a **long-running, resumable `claude -p` session on Max** — same feature set (new/refine chat → finalize-commit-to-main → save-&-build → verification → cross-device resume), but now with full working-tree `Read`/`Grep` over `docs/brain/` + `src/` and `WebSearch` every turn, at $0 marginal. Each user turn is a concurrency-1 `spec-chat` `agent_jobs` job that resumes the session ([[../tables/roadmap_chats]] gains `box_session_id`/`turn_status`); replies take minutes (accepted) in exchange for grounded, code-aware speccing. Sibling of [[goal-decomposition-engine]] on the same box substrate.
+
 ## Active project — Storefront coupon visibility + WELCOME SMS ⏳
 
 **Spec:** [[storefront-coupon-visibility-and-sms]] · **Owner:** [[../functions/growth]]
