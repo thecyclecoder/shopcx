@@ -34,7 +34,7 @@ function resolveTemplate(template: string, context: WorkflowContext) : string
 
 ## Gotchas
 
-_None documented._
+- **`sendReply` sets the authoritative final ticket status per step** (`statusOverride` arg, default `"closed"`; `closed` also stamps `resolved_at` + `closed_at`). Examples: `account_login` magic-link → `closed`, `return_to_sender` → `open`, several escalating replies → `open`. Because the workflow owns the status, [[action-executor]]'s `workflow` action returns `statusManaged: true` and the orchestrator's post-execute block ([[../inngest/unified-ticket-handler]] `postExecuteStatusAction`) must NOT override it. (Ticket `a89dcf76` Mindy Freeman: an `account_login` close was being reopened.) See [[../lifecycles/ticket-lifecycle]] Phase 5.
 
 ---
 

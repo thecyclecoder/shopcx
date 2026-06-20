@@ -1,4 +1,4 @@
-# Workflow actions own final ticket status — orchestrator must not reopen ⏳
+# Workflow actions own final ticket status — orchestrator must not reopen ✅
 
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `a89dcf76-f24c-4263-ad42-0ad027401ff5`
 
@@ -8,9 +8,18 @@ executeSonnetDecision should return a new statusManaged:true flag from its 'work
 Ticket a89dcf76 (Mindy Freeman, chat): account_login workflow sent the magic-link message and closed the ticket, but the orchestrator's post-execute logic immediately reopened it with 'No customer message sent — ticket kept open for agent review,' because the 'workflow' action type never reports that the workflow sent a message / set a status. Founder rule: sending a magic link should leave the ticket closed.
 
 ## Phases
-- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — implement the fix** — `executeSonnetDecision` now returns `statusManaged` (true from the `workflow` case via `handleWorkflow`); the post-execute block in `unified-ticket-handler.ts` (via the new pure `postExecuteStatusAction` helper) leaves a status-managed ticket untouched, after the escalated branch and before the closed/messageSent checks. Regression check added; brain pages updated. `npx tsc --noEmit` green.
+
+## What landed
+- `src/lib/action-executor.ts` — `executeSonnetDecision` return type gains `statusManaged: boolean`; the `workflow` case sets it from `handleWorkflow`, which now returns `true` only when a workflow actually ran (false on missing-handler / workflow-not-found, which escalates).
+- `src/lib/inngest/unified-ticket-handler.ts` — new exported pure helper `postExecuteStatusAction(execResult, agentAssigned)` encodes the branch order (`escalated` → `status_managed` → `closed` → `message_sent` → no-action); the post-execute block switches on it. The `status_managed` branch leaves the workflow-set status as-is (no `setStatus`).
+- `scripts/_regress-workflow-status-authoritative.ts` — pure-logic regression: asserts `account_login` ends closed, `return_to_sender` ends open, the pre-fix path reproduces the reopen bug, and escalation still wins.
+- Brain: `lifecycles/ticket-lifecycle.md` (Phase 5 + workflow bullet), `libraries/action-executor.md`, `libraries/workflow-executor.md`.
 
 ## Verification
-- Reproduce the ticket scenario → confirm the fixed behavior, and that the ticket that surfaced it would now be handled correctly.
+- Run `npx tsx scripts/_regress-workflow-status-authoritative.ts` → expect all ✅ and final `PASS` (exit 0).
+- In prod, send an `account_login` request (e.g. "I can't log in") on a chat/email ticket → expect the magic-link reply sent AND the ticket ends `status='closed'` with `closed_at` set, with a `[System] Workflow set the ticket status directly — leaving it as-is.` note (no "No customer message sent" reopen note).
+- Trigger a `return_to_sender` order-tracking workflow → expect the replacement reply sent AND the ticket ends `status='open'` (not auto-closed).
+- Re-check ticket `a89dcf76` (Mindy Freeman): the same scenario would now end closed, not reopened.
 
 > Authored by the box Improve agent from ticket `a89dcf76-f24c-4263-ad42-0ad027401ff5`. Commission the build from the Roadmap board (owner = cs).

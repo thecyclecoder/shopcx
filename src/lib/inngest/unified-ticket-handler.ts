@@ -434,6 +434,29 @@ async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string
 const setStatus = (admin: Admin, tid: string, _autoResolve: boolean) =>
   admin.from("tickets").update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", tid);
 
+// Pure decision for the post-execute status block. Kept separate from the
+// DB writes so it can be unit-checked (scripts/_regress-workflow-status-authoritative.ts).
+// Order matters — the first matching condition wins:
+//   • escalated      → leave open; an agent owns it.
+//   • status_managed → a workflow already set the authoritative status
+//                      (account_login → closed, return_to_sender → open);
+//                      leave it untouched. NEVER fall through to setStatus,
+//                      which always forces closed and would reopen-then-close
+//                      an intentionally-open workflow (Mindy Freeman a89dcf76).
+//   • closed         → close_ticket direct action; leave closed.
+//   • message_sent   → close the ticket; next inbound reopens.
+//   • no_action      → nothing happened; escalate to the To-Do routine if
+//                      agent-involved, else keep open for organic review.
+export type PostExecuteResult = { messageSent: boolean; escalated: boolean; closed: boolean; statusManaged: boolean };
+export type PostExecuteAction = "escalated" | "status_managed" | "closed" | "message_sent" | "no_action_agent" | "keep_open";
+export function postExecuteStatusAction(execResult: PostExecuteResult, agentAssigned: boolean): PostExecuteAction {
+  if (execResult.escalated) return "escalated";
+  if (execResult.statusManaged) return "status_managed";
+  if (execResult.closed) return "closed";
+  if (execResult.messageSent) return "message_sent";
+  return agentAssigned ? "no_action_agent" : "keep_open";
+}
+
 // ── Handler names for AI context ──
 
 async function handlerNames(admin: Admin, wsId: string, hasCust: boolean, ch: string) {
@@ -1714,32 +1737,32 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           async (m, sb) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
           async (m) => { await sysNote(admin, tid, m); },
         );
-        // Post-execute status. Three branches:
-        //   • Escalated → leave open for the agent (they'll handle it).
-        //   • Closed via close_ticket direct action (e.g. OOO auto-reply
-        //     handling) → leave closed; no message expected.
-        //   • Message sent → close the ticket; the next inbound reopens.
-        //   • Neither → no message and no intentional close, so something
-        //     went sideways — keep open for agent review.
-        if (execResult.escalated) {
-          await sysNote(admin, tid, "[System] Ticket escalated this run — leaving open for agent.");
-        } else if (execResult.closed) {
-          await sysNote(admin, tid, "[System] Ticket closed via close_ticket action — no customer reply expected.");
-        } else if (execResult.messageSent) {
-          await setStatus(admin, tid, cfg.auto_resolve);
-        } else {
-          // Orchestrator chose no customer-facing action (no send, no
-          // close, no escalate). On an agent-involved ticket this is a
-          // gap: the assigned agent needs a signal that a customer
-          // message is waiting. Without escalation it just sits in the
-          // open queue with nobody paged. Suzanne Doucet 2026-06-02 hit
-          // this — she replied "thanks", orchestrator decided to do
-          // nothing, ticket sat open. Always escalate in this branch
-          // when the ticket is agent-involved; otherwise just keep it
-          // open for organic review.
-          if (agentAssigned) {
-            // Agent To-Do system: route to the routine, not a human. escalated_to
-            // stays null until a human rejects a todo. docs/brain/specs/agent-todo-system.md.
+        // Post-execute status — decision in postExecuteStatusAction (above).
+        switch (postExecuteStatusAction(execResult, agentAssigned)) {
+          case "escalated":
+            await sysNote(admin, tid, "[System] Ticket escalated this run — leaving open for agent.");
+            break;
+          case "status_managed":
+            // A workflow already set the authoritative final status
+            // (account_login → closed, return_to_sender → open). Leave it
+            // untouched — routing through setStatus would force closed and
+            // reopen-then-close an intentionally-open workflow (Mindy
+            // Freeman a89dcf76: the magic-link close was being reopened).
+            await sysNote(admin, tid, "[System] Workflow set the ticket status directly — leaving it as-is.");
+            break;
+          case "closed":
+            await sysNote(admin, tid, "[System] Ticket closed via close_ticket action — no customer reply expected.");
+            break;
+          case "message_sent":
+            await setStatus(admin, tid, cfg.auto_resolve);
+            break;
+          case "no_action_agent":
+            // Orchestrator took no customer-facing action on an agent-involved
+            // ticket — the assigned agent needs a signal a customer message is
+            // waiting (Suzanne Doucet 2026-06-02: replied "thanks", nothing
+            // happened, ticket sat open). Route to the To-Do routine, not a
+            // human. escalated_to stays null until a human rejects a todo.
+            // docs/brain/specs/agent-todo-system.md.
             await admin.from("tickets").update({
               status: "open",
               assigned_to: null,
@@ -1748,10 +1771,11 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
               escalation_reason: "no_action_on_agent_ticket",
             }).eq("id", tid);
             await sysNote(admin, tid, "[System] Customer replied on agent-involved ticket; orchestrator took no action — escalated to the To-Do routine for review.");
-          } else {
+            break;
+          case "keep_open":
             await admin.from("tickets").update({ status: "open" }).eq("id", tid);
             await sysNote(admin, tid, "[System] No customer message sent — ticket kept open for agent review.");
-          }
+            break;
         }
       });
 

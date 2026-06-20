@@ -60,7 +60,7 @@ This is the brain. See [[ai-multi-turn]] for the full multi-turn detail. In one 
 - `direct_action` — execute subscription/loyalty/coupon ops directly via [[../integrations/appstle]] / [[../integrations/shopify]].
 - `journey` — look up by name OR trigger_intent, launch via `launchJourneyForTicket()` (see [[../journeys]]).
 - `playbook` — start via `startPlaybook()` (see [[../playbooks]]).
-- `workflow` — run via `executeWorkflow()` (template-based, deterministic).
+- `workflow` — run via `executeWorkflow()` (template-based, deterministic). The workflow executor sets the **authoritative final status itself** inside `sendReply` (e.g. `account_login` → `closed`, `return_to_sender` → `open`), so the action returns `statusManaged: true` and Phase 5 leaves the status untouched (see below).
 - `macro` / `kb_response` / `ai_response` — send Sonnet's response.
 - `escalate` — assign to agent, send holding message, set `tickets.escalated_to` + `escalation_reason`.
 
@@ -88,7 +88,13 @@ For SMS, Twilio status callbacks fire `delivered` / `failed` events back to our 
 
 ## Phase 5 — auto-resolve
 
-If the action was `ai_response` and the response was a complete reply (not a clarification question), the orchestrator auto-closes the ticket via `tickets.status = 'closed'` + `closed_at = now()`. The customer's next reply reopens it.
+After the executor returns, the post-execute status block (`unified-ticket-handler.ts`, decision in the pure `postExecuteStatusAction()` helper) resolves the final status. Order matters — first match wins:
+
+1. **escalated** → leave open; an agent owns it.
+2. **statusManaged** → a workflow already set the authoritative status (`account_login` → closed, `return_to_sender` → open); **leave it untouched.** This branch must come before the message/close checks — routing through `setStatus` would force `closed` and reopen-then-close an intentionally-open workflow. (Ticket `a89dcf76` Mindy Freeman: the `account_login` magic-link close was being reopened as "no customer message sent" because the `workflow` action never reported it had set a status.)
+3. **closed** → a `close_ticket` direct action ran (e.g. OOO auto-reply); leave closed.
+4. **messageSent** → `ai_response`/macro/etc. sent a complete reply (not a clarification); auto-close via `tickets.status = 'closed'` + `closed_at = now()`. The customer's next reply reopens it.
+5. **no action** → nothing happened; escalate to the To-Do routine if agent-involved, else keep open for organic review.
 
 Exception: if the action failed silently (e.g. Appstle call returned `{ success: false }`), the ticket stays open — Sonnet never tells the customer something was done unless [[../tables/customer_events]] confirms it. See [[../lifecycles/ai-multi-turn]] rule "Never fake confirmations."
 
