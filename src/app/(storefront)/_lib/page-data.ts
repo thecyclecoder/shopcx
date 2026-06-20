@@ -427,6 +427,13 @@ export interface PageData {
   // so a click can lazy-fetch the matched IDs that aren't loaded yet.
   // Only benefits with at least one match appear here.
   benefit_review_matches: Record<string, string[]>;
+  // Corpus-volume count per benefit_name — the summed `frequency` of the
+  // analysis cluster(s) that name-match each benefit (same name-match as
+  // benefit_review_matches). This is the real "how many reviews mention
+  // this" number (hundreds), used for the pill count. Falls back to the
+  // matched-id count where no cluster frequency exists. Keyed identically
+  // to benefit_review_matches.
+  benefit_review_counts: Record<string, number>;
   media_by_slot: Record<string, MediaItem>;
   // For slots that support multiple images (currently the hero), all
   // items in display_order. The first item also lives in
@@ -673,13 +680,14 @@ export async function getPageData(
   // truth for which pills show + how many reviews each surfaces; the
   // client lazy-fetches missing matched IDs when a pill is clicked.
   // Costs one extra round-trip at SSG/ISR time, ships a tiny ID map.
-  const benefit_review_matches = await computeBenefitReviewMatches(
-    admin,
-    workspace.id,
-    reviewProductIds,
-    (benefitSelectionsRes.data || []) as BenefitSelection[],
-    reviewAnalysisRes.data as ReviewAnalysis | null,
-  );
+  const { matches: benefit_review_matches, counts: benefit_review_counts } =
+    await computeBenefitReviewMatches(
+      admin,
+      workspace.id,
+      reviewProductIds,
+      (benefitSelectionsRes.data || []) as BenefitSelection[],
+      reviewAnalysisRes.data as ReviewAnalysis | null,
+    );
 
   const mediaBySlot: Record<string, MediaItem> = {};
   const mediaGalleryBySlot: Record<string, MediaItem[]> = {};
@@ -966,6 +974,7 @@ export async function getPageData(
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
     recent_orders_for_proof: recentOrdersForProof,
     benefit_review_matches,
+    benefit_review_counts,
     media_by_slot: mediaBySlot,
     media_gallery_by_slot: mediaGalleryBySlot,
     reviews: (reviews || []) as Review[],
@@ -1356,8 +1365,9 @@ async function computeBenefitReviewMatches(
   reviewProductIds: string[],
   benefits: BenefitSelection[],
   analysis: ReviewAnalysis | null,
-): Promise<Record<string, string[]>> {
-  if (benefits.length === 0 || reviewProductIds.length === 0) return {};
+): Promise<{ matches: Record<string, string[]>; counts: Record<string, number> }> {
+  if (benefits.length === 0 || reviewProductIds.length === 0)
+    return { matches: {}, counts: {} };
 
   const STOP_WORDS = new Set([
     "the", "a", "an", "and", "or", "of", "to", "in", "for", "with",
@@ -1383,10 +1393,17 @@ async function computeBenefitReviewMatches(
   const corpus: Array<{ id: string; body: string }> = (rows || []).map(
     (r) => ({ id: String(r.id), body: String(r.body || "").toLowerCase() }),
   );
-  if (corpus.length === 0) return {};
+  if (corpus.length === 0) return { matches: {}, counts: {} };
 
   const topBenefits = analysis?.top_benefits || [];
   const map: Record<string, string[]> = {};
+  // Corpus-volume count per benefit: the summed `frequency` of every
+  // analysis cluster whose name token-overlaps this benefit (the SAME
+  // name-match that drives phrase selection below). This is the real
+  // mention count across all analyzed reviews — hundreds — not the
+  // handful of loaded review_ids the pill filter ships. Falls back to
+  // the matched-id count when no cluster carries a frequency.
+  const counts: Record<string, number> = {};
 
   for (const b of benefits) {
     if (b.role !== "lead" && b.role !== "supporting") continue;
@@ -1397,11 +1414,15 @@ async function computeBenefitReviewMatches(
     }
 
     const benefitTokens = new Set(meaningfulTokens(b.benefit_name));
+    let frequencySum = 0;
     for (const tb of topBenefits) {
       const tbTokens = meaningfulTokens(tb.benefit || "");
       if (tbTokens.some((t) => benefitTokens.has(t))) {
         for (const p of tb.customer_phrases || []) {
           if (p && p.trim()) phrases.add(p.trim().toLowerCase());
+        }
+        if (typeof tb.frequency === "number" && tb.frequency > 0) {
+          frequencySum += tb.frequency;
         }
       }
     }
@@ -1413,9 +1434,12 @@ async function computeBenefitReviewMatches(
     for (const r of corpus) {
       if (phraseList.some((p) => r.body.includes(p))) matched.push(r.id);
     }
-    if (matched.length > 0) map[b.benefit_name] = matched;
+    if (matched.length > 0) {
+      map[b.benefit_name] = matched;
+      counts[b.benefit_name] = frequencySum > 0 ? frequencySum : matched.length;
+    }
   }
-  return map;
+  return { matches: map, counts };
 }
 
 /**
