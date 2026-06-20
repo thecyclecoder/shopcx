@@ -1,4 +1,4 @@
-# Storefront coupon visibility + WELCOME SMS delivery 🚧
+# Storefront coupon visibility + WELCOME SMS delivery ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate — landing-page / funnel conversion ([[../lifecycles/storefront-checkout]])
 
@@ -37,7 +37,7 @@ Even with the data present, the orchestrator agreed to a customer's unverified "
 - `src/lib/sonnet-orchestrator-v2.ts` — a static **DISCOUNT-CLAIM VERIFICATION** block in the orchestrator system prompt: never agree-and-refund; check the order's applied `coupons` field first, then real eligibility (quantity break depends on cart unit count — a 1-unit order earns no multi-unit break; subscribe-% only on subscriptions; WELCOME is the one-time signup offer, not stackable); escalate if the math is ambiguous.
 - `docs/brain/operational-rules.md` § Orchestrator discipline — the durable sibling rule, with the ticket-`8e9e325e` worked example.
 
-## Issue 3 — WELCOME SMS `sms_status` frozen at `queued` (missing status callback) 🚧 → buildable
+## Issue 3 — WELCOME SMS `sms_status` frozen at `queued` (missing status callback) ✅
 
 Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup (`storefront_leads`, source `popup_discount`). The code `WELCOME-P2RJD` was issued and sent **by SMS** (`sms_message_sid` present, **`sms_status: "queued"`**) and never advanced past `queued`, with `fallback_emailed_at: null`.
 
@@ -54,10 +54,13 @@ Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup 
 - `src/app/api/popup/claim/route.ts` — fires `popup/sms-coupon-sent` after a successful coupon SMS send.
 - `src/lib/inngest/popup-coupon-fallback.ts` — refactored onto the shared helper; the two fallbacks now share `fallback_emailed_at` so a lead gets at most one fallback email total.
 
-**Still open (BUILDABLE — supersedes the old "owner Twilio op task" framing, which was wrong):**
-- **Wire the status callback for popup SMS.** Pass a `StatusCallback` to `sendSMS` on the popup-coupon send (pointing at the `marketing-status` webhook, which already updates `storefront_leads.sms_status` by `MessageSid`), OR route the popup SMS through the Messaging Service that has the callback configured. Then `sms_status` advances `queued → sent → delivered` truthfully.
-- **Reconcile existing stuck rows.** A one-off (and/or cron) that polls the Twilio Messages API for `storefront_leads` with `sms_status='queued'` + a `sms_message_sid` and syncs the real status — covers every lead sent before the fix (Harvey was the manual proof).
-- **Fallback correctness depends on this.** The `popup-sms-delivery-fallback` timer fires when `sms_status != 'delivered'` after 10 min — but since the status never updates, it would email a code to customers who **already received the SMS** (false fallback). Fixing the status sync makes the fallback fire only on genuine non-delivery.
+**Landed (status callback + reconciliation — the durable fix):**
+- `src/app/api/popup/claim/route.ts` — the coupon SMS send now passes an explicit `StatusCallback` (`${NEXT_PUBLIC_SITE_URL}/api/webhooks/twilio/marketing-status`) to `sendSMS`. The popup SMS goes **direct from the short code** (no Messaging Service), so without this Twilio fires no delivery callback and `sms_status` stays frozen at `queued`. Now `sms_status` advances `queued → sent → delivered` (or `undelivered`/`failed`) truthfully.
+- `src/app/api/webhooks/twilio/marketing-status/route.ts` — verified: validates the Twilio signature (`validateTwilioSignature`), and its no-recipient branch matches the lead by `sms_message_sid` and writes `sms_status` + `sms_status_at`. Comment corrected (the popup SMS is NOT on the Messaging Service — it carries the per-message callback).
+- `scripts/backfill-popup-sms-status.ts` (new) — dry-run-by-default, `--apply` to write; cursor-paginated + idempotent. Finds `storefront_leads` with `sms_status='queued'` + `sms_message_sid`, GETs the Twilio Messages API (account-level creds) for each, and syncs `sms_status` + `sms_status_at` to the real Twilio status. Covers every lead sent before the fix (Harvey was the manual proof). **Not yet run against prod** — needs owner-approved/gated run.
+- **Fallback correctness now holds.** The `popup-sms-delivery-fallback` timer fires when `sms_status != 'delivered'` after 10 min; with the status now syncing, a delivered text no longer triggers a false fallback email — the fallback fires only on genuine non-delivery.
+
+**Still open / deferred:**
 - **Order-confirmation code surfacing** ("Consider…") deferred — the discount already appears in the order totals (`payment_details.discount_cents`), and the applied code now lives in `orders.discount_codes`; rendering the literal code on the thank-you page is a separate UI change, not required for the AI-visibility or delivery fixes.
 
 ## Evidence / pointers
@@ -79,9 +82,9 @@ Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup 
 
 ## Status
 
-🚧 **Issues 1 & 2 fully shipped; Issue 3 code shipped — one owner operational task remains.**
+✅ **All three issues shipped.**
 - Issue 1 — ✅ shipped. Checkout write + orchestrator surfacing landed; the historical backfill **ran against prod** (owner-approved).
 - Issue 2 — ✅ shipped (system-prompt guardrail + operational-rules sibling). `npx tsc --noEmit` clean.
-- Issue 3 — email-fallback code shipped (new shared helper + `popup-sms-delivery-fallback` Inngest fn + event wiring + brain pages). **Root cause re-diagnosed 2026-06-20 against the Twilio API: NOT a deliverability problem — the SMS delivered; our `sms_status` is frozen at `queued` because the popup send sets no `StatusCallback` (and isn't on the Messaging Service whose callback is wired).** So the remaining work is **buildable, not an owner Twilio-console task**: (a) wire the popup-SMS `StatusCallback` → `storefront_leads` status sync, (b) a reconciliation backfill for stuck-`queued` rows. Stays 🚧 only until that ships — then ✅.
+- Issue 3 — ✅ shipped. Email-fallback code (shared helper + `popup-sms-delivery-fallback` Inngest fn + event wiring) **plus** the status-callback fix: the popup-coupon SMS now passes an explicit `StatusCallback` → `marketing-status` webhook → `storefront_leads.sms_status` sync (root cause re-diagnosed 2026-06-20 against the Twilio API — NOT a deliverability problem; `sms_status` was frozen at `queued` because the direct-from-short-code send set no `StatusCallback`). Reconciliation backfill `scripts/backfill-popup-sms-status.ts` ships for legacy stuck rows — **awaiting an owner-approved/gated prod run** (Harvey was synced manually). `npx tsc --noEmit` clean.
 
 Triggered by ticket 8e9e325e; remediated for the one customer manually. Fixes above are the durable work.

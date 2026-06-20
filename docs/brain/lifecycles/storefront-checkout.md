@@ -63,6 +63,8 @@ Trust / conversion elements:
 
 The `SurveyChapter` (after the hero) is a **personalized recommender**, not just a lead-gate: one question per screen (cups/day → health goal → coffee style) with per-question imagery (Nano Banana Pro, `survey_q1..q3` media slots), then a **recommendation** rendered as a real inline `PriceCard` (1 cup→1-pack, 2→2-pack, 3-4→3-pack) or `BundleCard` (chose "with creamer" → Coffee+Creamer bundle), with checkout available at any time. An optional email→phone step applies the **same** popup discount on-page via `useSetAutoCoupon` (`AutoCouponProvider`) and reprices live — never stacked (one offer). `survey_step` fires per step (anon included) for funnel visibility. Reuses `/api/lead` + `/api/popup/claim` (source `survey_chapter`). Superseded the older gate-the-code design (spec verified + archived 2026-06-18 — see [[../archive]]).
 
+**Coupon-SMS delivery + status sync.** `/api/popup/claim` validates the phone (Twilio Lookup, SMS-capable mobile only), then texts the already-minted code and records `sms_message_sid` + `sms_status='queued'` on the [[../tables/storefront_leads]] row. The send passes an explicit per-message `StatusCallback` → `POST /api/webhooks/twilio/marketing-status`, whose no-recipient branch matches the lead by `sms_message_sid` and advances `sms_status` (`queued → sent → delivered` / `undelivered` / `failed`). This callback is **required** because the popup SMS goes direct from the short code (no Messaging Service), so absent it `sms_status` would freeze at `queued` even after delivery (ticket 8e9e325e). It also fires `popup/sms-coupon-sent` to arm the 10-min email fallback ([[../inngest/popup-sms-delivery-fallback]]) — which now keys off the truthful `sms_status`, so a delivered text no longer triggers a false fallback email. Legacy rows stuck at `queued` are reconciled by `scripts/backfill-popup-sms-status.ts` (polls the Twilio Messages API).
+
 ## Phase 2 — cart create
 
 Customer clicks "Add to cart" / "Subscribe" → browser POSTs to `/api/cart` with `{line_items, mode, frequency_days, ...}`.
@@ -244,6 +246,7 @@ The identity stitch mechanism — see [[customer-link-confirmation]] for the bro
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- `storefront-coupon-visibility-and-sms` (Issue 3) popup-coupon SMS now passes a `StatusCallback` → `storefront_leads.sms_status` syncs truthfully (was frozen at `queued`); reconciliation backfill `scripts/backfill-popup-sms-status.ts` for legacy rows (ticket 8e9e325e)
 - `checkout-customize-bypass` Pack-select → `/checkout` bypass (customize opt-in), gated on `workspaces.storefront_skip_customize`; `checkout_view` once-per-token guard (verified 2026-06-18)
 - `6b83532f` (PR #31) Storefront PDP enhancements: guarantee bar + trust modal, As-Seen-On press row, trust-chip fix, menu chapter nav, variant chapter parity, benefit-bar lead-in, **survey recommender rebuild**, per-cup banners, and the **cross-product quantity-break checkout fix** (card ↔ checkout now agree)
 - `aeb8b074` Checkout: free-gift image fix, identity stitch, guarantee badge
