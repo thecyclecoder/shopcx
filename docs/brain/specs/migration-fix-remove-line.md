@@ -1,4 +1,4 @@
-# Migration-Fix: Remove a Line Item (`remove_line` fix_kind) ⏳
+# Migration-Fix: Remove a Line Item (`remove_line` fix_kind) 🚧
 
 **Owner:** [[../functions/retention]] · **Parent:** extends [[migration-fix-agent]] + [[migration-shipping-protection]]. The `code_gap` behind stuck sub `e4589de9` (audit `4b831caa`) — a **free promo line** carried into the internal sub that the agent can't delete.
 
@@ -24,5 +24,9 @@ This sub needs **two** fixes to clear, both now available:
 - e4589de9: `remove_line` (ACV Gummies) + `shipping_protection_convert` ($3.95) → both checks clear, renews $63.91, Tabs override unchanged.
 - Negative: `remove_line` never touches another line's price/override; a real product line (with a catalog variant) is never proposed for removal — that's `variant_backfill` territory.
 
-## Phase 1 — `remove_line` fix_kind + skill rule + fix e4589de9 ⏳
-`MigrationFixKind` += `remove_line`; `applyMigrationFix` case; the skill's remove-vs-backfill decision rule; apply `remove_line` (+ the protection convert) to `e4589de9`. Brain: [[../libraries/migration-fix]] + [[migration-fix-agent]] + [[../dashboard/migrations]]. Fold on ship.
+## Phase 1 — `remove_line` fix_kind + skill rule + fix e4589de9 🚧
+- ✅ `MigrationFixKind` += `remove_line` + `RemoveLinePayload` + the `applyMigrationFix` case (`src/lib/migration-fix.ts`): payload identifies the line (`{ line_id }` / `{ shopify_variant_id }` / `{ title }`; matches only a line satisfying **every** field provided); idempotently removes the matched line from `items[]`, leaves all other lines + their `price_override_cents` untouched; fail-closed if a match would empty the sub; worker re-runs `verifyMigration`.
+- ✅ the `migration-fix` skill's **remove-vs-backfill** decision rule: real product missing a `product_variants` row → `variant_backfill` (keep + remap); a free/promo line with no catalog identity ($0, no variant) → `remove_line` (delete); unsure → `needs_input`.
+- ✅ Brain: [[../libraries/migration-fix]] (the five fixes) + [[migration-fix-agent]] (items_on_uuids backfill-or-remove + fix_kind enum) + [[../dashboard/migrations]] (action surfaced).
+- 🚧 **apply to `e4589de9` — gated on owner approval.** `scripts/fix-e4589de9-remove-line-protection.ts` applies `remove_line { title: "ACV Gummies" }` + `shipping_protection_convert { amount_cents: 395, baseline_cents: 5996 }` then re-verifies → expect `items_on_uuids` + `pricing_preserved` clear, renews $63.91 (Tabs 5996 + protection 395), Tabs override untouched. Dry-run by default; run with `--apply`. The build has no prod creds — the worker runs it on approval.
+- Fold on ship.
