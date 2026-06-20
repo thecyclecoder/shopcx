@@ -870,12 +870,28 @@ async function runProductSeedJob(job: Job) {
   // chapter images, KEEPING the existing research/reviews/benefits. For re-running
   // already-published products whose landers need the round-3 treatment.
   const isContentRefresh = params.mode === "content-refresh";
+  // refinement (pdp-refinement-pass, round-4): the FULL per-product polish pass on an
+  // already-published product — KEEP research/reviews/benefits, but re-author any pending
+  // copy fixes AND run SKILL §6d (harvest REAL endorsements + before/after from the live
+  // Shopify PDP w/ re-hosted images, lifestyle + Nano-Banana static-ad gallery slides,
+  // per-variant supplement_facts) + a full-corpus 4★+ review re-analysis. Per-product
+  // creative + (verified) nutrition + captions are read from docs/brain/specs/pdp-refinement-pass.md.
+  const isRefinement = params.mode === "refinement";
   console.log(
-    `${tag} ${isResume ? "resuming" : isMediaRefresh ? "media-refreshing" : isContentRefresh ? "content-refreshing" : "seeding"} product ${productId} on Max (job ${job.id})`,
+    `${tag} ${isResume ? "resuming" : isRefinement ? "refinement-pass" : isMediaRefresh ? "media-refreshing" : isContentRefresh ? "content-refreshing" : "seeding"} product ${productId} on Max (job ${job.id})`,
   );
 
   const prompt = isResume
     ? `Resuming. Continue the product-seed for product_id=${productId} (workspace_id=${job.workspace_id}) and finish. Same rules and the same final JSON output protocol as before.`
+    : isRefinement
+      ? [
+          `Use the seed-product skill to run the REFINEMENT PASS (docs/brain/specs/pdp-refinement-pass.md) on the already-published product_id=${productId} (workspace_id=${job.workspace_id}) (cwd is the repo root).`,
+          `Params: { "product_id": "${productId}", "workspace_id": "${job.workspace_id}", "mode": "refinement" }`,
+          `FIRST read docs/brain/specs/pdp-refinement-pass.md — its "Run #1 — Superfood Tabs" section carries the founder-LOCKED per-product inputs (punchy headline, the 16→15-superfoods copy fix EXCEPT the "12–16 oz water" dosing line, the FOUNDER-VERIFIED per-variant supplement_facts with Peach Mango prioritized, and the static-ad caption overlays). Apply those verbatim for Superfood Tabs.`,
+          `KEEP existing research/reviews/benefit selections (do NOT redo steps 1–4). Then: (1) re-author page content with the pending copy fixes; (2) run §6d — harvest the REAL nutritionist endorsements + up to 2 before/after stories from the live Shopify PDP and re-host EVERY image to Supabase via rehost-image (never hotlink; these REPLACE any fabricated endorsements/avatars); add the 4-slide hero gallery (resolve-lifestyle + generate-static-ad with the locked captions); (3) populate per-variant product_variants.supplement_facts using the spec's VERIFIED values (this product IS founder-verified per the spec — populate + publish them); (4) re-run review analysis over the FULL 4★+ corpus (paginate get-reviews, NO 1000/2000 cap, featured-first) so the category counts are real.`,
+          `Honor the locked-hero guard (never regenerate amazing-coffee / -pods / -creamer bag heroes; gallery lifestyle/static-ad slides are still allowed). Reach DB / Drive / Gemini ONLY through scripts/seed-product-tools.ts. You are on Max — never call the Anthropic API; never spawn a nested claude. Re-publish at the end.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_attention","summary":"…"}.`,
+        ].join("\n")
     : isContentRefresh
       ? [
           `Use the seed-product skill in CONTENT-REFRESH mode for product_id=${productId} (workspace_id=${job.workspace_id}) (cwd is the repo root).`,
