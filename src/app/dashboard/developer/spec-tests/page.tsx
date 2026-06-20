@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { getRoadmap, listArchivedSlugs, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestSpecTestRuns, type SpecTestRun } from "@/lib/spec-test-runs";
+import { getLatestSpecTestRuns, getHumanCheckResolutions, checkKey, type SpecTestRun } from "@/lib/spec-test-runs";
 import { AgentTestedStamp, TestChip, CheckList } from "./SpecTestView";
 import TestNowButton from "./TestNowButton";
 import ProposeFixButton from "./ProposeFixButton";
@@ -25,15 +25,22 @@ export default async function SpecTestsPage() {
   const shipped: SpecCard[] = specs
     .filter((s) => s.status === "shipped" && !archivedSet.has(s.slug))
     .sort((a, b) => a.title.localeCompare(b.title));
-  const runs: Record<string, SpecTestRun> = workspaceId ? await getLatestSpecTestRuns(workspaceId) : {};
+  const [runs, resolutions]: [Record<string, SpecTestRun>, Awaited<ReturnType<typeof getHumanCheckResolutions>>] = workspaceId
+    ? await Promise.all([getLatestSpecTestRuns(workspaceId), getHumanCheckResolutions(workspaceId)])
+    : [{}, new Map()];
 
-  // Aggregated "Needs human testing" list across every shipped spec's latest run.
+  // Aggregated "Needs human testing" list across every shipped spec's latest run — EXCLUDING
+  // checks the owner has already resolved in the human-queue (verified/failed/dismissed), so this
+  // matches the queue's "waiting" set and clears as you mark items tested.
   const needsHuman: { slug: string; title: string; check: SpecTestRun["checks"][number] }[] = [];
   for (const s of shipped) {
     const run = runs[s.slug];
     if (!run) continue;
     for (const c of run.checks) {
-      if (c.verdict === "needs_human") needsHuman.push({ slug: s.slug, title: s.title, check: c });
+      if (c.verdict !== "needs_human") continue;
+      const res = resolutions.get(`${s.slug}:${checkKey(c.text)}`);
+      if (res && res.resolution) continue; // already worked in the human-queue → drop it
+      needsHuman.push({ slug: s.slug, title: s.title, check: c });
     }
   }
 
