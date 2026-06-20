@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Comp Subscriptions ⏳
+
+**Spec:** [[comp-subscriptions]] · **Owner:** [[../functions/retention]]
+
+**Why this matters:** free internal subs that ship on schedule (base $0, no saved card) for **employees / influencers / investors / owners** — but **fail-closed**: a $0 renewal only fires if the customer is on the **comp allowlist** (`customers.comp_role`), otherwise it fails (no leaking product). Adds the comp marker + renewal branch (gate → no-PM → no-charge → still fulfill + advance), a no-PM Appstle→internal migration, and a **Customers → Comp Subscriptions** list (grouped by role). Triggered by employee Zach being charged (refunded); migrates him as the first comp sub. Extends [[../lifecycles/subscription-billing.md]].
+
 ## Active project — Spec-Test Agent (box QA) ⏳
 
 **Spec:** [[spec-test-agent]] · **Owner:** [[../functions/platform]]
