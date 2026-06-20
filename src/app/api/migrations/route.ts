@@ -39,5 +39,39 @@ export async function GET() {
   const atRisk = all.filter((r) => r.status === "failed" || r.status === "pending");
   const recentPassed = all.filter((r) => r.status === "passed").slice(0, 25);
 
+  // Attach the migration-fix box agent's diagnosis + proposed gated fix (if any) to each at-risk audit,
+  // so a `failed` row surfaces WITH the box's written diagnosis (and Approve/Decline when it proposed a
+  // fix). The job is keyed by spec_slug = the audit id. See docs/brain/specs/migration-fix-agent.md.
+  const atRiskIds = atRisk.map((r) => r.id);
+  if (atRiskIds.length) {
+    const { data: fixJobs } = await admin
+      .from("agent_jobs")
+      .select("id, spec_slug, status, pending_actions, log_tail, error, updated_at")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "migration-fix")
+      .in("spec_slug", atRiskIds)
+      .order("created_at", { ascending: false })
+      .limit(300);
+    type FixJobRow = { id: string; spec_slug: string; status: string; pending_actions: unknown; log_tail: string | null; error: string | null; updated_at: string };
+    const latestByAudit: Record<string, FixJobRow> = {};
+    for (const j of (fixJobs || []) as FixJobRow[]) {
+      if (!latestByAudit[j.spec_slug]) latestByAudit[j.spec_slug] = j; // newest wins (ordered desc)
+    }
+    for (const r of atRisk as Array<Record<string, unknown>>) {
+      const j = latestByAudit[r.id as string];
+      if (!j) continue;
+      const actions = Array.isArray(j.pending_actions)
+        ? (j.pending_actions as Array<Record<string, unknown>>).filter((a) => a.type === "migration_fix")
+        : [];
+      r.fix = {
+        jobId: j.id,
+        status: j.status, // queued|building|needs_approval|completed|failed|needs_attention
+        diagnosis: j.log_tail || null,
+        error: j.error || null,
+        actions: actions.map((a) => ({ id: a.id, fix_kind: a.fix_kind, summary: a.summary, preview: a.preview, status: a.status, result: a.result })),
+      };
+    }
+  }
+
   return NextResponse.json({ counts, atRisk, recentPassed });
 }

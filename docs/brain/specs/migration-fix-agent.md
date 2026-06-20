@@ -25,13 +25,21 @@ A box agent that **fixes internal subs stuck in migration** — the Appstle→in
 - **Idempotent + re-verify-gated:** a fix only "counts" when `verifyMigration` re-passes; the agent never marks an audit passed itself.
 
 ## Verification
-- Force a `migration_audits` row to `failed` with a `pricing_preserved` mismatch → within a poll cycle a `migration-fix` job runs; the box proposes a `price_override_cents` reconcile; on approval it applies + `verifyMigration` re-passes → the row clears from `/dashboard/migrations`. API console flat (Max).
-- An unresolved-variant failure → the box proposes a `product_variants` backfill + item remap; approve → re-verify passes.
-- A no-billable-card failure → the agent does NOT fabricate a card; it surfaces human-needed with a diagnosis (no silent fix, no re-bill).
-- No cron: the agent fires only off the `failed` transition, never on a timer.
+- In Supabase, set a `migration_audits` row's `status` from `pending`→`failed` by exhausting retries (or back-audit one with a `pricing_preserved` mismatch), then call `verifyMigration(auditId)` once more → expect a `kind='migration-fix'` `agent_jobs` row with `spec_slug = <auditId>`, `status='queued'`, `instructions = {"audit_id","subscription_id"}` (NOT a cron — it appears only on the `failed` transition).
+- Re-run `verifyMigration` on an **already-`failed`** row → expect **no second** migration-fix job (transition guard: prior status was already `failed`; plus the active-job dedupe in `enqueueMigrationFixJob`).
+- On the box worker, watch the `migration-fix` lane claim the job → for a `pricing_preserved` mismatch expect the job to land `needs_approval` with a `pending_actions[]` of `type:'migration_fix'`/`fix_kind:'price_reconcile'` and a `log_tail` diagnosis. The Anthropic API console stays flat (Max).
+- On `/dashboard/migrations`, the failed row shows the 🤖 panel with the diagnosis + an **Approve & fix** button → click it (owner) → expect `/api/roadmap/approve` to flip the action `approved` + the job to `queued_resume`; the worker runs `applyMigrationFix` (sets `subscriptions.items[].price_override_cents`) then `verifyMigration` re-passes → the row clears from "Needs attention".
+- For an **unresolved-variant** failure (`items_on_uuids`), approve the proposed `variant_backfill` → expect a new `product_variants` row for the lingering Shopify id + the sub item remapped to its UUID, then re-verify passes.
+- For a **no-billable-card** failure, expect the job to land `completed` with `error='human-needed'` and a diagnosis in `log_tail` (NO `pending_actions`, NO card fabricated, NO re-bill); the row stays `failed` on the dashboard with that diagnosis.
+- Confirm there is **no migration-fix cron** in `src/lib/inngest/` — the only enqueue path is the `verifyMigration`→`failed` event hook.
 
-## Phase 1 — failure hook + box fix + re-verify ⏳
-`migration-fix` kind + lane + `runMigrationFixJob`; the `verifyMigration`→`failed` enqueue hook; the `migration-fix` skill (diagnose failing checks → propose the judgment fixes → gated execute → re-verify); surface unfixable with diagnosis on `/dashboard/migrations`. Brain: [[../tables/agent_jobs]] (new kind/lane) · [[../libraries/migration-audit]] (failure → agent) · [[../dashboard/migrations]] (box diagnosis surfaced) · [[../recipes/build-box-setup]] (lane) · the `migration-fix` skill page.
+## Phase 1 — failure hook + box fix + re-verify ✅
+- ✅ shipped — `migration-fix` kind + concurrency-1 lane (`MAX_MIGRATION_FIX=1`) + `runMigrationFixJob` in `scripts/builder-worker.ts` (top-level `claude -p` on Max, no `ANTHROPIC_API_KEY`, KEEPS DB/crypto/Appstle secrets for the read brief + the gated executor).
+- ✅ EVENT trigger (not a cron): `src/lib/migration-audit.ts` `finalize()` enqueues a `migration-fix` job `{audit_id, subscription_id}` the moment a row TRANSITIONS to `failed` (prior status ≠ failed), via `enqueueMigrationFixJob` (deduped against an active job for that audit). The free-text `kind` needs **no migration**.
+- ✅ the `migration-fix` skill (`.claude/skills/migration-fix/SKILL.md`) — diagnose the failing checks read-only over a baked-in brief (audit + sub + catalog + engine pricing + live Appstle contract) → emit `propose` (typed fix plan) or `human_needed` (written diagnosis). It NEVER mutates.
+- ✅ gated execute: the box's typed plan parks in the job's `pending_actions` (`type:'migration_fix'`, `fix_kind ∈ price_reconcile|variant_backfill|appstle_cancel`); the owner approves on `/dashboard/migrations` (the existing `/api/roadmap/approve` route → `queued_resume`); the worker runs `applyMigrationFix` (`src/lib/migration-fix.ts`, the deterministic executor — never freestyle DB writes) then re-runs `verifyMigration(audit_id)`. Only a re-`passed` clears the row.
+- ✅ unfixable (no billable card / still-failing re-verify) stays `failed` on `/dashboard/migrations` WITH the box's written diagnosis (joined from the migration-fix job's `log_tail`/`error` by `/api/migrations`).
+- Brain: [[../tables/agent_jobs]] (new kind/lane) · [[../libraries/migration-audit]] (failure → agent) · [[../libraries/migration-fix]] (the executor) · [[../dashboard/migrations]] (box diagnosis surfaced) · [[../recipes/build-box-setup]] (lane) · the `migration-fix` skill page.
 
 ## Phase 2 — code-gap escalation ⏳
 For failures rooted in a code/data gap (missing catalog rows class, pricing-inference edge case), propose a fix spec ([[box-spec-chat]]) / route like [[box-escalation-triage]], so recurring migration failures become permanent fixes.

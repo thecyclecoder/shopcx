@@ -75,6 +75,15 @@ const MAX_SPEC_TEST = 1;
 // One spec-test pass reads the spec + runs the box QA toolkit (tsc can be slow). Minutes, not the
 // 90-min seed ceiling — give it a build-sized ceiling so a tsc + a few probes never get cut short.
 const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
+// Migration-fix jobs (migration-fix-agent) run in their OWN concurrency-1 lane: a top-level Max
+// `claude -p` (migration-fix skill) that DIAGNOSES a failed migration_audits row read-only and PROPOSES
+// the judgment fixes auto-heal punts; prod billing mutations are GATED (executed by the worker via
+// src/lib/migration-fix.ts on approval), then it re-runs verifyMigration. Serialized — a billing repair
+// must never race another, and one box session per audit is right (event-driven, not a sweep).
+const MAX_MIGRATION_FIX = 1;
+// One migration-fix pass: diagnose the failing checks read-only (re-fetch live Appstle, the sub, the
+// catalog) + propose a typed fix. Minutes — same ballpark as a ticket-improve turn, not the seed ceiling.
+const MIGRATION_FIX_TIMEOUT_MS = 15 * 60 * 1000;
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -112,7 +121,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -120,13 +129,17 @@ interface PendingAction {
   result?: string;
   spec?: ProposedSpec;
   autoSettled?: number; // worker safety net: times a resumed build re-requested this already-`done` cmd
+  // set when type==='migration_fix' (migration-fix-agent): the typed billing repair the worker runs via
+  // src/lib/migration-fix.ts `applyMigrationFix` on approval.
+  fix_kind?: "price_reconcile" | "variant_backfill" | "appstle_cancel";
+  payload?: unknown;
 }
 interface Job {
   id: string;
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -1686,6 +1699,287 @@ async function runSpecTestJob(job: Job) {
   }
 }
 
+// ── Box-hosted migration-fix agent (migration-fix-agent) ─────────────────────
+// A kind='migration-fix' job is fired by the EVENT hook in src/lib/migration-audit.ts the moment a
+// migration_audits row transitions to `failed` (NOT a cron). Like ticket-improve/triage it runs a
+// TOP-LEVEL `claude -p` on Max (no ANTHROPIC_API_KEY, web search on) and KEEPS the DB/crypto/Appstle
+// secrets — but its mutations are GATED: the box DIAGNOSES the failing checks read-only and PROPOSES a
+// typed fix plan (price reconcile / variant backfill / Appstle cancel); the owner approves on
+// /dashboard/migrations; the WORKER (the only component that should mutate) executes the approved plan
+// via src/lib/migration-fix.ts `applyMigrationFix`, then re-runs verifyMigration — only a re-`passed`
+// audit clears. Unfixable (no card anywhere) → surfaced human-needed with the box's written diagnosis,
+// the audit stays failed. spec_slug = the audit id; instructions = JSON {audit_id, subscription_id}.
+// No worktree / PR — it mutates the sub/catalog/Appstle, not the repo. See docs/brain/specs/migration-fix-agent.md.
+async function runMigrationFixClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: MIGRATION_FIX_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+// Best-effort re-fetch of the OLD Appstle contract's lines (for the grandfathered-base inference the
+// box reconciles against). Mirrors verifyAppstleCancelled's fetch; never throws (degrades to null).
+async function fetchAppstleContractForBrief(workspaceId: string, appstleContractId: string): Promise<unknown | null> {
+  if (!appstleContractId) return null;
+  try {
+    const { createAdminClient } = await import("../src/lib/supabase/admin");
+    const { decrypt } = await import("../src/lib/crypto");
+    const a = createAdminClient();
+    const { data: ws } = await a.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).maybeSingle();
+    if (!ws?.appstle_api_key_encrypted) return null;
+    const apiKey = decrypt(ws.appstle_api_key_encrypted);
+    const r = await fetch(`https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${appstleContractId}?api_key=${apiKey}`, { headers: { "X-API-Key": apiKey }, cache: "no-store" });
+    if (!r.ok) return { status: r.status === 404 ? "NOT_FOUND" : `http_${r.status}` };
+    return await r.json().catch(() => null);
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// Build the read-only brief baked into the fresh box session: the audit + failing checks, the sub + its
+// items, the catalog variants for the sub's products (so the box can map a lingering Shopify id → UUID
+// + see MSRP), the live engine pricing snapshot vs the captured pre-migration charge, and the live
+// Appstle contract lines. The box needs no extra read tools — everything to compute a typed fix is here.
+async function loadMigrationFixBrief(audit: Record<string, unknown>): Promise<string> {
+  const { createAdminClient } = await import("../src/lib/supabase/admin");
+  const a = createAdminClient();
+  const workspaceId = String(audit.workspace_id || "");
+  const subId = String(audit.subscription_id || "");
+
+  const { data: sub } = await a
+    .from("subscriptions")
+    .select("id, is_internal, status, shopify_contract_id, items, customer_id, payment_method_id, delivery_price_cents")
+    .eq("id", subId)
+    .maybeSingle();
+  const items = (sub && Array.isArray(sub.items) ? sub.items : []) as Array<Record<string, unknown>>;
+
+  // Catalog variants for the sub's products → so the box can resolve Shopify-id items + read MSRP.
+  const productIds = [...new Set(items.map((i) => String(i.product_id || "")).filter(Boolean))];
+  let catalog: Array<Record<string, unknown>> = [];
+  if (productIds.length) {
+    const { data: vars } = await a
+      .from("product_variants")
+      .select("id, product_id, shopify_variant_id, sku, title, price_cents")
+      .eq("workspace_id", workspaceId)
+      .in("product_id", productIds);
+    catalog = (vars || []) as Array<Record<string, unknown>>;
+  }
+
+  // Live engine pricing snapshot (what the internal engine would charge now) vs the captured pre charge.
+  let engineSubtotal: number | null = null;
+  try {
+    const { resolveSubscriptionPricing } = await import("../src/lib/pricing");
+    const pricing = await resolveSubscriptionPricing(workspaceId, sub as Record<string, unknown>);
+    engineSubtotal = pricing.product_subtotal_cents;
+  } catch (e) {
+    engineSubtotal = null;
+    void e;
+  }
+
+  const appstle = await fetchAppstleContractForBrief(workspaceId, String(audit.appstle_contract_id || ""));
+  const checks = Array.isArray(audit.checks) ? (audit.checks as Array<Record<string, unknown>>) : [];
+  const failing = checks.filter((c) => c.ok === false);
+
+  return [
+    `AUDIT ${audit.id} — status ${audit.status} · retry ${audit.retry_count} · is_recovery ${audit.is_recovery}`,
+    `  appstle_contract_id (old): ${audit.appstle_contract_id} → internal: ${audit.internal_contract_id}`,
+    `  pre_migration_charge_cents: ${audit.pre_migration_charge_cents}  ·  engine product_subtotal now: ${engineSubtotal ?? "(unavailable)"}`,
+    `  last_error: ${audit.last_error || "—"}`,
+    ``,
+    `FAILING CHECKS (${failing.length}):`,
+    ...failing.map((c) => `  ❌ ${c.key} — ${c.detail || "fail"}`),
+    `ALL CHECKS: ${checks.map((c) => `${c.ok ? "✅" : "❌"}${c.key}`).join(" ")}`,
+    ``,
+    `SUBSCRIPTION ${subId}: status ${sub?.status} · is_internal ${sub?.is_internal} · payment_method_id ${sub?.payment_method_id || "none"} · customer ${sub?.customer_id}`,
+    `  items (${items.length}):`,
+    ...items.map((i) => `    - variant_id=${i.variant_id} product_id=${i.product_id} sku=${i.sku ?? "—"} qty=${i.quantity ?? 1} title="${i.title ?? ""}" price_override_cents=${i.price_override_cents ?? "—"}`),
+    ``,
+    `CATALOG variants for these products (${catalog.length}):`,
+    ...catalog.map((v) => `    - id=${v.id} shopify_variant_id=${v.shopify_variant_id ?? "—"} sku=${v.sku ?? "—"} price_cents=${v.price_cents} title="${v.title ?? ""}" product_id=${v.product_id}`),
+    ``,
+    `LIVE APPSTLE CONTRACT (old id ${audit.appstle_contract_id}):`,
+    `${JSON.stringify(appstle)?.slice(0, 4000) || "null"}`,
+  ].join("\n");
+}
+
+function migrationFixPrompt(audit: Record<string, unknown>, brief: string): string {
+  return [
+    `Use the migration-fix skill (cwd is the repo root). You are the box's billing-integrity agent on Max — web search on, no API key. You KEEP read access to prod, but you NEVER mutate: you DIAGNOSE + PROPOSE a typed fix plan; the worker executes it on the owner's approval, then re-runs verifyMigration.`,
+    `A migration_audits row flipped to FAILED (a renewal at risk). Work each FAILING check and propose the judgment fix the mechanical auto-heal punts. Ground the inference by reading src/lib/appstle-pricing.ts (inferAppstleLineBase), src/lib/migrate-to-internal.ts, src/lib/pricing.ts, and src/lib/migration-audit.ts.`,
+    ``,
+    brief,
+    ``,
+    `Decide a fix for EACH failing check you can safely repair:`,
+    `  • pricing_preserved mismatch → recompute the true grandfathered base (inferAppstleLineBase logic over the LIVE Appstle line: pricingPolicy.basePrice if present, else currentPrice/(1−sns)) and propose a price_reconcile that sets each grandfathered line's item.price_override_cents so the internal engine product_subtotal ≈ pre_migration_charge_cents (±2¢/line). payload: {"overrides":[{"variant_id":"<the catalog UUID on the sub item>","price_override_cents":<int>}]}.`,
+    `  • items_on_uuids unresolved variant (an item points at a Shopify variant with NO product_variants row) → propose a variant_backfill that INSERTS the missing catalog row + remaps the item to the new UUID (never loosen the check). payload: {"variant":{"product_id":"<uuid>","shopify_variant_id":"<id>","title":"...","sku":"...","price_cents":<int>},"item_match":{"shopify_variant_id":"<id>","sku":"..."}}.`,
+    `  • appstle_cancelled / no_double_bill (the old Appstle contract is still ACTIVE → double-bill risk) → propose an appstle_cancel. payload: {"appstle_contract_id":"<old id, defaults to the audit's>","reason":"migrated to shopcx"}.`,
+    `  • card_pinned / no billable card → you CANNOT invent a card. Do NOT propose a fix; surface human_needed with a concrete diagnosis (the customer must add a card, or it's a comp sub).`,
+    ``,
+    `If every failing check has a safe typed fix → status "propose" with the actions. If ANY failing check is unfixable (no card, ambiguous pricing history, a genuine code/data gap) → status "human_needed" with a written diagnosis a human can act on (do NOT propose a partial fix that re-bills blindly).`,
+    ``,
+    `Final message = ONLY one JSON object:`,
+    `  {"status":"propose","diagnosis":"<plain-text: what failed + what each fix does + the numbers>","actions":[{"fix_kind":"price_reconcile|variant_backfill|appstle_cancel","summary":"<one line>","preview":"<the concrete change + values>","payload":{...}}]}`,
+    `  {"status":"human_needed","diagnosis":"<why it can't be auto-fixed + what a human must do>"}`,
+  ].join("\n");
+}
+
+// Map the box's proposed raw actions → typed migration_fix PendingActions (drop anything malformed).
+function normalizeMigrationFixActions(raw: unknown, jobId: string): PendingAction[] {
+  const arr = Array.isArray(raw) ? raw : [];
+  const KINDS = ["price_reconcile", "variant_backfill", "appstle_cancel"];
+  const out: PendingAction[] = [];
+  arr.forEach((r, i) => {
+    const o = (r || {}) as Record<string, unknown>;
+    const fix_kind = String(o.fix_kind || "");
+    if (!KINDS.includes(fix_kind)) return;
+    if (!o.payload || typeof o.payload !== "object") return;
+    out.push({
+      id: `mf${jobId.slice(0, 6)}${i}`,
+      type: "migration_fix",
+      fix_kind: fix_kind as PendingAction["fix_kind"],
+      summary: String(o.summary || `${fix_kind} fix`),
+      preview: typeof o.preview === "string" ? o.preview : undefined,
+      payload: o.payload,
+      status: "pending",
+    });
+  });
+  return out;
+}
+
+async function runMigrationFixJob(job: Job) {
+  const tag = `[migration-fix:${job.id.slice(0, 8)}]`;
+  let params: { audit_id?: string; subscription_id?: string } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fall back to spec_slug as the audit id */
+  }
+  const auditId = params.audit_id || job.spec_slug;
+  if (!auditId) {
+    await update(job.id, { status: "failed", error: "migration-fix job missing audit_id" });
+    return;
+  }
+
+  // Resume = the owner has approved/declined the proposed plan → execute approved actions + re-verify.
+  const isResume = (job.pending_actions || []).some((a) => a.status === "approved" || a.status === "declined");
+  console.log(`${tag} ${isResume ? "executing approved fix + re-verifying" : "diagnosing"} audit ${auditId.slice(0, 8)}`);
+
+  const { data: audit } = await db.from("migration_audits").select("*").eq("id", auditId).maybeSingle();
+  if (!audit) {
+    await update(job.id, { status: "completed", log_tail: "audit row gone — nothing to fix" });
+    return;
+  }
+
+  try {
+    if (isResume) {
+      // ── Execute the owner-approved typed fixes via the deterministic executor, then re-verify. ──
+      const { applyMigrationFix } = await import("../src/lib/migration-fix");
+      const actions = (job.pending_actions || []).map((a) => ({ ...a }));
+      const results: string[] = [];
+      for (const act of actions) {
+        if (act.type !== "migration_fix") continue;
+        if (act.status === "declined") {
+          act.result = "declined by owner";
+          results.push(`${act.summary} → declined`);
+          continue;
+        }
+        if (act.status !== "approved") continue;
+        try {
+          const r = await applyMigrationFix(db, audit as Record<string, unknown>, { fix_kind: act.fix_kind!, payload: act.payload });
+          act.status = r.ok ? "done" : "failed";
+          act.result = r.detail;
+          results.push(`${act.summary} → ${act.status}: ${r.detail}`);
+        } catch (e) {
+          act.status = "failed";
+          act.result = e instanceof Error ? e.message : String(e);
+          results.push(`${act.summary} → failed: ${act.result}`);
+        }
+      }
+      await update(job.id, { pending_actions: actions });
+      const applied = results.join("; ") || "no approved actions";
+      console.log(`${tag} applied: ${applied}`);
+
+      // Re-verify — idempotent + re-verify-gated: only a re-pass clears the audit. The verifyMigration
+      // failure hook won't re-enqueue (audit is already `failed` → transition guard + active-job dedupe).
+      let verifyStatus = "failed";
+      try {
+        const { verifyMigration } = await import("../src/lib/migration-audit");
+        const v = await verifyMigration(auditId);
+        verifyStatus = v.status;
+      } catch (e) {
+        verifyStatus = "failed";
+        console.error(`${tag} re-verify threw:`, e instanceof Error ? e.message : e);
+      }
+
+      if (verifyStatus === "passed") {
+        await update(job.id, { status: "completed", error: null, log_tail: `re-verified PASSED ✅ — ${applied}`.slice(-2000) });
+        console.log(`${tag} ✓ re-verified PASSED → audit clears`);
+      } else {
+        await update(job.id, {
+          status: "completed",
+          error: `applied fixes but audit still ${verifyStatus}`,
+          log_tail: `Re-verify ${verifyStatus} after fix. ${applied}`.slice(-2000),
+        });
+        console.log(`${tag} re-verify ${verifyStatus} — stays on /dashboard/migrations with diagnosis`);
+      }
+      return;
+    }
+
+    // ── Fresh: diagnose read-only on Max + propose a typed fix plan (or surface human-needed). ──
+    if (audit.status === "passed") {
+      await update(job.id, { status: "completed", log_tail: "audit already passed — nothing to fix" });
+      return;
+    }
+    const brief = await loadMigrationFixBrief(audit as Record<string, unknown>);
+    const prompt = migrationFixPrompt(audit as Record<string, unknown>, brief);
+    const { session, resultText, isError, raw } = await runMigrationFixClaude(prompt, null, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (parsed?.status === "propose") {
+      const proposed = normalizeMigrationFixActions(parsed.actions, job.id);
+      const diagnosis = String(parsed.diagnosis || "");
+      if (!proposed.length) {
+        // Proposed but nothing valid landed → surface for a human rather than silently doing nothing.
+        await update(job.id, { status: "completed", error: `proposed no valid fix actions`, log_tail: diagnosis.slice(-2000) || "no valid fix actions" });
+        return;
+      }
+      await update(job.id, { status: "needs_approval", pending_actions: proposed, log_tail: diagnosis.slice(-2000) || "(fix proposed)" });
+      console.log(`${tag} proposed ${proposed.length} fix(es) → awaiting approval`);
+      return;
+    }
+    if (parsed?.status === "human_needed") {
+      const diagnosis = String(parsed.diagnosis || "needs a human");
+      await update(job.id, { status: "completed", error: `human-needed`, log_tail: diagnosis.slice(-2000) });
+      console.log(`${tag} human-needed — stays failed with diagnosis`);
+      return;
+    }
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "migration-fix run errored", log_tail: raw.slice(-2000) });
+      return;
+    }
+    // No recognizable status — surface rather than assume fixed.
+    await update(job.id, { status: "needs_attention", error: "migration-fix ended without propose/human_needed", log_tail: raw.slice(-2000) });
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -1694,6 +1988,7 @@ async function runJob(job: Job) {
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   if (job.kind === "spec-test") return runSpecTestJob(job);
+  if (job.kind === "migration-fix") return runMigrationFixJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -1925,7 +2220,7 @@ async function main() {
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test lane, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix lane, polling every ${POLL_MS}ms`);
 
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
@@ -1939,7 +2234,8 @@ async function main() {
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test").length;
+  const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
@@ -1999,6 +2295,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed spec-test ${job.id.slice(0, 8)} → ${countSpecTest() + 1}/${MAX_SPEC_TEST} spec-test lane`);
+        launch(job);
+      }
+      // Fill the migration-fix lane (migration-fix-agent): event-fired gated billing repair, concurrency-1.
+      while (countMigrationFix() < MAX_MIGRATION_FIX) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["migration-fix"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed migration-fix ${job.id.slice(0, 8)} → ${countMigrationFix() + 1}/${MAX_MIGRATION_FIX} migration-fix lane`);
         launch(job);
       }
       // Fill the build/plan pool.

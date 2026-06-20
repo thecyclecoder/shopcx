@@ -24,8 +24,10 @@ export interface JobQuestion {
 }
 
 // 'spec' is the planner's proposed-branch action (goal-decomposition-engine): the owner approves it,
-// the worker authors docs/brain/specs/{slug}.md + queues its build. The others are gated prod side-effects.
-export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr" | "spec";
+// the worker authors docs/brain/specs/{slug}.md + queues its build. 'migration_fix' is a typed billing
+// repair proposed by the migration-fix box agent (executed via src/lib/migration-fix.ts on approval).
+// The others are gated prod side-effects.
+export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix";
 
 /** A planner-proposed spec branch — carried on a `type:'spec'` PendingAction so the worker can author it on approval. */
 export interface ProposedSpec {
@@ -48,13 +50,18 @@ export interface PendingAction {
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
   spec?: ProposedSpec; // set when type==='spec' (planner proposal)
+  // set when type==='migration_fix' (migration-fix agent) — the typed billing repair the worker runs
+  // through src/lib/migration-fix.ts `applyMigrationFix` on approval.
+  fix_kind?: "price_reconcile" | "variant_backfill" | "appstle_cancel";
+  payload?: unknown;
 }
 
 /** 'build' (default — build a spec to a PR) | 'plan' (run plan-goal against a goal → propose specs)
  * | 'fold' (batch fold-build — fold every pending-fold spec into the brain in one PR, fold-build-batching)
  * | 'product-seed' (box-product-seeding — drive one product none→published on Max)
- * | 'ticket-improve' (box-ticket-improve — one turn of a ticket-bound Improve session on Max). */
-export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve";
+ * | 'ticket-improve' (box-ticket-improve — one turn of a ticket-bound Improve session on Max)
+ * | 'migration-fix' (migration-fix-agent — fix a failed Appstle→internal migration on Max, gated). */
+export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix";
 
 export interface AgentJob {
   id: string;
