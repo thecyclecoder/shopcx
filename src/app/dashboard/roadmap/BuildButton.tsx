@@ -265,17 +265,20 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
             {showAnswers ? "Cancel" : "Answer"}
           </button>
         )}
-        {!active && specStatus !== "shipped" && (
+      </div>
+      {/* Build / Rebuild gets its own full-width row. */}
+      {!active && specStatus !== "shipped" && (
+        <div className="mt-2">
           <button
             type="button"
             onClick={build}
             disabled={busy}
-            className="rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            className="w-full rounded-md bg-indigo-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
           >
             {busy ? "…" : job ? "Rebuild" : "Build"}
           </button>
-        )}
-      </div>
+        </div>
+      )}
       {/* Report issue + Mark verified & archive get their own full-width row so they
           aren't jammed in with the status chip / PR / build controls above. */}
       {!active && (
