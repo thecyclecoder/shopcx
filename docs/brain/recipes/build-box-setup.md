@@ -16,7 +16,7 @@ The box that runs autonomous spec builds on the **Max subscription** for the [[.
 ## Day-to-day ops (over the tailnet)
 
 ```bash
-ssh root@100.75.99.7
+ssh root@100.75.99.7   # plain ssh, tailnet IP, default ~/.ssh/id_ed25519. NOT `tailscale ssh` (no Tailscale SSH server) and NOT builder@. Live repo = /home/builder/shopcx (git as `sudo -u builder`); /root/shopcx is a STALE clone, ignore it.
 systemctl status shopcx-builder          # health
 journalctl -u shopcx-builder -f          # live logs
 systemctl restart shopcx-builder         # restart
