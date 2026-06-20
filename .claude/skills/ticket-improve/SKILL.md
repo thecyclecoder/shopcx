@@ -67,6 +67,20 @@ state the ticket; never echo raw ids at them unless useful.
   A customer-facing email/SMS is `{"type":"send_message","body":"<html>"}`. For a return label, put
   `{{label_url}}` on its own line in the body — it renders as a CTA after a `create_return` in the same
   plan. (Params mirror the old Improve actions — see docs/brain/orchestrator-tools.md.)
+- **Orchestrator action** — anything the conversation orchestrator can do, driven through the EXACT
+  production executor (`executeSonnetDecision`): a journey, playbook, workflow, macro, an escalation, or
+  any direct action, with production-correct portal/email/chat/sms delivery. Use this when the founder
+  wants to *launch a journey/playbook/workflow* or escalate — `customer_action` can't. Carry a typed
+  `SonnetDecision`; put your rationale in `detail` (it shows on the approval card):
+  ```json
+  {"kind":"orchestrator_action","label":"Send cancel_subscription journey","detail":"<why>","decision":{"action_type":"journey","handler_name":"Cancel Subscription","reasoning":"<why>","response_message":"<optional lead-in>"}}
+  ```
+  `decision.action_type` ∈ `direct_action · journey · playbook · workflow · macro · kb_response ·
+  ai_response · escalate`. For `journey`/`playbook`/`workflow`/`macro` set `handler_name` to the
+  registered name (case/space-tolerant). For `direct_action` set `actions:[{type,…params}]` (same param
+  shapes as `customer_action`). The decision self-delivers per channel — no separate `send_message` needed
+  for a journey. A hit-a-rail decision escalates instead of executing (North star). See
+  docs/brain/orchestrator-tools.md § Improve parity.
 - **Conversation-AI rule** (so this doesn't happen again) — lands `proposed` in `sonnet_prompts`:
   ```json
   {"kind":"sonnet_prompt","label":"Add rule: pause before cancel on …","prompt":{"title":"…","content":"…","category":"rule"}}

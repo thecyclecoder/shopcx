@@ -34,9 +34,21 @@ async function runImproveActions(workspaceId: string, ticketId: string, actions:
 
 - `src/app/api/tickets/[id]/improve/route.ts`
 
+## One customer-action code path (no drift)
+
+The subscription / refund / coupon / price / marketing direct-action cases delegate to the orchestrator's `directActionHandlers` registry ([[action-executor]]) via the internal `dispatchDirectAction` helper — the SAME execution the conversation orchestrator runs. This kills the drift the [[../specs/improve-orchestrator-action-parity|parity spec]] was filed for (CLAUDE.md North star + "identical ticket messages"). `dispatchDirectAction` resolves the ticket's customer/channel, maps an internal subscription UUID → Shopify `contract_id`, and wraps the handler in `withActionContext` for per-action Appstle call logging. `captureContext` pulls customer-facing result fields (`refund_amount`, `label_url`, `tracking_number`, `carrier`, `coupon_code`) into `actionContext` so a chained `send_message` can still substitute them.
+
+**Kept bespoke (deliberately NOT delegated):**
+- `create_return` — ticket-aware order lookup (by `shopify_order_id` *or* `order_number`) + `source: "agent"`; the registry handler is `order_number`-only / `source: "ai"`.
+- `pause` (indefinite) — the registry `pause` handler only supports 30/60-day timed pauses; Improve allows an open-ended pause.
+- `cancel` — no registry direct handler (production routes cancellation through the cancel *journey*; for that, use an `orchestrator_action` with `action_type:"journey"`).
+- `send_message`, `propose_sonnet_prompt`, `propose_grader_rule`, `close_ticket`, `reopen_ticket` — not customer-subscription mutations.
+
+For anything beyond a direct action (launch a journey/playbook/workflow/macro, escalate), the box uses the `orchestrator_action` plan kind instead → [[improve-plan-executor]] → `executeSonnetDecision`. See [[../orchestrator-tools]] § Improve parity.
+
 ## Gotchas
 
-_None documented._
+- Migrating to the shared registry slightly changed some result strings (now prefer the handler's `summary`) — cosmetic, surfaced on the approval card / internal note.
 
 ---
 

@@ -99,6 +99,63 @@ export async function executeImprovePlan(
     results.push(...batchResults);
   }
 
+  // 1b. Orchestrator actions — drive the FULL production executor
+  //     (executeSonnetDecision) exactly as the orchestrator does, so Improve
+  //     can launch a journey/playbook/workflow/macro, escalate, or fire any
+  //     direct action with production-correct portal/email/chat/sms delivery.
+  //     Same code path as scripts/apply-coupon-via-executor.ts, one-off →
+  //     server-side. See docs/brain/specs/improve-orchestrator-action-parity.md.
+  const orchestratorActions = actions.filter((a) => a.status === "approved" && a.kind === "orchestrator_action" && a.decision);
+  if (orchestratorActions.length) {
+    const { executeSonnetDecision } = await import("@/lib/action-executor");
+    const { deliverTicketMessage } = await import("@/lib/ticket-delivery");
+    const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
+    const { data: ws } = await admin.from("workspaces").select("sandbox_mode").eq("id", workspaceId).single();
+    const sandbox = ws?.sandbox_mode === true;
+    for (const a of orchestratorActions) {
+      if (!t?.customer_id) {
+        a.status = "failed";
+        a.result = "orchestrator_action: no customer on ticket";
+        results.push(a.result);
+        continue;
+      }
+      try {
+        const ctx = {
+          admin,
+          workspaceId,
+          ticketId,
+          customerId: t.customer_id,
+          channel: t.channel || "email",
+          sandbox,
+        };
+        // send: deliver the decision's response_message on the ticket's channel
+        // (portal-aware). Journeys/playbooks/workflows self-deliver; this is the
+        // sink for direct_action / escalate / kb_response / ai_response / macro
+        // messages and the journey-launch-failed fallback.
+        const send = async (msg: string, sb: boolean) => {
+          await deliverTicketMessage(admin, workspaceId, ticketId, ctx.channel, msg, sb);
+        };
+        const sysNote = async (msg: string) => {
+          await admin.from("ticket_messages").insert({
+            ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: msg,
+          });
+        };
+        // Audit trail (North star: the tool surfaces its reasoning) — log the
+        // decision + reasoning the operator approved before it runs.
+        await sysNote(`[Improve] Running orchestrator action ${a.decision!.action_type}${a.decision!.handler_name ? ` "${a.decision!.handler_name}"` : ""}. Reasoning: ${a.decision!.reasoning || "(none)"}`);
+        const r = await executeSonnetDecision(ctx, a.decision!, null, send, sysNote);
+        a.status = "done";
+        a.result = `Ran ${a.decision!.action_type}${a.decision!.handler_name ? ` "${a.decision!.handler_name}"` : ""}` +
+          `${r.messageSent ? " — message delivered" : ""}${r.escalated ? " — escalated" : ""}${r.closed ? " — ticket closed" : ""}`;
+        if (r.closed) resolved = true;
+      } catch (e) {
+        a.status = "failed";
+        a.result = `orchestrator_action failed: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      results.push(a.result);
+    }
+  }
+
   // 2. Re-score this ticket (force a fresh ticket_analyses row).
   for (const a of actions) {
     if (a.status !== "approved" || a.kind !== "rescore") continue;

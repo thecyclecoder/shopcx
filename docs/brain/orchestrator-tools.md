@@ -96,6 +96,10 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 
 Per the [[operational-rules]] § Orchestrator discipline rule, the **confirmed-fraud gate runs BEFORE the orchestrator** — any matched customer with `fraud_cases.status='confirmed_fraud'`, an `amazon_reseller` flag, or a known-reseller address short-circuits to escalate before any of the above fires.
 
+### Improve parity — the CX co-pilot uses the SAME executor
+
+The box-hosted ticket **Improve** tab can do **anything the orchestrator can** to a customer, through this exact `executeSonnetDecision` path — not a parallel executor. The box proposes an approval-gated `orchestrator_action` plan kind carrying a typed `SonnetDecision`; on approval [[libraries/improve-plan-executor]] builds an `ActionContext` from the ticket (`workspaceId`, `ticketId`, `customerId`, `channel` from `tickets.channel`) and calls `executeSonnetDecision`, so journeys/playbooks/workflows/macros/escalate + every direct action run with production-correct portal/email/chat/sms delivery ([[libraries/ticket-delivery]] is the per-channel sink — portal-aware, unlike the old `send_message`). The hand-rolled direct-action cases in [[libraries/improve-actions]] now delegate to the shared `directActionHandlers` registry — **one customer-action code path** (CLAUDE.md North star + "identical ticket messages"). Same path `scripts/apply-coupon-via-executor.ts` drives one-off. Built by `improve-orchestrator-action-parity` (2026-06-20).
+
 ## Related
 
-[[lifecycles/ai-multi-turn]] · [[lifecycles/ticket-lifecycle]] · [[libraries/sonnet-orchestrator-v2]] · [[libraries/action-executor]] · [[customer-voice]] · [[operational-rules]] · [[tables/sonnet_prompts]] · [[recipes/change-line-item-price]] · [[recipes/issue-replacement]]
+[[lifecycles/ai-multi-turn]] · [[lifecycles/ticket-lifecycle]] · [[libraries/sonnet-orchestrator-v2]] · [[libraries/action-executor]] · [[libraries/improve-plan-executor]] · [[libraries/improve-actions]] · [[libraries/ticket-delivery]] · [[customer-voice]] · [[operational-rules]] · [[tables/sonnet_prompts]] · [[recipes/change-line-item-price]] · [[recipes/issue-replacement]]
