@@ -1,4 +1,4 @@
-# Comp Subscriptions (employee / influencer / free-product) ⏳
+# Comp Subscriptions (employee / influencer / free-product) ✅
 
 **Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" ([[../lifecycles/subscription-billing.md]]). Triggered live by Zach Zavala (employee) being charged on SC133080 (refunded).
 
@@ -40,8 +40,15 @@ Migration (`customers.comp_role` enum + `comp_note`; `subscriptions.comp` + `com
 - ✅ Brain: tables/customers, tables/subscriptions, lifecycles/subscription-billing, libraries/migrate-to-internal (new page), inngest/internal-subscription-renewals.
 - ✅ **Gated owner actions applied:** (1) migration applied via `scripts/apply-comp-subscriptions-migration.ts`; (2) `scripts/migrate-zach-comp-subscription.ts` ran — Zach allowlisted (`comp_role='employee'`) + contract `27852472493` flipped to internal comp. Run the [[#verification]] checklist to confirm his next renewal ships free.
 
-## Phase 2 — Customers → Comp Subscriptions list ⏳
-The sidebar page + read view (+ stretch "mark/create comp" action). Brain: [[../dashboard]] customers section. (Deferred — separate build.)
+## Phase 2 — Customers → Comp Subscriptions list ✅
+The sidebar page + read view. Brain: [[../dashboard/comp-subscriptions]].
+
+**Shipped:**
+- ✅ Page `src/app/dashboard/comp-subscriptions/page.tsx` — every `comp=true` sub: customer name+email, role badge (`not allowlisted` in red when `comp_role` null), note, items+quantities, cadence, next ship date, status. Role group tabs (All · Employees · Influencers · Investors · Owners) with live counts; customer search; sortable Next Ship / Status; row → subscription detail.
+- ✅ API `src/app/api/workspaces/[id]/comp-subscriptions/route.ts` — `comp=true` subs joined `customers!inner(comp_role, comp_note)`; `role` / `search` / `sort` / `order` params; returns `{ subscriptions, total, role_counts }`.
+- ✅ Sidebar entry under **Customers** → "Comp Subscriptions" (adminOnly).
+- ✅ Brain: `docs/brain/dashboard/comp-subscriptions.md`.
+- Deferred (stretch, not in v1): "Add to allowlist" / "New comp sub" write actions — read view only.
 
 ## Verification
 Phase-1 checklist (run after the two gated ops land). "ws" = `fdc11e10-b89f-4989-8b73-ed6526c4d906`.
@@ -51,3 +58,10 @@ Phase-1 checklist (run after the two gated ops land). "ws" = `fdc11e10-b89f-4989
 - **Zach migrated to comp** → `select is_internal, comp, comp_note, status, shopify_contract_id, next_billing_date, items from subscriptions where id = <Zach sub>` → `is_internal=true`, `comp=true`, `comp_note='employee'`, `shopify_contract_id` like `internal-%`, items unchanged (each with `price_override_cents=0`), cadence + next date preserved. Appstle contract `27852472493` shows `CANCELLED` (reason "migrated to shopcx (comp)"). His timeline has a `subscription.migrated` (source `comp_migration`) event.
 - **Comp renewal ships free** → when Zach's `next_billing_date` rolls (or fire `internal-subscription/renewal-attempt` with his `subscription_id`): expect a new [[../tables/orders]] row `total_cents=0`, `financial_status='paid'`, `source_name='internal_subscription_comp_renewal'`, `payment_details.comp=true`, an Amplifier handoff (`amplifier_order_id` set), a `transactions` row `type='comp' status='succeeded' amount_cents=0` (no Braintree id), `next_billing_date` advanced one cadence, a `subscription.comp_shipped` event. **No** Braintree charge, **no** `dunning_cycles` row, **no** `dunning/payment-failed` event.
 - **Fail-closed (negative)** → temporarily a `comp=true` sub whose customer has `comp_role IS NULL`, fire `renewal-attempt`: expect a `transactions` row `type='comp' status='failed'` (`metadata.needs_attention=true`), a `subscription.comp_renewal_failed` event, and **no** new order, **no** Amplifier handoff, **no** `next_billing_date` advance.
+
+Phase-2 checklist (the list view).
+- On the dashboard sidebar (as owner/admin), open **Customers → Comp Subscriptions** → expect the page at `/dashboard/comp-subscriptions` with Zach under the **Employees** tab (role badge `employee`, note `employee`, his items + cadence + next ship date, status `active`).
+- On `/dashboard/comp-subscriptions`, click the **Employees** tab → expect only `comp_role='employee'` subs; each tab's badge count matches `role_counts` from `GET /api/workspaces/{ws}/comp-subscriptions`.
+- On `/dashboard/comp-subscriptions`, search a comp customer's name/email → expect the list to narrow to matching rows; click a row → navigates to `/dashboard/subscriptions/{id}`.
+- `GET /api/workspaces/{ws}/comp-subscriptions` → expect every returned sub has `comp=true`; `total` = count of comp subs (after role/search filters); `role_counts` keys ∈ {employee, influencer, investor, owner, unassigned}.
+- Negative (UI surfaces fail-closed) → a `comp=true` sub whose customer has `comp_role IS NULL` shows a red **not allowlisted** badge in the Role column; it appears under the **All** tab (whose count includes the `unassigned` bucket) but under no role-specific tab.
