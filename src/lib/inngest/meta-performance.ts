@@ -8,6 +8,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { ingestMetaPerformance } from "@/lib/meta/performance";
 import { refreshVariantAttribution } from "@/lib/meta/attribution";
+import { refreshScorecards } from "@/lib/meta/scorecards";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -86,6 +87,49 @@ export const metaAttributionRefresh = inngest.createFunction(
     console.log(
       `[meta-attribution] account ${ad_account_id} variant_attribution_coverage=${result.coverage.variant_attribution_coverage}`,
       JSON.stringify(result.coverage),
+    );
+
+    // Phase 3 — refresh scorecards now that per-variant attribution is fresh. Phase
+    // 5 folds this into the full daily orchestration; firing it here keeps the
+    // controller's metrics current as soon as attribution lands.
+    await step.run("scorecards-refresh", async () => {
+      await inngest.send({
+        name: "meta/scorecards-refresh",
+        data: { workspace_id, ad_account_id },
+      });
+    });
+
+    return { status: "complete", ...result };
+  },
+);
+
+// ── meta/scorecards-refresh — Phase 3 deterministic metric rollups ──
+export const metaScorecardsRefresh = inngest.createFunction(
+  {
+    id: "meta-scorecards-refresh",
+    retries: 2,
+    concurrency: [{ limit: 1, key: "event.data.ad_account_id" }],
+    triggers: [{ event: "meta/scorecards-refresh" }],
+  },
+  async ({ event, step }) => {
+    const { workspace_id, ad_account_id, snapshot_date, window_days } = event.data as {
+      workspace_id: string;
+      ad_account_id: string;
+      snapshot_date?: string;
+      window_days?: number;
+    };
+
+    const result = await step.run("compute", async () => {
+      return refreshScorecards(
+        { workspaceId: workspace_id, adAccountId: ad_account_id },
+        { snapshotDate: snapshot_date, windowDays: window_days },
+      );
+    });
+
+    console.log(
+      `[meta-scorecards] account ${ad_account_id} ${result.snapshotDate} rows=${result.rows} ` +
+        `coverage=${result.variant_attribution_coverage}`,
+      JSON.stringify(result.counts),
     );
 
     return { status: "complete", ...result };
