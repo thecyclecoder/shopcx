@@ -265,25 +265,6 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
             {showAnswers ? "Cancel" : "Answer"}
           </button>
         )}
-        {!active && (
-          <button
-            type="button"
-            onClick={() => setShowIssue((v) => !v)}
-            className="rounded-md border border-zinc-200 px-2 py-0.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300"
-          >
-            {showIssue ? "Cancel" : "Report issue"}
-          </button>
-        )}
-        {canVerify && (
-          <button
-            type="button"
-            onClick={() => setConfirmVerify((v) => !v)}
-            className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700"
-            title="Owner gate: confirm this shipped feature works in production, then fold + archive its spec"
-          >
-            {confirmVerify ? "Cancel" : "Mark verified & archive"}
-          </button>
-        )}
         {!active && specStatus !== "shipped" && (
           <button
             type="button"
@@ -295,6 +276,29 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
           </button>
         )}
       </div>
+      {/* Report issue + Mark verified & archive get their own full-width row so they
+          aren't jammed in with the status chip / PR / build controls above. */}
+      {!active && (
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => setShowIssue((v) => !v)}
+            className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-[12px] font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            {showIssue ? "Cancel" : "Report issue"}
+          </button>
+          {canVerify && (
+            <button
+              type="button"
+              onClick={() => setConfirmVerify((v) => !v)}
+              className="flex-1 rounded-md bg-emerald-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-emerald-700"
+              title="Owner gate: confirm this shipped feature works in production, then fold + archive its spec"
+            >
+              {confirmVerify ? "Cancel" : "Mark verified & archive"}
+            </button>
+          )}
+        </div>
+      )}
       {canVerify && confirmVerify && (
         <div className="mt-2 space-y-2 rounded-md border border-emerald-200 bg-emerald-50/50 p-2 text-left dark:border-emerald-900/40 dark:bg-emerald-950/20">
           <p className="text-[11px] text-emerald-800 dark:text-emerald-300">
