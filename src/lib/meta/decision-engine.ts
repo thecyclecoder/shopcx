@@ -752,6 +752,67 @@ export async function persistRecommendations(
   return persisted;
 }
 
+/**
+ * Append/update the autonomous decisions into the Phase 4c `iteration_actions`
+ * ledger — the engine's audit/idempotency/reversal substrate. Decided actions
+ * land `status='decided'` (Phase 6a flips them to `executed`/`failed`);
+ * escalations (guardrail hits) land `status='escalated'` with the `guardrail`
+ * that fired — flagged for the Growth Director, never executed.
+ *
+ * Idempotent: upsert on `(workspace_id, meta_ad_account_id, object_id,
+ * action_type, snapshot_date)`, so a cron re-run on the same day re-upserts
+ * rather than double-acting. The engine only ever appends/updates this table —
+ * it never writes `iteration_policies`. NO Meta side effects (Phase 6a executes).
+ *
+ * NOT called by `runDecisionEngine` (Phase 4 has zero side effects); the Phase 5
+ * cron persists decisions after the engine returns them.
+ */
+export async function persistActions(
+  p: DecisionEngineParams,
+  snapshotDate: string,
+  actions: ComputedAction[],
+  escalations: ComputedAction[] = [],
+): Promise<number> {
+  const all = [
+    ...actions.map((a) => ({ a, status: "decided" as const })),
+    ...escalations.map((a) => ({ a, status: "escalated" as const })),
+  ];
+  if (!all.length) return 0;
+  const admin = createAdminClient();
+  const now = new Date().toISOString();
+  const records = all.map(({ a, status }) => ({
+    workspace_id: p.workspaceId,
+    meta_ad_account_id: p.adAccountId,
+    snapshot_date: snapshotDate,
+    level: a.level,
+    object_id: a.object_id,
+    label: a.label,
+    action_type: a.action_type,
+    rationale: a.rationale,
+    policy_version_id: a.policy_version_id,
+    triggering_scorecard_id: a.triggering_scorecard_id,
+    before_budget_cents: a.before.budget_cents,
+    before_status: a.before.status,
+    after_budget_cents: a.after.budget_cents,
+    after_status: a.after.status,
+    status,
+    guardrail: a.guardrail ?? null,
+    updated_at: now,
+  }));
+  let persisted = 0;
+  for (let i = 0; i < records.length; i += 200) {
+    const chunk = records.slice(i, i + 200);
+    const { error } = await admin
+      .from("iteration_actions")
+      .upsert(chunk, {
+        onConflict: "workspace_id,meta_ad_account_id,object_id,action_type,snapshot_date",
+        ignoreDuplicates: false,
+      });
+    if (!error) persisted += chunk.length;
+  }
+  return persisted;
+}
+
 // ── Orchestration ─────────────────────────────────────────────────────────────
 
 const ZERO_COUNTS = (): Record<AutonomousActionType, number> => ({
