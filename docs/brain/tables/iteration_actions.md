@@ -73,7 +73,10 @@ reversing action, linking the two via `reverses_action_id` / `reversed_by_action
 
 - [[../libraries/meta__decision-engine]] `loadRecentActions` reads this for
   cooldown enforcement + graduated-failure (was-recently-scaled, last-pause).
-- Phase 6a adapters update execution state + `external_result`.
+- [[../libraries/meta__execution]] `executeAutonomousActions` (Phase 6a) reads the
+  `status='decided'` rows, applies pause/unpause/scale to Meta, and updates each row
+  to `executed`/`failed` with `external_result` + `executed_at` (un-enabled types
+  like `replenish_creative` stay `decided`).
 
 ## Gotchas
 

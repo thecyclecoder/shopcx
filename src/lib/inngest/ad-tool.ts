@@ -856,7 +856,10 @@ export const adToolPublishToMeta = inngest.createFunction(
       const storyUrl = await urlFor(story);
       const singleUrl = storyUrl || feedUrl || (await urlFor(anchor));
       const token = await getMetaUserToken(workspace_id);
-      return { job, adName: campaign?.name || "ShopCX Ad", mediaKind, feedUrl, storyUrl, singleUrl, token };
+      // Engine-created jobs carry an explicit [ie]-tagged ad_name (Phase 6b); the
+      // studio path falls back to the campaign name.
+      const adName = (job.ad_name as string | null) || campaign?.name || "ShopCX Ad";
+      return { job, adName, mediaKind, feedUrl, storyUrl, singleUrl, token };
     });
 
     if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
@@ -943,9 +946,37 @@ export const adToolPublishToMeta = inngest.createFunction(
           status: j.publish_active ? "ACTIVE" : "PAUSED",
         });
         await setStatus("published", { meta_video_id: videoId, meta_creative_id: creativeId, meta_ad_id: adId, error: null });
+        // Phase 6b write-back: if this job fulfills an iteration_recommendation,
+        // record the engine-created Meta ids on it and flip status → executed.
+        if (j.recommendation_id) {
+          await admin
+            .from("iteration_recommendations")
+            .update({
+              status: "executed",
+              external_result: {
+                ad_publish_job_id: job_id,
+                meta_ad_id: adId,
+                meta_creative_id: creativeId,
+                meta_video_id: videoId,
+              },
+              executed_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", j.recommendation_id);
+        }
         return { ok: true, adId };
       } catch (err: any) {
         await setStatus("failed", { error: String(err?.message || err).slice(0, 300) });
+        if (j.recommendation_id) {
+          await admin
+            .from("iteration_recommendations")
+            .update({
+              status: "failed",
+              external_result: { ad_publish_job_id: job_id, error: String(err?.message || err).slice(0, 300) },
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", j.recommendation_id);
+        }
         throw err;
       }
     });

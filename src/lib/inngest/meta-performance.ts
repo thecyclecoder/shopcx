@@ -10,6 +10,8 @@ import { ingestMetaPerformance } from "@/lib/meta/performance";
 import { refreshVariantAttribution } from "@/lib/meta/attribution";
 import { refreshScorecards } from "@/lib/meta/scorecards";
 import { runDecisionEngine, persistActions } from "@/lib/meta/decision-engine";
+import { executeAutonomousActions } from "@/lib/meta/execution";
+import { executeRecommendation } from "@/lib/meta/recommendation-execute";
 import {
   startRun,
   finishRun,
@@ -310,9 +312,23 @@ export const metaIterationRun = inngest.createFunction(
       stages.push({ name: "persist-actions", status: "ok", ms: persisted.ms, persisted: persisted.count, reversals: persisted.reversals });
 
       // ── Stage 7 — execute autonomous adapters (6a) ──────────────────────────
-      // Phase 6 hook: the decided actions sit in iteration_actions (status='decided')
-      // for the Phase 6a adapters to apply to Meta. No execution happens yet.
-      stages.push({ name: "execute", status: "skipped", ms: 0, note: "Phase 6a not yet enabled — actions left status='decided'" });
+      // Apply the just-persisted decided actions to Meta (pause/unpause/scale).
+      // Idempotent: only status='decided' rows are touched, flipped to
+      // executed/failed; escalated rows are never executed. Self-correcting — a
+      // scale_down that reverts a prior scale_up runs here.
+      const execute = await step.run("execute", async () => {
+        const t0 = Date.now();
+        const r = await executeAutonomousActions(p, snapshotDate);
+        return { ms: Date.now() - t0, ...r };
+      });
+      stages.push({
+        name: "execute",
+        status: "ok",
+        ms: execute.ms,
+        executed: execute.executed,
+        failed: execute.failed,
+        skipped: execute.skipped,
+      });
 
       const counts = {
         scorecard_rows: scorecards.rows,
@@ -321,6 +337,8 @@ export const metaIterationRun = inngest.createFunction(
         actions_decided: decision.autonomous.actions.length,
         escalations: decision.autonomous.escalations.length,
         reversals: persisted.reversals,
+        actions_executed: execute.executed,
+        actions_failed: execute.failed,
         recommendations: decision.recommendations.persisted,
         spend_drift_objects: ingest.drift,
       };
@@ -339,6 +357,7 @@ export const metaIterationRun = inngest.createFunction(
       console.log(
         `[meta-iteration-run] account ${ad_account_id} ${snapshotDate} ` +
           `policy_active=${decision.policy_active} actions=${counts.actions_decided} ` +
+          `executed=${counts.actions_executed} failed=${counts.actions_failed} ` +
           `escalations=${counts.escalations} reversals=${counts.reversals} recs=${counts.recommendations}`,
         JSON.stringify(counts),
       );
@@ -356,6 +375,33 @@ export const metaIterationRun = inngest.createFunction(
       });
       throw err;
     }
+  },
+);
+
+// ── meta/execute-recommendation — Phase 6b: execute one approved recommendation ──
+// Fired by the review surface when Dylan approves an iteration_recommendations row.
+// Turns it into a DRAFT/PAUSED Meta object via the native publish path (never a new
+// live spend line). Idempotent: non-approved / already-dispatched rows short-circuit.
+export const metaExecuteRecommendation = inngest.createFunction(
+  {
+    id: "meta-execute-recommendation",
+    retries: 2,
+    concurrency: [{ limit: 2, key: "event.data.workspace_id" }],
+    triggers: [{ event: "meta/execute-recommendation" }],
+  },
+  async ({ event, step }) => {
+    const { workspace_id, recommendation_id } = event.data as {
+      workspace_id: string;
+      recommendation_id: string;
+    };
+    const result = await step.run("execute", () =>
+      executeRecommendation(workspace_id, recommendation_id),
+    );
+    console.log(
+      `[meta-execute-recommendation] rec ${recommendation_id} → ${result.status}` +
+        (result.reason ? ` (${result.reason})` : ""),
+    );
+    return { status: "complete", execution: result };
   },
 );
 

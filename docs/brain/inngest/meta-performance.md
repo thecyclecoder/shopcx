@@ -7,10 +7,13 @@ per-variant attributed spend + revenue (P2), computes the deterministic daily
 scorecards the controller reads (P3), then turns those scorecards + the active policy
 into autonomous actions + approval-gated recommendations (P4). **Phase 5** folds the
 whole sequence into one durable, run-recorded daily run (`meta-iteration-run`) with a
-reconcile/reversal stage and a failure alert. Delegates to
+reconcile/reversal stage and a failure alert. **Phase 6** executes the decisions:
+6a autonomous adapters run as the daily run's stage 7, and `meta-execute-recommendation`
+turns an approved recommendation into a PAUSED Meta draft. Delegates to
 [[../libraries/meta__performance]], [[../libraries/meta__attribution]],
-[[../libraries/meta__scorecards]], [[../libraries/meta__decision-engine]], and
-[[../libraries/meta__iteration-run]].
+[[../libraries/meta__scorecards]], [[../libraries/meta__decision-engine]],
+[[../libraries/meta__iteration-run]], [[../libraries/meta__execution]] (6a), and
+[[../libraries/meta__recommendation-execute]] (6b).
 
 **File:** `src/lib/inngest/meta-performance.ts`
 
@@ -32,7 +35,13 @@ reconcile/reversal stage and a failure alert. Delegates to
 - **Trigger:** event `meta/iteration-run`
 - **Retries:** 1 · **Concurrency:** `[{ limit: 1, key: "event.data.ad_account_id" }]`
 - **Event data:** `{ workspace_id, ad_account_id, meta_account_id, trigger?, incremental_days? }`
-- Runs the whole pipeline as ONE durable run: **ingest (P1) → attribution (P2/2b) → rollups (P3) → reconcile prior actions → 4a autonomous actions + 4b recommendations → persist actions + link reversals → execute (6a hook)**. Opens an [[../tables/iteration_runs]] record (`status='running'`) up front; stamps `complete`/`failed` with per-stage timings + summary counts on finish; on any stage error writes the failed run record and fires [[../libraries/notify-ops-alert]]. Delegates to [[../libraries/meta__iteration-run]] (`startRun`/`finishRun`/`reconcilePriorActions`/`linkReversals`) + the P1–P4 libraries. Enforces Phase 5 noise floors (min spend / min sessions) via `runDecisionEngine` opts; per-object cooldown + per-account budget-delta ceiling + the no-active-policy invariant are enforced inside the decision engine. Persists 4a decisions to [[../tables/iteration_actions]] (`status='decided'`; Phase 6a executes). Idempotent — a same-day re-run never double-writes/recommends/acts.
+- Runs the whole pipeline as ONE durable run: **ingest (P1) → attribution (P2/2b) → rollups (P3) → reconcile prior actions → 4a autonomous actions + 4b recommendations → persist actions + link reversals → execute (6a)**. Opens an [[../tables/iteration_runs]] record (`status='running'`) up front; stamps `complete`/`failed` with per-stage timings + summary counts on finish; on any stage error writes the failed run record and fires [[../libraries/notify-ops-alert]]. Delegates to [[../libraries/meta__iteration-run]] (`startRun`/`finishRun`/`reconcilePriorActions`/`linkReversals`) + the P1–P4 libraries. Enforces Phase 5 noise floors (min spend / min sessions) via `runDecisionEngine` opts; per-object cooldown + per-account budget-delta ceiling + the no-active-policy invariant are enforced inside the decision engine. Persists 4a decisions to [[../tables/iteration_actions]] (`status='decided'`), then **stage 7 executes them** ([[../libraries/meta__execution]] `executeAutonomousActions` — pause/unpause/scale flip the row to `executed`/`failed`; un-enabled types like `replenish_creative` stay `decided`). Idempotent — only `status='decided'` rows execute, so a same-day re-run never double-writes/recommends/acts.
+
+### `meta-execute-recommendation` (Phase 6b)
+- **Trigger:** event `meta/execute-recommendation`
+- **Retries:** 2 · **Concurrency:** `[{ limit: 2, key: "event.data.workspace_id" }]`
+- **Event data:** `{ workspace_id, recommendation_id }`
+- Fired by the review surface (`POST /api/ads/iteration-recommendations/[id]` on `approve`). Calls [[../libraries/meta__recommendation-execute]] `executeRecommendation` → for `new_static_adset`/`new_video_adset` creates a PAUSED [[../tables/ad_publish_jobs]] row (tagged `[ie]`, linked via `recommendation_id`) and fires `ad-tool/publish-to-meta`; other types are recognized but deferred (`external_result.deferred`). Idempotent: non-approved / already-dispatched rows short-circuit. **Never sets a new spend line live.**
 
 ### `meta-attribution-refresh` (Phase 2)
 - **Trigger:** event `meta/attribution-refresh`
@@ -59,6 +68,8 @@ reconcile/reversal stage and a failure alert. Delegates to
 - `meta/attribution-refresh` (from `meta-sync-performance`, after ingest)
 - `meta/scorecards-refresh` (from `meta-attribution-refresh`, after attribution)
 - `meta/decision-engine` (from `meta-scorecards-refresh`, after scorecards)
+- `ad-tool/publish-to-meta` (from `meta-execute-recommendation` — Phase 6b draft publish)
+- `meta/execute-recommendation` is sent from the review surface (`/api/ads/iteration-recommendations/[id]` on approve), consumed here
 
 ## Tables written
 
@@ -69,8 +80,9 @@ reconcile/reversal stage and a failure alert. Delegates to
 - [[../tables/meta_attribution_daily]] (Phase 2)
 - [[../tables/iteration_scorecards_daily]] (Phase 3)
 - [[../tables/iteration_recommendations]] (Phase 4b)
-- [[../tables/iteration_actions]] (Phase 5 — `meta-iteration-run` persists 4a decisions + reversals)
+- [[../tables/iteration_actions]] (Phase 5 — `meta-iteration-run` persists 4a decisions + reversals; Phase 6a stage 7 flips to `executed`/`failed`)
 - [[../tables/iteration_runs]] (Phase 5 — per-run audit record)
+- [[../tables/ad_publish_jobs]] (Phase 6b — `meta-execute-recommendation` creates the PAUSED draft job)
 
 ## Tables read (not written)
 

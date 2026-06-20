@@ -7,7 +7,8 @@ and the run-wide noise-floor constants. The durable orchestration itself lives i
 the `meta-iteration-run` Inngest function ([[../inngest/meta-performance]]), which
 sequences: ingest (P1) → attribution (P2/2b) → rollups (P3) → **reconcile** →
 4a actions + 4b recs ([[meta__decision-engine]]) → persist actions + link reversals
-→ execute (6a hook). Every stage is idempotent.
+→ **execute** (6a — [[meta__execution]] `executeAutonomousActions` applies the decided
+pause/unpause/scale to Meta). Every stage is idempotent.
 
 **File:** `src/lib/meta/iteration-run.ts`
 
@@ -70,9 +71,10 @@ the same values on a re-run.
 
 ## Gotchas
 
-- The reconcile **outcome** is most meaningful once Phase 6a actually executes actions
-  on Meta; until then it measures the object's post-decision trailing-window metrics
-  for `decided` rows (informative, harmless).
+- The reconcile **outcome** measures the object's post-decision trailing-window metrics;
+  it is most meaningful for actions Phase 6a actually executed ([[meta__execution]]) — a
+  `decided` row whose adapter is not yet enabled (e.g. `replenish_creative`) stays
+  `decided` and its outcome reflects an unapplied decision.
 - `linkReversals` must run **after** `persistActions` (it looks up the reversing row by
   its natural key for this snapshot).
 - [[../tables/iteration_runs]] is append-only run history — a re-run is a new row.

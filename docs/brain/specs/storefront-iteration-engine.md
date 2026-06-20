@@ -1,4 +1,4 @@
-# Storefront Iteration Engine 🚧
+# Storefront Iteration Engine ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
 
@@ -94,21 +94,26 @@ Library `src/lib/meta/iteration-run.ts` (run records + reconcile/reversal + nois
 - ✅ Skip autonomous actions + recommendations for objects below min spend / min sessions thresholds — `MIN_ACTION_SPEND_CENTS` ($5) / `MIN_VARIANT_SESSIONS` (30) passed to `runDecisionEngine` (module constants in v1; candidate to migrate into `iteration_policies` later)
 - ✅ If no active policy version exists, run scorecards + 4b recommendations only; take zero autonomous actions (`policy_active=false` on the run record)
 
-## Phase 6 — Execution adapters ⏳
+## Phase 6 — Execution adapters ✅
 Goal: execute decisions; manage live objects autonomously, create new spend lines as drafts only.
+Libraries `src/lib/meta/execution.ts` (6a — `executeAutonomousActions`) + `src/lib/meta/recommendation-execute.ts` (6b — `executeRecommendation`). New Graph writes `updateObjectStatus`/`updateObjectBudget` in `src/lib/meta-ads.ts`. 6a runs as the cron's stage 7 (`meta-iteration-run`); 6b fires `meta/execute-recommendation` (Inngest `meta-execute-recommendation`) on approval. Migration `20260620180000_ad_publish_jobs_engine_fields.sql` (apply: `scripts/apply-ad-publish-jobs-engine-fields-migration.ts`) adds `ad_publish_jobs.ad_name` (engine tag) + `recommendation_id` (write-back link). **Shipped one action type at a time** via explicit `ENABLED_ADAPTERS` allow-lists.
 ### 6a — Autonomous adapters (manage existing live objects, bounded by active policy)
-- ⏳ pause / unpause: Graph status update on `meta_ad_id`/`meta_adset_id`
-- ⏳ scale up (≤ step cap) / scale down: Graph budget update on the adset/campaign
-- ⏳ replenish thin adset: upload replacement creative; **proven/reused creative into an existing live adset may go live; brand-new untested creative uploads as PAUSED draft**
-- ⏳ Gated only by active policy + ledger idempotency + cooldown + ceiling; each action logged to `iteration_actions` with policy version + triggering snapshot
+- ✅ pause / unpause: Graph status update (`updateObjectStatus`) on the adset/campaign
+- ✅ scale up (≤ step cap) / scale down: Graph budget update (`updateObjectBudget`) on the same budget field (daily/lifetime) the object already uses
+- ⏭️ **Next increment (adapter not yet enabled):** replenish thin adset — upload replacement creative; **proven/reused creative into an existing live adset may go live; brand-new untested creative uploads as PAUSED draft**. Decided `replenish_creative` rows are left `status='decided'` until this adapter ships (not in `ENABLED_ADAPTERS`).
+- ✅ Gated only by active policy + ledger idempotency + cooldown + ceiling (all enforced upstream by the decision engine; the executor only applies `status='decided'` rows, never `escalated`); each executed action flips its `iteration_actions` row to `executed`/`failed` with `external_result` + `executed_at`. Self-correcting: a `scale_down` reverting a prior `scale_up` executes here.
 ### 6b — Approval-gated adapters (new live spend lines, drafts only)
-- ⏳ `new_static_adset` / `new_video_adset`: reuse `ad-tool/publish-to-meta` with `publish_active=false` → PAUSED, into an existing target campaign/adset
-- ⏳ `new_campaign`: requires net-new `createCampaign` + `createAdSet` exports in `src/lib/meta-ads.ts` (do not exist today) — ship LAST, behind its own verification; created PAUSED/draft
-- ⏳ `test_benefit_angle`: fire `ad-tool/generate-full` (or seed an `ad_campaigns` row with chosen `angle_id`), then publish drafts
-- ⏳ `new_lander_variant`: `generateAdvertorialPagesForCampaign` (auto-runs at campaign `ready`); adapter picks angle + variant
-- ⏳ Tag every engine-created Meta object with a stable marker via `ad_campaigns.name` convention (e.g. `[ie]` prefix); keep demographic terms out of the Meta object name
-- ⏳ Write executed action + external ids back to `iteration_recommendations` (status executed) for idempotency
-- ⏳ Ship execution adapters one action type at a time, each verified before the next is enabled
+- ✅ `new_static_adset` / `new_video_adset`: reuse `ad-tool/publish-to-meta` with `publish_active=false` → PAUSED, into the existing target adset; concrete build inputs (`ad_campaign_id`, `meta_adset_id`, `meta_page_id`, `destination_url`) read from the recommendation's `params`; missing inputs ⇒ left `status='approved'` with `external_result.deferred` (never guessed)
+- ⏭️ **Next increment (deferred, ship LAST):** `new_campaign` — requires net-new `createCampaign` + `createAdSet` exports (objective + targeting + optimization decisions not yet specified — see Open questions); created PAUSED/draft. Recognized but deferred (`external_result.deferred`).
+- ⏭️ **Next increment (deferred):** `test_benefit_angle` — seed an `ad_campaigns` row with the chosen `angle_id` + fire `ad-tool/generate-full`, then publish drafts.
+- ⏭️ **Next increment (deferred):** `new_lander_variant` — `generateAdvertorialPagesForCampaign` for the chosen angle + variant.
+- ⏭️ **Next increment (deferred):** `offer_test` — a pricing/bundle/guarantee change, not an ad publish (product decision).
+- ✅ Tag every engine-created Meta object with a stable `[ie]` marker via `ad_publish_jobs.ad_name` (the publisher prefers it over `ad_campaigns.name`); demographic terms kept out of the Meta object name
+- ✅ Write executed action + external ids back to `iteration_recommendations` (`status='executed'`, `external_result.meta_ad_id/...`) for idempotency; the dispatcher records `ad_publish_job_id` immediately + short-circuits an already-dispatched row
+- ✅ Ship execution adapters one action type at a time, each verified before the next is enabled (`ENABLED_ADAPTERS` allow-lists in both libraries — enabling a deferred type is a one-line, reviewable change)
+
+**Open questions (deferred adapters):**
+- `new_campaign` / a fully engine-authored adset needs a default **objective**, **optimization goal**, **billing event**, **bid strategy**, and **targeting/audience** — none are in the spec. These determine whether an engine-created adset is even valid, so `createAdSet` is intentionally not built yet. Decision needed before enabling `new_campaign` / `test_benefit_angle` end-to-end.
 
 ## Safety / invariants
 - Autonomy is bounded entirely by the **active approved policy version**; with no active policy, the engine takes zero autonomous actions.
@@ -139,6 +144,24 @@ Goal: execute decisions; manage live objects autonomously, create new spend line
 - Dylan can review the active policy + a daily list of autonomous actions and pending recommendations, edit/approve a policy version, and see autonomous management plus draft creation happen without anything going live unintentionally.
 
 ## Verification
+
+### Phase 6 — Execution adapters (shipped)
+- Apply the migration: `npx tsx scripts/apply-ad-publish-jobs-engine-fields-migration.ts` → expect `✓ applied 20260620180000_ad_publish_jobs_engine_fields.sql` then `✓ public.ad_publish_jobs.ad_name present` and `✓ public.ad_publish_jobs.recommendation_id present`.
+- In the Supabase SQL editor, confirm the columns: `select column_name from information_schema.columns where table_name='ad_publish_jobs' and column_name in ('ad_name','recommendation_id');` → expect both rows.
+- **6a — autonomous adapter executes within policy + self-corrects:**
+  - With an active `iteration_policies` row and a real adset below the ROAS floor with enough spend, send `meta/iteration-run` for the account → the run's stage 7 (`execute`) is `status='ok'`; `select status, action_type, external_result, executed_at from iteration_actions where meta_ad_account_id='<id>' and snapshot_date='<date>';` → the `pause`/`scale_down`/`scale_up`/`unpause` rows are now `status='executed'` with `external_result.graph_response` (status flip) or `external_result.applied_budget_cents` (budget) + non-null `executed_at`, and the Meta object reflects the change in the Ads Manager.
+  - **Enabled allow-list:** a decided `replenish_creative` row stays `status='decided'` after the run (adapter not in `ENABLED_ADAPTERS`); it is counted in the run's `execute` stage `skipped`.
+  - **Self-correction:** on a later run where a previously `scale_up`-ed object dropped below floor, the new `scale_down` is decided, executed (budget cut on Meta), and linked (`reverses_action_id`) — the prior `scale_up` flips to `reversed`.
+  - **Idempotency / re-run safety:** re-send the same `meta/iteration-run` → already-`executed` rows are NOT re-applied (the executor only touches `status='decided'`), so no duplicate Graph writes; the run's `execute` stage shows `executed=0`.
+  - **No token / no decided rows ⇒ no-op:** with no Meta token (or no active policy ⇒ no decided rows), stage 7 runs clean with `executed=0 failed=0` and changes nothing.
+- **6b — approval-gated adapter creates a tagged draft + writes ids back:**
+  - Seed a `pending` `new_static_adset` recommendation whose `params` carry real build inputs (`ad_campaign_id` of a built `ad_campaigns` with ready media, an existing `meta_adset_id`, `meta_page_id`, `destination_url`). `POST /api/ads/iteration-recommendations/<id>` `{ "workspaceId":"<ws>", "action":"approve" }` as an owner → `{ recommendation:{ status:"approved" } }` and a `meta/execute-recommendation` event fires.
+  - The `meta-execute-recommendation` function logs `→ executed`; `select status, external_result from iteration_recommendations where id='<id>';` → `external_result.ad_publish_job_id` set (status `publishing`); the linked `ad_publish_jobs` row has `publish_active=false`, `ad_name` starting `[ie] `, and `recommendation_id=<id>`.
+  - After the publisher completes, the recommendation flips to `status='executed'` with `external_result.meta_ad_id`/`meta_creative_id` and the Meta ad exists **PAUSED** (never live) under an `[ie] …` name.
+  - **Deferred types:** approve a `new_campaign` (or `test_benefit_angle`/`new_lander_variant`/`offer_test`) recommendation → it stays `status='approved'` with `external_result.deferred='adapter_deferred:<type>'`; **no Meta object created**.
+  - **Missing inputs ⇒ deferred, not guessed:** approve a `new_static_adset` lacking `ad_campaign_id` → stays `approved` with `external_result.deferred='missing_build_inputs:ad_campaign_id,…'`; no publish job created.
+  - **Idempotency:** re-fire `meta/execute-recommendation` for an already-dispatched row → result `skipped (already_dispatched)`; no second `ad_publish_jobs` row (`select count(*) from ad_publish_jobs where recommendation_id='<id>';` = 1).
+- **Safety invariant — never goes live:** every engine-created Meta object is PAUSED; confirm no `ad_publish_jobs` row created by the engine has `publish_active=true`, and 6a never sets `ACTIVE` on a draft/new object (it only flips status on existing objects + adjusts budget).
 
 ### Phase 5 — Daily cron orchestration (shipped)
 - Apply the migration: `npx tsx scripts/apply-iteration-runs-migration.ts` → expect `✓ applied 20260620170000_iteration_runs.sql` then `✓ public.iteration_runs has N columns`.

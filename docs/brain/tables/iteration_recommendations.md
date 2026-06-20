@@ -58,15 +58,21 @@ re-run for the same day re-upserts rather than double-recommending.
 `pending` → (review surface) → `approved` | `rejected`; an `approved` row → (Phase 6b)
 → `executed` | `failed`. The review surface is
 `src/app/api/ads/iteration-recommendations/route.ts` (GET) + `[id]/route.ts`
-(POST `{ action: "approve" | "reject" }`).
+(POST `{ action: "approve" | "reject" }`). On approve the route fires
+`meta/execute-recommendation` → [[../libraries/meta__recommendation-execute]]
+`executeRecommendation`: an enabled type (`new_static_adset`/`new_video_adset`) creates
+a PAUSED [[ad_publish_jobs]] draft and the publisher writes the meta ids back
+(`status='executed'`); a deferred type stays `approved` with `external_result.deferred`.
 
 ## Gotchas
 
 - **Only `pending` rows are reviewable** — the approve/reject route 409s on an
   already-decided row (idempotent re-approve guard).
-- **No external side effects on approve** — approval just flips status; the actual
-  draft Meta object is created in Phase 6b. Phases 4b and earlier never write to Meta.
+- **Approve fires execution but never goes live** — the Phase 6b draft is always
+  `publish_active=false` (PAUSED). Phases 4b and earlier never write to Meta.
 - The autonomous half of Phase 4 (4a) lands in `iteration_actions` (Phase 4c), **not**
   here — this table is recommendations only.
+- An execution that can't proceed (deferred adapter, or missing build inputs) leaves
+  the row `approved` with `external_result.deferred` — it is **not** marked `failed`.
 
-See [[../libraries/meta__decision-engine]] · [[../specs/storefront-iteration-engine]].
+See [[../libraries/meta__decision-engine]] · [[../libraries/meta__recommendation-execute]] · [[../specs/storefront-iteration-engine]].

@@ -17,12 +17,16 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 | `getVideoThumbnail(token, videoId)` | `GET /{video_id}/thumbnails` → preferred auto-thumbnail URI |
 | `createAdCreative(token, args)` | `act_{id}/adcreatives` — **non-dynamic multi-text** creative: video+link+CTA in `object_story_spec.video_data` (`video_id`,`image_hash`,`call_to_action.value.link`) + variations in `asset_feed_spec` (`titles[]`/`bodies[]`, `optimization_type:DEGREES_OF_FREEDOM`, NO `videos`/`ad_formats`/`link_urls`) + `degrees_of_freedom_spec` text-opt OPT_OUT + top-level `url_tags` → creative_id |
 | `createAd(token, accountId, {name,adsetId,creativeId,status})` | `act_{id}/ads` (default PAUSED) → ad_id |
+| `updateObjectStatus(token, objectId, status)` | **Iteration Engine 6a** — `POST /{object_id}` `status=ACTIVE\|PAUSED` (ad/adset/campaign); pause/unpause an existing live object |
+| `updateObjectBudget(token, objectId, {dailyBudgetCents?,lifetimeBudgetCents?})` | **Iteration Engine 6a** — `POST /{object_id}` `daily_budget`/`lifetime_budget` (cents → integer minor units); scale an adset/campaign on its existing budget field |
 
 `META_CTA_TYPES` + `generateMetaCopy` live in `src/lib/ad-meta-copy.ts` (Opus copy gen). Errors throw `meta_{status}: {graph message}`.
 
+`updateObjectStatus`/`updateObjectBudget` are the raw Graph writes behind the autonomous adapters in [[meta__execution]] (Phase 6a) — manage EXISTING live objects only; the engine never sets ACTIVE on a draft/new object.
+
 ## Caller
 
-[[../inngest/ad-tool]] `adToolPublishToMeta`; the API routes `/api/ads/meta` + `/api/ads/campaigns/[id]/{meta-copy,publish}`.
+[[../inngest/ad-tool]] `adToolPublishToMeta`; the API routes `/api/ads/meta` + `/api/ads/campaigns/[id]/{meta-copy,publish}`; [[meta__execution]] (`updateObjectStatus`/`updateObjectBudget`, Iteration Engine 6a).
 
 ## Related
 
