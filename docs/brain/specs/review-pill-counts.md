@@ -1,4 +1,4 @@
-# Review Filter Pill Counts — show the real corpus volume ⏳
+# Review Filter Pill Counts — show the real corpus volume ✅
 
 **Owner:** [[../functions/cmo]] · **Parent:** CMO mandate — owned product/website content (PDP family; follows [[pdp-refinement-pass]] / [[box-product-seeding]]).
 
@@ -15,7 +15,11 @@ The "What customers are saying" filter pills show a **count next to each benefit
 - **"All reviews"** pill keeps the true total (`review_total_count`), unchanged.
 
 ## Verification
-- Superfood Tabs reviews section: pills read the corpus volume (Bloating ~519, Weight ~407, Energy ~656, etc. — matching `top_benefits[].frequency`), not 3–7. Clicking a pill still shows that category's curated reviews with the "showing top reviews…" subhead. "All reviews" still shows 13k+. No category shows a count with zero clickable reviews (a benefit with frequency but no matched ids is hidden, as today via `availableFilters`).
+- On the Superfood Tabs PDP reviews section ("What customers are saying"), read the benefit pills → expect each count to be the corpus volume from `product_review_analysis.top_benefits[].frequency` (Bloating ~519, Weight ~407, Energy ~656, etc.), NOT the old 3–7.
+- Click a benefit pill → expect the list to still show only that category's curated/loaded reviews (`benefit_review_matches[f]`), with a `Showing top reviews mentioning {category}` subhead directly above the grid.
+- Click "All reviews" (or re-click the active pill) → expect the subhead to disappear and the full list to return; the "All reviews" pill behavior/total (`review_total_count`, 13k+) is unchanged.
+- Inspect the pills list → expect no pill whose category has zero clickable reviews (benefits with no matched ids never enter `availableFilters`, unchanged).
+- A benefit whose name matches a `top_benefits` cluster with no `frequency` → expect the pill to fall back to the matched-id count (no zero/blank count).
 
 ## Phases
-- ⏳ **P1:** `benefit_review_counts` in page-data + ReviewsSection pill uses it + the filtered subhead. Fold into [[../lifecycles/product-intelligence]] / the reviews-section notes on ship.
+- ✅ **P1:** `benefit_review_counts` in page-data (`computeBenefitReviewMatches` now returns `{ matches, counts }`; counts = summed `top_benefits[].frequency` of the same token-overlap name-match, fallback matched-id count) + ReviewsSection pill uses `data.benefit_review_counts[f]` + the `Showing top reviews mentioning {category}` subhead. Filter/click behavior (`benefit_review_matches`) and "All reviews" unchanged. Fold into [[../lifecycles/product-intelligence]] / the reviews-section notes on ship.

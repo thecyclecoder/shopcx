@@ -223,7 +223,10 @@ export function ReviewsSection({
               All reviews
             </button>
             {availableFilters.map((f) => {
-              const count = matches[f]?.length || 0;
+              // Corpus volume (real mention count, hundreds) — NOT the
+              // small set of loaded/matched ids used to filter the list.
+              const count =
+                data.benefit_review_counts?.[f] ?? matches[f]?.length ?? 0;
               const active = filter === f;
               return (
                 <button
@@ -245,6 +248,14 @@ export function ReviewsSection({
               );
             })}
           </div>
+        )}
+
+        {filter && (
+          // The pill shows the corpus volume (e.g. 519); the list shows a
+          // curated sample. This subhead keeps the big number honest.
+          <p className="mb-4 text-sm text-zinc-500">
+            Showing top reviews mentioning {filter}
+          </p>
         )}
 
         <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
