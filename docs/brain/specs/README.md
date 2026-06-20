@@ -46,6 +46,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** turns the ticket Improve tab into the founder's "fix-this-weird-ticket" terminal chat, productized — a **ticket-bound, resumable `claude -p` Max session** (auto-carries `ticket_id`) with full brain/`src/`/web powers, that **recommends then acts under one approval**: customer actions + internal notes + close/unassign/unescalate, sonnet-rule + grader changes, ticket re-score, and **code changes routed as ticket-sourced specs to the CS manager** (commissioned in Roadmap, never auto-built). Pivotable mid-conversation. Reuses the [[box-spec-chat]] session primitive + the [[build-approval-gates]] `pending_actions` gate; introduces a `cs_manager` role + [[../functions/cs]]. Replies take minutes (accepted), $0 marginal on Max.
 
+## Active project — Box-hosted Escalation Triage ⏳
+
+**Spec:** [[box-escalation-triage]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** retires the Anthropic-cloud agent-todo routine and replaces it with an **hourly box sweep over escalated tickets** on Max, using a **solver→skeptic→quorum** loop: the solver finds the fix to unescalate (or, if mis-escalated, specs an analyzer fix); a skeptic adversarially re-checks against brain/rules/DB; on agreement it materializes the same human-gated `agent_todos`. Tweaks: **code changes become spec files** (owner=cs, ticket-ref, commissioned on Roadmap — never `code_change` todos), prompt rules stay **admin-approvable so Zach can approve**, and no-quorum leaves the ticket escalated for a human. Bounded-proxy autonomy (proposes, never silently mutates). Includes deleting the old routine so there's no dead code. Box-agent family with [[box-spec-chat]] + [[box-ticket-improve]].
+
 ## Active project — Storefront coupon visibility + WELCOME SMS ⏳
 
 **Spec:** [[storefront-coupon-visibility-and-sms]] · **Owner:** [[../functions/growth]]
