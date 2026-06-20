@@ -32,11 +32,25 @@ A `content+media refresh`-style run ([[box-product-seeding]] modes) that, for th
 Tabs carries the concrete instances of B + C captured 2026-06-20: headline above; 16→15; Danielle F. `smart_quote` fix; 8 individual pills; 3-variant supplement facts (Peach Mango prioritized — Sodium 230/Potassium 300/Blend 400mg; Mixed Berry 230/306/457; Strawberry Lemonade 240/310/467 — **pending founder verification**); real endorsements (Lindsey Ray / Teresa Rodriguez / Brenda Gregory, photos re-hosted); 2 before/after stories (Anne B. + one more); 4-slide gallery; full-corpus review analysis.
 
 ## Verification
+
+### P1 — global build (code-level, after migrations applied)
+- Apply migrations: `npx tsx scripts/apply-pdp-refinement-migrations.ts` → expect `✓ applied 20260620130000_before_after_stories.sql`, `✓ applied 20260620140000_split_trust_pills.sql`. Re-run → same output, no row changes (idempotent).
+- After the split migration, in Supabase SQL: `select certifications from products where array_to_string(certifications, '|') ~ ','` → expect **0 rows** (no element still contains a comma).
+- On a PDP whose timeline has 4 milestones, view desktop → the row is centered/balanced (4 equal columns), not left-aligned with an empty 5th slot. A 5-step timeline still fills 5 columns.
+- On a PDP with `before_1`/`after_1` + `before_2`/`after_2` media and 2 `before_after_stories` → expect two before/after pairs, each beside its own testimonial (quote/name/variant). A PDP with only legacy `before`/`after` still renders one unlabeled pair (Amazing Coffee).
+- On a PDP where one ingredient is a caffeine-source duplicate of another (e.g. Tabs: "100mg Caffeine (Green Tea)" + "Green Tea") → the hero credibility badge reads "…on **15 superfoods**…" (duplicate excluded), and the duplicate ingredient card still renders in "Inside every serving".
+- Box: `npx tsx scripts/seed-product-tools.ts get-reviews <ws> <pid> 0 100` on a product with >1000 4★ reviews → `total` reflects the **full** corpus (thousands, not capped at 1000/2000); paging `offset` 0,100,200… walks all reviews without repeats.
+- Box: `echo '{"sourceUrl":"https://cdn.shopify.com/…/before.jpg","slot":"before_1"}' | npx tsx scripts/seed-product-tools.ts rehost-image <ws> <pid>` → returns a `product-media` Supabase URL; the row's `url` is **not** a Shopify-CDN URL (re-hosted, never hotlinked).
+- Ticket/Improve: ask a nutrition question (e.g. "how much sodium is in Peach Mango Tabs?") → the orchestrator calls `get_product_nutrition`; with no populated `supplement_facts` it returns the "no facts on file — don't guess" message (nothing fabricated). After facts are populated + a republish, the KB article contains a "## Supplement Facts (per variant)" section and the tool quotes the exact number.
+- `npx tsc --noEmit` → clean.
+
+### Per-product pass (prod-facing, P2/P3)
 - Run the pass on a product → trust pills are individual; timeline centered on desktop; review filter counts are realistic (hundreds, not single digits); each variant has a Supplement Facts panel (HTML) + the AI can quote it on a ticket + it's in the KB; endorsements show real people with **Supabase-hosted** photos; up to 2 before/after stories render with re-hosted photos; hero gallery = 4 slides; headline reads punchy. API console flat (Max).
 - Negative: no fabricated endorsements/avatars remain; no Shopify-CDN hotlinks in `product_media`; no nutrition panel ships without verification.
 
 ## Phases
-- ⏳ **P1 — global build:** ship section A (components + skill + seed-tools + orchestrator tool + KB + harvest step), tsc-clean, PR.
+- 🚧 **P1 — global build:** section A landed, tsc-clean. Code complete; two migrations authored + **pending owner approval to apply** (`20260620130000_before_after_stories.sql`, `20260620140000_split_trust_pills.sql` → `scripts/apply-pdp-refinement-migrations.ts`). Flip to ✅ once applied.
+  - **Built:** `WhatToExpectTimeline` centering (cols = min(steps,5)) · `UGCSection`/`BeforeAfterPair` + `before_after_stories` 2-story model (legacy `before`/`after` still works) · `HeroSection` `ResearchCredibility` "N superfoods" badge excludes caffeine-style duplicates · `seed-tools.saveTrustPills` (individual pills) + skill guidance + one-time split migration · `seed-tools.getReviews` range-pagination (no 1000 cap) · `get_product_nutrition` orchestrator tool (improve delegates) + per-variant Supplement-Facts KB mirror in `publishProductContent` · PDP harvest (`getPdpImages` + `rehostImage` — re-host, never hotlink) · gallery slides (`resolveLifestyleSlide` Drive UGC + `generateStaticAdSlide` Nano-Banana w/ caption overlays) + `save-media` displayOrder for gallery rows. All wired into `scripts/seed-product-tools.ts` + the `seed-product` skill.
 - ⏳ **P2 — Tabs run:** execute the pass on Superfood Tabs with its C specifics; verify live.
 - ⏳ **P3 — fan-out:** run the pass on Creamer, Guru, Zen, Creatine, K-Cups, Amazing Coffee (each harvests its own PDP/Drive/reviews).
 

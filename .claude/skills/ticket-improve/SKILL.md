@@ -33,6 +33,7 @@ npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]
 
 Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` ·
 `get_crisis_status` · `get_dunning_status` · `get_product_knowledge` (json_input `{"query":"…"}`) ·
+`get_product_nutrition` (per-variant Supplement Facts — sodium/potassium/caffeine/calories/etc.; json_input `{"query":"…"}`) ·
 `get_ticket_analysis` (why a ticket was graded N/10). These are READ-ONLY — they never mutate.
 
 ## Output protocol — ONE JSON object as your final message

@@ -28,6 +28,7 @@ Two paths:
 
 1. **Author from scratch** in the dashboard editor — rich-text contentEditable + toolbar, slug auto-generated from title, draft/publish toggle, product associations.
 2. **Scrape from existing help site** — Inngest function `scrape-help-center` (`src/lib/inngest/scrape-help-center.ts`) crawls a target URL (tested at help.superfoodscompany.com — 200+ articles), strips Gorgias widget markup, decodes HTML entities, maps article topics to Shopify products via partial keyword matching.
+3. **Generated from Product Intelligence** — `publishProductContent` (`src/lib/product-intelligence/publish.ts`) upserts a per-product KB article (the page's `knowledge_base_article` + "what it doesn't do"). It also **mirrors per-variant Supplement Facts** into that article (a "## Supplement Facts (per variant)" section) whenever `product_variants.supplement_facts` is populated — so the support AI can retrieve nutrition (sodium/potassium/caffeine/calories per flavor) via RAG, in addition to the dedicated `get_product_nutrition` tool. Nothing is mirrored until facts exist (founder-verified), so nutrition never ships unverified.
 
 ## Article view → AI agent
 

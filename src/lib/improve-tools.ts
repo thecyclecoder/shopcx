@@ -60,7 +60,9 @@ export default async function executeToolCallImprove(
   }
 
   const custId = await resolveCustomerId(workspaceId, ticket);
-  if (!custId && name !== "get_product_knowledge") {
+  // Product-level tools don't need a resolved customer.
+  const customerlessTools = new Set(["get_product_knowledge", "get_product_nutrition"]);
+  if (!custId && !customerlessTools.has(name)) {
     return "No customer found for this ticket.";
   }
   return executeToolCall(name, input, workspaceId, custId, ticket.id);
