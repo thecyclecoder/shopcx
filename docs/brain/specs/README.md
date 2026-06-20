@@ -34,7 +34,13 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
-## Active project — Spec-Test Classification (no phantom regressions) ⏳
+## Active project — Migration: Shipping Protection ⏳
+
+**Spec:** [[migration-shipping-protection]] · **Owner:** [[../functions/retention]]
+
+**Why this matters:** Appstle bills shipping protection as a **line item**; internal subs use a **flag** (`shipping_protection_added` + `_amount_cents`, billed separately). `migrate-to-internal` never converts it, so the protection line lands in `items[]` and `pre_migration_charge_cents` over-counts → `pricing_preserved` fails on every protection-carrying migration, and no mechanical fix can wire the columns (stuck sub `4b831caa`). Fix: (1) migration converts the protection line → flag + excludes it from the baseline; (2) a new `shipping_protection_convert` migration-fix `fix_kind` so the agent repairs stuck subs (first use: `4b831caa` — flag $3.75/375¢, baseline 6371¢→5996¢, Tabs override untouched). Extends [[migration-fix-agent]].
+
+## Active project — Spec-Test Classification (no phantom regressions) ✅
 
 **Spec:** [[spec-test-classification]] · **Owner:** [[../functions/platform]]
 
