@@ -13,11 +13,13 @@ import { useWorkspace } from "@/lib/workspace-context";
 
 interface Check { key: string; ok: boolean; detail?: string }
 interface FixAction { id: string; fix_kind: string; summary: string; preview?: string; status: string; result?: string }
+interface FixQuestion { id: string; q: string }
 interface FixInfo {
   jobId: string;
-  status: string; // queued|building|needs_approval|completed|failed|needs_attention
+  status: string; // queued|building|needs_input|needs_approval|completed|failed|needs_attention
   diagnosis: string | null;
   error: string | null;
+  questions: FixQuestion[];
   actions: FixAction[];
 }
 interface Audit {
@@ -172,11 +174,48 @@ function FixPanel({ fix, isOwner, onChange }: { fix: FixInfo; isOwner: boolean; 
   const [err, setErr] = useState<string | null>(null);
   const diagnosis = fix.diagnosis || fix.error;
   const label =
-    fix.status === "needs_approval" ? "🤖 fix proposed — awaiting approval"
+    fix.status === "needs_input" ? "🤖 needs your answer"
+    : fix.status === "needs_approval" ? "🤖 fix proposed — awaiting approval"
     : fix.status === "completed" ? (fix.error ? "🤖 needs a human" : "🤖 worked")
-    : fix.status === "queued" || fix.status === "building" ? "🤖 diagnosing…"
+    : fix.status === "queued" || fix.status === "building" || fix.status === "queued_resume" ? "🤖 diagnosing…"
     : fix.status === "needs_attention" || fix.status === "failed" ? "🤖 attention needed"
     : `🤖 ${fix.status}`;
+
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [note, setNote] = useState("");
+
+  // Owner answers the box's plain judgment question inline → reuse POST /api/roadmap/answer
+  // ({jobId, answers:[{id,q,answer}]}) → the job flips queued_resume and the box resumes WITH the
+  // answer to propose a concrete gated fix. See docs/brain/specs/migration-fix-human-input.md.
+  const send = async () => {
+    const payload = fix.questions.map((q) => ({ id: q.id, q: q.q, answer: (answers[q.id] || "").trim() }));
+    if (note.trim()) payload.push({ id: "note", q: "Additional note", answer: note.trim() });
+    if (payload.every((a) => !a.answer)) {
+      setErr("Type an answer first.");
+      return;
+    }
+    setBusy("send");
+    setErr(null);
+    try {
+      const res = await fetch("/api/roadmap/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: fix.jobId, answers: payload }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setErr(j.error || `Failed (${res.status})`);
+      } else {
+        setAnswers({});
+        setNote("");
+        await onChange();
+      }
+    } catch {
+      setErr("Network error");
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const decide = async (actionId: string, decision: "approve" | "decline") => {
     setBusy(actionId + decision);
@@ -206,6 +245,45 @@ function FixPanel({ fix, isOwner, onChange }: { fix: FixInfo; isOwner: boolean; 
         <span className="text-[11px] font-semibold uppercase tracking-wider text-indigo-700">{label}</span>
       </div>
       {diagnosis && <p className="mt-1.5 whitespace-pre-wrap text-xs text-zinc-700">{diagnosis}</p>}
+      {fix.status === "needs_input" && (
+        isOwner ? (
+          <div className="mt-2 space-y-2">
+            {fix.questions.map((q) => (
+              <div key={q.id}>
+                <p className="text-xs font-medium text-zinc-800">{q.q}</p>
+                <input
+                  type="text"
+                  value={answers[q.id] || ""}
+                  onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                  placeholder="Type your answer…"
+                  disabled={!!busy}
+                  className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none disabled:opacity-50"
+                />
+              </div>
+            ))}
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">Note (optional)</p>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Anything else the fix should know…"
+                rows={2}
+                disabled={!!busy}
+                className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none disabled:opacity-50"
+              />
+            </div>
+            <button
+              disabled={!!busy}
+              onClick={send}
+              className="rounded-md bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {busy === "send" ? "Sending…" : "Send"}
+            </button>
+          </div>
+        ) : (
+          <p className="mt-1 text-[11px] text-zinc-400">Owner answer required.</p>
+        )
+      )}
       {fix.status === "needs_approval" && fix.actions.length > 0 && (
         <ul className="mt-2 space-y-2">
           {fix.actions.map((act) => (

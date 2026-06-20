@@ -63,11 +63,14 @@ For every failing check, decide the safe fix:
   incident did by hand.
 - **`appstle_cancelled` / `no_double_bill`** (the old Appstle contract is still `ACTIVE`) → propose an
   **`appstle_cancel`** of the old contract (double-bill risk).
-- **`card_pinned`** / no billable card → you **cannot** invent a card → `human_needed` (the customer
-  must add one, or it's a comp sub → see the comp-subscriptions path).
+- **`card_pinned`** / no billable card → **out-of-system** (the customer must act). You **cannot**
+  invent a card → terminal `human_needed` with a **one-line plain instruction** (the customer must add
+  one, or it's a comp sub → see the comp-subscriptions path).
 
-If you're unsure a fix is safe (ambiguous pricing history, you can't reconstruct the intended base, a
-class of missing rows that smells like a code gap) → don't guess. Surface `human_needed`.
+If a failing check needs a **decision** you can't make but the **owner** can (an ambiguous pricing
+history you can't reconstruct, two conflicting locked-in prices) → don't guess and don't dump
+check-jargon. Pause on **`needs_input`** with **one plain question** (see Step 2). If it's genuinely
+out-of-system (nothing the owner can type fixes it) → `human_needed`.
 
 ## Step 2 — emit ONE JSON object
 
@@ -81,14 +84,25 @@ If **every** failing check has a safe typed fix:
 ]}
 ```
 
-If **any** failing check is unfixable:
+If a failing check needs an **owner decision** (human-JUDGMENT) — ask **one plain, actionable**
+question that names the concrete choice and the specific values (NOT raw check names):
 
 ```json
-{"status":"human_needed","diagnosis":"<why it can't be auto-fixed + exactly what a human must do>"}
+{"status":"needs_input","questions":[{"id":"q1","q":"This customer's locked-in price is unclear — our records show $39 and $49 for their coffee. What should we bill per unit?"}]}
 ```
 
-The `diagnosis` is what surfaces on `/dashboard/migrations` next to the still-failed row, so write it
-for the owner: name the sub, the failing check, the root cause, and the proposed (or required) action.
+The owner answers inline on `/dashboard/migrations`; you'll be **resumed with the answer** (the brief +
+your question are in context) → then `propose` the concrete gated fix.
+
+If a failing check is **out-of-system** (no card anywhere — nothing the owner can type fixes it):
+
+```json
+{"status":"human_needed","diagnosis":"Ask {customer} to add a card; this sub can't bill until then."}
+```
+
+The `diagnosis` / question is what surfaces on `/dashboard/migrations` next to the still-failed row, so
+write it for the owner in plain language: a `needs_input` question names the decision + the values; a
+`human_needed` diagnosis is a one-line instruction. Never a wall of check-jargon.
 
 ## Payload shapes (what the worker applies verbatim)
 
@@ -98,11 +112,15 @@ for the owner: name the sub, the failing check, the root cause, and the proposed
 
 ## What happens after you emit
 
-The worker stores your plan on the migration-fix `agent_jobs` row (`needs_approval`) and surfaces it +
-your diagnosis on `/dashboard/migrations`. The owner clicks **Approve & fix** (or Decline); on approval
-the worker runs `applyMigrationFix` for each approved action and re-runs `verifyMigration(audit_id)`.
-`passed` → the row clears (green). Still failing → it stays on the board with the re-verify result, for
-a human. You never see the approval — your job ends at the proposal.
+- **`propose`** → the worker stores your plan on the migration-fix `agent_jobs` row (`needs_approval`)
+  and surfaces it + your diagnosis on `/dashboard/migrations`. The owner clicks **Approve & fix** (or
+  Decline); on approval the worker runs `applyMigrationFix` for each approved action and re-runs
+  `verifyMigration(audit_id)`. `passed` → the row clears (green). Still failing → it stays on the board
+  with the re-verify result, for a human. You never see the approval — your job ends at the proposal.
+- **`needs_input`** → the worker parks your question on the job (`questions`, status `needs_input`); the
+  panel renders it + a text box. When the owner answers, the worker **resumes this same session** with
+  their answer — at which point you `propose` the concrete gated fix (then the Approve & fix flow above).
+- **`human_needed`** → terminal; the one-line instruction shows next to the still-`failed` row.
 
 ## Related
 

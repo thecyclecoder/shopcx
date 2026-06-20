@@ -1,4 +1,4 @@
-# Migration-Fix — Plain Question + Inline Answer ⏳
+# Migration-Fix — Plain Question + Inline Answer ✅
 
 **Owner:** [[../functions/retention]] · **Parent:** extends [[migration-fix-agent]]. Found in use 2026-06-20: a human-needed migration (audit 7ad54096) showed a hard-to-read technical diagnosis and gave the owner no way to respond.
 
@@ -11,9 +11,16 @@ When the migration-fix agent can't safely auto-fix a migration, two problems tod
 - **Truly out-of-system cases** (e.g. no card anywhere — the customer must add one) stay terminal, but with a **one-line plain instruction** ("Ask {customer} to add a card; this sub can't bill until then") + still allow a free-text note.
 
 ## Verification
-- A human-judgment failure → the FixPanel shows a **single plain question** + a text box. Type an answer + Send → the job flips to `queued_resume`, the box resumes, and it comes back with a concrete **Approve & fix** proposal reflecting the answer.
-- No more raw `pricing_preserved`/check-name jargon in the owner-facing prompt — the question is human-readable and names the actual decision.
-- An out-of-system case shows a one-line instruction (no dead-end technical dump).
+- On `/dashboard/migrations`, a `failed` row whose migration-fix job is **`needs_input`** → the 🤖 panel shows label "needs your answer", the box's **single plain question** (e.g. "…records show $39 and $49…what should we bill per unit?"), a text input per question, an optional note box, and a **Send** button (owner only; a non-owner sees "Owner answer required.").
+- On that panel, type an answer + **Send** → `POST /api/roadmap/answer` `{jobId, answers:[{id,q,answer}]}` returns 200, the job flips `needs_input → queued_resume`, the migration-fix lane re-claims it, the box re-diagnoses **with the answer** (resumed session), and the row comes back **`needs_approval`** with a concrete `price_reconcile`/`variant_backfill`/`appstle_cancel` proposal reflecting the answer + the existing **Approve & fix** button.
+- Inspect the `needs_input` job's `questions` jsonb → it's `[{id,q}]` with a **plain** question (names the decision + the specific values), NOT a `pricing_preserved`/check-name jargon dump.
+- `GET /api/migrations` → each at-risk row's joined `fix` object includes a `questions` array (populated only when the job is `needs_input`).
+- An **out-of-system** failure (no billable card) → the job is terminal `human_needed`; the panel shows a **one-line plain instruction** ("Ask {customer} to add a card; this sub can't bill until then") with **no** buttons (no dead-end technical dump).
+- `npx tsc --noEmit` clean.
 
-## Phase 1 — needs_input question + FixPanel answer box ⏳
-The `migration-fix` skill emits a plain `needs_input` question for human-judgment cases (+ plain terminal instruction for out-of-system ones); `/api/migrations` returns `questions`; the FixPanel renders the question + text input + Send wired to `/api/roadmap/answer`. Brain: [[migration-fix-agent]] + [[../dashboard/migrations]] + [[../libraries/migration-fix]]. Fold on ship.
+## Phase 1 — needs_input question + FixPanel answer box ✅
+- ✅ The `migration-fix` skill (`.claude/skills/migration-fix/SKILL.md`) + the worker's `migrationFixPrompt` (`scripts/builder-worker.ts`) split the human path: **human-JUDGMENT → `needs_input`** with ONE plain `questions [{id,q}]` (no check-jargon); **out-of-system → terminal `human_needed`** with a one-line plain instruction.
+- ✅ `runMigrationFixJob` handles the new **answer-resume** path: when the owner answers (`queued_resume` with `answers` set, no approved/declined action), it re-runs the skill via `migrationFixAnswerPrompt` **resuming the same Max session** with the answer → `propose` → `needs_approval` (the existing Approve & fix flow). A fresh `needs_input` parse parks `questions` + flips the job `needs_input`.
+- ✅ `/api/migrations` selects + returns the fix job's `questions` on each at-risk row's `fix` object.
+- ✅ The migrations **FixPanel** (`src/app/dashboard/migrations/page.tsx`) renders a `needs_input` job's question(s) prominently + a text input per question + a free-text note + **Send** (owner-only), wired to `POST /api/roadmap/answer` (reused as-is — `answerRoadmapBuild` already gates on `needs_input` → `queued_resume`).
+- Brain: [[migration-fix-agent]] + [[../dashboard/migrations]] + [[../libraries/migration-fix]]. Fold on ship.
