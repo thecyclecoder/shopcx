@@ -67,7 +67,7 @@ async function main() {
       return;
     }
     await admin.from("ticket_messages").insert({
-      ticket_id: TICKET, workspace_id: WS, direction: "outbound", visibility: "internal", author_type: "system",
+      ticket_id: TICKET, direction: "outbound", visibility: "internal", author_type: "system",
       body: `${SENTINEL} (braintree refund ${r.refundId ?? "?"}) — goodwill 10% on SHOPCX19; customer already received the 15% WELCOME-P2RJD discount.`,
     });
     console.log("  sentinel written.");
@@ -88,7 +88,9 @@ async function main() {
   console.log("\nSTEP 2 — ✓ sent, resend id:", messageId);
 
   await admin.from("ticket_messages").insert({
-    ticket_id: TICKET, workspace_id: WS, direction: "outbound", visibility: "external", author_type: "agent",
+    // NOTE: ticket_messages has NO workspace_id column — including it makes the
+    // insert silently fail (the email still sends, but no conversation record).
+    ticket_id: TICKET, direction: "outbound", visibility: "external", author_type: "agent",
     body, resend_email_id: messageId, sent_at: new Date().toISOString(),
   });
 
