@@ -270,6 +270,7 @@ export default function TicketDetailPage() {
     pending_plan: ImprovePlan | null;
     last_error: string | null;
     status: string;
+    updated_at: string;
   };
   const [improveSession, setImproveSession] = useState<ImproveSession | null>(null);
   const [improveInput, setImproveInput] = useState("");
@@ -300,6 +301,19 @@ export default function TicketDetailPage() {
     tick();
     return () => { alive = false; if (timer) clearTimeout(timer); };
   }, [activeTab, id]);
+
+  // Auto-mark-on-open (improve-queue-mark-read): opening the Improve tab — or having a fresh box reply
+  // land while you're watching it — means you've seen it, so clear it from the Improve Queue + nav badge.
+  // Keyed on the session's updated_at so a later box turn (which bumps it) re-marks it once you see it.
+  // Skip while thinking: the reply hasn't landed yet, so there's nothing new to have seen.
+  useEffect(() => {
+    if (activeTab !== "improve" || !improveSession || improveSession.turn_status === "thinking") return;
+    void fetch(`/api/tickets/improve-queue/seen`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticket_id: id }),
+    }).catch(() => { /* transient — the queue will re-surface it as unread if this didn't land */ });
+  }, [activeTab, id, improveSession?.updated_at, improveSession?.turn_status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sendImprove = async () => {
     const msg = improveInput.trim();

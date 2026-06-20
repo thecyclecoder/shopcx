@@ -22,6 +22,7 @@ interface QueueItem {
   queue_state: QueueState;
   last_error: string | null;
   updated_at: string;
+  unread: boolean;
 }
 
 const CHIP: Record<QueueState, { label: string; className: string }> = {
@@ -44,34 +45,52 @@ function relativeTime(iso: string): string {
   return `${days}d ago`;
 }
 
-function Row({ item }: { item: QueueItem }) {
+function Row({ item, onMarkRead }: { item: QueueItem; onMarkRead?: (ticketId: string) => void }) {
   const chip = CHIP[item.queue_state];
+  // The whole row deep-links to the ticket's Improve tab (which auto-marks read on open). The
+  // "Mark read" button is a sibling — never nested in the <a> — for the FYI replies you don't need to
+  // open. A read-but-still-parked plan keeps its "needs approval" chip (reading ≠ approving).
   return (
-    <Link
-      href={`/dashboard/tickets/${item.ticket_id}`}
-      className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-700 dark:hover:bg-indigo-950/30"
+    <div
+      className={`flex items-center gap-3 rounded-lg border px-4 py-3 transition-colors ${
+        item.unread
+          ? "border-zinc-200 bg-white hover:border-indigo-300 hover:bg-indigo-50/40 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-700 dark:hover:bg-indigo-950/30"
+          : "border-zinc-200 bg-zinc-50/60 dark:border-zinc-800/70 dark:bg-zinc-900/40"
+      }`}
     >
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-          {item.subject || "(no subject)"}
-        </p>
-        <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-          {item.customer_name || "Unknown customer"}
-          {item.queue_state === "error" && item.last_error ? ` · ${item.last_error}` : ""}
-        </p>
-      </div>
-      <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${chip.className}`}>
-        {chip.label}
-      </span>
-      <span className="hidden shrink-0 text-xs tabular-nums text-zinc-400 sm:inline">
-        {relativeTime(item.updated_at)}
-      </span>
-      <span className="shrink-0 text-zinc-300 dark:text-zinc-600">&#9656;</span>
-    </Link>
+      <Link href={`/dashboard/tickets/${item.ticket_id}`} className="flex min-w-0 flex-1 items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <p className={`truncate text-sm font-medium ${item.unread ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-500 dark:text-zinc-400"}`}>
+            {item.subject || "(no subject)"}
+          </p>
+          <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+            {item.customer_name || "Unknown customer"}
+            {item.queue_state === "error" && item.last_error ? ` · ${item.last_error}` : ""}
+          </p>
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${chip.className}`}>
+          {chip.label}
+        </span>
+        <span className="hidden shrink-0 text-xs tabular-nums text-zinc-400 sm:inline">
+          {relativeTime(item.updated_at)}
+        </span>
+      </Link>
+      {item.unread && onMarkRead ? (
+        <button
+          type="button"
+          onClick={() => onMarkRead(item.ticket_id)}
+          className="shrink-0 rounded-md border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        >
+          Mark read
+        </button>
+      ) : (
+        <span className="shrink-0 text-zinc-300 dark:text-zinc-600">&#9656;</span>
+      )}
+    </div>
   );
 }
 
-function Group({ title, hint, items }: { title: string; hint: string; items: QueueItem[] }) {
+function Group({ title, hint, items, onMarkRead }: { title: string; hint: string; items: QueueItem[]; onMarkRead?: (ticketId: string) => void }) {
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2">
@@ -84,6 +103,34 @@ function Group({ title, hint, items }: { title: string; hint: string; items: Que
           Nothing here.
         </p>
       ) : (
+        <div className="space-y-1.5">
+          {items.map((item) => (
+            <Row key={item.ticket_id} item={item} onMarkRead={onMarkRead} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// "Earlier" — read-but-still-waiting sessions. Collapsed by default so the unread queue stays focused,
+// but nothing vanishes: a read session lives here (greyed) until its next box turn re-surfaces it.
+function EarlierGroup({ items }: { items: QueueItem[] }) {
+  const [open, setOpen] = useState(false);
+  if (items.length === 0) return null;
+  return (
+    <section className="space-y-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-baseline gap-2 text-left"
+      >
+        <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
+        <h2 className="text-sm font-semibold text-zinc-500 dark:text-zinc-400">Earlier</h2>
+        <span className="text-xs tabular-nums text-zinc-400">{items.length}</span>
+        <span className="text-xs text-zinc-400">· Read — re-surfaces on a new box reply</span>
+      </button>
+      {open && (
         <div className="space-y-1.5">
           {items.map((item) => (
             <Row key={item.ticket_id} item={item} />
@@ -130,9 +177,26 @@ export default function ImproveQueuePage() {
     };
   }, [load]);
 
-  const waiting = items
+  // Mark read = POST …/seen, then optimistically flip unread locally (the next poll confirms it).
+  const markRead = useCallback(async (ticketId: string) => {
+    setItems((prev) => prev.map((i) => (i.ticket_id === ticketId ? { ...i, unread: false } : i)));
+    try {
+      await fetch("/api/tickets/improve-queue/seen", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket_id: ticketId }),
+      });
+    } catch {
+      // transient — the next poll will re-surface it as unread if the write didn't land
+    }
+    load(true);
+  }, [load]);
+
+  const waitingAll = items
     .filter((i) => WAITING_ORDER.includes(i.queue_state))
     .sort((a, b) => WAITING_ORDER.indexOf(a.queue_state) - WAITING_ORDER.indexOf(b.queue_state));
+  const waiting = waitingAll.filter((i) => i.unread);
+  const earlier = waitingAll.filter((i) => !i.unread);
   const inProgress = items.filter((i) => i.queue_state === "thinking");
 
   return (
@@ -154,8 +218,9 @@ export default function ImproveQueuePage() {
         <p className="text-sm text-zinc-400">Loading…</p>
       ) : (
         <div className="space-y-6">
-          <Group title="Waiting on you" hint="Answered · Needs approval · Error" items={waiting} />
+          <Group title="Waiting on you" hint="Answered · Needs approval · Error" items={waiting} onMarkRead={markRead} />
           <Group title="In progress" hint="Thinking…" items={inProgress} />
+          <EarlierGroup items={earlier} />
         </div>
       )}
     </div>

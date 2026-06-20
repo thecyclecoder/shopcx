@@ -18,6 +18,7 @@ The DB-backed home for the **box-hosted ticket Improve agent** ([[../specs/box-t
 | `pending_plan` | `jsonb?` | the typed action plan the box proposed (`{summary, actions[]}`), awaiting approval |
 | `last_error` | `text?` | surfaced in the UI on an `error` turn (retry by sending again) |
 | `status` | `text` | `active｜resolved` · default `active` (flips `resolved` once a plan's closeout closes the ticket) |
+| `seen_at` | `timestamptz?` | per-session **read marker** for the Improve Queue ([[../specs/improve-queue-mark-read]]) · null = never read · "Mark read" sets it to the row's current `updated_at`; a later box turn bumps `updated_at` past it → re-surfaces as unread |
 | `created_at` / `updated_at` | `timestamptz` | `updated_at` bumped every write |
 
 ## `turn_status` enum
@@ -43,11 +44,13 @@ The DB-backed home for the **box-hosted ticket Improve agent** ([[../specs/box-t
 
 A workspace-scoped, read-only view of this table powers the **Improve Queue** ([[../dashboard/tickets__improve]], `GET /api/tickets/improve-queue`): the founder / CX manager fire off several box Improve turns, walk away, and glance at which the box has answered. The route reads active rows (`status='active'`) joined to `tickets.subject` + `customers` (name), ordered `updated_at desc`, and derives a `queue_state`:
 
-- `awaiting_approval` → **Needs approval** · `error` → **Error** · `idle` **+ last `messages` entry is the assistant's** → **Answered** (these three = "Waiting on you", and feed the nav badge `counts.waiting`).
+- `awaiting_approval` → **Needs approval** · `error` → **Error** · `idle` **+ last `messages` entry is the assistant's** → **Answered** (these three are the "waiting" states).
 - `thinking` → **Thinking…** ("In progress").
 - `idle` with no assistant-last message → not surfaced.
 
-The queue only *surfaces + links* (deep-link to the ticket's Improve tab); you still Approve / reply on the ticket. See [[../specs/improve-queue]].
+**Read/unread ([[../specs/improve-queue-mark-read]]):** each waiting row also carries `unread = seen_at IS NULL OR updated_at > seen_at` (the box answered since you last looked). The nav badge `counts.waiting` counts **unread** waiting rows only. Unread rows show under **"Waiting on you"** (each with a **Mark read** button → `POST /api/tickets/improve-queue/seen {ticket_id}`, which sets `seen_at = updated_at`); read-but-still-waiting rows drop to a collapsible **"Earlier"** group (greyed, never lost) until the next box turn bumps `updated_at` past `seen_at` and re-surfaces them. Opening the ticket's Improve tab **auto-marks read** (the tab POSTs `…/seen` on load + when a fresh reply lands while you watch). Reading ≠ approving: a still-parked `pending_plan` keeps its **Needs approval** chip even once read.
+
+The queue only *surfaces + links* (deep-link to the ticket's Improve tab); you still Approve / reply on the ticket. See [[../specs/improve-queue]] + [[../specs/improve-queue-mark-read]].
 
 ## Gotchas
 
