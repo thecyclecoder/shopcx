@@ -56,7 +56,22 @@ publish. The skill does the thinking; these do the I/O.
 size — square heroes were cut off in the storefront gallery). Per-ingredient
 images come **from the PDP**, not Gemini — `pullIngredientImages` extracts
 Shopify-CDN URLs (`extractPdpImages`), matches filenames to ingredient names, and
-writes `product_media` slot=`ingredient_{snake}` at 400×400. **`media-refresh`
+writes `product_media` slot=`ingredient_{snake}` at 400×400.
+
+**Ingredient-image extraction + matching (fixed):** `extractPdpImages` matches
+**both** the live storefront CDN path (`superfoodscompany.com/cdn/shop/files/…`,
+what the PDPs actually serve) **and** the legacy `cdn.shopify.com` host — the
+earlier regex only matched the latter, so real PDPs returned `pdp_images:0` (blank
+ingredient cards). Filename↔ingredient matching is **token-based**: both sides are
+lowercased into alphanumeric tokens; generic descriptors + PDP prefixes
+(`vitamin`, `extract`, `oil`, `acid`, `root`, `ingredient`, `creamer`, …) are
+dropped so the **distinctive** token drives the match (`Vitamin D3`→`d3`, `MCT
+Oil`→`mct`, `Hyaluronic Acid`→`hyaluronic`, `Beet Root`→`beet`). An image matches
+when **every** distinctive ingredient token appears in (or as) a filename token
+(containment requires the contained side ≥3 chars, so a stray 1–2-char filename
+token can't spuriously match). This handles divergent PDP conventions —
+`Ashwagandha_1.jpg` (TitleCase_underscore) and `creamer-ingredient-collagen.jpg`
+(lowercase-dashed-prefixed) alike. **`media-refresh`
 mode** (`agent_jobs` instructions `{product_id, mode:"media-refresh"}`) re-runs
 ONLY the image stages (step 6 + 6b) on a published product — `runProductSeedJob`
 builds a media-refresh prompt; the skill skips research/reviews/content and never

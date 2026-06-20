@@ -604,7 +604,35 @@ export function ingredientSlot(name: string): string {
   return `ingredient_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
 }
 
-const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+// Generic supplement descriptors + PDP filename prefixes that vary between PDPs
+// and should NOT drive ingredient matching — the DISTINCTIVE token does
+// ("Vitamin D3" → d3, "MCT Oil" → mct, "Beet Root" → beet, "Hyaluronic Acid" →
+// hyaluronic, "creamer-ingredient-collagen" → collagen). Stripping these makes
+// the match robust across naming conventions (TitleCase_underscore like
+// `Ashwagandha_1.jpg` vs lowercase-dashed-prefixed like
+// `creamer-ingredient-collagen.jpg`). See box-product-seeding.md (round-2 fix).
+const GENERIC_INGREDIENT_TOKENS = new Set([
+  "vitamin", "vit", "organic", "extract", "powder", "root", "complex", "blend",
+  "fruit", "leaf", "bark", "seed", "oil", "acid", "standardized", "concentrate",
+  "isolate", "whole", "raw", "pure", "ingredient", "ingredients",
+]);
+
+/** Lowercase alphanumeric tokens (split on any non-alphanumeric run). */
+function tokenize(s: string): string[] {
+  return s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+/**
+ * The DISTINCTIVE tokens of an ingredient name: generics + pure-index numbers +
+ * lone non-numeric single chars dropped (so "L-Theanine" → theanine, "D3" → d3).
+ * Falls back to all ≥2-char/alphanumeric tokens if stripping generics empties it.
+ */
+function significantTokens(s: string): string[] {
+  const toks = tokenize(s).filter((t) => !/^\d+$/.test(t)); // drop "_1" index numbers
+  const keep = (t: string) => t.length >= 2 || /\d/.test(t);
+  const sig = toks.filter((t) => keep(t) && !GENERIC_INGREDIENT_TOKENS.has(t));
+  return [...new Set(sig.length ? sig : toks.filter(keep))];
+}
 
 /** Raw PDP HTML (NOT tag-stripped) so we can pull CDN image URLs from img/srcset. */
 async function fetchPdpHtml(handle: string): Promise<string | null> {
@@ -623,18 +651,18 @@ function cleanShopifyUrl(raw: string): string {
   return u;
 }
 
-/** The ingredient key a filename implies: drop ext + trailing `_1` index, normalize. */
-function fileIngredientKey(filename: string): string {
-  const noExt = filename.replace(/\.(?:jpe?g|png|webp)$/i, "");
-  const tokens = noExt.split(/[_\-\s]+/).filter((t) => t && !/^\d+$/.test(t)); // drop "_1"
-  return norm(tokens.join(""));
-}
+export type PdpImage = { cleanUrl: string; filename: string; tokens: string[] };
 
-export type PdpImage = { cleanUrl: string; filename: string; key: string };
-
-/** Every distinct Shopify-CDN image on the PDP, keyed by its ingredient-name guess. */
+/**
+ * Every distinct Shopify-CDN image on the PDP. Matches both the storefront CDN
+ * path (`superfoodscompany.com/cdn/shop/files/…`, what the live PDP actually
+ * serves) and the legacy `cdn.shopify.com/…` host — the prior regex only matched
+ * the latter, so these PDPs returned 0 images. Each image carries its filename
+ * tokens for ingredient matching.
+ */
 export function extractPdpImages(html: string): PdpImage[] {
-  const re = /(?:https:)?\/\/cdn\.shopify\.com\/[^\s"'\\)]+?\.(?:jpe?g|png|webp)(?:\?[^\s"'\\)]*)?/gi;
+  const re =
+    /(?:https?:)?\/\/(?:cdn\.shopify\.com|[a-z0-9.-]+\/cdn\/shop)\/[^\s"'\\)]+?\.(?:jpe?g|png|webp)(?:\?[^\s"'\\)]*)?/gi;
   const seen = new Set<string>();
   const out: PdpImage[] = [];
   let m: RegExpExecArray | null;
@@ -643,29 +671,45 @@ export function extractPdpImages(html: string): PdpImage[] {
     if (seen.has(cleanUrl)) continue;
     seen.add(cleanUrl);
     const filename = decodeURIComponent(cleanUrl.split("/").pop() || "");
-    out.push({ cleanUrl, filename, key: fileIngredientKey(filename) });
+    const tokens = tokenize(filename.replace(/\.(?:jpe?g|png|webp)$/i, "")).filter((t) => !/^\d+$/.test(t));
+    out.push({ cleanUrl, filename, tokens });
   }
   return out;
 }
 
-/** A PDP image whose filename matches an ingredient name (exact, else containment ≥4 chars). */
+/**
+ * A PDP image whose filename contains the ingredient's significant token(s).
+ * Both sides are normalized to lowercase alphanumeric tokens; an image matches
+ * when EVERY distinctive ingredient token appears in (or as) a filename token —
+ * so `collagen`/`mct`/`hyaluronic`/`d3` match `creamer-ingredient-collagen.jpg`,
+ * `…-mct-oil.jpg`, `…-hyaluronic-acid.jpg`, and `D3_1.jpg` alike. Filename prefix
+ * noise (`creamer`, `ingredient`) is harmless — it's never required.
+ */
 function matchIngredientImage(ingredientName: string, images: PdpImage[]): PdpImage | null {
-  const target = norm(ingredientName);
-  if (target.length < 2) return null;
-  const cands = images.filter((im) => {
-    if (im.key.length < 2) return false;
-    if (im.key === target) return true;
-    const [short, long] = im.key.length <= target.length ? [im.key, target] : [target, im.key];
-    if (short.length >= 4 && long.includes(short)) return true;
-    // Short codes: "D3" ↔ "Vitamin D3", "B12" ↔ "Vitamin B12", "Theanine" ↔ "L-Theanine".
-    return short.length >= 2 && long.endsWith(short);
-  });
+  const sig = significantTokens(ingredientName);
+  if (sig.length === 0) return null;
+  // A token matches a filename token by equality, or by containment in EITHER
+  // direction — but only when the contained side is ≥3 chars, so a stray 1–2-char
+  // filename token (e.g. the `C` in `SHOP-COFFEE-I-C`) can't spuriously satisfy a
+  // short ingredient token like `mct`.
+  const inFile = (t: string, im: PdpImage) =>
+    im.tokens.some(
+      (ft) => ft === t || (ft.includes(t) && t.length >= 3) || (t.includes(ft) && ft.length >= 3),
+    );
+  const cands = images.filter((im) => im.tokens.length > 0 && sig.every((t) => inFile(t, im)));
   if (cands.length === 0) return null;
-  // Prefer an exact key match; then the shortest filename (the clean `Name_1.jpg`).
+  // Prefer the most specific filename: an exact distinctive-token-set match
+  // first, then the fewest tokens (least prefix noise), then the shortest name.
+  const sigKey = [...sig].sort().join(",");
+  const fileKey = (im: PdpImage) =>
+    [...new Set(im.tokens.filter((t) => !GENERIC_INGREDIENT_TOKENS.has(t) && (t.length >= 2 || /\d/.test(t))))]
+      .sort()
+      .join(",");
   cands.sort((a, b) => {
-    const ax = a.key === target ? 1 : 0;
-    const bx = b.key === target ? 1 : 0;
+    const ax = fileKey(a) === sigKey ? 1 : 0;
+    const bx = fileKey(b) === sigKey ? 1 : 0;
     if (ax !== bx) return bx - ax;
+    if (a.tokens.length !== b.tokens.length) return a.tokens.length - b.tokens.length;
     return a.filename.length - b.filename.length;
   });
   return cands[0];
