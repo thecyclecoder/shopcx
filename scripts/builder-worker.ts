@@ -1886,11 +1886,14 @@ function migrationFixPrompt(audit: Record<string, unknown>, brief: string): stri
     `  • appstle_cancelled / no_double_bill (the old Appstle contract is still ACTIVE → double-bill risk) → propose an appstle_cancel. payload: {"appstle_contract_id":"<old id, defaults to the audit's>","reason":"migrated to shopcx"}.`,
     `  • card_pinned / no billable card → you CANNOT invent a card. Do NOT propose a fix; surface human_needed with a concrete diagnosis (the customer must add a card, or it's a comp sub).`,
     ``,
-    `If every failing check has a safe typed fix → status "propose" with the actions. If ANY failing check is unfixable (no card, ambiguous pricing history, a genuine code/data gap) → status "human_needed" with a written diagnosis a human can act on (do NOT propose a partial fix that re-bills blindly).`,
+    `If every failing check has a safe typed fix → status "propose" with the actions. If ANY failing check is unfixable (no card, ambiguous pricing history) → status "human_needed" with a written diagnosis a human can act on (do NOT propose a partial fix that re-bills blindly).`,
+    ``,
+    `CODE-GAP escalation: if the root cause is a RECURRING code/data gap — a CLASS of missing catalog rows (not just this sub's one variant), or a pricing-inference edge case inferAppstleLineBase can't cover — don't just hand it to a human one sub at a time. Status "code_gap": author a permanent fix spec so the box commits docs/brain/specs/{slug}.md (surfaced on Roadmap to commission a build, like box-escalation-triage routes analyzer fixes). Use a STABLE, gap-descriptive slug (NOT the sub/audit id — recurring failures must converge on ONE spec, e.g. "migration-variant-backfill-from-appstle"), so the same gap doesn't spawn a duplicate spec per sub. The migration still fails-closed to a human (the spec fixes the class, not this renewal) — put what to do for THIS sub in the diagnosis.`,
     ``,
     `Final message = ONLY one JSON object:`,
     `  {"status":"propose","diagnosis":"<plain-text: what failed + what each fix does + the numbers>","actions":[{"fix_kind":"price_reconcile|variant_backfill|appstle_cancel","summary":"<one line>","preview":"<the concrete change + values>","payload":{...}}]}`,
     `  {"status":"human_needed","diagnosis":"<why it can't be auto-fixed + what a human must do>"}`,
+    `  {"status":"code_gap","diagnosis":"<the recurring gap + what to do for THIS sub now>","spec":{"slug":"<stable gap-class slug>","title":"...","intent":"<one paragraph>","problem":"<concrete, grounded in the failing check + the live state>","target":"src/lib/<the file/fn to fix>"}}`,
   ].join("\n");
 }
 
@@ -1915,6 +1918,69 @@ function normalizeMigrationFixActions(raw: unknown, jobId: string): PendingActio
     });
   });
   return out;
+}
+
+// Phase 2 — code-gap escalation. A failure rooted in a recurring CODE/DATA gap (a CLASS of missing
+// catalog rows, a pricing-inference edge case the one inference fn can't cover) isn't a one-off billing
+// repair — it needs a PERMANENT fix. The box proposes a fix SPEC; the worker commits it to
+// docs/brain/specs/ on main (same as box-escalation-triage routes analyzer fixes), surfaced on the
+// Roadmap board to commission a build. The migration itself still fails-closed to a human with the
+// diagnosis (the spec fixes the CLASS, not this one sub's renewal). Idempotent: a STABLE gap-class slug
+// means recurring failures converge on one spec instead of spawning a duplicate per sub.
+interface GapSpec { slug: string; title: string; intent: string; problem: string; target?: string }
+
+function migrationGapSpecMarkdown(spec: GapSpec, auditId: string, subId: string): string {
+  return [
+    `# ${spec.title} ⏳`,
+    ``,
+    `**Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" · **Derived-from-migration:** \`${auditId}\``,
+    ``,
+    spec.intent.trim(),
+    ``,
+    `## Problem (from failed migration \`${auditId}\`, sub \`${subId}\`)`,
+    spec.problem.trim(),
+    spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
+    ``,
+    `## Phases`,
+    `- ⏳ **P1 — close the gap** — scope from the problem above; land the code/data fix + its brain page; gate on \`npx tsc --noEmit\`.`,
+    ``,
+    `## Verification`,
+    `- Re-run \`verifyMigration\` on a migration that hit this gap → expect it to auto-heal/pass without a hand fix, and confirm the class of failure no longer recurs.`,
+    ``,
+    `> Authored by the box migration-fix routine from failed migration \`${auditId}\`. Commission the build from the Roadmap board (owner = retention).`,
+    ``,
+  ].join("\n");
+}
+
+// Commit the gap-fix spec to main. Idempotent: if a spec with this (stable, gap-class) slug already
+// exists, leave it for the in-flight fix rather than clobbering. Returns a one-line result for log_tail.
+async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: string): Promise<string> {
+  const s = (raw || {}) as Record<string, unknown>;
+  const rawSlug = String(s.slug || "");
+  const title = String(s.title || "");
+  if (!rawSlug || !title) return "code-gap: no valid fix spec proposed (left diagnosis only)";
+  const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
+  if (!slug) return "code-gap: spec slug empty after sanitize";
+  const path = `docs/brain/specs/${slug}.md`;
+  try {
+    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+    if (existing.ok) return `gap spec already tracked: ${path} (commission on Roadmap)`;
+    const spec: GapSpec = {
+      slug,
+      title,
+      intent: String(s.intent || "Close the code/data gap behind this recurring migration failure."),
+      problem: String(s.problem || "(see the migration-fix diagnosis above)"),
+      target: typeof s.target === "string" ? s.target : undefined,
+    };
+    const put = await putFileMain(
+      path,
+      migrationGapSpecMarkdown(spec, auditId, subId),
+      `spec: ${slug} (from failed migration ${auditId} via migration-fix code-gap escalation)`,
+    );
+    return put.ok ? `gap spec authored: ${path} (owner=retention) — commission on Roadmap` : `gap spec commit failed (${put.status})`;
+  } catch (e) {
+    return `gap spec commit failed: ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 async function runMigrationFixJob(job: Job) {
@@ -2024,6 +2090,17 @@ async function runMigrationFixJob(job: Job) {
       const diagnosis = String(parsed.diagnosis || "needs a human");
       await update(job.id, { status: "completed", error: `human-needed`, log_tail: diagnosis.slice(-2000) });
       console.log(`${tag} human-needed — stays failed with diagnosis`);
+      return;
+    }
+    if (parsed?.status === "code_gap") {
+      // Recurring code/data gap → author a permanent fix spec (committed to main, surfaced on Roadmap),
+      // and fail-closed to a human with the diagnosis. The spec fixes the CLASS; this sub still needs a
+      // hand for now, so the row stays `failed` with the diagnosis.
+      const diagnosis = String(parsed.diagnosis || "code/data gap — needs a permanent fix");
+      const subId = params.subscription_id || String(audit.subscription_id || "");
+      const specResult = await authorMigrationGapSpec(parsed.spec, auditId, subId);
+      await update(job.id, { status: "completed", error: `code-gap`, log_tail: `${diagnosis}\n\n${specResult}`.slice(-2000) });
+      console.log(`${tag} code-gap — ${specResult}; stays failed with diagnosis`);
       return;
     }
     if (isError && !parsed) {

@@ -18,6 +18,8 @@
 
 `card_pinned` / no billable card has **no fix** — the box surfaces `human_needed` instead (never invents a card).
 
+**Code-gap escalation (Phase 2).** When a failure is rooted in a **recurring** code/data gap — a CLASS of missing catalog rows, a pricing-inference edge case `inferAppstleLineBase` structurally can't cover — the box emits `code_gap` with a fix `spec` instead of a per-sub `human_needed`. `runMigrationFixJob` → `authorMigrationGapSpec` (in `scripts/builder-worker.ts`) commits `docs/brain/specs/{slug}.md` to main (owner=`retention`, surfaced on the Roadmap board to commission a build — exactly how [[../specs/box-escalation-triage]] routes analyzer fixes). The slug is a **stable gap-class slug** (not the sub/audit id) and the commit is **idempotent** — if that spec already exists the box leaves the in-flight one rather than spawning a duplicate per sub. The migration still **fails-closed** to a human (job `error='code-gap'`, diagnosis + spec result in `log_tail`); the spec fixes the class, not this renewal.
+
 ## Callers
 
 - [[migration-audit]] `verifyMigration` → `enqueueMigrationFixJob` (failure event).

@@ -1,4 +1,4 @@
-# Migration-Fix Agent (box session on migration failure) ⏳
+# Migration-Fix Agent (box session on migration failure) ✅
 
 **Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" ([[../lifecycles/subscription-billing.md]] § Migration path). Box-agent family with [[box-escalation-triage]] · [[box-ticket-improve]].
 
@@ -32,6 +32,8 @@ A box agent that **fixes internal subs stuck in migration** — the Appstle→in
 - For an **unresolved-variant** failure (`items_on_uuids`), approve the proposed `variant_backfill` → expect a new `product_variants` row for the lingering Shopify id + the sub item remapped to its UUID, then re-verify passes.
 - For a **no-billable-card** failure, expect the job to land `completed` with `error='human-needed'` and a diagnosis in `log_tail` (NO `pending_actions`, NO card fabricated, NO re-bill); the row stays `failed` on the dashboard with that diagnosis.
 - Confirm there is **no migration-fix cron** in `src/lib/inngest/` — the only enqueue path is the `verifyMigration`→`failed` event hook.
+- For a **recurring code/data-gap** failure (the box returns `status:'code_gap'` with a `spec`), watch the `migration-fix` lane: expect the job to land `completed` with `error='code-gap'`, a `log_tail` carrying the diagnosis + `gap spec authored: docs/brain/specs/{slug}.md`, and **no** `pending_actions` (no card fabricated, no re-bill). On GitHub `main`, expect a new `docs/brain/specs/{slug}.md` with `**Owner:** [[../functions/retention]]` and an `## Phases` "P1 — close the gap" — surfaced on `/dashboard/branches` / the Roadmap board to commission a build. The migration row **stays `failed`** on `/dashboard/migrations` with the diagnosis (the spec fixes the class, not this renewal).
+- Re-run a **second** migration that hits the **same** gap class (the box returns the SAME stable slug) → expect `authorMigrationGapSpec` to **skip** the write (`log_tail` says "gap spec already tracked: …") and **not** create a duplicate spec file — recurring failures converge on one spec.
 
 ## Phase 1 — failure hook + box fix + re-verify ✅
 - ✅ shipped — `migration-fix` kind + concurrency-1 lane (`MAX_MIGRATION_FIX=1`) + `runMigrationFixJob` in `scripts/builder-worker.ts` (top-level `claude -p` on Max, no `ANTHROPIC_API_KEY`, KEEPS DB/crypto/Appstle secrets for the read brief + the gated executor).
@@ -41,5 +43,10 @@ A box agent that **fixes internal subs stuck in migration** — the Appstle→in
 - ✅ unfixable (no billable card / still-failing re-verify) stays `failed` on `/dashboard/migrations` WITH the box's written diagnosis (joined from the migration-fix job's `log_tail`/`error` by `/api/migrations`).
 - Brain: [[../tables/agent_jobs]] (new kind/lane) · [[../libraries/migration-audit]] (failure → agent) · [[../libraries/migration-fix]] (the executor) · [[../dashboard/migrations]] (box diagnosis surfaced) · [[../recipes/build-box-setup]] (lane) · the `migration-fix` skill page.
 
-## Phase 2 — code-gap escalation ⏳
-For failures rooted in a code/data gap (missing catalog rows class, pricing-inference edge case), propose a fix spec ([[box-spec-chat]]) / route like [[box-escalation-triage]], so recurring migration failures become permanent fixes.
+## Phase 2 — code-gap escalation ✅
+For failures rooted in a code/data gap (a CLASS of missing catalog rows, a pricing-inference edge case), the box escalates to a permanent fix **spec** instead of hand-fixing each sub forever — routed like [[box-escalation-triage]] routes analyzer fixes.
+- ✅ new skill output `status:'code_gap'` (`.claude/skills/migration-fix/SKILL.md` Step 3 + the worker's `migrationFixPrompt`): when the root cause is a **recurring** gap (not a one-off `human_needed`), the box emits a fix `spec` `{slug,title,intent,problem,target}` alongside the diagnosis. It NEVER mutates.
+- ✅ `runMigrationFixJob` handles `code_gap` → `authorMigrationGapSpec` (`scripts/builder-worker.ts`) commits `docs/brain/specs/{slug}.md` to main via `putFileMain` (owner=`retention`, parent=Retention "Subscription continuity & billing integrity"), surfaced on the Roadmap board to commission a build — the same `gh` Contents-API path [[box-escalation-triage]] uses.
+- ✅ **stable, idempotent slug**: the box uses a gap-class slug (not the sub/audit id) so recurring failures converge on ONE spec; `authorMigrationGapSpec` skips the write if that slug already exists (leaves the in-flight fix, never clobbers / duplicates per sub).
+- ✅ still **fails-closed**: a `code_gap` does NOT clear the row — the job completes `error='code-gap'` with the diagnosis + spec result in `log_tail`; the spec fixes the class, this sub's renewal still needs a human (per the diagnosis).
+- Brain: [[../libraries/migration-fix]] (code-gap escalation) · [[../libraries/migration-audit]] (failure → recurring-gap path) · [[../dashboard/migrations]] (code-gap surfaced) · the `migration-fix` skill page (Step 3).

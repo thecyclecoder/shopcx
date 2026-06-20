@@ -1,6 +1,6 @@
 ---
 name: migration-fix
-description: Be the box's billing-integrity agent fixing ONE failed Appstle→internal migration, on Max. A migration_audits row flipped to `failed` (a renewal at risk) — diagnose the failing checks read-only and PROPOSE the judgment fixes the mechanical auto-heal punts (pricing_preserved reconcile, items_on_uuids variant backfill + remap, lingering Appstle cancel), or surface human-needed (no billable card) with a written diagnosis. You NEVER mutate — the worker executes your typed plan on the owner's approval, then re-runs verifyMigration; only a re-pass clears the row. Invoked by the box worker's migration-fix job (scripts/builder-worker.ts → runMigrationFixJob). Implements docs/brain/specs/migration-fix-agent.md Phase 1.
+description: Be the box's billing-integrity agent fixing ONE failed Appstle→internal migration, on Max. A migration_audits row flipped to `failed` (a renewal at risk) — diagnose the failing checks read-only and PROPOSE the judgment fixes the mechanical auto-heal punts (pricing_preserved reconcile, items_on_uuids variant backfill + remap, lingering Appstle cancel), or surface human-needed (no billable card) with a written diagnosis. For a recurring code/data gap you escalate to a permanent fix SPEC (committed to docs/brain/specs/, surfaced on Roadmap). You NEVER mutate — the worker executes your typed plan on the owner's approval, then re-runs verifyMigration; only a re-pass clears the row. Invoked by the box worker's migration-fix job (scripts/builder-worker.ts → runMigrationFixJob). Implements docs/brain/specs/migration-fix-agent.md.
 ---
 
 # migration-fix
@@ -28,8 +28,14 @@ constrained to reads + a **proposal** (see the hard rule).
 - **Re-verify-gated + idempotent.** A fix only "counts" when `verifyMigration` re-passes. You never
   mark an audit passed yourself; you propose, the worker applies + re-verifies.
 - **Fail closed to a human.** What you can't safely fix (no billable card anywhere, an ambiguous
-  pricing history, a genuine code/data gap) → `human_needed` with a written diagnosis. **Never** invent
-  a card and never propose a partial fix that re-bills blindly.
+  pricing history) → `human_needed` with a written diagnosis. **Never** invent a card and never propose
+  a partial fix that re-bills blindly.
+- **Escalate a recurring gap to a permanent fix.** When the root cause is a CODE/DATA gap that will keep
+  failing future migrations (a CLASS of missing catalog rows, a pricing-inference edge case the one
+  inference fn can't cover) → `code_gap` with a fix **spec**. The worker commits it to
+  `docs/brain/specs/` on main (surfaced on the Roadmap board to commission a build, exactly how
+  [[../escalation-triage/SKILL]] routes analyzer fixes). You still write what to do for THIS sub in the
+  diagnosis — the spec fixes the class, not this renewal. See Step 3.
 - **Never loosen a check.** The `items_on_uuids` check stays strict against `product_variants` — if a
   variant row is missing, **backfill the row**, don't weaken the check.
 
@@ -66,8 +72,10 @@ For every failing check, decide the safe fix:
 - **`card_pinned`** / no billable card → you **cannot** invent a card → `human_needed` (the customer
   must add one, or it's a comp sub → see the comp-subscriptions path).
 
-If you're unsure a fix is safe (ambiguous pricing history, you can't reconstruct the intended base, a
-class of missing rows that smells like a code gap) → don't guess. Surface `human_needed`.
+If you're unsure a one-off fix is safe (ambiguous pricing history, you can't reconstruct the intended
+base) → don't guess. Surface `human_needed`. If the failure is a **recurring class** — the missing rows
+smell like a systemic gap, the pricing case is one `inferAppstleLineBase` doesn't handle — surface
+`code_gap` so it becomes a permanent fix (Step 3), not a hand-fix per sub forever.
 
 ## Step 2 — emit ONE JSON object
 
@@ -81,14 +89,38 @@ If **every** failing check has a safe typed fix:
 ]}
 ```
 
-If **any** failing check is unfixable:
+If **any** failing check is an unfixable one-off (no card, ambiguous history):
 
 ```json
 {"status":"human_needed","diagnosis":"<why it can't be auto-fixed + exactly what a human must do>"}
 ```
 
+If the failure is a **recurring code/data gap** → escalate it to a permanent fix (Step 3):
+
+```json
+{"status":"code_gap","diagnosis":"<the recurring gap + exactly what to do for THIS sub now>","spec":{"slug":"<stable gap-class slug>","title":"...","intent":"<one paragraph>","problem":"<concrete, grounded in the failing check + live state>","target":"src/lib/<file/fn to fix>"}}
+```
+
 The `diagnosis` is what surfaces on `/dashboard/migrations` next to the still-failed row, so write it
 for the owner: name the sub, the failing check, the root cause, and the proposed (or required) action.
+
+## Step 3 — `code_gap`: escalate a recurring failure to a permanent fix
+
+When you can see the failure is **not a one-off** — the same class will keep landing migrations in
+`failed` (a whole class of catalog rows is missing, not just this sub's one variant; the pricing case is
+one `inferAppstleLineBase` structurally can't infer) — emit `code_gap` with a fix `spec`. The worker
+commits `docs/brain/specs/{slug}.md` to main (surfaced on the Roadmap board to commission a build), the
+same way [[../escalation-triage/SKILL]] routes analyzer fixes into specs.
+
+- **Use a STABLE, gap-descriptive slug** — describe the GAP, never the sub/audit id
+  (e.g. `migration-variant-backfill-from-appstle`, not `migration-fix-<auditid>`). Recurring failures
+  must converge on **one** spec; the worker is idempotent — if a spec with that slug already exists it
+  leaves it for the in-flight fix rather than spawning a duplicate per sub.
+- **`problem`** must be concrete and grounded in the failing check + the live brief (which variant ids,
+  which products, the pricing shape) so the build agent can scope the fix without re-deriving it.
+- **`target`** points at the file/function to fix (e.g. `src/lib/appstle-pricing.ts inferAppstleLineBase`).
+- The migration **still fails-closed to a human** — `code_gap` does NOT clear the row; the spec fixes the
+  class, not this renewal. Put what a human should do for THIS sub now in the `diagnosis`.
 
 ## Payload shapes (what the worker applies verbatim)
 
@@ -103,6 +135,11 @@ your diagnosis on `/dashboard/migrations`. The owner clicks **Approve & fix** (o
 the worker runs `applyMigrationFix` for each approved action and re-runs `verifyMigration(audit_id)`.
 `passed` → the row clears (green). Still failing → it stays on the board with the re-verify result, for
 a human. You never see the approval — your job ends at the proposal.
+
+For `code_gap` there's no approval gate: the worker commits the fix spec to `docs/brain/specs/` on main
+(or, if that slug already exists, leaves the in-flight one) and completes the job with `error='code-gap'`
+and the diagnosis + spec result in `log_tail`. The row stays `failed` with your diagnosis; the permanent
+fix is commissioned separately from the Roadmap board.
 
 ## Related
 
