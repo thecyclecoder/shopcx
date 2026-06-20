@@ -2,9 +2,14 @@
  * Generic journey delivery — routes to the correct delivery method per channel.
  *
  * Email/Help Center → HTML CTA email with AI lead-in + button text
- * Chat → Embedded inline form (hides send input)
+ * Chat → CTA link bubble in the chat window
+ * Portal → CTA bubble in the portal thread + emailed to the customer
  * SMS/Meta DM → Plain text message with URL link
  * Social Comments → N/A (no journeys)
+ *
+ * Delivery fails loud: if no branch matches the effective channel, we
+ * write an internal error note and return false — never a phantom
+ * 'delivered' note with no message sent.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -190,6 +195,13 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
   const effectiveChannel = await getDeliveryChannel(ticketId, channel);
   const channelSwitched = effectiveChannel !== channel;
 
+  // Track whether a branch below actually emitted a customer-facing
+  // message. If nothing did, delivery FAILED — we must not write a
+  // phantom 'delivered' note/tag/history (the bug that surfaced on
+  // ticket 3bb28cfd, where a portal journey logged success but inserted
+  // no CTA and sent no email).
+  let delivered = false;
+
   if (effectiveChannel === "email" || effectiveChannel === "help_center") {
     // HTML CTA email — sendJourneyCTA returns the rendered HTML and
     // Resend message ID so we store the exact email body in
@@ -272,6 +284,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
         customerId,
       });
     }
+    delivered = true;
 
   } else if (effectiveChannel === "chat") {
     // Single render path — CTA link to the mini-site. No embedded
@@ -284,6 +297,30 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       ticket_id: ticketId, direction: "outbound", visibility: "external",
       author_type: "system", body: ctaHtml,
     });
+    delivered = true;
+
+  } else if (effectiveChannel === "portal") {
+    // Portal channel — insert the CTA bubble into the portal conversation
+    // window (mirrors the chat branch), then ALWAYS email it to the
+    // customer the same way every other portal reply is delivered
+    // (deliver-pending-send.ts / unified-ticket-handler.ts). The portal
+    // submitter isn't necessarily watching the thread, so the email is
+    // the guaranteed delivery. The plain <a> button HTML renders fine in
+    // that email.
+    const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
+    const { data: inserted } = await admin.from("ticket_messages").insert({
+      ticket_id: ticketId, direction: "outbound", visibility: "external",
+      author_type: "system", body: ctaHtml,
+    }).select("id").single();
+
+    const { sendPortalThreadEmail } = await import("@/lib/portal/portal-thread-email");
+    const msgId = await sendPortalThreadEmail(admin, workspaceId, ticketId);
+    if (msgId && inserted?.id) {
+      await admin.from("ticket_messages")
+        .update({ resend_email_id: msgId, email_status: "sent" })
+        .eq("id", inserted.id);
+    }
+    delivered = true;
 
   } else if (effectiveChannel === "sms") {
     // Plain text + URL
@@ -292,6 +329,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       ticket_id: ticketId, direction: "outbound", visibility: "external",
       author_type: "system", body: smsText,
     });
+    delivered = true;
     // TODO: actually send via Twilio SMS
     // await sendSms(workspaceId, customer.phone, smsText);
 
@@ -302,7 +340,22 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       ticket_id: ticketId, direction: "outbound", visibility: "external",
       author_type: "system", body: dmText,
     });
+    delivered = true;
     // TODO: send via Meta Send API
+  }
+
+  // ── Fail loud ──
+  // No branch emitted a customer-facing message → delivery FAILED. Write
+  // an internal error note (so dashboards never show a phantom send) and
+  // return false instead of falling through to the 'delivered' note/tag/
+  // journey_history block below.
+  if (!delivered) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId, direction: "outbound", visibility: "internal",
+      author_type: "system",
+      body: `[System] Journey delivery FAILED: no delivery path for channel ${effectiveChannel}`,
+    });
+    return false;
   }
 
   // ── Common post-delivery ──

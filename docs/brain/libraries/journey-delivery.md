@@ -1,6 +1,6 @@
 # libraries/journey-delivery
 
-Channel-aware journey delivery: email CTA, chat inline form, SMS / Meta DM URL. Honors `chat_idle` switch to email after 3 min.
+Channel-aware journey delivery: email CTA, chat CTA bubble, portal CTA bubble + email, SMS / Meta DM URL. Honors `chat_idle` switch to email after 3 min.
 
 **File:** `src/lib/journey-delivery.ts`
 
@@ -9,7 +9,8 @@ Channel-aware journey delivery: email CTA, chat inline form, SMS / Meta DM URL. 
 ```
 Generic journey delivery — routes to the correct delivery method per channel.
 Email/Help Center → HTML CTA email with AI lead-in + button text
-Chat → Embedded inline form (hides send input)
+Chat → CTA link bubble in the chat window
+Portal → CTA bubble in the portal thread + emailed to the customer
 SMS/Meta DM → Plain text message with URL link
 Social Comments → N/A (no journeys)
 ```
@@ -36,7 +37,8 @@ async function nudgeJourney(workspaceId: string, ticketId: string, journeyEntry:
 
 ## Gotchas
 
-_None documented._
+- **Portal branch is mandatory + fail-loud.** `getDeliveryChannel()` passes `portal` through unchanged, so a portal-channel journey must hit the dedicated `portal` branch: it inserts the lead-in + CTA as a `visibility:external` outbound `ticket_message` (so the CTA shows in the portal conversation window) and then calls `sendPortalThreadEmail(admin, workspaceId, ticketId)` ([[portal__thread-email]]) so the customer is emailed exactly like every other portal reply (latest-on-top + history, Message-ID threaded back onto the ticket). Mirrors `deliver-pending-send.ts` / `unified-ticket-handler.ts`.
+- **No phantom sends.** Each channel branch sets a local `delivered` flag. If no branch matched the effective channel, `launchJourneyForTicket` writes an internal `[System] Journey delivery FAILED: no delivery path for channel <x>` note and returns `false` — it does NOT write the `delivered` note/tag/`journey_history`. Previously a portal journey fell through every branch yet still logged success (ticket `3bb28cfd`: internal "delivered via portal" note, no CTA bubble, no email).
 
 ---
 
