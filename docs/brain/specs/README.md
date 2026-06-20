@@ -34,7 +34,13 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
-## Active project — Migration: Shipping Protection ⏳
+## Active project — Migration-Fix: Remove a Line Item ⏳
+
+**Spec:** [[migration-fix-remove-line]] · **Owner:** [[../functions/retention]]
+
+**Why this matters:** the migration-fix agent can't delete a line from `items[]`, so a migration that drags a **free/promo line** across (a $0 ACV Gummies add-on with no catalog variant) fails `items_on_uuids` and can't be repaired (`variant_backfill` keeps it; nothing removes it). Adds a `remove_line` fix_kind + a remove-vs-backfill skill rule. First use: sub `e4589de9` (audit `4b831caa`) — `remove_line` the free ACV Gummies **and** `shipping_protection_convert` ($3.95) → renews $63.91. Queue **after** [[migration-shipping-protection]] merges (both touch `migration-fix.ts`). Extends [[migration-fix-agent]].
+
+## Active project — Migration: Shipping Protection 🚧
 
 **Spec:** [[migration-shipping-protection]] · **Owner:** [[../functions/retention]]
 
