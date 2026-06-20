@@ -331,6 +331,7 @@ Every background job, webhook fan-out, and cron lives here. Each page lists trig
 - [[inngest/ticket-research]] — Research-and-heal pipeline: investigate → recipe → propose → auto-execute allowlisted.
 - [[inngest/ticket-snooze]] — Wakes snoozed tickets.
 - [[inngest/today-sync]] — Today-only incremental Shopify sync.
+- [[inngest/triage-escalations]] — Hourly cron (`:30`) — enqueues one box `triage-escalations` job per workspace with a routine-owned escalated ticket (the box runs the solver→skeptic→quorum sweep).
 - [[inngest/unified-ticket-handler]] — **THE main pipeline.** Every inbound message → resolve → playbook → Sonnet → execute.
 
 ## Integrations (`integrations/`)

@@ -7,17 +7,16 @@
  */
 import type { WorkspaceRole } from "@/lib/types/workspace";
 
+// Post-prune (box-escalation-triage P4): the box only ever produces these four. The retired
+// Anthropic-cloud routine's system-level outputs (sonnet_prompt_*, grader_prompt_edit,
+// escalation_rule_fix, brain_doc_edit, code_change) are now `proposed` sonnet_prompts or committed
+// spec files — never agent_todos. The DB CHECK enforces the same set (NOT VALID, so historical rows
+// carrying a retired type survive as the audit trail).
 export type AgentTodoActionType =
   | "customer_reply"
   | "customer_action"
   | "ticket_close"
-  | "sonnet_prompt_new"
-  | "sonnet_prompt_edit"
-  | "ticket_analysis_rescore"
-  | "grader_prompt_edit"
-  | "escalation_rule_fix"
-  | "brain_doc_edit"
-  | "code_change";
+  | "ticket_analysis_rescore";
 
 export type AgentTodoStatus =
   | "pending"
@@ -34,60 +33,39 @@ export const ALL_ACTION_TYPES: AgentTodoActionType[] = [
   "customer_reply",
   "customer_action",
   "ticket_close",
-  "sonnet_prompt_new",
-  "sonnet_prompt_edit",
   "ticket_analysis_rescore",
-  "grader_prompt_edit",
-  "escalation_rule_fix",
-  "brain_doc_edit",
-  "code_change",
 ];
 
-/** Action types the Inngest event worker executes within seconds of approval. */
+/** Action types that touch the customer (reply/account change/close). */
 export const CUSTOMER_FACING_ACTION_TYPES: AgentTodoActionType[] = [
   "customer_reply",
   "customer_action",
   "ticket_close",
 ];
 
-/** Action types the Claude Code Routine executes (DB inserts, brain/code PRs). */
-export const SYSTEM_LEVEL_ACTION_TYPES: AgentTodoActionType[] = [
-  "sonnet_prompt_new",
-  "sonnet_prompt_edit",
-  "ticket_analysis_rescore",
-  "grader_prompt_edit",
-  "escalation_rule_fix",
-  "brain_doc_edit",
-  "code_change",
-];
-
-/** Action types whose execution opens a PR on a claude/-prefixed branch. */
-export const PR_ACTION_TYPES: AgentTodoActionType[] = [
-  "brain_doc_edit",
-  "code_change",
-  // grader_prompt_edit / escalation_rule_fix land as code → PR path when
-  // the proposed change touches code rather than a DB row.
-  "grader_prompt_edit",
-  "escalation_rule_fix",
-];
-
 export function isCustomerFacing(t: AgentTodoActionType): boolean {
   return CUSTOMER_FACING_ACTION_TYPES.includes(t);
 }
 
-export function isSystemLevel(t: AgentTodoActionType): boolean {
-  return SYSTEM_LEVEL_ACTION_TYPES.includes(t);
+/**
+ * Action types the Inngest event worker (`agent-todo-execute`) runs within seconds of approval.
+ * After the Anthropic-cloud routine was retired (box-escalation-triage), ticket_analysis_rescore —
+ * the one non-customer survivor — executes here too (a single ticket_analyses update), so EVERY
+ * remaining action type is Inngest-executable. The box never executes todos itself; it only proposes.
+ */
+export function isInngestExecutable(t: AgentTodoActionType): boolean {
+  return isCustomerFacing(t) || t === "ticket_analysis_rescore";
 }
 
 /**
- * Role-gated approval matrix (spec § Safety / invariants).
+ * Role-gated approval matrix. Post-prune (box-escalation-triage) every surviving agent_todo type is
+ * owner-OR-admin approvable — they are all customer fixes or a re-score. (Rule/prompt proposals now
+ * live in sonnet_prompts, where `admin`/Zach approves them; code/analyzer fixes are spec files
+ * commissioned on Roadmap — neither is an agent_todo anymore.)
  *
- *  | action_type                                  | Approver        |
- *  | customer_reply/action/close                  | owner OR admin  |
- *  | ticket_analysis_rescore                      | owner OR admin  |
- *  | sonnet_prompt_new/edit                        | owner only      |
- *  | grader_prompt_edit, escalation_rule_fix      | owner only      |
- *  | brain_doc_edit, code_change                   | owner only      |
+ *  | action_type                  | Approver        |
+ *  | customer_reply/action/close  | owner OR admin  |
+ *  | ticket_analysis_rescore      | owner OR admin  |
  */
 const OWNER_OR_ADMIN: AgentTodoActionType[] = [
   "customer_reply",

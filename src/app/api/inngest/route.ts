@@ -97,6 +97,7 @@ import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-commen
 import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/ticket-research";
 import { adToolFunctions } from "@/lib/inngest/ad-tool";
 import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
+import { triageEscalationsCron } from "@/lib/inngest/triage-escalations";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 import { foundervipFollowupGate } from "@/lib/inngest/foundervip-followup-gate";
 import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
@@ -213,6 +214,7 @@ export const { GET, POST, PUT } = serve({
     ticketResearchRequested,
     ticketHealRequested,
     agentTodoExecute,
+    triageEscalationsCron,
     portalActionHealer,
     foundervipFollowupGate,
     slackRoadmapNotify,

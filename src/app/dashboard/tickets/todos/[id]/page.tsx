@@ -40,13 +40,7 @@ const ACTION_BADGE: Record<string, string> = {
   customer_reply: "bg-teal-100 text-teal-700",
   customer_action: "bg-indigo-100 text-indigo-700",
   ticket_close: "bg-zinc-100 text-zinc-600",
-  sonnet_prompt_new: "bg-violet-100 text-violet-700",
-  sonnet_prompt_edit: "bg-violet-100 text-violet-700",
   ticket_analysis_rescore: "bg-amber-100 text-amber-700",
-  grader_prompt_edit: "bg-fuchsia-100 text-fuchsia-700",
-  escalation_rule_fix: "bg-fuchsia-100 text-fuchsia-700",
-  brain_doc_edit: "bg-emerald-100 text-emerald-700",
-  code_change: "bg-rose-100 text-rose-700",
 };
 
 const STATUS_BADGE: Record<string, string> = {
@@ -288,27 +282,6 @@ function ActionPreview({ todo }: { todo: Todo }) {
       <div className="mt-2 rounded border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-700 dark:bg-zinc-900/40">
         <div className="text-zinc-700 dark:text-zinc-300">New score: {pa.score}/10</div>
         {pa.summary && <div className="mt-1 text-xs text-zinc-500">{pa.summary}</div>}
-      </div>
-    );
-  }
-  if (todo.action_type === "sonnet_prompt_new" || todo.action_type === "sonnet_prompt_edit") {
-    const pa = p as { title?: string; content?: string; category?: string };
-    return (
-      <div className="mt-2 rounded border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-700 dark:bg-zinc-900/40">
-        <div className="font-medium text-zinc-700 dark:text-zinc-300">
-          {pa.title} <span className="text-xs text-zinc-400">({pa.category})</span>
-        </div>
-        <pre className="mt-1 whitespace-pre-wrap text-xs text-zinc-600 dark:text-zinc-400">{pa.content}</pre>
-      </div>
-    );
-  }
-  // brain_doc_edit / code_change / grader / escalation_rule → unified diff
-  const pd = p as { unified_diff?: string; file_path?: string; new_file_body?: string };
-  if (pd.unified_diff || pd.new_file_body) {
-    return (
-      <div className="mt-2 rounded border border-zinc-200 bg-zinc-900 p-3 dark:border-zinc-700">
-        {pd.file_path && <div className="mb-1 text-xs text-zinc-400">{pd.file_path}</div>}
-        <pre className="overflow-x-auto text-xs text-zinc-200">{pd.unified_diff || pd.new_file_body}</pre>
       </div>
     );
   }

@@ -30,26 +30,14 @@ const ACTION_TYPE_OPTIONS = [
   "customer_reply",
   "customer_action",
   "ticket_close",
-  "sonnet_prompt_new",
-  "sonnet_prompt_edit",
   "ticket_analysis_rescore",
-  "grader_prompt_edit",
-  "escalation_rule_fix",
-  "brain_doc_edit",
-  "code_change",
 ];
 
 const ACTION_BADGE: Record<string, string> = {
   customer_reply: "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400",
   customer_action: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
   ticket_close: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
-  sonnet_prompt_new: "bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400",
-  sonnet_prompt_edit: "bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400",
   ticket_analysis_rescore: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-  grader_prompt_edit: "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-400",
-  escalation_rule_fix: "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-400",
-  brain_doc_edit: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-  code_change: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
 const URGENCY_DOT: Record<string, string> = {

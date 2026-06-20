@@ -1,16 +1,15 @@
 /**
  * Inngest event worker — agent-todo-execute.
  *
- * Fires on `agent-todo/execute` (sent by POST /api/todos/[id]/approve for
- * customer-facing action types). Executes the approved todo within seconds so
- * customer replies don't wait for the hourly Claude Code Routine.
+ * Fires on `agent-todo/execute` (sent by POST /api/todos/[id]/approve on approval). Executes the
+ * approved todo within seconds so customer replies don't wait.
  *
- * Handles ONLY customer-facing action types (customer_reply, customer_action,
- * ticket_close). System-level actions (sonnet_prompt_*, brain/code) are the
- * Routine's territory.
+ * Handles every surviving agent_todo action type (box-escalation-triage P4): the customer-facing ones
+ * (customer_reply, customer_action, ticket_close) plus ticket_analysis_rescore — the latter was the
+ * retired Claude Code Routine's only DB-action survivor, now executed here. The box (escalation-triage
+ * solver/skeptic) only PROPOSES; execution still gates on a human approval and runs here.
  *
- * See docs/brain/inngest/agent-todo-routine.md and
- * docs/brain/lifecycles/agent-todo-system.md.
+ * See docs/brain/lifecycles/agent-todo-system.md.
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -19,7 +18,7 @@ import {
   executeCustomerTodo,
   maybeAutoCloseGroup,
 } from "@/lib/agent-todos/execute";
-import { isCustomerFacing } from "@/lib/agent-todos/constants";
+import { isCustomerFacing, isInngestExecutable } from "@/lib/agent-todos/constants";
 import type { AgentTodo } from "@/lib/agent-todos/types";
 
 export const agentTodoExecute = inngest.createFunction(
@@ -37,12 +36,15 @@ export const agentTodoExecute = inngest.createFunction(
 
     if (!todo) return { ok: false, reason: "todo not found" };
     if (todo.status !== "approved") return { ok: false, reason: `todo not approved (status=${todo.status})` };
-    if (!isCustomerFacing(todo.action_type)) {
-      return { ok: false, reason: `not a customer-facing action: ${todo.action_type}` };
+    if (!isInngestExecutable(todo.action_type)) {
+      return { ok: false, reason: `not an Inngest-executable action: ${todo.action_type}` };
     }
 
-    // ── Drift check — re-fetch live ticket state; supersede if customer replied.
-    const drift = await step.run("drift-check", () => driftCheck(admin, todo));
+    // ── Drift check — re-fetch live ticket state; supersede if the customer replied since proposal.
+    // Only customer-facing actions can go stale this way; a re-score isn't voided by a new inbound.
+    const drift = isCustomerFacing(todo.action_type)
+      ? await step.run("drift-check", () => driftCheck(admin, todo))
+      : { drifted: false as const };
     if (drift.drifted) {
       await step.run("mark-superseded", async () => {
         await admin

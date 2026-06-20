@@ -84,14 +84,6 @@ export interface CustomerActionPayload {
   diff_summary?: string;
 }
 
-export interface SonnetPromptPayload {
-  title: string;
-  category: "rule" | "approach" | "tool_hint" | "personality" | "knowledge";
-  content: string;
-  /** For sonnet_prompt_edit: the existing row to edit. */
-  target_prompt_id?: string;
-}
-
 export interface TicketAnalysisRescorePayload {
   ticket_analysis_id: string;
   score: number;
@@ -99,21 +91,8 @@ export interface TicketAnalysisRescorePayload {
   issues: Array<{ type: string; description: string }>;
 }
 
-export interface DiffPayload {
-  /** Unified diff (git apply-able) OR a description the routine applies. */
-  unified_diff?: string;
-  file_path?: string;
-  /** For brain edits the routine can also accept a full new file body. */
-  new_file_body?: string;
-  /** brain_doc_edit only: when true, auto-merge after CI (never for code). */
-  auto_merge?: boolean;
-  rationale?: string;
-}
-
 export type AgentTodoPayload =
   | CustomerReplyPayload
   | CustomerActionPayload
-  | SonnetPromptPayload
   | TicketAnalysisRescorePayload
-  | DiffPayload
   | Record<string, unknown>;

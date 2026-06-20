@@ -14,6 +14,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, join } from "path";
 import { spawn, spawnSync } from "child_process";
+import { randomUUID } from "crypto";
+// Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
+import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -52,6 +55,15 @@ const MAX_SEED = 2;
 // resumable Max `claude -p` session per ticket, one short job per turn. Serialized so a turn never
 // races the self-update reset of REPO_DIR (it reads brain/src in the main checkout, read-only).
 const MAX_TICKET_IMPROVE = 1;
+// Escalation-triage sweeps (box-escalation-triage) run in their OWN concurrency-1 lane: one hourly
+// agent_jobs row per workspace, processed as a batch of solver→skeptic→quorum loops (each loop is 2–4
+// separate top-level Max `claude -p` sessions). Serialized so a long sweep never races other lanes.
+const MAX_TRIAGE = 1;
+// A solver/skeptic pass is one Max `claude -p` investigation (read brain/src + web + read-only DB
+// tools). Minutes, not the 90-min seed ceiling — same ballpark as a ticket-improve turn.
+const TRIAGE_PASS_TIMEOUT_MS = 15 * 60 * 1000;
+// How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
+const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
 // SAME already-applied action before we stop the loop and surface it for a human. Normally 0–1.
 const AUTO_SETTLE_MAX = 2;
@@ -101,7 +113,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "triage-escalations";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -224,6 +236,30 @@ function parseStatus(text: string): { status: string; questions?: unknown[]; sum
     if (o) return o;
   }
   return null;
+}
+
+// Generic last-JSON-object extractor for the solver/skeptic passes (they emit a final JSON object that
+// is NOT a {"status":…} envelope). Tries raw → fenced ```json``` → the widest {…} span.
+function extractJson<T = Record<string, unknown>>(text: string): T | null {
+  const tryParse = (s: string): T | null => {
+    try {
+      const o = JSON.parse(s);
+      return o && typeof o === "object" ? (o as T) : null;
+    } catch {
+      return null;
+    }
+  };
+  let o = tryParse(text.trim());
+  if (o) return o;
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) {
+    o = tryParse(fence[1].trim());
+    if (o) return o;
+  }
+  const first = text.indexOf("{");
+  const last = text.lastIndexOf("}");
+  if (first >= 0 && last > first) o = tryParse(text.slice(first, last + 1));
+  return o;
 }
 
 async function gh(method: string, path: string, body?: unknown) {
@@ -1106,11 +1142,181 @@ async function runTicketImproveJob(job: Job) {
   }
 }
 
+// ── Box-hosted escalation triage (box-escalation-triage) ─────────────────────
+// A kind='triage-escalations' job is ONE hourly sweep of a workspace's routine-owned escalated tickets
+// (escalated_at IS NOT NULL, escalated_to IS NULL). For each ticket the worker orchestrates a
+// solver→skeptic→quorum loop as 2–4 SEPARATE top-level Max `claude -p` sessions — the skeptic is a
+// fresh session (real adversarial double-check, not the solver re-grading itself). On quorum the worker
+// (the only component with prod creds) materializes the agreed outputs: `pending` agent_todos for
+// customer fixes, `proposed` sonnet_prompts for rule changes, committed spec files for code/analyzer
+// fixes. No quorum → nothing materializes, the ticket stays escalated, and the disagreement is logged
+// in triage_runs for a human. Like product-seed/ticket-improve this KEEPS the DB/crypto secrets (the
+// passes investigate read-only via scripts/improve-box-tools.ts) and unsets ANTHROPIC_API_KEY (Max,
+// $0 marginal). No worktree / PR — it mutates the DB + commits specs to main, not a feature branch.
+// See docs/brain/specs/box-escalation-triage.md.
+async function runTriageClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: TRIAGE_PASS_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+const TRIAGE_TOOLS_LINE =
+  "For deeper READ-ONLY data run: npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input] " +
+  "(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, " +
+  "get_dunning_status, get_product_knowledge, get_ticket_analysis). You may also Read/Grep the brain + src/ and WebSearch.";
+
+function triageSolverPrompt(ticketId: string, brief: string): string {
+  return [
+    `Use the escalation-triage skill in SOLVER mode (cwd is the repo root). You are on Max, web search on, no API key.`,
+    `This ticket was ESCALATED precisely because it slipped past every deterministic rule, every sonnet_prompt rule, AND the orchestrator. Your job: figure out WHY it escaped, then propose the fix that unescalates it — or, if it was escalated incorrectly, a spec to fix the analyzer.`,
+    ``,
+    `ESCALATED TICKET id ${ticketId} — full context:`,
+    brief,
+    ``,
+    TRIAGE_TOOLS_LINE,
+    `Investigation is free + read-only. You PROPOSE only — never mutate anything; the worker materializes after a skeptic agrees.`,
+    ``,
+    `Decide ONE decision and propose accordingly. See the escalation-triage skill for the exact action/payload shapes.`,
+    `Final message = ONLY one JSON object (the SolverProposal): {"decision":"customer_fix|escalation_false_positive|analysis_gap|system_gap|no_action","reasoning":"why it escaped every rule","context_what_happened":"...","context_what_we_propose":"...","urgency":"urgent|normal|low","todos":[{"action_type":"customer_reply|customer_action|ticket_close|ticket_analysis_rescore","summary":"...","payload":{...},"confidence":0.0}],"spec":{"slug":"...","title":"...","intent":"...","problem":"...","target":"..."},"sonnet_prompt":{"title":"...","category":"rule","content":"..."}}`,
+    `Include only the keys relevant to your decision (todos for customer_fix/no_action/analysis_gap; spec for escalation_false_positive/system_gap; sonnet_prompt optional).`,
+  ].join("\n");
+}
+
+function triageSkepticPrompt(ticketId: string, brief: string, proposal: SolverProposal): string {
+  return [
+    `Use the escalation-triage skill in SKEPTIC mode (cwd is the repo root). You are a FRESH pair of eyes — not the solver. Try to REFUTE the solver, do not rubber-stamp.`,
+    `Independently re-examine the ticket, the brain, the live rules (sonnet_prompts), and the DB settings to judge: is the issue correctly understood? Is the proposed fix correct, safe, and minimal? Would it actually unescalate this ticket (or correctly fix the analyzer)?`,
+    ``,
+    `ESCALATED TICKET id ${ticketId} — full context:`,
+    brief,
+    ``,
+    `THE SOLVER PROPOSED:`,
+    JSON.stringify(proposal, null, 2),
+    ``,
+    TRIAGE_TOOLS_LINE,
+    `Investigate read-only, then judge. If the issue is misunderstood or the fix is wrong/unsafe → reject. If it's close but needs a bounded change → revise (give a concrete critique the solver can act on). Only agree if you genuinely could not refute it.`,
+    `Final message = ONLY one JSON object: {"verdict":"agree|revise|reject","critique":"what's wrong / what to change / why you couldn't refute it","concerns":["..."]}`,
+  ].join("\n");
+}
+
+function triageRevisePrompt(critique: string, concerns: string[]): string {
+  return [
+    `The skeptic did NOT agree and asked you to revise. Critique: ${critique}`,
+    concerns.length ? `Concerns: ${concerns.map((c) => `- ${c}`).join("\n")}` : ``,
+    `Incorporate this and emit a corrected SolverProposal — the SAME JSON shape and the same rules as before. If you now believe no safe fix exists, switch decision to "no_action" with an honest reasoning.`,
+  ].filter(Boolean).join("\n");
+}
+
+async function runEscalationTriageJob(job: Job) {
+  const tag = `[triage:${job.id.slice(0, 8)}]`;
+  const wsId = job.workspace_id;
+  const { selectEscalatedForTriage, loadTriageBrief, materializeTriageOutcome, recordTriageRun } = await import(
+    "../src/lib/agent-todos/triage"
+  );
+
+  const sel = await selectEscalatedForTriage(db, wsId, TRIAGE_CAP);
+  console.log(`${tag} ${sel.selected.length}/${sel.eligible} eligible escalated ticket(s) this sweep (deferred ${sel.deferred})`);
+  if (!sel.selected.length) {
+    await update(job.id, { status: "completed", log_tail: `no eligible escalated tickets (deferred ${sel.deferred})` });
+    return;
+  }
+
+  const summaries: string[] = [];
+  for (const ticketId of sel.selected) {
+    const triageRunId = randomUUID();
+    try {
+      const brief = await loadTriageBrief(db, wsId, ticketId);
+
+      // ── Solver (fresh session) ──
+      let solver = await runTriageClaude(triageSolverPrompt(ticketId, brief), null, REPO_DIR);
+      let proposal = extractJson<SolverProposal>(solver.resultText);
+      if (!proposal || !proposal.decision) {
+        await recordTriageRun(db, {
+          id: triageRunId, workspaceId: wsId, jobId: job.id, ticketId, decision: null, verdict: "no_quorum",
+          materialized: false, outcome: "solver produced no parseable proposal",
+          solverTranscript: { raw: solver.raw.slice(-2000) }, skepticTranscript: null, groupId: null,
+        });
+        summaries.push(`${ticketId.slice(0, 8)}: solver-empty`);
+        continue;
+      }
+      const solverSession = solver.session;
+
+      // ── Skeptic (fresh eyes — separate session) ──
+      let skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR);
+      let verdict = extractJson<SkepticVerdict>(skeptic.resultText);
+
+      // ── One bounded re-loop on "revise" (solver incorporates critique; skeptic re-checks fresh) ──
+      if (verdict?.verdict === "revise") {
+        solver = await runTriageClaude(triageRevisePrompt(verdict.critique || "", verdict.concerns || []), solverSession, REPO_DIR);
+        const revised = extractJson<SolverProposal>(solver.resultText);
+        if (revised?.decision) proposal = revised;
+        skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR);
+        verdict = extractJson<SkepticVerdict>(skeptic.resultText);
+      }
+
+      const v = verdict?.verdict;
+      const finalVerdict: "agree" | "revise" | "reject" | "no_quorum" =
+        v === "agree" || v === "revise" || v === "reject" ? v : "no_quorum";
+      const solverTranscript = { proposal, raw: solver.raw.slice(-2000) };
+      const skepticTranscript = { verdict: verdict?.verdict ?? null, critique: verdict?.critique ?? null, concerns: verdict?.concerns ?? null, raw: skeptic.raw.slice(-2000) };
+
+      if (finalVerdict === "agree") {
+        const mat = await materializeTriageOutcome(db, { workspaceId: wsId, ticketId, proposal, triageRunId });
+        await recordTriageRun(db, {
+          id: triageRunId, workspaceId: wsId, jobId: job.id, ticketId, decision: proposal.decision, verdict: "agree",
+          materialized: true, outcome: mat.summary, solverTranscript, skepticTranscript, groupId: mat.groupId ?? null,
+        });
+        summaries.push(`${ticketId.slice(0, 8)}: agree·${proposal.decision} → ${mat.summary}`);
+        console.log(`${tag} ${ticketId.slice(0, 8)} AGREE (${proposal.decision}) → ${mat.summary}`);
+      } else {
+        const outcome = `no quorum (solver=${proposal.decision}, skeptic=${finalVerdict})${verdict?.critique ? `: ${verdict.critique.slice(0, 300)}` : ""}`;
+        await recordTriageRun(db, {
+          id: triageRunId, workspaceId: wsId, jobId: job.id, ticketId, decision: proposal.decision, verdict: finalVerdict,
+          materialized: false, outcome, solverTranscript, skepticTranscript, groupId: null,
+        });
+        summaries.push(`${ticketId.slice(0, 8)}: ${finalVerdict}·${proposal.decision} (stays escalated)`);
+        console.log(`${tag} ${ticketId.slice(0, 8)} NO-QUORUM (${finalVerdict}) — stays escalated`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      try {
+        await recordTriageRun(db, {
+          id: triageRunId, workspaceId: wsId, jobId: job.id, ticketId, decision: null, verdict: "no_quorum",
+          materialized: false, outcome: `error: ${msg}`, solverTranscript: null, skepticTranscript: null, groupId: null,
+        });
+      } catch { /* audit best-effort */ }
+      summaries.push(`${ticketId.slice(0, 8)}: error ${msg.slice(0, 120)}`);
+      console.error(`${tag} ${ticketId.slice(0, 8)} errored: ${msg}`);
+    }
+  }
+
+  await update(job.id, {
+    status: "completed",
+    log_tail: `swept ${sel.selected.length} ticket(s); deferred ${sel.deferred}. ${summaries.join(" | ")}`.slice(-2000),
+  });
+  console.log(`${tag} ✓ swept ${sel.selected.length} ticket(s)`);
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
   if (job.kind === "product-seed") return runProductSeedJob(job);
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
+  if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -1353,7 +1559,8 @@ async function main() {
   const countFold = () => [...active.values()].filter((v) => v.kind === "fold").length;
   const countSeed = () => [...active.values()].filter((v) => v.kind === "product-seed").length;
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "ticket-improve").length;
+  const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
@@ -1389,6 +1596,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ticket-improve ${job.id.slice(0, 8)} → ${countImprove() + 1}/${MAX_TICKET_IMPROVE} improve lane`);
+        launch(job);
+      }
+      // Fill the escalation-triage lane (box-escalation-triage): hourly solver→skeptic→quorum sweep, concurrency-1.
+      while (countTriage() < MAX_TRIAGE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["triage-escalations"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed triage-escalations ${job.id.slice(0, 8)} → ${countTriage() + 1}/${MAX_TRIAGE} triage lane`);
         launch(job);
       }
       // Fill the build/plan pool.
