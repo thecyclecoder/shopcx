@@ -91,7 +91,30 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     const engineCents = pricing.product_subtotal_cents;
     const pre = Number(audit.pre_migration_charge_cents || 0);
     const tol = Math.max(PRICE_TOLERANCE_CENTS, items.length * PRICE_TOLERANCE_CENTS);
-    push("pricing_preserved", pre <= 0 || Math.abs(engineCents - pre) <= tol, `engine ${engineCents}¢ vs pre ${pre}¢`);
+
+    // The Appstle baseline (`pre`) is Σ per-line currentPrice — it carries S&S but
+    // NEVER our internal mix-and-match quantity break (Appstle contracts had no
+    // such tier). The engine legitimately applies that break on renewal, so a
+    // migrated multi-unit sub on a rule with a break prices BELOW `pre` by exactly
+    // the break amount, and price_reconcile can't repair it (raising the base to
+    // cancel the break would exceed MSRP, forbidden). So compare on the SAME bases
+    // the engine used but WITHOUT the quantity break: reconstruct each product
+    // line's S&S-only unit (base × (1 − sns), break removed) and sum. That no-break
+    // subtotal is what the Appstle baseline should equal. The tolerated shortfall
+    // (`pre − engine`) is thus tied to the specific catalog break the rule grants
+    // for this line's qty — we do NOT blanket-accept engine < pre. A wrong/too-high
+    // base still fails (no-break subtotal > pre → charged MORE), and any underpricing
+    // not explained by the break still fails (no-break subtotal < pre).
+    // See docs/brain/specs/migration-pricing-preserved-quantity-break.md.
+    const noBreakCents = pricing.lines
+      .filter((l) => l.kind === "product")
+      .reduce((s, l) => s + Math.round(l.base_cents * (1 - l.sns_pct / 100)) * l.quantity, 0);
+    const breakCents = noBreakCents - engineCents; // ≥ 0 — the legitimate qty-break shortfall
+    push(
+      "pricing_preserved",
+      pre <= 0 || Math.abs(noBreakCents - pre) <= tol,
+      `engine ${engineCents}¢ (+${breakCents}¢ qty-break = ${noBreakCents}¢ pre-break) vs pre ${pre}¢`,
+    );
   } catch (e) {
     push("pricing_preserved", false, e instanceof Error ? e.message : "pricing engine threw");
   }
