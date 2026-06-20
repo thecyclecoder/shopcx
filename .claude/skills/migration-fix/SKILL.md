@@ -67,6 +67,17 @@ For every failing check, decide the safe fix:
   propose a **`variant_backfill`** that inserts the missing catalog row (from the live Appstle line +
   the product it belongs to) and remaps the item onto the new UUID. This is the fix the 2026-06-10
   incident did by hand.
+- **`pricing_preserved` overage equals an Appstle protection line** (`engine N¢ vs pre M¢` where
+  `M − N` is exactly a "Shipping Protection" line on the LIVE Appstle contract, and that same line is
+  still sitting in the sub's `items[]`) → this is the protection line/flag mismatch, NOT a grandfathered
+  base. Appstle bills shipping protection as a **line item**; internally it's a **flag**
+  (`shipping_protection_added` + `shipping_protection_amount_cents`) the engine bills separately on top
+  of the product subtotal. The old charge over-counted by the $X protection line, so the baseline
+  inflated. Propose a **`shipping_protection_convert`** that wires the flag + amount, removes the
+  protection line from `items[]`, and corrects the baseline to the product-only subtotal — **do NOT
+  raise the product override** (the product line was already correct). Read the live contract to confirm
+  the overage is the protection line, not a real price difference. (If the overage is a grandfathered
+  base difference, use `price_reconcile` instead.)
 - **`appstle_cancelled` / `no_double_bill`** (the old Appstle contract is still `ACTIVE`) → propose an
   **`appstle_cancel`** of the old contract (double-bill risk).
 - **`card_pinned`** / no billable card → **out-of-system** (the customer must act). You **cannot**
@@ -89,7 +100,8 @@ If **every** failing check has a safe typed fix:
 {"status":"propose","diagnosis":"<plain-text: what failed, what each fix does, the numbers>","actions":[
   {"fix_kind":"price_reconcile","summary":"<one line>","preview":"<concrete change + values>","payload":{"overrides":[{"variant_id":"<catalog UUID on the item>","price_override_cents":6396}]}},
   {"fix_kind":"variant_backfill","summary":"...","preview":"...","payload":{"variant":{"product_id":"<uuid>","shopify_variant_id":"<id>","title":"...","sku":"...","price_cents":7995},"item_match":{"shopify_variant_id":"<id>","sku":"..."}}},
-  {"fix_kind":"appstle_cancel","summary":"...","preview":"...","payload":{"appstle_contract_id":"<old id>","reason":"migrated to shopcx"}}
+  {"fix_kind":"appstle_cancel","summary":"...","preview":"...","payload":{"appstle_contract_id":"<old id>","reason":"migrated to shopcx"}},
+  {"fix_kind":"shipping_protection_convert","summary":"<one line>","preview":"old charge over-counted by the $3.75 protection line the engine bills separately → wire flag + correct baseline 6371→5996, leave Tabs override at 5996","payload":{"amount_cents":375,"baseline_cents":5996}}
 ]}
 ```
 
@@ -143,6 +155,7 @@ same way [[../escalation-triage/SKILL]] routes analyzer fixes into specs.
 - `price_reconcile` → `{ overrides: [{ variant_id: <catalog UUID on the sub item>, price_override_cents: <int, 0 < x ≤ 100000> }] }`. The worker sets `items[].price_override_cents` for each matched line.
 - `variant_backfill` → `{ variant: { product_id: <uuid>, shopify_variant_id, title?, sku?, price_cents?, option1?, option2?, option3? }, item_match: { shopify_variant_id?, sku? } }`. The worker inserts the catalog row (idempotent — reuses an existing row for that Shopify id) then remaps the matched sub item onto the new UUID.
 - `appstle_cancel` → `{ appstle_contract_id?: <old id, defaults to the audit's>, reason?: string }`. The worker calls `appstleSubscriptionAction(..., "cancel", ...)` on the OLD numeric contract.
+- `shipping_protection_convert` → `{ amount_cents: <int, 0 < x ≤ 100000>, baseline_cents: <int, the product-only subtotal> }`. The worker sets `shipping_protection_added=true` + `shipping_protection_amount_cents=amount_cents`, removes the "Shipping Protection" line from `items[]` (product lines + overrides left UNTOUCHED), and corrects the audit's `pre_migration_charge_cents` to `baseline_cents`. Idempotent.
 
 ## What happens after you emit
 

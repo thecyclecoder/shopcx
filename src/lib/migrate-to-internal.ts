@@ -26,6 +26,19 @@ import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+/**
+ * Appstle bills shipping protection as a regular **line item** titled "Shipping
+ * Protection". Internally it is NOT a catalog item — it's a flag on the sub
+ * (`shipping_protection_added` + `shipping_protection_amount_cents`) and the
+ * pricing engine bills it separately, on TOP of the product subtotal (see
+ * [[pricing]] / [[internal-subscription-renewals]]). So a migration must convert
+ * that line into the flag, never leave it in `items[]`. Match the same title
+ * convention the audit's `items_on_uuids` check and the pricing engine use
+ * (case-insensitive substring). */
+function isShippingProtectionLine(l: Record<string, unknown>): boolean {
+  return String((l.title as string) || "").toLowerCase().includes("shipping protection");
+}
+
 export interface MigrateResult {
   migrated: Array<{ contractId: string; subId: string; billableCustomerId: string }>;
   skipped: Array<{ contractId: string; reason: string }>;
@@ -69,15 +82,27 @@ async function appstleLinesToInternalItems(
   admin: Admin,
   workspaceId: string,
   lines: Array<Record<string, unknown>>,
-): Promise<Array<Record<string, unknown>>> {
+): Promise<{ items: Array<Record<string, unknown>>; shippingProtectionCents: number }> {
   const items: Array<Record<string, unknown>> = [];
+  let shippingProtectionCents = 0;
   for (const l of lines) {
-    const shopifyVid = String((l.variantId as string) || "").split("/").pop() || "";
-    if (!shopifyVid) continue;
     const quantity = (l.quantity as number) || 1;
     const currentPriceCents = Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100);
     const title = (l.title as string) || "";
     const variantTitle = (l.variantTitle as string) || "";
+
+    // Shipping protection is a flag internally, never a catalog line: capture its
+    // charge for `shipping_protection_amount_cents` and EXCLUDE it from items[].
+    // The engine re-adds it on top of the product subtotal via the flag, so the
+    // customer's total is unchanged while the product-only subtotal is what the
+    // audit's `pricing_preserved` compares against.
+    if (isShippingProtectionLine(l)) {
+      shippingProtectionCents += currentPriceCents * quantity;
+      continue;
+    }
+
+    const shopifyVid = String((l.variantId as string) || "").split("/").pop() || "";
+    if (!shopifyVid) continue;
 
     const { data: v } = await admin
       .from("product_variants")
@@ -113,7 +138,7 @@ async function appstleLinesToInternalItems(
     if (isGrandfathered && trueBaseCents > 0) item.price_override_cents = trueBaseCents;
     items.push(item);
   }
-  return items;
+  return { items, shippingProtectionCents };
 }
 
 /**
@@ -204,7 +229,9 @@ export async function migrateContractToInternalComp(
     let intervalCount: number;
     let nextBillingDate: string;
     if (liveUsable) {
-      items = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []);
+      // Comp subs ship free (base $0), so a protection charge never applies — we
+      // take only the converted product items and drop any protection line.
+      ({ items } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
       interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
       intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
       nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
@@ -320,10 +347,14 @@ export async function migrateCustomerAppstleSubsToInternal(
       let interval: string;
       let intervalCount: number;
       let nextBillingDate: string;
+      // Shipping protection moves from an Appstle line → an internal flag on the
+      // flipped sub. 0 when the contract had no protection line.
+      let shippingProtectionCents = 0;
       if (liveUsable) {
         // Translate Appstle lines → internal catalog UUID references (no baked
-        // price; grandfathered lines get a price_override_cents).
-        items = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []);
+        // price; grandfathered lines get a price_override_cents). A "Shipping
+        // Protection" line is pulled out into the flag below, not items[].
+        ({ items, shippingProtectionCents } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
         interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
         intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
         nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
@@ -359,6 +390,12 @@ export async function migrateCustomerAppstleSubsToInternal(
           status: sub.status,
           customer_id: billableCustomerId,
           items,
+          // Carry shipping protection across as a flag (engine bills it on top of
+          // the product subtotal). Only set when the contract actually had it, so
+          // a protection-free sub is untouched.
+          ...(shippingProtectionCents > 0
+            ? { shipping_protection_added: true, shipping_protection_amount_cents: shippingProtectionCents }
+            : {}),
           next_billing_date: nextBillingDate,
           billing_interval: interval,
           billing_interval_count: intervalCount,
@@ -387,10 +424,14 @@ export async function migrateCustomerAppstleSubsToInternal(
       }
 
       // Monitor: record + verify this migration. Pre-migration charge = sum of
-      // the live Appstle per-line charge (products only). Non-fatal.
+      // the live Appstle per-line charge (products only). Shipping protection is
+      // EXCLUDED — it's a flag the engine bills separately, and the audit's
+      // `pricing_preserved` compares this baseline against the engine's
+      // product_subtotal_cents (which also excludes protection). Non-fatal.
       try {
         const liveLines = liveUsable ? ((live.lines?.nodes as Array<Record<string, unknown>>) || []) : [];
         const preCharge = liveLines.reduce((s, l) => {
+          if (isShippingProtectionLine(l)) return s;
           const amt = Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100);
           return s + amt * Number(l.quantity || 1);
         }, 0);
