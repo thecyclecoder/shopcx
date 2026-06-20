@@ -215,6 +215,10 @@ interface PersistParams {
  * carries the variant (slug is unique per workspace+product, with `-ba`/`-reasons`
  * suffixes), so a single (workspace_id, slug) lookup fully identifies the lander.
  * Returns nulls for non-lander landings — most traffic. Best-effort.
+ *
+ * Called both at first INSERT and on a set-when-null re-resolve for an existing
+ * session (advertorial-attribution-fix): a later pixel hit carrying the resolving
+ * `?angle=` heals a row whose first touch landed without it.
  */
 async function resolveLanderIds(
   admin: ReturnType<typeof createAdminClient>,
@@ -277,7 +281,7 @@ async function persistEvents({
   // unique index.
   const { data: existingSession } = await admin
     .from("storefront_sessions")
-    .select("id, customer_id, is_internal, is_bot")
+    .select("id, customer_id, is_internal, is_bot, advertorial_page_id")
     .eq("workspace_id", workspaceId)
     .eq("anonymous_id", anonymousId)
     .maybeSingle();
@@ -298,6 +302,20 @@ async function persistEvents({
     // Same for bot: once a datacenter hit is seen on the session, it sticks.
     if (isBot && !existingSession.is_bot) {
       updates.is_bot = true;
+    }
+    // Set-when-null re-resolve of the lander identity. The stamp is otherwise
+    // INSERT-only (below), so a session whose first pixel hit created the row
+    // without a resolving angle landing_url stays advertorial_page_id=null
+    // forever — even when a later hit carries the `?angle=` that exactly
+    // matches a page. Heal it here: if still null and the current landing_url
+    // resolves, stamp the lander id (+ its campaign). Set-when-null only — we
+    // never overwrite a non-null, and landing_url itself stays insert-only.
+    if (!existingSession.advertorial_page_id) {
+      const landerIds = await resolveLanderIds(admin, workspaceId, sessionContext.landing_url);
+      if (landerIds.advertorial_page_id) {
+        updates.advertorial_page_id = landerIds.advertorial_page_id;
+        updates.ad_campaign_id = landerIds.ad_campaign_id;
+      }
     }
     await admin
       .from("storefront_sessions")

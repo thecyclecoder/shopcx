@@ -64,6 +64,12 @@ Thin wrapper: defaults `snapshotDate` to today and `windowDays` to 7, delegates 
   anchor doesn't map to a qualifying lead benefit (still emitted for performance).
 - The `(unresolved)` variant is a real row (surfaced, not dropped); `variant_attribution_coverage`
   (account-level resolved-session share for the window) is stamped on every variant/angle row.
+- **Angle→page resolution is uniform** across the pipe (advertorial-attribution-fix): the rollup
+  ([[meta__attribution]] → [[../tables/meta_attribution_daily]]), the variant ATC session map here, and
+  the pixel stamp all resolve a session's lander the same way — prefer the persisted
+  `storefront_sessions.advertorial_page_id`, else parse `?angle={slug}` from `landing_url` and exact-match
+  an [[../tables/advertorial_pages]]`.slug`. So the variant/landing-page breakdown reflects the corrected
+  stamps regardless of whether the column was filled at ingest, healed on a later hit, or backfilled.
 
 ---
 
