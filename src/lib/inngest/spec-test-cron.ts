@@ -14,6 +14,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
+import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
 
 export const specTestCron = inngest.createFunction(
   {
@@ -27,7 +28,8 @@ export const specTestCron = inngest.createFunction(
     const admin = createAdminClient();
 
     const result = await step.run("enqueue-spec-test-jobs", async () => {
-      // Shipped-but-not-archived specs: status `shipped` and slug not in archive.d/.
+      // Backlog sweep: shipped-but-not-archived specs (status `shipped`, slug not in archive.d/) that the
+      // event triggers (spec-test-on-ship) missed — box was down, or they shipped before the event existed.
       const [{ specs }, archived] = await Promise.all([getRoadmap(), listArchivedSlugs()]);
       const archivedSet = new Set(archived);
       const slugs = specs.filter((s) => s.status === "shipped" && !archivedSet.has(s.slug)).map((s) => s.slug);
@@ -38,35 +40,14 @@ export const specTestCron = inngest.createFunction(
       const workspaceIds = Array.from(new Set((wsRows || []).map((r) => r.workspace_id as string)));
       if (!workspaceIds.length) return { workspaces: 0, candidates: slugs.length, enqueued: 0 };
 
-      // In-flight spec-test jobs (skip a (workspace, slug) already queued/building).
-      const { data: inflight } = await admin
-        .from("agent_jobs")
-        .select("workspace_id, spec_slug")
-        .eq("kind", "spec-test")
-        .in("status", ["queued", "queued_resume", "building", "claimed"]);
-      const busy = new Set((inflight || []).map((j) => `${j.workspace_id}:${j.spec_slug}`));
-
-      // Fresh runs (skip a (workspace, slug) tested in the last ~20h).
-      const since = new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString();
-      const { data: recent } = await admin
-        .from("spec_test_runs")
-        .select("workspace_id, spec_slug")
-        .gte("run_at", since);
-      const fresh = new Set((recent || []).map((r) => `${r.workspace_id}:${r.spec_slug}`));
-
+      // Per (workspace, slug) through the shared guard — the SAME in-flight + fresh-run dedupe the event
+      // triggers use, so a cron tick that races a manual flip / build merge no-ops the duplicate. We pass
+      // the already-derived `shipped` status to skip a redundant per-slug disk read.
       let enqueued = 0;
       for (const workspaceId of workspaceIds) {
         for (const slug of slugs) {
-          const key = `${workspaceId}:${slug}`;
-          if (busy.has(key) || fresh.has(key)) continue;
-          const { error } = await admin.from("agent_jobs").insert({
-            workspace_id: workspaceId,
-            spec_slug: slug,
-            kind: "spec-test",
-            status: "queued",
-            created_by: null,
-          });
-          if (!error) enqueued++;
+          const { enqueued: did } = await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
+          if (did) enqueued++;
         }
       }
       return { workspaces: workspaceIds.length, candidates: slugs.length, enqueued };

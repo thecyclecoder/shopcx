@@ -1,4 +1,4 @@
-# Spec-Test on Ship (event-trigger, cron = backlog) ⏳
+# Spec-Test on Ship (event-trigger, cron = backlog) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[spec-test-agent]]. We ship often, so a once-a-day QA sweep is too slow — **test a spec the moment its card moves to Shipped**, and demote the daily cron to a backlog catch-all.
 
@@ -21,5 +21,5 @@ Both hooks + the cron share one guard (factor it out): **skip a (workspace, slug
 - Do both (or add the cron tick) for one slug in a short window → only **one** run (dedupe holds). Change the spec + re-ship → a fresh run is allowed.
 - The daily cron, with the event trigger live, enqueues only specs lacking a recent run.
 
-## Phase 1 — event triggers + shared dedupe ⏳
-Factor the cron's "shipped-unverified + not-recently-run" check into a shared `enqueueSpecTestIfDue(workspaceId, slug)` helper; call it from (a) `/api/roadmap/status` after a commit that yields `shipped`, and (b) `reconcileMergedJobs` when a merge ships a spec; the daily cron calls the same helper per backlog slug. Brain: [[spec-test-agent]] (note the event trigger) + [[../inngest/spec-test-cron]] (now backlog-only) + [[../libraries/agent-jobs]]. Fold on ship.
+## Phase 1 — event triggers + shared dedupe ✅
+Factored the cron's "shipped-unverified + not-recently-run" check into a shared `enqueueSpecTestIfDue(workspaceId, slug, knownStatus?)` helper in [[../libraries/agent-jobs]] (dedupe = no in-flight `spec-test` job + no fresh `spec_test_runs` row ~20h). Called from (a) `/api/roadmap/status` after a commit whose `deriveSpecStatus` yields `shipped` (new `deriveSpecStatus` export on [[../libraries/brain-roadmap]] derives over the just-committed content, since the deployed bundle's disk is stale), and (b) `reconcileMergedJobs` when a merged `build` job's spec — fetched from `main` — is now shipped. The daily cron calls the same helper per backlog slug (passing `'shipped'`). Brain updated: [[spec-test-agent]] (event trigger) + [[../inngest/spec-test-cron]] (backlog-only) + new [[../libraries/agent-jobs]] page. Fold on ship.

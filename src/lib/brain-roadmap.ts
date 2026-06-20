@@ -435,6 +435,15 @@ export function stripSpecSection(raw: string, heading: string): string {
 }
 
 /** Raw markdown + parsed card for one spec, or null if it doesn't exist. Slug is path-guarded. */
+/**
+ * Derive a spec's overall status from its raw markdown (no disk read) — the same deriveStatus the
+ * board uses, exposed for callers that hold freshly-committed content in memory (e.g. /api/roadmap/status
+ * computing the result of a status flip before disk reflects it). See spec-test-on-ship.
+ */
+export function deriveSpecStatus(raw: string): Phase {
+  return parseSpec("_", raw).status;
+}
+
 export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
   try {
