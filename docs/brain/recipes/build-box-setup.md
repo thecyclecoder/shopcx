@@ -82,6 +82,8 @@ The worker runs **up to `MAX_CONCURRENT = 5` builds at once**, each in its own *
 
 **Recovery / fleet ops:** [[manage-the-build-queue]] (`queue-control`) — pause by stopping the worker, `reset-all` to a clean slate, `requeue-stale` after a restart orphans in-flight lanes.
 
+**Interactive Max lanes (no PR).** Beyond the 5 build/plan worktree lanes + the concurrency-1 fold lane, the worker fills two more dedicated lanes each poll tick: `['product-seed']` (`MAX_SEED=2`, [[../specs/box-product-seeding]]) and `['ticket-improve']` (`MAX_TICKET_IMPROVE=1`, [[../specs/box-ticket-improve]] — one resumable Max turn per ticket, reads brain/`src/` in the main checkout read-only, never mutates / opens a PR). Both run as top-level `claude -p` on Max (`ANTHROPIC_API_KEY` unset) and keep the DB/crypto secrets so their deterministic CLI tools can reach prod — product-seed writes; ticket-improve only reads (via `scripts/improve-box-tools.ts`), with mutation gated to the server-side approval path.
+
 ## Related
 
 [[../specs/roadmap-build-console]] · [[../specs/build-approval-gates]] · [[../specs/worker-self-update]] · [[../tables/agent_jobs]] · [[../tables/worker_heartbeats]] · [[../dashboard/branches]] · [[../dashboard/roadmap]] · [[write-a-migration-apply-script]]

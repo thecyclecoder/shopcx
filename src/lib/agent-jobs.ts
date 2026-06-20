@@ -51,8 +51,10 @@ export interface PendingAction {
 }
 
 /** 'build' (default — build a spec to a PR) | 'plan' (run plan-goal against a goal → propose specs)
- * | 'fold' (batch fold-build — fold every pending-fold spec into the brain in one PR, fold-build-batching). */
-export type JobKind = "build" | "plan" | "fold";
+ * | 'fold' (batch fold-build — fold every pending-fold spec into the brain in one PR, fold-build-batching)
+ * | 'product-seed' (box-product-seeding — drive one product none→published on Max)
+ * | 'ticket-improve' (box-ticket-improve — one turn of a ticket-bound Improve session on Max). */
+export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve";
 
 export interface AgentJob {
   id: string;

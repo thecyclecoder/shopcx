@@ -36,6 +36,9 @@ const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 // Product-seed runs the full Engine to completion on Max (per-ingredient web
 // research + ~2000-review analysis + content + imagery) — give it a long ceiling.
 const SEED_TIMEOUT_MS = 90 * 60 * 1000;
+// A ticket-improve turn is one Max `claude -p` investigation/proposal (read brain/src + web + the
+// read-only DB tools). Minutes, not the 90-min seed ceiling. See box-ticket-improve.
+const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_CONCURRENT = 5; // build/plan pool — real ceiling is Max rate limits, not the box
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
@@ -45,6 +48,10 @@ const MAX_FOLD = 1;
 // research + ~2000-review analysis + imagery) never occupies a feature-build
 // lane. Each is one long-running claude session, so a small cap is right.
 const MAX_SEED = 2;
+// Ticket-improve turns (box-ticket-improve) run in their OWN concurrency-1 interactive lane: a
+// resumable Max `claude -p` session per ticket, one short job per turn. Serialized so a turn never
+// races the self-update reset of REPO_DIR (it reads brain/src in the main checkout, read-only).
+const MAX_TICKET_IMPROVE = 1;
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
 // SAME already-applied action before we stop the loop and surface it for a human. Normally 0–1.
 const AUTO_SETTLE_MAX = 2;
@@ -94,7 +101,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -880,10 +887,230 @@ async function runProductSeedJob(job: Job) {
   }
 }
 
+// ── Box-hosted ticket Improve agent (box-ticket-improve) ─────────────────────
+// A kind='ticket-improve' job is ONE turn of the ticket-bound Improve session. Like product-seed it
+// runs a TOP-LEVEL `claude -p` on Max (web search on, ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
+// the DB/crypto secrets — because the `ticket-improve` skill reaches the prod DB READ-ONLY through the
+// deterministic scripts/improve-box-tools.ts CLI for live investigation. The box NEVER mutates: it
+// investigates read-only + either replies or proposes a typed action plan. The plan is parked in
+// ticket_improve_chats.pending_plan and EXECUTED server-side by the Vercel route on the founder's
+// approval (it holds the prod write creds, exactly like today's Improve tab). No worktree / PR — this
+// mutates a DB session row, not the repo, so it runs read-only in the main checkout (REPO_DIR).
+// Params on the job: instructions = JSON {ticket_id, session_id, mode:'turn', user_message}.
+async function runImproveClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: IMPROVE_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+// Build the read-only context brief baked into turn 1 — so the box's FIRST reply already references
+// THIS exact ticket's customer/order facts with no prompting (auto ticket-binding). Queried directly
+// (the worker has DB creds); the box can fetch deeper/fresh data via the improve-box-tools CLI.
+async function loadImproveBrief(ticketId: string): Promise<string> {
+  const { data: ticket } = await db
+    .from("tickets")
+    .select("id, subject, status, channel, tags, escalation_reason, escalated_at, assigned_to, ai_turn_count, customer_id")
+    .eq("id", ticketId)
+    .single();
+  if (!ticket) return `Ticket ${ticketId} not found.`;
+
+  let customerLine = "No customer linked.";
+  if (ticket.customer_id) {
+    const { data: c } = await db
+      .from("customers")
+      .select("first_name, last_name, email, subscription_status, retention_score")
+      .eq("id", ticket.customer_id)
+      .single();
+    if (c) {
+      let ltv = "";
+      try {
+        const { getCustomerStats } = await import("../src/lib/customer-stats");
+        const s = await getCustomerStats(ticket.customer_id);
+        ltv = `, Orders: ${s.total_orders}, LTV: $${(s.ltv_cents / 100).toFixed(0)}`;
+      } catch {
+        /* LTV is best-effort — the brief is still useful without it */
+      }
+      customerLine = `${c.first_name || ""} ${c.last_name || ""} (${c.email}), Subscription: ${c.subscription_status || "none"}, Retention: ${c.retention_score ?? 0}${ltv}`;
+    }
+  }
+
+  const { data: messages } = await db
+    .from("ticket_messages")
+    .select("direction, visibility, author_type, body, created_at")
+    .eq("ticket_id", ticketId)
+    .order("created_at", { ascending: true })
+    .limit(50);
+  const { data: analysis } = await db
+    .from("ticket_analyses")
+    .select("score, summary, created_at, window_end")
+    .eq("ticket_id", ticketId)
+    .order("window_end", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return [
+    `Subject: ${ticket.subject}`,
+    `Status: ${ticket.status} · Channel: ${ticket.channel} · Tags: ${(ticket.tags || []).join(", ") || "none"}`,
+    `AI turns: ${ticket.ai_turn_count || 0}${ticket.escalated_at ? " · escalated" : ""}${ticket.assigned_to ? " · assigned to a human" : ""}`,
+    ticket.escalation_reason ? `Escalation reason: ${ticket.escalation_reason}` : null,
+    `Customer: ${customerLine}`,
+    analysis ? `Latest AI quality analysis: ${analysis.score}/10 — ${analysis.summary || ""}` : "No ticket analysis yet.",
+    "",
+    `--- Ticket messages (last ${(messages || []).length}) ---`,
+    ...(messages || []).map((m) => {
+      const prefix = m.author_type === "ai" ? "[AI]" : m.author_type === "system" ? "[System]" : m.direction === "inbound" ? "[Customer]" : "[Agent]";
+      const vis = m.visibility === "internal" ? " (internal note)" : "";
+      return `${prefix}${vis}: ${String(m.body || "").replace(/<[^>]+>/g, " ").slice(0, 500)}`;
+    }),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+interface SessionRow {
+  id: string;
+  workspace_id: string;
+  ticket_id: string;
+  box_session_id: string | null;
+  messages: { role: string; content: string }[];
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizePlan(plan: any, ts: string): { summary: string; actions: any[] } | null {
+  if (!plan || typeof plan !== "object" || !Array.isArray(plan.actions) || !plan.actions.length) return null;
+  const KINDS = ["customer_action", "sonnet_prompt", "grader_rule", "rescore", "ticket_spec", "resolve_sequence"];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actions = plan.actions
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((a: any) => a && typeof a === "object" && KINDS.includes(a.kind))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((a: any, i: number) => ({ ...a, id: `pa${ts}${i}`, status: "pending" }));
+  if (!actions.length) return null;
+  return { summary: String(plan.summary || "Proposed plan"), actions };
+}
+
+async function runTicketImproveJob(job: Job) {
+  const tag = `[improve:${job.id.slice(0, 8)}]`;
+  let params: { ticket_id?: string; session_id?: string; mode?: string; user_message?: string } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* fall through to the missing-params guard */
+  }
+  const ticketId = params.ticket_id;
+  const sessionId = params.session_id;
+  const userMessage = params.user_message || "";
+  if (!ticketId || !sessionId) {
+    await update(job.id, { status: "failed", error: "ticket-improve job missing ticket_id/session_id" });
+    return;
+  }
+
+  const { data: sessionRaw } = await db.from("ticket_improve_chats").select("id, workspace_id, ticket_id, box_session_id, messages").eq("id", sessionId).single();
+  const session = sessionRaw as SessionRow | null;
+  if (!session) {
+    await update(job.id, { status: "failed", error: "improve session not found" });
+    return;
+  }
+  const setSession = (patch: Record<string, unknown>) =>
+    db.from("ticket_improve_chats").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", sessionId);
+
+  const isResume = !!session.box_session_id;
+  console.log(`${tag} ${isResume ? "resuming" : "starting"} session ${sessionId.slice(0, 8)} on ticket ${ticketId.slice(0, 8)}`);
+
+  try {
+    const prompt = isResume
+      ? [
+          `New message from the human on ticket ${ticketId}: "${userMessage}"`,
+          `Continue the conversation. Same role, same read-only-investigation rule, same final JSON output protocol ("reply" or "propose") as before.`,
+        ].join("\n")
+      : [
+          `Use the ticket-improve skill (cwd is the repo root). You are the founder's CX co-pilot fixing ONE specific ticket, super-powered on Max.`,
+          ``,
+          `TICKET id ${ticketId} — full context loaded for you:`,
+          await loadImproveBrief(ticketId),
+          ``,
+          `The human's message: "${userMessage}"`,
+          ``,
+          `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
+          `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_ticket_analysis). You may also Read/Grep the brain + src/ and WebSearch.`,
+          `Investigation is free + read-only. To ACT, propose a typed plan for approval — NEVER mutate anything yourself.`,
+          ``,
+          `Final message = ONLY one JSON object:`,
+          `  {"status":"reply","message":"<plain-text reply / investigation answer, no actions>"}`,
+          `  {"status":"propose","message":"<what you'll do + why>","plan":{"summary":"...","actions":[ ... ]}}`,
+          `See the ticket-improve skill for the exact action shapes (customer_action, sonnet_prompt, grader_rule, rescore, ticket_spec, resolve_sequence).`,
+        ].join("\n");
+
+    const { session: boxSession, resultText, isError, raw } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR);
+    const parsed = parseStatus(resultText);
+    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (boxSession && boxSession !== session.box_session_id) {
+      await setSession({ box_session_id: boxSession });
+    }
+
+    const messages = Array.isArray(session.messages) ? session.messages : [];
+    const ts = job.id.slice(0, 6);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const p = parsed as any;
+
+    if (p?.status === "propose") {
+      const plan = normalizePlan(p.plan, ts);
+      const reply = String(p.message || "I've put together a plan for your approval.");
+      if (plan) {
+        await setSession({
+          messages: [...messages, { role: "assistant", content: reply }],
+          turn_status: "awaiting_approval",
+          pending_plan: plan,
+          last_error: null,
+        });
+      } else {
+        // proposed but the plan was malformed/empty → treat as a plain reply, no parked plan
+        await setSession({ messages: [...messages, { role: "assistant", content: reply }], turn_status: "idle", pending_plan: null, last_error: null });
+      }
+      await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
+      return;
+    }
+
+    if (p?.status === "reply") {
+      await setSession({
+        messages: [...messages, { role: "assistant", content: String(p.message || "(no reply)") }],
+        turn_status: "idle",
+        pending_plan: null,
+        last_error: null,
+      });
+      await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
+      return;
+    }
+
+    // No recognizable status → surface as an error turn the UI can retry.
+    await setSession({ turn_status: "error", last_error: "The box turn ended without a reply or plan. Try again." });
+    await update(job.id, { status: isError ? "failed" : "needs_attention", error: "improve turn produced no reply/plan", log_tail: raw.slice(-2000) });
+  } catch (e) {
+    await setSession({ turn_status: "error", last_error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
   if (job.kind === "product-seed") return runProductSeedJob(job);
+  if (job.kind === "ticket-improve") return runTicketImproveJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -1125,7 +1352,8 @@ async function main() {
   const active = new Map<string, LaneInfo>();
   const countFold = () => [...active.values()].filter((v) => v.kind === "fold").length;
   const countSeed = () => [...active.values()].filter((v) => v.kind === "product-seed").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed").length;
+  const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "ticket-improve").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
@@ -1153,6 +1381,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed product-seed ${job.id.slice(0, 8)} → ${countSeed() + 1}/${MAX_SEED} seed lane`);
+        launch(job);
+      }
+      // Fill the ticket-improve lane (box-ticket-improve): interactive Max turns, concurrency-1.
+      while (countImprove() < MAX_TICKET_IMPROVE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ticket-improve"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ticket-improve ${job.id.slice(0, 8)} → ${countImprove() + 1}/${MAX_TICKET_IMPROVE} improve lane`);
         launch(job);
       }
       // Fill the build/plan pool.

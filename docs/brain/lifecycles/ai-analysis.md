@@ -75,6 +75,7 @@ Tickets where the grader flagged a *specific verifiable claim mismatch* (e.g. AI
 
 **Recent activity:**
 - No active commits — pipeline is paused.
+- The ticket **Improve** tab is now **box-hosted** ([[../specs/box-ticket-improve]] · [[../tables/ticket_improve_chats]]): a ticket-bound, resumable Max `claude -p` session that investigates read-only and proposes an approval-gated plan. It can **re-score this ticket** on approval (a `rescore` plan action → `analyzeTicket(ticketId, "manual")` → a fresh `ticket_analyses` row) and propose `sonnet_prompts`/`grader_prompts` rules + ticket-derived analyzer-fix specs (owner=cs). Owned by [[../functions/cs]].
 
 **Open questions:**
 - When does the nightly cron resume? Resuming without clearing the Apr-28-era backlog will surface the same patterns over and over.
