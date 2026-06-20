@@ -84,14 +84,15 @@ Migration `20260620150000_iteration_policy_action_tables.sql` (apply: `scripts/a
 - ✅ `iteration_actions`: object level + id, action type, before/after budget/status, authorizing policy version id, triggering scorecard snapshot, external Meta result/ids (`external_result`), outcome-after fields (`outcome_roas`/`outcome_revenue_cents`/`outcome_window_days`) + reversal links (`reverses_action_id`/`reversed_by_action_id`); idempotent per object via unique `(workspace_id, meta_ad_account_id, object_id, action_type, snapshot_date)`; cooldown enforced in code (`loadRecentActions` + `per_object_cooldown_hours`)
 - ✅ Engine treats both tables: policy read-only (`loadActivePolicy`/`loadRecentActions`), actions append/update only (`persistActions`, NOT wired into `runDecisionEngine` so Phase 4 keeps zero side effects — the Phase 5 cron persists after the engine returns)
 
-## Phase 5 — Daily cron orchestration ⏳
+## Phase 5 — Daily cron orchestration ✅
 Goal: wire the pipeline into one reliable, self-correcting daily run.
-- ⏳ Cron sequence: ingest (P1) → attribution refresh (P2/2b) → rollups (P3) → **reconcile prior actions (emit reversals: scale-down, unpause, replace)** → autonomous policy actions (4a) → recommendation generation (4b) → execute autonomous adapters (6a)
-- ⏳ Run-records table with status, timing, counts; alert on failure
-- ⏳ Re-run safety: every stage idempotent so a re-run never double-writes, double-recommends, or double-acts
-- ⏳ Enforce per-object cooldown + per-account daily budget-delta ceiling across the whole run; exceeding flags for manual review instead of acting
-- ⏳ Skip autonomous actions + recommendations for objects below min spend / min sessions thresholds
-- ⏳ If no active policy version exists, run scorecards + 4b recommendations only; take zero autonomous actions
+Library `src/lib/meta/iteration-run.ts` (run records + reconcile/reversal + noise floors); Inngest `meta-iteration-run` in `src/lib/inngest/meta-performance.ts` (the consolidated durable run); the daily cron `meta-performance-daily` now fires `meta/iteration-run` per active account. Migration `20260620170000_iteration_runs.sql` (apply: `scripts/apply-iteration-runs-migration.ts`). Table documented at [[../tables/iteration_runs]]; library at [[../libraries/meta__iteration-run]].
+- ✅ Cron sequence (one durable run): ingest (P1) → attribution refresh (P2/2b) → rollups (P3) → **reconcile prior actions (measure outcomes + link reversals: scale-down reverts scale-up, unpause reverts pause)** → autonomous policy actions (4a) → recommendation generation (4b) → persist 4a decisions to `iteration_actions` → execute autonomous adapters (6a — Phase 6 hook; decided actions left `status='decided'`)
+- ✅ Run-records table `iteration_runs` with status, timing (`duration_ms` + per-stage `ms`), counts (jsonb); failure writes the failed run record + DMs owners via `notifyOpsAlert`
+- ✅ Re-run safety: every stage idempotent (scorecards/attribution/recs/actions all upsert on stable keys; reconcile only touches un-evaluated rows) so a same-day re-run never double-writes, double-recommends, or double-acts; `iteration_runs` is append-only run history
+- ✅ Enforce per-object cooldown + per-account daily budget-delta ceiling across the whole run (inside `computeAutonomousActions`); exceeding flags for manual review — persisted as `status='escalated'` rows with the `guardrail` that fired, never executed
+- ✅ Skip autonomous actions + recommendations for objects below min spend / min sessions thresholds — `MIN_ACTION_SPEND_CENTS` ($5) / `MIN_VARIANT_SESSIONS` (30) passed to `runDecisionEngine` (module constants in v1; candidate to migrate into `iteration_policies` later)
+- ✅ If no active policy version exists, run scorecards + 4b recommendations only; take zero autonomous actions (`policy_active=false` on the run record)
 
 ## Phase 6 — Execution adapters ⏳
 Goal: execute decisions; manage live objects autonomously, create new spend lines as drafts only.
@@ -138,6 +139,18 @@ Goal: execute decisions; manage live objects autonomously, create new spend line
 - Dylan can review the active policy + a daily list of autonomous actions and pending recommendations, edit/approve a policy version, and see autonomous management plus draft creation happen without anything going live unintentionally.
 
 ## Verification
+
+### Phase 5 — Daily cron orchestration (shipped)
+- Apply the migration: `npx tsx scripts/apply-iteration-runs-migration.ts` → expect `✓ applied 20260620170000_iteration_runs.sql` then `✓ public.iteration_runs has N columns`.
+- In the Supabase SQL editor, confirm the table + CHECKs: `select column_name from information_schema.columns where table_name='iteration_runs';` → expect the [[../tables/iteration_runs]] columns; `select conname from pg_constraint where conrelid='public.iteration_runs'::regclass and contype='c';` → CHECKs on `trigger`, `status`.
+- **End-to-end run:** trigger the consolidated pipeline from the Inngest dev/prod UI — send event `meta/iteration-run` with `{ "workspace_id":"<ws>", "ad_account_id":"<meta_ad_accounts.id uuid>", "meta_account_id":"<bare meta account id>", "trigger":"manual" }` → expect the function `meta-iteration-run` to complete and a log line `[meta-iteration-run] account <id> <date> policy_active=<bool> actions=<n> escalations=<n> reversals=<n> recs=<n>`. Then `select status, snapshot_date, policy_active, duration_ms, counts, jsonb_array_length(stages) as n_stages from iteration_runs where meta_ad_account_id='<id>' order by started_at desc limit 1;` → expect `status='complete'`, a `snapshot_date`, `duration_ms>0`, and `n_stages=7` (ingest, attribution, rollups, reconcile, decide, persist-actions, execute).
+- **Daily cron drives it:** confirm `meta-performance-daily` (cron `30 11 * * *`) now fans out `meta/iteration-run` (not `meta/sync-performance`) — one event per active [[../tables/meta_ad_accounts]] row.
+- **No active policy ⇒ recs only, zero actions:** with no `iteration_policies` active row, run `meta/iteration-run` → the latest `iteration_runs` row has `policy_active=false`, `counts->>'actions_decided'='0'`, and `counts->>'recommendations'` ≥ 0 (4b still runs). No new `iteration_actions` rows for that snapshot.
+- **Active policy ⇒ actions persisted + run-wide guardrails:** insert one active `iteration_policies` row, run `meta/iteration-run` → `iteration_runs.policy_active=true` with `policy_version_id` = that row's id; `select status, count(*) from iteration_actions where meta_ad_account_id='<id>' and snapshot_date='<date>' group by status;` → `decided` rows for executable actions and `escalated` rows (with `guardrail` set) for any that breached the budget floor / per-account daily delta ceiling / never-pause list.
+- **Noise floors:** an adset/campaign with trailing-window spend < $5 (or a variant with < 30 sessions) produces NO `iteration_actions` row and is absent from the recommendation context for that run.
+- **Reconcile / reversals:** with a prior un-reversed `scale_up` whose object now sits below ROAS floor, a run that emits a `scale_down` for it → `select reverses_action_id from iteration_actions where action_type='scale_down' and object_id='<id>' and snapshot_date='<date>';` is the prior scale_up's id, and that prior row flips to `status='reversed'` with `reversed_by_action_id` set. Prior matured actions (older than 3 days, unevaluated) get `outcome_roas`/`outcome_revenue_cents`/`outcome_evaluated_at` populated.
+- **Re-run safety:** re-send the same `meta/iteration-run` → a NEW `iteration_runs` row is appended, but `iteration_actions`/`iteration_recommendations` row counts for that `(account, snapshot_date)` are stable (no duplicates, no double-acts).
+- **Failure alert:** force a stage error (e.g. no Meta token) → the latest `iteration_runs` row is `status='failed'` with a non-null `error`, and workspace owners/admins receive a `notify-ops-alert` Slack DM "Iteration engine daily run failed".
 
 ### Phase 4c — Policy + action ledger tables (shipped)
 - Apply the migration: `npx tsx scripts/apply-iteration-policy-action-migration.ts` → expect `✓ applied 20260620150000_iteration_policy_action_tables.sql` then `✓ public.iteration_policies has N columns` and `✓ public.iteration_actions has N columns`.

@@ -271,6 +271,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/import_jobs]] — Background import jobs (Shopify/Gorgias/Klaviyo) with progress + status. UI shows a progress bar.
 - [[tables/iteration_actions]] — Iteration engine's autonomous-action ledger (audit/idempotency/reversal); engine append/update only (Phase 4c).
 - [[tables/iteration_policies]] — Iteration engine's versioned policy control surface; engine reads active version read-only, no active ⇒ zero autonomous actions (Phase 4c).
+- [[tables/iteration_runs]] — Iteration engine's per-account daily-run audit log (status/timing/per-stage counts); the supervisable-autonomy record for the whole engine (Phase 5).
 - [[tables/iteration_scorecards_daily]] — Deterministic daily ad/adset/campaign/variant/angle scorecards the iteration engine reads (Phase 3).
 - [[tables/slack_notification_rules]] — Per-workspace Slack notification routing rules (which events go to which channel).
 - [[tables/sync_jobs]] — Background sync job state (Shopify bulk ops, Appstle pulls) — progress, status, error.

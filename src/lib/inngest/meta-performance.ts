@@ -9,7 +9,18 @@ import { getMetaUserToken } from "@/lib/meta-ads";
 import { ingestMetaPerformance } from "@/lib/meta/performance";
 import { refreshVariantAttribution } from "@/lib/meta/attribution";
 import { refreshScorecards } from "@/lib/meta/scorecards";
-import { runDecisionEngine } from "@/lib/meta/decision-engine";
+import { runDecisionEngine, persistActions } from "@/lib/meta/decision-engine";
+import {
+  startRun,
+  finishRun,
+  reconcilePriorActions,
+  buildReversalLinks,
+  linkReversals,
+  MIN_ACTION_SPEND_CENTS,
+  MIN_VARIANT_SESSIONS,
+  type StageRecord,
+} from "@/lib/meta/iteration-run";
+import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -185,7 +196,173 @@ export const metaDecisionEngine = inngest.createFunction(
   },
 );
 
-// ── Daily cron: ingest performance for all active accounts ──
+// ── meta/iteration-run — Phase 5: the full daily pipeline as ONE durable run ──
+// Folds the chain above (ingest → attribution → rollups) into a single
+// self-correcting run, then adds the reconcile/reversal stage, persists the 4a
+// autonomous decisions to iteration_actions, and records the whole thing to
+// iteration_runs (status, timing, counts) with a failure alert. Every stage is
+// idempotent, so a re-run on the same day never double-writes/recommends/acts.
+// Phase 6a (actual Meta execution of the decided actions) is a documented hook
+// here — the actions land status='decided' for Phase 6a to execute. With no
+// active policy the run does scorecards + 4b recommendations only.
+export const metaIterationRun = inngest.createFunction(
+  {
+    id: "meta-iteration-run",
+    retries: 1,
+    concurrency: [{ limit: 1, key: "event.data.ad_account_id" }],
+    triggers: [{ event: "meta/iteration-run" }],
+  },
+  async ({ event, step }) => {
+    const { workspace_id, ad_account_id, meta_account_id, trigger, incremental_days } = event.data as {
+      workspace_id: string;
+      ad_account_id: string;
+      meta_account_id: string;
+      trigger?: "cron" | "manual";
+      incremental_days?: number;
+    };
+    const p = { workspaceId: workspace_id, adAccountId: ad_account_id };
+
+    const runId = await step.run("start-run", () =>
+      startRun(p, trigger === "manual" ? "manual" : "cron"),
+    );
+
+    const stages: StageRecord[] = [];
+    try {
+      // ── Stage 1 — ingest Meta performance (P1) ──────────────────────────────
+      const ingest = await step.run("ingest", async () => {
+        const t0 = Date.now();
+        const token = await getMetaUserToken(workspace_id);
+        if (!token) throw new Error("No active Meta token for workspace");
+        const r = await ingestMetaPerformance(
+          { workspaceId: workspace_id, adAccountId: ad_account_id, metaAccountId: meta_account_id, accessToken: token },
+          { incrementalDays: incremental_days },
+        );
+        return { ms: Date.now() - t0, drift: r.reconcile.drift.length };
+      });
+      stages.push({ name: "ingest", status: "ok", ms: ingest.ms, spend_drift_objects: ingest.drift });
+
+      // ── Stage 2 — variant attribution refresh (P2/2b) ───────────────────────
+      const attribution = await step.run("attribution", async () => {
+        const t0 = Date.now();
+        const r = await refreshVariantAttribution({ workspaceId: workspace_id, adAccountId: ad_account_id }, {});
+        return { ms: Date.now() - t0, coverage: r.coverage.variant_attribution_coverage, rows: r.rows };
+      });
+      stages.push({
+        name: "attribution",
+        status: "ok",
+        ms: attribution.ms,
+        variant_attribution_coverage: attribution.coverage,
+        rows: attribution.rows,
+      });
+
+      // ── Stage 3 — scorecard rollups (P3) → resolves the snapshot date ───────
+      const scorecards = await step.run("rollups", async () => {
+        const t0 = Date.now();
+        const r = await refreshScorecards({ workspaceId: workspace_id, adAccountId: ad_account_id }, {});
+        return { ms: Date.now() - t0, snapshotDate: r.snapshotDate, rows: r.rows, counts: r.counts };
+      });
+      const snapshotDate = scorecards.snapshotDate;
+      stages.push({ name: "rollups", status: "ok", ms: scorecards.ms, snapshot_date: snapshotDate, rows: scorecards.rows });
+
+      // ── Stage 4 — reconcile prior actions (outcomes + reversal targets) ─────
+      const reconcile = await step.run("reconcile", async () => {
+        const t0 = Date.now();
+        const r = await reconcilePriorActions(p, snapshotDate);
+        return { ms: Date.now() - t0, ...r };
+      });
+      stages.push({ name: "reconcile", status: "ok", ms: reconcile.ms, outcomes_reconciled: reconcile.outcomes_reconciled });
+
+      // ── Stage 5+6 — decision engine: 4a autonomous actions + 4b recs ────────
+      // Run-wide cooldown + per-account budget-delta ceiling + the no-active-policy
+      // invariant are enforced inside runDecisionEngine; noise floors skip thin objects.
+      const decision = await step.run("decide", async () => {
+        const t0 = Date.now();
+        const r = await runDecisionEngine(p, {
+          snapshotDate,
+          minSpendCents: MIN_ACTION_SPEND_CENTS,
+          minSessions: MIN_VARIANT_SESSIONS,
+        });
+        return { ms: Date.now() - t0, ...r };
+      });
+      stages.push({
+        name: "decide",
+        status: "ok",
+        ms: decision.ms,
+        policy_active: decision.policy_active,
+        actions: decision.autonomous.actions.length,
+        escalations: decision.autonomous.escalations.length,
+        recommendations: decision.recommendations.persisted,
+      });
+
+      // ── Stage 6b — persist the 4a decisions to the ledger + link reversals ──
+      const persisted = await step.run("persist-actions", async () => {
+        const t0 = Date.now();
+        const count = await persistActions(
+          p,
+          snapshotDate,
+          decision.autonomous.actions,
+          decision.autonomous.escalations,
+        );
+        const links = buildReversalLinks(decision.autonomous.actions, reconcile.openReversibles);
+        const reversals = await linkReversals(p, snapshotDate, links);
+        return { ms: Date.now() - t0, count, reversals };
+      });
+      stages.push({ name: "persist-actions", status: "ok", ms: persisted.ms, persisted: persisted.count, reversals: persisted.reversals });
+
+      // ── Stage 7 — execute autonomous adapters (6a) ──────────────────────────
+      // Phase 6 hook: the decided actions sit in iteration_actions (status='decided')
+      // for the Phase 6a adapters to apply to Meta. No execution happens yet.
+      stages.push({ name: "execute", status: "skipped", ms: 0, note: "Phase 6a not yet enabled — actions left status='decided'" });
+
+      const counts = {
+        scorecard_rows: scorecards.rows,
+        variant_attribution_coverage: attribution.coverage,
+        outcomes_reconciled: reconcile.outcomes_reconciled,
+        actions_decided: decision.autonomous.actions.length,
+        escalations: decision.autonomous.escalations.length,
+        reversals: persisted.reversals,
+        recommendations: decision.recommendations.persisted,
+        spend_drift_objects: ingest.drift,
+      };
+
+      await step.run("finish-run", () =>
+        finishRun(runId, {
+          status: "complete",
+          snapshotDate,
+          policy_active: decision.policy_active,
+          policy_version_id: decision.policy_version_id,
+          stages,
+          counts,
+        }),
+      );
+
+      console.log(
+        `[meta-iteration-run] account ${ad_account_id} ${snapshotDate} ` +
+          `policy_active=${decision.policy_active} actions=${counts.actions_decided} ` +
+          `escalations=${counts.escalations} reversals=${counts.reversals} recs=${counts.recommendations}`,
+        JSON.stringify(counts),
+      );
+
+      return { status: "complete", runId, snapshotDate, ...counts };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Record the failure on the run row + alert the owners, then rethrow so
+      // Inngest marks the run failed (and retries per the function config).
+      await finishRun(runId, { status: "failed", stages, error: message });
+      await notifyOpsAlert(workspace_id, {
+        title: "Iteration engine daily run failed",
+        lines: [`Account ${ad_account_id}`, `Stage reached: ${stages.length}`, message],
+        severity: "warning",
+      });
+      throw err;
+    }
+  },
+);
+
+// ── Daily cron: drive the full iteration pipeline for all active accounts ──
+// Phase 5: fires meta/iteration-run (the consolidated, run-recorded pipeline)
+// per account. The per-stage events (meta/sync-performance → … → decision-engine)
+// remain for manual/stage-by-stage debugging.
 export const metaPerformanceDailyCron = inngest.createFunction(
   {
     id: "meta-performance-daily",
@@ -204,13 +381,14 @@ export const metaPerformanceDailyCron = inngest.createFunction(
     });
 
     for (const acct of accounts) {
-      await step.run(`trigger-perf-${acct.id}`, async () => {
+      await step.run(`trigger-run-${acct.id}`, async () => {
         await inngest.send({
-          name: "meta/sync-performance",
+          name: "meta/iteration-run",
           data: {
             workspace_id: acct.workspace_id,
             ad_account_id: acct.id,
             meta_account_id: acct.meta_account_id,
+            trigger: "cron",
           },
         });
       });
