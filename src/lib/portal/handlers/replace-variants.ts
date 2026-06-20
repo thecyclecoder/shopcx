@@ -126,9 +126,45 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     return jsonErr({ error: "would_remove_all_regular_products" }, 400);
   }
 
+  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
+
   const body: Record<string, unknown> = { shop, contractId, eventSource: "CUSTOMER_PORTAL", stopSwapEmails };
   if (carryForwardDiscount) body.carryForwardDiscount = carryForwardDiscount;
-  if (oldLineId) body.oldLineId = oldLineId.startsWith("gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
+
+  // oldLineId → oldVariants for Appstle subs.
+  //
+  // The portal sends oldLineId = the line's `id`, which transform-subscription
+  // sets to `line_id || variant_id`. Appstle sub lines often carry no real
+  // Shopify SubscriptionLine id, so this is actually the variant id (or a
+  // catalog UUID). Wrapping it as gid://shopify/SubscriptionLine/<x> and
+  // sending it as oldLineId makes Appstle reject the swap with a 400 (the
+  // Jessica Ollet ticket). Resolve it to the line's variant_id from
+  // subscriptions.items and send the reliable oldVariants path instead — the
+  // same approach subSwapVariant already uses successfully. Fall back to the
+  // synthesized line GID only when we genuinely can't resolve a variant id.
+  if (oldLineId && !isInternal) {
+    if (oldLineId.startsWith("gid://shopify/SubscriptionLine/")) {
+      // Already a real Shopify line GID — trust it.
+      body.oldLineId = oldLineId;
+    } else {
+      const adminDb = createAdminClient();
+      const { data: subData } = await adminDb.from("subscriptions")
+        .select("items").eq("shopify_contract_id", String(contractId)).single();
+      const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
+      const li = items.find(i => i.line_id === oldLineId || String(i.variant_id) === oldLineId);
+      const resolvedVariant = Number(li?.variant_id);
+      if (li?.variant_id && Number.isFinite(resolvedVariant)) {
+        body.oldVariants = [resolvedVariant];
+      } else {
+        // Last resort — preserve the legacy synthesized-GID behavior.
+        body.oldLineId = `gid://shopify/SubscriptionLine/${oldLineId}`;
+      }
+    }
+  } else if (oldLineId) {
+    // Internal subs don't use this body for an API call (they take the internal
+    // branch below), but keep the legacy shape so logging stays consistent.
+    body.oldLineId = oldLineId.startsWith("gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
+  }
 
   // Pure removals (without replacement) belong in the dedicated removeLineItem
   // route — separate Appstle endpoint, separate handler. Reject here.
@@ -164,7 +200,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
           .select("items").eq("shopify_contract_id", String(contractId)).single();
         const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
         const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
-        const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId);
+        const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
         oldVariantId = lineItem?.variant_id ? String(lineItem.variant_id) : null;
       }
 
@@ -194,8 +230,6 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     } catch (e) { console.error("[replaceVariants] grandfathered pricing pre-check error:", e); }
   }
   console.log("[replaceVariants] grandfathered check:", { isSingleSwap, grandfatheredBase, newVariantIdForPrice, oldLineId, oldVariantsLen: oldVariants.length });
-
-  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
 
   let updated: Record<string, unknown> | null = null;
   if (isInternal) {
@@ -322,7 +356,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
         }
       } else if (oldLineId) {
         const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
-        const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId);
+        const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
         if (lineItem?.variant_id) {
           resolvedOldVariants.push({ variant_id: String(lineItem.variant_id), sku: lineItem.sku || null, title: lineItem.title || null, variant_title: lineItem.variant_title || null, quantity: lineItem.quantity || 1 });
         }
