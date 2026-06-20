@@ -67,6 +67,14 @@ const MAX_TRIAGE = 1;
 // A solver/skeptic pass is one Max `claude -p` investigation (read brain/src + web + read-only DB
 // tools). Minutes, not the 90-min seed ceiling — same ballpark as a ticket-improve turn.
 const TRIAGE_PASS_TIMEOUT_MS = 15 * 60 * 1000;
+// Spec-test runs (spec-test-agent) run in their OWN concurrency-1 lane: a top-level Max `claude -p`
+// QA pass over ONE shipped-but-unverified spec's `## Verification` checklist — non-destructive checks
+// only (repo/tsc, gh CI, vercel deploy+logs+env, read-only DB probes, GET endpoints). It NEVER mutates
+// prod and NEVER marks a spec verified/archived; it stamps a spec_test_runs row. Serialized (one box).
+const MAX_SPEC_TEST = 1;
+// One spec-test pass reads the spec + runs the box QA toolkit (tsc can be slow). Minutes, not the
+// 90-min seed ceiling — give it a build-sized ceiling so a tsc + a few probes never get cut short.
+const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -118,7 +126,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -1555,6 +1563,129 @@ async function runEscalationTriageJob(job: Job) {
   console.log(`${tag} ✓ swept ${sel.selected.length} ticket(s)`);
 }
 
+// A kind='spec-test' job is ONE non-destructive QA pass over a shipped-but-unverified spec's
+// `## Verification` checklist (spec-test-agent). Like ticket-improve/triage it KEEPS the DB/crypto
+// secrets (the agent probes prod read-only via scripts/spec-test-db-probe.ts, gh, vercel, GET hits) and
+// unsets ANTHROPIC_API_KEY (Max, $0 marginal). No worktree / PR — it writes one spec_test_runs row and
+// NEVER mutates prod or flips a spec verified/archived. See docs/brain/specs/spec-test-agent.md.
+async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: SPEC_TEST_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+type SpecTestCheck = { text: string; verdict: string; category?: string; evidence?: string };
+type SpecTestSummary = { auto_pass: number; auto_fail: number; needs_human: number; inconclusive: number };
+
+// Normalize + re-derive the verdict/summary from the agent's checks so the stamp can never lie (e.g. the
+// agent says "approved" but a check failed). The checks array is the ground truth; counts follow it.
+function normalizeSpecTest(parsed: Record<string, unknown> | null): {
+  agent_verdict: "approved" | "issues" | "needs_human";
+  summary: SpecTestSummary;
+  checks: SpecTestCheck[];
+  report: string;
+} {
+  const rawChecks = Array.isArray(parsed?.checks) ? (parsed!.checks as unknown[]) : [];
+  const checks: SpecTestCheck[] = rawChecks.map((c) => {
+    const o = (c || {}) as Record<string, unknown>;
+    const v = String(o.verdict || "inconclusive");
+    const verdict = ["pass", "fail", "needs_human", "inconclusive"].includes(v) ? v : "inconclusive";
+    return {
+      text: String(o.text || "(unnamed check)"),
+      verdict,
+      category: o.category ? String(o.category) : undefined,
+      evidence: o.evidence ? String(o.evidence) : undefined,
+    };
+  });
+  const summary: SpecTestSummary = {
+    auto_pass: checks.filter((c) => c.verdict === "pass").length,
+    auto_fail: checks.filter((c) => c.verdict === "fail").length,
+    needs_human: checks.filter((c) => c.verdict === "needs_human").length,
+    inconclusive: checks.filter((c) => c.verdict === "inconclusive").length,
+  };
+  const agent_verdict: "approved" | "issues" | "needs_human" =
+    summary.auto_fail > 0 ? "issues" : summary.auto_pass > 0 ? "approved" : "needs_human";
+  return { agent_verdict, summary, checks, report: String(parsed?.report || "") };
+}
+
+// runSpecTestJob — the box QA agent for ONE shipped-but-unverified spec (spec-test-agent Phase 1). Runs
+// the spec-test skill on Max in the MAIN checkout (read-only; the shipped spec is on origin/main), then
+// records a spec_test_runs row with the agent_verdict stamp + per-check verdict+evidence. NEVER opens a
+// PR, NEVER mutates prod, NEVER marks the spec verified — the owner's verify gate stays untouched.
+async function runSpecTestJob(job: Job) {
+  const slug = job.spec_slug;
+  const tag = `[spec-test:${slug}]`;
+  console.log(`${tag} testing shipped spec (job ${job.id.slice(0, 8)})`);
+  try {
+    const prompt = [
+      `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
+      `The spec to test is docs/brain/specs/${slug}.md. Read it + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human | mutating→needs-human), and run ONLY the non-destructive checks on the box.`,
+      `You have the box's read-only QA toolkit: repo Read/Grep + \`npx tsc --noEmit\`, the \`gh\` CLI for CI/PR status, the \`vercel\` CLI for deploy READY + logs + \`vercel env ls\`, read-only DB probes via \`npx tsx scripts/spec-test-db-probe.ts "<select …>"\`, and GET/read-only endpoint hits. NEVER mutate prod, NEVER mark the spec verified/archived, NEVER run a mutating check (those are needs_human).`,
+      `Final message = ONLY one JSON object: {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>"}],"report":"<2-4 plain-text sentences>"} — or {"status":"error","error":"<why>"} if you cannot proceed.`,
+    ].join("\n");
+
+    const { session, resultText, isError, raw } = await runSpecTestClaude(prompt, null, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (parsed?.status === "error") {
+      await db.from("spec_test_runs").insert({
+        workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
+        agent_verdict: "needs_human", summary: {}, checks: [],
+        transcript: raw.slice(-8000), error: String(parsed.error || "agent reported error"),
+      });
+      await update(job.id, { status: "completed", log_tail: `spec-test error: ${String(parsed.error || "").slice(0, 300)}` });
+      return;
+    }
+
+    if (!parsed) {
+      await db.from("spec_test_runs").insert({
+        workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
+        agent_verdict: "needs_human", summary: {}, checks: [],
+        transcript: raw.slice(-8000), error: "agent produced no parseable JSON",
+      });
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "spec-test produced no parseable JSON", log_tail: raw.slice(-2000) });
+      return;
+    }
+
+    const { agent_verdict, summary, checks, report } = normalizeSpecTest(parsed);
+    await db.from("spec_test_runs").insert({
+      workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
+      agent_verdict, summary, checks, transcript: raw.slice(-8000), error: null,
+    });
+    await update(job.id, {
+      status: "completed",
+      log_tail: `${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}. ${report}`.slice(-2000),
+    });
+    console.log(`${tag} ✓ ${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    try {
+      await db.from("spec_test_runs").insert({
+        workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
+        agent_verdict: "needs_human", summary: {}, checks: [], transcript: null, error: `error: ${msg}`,
+      });
+    } catch { /* audit best-effort */ }
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -1562,6 +1693,7 @@ async function runJob(job: Job) {
   if (job.kind === "spec-chat") return runSpecChatJob(job);
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
+  if (job.kind === "spec-test") return runSpecTestJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -1793,7 +1925,7 @@ async function main() {
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage lane, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test lane, polling every ${POLL_MS}ms`);
 
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
@@ -1806,7 +1938,8 @@ async function main() {
   const countSpecChat = () => [...active.values()].filter((v) => v.kind === "spec-chat").length;
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations").length;
+  const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
@@ -1858,6 +1991,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed triage-escalations ${job.id.slice(0, 8)} → ${countTriage() + 1}/${MAX_TRIAGE} triage lane`);
+        launch(job);
+      }
+      // Fill the spec-test lane (spec-test-agent): non-destructive QA pass over a shipped spec, concurrency-1.
+      while (countSpecTest() < MAX_SPEC_TEST) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["spec-test"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed spec-test ${job.id.slice(0, 8)} → ${countSpecTest() + 1}/${MAX_SPEC_TEST} spec-test lane`);
         launch(job);
       }
       // Fill the build/plan pool.

@@ -3,6 +3,16 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import { AgentTestedStamp, CheckList, TestChip, type Check, type Summary } from "../developer/spec-tests/SpecTestView";
+import TestNowButton from "../developer/spec-tests/TestNowButton";
+
+/** The latest box spec-test run for this spec (spec-test-agent) — structural, no server import. */
+export interface SpecTestRunLite {
+  agent_verdict: string;
+  summary: Summary;
+  checks: Check[];
+  run_at: string;
+}
 
 /**
  * The "how to test this" card on a spec detail page (verification-guides), rendered right beside
@@ -13,8 +23,10 @@ import { useWorkspace } from "@/lib/workspace-context";
  *    job (POST /api/roadmap/chat, action "generate_verification"; box-spec-chat) — a Max `claude -p` that
  *    Reads the spec + its brain homes and emits a concrete `## Verification` section, which the worker commits
  *    to specs/{slug}.md on main. The section appears after the box commits it + the next deploy.
+ *  - `run` (spec-test-agent): the box QA agent's latest run — render the Agent-tested stamp + per-bullet
+ *    verdicts + a distinct "Needs human testing" list, so the owner does only those, then verifies.
  */
-export default function VerificationCard({ slug, html }: { slug: string; html: string | null }) {
+export default function VerificationCard({ slug, html, run }: { slug: string; html: string | null; run?: SpecTestRunLite | null }) {
   const workspace = useWorkspace();
   const router = useRouter();
   const [generating, setGenerating] = useState(false);
@@ -43,38 +55,76 @@ export default function VerificationCard({ slug, html }: { slug: string; html: s
     }
   }
 
+  // The box QA agent's report — per-bullet verdicts + the human-only list (spec-test-agent).
+  const humanChecks = run?.checks.filter((c) => c.verdict === "needs_human") ?? [];
+  const agentBlock = run ? (
+    <div className="mt-2 rounded-lg border border-indigo-200 bg-indigo-50/50 p-3 dark:border-indigo-900/40 dark:bg-indigo-950/20">
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <AgentTestedStamp verdict={run.agent_verdict} />
+          <TestChip summary={run.summary} />
+        </div>
+        {isOwner && <TestNowButton slug={slug} compact />}
+      </div>
+      <p className="mb-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+        The box checked the automatable parts — it never marks this verified. You still own the Verified &amp; archive gate.
+      </p>
+      {run.checks.length > 0 && <CheckList checks={run.checks} />}
+      {humanChecks.length > 0 && (
+        <div className="mt-2 border-t border-indigo-100 pt-2 dark:border-indigo-900/40">
+          <div className="mb-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">👤 Needs human testing</div>
+          <ul className="space-y-1">
+            {humanChecks.map((c, i) => (
+              <li key={i} className="text-[11px] text-zinc-600 dark:text-zinc-400">{c.text}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  ) : isOwner ? (
+    <div className="mt-2 text-center">
+      <TestNowButton slug={slug} compact />
+    </div>
+  ) : null;
+
   if (html) {
     return (
-      <div className="rounded-lg border border-teal-200 bg-teal-50/60 p-3 dark:border-teal-900/40 dark:bg-teal-950/20">
-        <div className="mb-1.5 text-xs font-semibold text-teal-800 dark:text-teal-300">✅ How to verify in prod</div>
-        <div
-          className="prose prose-sm max-w-none text-xs text-zinc-700 prose-li:my-0.5 prose-ul:my-1 prose-code:before:content-none prose-code:after:content-none dark:prose-invert dark:text-zinc-300"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+      <div>
+        <div className="rounded-lg border border-teal-200 bg-teal-50/60 p-3 dark:border-teal-900/40 dark:bg-teal-950/20">
+          <div className="mb-1.5 text-xs font-semibold text-teal-800 dark:text-teal-300">✅ How to verify in prod</div>
+          <div
+            className="prose prose-sm max-w-none text-xs text-zinc-700 prose-li:my-0.5 prose-ul:my-1 prose-code:before:content-none prose-code:after:content-none dark:prose-invert dark:text-zinc-300"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        </div>
+        {agentBlock}
       </div>
     );
   }
 
   return (
-    <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50/60 p-3 text-center dark:border-zinc-700 dark:bg-zinc-900">
-      <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">No test plan yet</div>
-      {isOwner &&
-        (done ? (
-          <p className="mt-1 text-[11px] text-emerald-600 dark:text-emerald-400">
-            Queued on the box — it drafts + commits to <code>specs/{slug}.md</code>. Appears here after it lands + the next deploy.
-          </p>
-        ) : (
-          <button
-            type="button"
-            onClick={generate}
-            disabled={generating}
-            className="mt-2 rounded-md bg-teal-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-teal-700 disabled:opacity-50"
-            title="Opus drafts a concrete prod-facing test checklist from this spec + its brain homes, then commits it"
-          >
-            {generating ? "Generating…" : "Generate test plan"}
-          </button>
-        ))}
-      {error && <p className="mt-1 text-[11px] text-rose-500">{error}</p>}
+    <div>
+      <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50/60 p-3 text-center dark:border-zinc-700 dark:bg-zinc-900">
+        <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">No test plan yet</div>
+        {isOwner &&
+          (done ? (
+            <p className="mt-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+              Queued on the box — it drafts + commits to <code>specs/{slug}.md</code>. Appears here after it lands + the next deploy.
+            </p>
+          ) : (
+            <button
+              type="button"
+              onClick={generate}
+              disabled={generating}
+              className="mt-2 rounded-md bg-teal-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-teal-700 disabled:opacity-50"
+              title="Opus drafts a concrete prod-facing test checklist from this spec + its brain homes, then commits it"
+            >
+              {generating ? "Generating…" : "Generate test plan"}
+            </button>
+          ))}
+        {error && <p className="mt-1 text-[11px] text-rose-500">{error}</p>}
+      </div>
+      {agentBlock}
     </div>
   );
 }

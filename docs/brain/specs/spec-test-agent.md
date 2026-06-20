@@ -1,4 +1,4 @@
-# Spec-Test Agent (box QA over shipped-unverified specs) ⏳
+# Spec-Test Agent (box QA over shipped-unverified specs) 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform" (box-agent family with [[box-spec-chat]] · [[box-ticket-improve]] · [[box-escalation-triage]]). Fills the **Shipped → Verified** gap in [[../project-management]].
 
@@ -41,11 +41,16 @@ All read-only / non-destructive (see guardrails). The box keeps its secrets for 
 - **VerificationCard** (`src/app/dashboard/roadmap/VerificationCard.tsx`, beside "Mark verified & archive"): render each checklist bullet with its auto-verdict + evidence inline + a distinct **"Needs human testing"** list — so the owner does only those, then verifies.
 
 ## Verification
-- Seed a shipped-unverified spec with a `## Verification` checklist mixing DB/route/role checks + a "looks right" bullet → the agent runs a `spec-test` job; `spec_test_runs` gets a row where the DB/route/role bullets are `pass`/`fail` with evidence and the visual bullet is `needs_human`. The board card shows the chip; the VerificationCard lists per-bullet verdicts + the human list. API console flat (Max).
-- A spec whose feature is genuinely broken (e.g. a column the spec claims is selected isn't) → an auto-`fail` with the probe evidence, surfaced loudly.
-- Negative: the agent never sends a message/creates an order while testing (mutating bullets are `needs_human`); it never sets a spec verified/archived.
+- On the box, apply the migration (`npx tsx scripts/apply-spec-test-runs-migration.ts`) → expect `✓ spec_test_runs table present: true`; re-running it is a no-op (idempotent `IF NOT EXISTS`).
+- In the dashboard sidebar (as owner), open **Developer → Spec Tests** (`/dashboard/developer/spec-tests`) → expect a page listing every shipped-but-unverified spec, each with a **Test now** button; non-owners don't see the nav item (owner-gated). A spec not yet tested shows "not yet tested".
+- On a shipped spec's Spec Tests row, click **Test now** → expect a `POST /api/roadmap/spec-test` returning `{queued:true}` and a `kind='spec-test'` row inserted in `agent_jobs`; clicking again while it's in flight returns `{queued:true, already:true}` (no duplicate job).
+- After the box runs the job (or `npx tsx scripts/builder-worker.ts` claims it), query `select agent_verdict, summary, jsonb_array_length(checks) from spec_test_runs order by run_at desc limit 1` → expect one row whose `summary` counts match the `checks` length and `agent_verdict` ∈ `approved|issues|needs_human` (re-derived from checks: `issues` iff any check is `fail`).
+- On `/dashboard/roadmap`, a shipped card with a run → expect the compact **Agent-tested** stamp + `✅·✗·👤·?` chip linking to the Spec Tests page; on `/dashboard/roadmap/{slug}` the VerificationCard shows per-bullet verdicts with expandable evidence + a distinct **👤 Needs human testing** list.
+- On the box, `npx tsx scripts/spec-test-db-probe.ts "select 1"` → expect JSON rows; `npx tsx scripts/spec-test-db-probe.ts "update spec_test_runs set agent_verdict='x'"` → expect it to refuse (read-only: rejects non-SELECT / mutating keywords) and exit non-zero.
+- Confirm the cron is registered: `grep specTestCron src/app/api/inngest/route.ts` → present; the function id is `spec-test-cron` with cron `45 10 * * *`.
+- Negative: a run never sends a message / creates an order / charges a card (mutating bullets are recorded `needs_human`, not executed); the agent never flips a spec to verified or writes to `archive.d/` — the owner's **Mark verified & archive** gate is untouched. API console stays flat (Max, no `ANTHROPIC_API_KEY`).
 
-## Phase 1 — sweep + auto-checks + report ⏳
+## Phase 1 — sweep + auto-checks + report ✅
 `spec-test` job kind + `MAX_SPEC_TEST` lane + `runSpecTestJob`; box provisioning (install Vercel CLI + `VERCEL_TOKEN` in the worker env; `gh`/`GITHUB_TOKEN` already there); the `spec-test` skill (classify + **non-destructive** execution of `## Verification` bullets using the box toolchain — repo/`tsc`, `gh` CI, `vercel` deploy+logs+env, DB reads, GET endpoints); `spec_test_runs` table with the `agent_verdict` stamp; the daily cron; the new **`Developer → Spec Tests`** page; and the board test-chip + Agent-tested stamp + VerificationCard per-bullet verdicts. "Test now" on-demand button.
 
 ## Phase 2 — human-test queue + regression escalation ⏳

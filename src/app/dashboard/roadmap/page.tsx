@@ -2,11 +2,13 @@ import Link from "next/link";
 import { getRoadmap, getArchive, type Phase, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
+import { getLatestSpecTestRuns, type SpecTestRun } from "@/lib/spec-test-runs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
 import BoxChip from "./BoxChip";
+import { AgentTestedStamp, TestChip } from "../developer/spec-tests/SpecTestView";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 export const dynamic = "force-dynamic";
@@ -57,7 +59,7 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-function Card({ spec, job, fold }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null }) {
+function Card({ spec, job, fold, testRun }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <Link href={`/dashboard/roadmap/${spec.slug}`} className="group flex items-start gap-2">
@@ -83,6 +85,13 @@ function Card({ spec, job, fold }: { spec: SpecCard; job: AgentJob | null; fold:
         </div>
       )}
       <CountPills counts={spec.counts} />
+      {/* Spec-test agent stamp + chip on a shipped-awaiting-verification card (spec-test-agent). */}
+      {spec.status === "shipped" && testRun && (
+        <Link href="/dashboard/developer/spec-tests" className="mt-2 flex flex-wrap items-center gap-2 hover:opacity-80">
+          <AgentTestedStamp verdict={testRun.agent_verdict} />
+          <TestChip summary={testRun.summary} />
+        </Link>
+      )}
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 flex items-center justify-between gap-2">
         <StatusControl slug={spec.slug} status={spec.status} />
@@ -98,9 +107,9 @@ function Card({ spec, job, fold }: { spec: SpecCard; job: AgentJob | null; fold:
 export default async function RoadmapPage() {
   const [{ specs, tracks }, archive] = await Promise.all([getRoadmap(), getArchive()]);
   const workspaceId = await getActiveWorkspaceId();
-  const [jobsBySlug, folds] = workspaceId
-    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId)])
-    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>];
+  const [jobsBySlug, folds, testRuns] = workspaceId
+    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId)])
+    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>];
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
   // Live overlay: a Planned spec with an active build job shows as In progress immediately (tapping Build
   // inserts the job, so the card jumps columns within one render), reverting to its markdown status once
@@ -169,7 +178,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} />)
                   )}
                 </div>
               </div>
