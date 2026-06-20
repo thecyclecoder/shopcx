@@ -225,6 +225,20 @@ async function executeCustomerAction(admin: Admin, todo: AgentTodo): Promise<Exe
     }
     const handler = directActionHandlers[action.type];
     if (!handler) {
+      // Improve-only account-repair actions (reassign_ticket_customer /
+      // send_magic_link / link_customer_accounts) deliberately live OUTSIDE
+      // directActionHandlers (the Sonnet orchestrator must never trigger them).
+      // The escalation-triage solver proposes them for the auto-detected
+      // duplicate-account pattern, so route them through the same shared
+      // dispatcher the Improve tab uses — one code path. link_customer_accounts
+      // enforces the empty-shell heuristic inside the dispatcher.
+      const { IMPROVE_ONLY_ACTION_TYPES, runImproveOnlyAccountAction } = await import("@/lib/improve-actions");
+      if ((IMPROVE_ONLY_ACTION_TYPES as readonly string[]).includes(action.type)) {
+        const r = await runImproveOnlyAccountAction(admin, ctx.workspaceId, ctx.ticketId, action);
+        results.push({ type: action.type, success: r.success, summary: r.success ? r.message : undefined, error: r.success ? undefined : r.message });
+        await sysNote(admin, tid, r.success ? `[System] Action completed: ${r.message}` : `[System] Action failed: ${action.type} — ${r.message}`);
+        continue;
+      }
       results.push({ type: action.type, success: false, error: `Unknown action type: ${action.type}` });
       continue;
     }

@@ -40,11 +40,11 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a box agent that tests **shipped-but-unverified** specs against their own `## Verification` checklist and reports findings — runs the **non-destructive** checks on the box (repo/`tsc`, `gh` CI, `vercel` deploy+logs+env, DB reads, GET endpoints) and flags anything needing a human (visual/UX, or mutating tests). It **never** marks verified/archives (that owner gate stays) but applies its own **"Agent-tested ✅"** stamp. Reports in a new **Developer → Spec Tests** sidebar page + a board chip + inline on the VerificationCard. Box-agent family with [[box-spec-chat]] · [[box-ticket-improve]] · [[box-escalation-triage]].
 
-## Active project — Improve Agent Account-Fix Actions 🚧
+## Active project — Improve Agent Account-Fix Actions ✅
 
 **Spec:** [[improve-account-fix-actions]] · **Owner:** [[../functions/platform]]
 
-**Why this matters:** the box Improve agent could *diagnose* a typo'd-duplicate-account login mess (Mindy Freeman, ticket a89dcf76) but couldn't *fix* it — no action to re-point a ticket to the right customer or (re)send a magic login link, so a human did both by hand. **P1 shipped ✅ (#129, 2026-06-20):** `reassign_ticket_customer` + `send_magic_link` as approval-gated Improve actions (box proposes → approve → Improve route executes). **P2 ⏳:** `link_customer_accounts` (founder-gated dupe-merge) + teaching the escalation-triage solver to auto-catch the duplicate-account pattern. Extends [[box-ticket-improve]].
+**Why this matters:** the box Improve agent could *diagnose* a typo'd-duplicate-account login mess (Mindy Freeman, ticket a89dcf76) but couldn't *fix* it — no action to re-point a ticket to the right customer or (re)send a magic login link, so a human did both by hand. **P1 shipped ✅ (#129, 2026-06-20):** `reassign_ticket_customer` + `send_magic_link` as approval-gated Improve actions (box proposes → approve → Improve route executes). **P2 shipped ✅ (2026-06-20):** `link_customer_accounts` (founder/owner-gated dupe-merge, empty-shell-heuristic-guarded) + the escalation-triage solver now auto-catches the duplicate-account pattern (proposes the reassign → magic-link → link set). All phases ✅ — fold next. Extends [[box-ticket-improve]].
 
 ## Active project — Improve Queue ⏳
 

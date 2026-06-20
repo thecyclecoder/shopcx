@@ -15,7 +15,7 @@ This routine optimizes a **bounded proxy — well-formed, double-checked *propos
 
 ## Per-ticket loop (solver → skeptic → quorum)
 1. **Solver** (Max `claude -p`): loads full context (the `ticket_messages`, customer + subs + orders, latest `ticket_analyses`, the brain brief + the live `sonnet_prompts` rules) and asks *why did this escape every rule?* Then branches (same taxonomy the reasoning pass already uses):
-   - `customer_fix` → propose the resolution that **unescalates**: `customer_reply` + N `customer_action` to-dos.
+   - `customer_fix` → propose the resolution that **unescalates**: `customer_reply` + N `customer_action` to-dos. **Known pattern — duplicate/typo'd-account login** (Mindy Freeman `a89dcf76`): a login ticket sitting on a typo'd **empty-shell** customer (0 orders/subs/points) whose near-duplicate email holds the real history → propose `reassign_ticket_customer` → `send_magic_link` (+ founder-gated `link_customer_accounts` when the wrong record is a confirmed empty shell). These Improve-only account-repair actions execute through the same `runImproveOnlyAccountAction` path the Improve tab uses (`agent-todos/execute.ts` falls back to it). Added by [[improve-account-fix-actions]] P2.
    - `escalation_false_positive` → it was escalated incorrectly → propose a **spec to fix the ticket analyzer** (target `src/lib/ticket-analyzer.ts` severity thresholds / `SEVERE_ISSUE_TYPES` / `CUSTOMER_ESCALATION_KEYWORDS` / grader prompt).
    - `analysis_gap` → `ticket_analysis_rescore` (+ a grader-rule change if the pattern repeats).
    - `system_gap` → a code change → a **spec** (see tweak below).

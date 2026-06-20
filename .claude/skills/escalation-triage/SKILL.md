@@ -55,6 +55,21 @@ Ask: **why did this escape every rule?** Then decide **ONE** decision and propos
 Code/analyzer fixes are **specs, never todos** — the routine never writes code. A rule change is a
 **proposed `sonnet_prompt`**, never a todo. Re-scores and customer fixes are **todos**.
 
+### Known pattern — duplicate / typo'd-account login (account-repair `customer_fix`)
+A recurring, self-detectable failure (first surfaced by Mindy Freeman `a89dcf76`): a **login / "can't
+access my account"** ticket sits on the **wrong customer record** — a typo'd or duplicate **empty shell**
+(0 orders, 0 subs, 0 loyalty points) — while a **near-duplicate** email (one transposed/missing letter,
+e.g. `mindyfeeman7` vs `mindyfreeman7`) holds the **real order history**. The account_login workflow then
+mints a magic link for the empty shell and emails it to the misspelled address, so the customer logs into
+a blank account. **How to spot it:** the on-file email looks like a typo, `get_customer_account` shows the
+ticket customer has no history, and a sibling email differing by ~1 char *does*. **Propose** a single
+`customer_fix` with, in order: `reassign_ticket_customer {to_customer_id:<real>, reason}` →
+`send_magic_link {}` (always *after* the reassign, so the link resolves to the corrected account) → and,
+only when you've confirmed the wrong record is a true empty shell, `link_customer_accounts
+{primary_customer_id:<real>, duplicate_customer_id:<shell>, reason}` to fix the root cause. The link action
+is **founder-gated** (owner-only) and the executor **refuses** unless the duplicate is a real empty shell —
+never propose merging two accounts that both have history.
+
 ### Customer voice (hard rules for `customer_reply`)
 Plain text, **no markdown**. Max 2 sentences per paragraph. Mirror the customer's language. Don't
 apologize for what the customer did. Sign off as a teammate, not "AI".
@@ -66,7 +81,9 @@ apologize for what the customer did. Sign off as a teammate, not "AI".
   Action types mirror the orchestrator: `remove_item` · `add_item` · `swap_variant` ·
   `change_frequency` · `change_next_date` · `pause_timed {pause_days:30|60}` · `skip_next_order` ·
   `partial_refund {shopify_order_id, amount_cents, reason}` · `create_return {order_number, free_label}` ·
-  `apply_coupon {contract_id, code}`.
+  `apply_coupon {contract_id, code}`. **Account-repair (Improve-only) types** for the duplicate-account
+  login pattern (see below): `reassign_ticket_customer {to_customer_id, reason}` ·
+  `send_magic_link {}` · `link_customer_accounts {primary_customer_id, duplicate_customer_id, reason}`.
 - `ticket_close` → `{}`.
 - `ticket_analysis_rescore` → `{ "ticket_analysis_id":"…", "score":N, "summary":"…", "issues":[{"type":"…","description":"…"}] }`.
 - `spec` → `{ "slug":"kebab-case", "title":"…", "intent":"one paragraph tying the fix to the ticket", "problem":"the concrete problem, grounded in the ticket", "target":"src/lib/ticket-analyzer.ts …" }`.
