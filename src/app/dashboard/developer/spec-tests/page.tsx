@@ -4,6 +4,7 @@ import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestSpecTestRuns, type SpecTestRun } from "@/lib/spec-test-runs";
 import { AgentTestedStamp, TestChip, CheckList } from "./SpecTestView";
 import TestNowButton from "./TestNowButton";
+import ProposeFixButton from "./ProposeFixButton";
 
 // Reads docs/brain/specs at request time + the latest spec_test_runs — always live.
 export const dynamic = "force-dynamic";
@@ -42,9 +43,14 @@ export default async function SpecTestsPage() {
     <div className="mx-auto w-full max-w-5xl p-6">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Spec Tests</h1>
-        <Link href="/dashboard/roadmap" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
-          Roadmap →
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link href="/dashboard/developer/spec-tests/human-queue" className="text-sm text-amber-600 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300">
+            👤 Human-test queue →
+          </Link>
+          <Link href="/dashboard/roadmap" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+            Roadmap →
+          </Link>
+        </div>
       </div>
       <p className="mb-5 mt-1 text-sm text-zinc-500 dark:text-zinc-400">
         The box QA agent runs each shipped-but-unverified spec&apos;s <code>## Verification</code> checklist —
@@ -92,6 +98,7 @@ export default async function SpecTestsPage() {
                     {run && <TestChip summary={run.summary} />}
                   </div>
                   <div className="flex items-center gap-2">
+                    {run?.agent_verdict === "issues" && <ProposeFixButton slug={s.slug} compact />}
                     {run && <span className="text-[11px] text-zinc-400">{timeAgo(run.run_at)}</span>}
                     <TestNowButton slug={s.slug} />
                   </div>
