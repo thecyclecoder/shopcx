@@ -277,6 +277,8 @@ export default function TicketDetailPage() {
   const [improveSending, setImproveSending] = useState(false);
   // Per-action include toggles for the approval card (default: every action approved → one-tap "do everything").
   const [improveExcluded, setImproveExcluded] = useState<Record<string, boolean>>({});
+  // Client-side execute error (e.g. the founder-gate 403 on link_customer_accounts).
+  const [improveExecError, setImproveExecError] = useState<string | null>(null);
 
   // Load the ticket's Improve session on entering the tab, then self-reschedule: fast-poll while a box
   // turn is thinking, slow-poll otherwise. The server session is the source of truth (the route appends
@@ -335,6 +337,7 @@ export default function TicketDetailPage() {
     const plan = improveSession?.pending_plan;
     if (!plan || improveSending) return;
     setImproveSending(true);
+    setImproveExecError(null);
     const decisions: Record<string, "approve" | "decline"> = {};
     for (const a of plan.actions) decisions[a.id] = mode === "decline" || improveExcluded[a.id] ? "decline" : "approve";
     try {
@@ -349,8 +352,12 @@ export default function TicketDetailPage() {
         setImproveExcluded({});
         // Pull the freshly-posted internal/external messages into the thread.
         fetch(`/api/tickets/${id}`).then((r) => r.json()).then((dd) => { if (dd.messages) setMessages(dd.messages); }).catch(() => {});
+      } else {
+        // Surface the server rejection (e.g. founder-gate 403 on link_customer_accounts) — the plan stays parked.
+        const d = await res.json().catch(() => ({}));
+        setImproveExecError(d?.error || `Couldn't execute (${res.status}).`);
       }
-    } catch { /* ignore */ } finally { setImproveSending(false); }
+    } catch { setImproveExecError("Network error — try again."); } finally { setImproveSending(false); }
   };
   const [availableWorkflows, setAvailableWorkflows] = useState<{ id: string; name: string; template: string; trigger_tag: string }[]>([]);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
@@ -1729,6 +1736,11 @@ export default function TicketDetailPage() {
                     </button>
                     <span className="text-xs text-amber-600 dark:text-amber-400">…or type a redirect below</span>
                   </div>
+                  {improveExecError && (
+                    <p className="mt-2 rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                      {improveExecError}
+                    </p>
+                  )}
                 </div>
               )}
 

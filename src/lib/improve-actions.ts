@@ -78,6 +78,200 @@ function captureContext(actionContext: Record<string, string>, result: ActionRes
 const ctaButton = (url: string, label: string): string =>
   `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 16px 0;"><tr><td bgcolor="#0f766e" style="background-color:#0f766e;border-radius:8px;"><a href="${url}" style="display:inline-block;padding:14px 24px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">${label}</a></td></tr></table>`;
 
+// ── Improve-only account-repair actions (no Sonnet-runtime equivalent) ──────
+// The duplicate/typo'd-account login mess (Mindy Freeman a89dcf76). These three
+// live ONLY here — never in `directActionHandlers` — so the conversation
+// orchestrator can't re-point a ticket, re-send a login link, or merge accounts
+// on its own (P1 guardrail). Two callers dispatch them through the shared
+// `runImproveOnlyAccountAction` so there's ONE code path (CLAUDE.md North star):
+//   - runImproveActions (the Improve tab approval plan), and
+//   - the escalation-triage agent_todo executor (src/lib/agent-todos/execute.ts),
+//     which proposes these for the auto-detected duplicate-account pattern.
+// Each returns a structured {success, message}; the result string is unchanged
+// from the original inline cases so the approval card / internal notes read the same.
+export const IMPROVE_ONLY_ACTION_TYPES = [
+  "reassign_ticket_customer",
+  "send_magic_link",
+  "link_customer_accounts",
+] as const;
+
+export async function runImproveOnlyAccountAction(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  a: any,
+): Promise<{ success: boolean; message: string }> {
+  switch (String(a?.type)) {
+    case "reassign_ticket_customer":
+      return reassignTicketCustomer(admin, workspaceId, ticketId, a);
+    case "send_magic_link":
+      return sendMagicLink(admin, workspaceId, ticketId);
+    case "link_customer_accounts":
+      return linkCustomerAccounts(admin, workspaceId, ticketId, a);
+    default:
+      return { success: false, message: `Unknown account action: ${a?.type}` };
+  }
+}
+
+// Re-point tickets.customer_id to the correct customer (the typo'd /
+// duplicate-account case — Mindy Freeman a89dcf76). Validate the target customer
+// is in THIS workspace, record a from→to internal note + reason. Pair a
+// `send_magic_link` AFTER this in the same plan so the fresh link resolves to the
+// (now-correct) ticket customer.
+async function reassignTicketCustomer(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  a: any,
+): Promise<{ success: boolean; message: string }> {
+  const toCustomerId = String(a.to_customer_id || "");
+  if (!toCustomerId) return { success: false, message: "reassign_ticket_customer: missing to_customer_id" };
+  const { data: t } = await admin.from("tickets").select("customer_id").eq("id", ticketId).single();
+  const { data: toCust } = await admin.from("customers")
+    .select("id, email, first_name, last_name").eq("id", toCustomerId).eq("workspace_id", workspaceId).maybeSingle();
+  if (!toCust) return { success: false, message: `reassign_ticket_customer: target customer ${toCustomerId} not found in workspace` };
+  if (t?.customer_id === toCustomerId) return { success: true, message: "reassign_ticket_customer: ticket already on that customer" };
+  let fromLabel = t?.customer_id || "(none)";
+  if (t?.customer_id) {
+    const { data: fromCust } = await admin.from("customers").select("email").eq("id", t.customer_id).maybeSingle();
+    if (fromCust?.email) fromLabel = `${fromCust.email} (${t.customer_id})`;
+  }
+  const toLabel = `${toCust.email || `${toCust.first_name || ""} ${toCust.last_name || ""}`.trim()} (${toCustomerId})`;
+  const { error: reErr } = await admin.from("tickets")
+    .update({ customer_id: toCustomerId, updated_at: new Date().toISOString() })
+    .eq("id", ticketId).eq("workspace_id", workspaceId);
+  if (reErr) return { success: false, message: `reassign_ticket_customer failed: ${reErr.message}` };
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system",
+    body: `[Admin Improve] Ticket reassigned: ${fromLabel} → ${toLabel}.${a.reason ? ` Reason: ${a.reason}` : ""}`,
+  });
+  return { success: true, message: `Ticket reassigned to ${toLabel}` };
+}
+
+// Generate a portal login link for the ticket's CURRENT customer and email it to
+// that customer's on-file address (no free-text recipient — account access only
+// ever goes to the inbox we have on file). Runs AFTER any reassignment in the
+// same plan, so the right link hits the right inbox. Reuses generateMagicLinkURL
+// + the sendTicketReply path.
+async function sendMagicLink(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<{ success: boolean; message: string }> {
+  const { data: t } = await admin.from("tickets")
+    .select("customer_id, subject, email_message_id").eq("id", ticketId).single();
+  if (!t?.customer_id) return { success: false, message: "send_magic_link: no customer on ticket" };
+  const { data: cust } = await admin.from("customers")
+    .select("email, shopify_customer_id").eq("id", t.customer_id).single();
+  if (!cust?.email) return { success: false, message: "send_magic_link: ticket customer has no email on file" };
+  const { generateMagicLinkURL } = await import("@/lib/magic-link");
+  const magicUrl = await generateMagicLinkURL(
+    t.customer_id, cust.shopify_customer_id || "", cust.email, workspaceId,
+  );
+  const body = `<p>Here's your personal login link to access your account:</p>${ctaButton(magicUrl, "Log In to My Account")}<p>This link is valid for 24 hours and is unique to you — no password needed.</p>`;
+  // Record the outbound external reply on the ticket.
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticketId, direction: "outbound", visibility: "external",
+    author_type: "system", body, sent_at: new Date().toISOString(),
+  });
+  const { data: wsInfo } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspaceId).single();
+  if (!wsInfo?.sandbox_mode) {
+    const { sendTicketReply } = await import("@/lib/email");
+    await sendTicketReply({
+      workspaceId, toEmail: cust.email, subject: `Re: ${t.subject || "Your login link"}`,
+      body, inReplyTo: t.email_message_id, agentName: "Support", workspaceName: wsInfo?.name || "",
+    });
+  }
+  return { success: true, message: `Magic login link sent to ${cust.email}` };
+}
+
+// Count (orders, subs, loyalty points) for a customer → the "empty shell" test.
+// A shell is the typo'd/duplicate record with NO real history (0 orders, 0 subs,
+// 0 loyalty points). We only ever link a shell INTO a real account; two real
+// accounts are never auto-merged (highest blast-radius — see linkCustomerAccounts).
+async function customerShellStats(
+  admin: Admin,
+  customerId: string,
+): Promise<{ orders: number; subs: number; points: number; isShell: boolean }> {
+  const [orderRes, subRes, loyRes] = await Promise.all([
+    admin.from("orders").select("id", { count: "exact", head: true }).eq("customer_id", customerId),
+    admin.from("subscriptions").select("id", { count: "exact", head: true }).eq("customer_id", customerId),
+    admin.from("loyalty_members").select("points_balance").eq("customer_id", customerId).maybeSingle(),
+  ]);
+  const orders = orderRes.count || 0;
+  const subs = subRes.count || 0;
+  const points = loyRes.data?.points_balance || 0;
+  return { orders, subs, points, isShell: orders === 0 && subs === 0 && points === 0 };
+}
+
+// Link a duplicate EMPTY SHELL customer into the real account so future tickets +
+// magic links resolve to one identity — the root cause of the duplicate/typo'd
+// email login mess (Mindy Freeman a89dcf76), not just this one ticket. This is
+// the highest-blast-radius Improve action, so it is gated TWO ways:
+//   1. Approval: FOUNDER-gated at the Improve route (owner only, not cs_manager);
+//      the agent_todo path is already owner/admin-only.
+//   2. Executor rail (here, ALL paths): refuse unless the `duplicate` side is a
+//      clear empty shell (0 orders / 0 subs / 0 loyalty points). Two real
+//      accounts are NEVER auto-merged — that returns a refusal for manual review.
+// Linking reuses the same `customer_links` group mechanism as link_account_by_email.
+async function linkCustomerAccounts(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  a: any,
+): Promise<{ success: boolean; message: string }> {
+  const primaryId = String(a.primary_customer_id || "");
+  const duplicateId = String(a.duplicate_customer_id || "");
+  if (!primaryId || !duplicateId) return { success: false, message: "link_customer_accounts: missing primary_customer_id or duplicate_customer_id" };
+  if (primaryId === duplicateId) return { success: false, message: "link_customer_accounts: primary and duplicate are the same customer" };
+
+  const { data: custs } = await admin.from("customers")
+    .select("id, email").in("id", [primaryId, duplicateId]).eq("workspace_id", workspaceId);
+  const primary = custs?.find((c) => c.id === primaryId);
+  const duplicate = custs?.find((c) => c.id === duplicateId);
+  if (!primary || !duplicate) return { success: false, message: "link_customer_accounts: both customers must exist in this workspace" };
+
+  // Empty-shell heuristic — the universal safety rail (enforced on every path).
+  const dStats = await customerShellStats(admin, duplicateId);
+  if (!dStats.isShell) {
+    return {
+      success: false,
+      message: `link_customer_accounts: refused — duplicate ${duplicate.email} is NOT an empty shell (${dStats.orders} orders, ${dStats.subs} subs, ${dStats.points} pts). Two real accounts are never auto-merged; merge manually after review.`,
+    };
+  }
+
+  // Merge into a single customer_links group: primary is_primary=true, the shell
+  // joins as non-primary. onConflict:"customer_id" makes this idempotent.
+  const { data: primaryLink } = await admin.from("customer_links")
+    .select("group_id, is_primary").eq("customer_id", primaryId).maybeSingle();
+  const { data: dupLink } = await admin.from("customer_links")
+    .select("group_id").eq("customer_id", duplicateId).maybeSingle();
+  if (primaryLink && dupLink && primaryLink.group_id === dupLink.group_id) {
+    return { success: true, message: `link_customer_accounts: ${duplicate.email} already linked to ${primary.email}` };
+  }
+  const { randomUUID } = await import("crypto");
+  const groupId = primaryLink?.group_id || dupLink?.group_id || randomUUID();
+  if (!primaryLink) {
+    await admin.from("customer_links").upsert(
+      { customer_id: primaryId, workspace_id: workspaceId, group_id: groupId, is_primary: true },
+      { onConflict: "customer_id" },
+    );
+  }
+  await admin.from("customer_links").upsert(
+    { customer_id: duplicateId, workspace_id: workspaceId, group_id: groupId, is_primary: false },
+    { onConflict: "customer_id" },
+  );
+
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system",
+    body: `[Admin Improve] Linked duplicate empty-shell account ${duplicate.email} (${duplicateId}) → primary ${primary.email} (${primaryId}).${a.reason ? ` Reason: ${a.reason}` : ""}`,
+  });
+  return { success: true, message: `Linked duplicate ${duplicate.email} → primary account ${primary.email}` };
+}
+
 export async function runImproveActions(
   workspaceId: string,
   ticketId: string,
@@ -251,67 +445,15 @@ export async function runImproveActions(
           results.push("Message sent to customer");
           break;
         }
-        case "reassign_ticket_customer": {
-          // Re-point tickets.customer_id to the correct customer (the typo'd /
-          // duplicate-account case — Mindy Freeman a89dcf76). Validate the
-          // target customer is in THIS workspace, record a from→to internal
-          // note + reason. Pair a `send_magic_link` AFTER this in the same plan
-          // so the fresh link resolves to the (now-correct) ticket customer.
-          const toCustomerId = String(a.to_customer_id || "");
-          if (!toCustomerId) { results.push("reassign_ticket_customer: missing to_customer_id"); break; }
-          const { data: t } = await admin.from("tickets").select("customer_id").eq("id", ticketId).single();
-          const { data: toCust } = await admin.from("customers")
-            .select("id, email, first_name, last_name").eq("id", toCustomerId).eq("workspace_id", workspaceId).maybeSingle();
-          if (!toCust) { results.push(`reassign_ticket_customer: target customer ${toCustomerId} not found in workspace`); break; }
-          if (t?.customer_id === toCustomerId) { results.push("reassign_ticket_customer: ticket already on that customer"); break; }
-          let fromLabel = t?.customer_id || "(none)";
-          if (t?.customer_id) {
-            const { data: fromCust } = await admin.from("customers").select("email").eq("id", t.customer_id).maybeSingle();
-            if (fromCust?.email) fromLabel = `${fromCust.email} (${t.customer_id})`;
-          }
-          const toLabel = `${toCust.email || `${toCust.first_name || ""} ${toCust.last_name || ""}`.trim()} (${toCustomerId})`;
-          const { error: reErr } = await admin.from("tickets")
-            .update({ customer_id: toCustomerId, updated_at: new Date().toISOString() })
-            .eq("id", ticketId).eq("workspace_id", workspaceId);
-          if (reErr) { results.push(`reassign_ticket_customer failed: ${reErr.message}`); break; }
-          await admin.from("ticket_messages").insert({
-            ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system",
-            body: `[Admin Improve] Ticket reassigned: ${fromLabel} → ${toLabel}.${a.reason ? ` Reason: ${a.reason}` : ""}`,
-          });
-          results.push(`Ticket reassigned to ${toLabel}`);
-          break;
-        }
-        case "send_magic_link": {
-          // Generate a portal login link for the ticket's CURRENT customer and
-          // email it to that customer's on-file address (no free-text recipient
-          // — account access only ever goes to the inbox we have on file). Runs
-          // AFTER any reassignment in the same plan, so the right link hits the
-          // right inbox. Reuses generateMagicLinkURL + the sendTicketReply path.
-          const { data: t } = await admin.from("tickets")
-            .select("customer_id, subject, email_message_id").eq("id", ticketId).single();
-          if (!t?.customer_id) { results.push("send_magic_link: no customer on ticket"); break; }
-          const { data: cust } = await admin.from("customers")
-            .select("email, shopify_customer_id").eq("id", t.customer_id).single();
-          if (!cust?.email) { results.push("send_magic_link: ticket customer has no email on file"); break; }
-          const { generateMagicLinkURL } = await import("@/lib/magic-link");
-          const magicUrl = await generateMagicLinkURL(
-            t.customer_id, cust.shopify_customer_id || "", cust.email, workspaceId,
-          );
-          const body = `<p>Here's your personal login link to access your account:</p>${ctaButton(magicUrl, "Log In to My Account")}<p>This link is valid for 24 hours and is unique to you — no password needed.</p>`;
-          // Record the outbound external reply on the ticket.
-          await admin.from("ticket_messages").insert({
-            ticket_id: ticketId, direction: "outbound", visibility: "external",
-            author_type: "system", body, sent_at: new Date().toISOString(),
-          });
-          const { data: wsInfo } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspaceId).single();
-          if (!wsInfo?.sandbox_mode) {
-            const { sendTicketReply } = await import("@/lib/email");
-            await sendTicketReply({
-              workspaceId, toEmail: cust.email, subject: `Re: ${t.subject || "Your login link"}`,
-              body, inReplyTo: t.email_message_id, agentName: "Support", workspaceName: wsInfo?.name || "",
-            });
-          }
-          results.push(`Magic login link sent to ${cust.email}`);
+        case "reassign_ticket_customer":
+        case "send_magic_link":
+        case "link_customer_accounts": {
+          // Improve-only account-repair pair/trio — dispatched through the shared
+          // runImproveOnlyAccountAction so the Improve tab and the escalation-triage
+          // agent_todo executor run identical logic (one code path). `link_customer_accounts`
+          // is founder-gated at the route + enforces the empty-shell heuristic in the executor.
+          const r = await runImproveOnlyAccountAction(admin, workspaceId, ticketId, a);
+          results.push(r.message);
           break;
         }
         case "reactivate": {

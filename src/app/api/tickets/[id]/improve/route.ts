@@ -59,7 +59,7 @@ async function authTicket(ticketId: string) {
     .single();
   if (!ticket) return { error: NextResponse.json({ error: "Ticket not found" }, { status: 404 }) };
 
-  return { user, workspaceId };
+  return { user, workspaceId, role: member.role as string };
 }
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -128,6 +128,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       ...a,
       status: decisions[a.id] === "decline" ? "declined" : a.status === "pending" ? "approved" : a.status,
     }));
+
+    // Founder-gate the highest-blast-radius action: linking/merging customer
+    // accounts is owner-only (not cs_manager, not admin). The box only ever
+    // PROPOSES it; the founder must be the one to approve. (reassign + magic
+    // link stay owner/admin/cs_manager — only the account merge is founder-gated.)
+    const wantsAccountLink = planActions.some(
+      (a) => a.status === "approved" && a.kind === "customer_action" && a.action?.type === "link_customer_accounts",
+    );
+    if (wantsAccountLink && auth.role !== "owner") {
+      return NextResponse.json(
+        { error: "Linking customer accounts is founder-gated — only the workspace owner can approve a link_customer_accounts action." },
+        { status: 403 },
+      );
+    }
 
     const { actions, results, resolved } = await executeImprovePlan(workspaceId, ticketId, planActions);
 

@@ -30,9 +30,22 @@ async function runImproveActions(workspaceId: string, ticketId: string, actions:
 
 ### `ImproveActionResult` — interface
 
+### `runImproveOnlyAccountAction` — function
+
+```ts
+async function runImproveOnlyAccountAction(admin, workspaceId: string, ticketId: string, action): Promise<{ success: boolean; message: string }>
+```
+
+Shared dispatcher for the three Improve-only account-repair actions (`reassign_ticket_customer` · `send_magic_link` · `link_customer_accounts`). Returns a structured result so both callers can map success/failure. The `runImproveActions` switch and `agent-todos/execute.ts` both go through it.
+
+### `IMPROVE_ONLY_ACTION_TYPES` — const
+
+The `readonly` tuple of the three account-repair action types — `agent-todos/execute.ts` uses it to decide when to fall back to `runImproveOnlyAccountAction` (they have no `directActionHandlers` entry by design).
+
 ## Callers
 
-- `src/app/api/tickets/[id]/improve/route.ts`
+- `src/app/api/tickets/[id]/improve/route.ts` (via `runImproveActions` / the founder-gate on `link_customer_accounts`)
+- `src/lib/agent-todos/execute.ts` (escalation-triage `customer_action` todos → `runImproveOnlyAccountAction`)
 
 ## One customer-action code path (no drift)
 
@@ -43,7 +56,10 @@ The subscription / refund / coupon / price / marketing direct-action cases deleg
 - `pause` (indefinite) — the registry `pause` handler only supports 30/60-day timed pauses; Improve allows an open-ended pause.
 - `cancel` — no registry direct handler (production routes cancellation through the cancel *journey*; for that, use an `orchestrator_action` with `action_type:"journey"`).
 - `send_message`, `propose_sonnet_prompt`, `propose_grader_rule`, `close_ticket`, `reopen_ticket` — not customer-subscription mutations.
-- `reassign_ticket_customer` `{to_customer_id, reason}` + `send_magic_link` `{}` — **Improve-only** account-repair pair (no Sonnet-runtime equivalent; the duplicate/typo'd-account login mess, Mindy Freeman `a89dcf76`). `reassign_ticket_customer` validates the target customer is in-workspace, re-points `tickets.customer_id`, and records a from→to internal note. `send_magic_link` mints a 24h link via `generateMagicLinkURL` for the ticket's **current** customer and emails it to that customer's **on-file address only** (no free-text recipient) — pair it *after* the reassign in one plan. See [[../specs/improve-account-fix-actions|account-fix spec]].
+- `reassign_ticket_customer` `{to_customer_id, reason}`, `send_magic_link` `{}`, and `link_customer_accounts` `{primary_customer_id, duplicate_customer_id, reason}` — the **Improve-only** account-repair set (no Sonnet-runtime equivalent; the duplicate/typo'd-account login mess, Mindy Freeman `a89dcf76`). They live OUTSIDE `directActionHandlers` and are dispatched through the exported `runImproveOnlyAccountAction(admin, workspaceId, ticketId, action)` → `{success, message}` — so the `runImproveActions` switch **and** the escalation-triage `customer_action` todo executor (`agent-todos/execute.ts`, which falls back to this dispatcher for `IMPROVE_ONLY_ACTION_TYPES` when `directActionHandlers` has no handler) run identical logic (one code path).
+  - `reassign_ticket_customer` validates the target customer is in-workspace, re-points `tickets.customer_id`, records a from→to internal note.
+  - `send_magic_link` mints a 24h link via `generateMagicLinkURL` for the ticket's **current** customer and emails it to that customer's **on-file address only** (no free-text recipient) — pair it *after* the reassign in one plan.
+  - `link_customer_accounts` is the **root-cause** fix: it links the duplicate **empty shell** into the real account (a `customer_links` group, same mechanism as `link_account_by_email`) so future tickets + magic links resolve to one identity. Two gates: (1) **founder-gated** — the Improve route 403s unless the approver is the workspace `owner`; (2) the executor's **empty-shell heuristic** (`customerShellStats`) refuses unless `duplicate_customer_id` has 0 orders / 0 subs / 0 loyalty points, so two real accounts are never auto-merged. See [[../specs/improve-account-fix-actions|account-fix spec]].
 
 For anything beyond a direct action (launch a journey/playbook/workflow/macro, escalate), the box uses the `orchestrator_action` plan kind instead → [[improve-plan-executor]] → `executeSonnetDecision`. See [[../orchestrator-tools]] § Improve parity.
 
