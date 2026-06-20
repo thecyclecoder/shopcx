@@ -259,7 +259,29 @@ async function executeTicketClose(admin: Admin, todo: AgentTodo): Promise<Execut
   return { ok: true };
 }
 
-/** Dispatch a single customer-facing todo. */
+/**
+ * Apply an approved ticket_analysis_rescore: correct the latest analysis with the box's score.
+ * Moved here from the retired Claude Code Routine (box-escalation-triage) so the Inngest event worker
+ * can execute it on approval — it's a single ticket_analyses update, no repo/PR needed.
+ */
+async function executeAnalysisRescore(admin: Admin, todo: AgentTodo): Promise<ExecutionResult> {
+  const p = todo.payload as { ticket_analysis_id?: string; score?: number; summary?: string; issues?: unknown };
+  if (!p.ticket_analysis_id) return { ok: false, error: "missing ticket_analysis_id" };
+  const { error } = await admin
+    .from("ticket_analyses")
+    .update({
+      admin_score: p.score,
+      admin_score_reason: "Rescored by escalation-triage (approved)",
+      admin_corrected_at: new Date().toISOString(),
+      summary: p.summary,
+      issues: p.issues ?? undefined,
+    })
+    .eq("id", p.ticket_analysis_id);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, row_id: p.ticket_analysis_id };
+}
+
+/** Dispatch a single approved, Inngest-executable todo (customer-facing actions + the re-score). */
 export async function executeCustomerTodo(admin: Admin, todo: AgentTodo): Promise<ExecutionResult> {
   switch (todo.action_type) {
     case "customer_reply":
@@ -268,6 +290,8 @@ export async function executeCustomerTodo(admin: Admin, todo: AgentTodo): Promis
       return executeCustomerAction(admin, todo);
     case "ticket_close":
       return executeTicketClose(admin, todo);
+    case "ticket_analysis_rescore":
+      return executeAnalysisRescore(admin, todo);
     default:
       return { ok: false, error: `executeCustomerTodo cannot handle ${todo.action_type}` };
   }

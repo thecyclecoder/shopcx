@@ -17,11 +17,11 @@ Reproduce the founder's terminal "fix this ticket" chat inside the Improve tab �
 ### Ticket-derived product fixes
 A code recommendation from a ticket becomes a **ticket-sourced spec** (owner = cs, `Derived-from-ticket:` ref) committed to main and surfaced on [[../dashboard/roadmap]] — the founder/CX manager commissions the build (the existing `kind='build'` flow). The Improve agent + escalation triage **never build code themselves**; they hand Roadmap a well-formed, ticket-grounded spec.
 - **Metric:** ticket→spec→shipped-fix cycle time; share of recurring issues closed by a structural fix vs. one-off remediation.
-- **Specs:** [[../specs/box-ticket-improve]] ⏳ · [[../specs/box-escalation-triage]] ⏳
+- **Specs:** [[../specs/box-ticket-improve]] ⏳ · [[../specs/box-escalation-triage]] ✅
 
 ### Escalation triage quality
-Every hour, double-check the escalation queue (solver → skeptic → quorum) so mis-escalations become analyzer-fix specs and genuine issues become approved to-dos — nothing ships without agreement.
-- **Specs:** [[../specs/box-escalation-triage]] ⏳
+CS owns the **hourly box-hosted solver → skeptic → quorum sweep** of the escalation queue ([[../specs/box-escalation-triage]], shipped): each escalated ticket is adversarially double-checked before anything materializes, so genuine issues become approved `agent_todos` ([[../tables/agent_todos]]), recurring rule gaps become admin-approvable proposed `sonnet_prompts`, **mis-escalations become analyzer-fix specs** (owner=cs, `Derived-from-ticket:`, targeting `src/lib/ticket-analyzer.ts`) commissioned on [[../dashboard/roadmap]], and **no-quorum disagreements leave the ticket escalated for a human**. Every run is audited in [[../tables/triage_runs]]. Nothing ships without solver + skeptic agreement.
+- **Specs:** [[../specs/box-escalation-triage]] ✅
 
 ## Roles + approval
 

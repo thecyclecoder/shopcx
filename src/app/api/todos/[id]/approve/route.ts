@@ -1,19 +1,19 @@
 /**
  * POST /api/todos/[id]/approve
  *
- * Approves a single agent_todo. Role-gated by action_type (see canApprove).
- * Customer-facing actions fire the Inngest event worker for immediate
- * execution; system-level actions wake the Claude Code Routine on-demand
- * (or wait for the next hourly tick if the trigger URL isn't configured).
+ * Approves a single agent_todo. Role-gated by action_type (see canApprove). Every surviving action
+ * type (customer_reply/customer_action/ticket_close/ticket_analysis_rescore) is executed by the
+ * Inngest event worker within seconds — the Anthropic-cloud routine that once ran system-level todos
+ * is retired (box-escalation-triage); rule/code proposals are now sonnet_prompts / spec files.
  *
- * See docs/brain/specs/agent-todo-system.md § Phase 4.
+ * See docs/brain/lifecycles/agent-todo-system.md.
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
-import { canApprove, isCustomerFacing } from "@/lib/agent-todos/constants";
+import { canApprove, isInngestExecutable } from "@/lib/agent-todos/constants";
 import type { WorkspaceRole } from "@/lib/types/workspace";
 import type { AgentTodo } from "@/lib/agent-todos/types";
 
@@ -74,30 +74,10 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  if (isCustomerFacing(t.action_type)) {
-    // Immediate execution — drift check runs inside the worker.
+  if (isInngestExecutable(t.action_type)) {
+    // Immediate execution — drift check runs inside the worker. Covers all surviving action types
+    // (customer reply/action/close + ticket_analysis_rescore) now that the routine is retired.
     await inngest.send({ name: "agent-todo/execute", data: { todo_id: id } });
-  } else {
-    // System-level — wake the Routine on-demand if a trigger URL is configured;
-    // otherwise it's picked up on the next hourly tick. Best-effort.
-    const triggerUrl = process.env.AGENT_TODO_ROUTINE_TRIGGER_URL;
-    if (triggerUrl) {
-      try {
-        await fetch(triggerUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(process.env.AGENT_TODO_ROUTINE_TRIGGER_TOKEN
-              ? { Authorization: `Bearer ${process.env.AGENT_TODO_ROUTINE_TRIGGER_TOKEN}` }
-              : {}),
-          },
-          body: JSON.stringify({ todo_id: id }),
-        });
-      } catch (err) {
-        // Non-fatal: the hourly tick will still pick it up.
-        console.warn("[todos/approve] routine wake failed:", err);
-      }
-    }
   }
 
   return NextResponse.json(updated);
