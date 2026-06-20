@@ -34,6 +34,18 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Advertorial Attribution Fix ⏳
+
+**Spec:** [[advertorial-attribution-fix]] · **Owner:** [[../functions/cmo]]
+
+**Why this matters:** the ad scorecard under-counts advertorial/listicle traffic — listicle ads land on a PDP-with-`?angle=`, and `advertorial_page_id` is stamped only on a session's first insert and never re-resolved, so ~72 of 150 recent Meta sessions carry an exact-match advertorial angle but show as plain PDP (true advertorial share ~85%, displayed ~37%). Fix: re-resolve `advertorial_page_id` when null + backfill + align the `meta_attribution_daily`/scorecard resolution. Spend/CPA from Meta unaffected.
+
+## Active project — Spec-Test JSON Robustness ⏳
+
+**Spec:** [[spec-test-json-robustness]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** a spec-test run produced "agent produced no parseable JSON" (0 checks, no verdict). Strict output contract + a parse/repair re-prompt + an honest `error` terminal state (never a silent 0-check pass) + Developer-page retry. Extends [[spec-test-agent]].
+
 ## Active project — Migration-Fix Agent ⏳
 
 **Spec:** [[migration-fix-agent]] · **Owner:** [[../functions/retention]]
