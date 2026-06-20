@@ -1,6 +1,6 @@
 # `ad_publish_jobs` — Meta ad publish jobs
 
-One row per "publish this campaign's video to Meta" action: the chosen targets + copy + the resulting Meta ids. Driven by [[../inngest/ad-tool]] `adToolPublishToMeta`. Migration `20260610140000_ad_publish_jobs.sql`. RLS: workspace-member SELECT, service-role write. See [[../lifecycles/ad-publish]].
+One row per "publish this campaign's video to Meta" action: the chosen targets + copy + the resulting Meta ids. Driven by [[../inngest/ad-tool]] `adToolPublishToMeta`. Migrations `20260610140000_ad_publish_jobs.sql` + `20260620180000_ad_publish_jobs_engine_fields.sql` (Iteration Engine 6b: `ad_name` + `recommendation_id`). RLS: workspace-member SELECT, service-role write. See [[../lifecycles/ad-publish]].
 
 ## Columns
 
@@ -23,6 +23,8 @@ One row per "publish this campaign's video to Meta" action: the chosen targets +
 | `publish_status` | text | `queued` → `uploading` → `creating` → `published` \| `failed` |
 | `meta_video_id` / `meta_creative_id` / `meta_ad_id` | text | results from the Graph calls |
 | `error` | text | failure reason |
+| `ad_name` | text | **6b** — explicit ad/creative name; the publisher prefers it over `ad_campaigns.name`, so engine drafts carry the `[ie]` marker without renaming the operator's campaign |
+| `recommendation_id` | uuid → [[iteration_recommendations]] | **6b** — the recommendation this job fulfills; on publish the meta ids are written back to it (`status='executed'`/`failed`) |
 | `created_by` | uuid | |
 | `created_at` / `updated_at` | timestamptz | |
 
@@ -30,8 +32,8 @@ One row per "publish this campaign's video to Meta" action: the chosen targets +
 
 - `meta_*_id` are **bare** Meta ids (strings), not our UUIDs — they cross into the Graph API.
 - A `published` row's `meta_ad_id` opens the ad in Ads Manager: `business.facebook.com/adsmanager/manage/ads?act={account}&selected_ad_ids={meta_ad_id}`.
-- Default ads are **PAUSED** (`publish_active=false`) — created but not spending.
+- Default ads are **PAUSED** (`publish_active=false`) — created but not spending. Iteration Engine 6b ([[../libraries/meta__recommendation-execute]]) always sets `publish_active=false`.
 
 ## Related
 
-[[ad_campaigns]] · [[ad_videos]] · [[../lifecycles/ad-publish]] · [[../libraries/meta-ads]] · [[../integrations/meta-marketing]]
+[[ad_campaigns]] · [[ad_videos]] · [[iteration_recommendations]] · [[../lifecycles/ad-publish]] · [[../libraries/meta-ads]] · [[../libraries/meta__recommendation-execute]] · [[../integrations/meta-marketing]]

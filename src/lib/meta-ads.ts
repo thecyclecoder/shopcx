@@ -316,6 +316,43 @@ export async function createDualAssetCreative(token: string, a: DualAssetCreativ
   return j.id;
 }
 
+// ── Live-object management (Storefront Iteration Engine Phase 6a) ─────────────
+// The autonomous engine manages EXISTING live objects only — flip status (pause /
+// unpause) and adjust budget (scale up ≤ step cap / scale down) on an adset or
+// campaign. All gated upstream by the active policy + ledger (iteration_actions);
+// these are the raw Graph writes. It never sets ACTIVE on a draft/new object and
+// never creates a new live spend line (those are draft-only — Phase 6b).
+
+/**
+ * Flip a Meta object's status. Works for ads, adsets, and campaigns (same
+ * `POST /{object_id}` `status=` shape). Returns Graph's `{ success: true }` body.
+ */
+export async function updateObjectStatus(
+  token: string,
+  objectId: string,
+  status: "ACTIVE" | "PAUSED",
+): Promise<Record<string, unknown>> {
+  return metaPost(`${objectId}`, { status }, token);
+}
+
+/**
+ * Adjust an adset's or campaign's budget. Pass exactly one of daily/lifetime in
+ * cents (minor units of the account currency) — Meta's `daily_budget` /
+ * `lifetime_budget` fields are integer minor units. Same `POST /{object_id}` shape
+ * for both levels (ABO adset budget or CBO campaign budget).
+ */
+export async function updateObjectBudget(
+  token: string,
+  objectId: string,
+  budget: { dailyBudgetCents?: number | null; lifetimeBudgetCents?: number | null },
+): Promise<Record<string, unknown>> {
+  const body: Record<string, unknown> = {};
+  if (budget.dailyBudgetCents != null) body.daily_budget = Math.round(budget.dailyBudgetCents);
+  if (budget.lifetimeBudgetCents != null) body.lifetime_budget = Math.round(budget.lifetimeBudgetCents);
+  if (Object.keys(body).length === 0) throw new Error("updateObjectBudget: no budget provided");
+  return metaPost(`${objectId}`, body, token);
+}
+
 /** Create the ad in an ad set. Defaults to PAUSED so nothing spends until reviewed. */
 export async function createAd(
   token: string,

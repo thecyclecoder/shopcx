@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { inngest } from "@/lib/inngest/client";
 
-// Phase 4b review action — approve or reject one recommendation. Approving only
-// flips status → 'approved' (no external side effects here); Phase 6b picks up
-// approved rows and creates the PAUSED/draft Meta object, writing ids back.
+// Phase 4b review action — approve or reject one recommendation. Approving flips
+// status → 'approved' and fires meta/execute-recommendation, which (Phase 6b)
+// creates the PAUSED/draft Meta object and writes ids back — nothing goes live.
 // Rejecting → 'rejected'. Both stamp reviewer + timestamp for the audit trail.
 
 async function authorize(workspaceId: string | null, user: { id: string }) {
@@ -65,5 +66,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Phase 6b — on approval, dispatch execution (creates the PAUSED draft + writes
+  // ids back). Fire-and-forget; the adapter is idempotent + leaves anything it
+  // can't yet handle deferred. Approval itself already succeeded above.
+  if (action === "approve") {
+    await inngest
+      .send({
+        name: "meta/execute-recommendation",
+        data: { workspace_id: workspaceId as string, recommendation_id: id },
+      })
+      .catch(() => {});
+  }
+
   return NextResponse.json({ recommendation: updated });
 }

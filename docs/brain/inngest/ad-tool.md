@@ -61,7 +61,7 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 
 ### `ad-tool-publish-to-meta` (publish ad to Meta)
 - **Trigger:** event `ad-tool/publish-to-meta` (`{ workspace_id, job_id }`) · **Retries:** 1
-- Loads the [[../tables/ad_publish_jobs]] row → `uploadAdVideo` (re-signed video `file_url`) → `waitForVideoReady` (poll) → `createAdCreative` (asset_feed_spec copy variants) → `createAd` (**PAUSED** unless `publish_active`) → writes `meta_video_id`/`meta_creative_id`/`meta_ad_id` + `publish_status`. Graph v21.0 via [[../libraries/meta-ads]]. Routes: `POST /api/ads/campaigns/[id]/publish` (+ `/meta-copy`, `GET /api/ads/meta`). See [[../lifecycles/ad-publish]].
+- Loads the [[../tables/ad_publish_jobs]] row → `uploadAdVideo` (re-signed video `file_url`) → `waitForVideoReady` (poll) → `createAdCreative` (asset_feed_spec copy variants) → `createAd` (**PAUSED** unless `publish_active`) → writes `meta_video_id`/`meta_creative_id`/`meta_ad_id` + `publish_status`. The ad name is `ad_publish_jobs.ad_name` when set (engine-created `[ie]` drafts — Iteration Engine 6b), else the campaign name. Graph v21.0 via [[../libraries/meta-ads]]. **6b write-back:** when the job carries a `recommendation_id`, on publish it flips that [[../tables/iteration_recommendations]] row to `status='executed'` with the meta ids (or `failed`). Routes: `POST /api/ads/campaigns/[id]/publish` (+ `/meta-copy`, `GET /api/ads/meta`); also fired by [[meta-performance]] `meta-execute-recommendation`. See [[../lifecycles/ad-publish]].
 
 ### `ad-tool-generate-full` (orchestrator — whole ad, fire-and-forget)
 - **Trigger:** event `ad-tool/generate-full` (`{ workspace_id, campaign_id, broll_actions?: string[] }`) · **Retries:** 0 · **Concurrency:** 1 / workspace (a batch serializes so it doesn't burst past Veo's rate cap).
@@ -77,7 +77,7 @@ Stages are **manual + staged** by default — each fired by its own route from t
 
 ## Tables written
 
-`ad_campaigns` (hero_image_url, audio_url, **composition**, status), `ad_segments` (talking/broll/music pieces — the creative library), `ad_videos` (one row per format), `ad_jobs` (every Higgsfield call, via the client wrapper).
+`ad_campaigns` (hero_image_url, audio_url, **composition**, status), `ad_segments` (talking/broll/music pieces — the creative library), `ad_videos` (one row per format), `ad_jobs` (every Higgsfield call, via the client wrapper), `ad_publish_jobs` (publish status + meta ids), [[../tables/iteration_recommendations]] (6b write-back when `recommendation_id` set).
 
 ## Tables read (not written)
 
