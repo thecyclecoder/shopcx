@@ -1,4 +1,4 @@
-# Improve Queue — Mark-as-Read / Dismiss ⏳
+# Improve Queue — Mark-as-Read / Dismiss ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[improve-queue]] (shipped #127) — the v1 surfaced answered Improve turns but had no way to clear them, so the queue + nav badge **persist forever**. This adds the dismiss the founder asked for: "once I've read it, it's done (sometimes there are actions, sometimes no)."
 
@@ -18,7 +18,12 @@ A read/seen state on each Improve session so an answered turn drops off the **"W
 - Queue rows get a **Mark read** affordance; reading via click-through auto-clears. The nav badge = count of unread "Waiting on you" sessions. A session you've read stays visible (greyed / "read") under a collapsible **"Earlier"** group until its next box turn, rather than vanishing entirely — so nothing's truly lost.
 
 ## Verification
-- Box answers a turn → session shows unread in "Waiting on you", badge +1. Click it (or hit "Mark read") → it leaves the unread list, badge −1. Send another turn / get another box reply → it re-surfaces as unread (badge +1). Mark a no-action reply read → gone from unread. A read session that still has a parked plan keeps its "needs approval" chip.
+- On `/dashboard/tickets/improve` after the box answers a turn → expect that session under **"Waiting on you"** with a **Mark read** button, and the sidebar **Improve** badge incremented by 1.
+- On a "Waiting on you" row, click **Mark read** → expect it to leave "Waiting on you", drop into the collapsible **"Earlier"** group (greyed), and the sidebar badge to decrement by 1.
+- On a "Waiting on you" row, click the row body (open the ticket's **Improve** tab) → expect it to be auto-marked read (leaves "Waiting on you" / badge −1 on the next ~8s poll) without a second tap.
+- On a read session, send another Improve turn (or get another box reply) → expect it to re-surface under "Waiting on you" with badge +1 (a new `updated_at > seen_at`).
+- On a read session that still has a parked `pending_plan` (`awaiting_approval`) → expect it to keep its **Needs approval** chip in "Earlier" (reading ≠ approving — the plan is still actionable on the ticket).
+- `POST /api/tickets/improve-queue/seen {ticket_id}` as a non-owner/admin/cs role → expect `403`; with an unknown ticket → expect `404`.
 
 ## Phases
-- ⏳ **P1:** the `seen_at` migration + unread filter + `…/seen` API + the Mark-read button + auto-mark-on-open + badge counts unread. Fold into [[improve-queue]] + [[../tables/ticket_improve_chats]] on ship.
+- ✅ **P1:** the `seen_at` migration + unread filter + `…/seen` API + the Mark-read button + auto-mark-on-open + badge counts unread. Folds into [[improve-queue]] + [[../tables/ticket_improve_chats]] (table page updated) on archive.
