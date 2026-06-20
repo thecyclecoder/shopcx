@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Storefront coupon visibility + WELCOME SMS ⏳
+
+**Spec:** [[storefront-coupon-visibility-and-sms]] · **Owner:** [[../functions/growth]]
+
+**Why this matters:** storefront orders apply the WELCOME discount but never write it to `orders.discount_codes` (it's only in `payment_details`), so the AI reads "no discounts applied" and agrees to refund discounts the customer already got. Plus the WELCOME code SMS sits at `queued` and never delivers, so customers think the discount failed. Surfaced by ticket 8e9e325e (Harvey Kletz). Three fixes: persist+surface the coupon on the order, make the AI verify discount claims against order data, and fix queued-SMS delivery + email fallback.
+
 ## Active project — Spec lifecycle + archival ⏳
 
 **Spec:** [[spec-lifecycle-and-archival]]
