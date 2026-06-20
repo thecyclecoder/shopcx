@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Spec-Test Agent (box QA) ⏳
+
+**Spec:** [[spec-test-agent]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** a box agent that tests **shipped-but-unverified** specs against their own `## Verification` checklist and reports findings — runs the **non-destructive** checks on the box (repo/`tsc`, `gh` CI, `vercel` deploy+logs+env, DB reads, GET endpoints) and flags anything needing a human (visual/UX, or mutating tests). It **never** marks verified/archives (that owner gate stays) but applies its own **"Agent-tested ✅"** stamp. Reports in a new **Developer → Spec Tests** sidebar page + a board chip + inline on the VerificationCard. Box-agent family with [[box-spec-chat]] · [[box-ticket-improve]] · [[box-escalation-triage]].
+
 ## Active project — Improve Agent Account-Fix Actions 🚧
 
 **Spec:** [[improve-account-fix-actions]] · **Owner:** [[../functions/platform]]
