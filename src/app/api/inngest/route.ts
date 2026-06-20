@@ -56,6 +56,7 @@ import { migrationAuditRetryCron } from "@/lib/inngest/migration-audit-retry";
 import { migrationIntegritySweepCron } from "@/lib/inngest/migration-integrity-sweep";
 import { metaCapiDispatchCron } from "@/lib/inngest/meta-capi-dispatch";
 import { popupCouponFallback } from "@/lib/inngest/popup-coupon-fallback";
+import { popupSmsDeliveryFallback } from "@/lib/inngest/popup-sms-delivery-fallback";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
@@ -167,6 +168,7 @@ export const { GET, POST, PUT } = serve({
     migrationIntegritySweepCron,
     metaCapiDispatchCron,
     popupCouponFallback,
+    popupSmsDeliveryFallback,
     unifiedTicketHandler,
     returnsProcessDelivery,
     returnsIssueRefund,

@@ -40,56 +40,22 @@ export const popupCouponFallback = inngest.createFunction(
         .maybeSingle();
 
       // Phone step completed → SMS already delivered the code. Skip.
+      // (If the SMS doesn't actually deliver, popup-sms-delivery-fallback
+      // covers that case — it fires off the phone step's SMS send.)
       if (!lead || lead.sms_consent_at) return { skipped: "phone_completed" };
       // Already sent the fallback → don't double-send.
       if (lead.fallback_emailed_at) return { skipped: "already_sent" };
       const code = lead.coupon_code_issued as string | null;
       if (!code) return { skipped: "no_coupon" };
 
-      const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspace_id).single();
-      const { data: customer } = await admin.from("customers").select("first_name").eq("id", customer_id).maybeSingle();
-      const first = (customer?.first_name as string) || "there";
-
-      // Cross-device redeem link — drops them back on the PDP with the code
-      // auto-applied (and the price tables reflecting it), no typing required.
-      let redeemUrl: string | null = null;
-      if (product_handle) {
-        try {
-          const { buildPopupRedeemUrl } = await import("@/lib/popup/redeem-link");
-          redeemUrl = await buildPopupRedeemUrl(workspace_id, customer_id, code, product_handle);
-        } catch (e) {
-          console.warn("[popup-coupon-fallback] redeem link build failed:", e instanceof Error ? e.message : e);
-        }
-      }
-
-      const cta = redeemUrl
-        ? `<p><a href="${redeemUrl}" style="display:inline-block;background:#1f5e3a;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;">Shop with my discount applied →</a></p>
-<p style="font-size:12px;color:#888;">The discount is already applied — just complete checkout. This code is reserved for you and won't work for anyone else, so please don't share it.</p>`
-        : `<p>Enter it at checkout to claim your savings — it's reserved just for you and won't work for anyone else, so please don't share it.</p>`;
-
-      const body = `<p>Hi ${first}, here's the discount code you unlocked:</p>
-<p style="font-size:22px;font-weight:700;letter-spacing:1px;">${code}</p>
-${cta}
-<p>The ${ws?.name || "Superfoods"} Team</p>`;
-
-      try {
-        const { sendTicketReply } = await import("@/lib/email");
-        await sendTicketReply({
-          workspaceId: workspace_id,
-          toEmail: email,
-          subject: "Your discount code inside",
-          body,
-          inReplyTo: null,
-          agentName: ws?.name || "Superfoods",
-          workspaceName: ws?.name || "Superfoods",
-        });
-        await admin.from("storefront_leads")
-          .update({ fallback_emailed_at: new Date().toISOString() })
-          .eq("workspace_id", workspace_id).eq("customer_id", customer_id);
-        return { emailed: true };
-      } catch (e) {
-        return { error: e instanceof Error ? e.message : String(e) };
-      }
+      const { sendPopupCouponEmail } = await import("@/lib/popup/coupon-email");
+      return sendPopupCouponEmail({
+        workspaceId: workspace_id,
+        customerId: customer_id,
+        email,
+        couponCode: code,
+        productHandle: product_handle,
+      });
     });
 
     return result;

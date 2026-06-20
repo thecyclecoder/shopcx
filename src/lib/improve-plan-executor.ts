@@ -1,0 +1,179 @@
+/**
+ * improve-plan-executor — runs an APPROVED Improve action plan server-side (box-ticket-improve P2/P3).
+ *
+ * The box (Max `claude -p`) only PROPOSES the plan; this executes it once the founder/CX manager
+ * approves, in the trusted Vercel runtime (service role + integration + GitHub creds) — the same
+ * place today's Improve tab already runs `runImproveActions`. Each plan-action kind maps to an
+ * existing executor; nothing here is freestyle DB writes.
+ *
+ * Order: customer actions + rule proposals (one runImproveActions batch, preserves {{label_url}}
+ * chaining) → rescore → ticket_spec commit → resolve_sequence LAST (close after everything lands).
+ * See docs/brain/specs/box-ticket-improve.md.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { runImproveActions, type ImproveAction } from "@/lib/improve-actions";
+import type { ImprovePlanAction } from "@/lib/ticket-improve-chats";
+
+const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
+function ghToken() {
+  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
+}
+async function gh(method: string, path: string, body?: unknown) {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${ghToken()}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
+  });
+  const text = await res.text();
+  return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
+}
+
+/** A code change → a ticket-sourced spec committed to main (owner=cs), surfaced on Roadmap to commission. */
+function ticketSpecMarkdown(spec: { title: string; intent: string; problem: string }, ticketId: string): string {
+  return [
+    `# ${spec.title} ⏳`,
+    ``,
+    `**Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** \`${ticketId}\``,
+    ``,
+    spec.intent.trim(),
+    ``,
+    `## Problem (from ticket \`${ticketId}\`)`,
+    spec.problem.trim(),
+    ``,
+    `## Phases`,
+    `- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on \`npx tsc --noEmit\`.`,
+    ``,
+    `## Verification`,
+    `- Reproduce the ticket scenario → confirm the fixed behavior, and that the ticket that surfaced it would now be handled correctly.`,
+    ``,
+    `> Authored by the box Improve agent from ticket \`${ticketId}\`. Commission the build from the Roadmap board (owner = cs).`,
+    ``,
+  ].join("\n");
+}
+
+export interface ExecutePlanResult {
+  actions: ImprovePlanAction[];
+  results: string[];
+  resolved: boolean; // true if a resolve_sequence closed the ticket
+}
+
+/**
+ * Execute the approved actions of a plan against `ticketId`. Declined/non-approved actions are left
+ * untouched. Returns the actions with updated status/result + a flat result log + whether the ticket
+ * was closed by a resolve_sequence (so the session can flip to 'resolved').
+ */
+export async function executeImprovePlan(
+  workspaceId: string,
+  ticketId: string,
+  actions: ImprovePlanAction[],
+): Promise<ExecutePlanResult> {
+  const admin = createAdminClient();
+  const results: string[] = [];
+  let resolved = false;
+
+  // 1. Batch the customer actions + rule proposals through runImproveActions (preserves chaining +
+  //    its single internal results note). Map each plan-action kind to an ImproveAction.
+  const batch: { ref: ImprovePlanAction; action: ImproveAction }[] = [];
+  for (const a of actions) {
+    if (a.status !== "approved") continue;
+    if (a.kind === "customer_action" && a.action) {
+      batch.push({ ref: a, action: a.action });
+    } else if (a.kind === "sonnet_prompt" && a.prompt) {
+      batch.push({ ref: a, action: { type: "propose_sonnet_prompt", title: a.prompt.title, content: a.prompt.content, category: a.prompt.category || "rule" } });
+    } else if (a.kind === "grader_rule" && a.rule) {
+      batch.push({ ref: a, action: { type: "propose_grader_rule", title: a.rule.title, content: a.rule.content } });
+    }
+  }
+  if (batch.length) {
+    const { results: batchResults } = await runImproveActions(workspaceId, ticketId, batch.map((b) => b.action));
+    batch.forEach((b, i) => {
+      b.ref.status = "done";
+      b.ref.result = batchResults[i] || "done";
+    });
+    results.push(...batchResults);
+  }
+
+  // 2. Re-score this ticket (force a fresh ticket_analyses row).
+  for (const a of actions) {
+    if (a.status !== "approved" || a.kind !== "rescore") continue;
+    try {
+      const { analyzeTicket } = await import("@/lib/ticket-analyzer");
+      const r = await analyzeTicket(ticketId, "manual");
+      a.status = "done";
+      a.result = r && typeof r === "object" && "score" in r ? `Re-scored: ${(r as { score?: number }).score}/10` : "Re-analysis triggered";
+      results.push(a.result);
+    } catch (e) {
+      a.status = "failed";
+      a.result = `rescore failed: ${e instanceof Error ? e.message : String(e)}`;
+      results.push(a.result);
+    }
+  }
+
+  // 3. Commit ticket-sourced spec(s) to main (owner=cs). Never auto-builds — surfaced on Roadmap.
+  for (const a of actions) {
+    if (a.status !== "approved" || a.kind !== "ticket_spec" || !a.spec) continue;
+    const slug = a.spec.slug.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
+    const path = `docs/brain/specs/${slug}.md`;
+    try {
+      const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+      const sha = existing.ok ? (existing.json as { sha?: string }).sha : undefined;
+      const put = await gh("PUT", `/repos/${REPO}/contents/${path}`, {
+        message: `spec: ${slug} (from ticket ${ticketId} via Improve agent)`,
+        content: Buffer.from(ticketSpecMarkdown(a.spec, ticketId), "utf8").toString("base64"),
+        sha,
+        branch: "main",
+      });
+      a.status = put.ok ? "done" : "failed";
+      a.result = put.ok ? `Spec committed: ${path} (owner=cs) — commission on Roadmap` : `spec commit failed (${put.status})`;
+    } catch (e) {
+      a.status = "failed";
+      a.result = `spec commit failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    results.push(a.result!);
+  }
+
+  // 4. Resolve sequence LAST: post internal note(s) → close → unassign → unescalate.
+  for (const a of actions) {
+    if (a.status !== "approved" || a.kind !== "resolve_sequence" || !a.resolve) continue;
+    try {
+      for (const note of a.resolve.internal_notes || []) {
+        if (!note?.trim()) continue;
+        await admin.from("ticket_messages").insert({
+          ticket_id: ticketId,
+          direction: "outbound",
+          visibility: "internal",
+          author_type: "system",
+          body: note,
+        });
+      }
+      const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (a.resolve.close !== false) {
+        patch.status = "closed";
+        patch.closed_at = new Date().toISOString();
+      }
+      if (a.resolve.unassign !== false) patch.assigned_to = null;
+      if (a.resolve.unescalate !== false) {
+        patch.escalated_at = null;
+        patch.escalated_to = null;
+        patch.escalation_reason = null;
+      }
+      await admin.from("tickets").update(patch).eq("id", ticketId).eq("workspace_id", workspaceId);
+      a.status = "done";
+      a.result = `Closeout: ${[a.resolve.internal_notes?.length ? `${a.resolve.internal_notes.length} internal note(s)` : null, patch.status ? "closed" : null, "unassigned" in patch || a.resolve.unassign !== false ? "unassigned" : null, a.resolve.unescalate !== false ? "unescalated" : null].filter(Boolean).join(", ")}`;
+      results.push(a.result);
+      if (patch.status === "closed") resolved = true;
+    } catch (e) {
+      a.status = "failed";
+      a.result = `resolve_sequence failed: ${e instanceof Error ? e.message : String(e)}`;
+      results.push(a.result);
+    }
+  }
+
+  return { actions, results, resolved };
+}

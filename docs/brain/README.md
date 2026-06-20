@@ -6,7 +6,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 167 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 169 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 62 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 18 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 214 |
@@ -269,6 +269,8 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/dashboard_notifications]] — Generic notification system — macro_suggestion, pattern_review, knowledge_gap, fraud_alert, manual_action_needed, etc. Surfaced in the bell.
 - [[tables/escalation_gaps]] — Audit of cases where the AI escalated AND a manual signal said it shouldn't have — feedback loop for confidence tuning.
 - [[tables/import_jobs]] — Background import jobs (Shopify/Gorgias/Klaviyo) with progress + status. UI shows a progress bar.
+- [[tables/iteration_actions]] — Iteration engine's autonomous-action ledger (audit/idempotency/reversal); engine append/update only (Phase 4c).
+- [[tables/iteration_policies]] — Iteration engine's versioned policy control surface; engine reads active version read-only, no active ⇒ zero autonomous actions (Phase 4c).
 - [[tables/iteration_scorecards_daily]] — Deterministic daily ad/adset/campaign/variant/angle scorecards the iteration engine reads (Phase 3).
 - [[tables/slack_notification_rules]] — Per-workspace Slack notification routing rules (which events go to which channel).
 - [[tables/sync_jobs]] — Background sync job state (Shopify bulk ops, Appstle pulls) — progress, status, error.

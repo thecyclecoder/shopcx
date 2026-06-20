@@ -1,4 +1,6 @@
-# Box-hosted Ticket "Improve" Agent (Max session) ⏳
+# Box-hosted Ticket "Improve" Agent (Max session) ✅
+
+> **Build note (execution path):** The box (Max `claude -p`) does read-only investigation + **proposes** a typed plan; **execution runs server-side in the Improve route** (`/api/tickets/[id]/improve`, which holds service-role + integration + GitHub creds — exactly where today's Improve tab already runs `runImproveActions`). This is faithful to the spec's gate (the box never mutates; execution is human-approved + runs in a trusted, cred-holding component) while reusing the proven executors, instead of a box→worker plan-handoff. Rule proposals land `proposed` (normal review). **Default chosen** for the "flag at build" open items: `cs_manager` can approve customer-action plans; the data model is the **sibling `ticket_improve_chats` table**.
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform" (same box-agent substrate as [[box-spec-chat]]; action surface from [[../lifecycles/ai-analysis]] + [[../orchestrator-tools]]). **Introduces** a CS/support ownership lane (new `functions/cs` + `cs_manager` role) for ticket-derived code specs.
 
@@ -52,19 +54,24 @@ Same primitive as [[box-spec-chat]] — a resumable box `claude -p` session, one
 - Improve tab = the same chat box, now ticket-bound + box-backed: send a message → "thinking on the box… (takes a minute)" while `turn_status='thinking'` → reply lands (poll). When the agent proposes a plan, an **approval card** lists the actions (customer actions, messages, rule/spec/rescore, then close/unassign/unescalate) with **Approve all / Decline / or just type a redirect**. Internal messages it posts appear in the ticket thread. Usable by founder + CX manager.
 
 ## Verification
-- Open Improve on a weird ticket → the agent's first reply references **this exact ticket's** customer/order facts with no prompting (proves auto ticket-binding) and cites a brain page or `src/` path it Read (proves working-tree access); API console flat while claude.ai/usage moves (Max).
-- Ask "refund the last order, tell them it's done, and close it" → one approval card with `partial_refund` + `send_message` + `resolve_sequence`; Approve all → refund executed, external+internal messages posted, ticket `closed`, unassigned, unescalated. `agent_jobs` shows `ticket-improve` `needs_approval→queued_resume→completed`.
-- Ask it to "tighten the rule that caused this" → a `sonnet_prompt`/`grader_rule` proposal lands in `sonnet_prompts` (`proposed`, `derived_from_ticket_id` = this ticket).
-- Ask it to "re-score this ticket" → re-analysis runs; `ticket_analyses` gets a fresh row.
-- Ask for a code fix → a `docs/brain/specs/{slug}.md` is committed with a `Derived-from-ticket` ref + `owner = cs`, visible on Roadmap to commission (no build auto-runs).
-- Pivot: decline its plan, type "actually just send store credit instead" → session resumes and proposes the store-credit plan.
-- Resume: re-open the ticket later → full transcript + same `box_session_id`.
+
+Pre-req: apply both migrations (`20260620150000_ticket_improve_chats.sql`, `20260620150100_workspace_role_cs_manager.sql`) and confirm the box worker is running the new `builder-worker.ts` (its `ticket-improve` lane).
+
+- **Auto ticket-binding + Max + working-tree access.** On a weird ticket's detail page → **Improve** tab → send "what happened here?". Within ~1–2 min the reply lands and references **this exact ticket's** customer/order facts with no prompting, and cites a brain page or `src/` path it read. Expect: `agent_jobs` row `kind='ticket-improve'` goes `queued→building→completed`; `ticket_improve_chats` row for the ticket has `box_session_id` set; the Anthropic API console stays flat while claude.ai/usage moves (Max).
+- **Resume.** Send a 2nd message → expect it references the earlier turn without re-stating, and `box_session_id` is unchanged. Re-open the ticket later → the full transcript is still there (DB-persisted, ticket-bound).
+- **Approval-gated fix.** Send "refund the last order $X, tell them it's done, and close it" → expect `turn_status='awaiting_approval'` and an approval card listing `customer_action` (partial_refund) + `customer_action` (send_message) + `resolve_sequence`. Click **Approve all** → expect the refund executes, the external + internal messages post into the ticket thread, the ticket becomes `closed` + unassigned + unescalated, and the session flips to `status='resolved'`.
+- **Calibrate.** Send "tighten the rule that caused this" → approve → expect a `sonnet_prompts` (and/or `grader_prompts`) row, `status='proposed'`, `derived_from_ticket_id` = this ticket, reviewable at Settings → AI → Prompts.
+- **Re-score.** Send "re-score this ticket" → approve → expect a fresh `ticket_analyses` row for the ticket.
+- **Ticket → spec.** Send "this needs a code change to fix X" → approve the `ticket_spec` → expect `docs/brain/specs/{slug}.md` committed to `main` with `**Owner:** [[../functions/cs]]` + a `Derived-from-ticket:` ref, visible on `/dashboard/roadmap` (owner chip = cs) to commission — no build auto-runs.
+- **Pivot.** With a plan parked, click **Decline** (or just type "actually just send store credit instead") → expect the plan clears and (on the redirect) a new turn proposes the store-credit plan.
+- **CX manager.** As a `cs_manager` member, the **Improve** tab is visible and usable; customer-action plans are approvable.
+- **Negative.** Send a message, then kill the box mid-turn → expect `turn_status='error'` with `last_error` shown + a retry affordance (sending again resumes the same session).
 
 ## Phases
-- ⏳ **P1 — ticket-bound turn loop:** session table + `ticket-improve` kind/lane + `runTicketImproveJob` (fresh+resume, auto ticket context), `ticket-improve` skill, Improve route rewired to enqueue-not-call-API, tab polling + "thinking" UX. Read-only investigation + recommendations only.
-- ⏳ **P2 — approval-gated execution:** typed `pending_actions` plan → approval card → worker executes the full batch (customer actions + messages + close/unassign/unescalate) via existing executors; pivot/redirect.
-- ⏳ **P3 — rules + re-score + ticket→spec:** `propose_sonnet_prompt`/`propose_grader_rule`, `rescore`, and `ticket_spec` (commit spec to main, owner=cs, ticket ref) surfaced on Roadmap.
-- ⏳ **P4 — CS role:** `cs_manager` role + `functions/cs` page + Roadmap filter for ticket-derived specs; per-action approval scoping (founder co-sign for high-blast-radius).
+- ✅ **P1 — ticket-bound turn loop:** `ticket_improve_chats` session table + `ticket-improve` kind/lane + `runTicketImproveJob` (fresh+resume, auto ticket-context brief + read-only `improve-box-tools.ts` CLI), `ticket-improve` skill, Improve route rewired to enqueue-not-call-API, tab polling + "thinking" UX. Read-only investigation + recommendations.
+- ✅ **P2 — approval-gated execution:** typed `pending_plan` → approval card (Approve all / per-action / Decline / type a redirect) → `improve-plan-executor.ts` runs the full batch (customer actions + messages, then close/unassign/unescalate) via existing executors; pivot/redirect by sending a new message.
+- ✅ **P3 — rules + re-score + ticket→spec:** `sonnet_prompt`/`grader_rule` plan actions (→ `proposed`), `rescore` (`analyzeTicket(ticketId,"manual")`), and `ticket_spec` (commit `docs/brain/specs/{slug}.md` to main, owner=cs, `Derived-from-ticket:` ref) surfaced on Roadmap (no auto-build).
+- ✅ **P4 — CS role:** `cs_manager` workspace role (`ALTER TYPE`) + [[../functions/cs]] page + Improve gate widened to `owner｜admin｜cs_manager`. Ticket-derived specs surface on Roadmap by `owner = cs` (the existing owner-chip → `/dashboard/roadmap/functions/cs` filter). Prompt/grader-rule approval stays `admin`.
 
 ## Brain updates (same PR set)
 [[../tables/agent_jobs]] (`ticket-improve` kind/lane) · new improve-session table page · [[../tables/sonnet_prompts]] (ticket-improve as a proposer) · [[../lifecycles/ai-analysis]] (Improve now box-hosted + re-score trigger) · [[../orchestrator-tools]] (action surface reused by the box agent) · [[../tables/workspace_members]] (`cs_manager`) · new [[../functions/cs]] · [[../recipes/build-box-setup]] (lane) · the `ticket-improve` skill page. Shares the session primitive with [[box-spec-chat]]. On ship, fold into those pages + delete.

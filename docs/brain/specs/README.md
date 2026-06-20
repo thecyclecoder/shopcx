@@ -52,6 +52,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** retires the Anthropic-cloud agent-todo routine and replaces it with an **hourly box sweep over escalated tickets** on Max, using a **solver→skeptic→quorum** loop: the solver finds the fix to unescalate (or, if mis-escalated, specs an analyzer fix); a skeptic adversarially re-checks against brain/rules/DB; on agreement it materializes the same human-gated `agent_todos`. Tweaks: **code changes become spec files** (owner=cs, ticket-ref, commissioned on Roadmap — never `code_change` todos), prompt rules stay **admin-approvable so Zach can approve**, and no-quorum leaves the ticket escalated for a human. Bounded-proxy autonomy (proposes, never silently mutates). Includes deleting the old routine so there's no dead code. Box-agent family with [[box-spec-chat]] + [[box-ticket-improve]].
 
+## Active project — PDP Refinement Pass ⏳
+
+**Spec:** [[pdp-refinement-pass]] · **Owner:** [[../functions/cmo]]
+
+**Why this matters:** codifies the hand-tuned Superfood Tabs polish (2026-06-20) into a **repeatable per-product pass** so the founder never re-types it per page. Splits into (A) one-time global code/pipeline upgrades — timeline centering, before/after → 2 stories, 15-vs-16 badge, individual trust pills, full-corpus review-analysis pagination, per-variant Supplement Facts + AI/KB nutrition access, a harvest-from-Shopify-PDP step (real endorsements + before/after photos re-hosted to Supabase), and lifestyle + Nano-Banana static-ad gallery slides — and (B) a box pass that applies them per product from its own PDP/Drive/reviews, plus (C) per-product creative (headline, captions) proposed for approval. Run #1 = Superfood Tabs; then fan out. Extends [[box-product-seeding]].
+
 ## Active project — Storefront coupon visibility + WELCOME SMS ⏳
 
 **Spec:** [[storefront-coupon-visibility-and-sms]] · **Owner:** [[../functions/growth]]

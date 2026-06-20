@@ -1,6 +1,6 @@
 # workspace_members
 
-User ↔ workspace membership. role enum (owner/admin/agent/social/marketing/read_only). display_name is the user-facing label.
+User ↔ workspace membership. role enum (owner/admin/agent/social/marketing/read_only/cs_manager). display_name is the user-facing label.
 
 **Primary key:** `id`
 
@@ -47,7 +47,7 @@ const { count } = await admin.from("workspace_members")
 
 ## Gotchas
 
-- Roles: `owner`, `admin`, `agent`, `social`, `marketing`, `read_only`.
+- Roles: `owner`, `admin`, `agent`, `social`, `marketing`, `read_only`, `cs_manager`. `cs_manager` (the CX manager, added by [[../specs/box-ticket-improve]] via `ALTER TYPE workspace_role ADD VALUE`) can drive the ticket Improve agent + approve customer-action plans; it owns ticket-derived specs ([[../functions/cs]]). Prompt/grader-rule approval stays at `admin`.
 - Always use `display_name` for user-facing strings — never full name. See feedback_display_name.
 
 ---

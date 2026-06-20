@@ -65,8 +65,22 @@ defensively (returns `[]` on any failure). Persist upserts on
 
 ### `loadActivePolicy` / `loadRecentActions` — functions
 
-Read-only loaders for the Phase 4c [[../tables/iteration_policies]] / `iteration_actions`
-tables; both degrade to `null` / `[]` when the table is absent.
+Read-only loaders for the Phase 4c [[../tables/iteration_policies]] /
+[[../tables/iteration_actions]] tables; both degrade to `null` / `[]` when the
+table is absent. `loadActivePolicy` → null ⇒ zero autonomous actions.
+
+### `persistActions` — function (Phase 4c ledger append/update)
+
+```ts
+async function persistActions(p: DecisionEngineParams, snapshotDate: string, actions: ComputedAction[], escalations?: ComputedAction[]): Promise<number>
+```
+Idempotent upsert of the 4a decisions into [[../tables/iteration_actions]] —
+`actions` land `status='decided'`, `escalations` land `status='escalated'` with the
+`guardrail` that fired. Upsert key
+`(workspace_id, meta_ad_account_id, object_id, action_type, snapshot_date)`. **NOT**
+called by `runDecisionEngine` (Phase 4 keeps zero side effects) — the Phase 5 cron
+persists after the engine returns. The engine appends/updates this ledger only;
+it never writes [[../tables/iteration_policies]].
 
 ### Types
 

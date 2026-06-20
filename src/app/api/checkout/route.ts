@@ -774,6 +774,13 @@ export async function POST(request: NextRequest) {
       braintree_customer_id: braintreeCustomerId,
       cart_token: cart.token,
       subscription_id: primarySubscriptionId,
+      // Mirror the applied code into discount_codes (the column the
+      // orchestrator's order context reads — Shopify orders populate it
+      // too). Without this, storefront orders looked discount-free to the
+      // AI even though payment_details carried the code, causing the
+      // "no discounts applied" misread + agree-and-refund failure
+      // (ticket 8e9e325e). Same string-array shape as the Shopify path.
+      discount_codes: discountCents > 0 && couponCode ? [couponCode] : [],
       payment_details: {
         subtotal_cents: subtotalCents,
         discount_cents: discountCents,

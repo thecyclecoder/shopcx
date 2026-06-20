@@ -37,7 +37,7 @@ DB-driven prompt rules for the Sonnet orchestrator. category: rule/approach/know
 
 **Out (this → others):**
 
-- `derived_from_ticket_id` → [[tickets]].`id`
+- `derived_from_ticket_id` → [[tickets]].`id` — set when a rule is proposed from a ticket. Proposers: the AI analyzer ([[../lifecycles/ai-analysis]]), the admin Improve flow, and now the **box ticket Improve agent** ([[../specs/box-ticket-improve]] — a `sonnet_prompt` plan action lands `status='proposed'` with this ref on approval).
 - `workspace_id` → [[workspaces]].`id`
 - `superseded_by_id` → [[sonnet_prompts]].`id`
 - `merged_into_id` → [[sonnet_prompts]].`id`
