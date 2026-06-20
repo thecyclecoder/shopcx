@@ -45,6 +45,16 @@ async function json<T = unknown>(): Promise<T> {
   }
 }
 
+async function jsonOptional<T = unknown>(fallback: T): Promise<T> {
+  const raw = (await readStdin()).trim();
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (e) {
+    throw new Error(`invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 function out(value: unknown) {
   process.stdout.write(JSON.stringify(value));
   process.stdout.write("\n");
@@ -136,6 +146,12 @@ async function main() {
     case "pull-ingredient-images":
       // pull-ingredient-images <ws> <pid> <handle> — real PDP CDN images → product_media slot=ingredient_{name}
       return out(await T.pullIngredientImages(ws, pid, rest[2]));
+
+    case "ingredient-images-fallback":
+      // ingredient-images-fallback <ws> <pid> ← optional stdin [{name,visual_description}]
+      // FALLBACK after pull-ingredient-images: Nano Banana Pro studio photos ONLY
+      // for ingredients still missing a pulled PDP image. PDP pull stays preferred.
+      return out(await T.generateIngredientImagesFallback(ws, pid, await jsonOptional<T.IngredientFallbackInput[]>([])));
 
     case "save-media": {
       // payload: { slot, localPath, mimeType, altText }
