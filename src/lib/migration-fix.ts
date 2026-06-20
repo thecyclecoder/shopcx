@@ -26,7 +26,7 @@ const MAX_OVERRIDE_CENTS = 100_000;
 const ACTIVE_JOB_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
 /** The judgment fixes the mechanical auto-heal punts (see [[migration-audit]] `autoHealMigration`). */
-export type MigrationFixKind = "price_reconcile" | "variant_backfill" | "appstle_cancel" | "shipping_protection_convert";
+export type MigrationFixKind = "price_reconcile" | "variant_backfill" | "appstle_cancel" | "shipping_protection_convert" | "remove_line";
 
 /** Per-fix payloads — the box computes the concrete values read-only; the worker applies them verbatim. */
 export interface PriceReconcilePayload {
@@ -60,6 +60,18 @@ export interface ShippingProtectionConvertPayload {
    * `migration_audits.pre_migration_charge_cents` baseline (engine compares this
    * against `product_subtotal_cents`, which excludes protection). */
   baseline_cents: number;
+}
+export interface RemoveLinePayload {
+  /** Identify the FREE/promo line to delete from `items[]` — provide at least one;
+   * a line is removed only when it matches every field that is provided (so a
+   * generic title can't over-match). Match the same way the audit named the
+   * offending line:
+   *  - `line_id`: an explicit id on the item (`items[].line_id`/`items[].id`), if one exists.
+   *  - `shopify_variant_id`: a lingering non-UUID `items[].variant_id` (a non-catalog line).
+   *  - `title`: case-insensitive substring of `items[].title` (e.g. "ACV Gummies"). */
+  line_id?: string;
+  shopify_variant_id?: string;
+  title?: string;
 }
 
 export interface MigrationFixApplyResult {
@@ -254,6 +266,41 @@ export async function applyMigrationFix(
     if (auditErr) return { ok: false, detail: `shipping_protection_convert: audit baseline write failed — ${auditErr.message}` };
     const removed = sub.items.length - items.length;
     return { ok: true, detail: `shipping_protection_convert: flag set (${amount}¢), removed ${removed} protection line(s), baseline → ${baseline}¢` };
+  }
+
+  if (action.fix_kind === "remove_line") {
+    // A FREE/promo line with no catalog identity ($0, no product_variants row) was
+    // dragged across by the old migration and fails items_on_uuids — but we don't
+    // want to KEEP it (that's variant_backfill, for a real product missing a row);
+    // we want it GONE. Remove ONLY the matched line; every other line + its
+    // price_override_cents stays verbatim (we NEVER touch another line's price).
+    // Idempotent: a no-op once the line is already gone. The worker then re-runs
+    // verifyMigration. See docs/brain/specs/migration-fix-remove-line.md.
+    const payload = (action.payload || {}) as RemoveLinePayload;
+    const lineId = payload.line_id ? String(payload.line_id) : null;
+    const shopId = payload.shopify_variant_id ? String(payload.shopify_variant_id) : null;
+    const title = payload.title ? String(payload.title).toLowerCase() : null;
+    if (!lineId && !shopId && !title) {
+      return { ok: false, detail: "remove_line: no line identifier (line_id / shopify_variant_id / title) provided" };
+    }
+    const sub = await loadSubItems(admin, subscriptionId);
+    if (!sub) return { ok: false, detail: "remove_line: subscription not found" };
+    const matches = (i: Record<string, unknown>): boolean => {
+      if (lineId && String((i.line_id ?? i.id) || "") !== lineId) return false;
+      if (shopId && String(i.variant_id || "") !== shopId) return false;
+      if (title && !String(i.title || "").toLowerCase().includes(title)) return false;
+      return true;
+    };
+    const items = sub.items.filter((i) => !matches(i));
+    const removed = sub.items.length - items.length;
+    // Fail-closed against an over-broad identifier that would empty the whole sub.
+    if (removed > 0 && items.length === 0 && sub.items.length > 0) {
+      return { ok: false, detail: "remove_line: refused — match would remove ALL lines (over-broad identifier)" };
+    }
+    if (!removed) return { ok: true, detail: "remove_line: no matching line (already removed)" };
+    const { error } = await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", subscriptionId);
+    if (error) return { ok: false, detail: `remove_line: write failed — ${error.message}` };
+    return { ok: true, detail: `remove_line: removed ${removed} line(s)` };
   }
 
   return { ok: false, detail: `unknown fix_kind: ${(action as { fix_kind?: string }).fix_kind}` };

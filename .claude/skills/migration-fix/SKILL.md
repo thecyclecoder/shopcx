@@ -1,6 +1,6 @@
 ---
 name: migration-fix
-description: Be the box's billing-integrity agent fixing ONE failed Appstle→internal migration, on Max. A migration_audits row flipped to `failed` (a renewal at risk) — diagnose the failing checks read-only and PROPOSE the judgment fixes the mechanical auto-heal punts (pricing_preserved reconcile, items_on_uuids variant backfill + remap, lingering Appstle cancel), or surface human-needed (no billable card) with a written diagnosis. For a recurring code/data gap you escalate to a permanent fix SPEC (committed to docs/brain/specs/, surfaced on Roadmap). You NEVER mutate — the worker executes your typed plan on the owner's approval, then re-runs verifyMigration; only a re-pass clears the row. Invoked by the box worker's migration-fix job (scripts/builder-worker.ts → runMigrationFixJob). Implements docs/brain/specs/migration-fix-agent.md.
+description: Be the box's billing-integrity agent fixing ONE failed Appstle→internal migration, on Max. A migration_audits row flipped to `failed` (a renewal at risk) — diagnose the failing checks read-only and PROPOSE the judgment fixes the mechanical auto-heal punts (pricing_preserved reconcile, items_on_uuids variant backfill + remap OR removing a free/promo line, shipping-protection convert, lingering Appstle cancel), or surface human-needed (no billable card) with a written diagnosis. For a recurring code/data gap you escalate to a permanent fix SPEC (committed to docs/brain/specs/, surfaced on Roadmap). You NEVER mutate — the worker executes your typed plan on the owner's approval, then re-runs verifyMigration; only a re-pass clears the row. Invoked by the box worker's migration-fix job (scripts/builder-worker.ts → runMigrationFixJob). Implements docs/brain/specs/migration-fix-agent.md.
 ---
 
 # migration-fix
@@ -64,9 +64,17 @@ For every failing check, decide the safe fix:
   item's `price_override_cents` (the catalog **UUID** on the item) so the engine `product_subtotal`
   lands within ±2¢/line of `pre_migration_charge_cents`. Show your arithmetic in the `preview`.
 - **`items_on_uuids`** (an item points at a Shopify variant id with **no `product_variants` row**) →
-  propose a **`variant_backfill`** that inserts the missing catalog row (from the live Appstle line +
-  the product it belongs to) and remaps the item onto the new UUID. This is the fix the 2026-06-10
-  incident did by hand.
+  decide **backfill vs remove** by what the line *is*:
+  - a **real product** missing its catalog row → propose a **`variant_backfill`** that inserts the
+    missing [[../../../docs/brain/tables/product_variants]] row (from the live Appstle line + the
+    product it belongs to) and remaps the item onto the new UUID — **keep** the line. This is the fix
+    the 2026-06-10 incident did by hand.
+  - a **FREE / promo line with no catalog identity** ($0, no variant — an add-on the old migration
+    dragged across that shouldn't carry over, e.g. a $0 "ACV Gummies") → propose a **`remove_line`**
+    that **deletes** the line from `items[]` (leaving every other line + its `price_override_cents`
+    untouched). We don't want to keep it, so backfill is wrong; nothing else deletes a line.
+  - **unsure which** (could be a real product, could be a promo) → don't guess: pause on
+    **`needs_input`** (Step 2) and name the line + ask keep-or-drop.
 - **`pricing_preserved` overage equals an Appstle protection line** (`engine N¢ vs pre M¢` where
   `M − N` is exactly a "Shipping Protection" line on the LIVE Appstle contract, and that same line is
   still sitting in the sub's `items[]`) → this is the protection line/flag mismatch, NOT a grandfathered
@@ -101,7 +109,8 @@ If **every** failing check has a safe typed fix:
   {"fix_kind":"price_reconcile","summary":"<one line>","preview":"<concrete change + values>","payload":{"overrides":[{"variant_id":"<catalog UUID on the item>","price_override_cents":6396}]}},
   {"fix_kind":"variant_backfill","summary":"...","preview":"...","payload":{"variant":{"product_id":"<uuid>","shopify_variant_id":"<id>","title":"...","sku":"...","price_cents":7995},"item_match":{"shopify_variant_id":"<id>","sku":"..."}}},
   {"fix_kind":"appstle_cancel","summary":"...","preview":"...","payload":{"appstle_contract_id":"<old id>","reason":"migrated to shopcx"}},
-  {"fix_kind":"shipping_protection_convert","summary":"<one line>","preview":"old charge over-counted by the $3.75 protection line the engine bills separately → wire flag + correct baseline 6371→5996, leave Tabs override at 5996","payload":{"amount_cents":375,"baseline_cents":5996}}
+  {"fix_kind":"shipping_protection_convert","summary":"<one line>","preview":"old charge over-counted by the $3.75 protection line the engine bills separately → wire flag + correct baseline 6371→5996, leave Tabs override at 5996","payload":{"amount_cents":375,"baseline_cents":5996}},
+  {"fix_kind":"remove_line","summary":"<one line>","preview":"the free $0 ACV Gummies promo line has no catalog variant and shouldn't carry over → drop it from items[]; Tabs line + override untouched","payload":{"title":"ACV Gummies"}}
 ]}
 ```
 
@@ -156,6 +165,7 @@ same way [[../escalation-triage/SKILL]] routes analyzer fixes into specs.
 - `variant_backfill` → `{ variant: { product_id: <uuid>, shopify_variant_id, title?, sku?, price_cents?, option1?, option2?, option3? }, item_match: { shopify_variant_id?, sku? } }`. The worker inserts the catalog row (idempotent — reuses an existing row for that Shopify id) then remaps the matched sub item onto the new UUID.
 - `appstle_cancel` → `{ appstle_contract_id?: <old id, defaults to the audit's>, reason?: string }`. The worker calls `appstleSubscriptionAction(..., "cancel", ...)` on the OLD numeric contract.
 - `shipping_protection_convert` → `{ amount_cents: <int, 0 < x ≤ 100000>, baseline_cents: <int, the product-only subtotal> }`. The worker sets `shipping_protection_added=true` + `shipping_protection_amount_cents=amount_cents`, removes the "Shipping Protection" line from `items[]` (product lines + overrides left UNTOUCHED), and corrects the audit's `pre_migration_charge_cents` to `baseline_cents`. Idempotent.
+- `remove_line` → `{ line_id?, shopify_variant_id?, title? }` (≥1; a line is removed only when it matches **every** field provided, so a generic title can't over-match). The worker deletes the matched FREE/promo line from `items[]`, leaving every other line + its `price_override_cents` UNTOUCHED. Idempotent (no-op once gone); fail-closed if a match would remove ALL lines. **Only for a $0/promo line with no catalog identity — a real product missing a row is `variant_backfill`.**
 
 ## What happens after you emit
 
