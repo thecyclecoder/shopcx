@@ -166,10 +166,23 @@ export function track(eventType: string, meta?: EventMeta, eventId?: string) {
  * calls internally until the script loads.
  */
 function initMetaPixel(pixelId: string) {
-  if (typeof window === "undefined" || metaPixelId) return;
+  if (typeof window === "undefined") return;
+  // WINDOW-level guards (not just the module `metaPixelId`) so a duplicated
+  // module instance across code-split chunks, a re-mount, or a second caller
+  // can NEVER inject `fbevents.js` twice or re-init the same pixel — that's
+  // what triggers Meta's "Multiple pixels with conflicting versions" warning.
+  const g = window as unknown as {
+    fbq?: ((...args: unknown[]) => void) & { callMethod?: unknown; queue?: unknown[]; loaded?: boolean; version?: string; push?: unknown };
+    __sxFbInited?: Set<string>;
+  };
+  if (!g.__sxFbInited) g.__sxFbInited = new Set<string>();
+  if (g.__sxFbInited.has(pixelId)) return; // this pixel already inited on this page
   metaPixelId = pixelId;
-  const w = window as unknown as { fbq?: ((...args: unknown[]) => void) & { callMethod?: unknown; queue?: unknown[]; loaded?: boolean; version?: string; push?: unknown } };
-  if (!w.fbq) {
+  const w = g;
+  // Inject the base ONCE — guard on window.fbq AND on an already-present
+  // fbevents.js <script> in the DOM (belt + suspenders against a double inject).
+  const alreadyLoaded = !!w.fbq || !!document.querySelector('script[src*="connect.facebook.net/en_US/fbevents.js"]');
+  if (!alreadyLoaded) {
     // Standard Meta pixel bootstrap (the snippet Meta ships), inlined so
     // we control load timing and don't depend on an external <Script>.
     const fbq = function (...args: unknown[]) {
@@ -191,6 +204,7 @@ function initMetaPixel(pixelId: string) {
   // PageView is the canonical Meta base event; ViewContent fires
   // separately from our pdp_view track() with the dedupe event_id.
   w.fbq?.("track", "PageView");
+  g.__sxFbInited.add(pixelId);
 }
 
 function fireMetaPixel(eventType: string, eventId: string, meta?: EventMeta) {
