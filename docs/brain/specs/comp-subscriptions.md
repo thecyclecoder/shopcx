@@ -30,8 +30,24 @@ A new page under the **Customers** sidebar: **Comp Subscriptions** — every `co
 - **Allowlist Zach** (`customers.comp_role='employee'`) and **migrate** him off Appstle (contract `27852472493`) → internal **comp** sub, item `price_override_cents=0`, `comp_note="employee"`, preserving items/cadence/next date. (His SC133080 charge is already refunded.) Confirm his next renewal **ships free** (a $0 order + Amplifier handoff, no charge, no dunning) and he appears under **Employees** on **Customers → Comp Subscriptions**.
 - Negative: a comp sub with no PM does NOT skip with `no_payment_method`; a comp renewal does NOT call Braintree and does NOT open dunning. **A `comp=true` sub whose customer is NOT allowlisted (`comp_role` null) → the $0 renewal FAILS** (no free shipment, surfaced) — fail-closed.
 
-## Phase 1 — allowlist + comp mode + renewal + migration + Zach ⏳
+## Phase 1 — allowlist + comp mode + renewal + migration + Zach 🚧
 Migration (`customers.comp_role` enum + `comp_note`; `subscriptions.comp` + `comp_note`); renewal-path comp branch (**allowlist gate first — fail-closed if not allowlisted**, then no-PM, no-charge, still-fulfill, advance); `migrateToInternalComp` (no-PM Appstle→internal comp); allowlist + migrate Zach. Brain: [[../tables/customers]] (comp_role) + [[../tables/subscriptions]] + [[../lifecycles/subscription-billing.md]] + [[../libraries/migrate-to-internal]].
 
+**Code shipped** (🚧 → ✅ on the two gated prod ops below):
+- ✅ Migration `supabase/migrations/20260620190000_comp_subscriptions.sql` (`comp_role` enum + `comp_note` on customers; `comp` + `comp_note` on subscriptions; partial indexes `idx_subscriptions_comp`, `idx_customers_comp_role`). Apply: `npx tsx scripts/apply-comp-subscriptions-migration.ts`.
+- ✅ Renewal comp branch in `src/lib/inngest/internal-subscription-renewals.ts` (`load-comp-context` → fail-closed gate → $0 order + Amplifier + `type='comp'` transaction + advance; no PM/Braintree/Avalara/shipping/dunning).
+- ✅ `migrateContractToInternalComp` in `src/lib/migrate-to-internal.ts` (no-PM Appstle→internal comp; sets `comp=true` + item `price_override_cents=0`).
+- ✅ Brain: tables/customers, tables/subscriptions, lifecycles/subscription-billing, libraries/migrate-to-internal (new page), inngest/internal-subscription-renewals.
+- ⏳ **Gated owner actions** (no prod creds in build): (1) apply the migration; (2) run `scripts/migrate-zach-comp-subscription.ts` to allowlist Zach (`comp_role='employee'`) + migrate contract `27852472493` → internal comp.
+
 ## Phase 2 — Customers → Comp Subscriptions list ⏳
-The sidebar page + read view (+ stretch "mark/create comp" action). Brain: [[../dashboard]] customers section.
+The sidebar page + read view (+ stretch "mark/create comp" action). Brain: [[../dashboard]] customers section. (Deferred — separate build.)
+
+## Verification
+Phase-1 checklist (run after the two gated ops land). "ws" = `fdc11e10-b89f-4989-8b73-ed6526c4d906`.
+
+- **Migration applied** → in Supabase, `\d customers` shows `comp_role` (type `comp_role`) + `comp_note`; `\d subscriptions` shows `comp bool default false` + `comp_note`; `\di idx_subscriptions_comp`, `idx_customers_comp_role` exist. (Or run `npx tsx scripts/_verify-*` style probe.)
+- **Zach allowlisted** → `select comp_role, comp_note from customers where email ilike 'zachary@superfoodscompany.com'` → `employee` / `employee`.
+- **Zach migrated to comp** → `select is_internal, comp, comp_note, status, shopify_contract_id, next_billing_date, items from subscriptions where id = <Zach sub>` → `is_internal=true`, `comp=true`, `comp_note='employee'`, `shopify_contract_id` like `internal-%`, items unchanged (each with `price_override_cents=0`), cadence + next date preserved. Appstle contract `27852472493` shows `CANCELLED` (reason "migrated to shopcx (comp)"). His timeline has a `subscription.migrated` (source `comp_migration`) event.
+- **Comp renewal ships free** → when Zach's `next_billing_date` rolls (or fire `internal-subscription/renewal-attempt` with his `subscription_id`): expect a new [[../tables/orders]] row `total_cents=0`, `financial_status='paid'`, `source_name='internal_subscription_comp_renewal'`, `payment_details.comp=true`, an Amplifier handoff (`amplifier_order_id` set), a `transactions` row `type='comp' status='succeeded' amount_cents=0` (no Braintree id), `next_billing_date` advanced one cadence, a `subscription.comp_shipped` event. **No** Braintree charge, **no** `dunning_cycles` row, **no** `dunning/payment-failed` event.
+- **Fail-closed (negative)** → temporarily a `comp=true` sub whose customer has `comp_role IS NULL`, fire `renewal-attempt`: expect a `transactions` row `type='comp' status='failed'` (`metadata.needs_attention=true`), a `subscription.comp_renewal_failed` event, and **no** new order, **no** Amplifier handoff, **no** `next_billing_date` advance.

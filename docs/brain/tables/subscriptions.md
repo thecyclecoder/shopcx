@@ -36,6 +36,8 @@ Synced from Appstle. items JSONB, billing interval, next billing date. Will beco
 | `avalara_quote_total_cents` | `int4` | ✓ |  |
 | `avalara_quote_at` | `timestamptz` | ✓ |  |
 | `avalara_quote_address` | `jsonb` | ✓ |  |
+| `comp` | `bool` | — | default: `false`. **Comp sub** — ships free on schedule (base $0, no PM, no charge). Pairs with item `price_override_cents=0` + `is_internal=true`. Renewal ships free only when the customer is comp-allowlisted ([[customers]].`comp_role`); else fails closed. |
+| `comp_note` | `text` | ✓ | Free-text reason on the comp sub ("employee"). |
 
 ## Foreign keys
 
@@ -111,6 +113,7 @@ const { data } = await admin.from("customer_events")
 - Always include linked customers — use `linkedIds(customerId)` helper, then `.in("customer_id", ids)`.
 - `items` is JSONB — variant ids live inside, not on a join table. Use `items->0->>'variantId'`.
 - **`payment_method_id`** (uuid → [[customer_payment_methods]].id, nullable, `ON DELETE SET NULL`) — the **pinned** vaulted Braintree card the renewal charges for *this* sub. NULL = the customer's default. Internal subs only; set via the portal's per-sub card picker (`setSubscriptionPaymentMethod`). The renewal prefers it, falling back to the default if absent/removed.
+- **`comp=true` = ships free.** A comp sub is `is_internal=true` with every item `price_override_cents=0` (base $0). The renewal ([[../inngest/internal-subscription-renewals]]) takes a dedicated branch: **gate first** — if the customer's [[customers]].`comp_role` is null/invalid → FAIL CLOSED (failed `type='comp'` transaction + `subscription.comp_renewal_failed` event, no shipment, no advance); else skip PM/Braintree/Avalara/shipping, create a $0 `paid` order (does NOT trip dunning), advance `next_billing_date`, hand to Amplifier, record a `type='comp'` succeeded transaction. Never routes to dunning. Partial index `idx_subscriptions_comp (workspace_id) WHERE comp = true` backs the comp list view. Migrate an Appstle sub onto comp rails with `migrateContractToInternalComp` ([[../libraries/migrate-to-internal]]).
 - **Internal-sub items are catalog references, not prices.** Each line is `{ variant_id (product_variants.id UUID), product_id (UUID), title, variant_title, sku, quantity, line_id, price_override_cents? }`. The price is **derived live** by the pricing engine ([[../libraries/pricing]]) from the catalog + [[pricing_rules]] — never baked. `price_override_cents` is the only price an internal sub carries, and only for grandfathered lines. A baked `price_cents` is legacy; mutations strip it. (Appstle subs are unchanged — they keep Appstle/Shopify-baked prices and Shopify variant ids.)
 
 ---

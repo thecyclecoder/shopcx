@@ -54,6 +54,8 @@ Synced from Shopify. Email, retention_score, subscription_status, LTV, marketing
 | `preferred_sms_send_hour_at` | `timestamptz` | ✓ |  |
 | `short_code` | `varchar` | ✓ |  |
 | `braintree_customer_id` | `text` | ✓ |  |
+| `comp_role` | `comp_role` enum | ✓ | `employee`｜`influencer`｜`investor`｜`owner`. **null = NOT comp-eligible.** Setting it adds the customer to the **comp allowlist** (owner/admin only) — the gate the comp-subscription renewal fails closed on. |
+| `comp_note` | `text` | ✓ | Free-text reason for the comp role ("employee", "creator @x"). |
 
 ## Foreign keys
 
@@ -152,6 +154,7 @@ const { data } = await admin.from("customers")
 - `subscription_status`: `"active"`, `"cancelled"`, `"never"`, `"paused"`. `"never"` = a lead (no orders yet).
 - Customers can be linked. To get a customer's full history, expand to linked group first (see `customer_links`).
 - A lead IS a customer (no orders, `subscription_status='never'`). No parallel `leads` table.
+- **`comp_role` IS the comp allowlist.** The set of customers with a non-null `comp_role` is the standing free-product roster. A [[subscriptions]] `comp=true` sub only ships free when its customer has a valid `comp_role` — the renewal path ([[../inngest/internal-subscription-renewals]]) **fails closed** otherwise (no $0 leak). Partial index `idx_customers_comp_role` `(workspace_id, comp_role) WHERE comp_role IS NOT NULL` backs the roster + the Customers → Comp Subscriptions list. See [[../lifecycles/subscription-billing]] § Comp.
 - `banned` (storefront ban) vs `portal_banned` (customer portal ban) are different flags.
 - Email is the matching key but **`shopify_customer_id` is the primary lookup** — match by it first, fall back to email. See feedback_shopify_id_primary.
 - **Email matching uses `ILIKE` (case-insensitive)** across checkout/lead/OTP/identity paths. The `(workspace_id, email)` btree CANNOT serve `ILIKE` → seq scans. A **trigram GIN index `idx_customers_email_trgm`** (`pg_trgm` + `btree_gin`, migration `20260614180000`) backs it (~4ms). If you add a new email-match query, keep it `ILIKE` (or the trigram won't help) — don't reintroduce a plain btree expecting it to serve case-insensitive matches.

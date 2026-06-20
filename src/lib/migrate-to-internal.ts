@@ -151,6 +151,128 @@ export async function ensureGroupMigratedIfBillable(workspaceId: string, custome
   return r.migrated.length;
 }
 
+/**
+ * Comp migration: flip ONE Appstle contract → internal **comp** sub, WITHOUT the
+ * billable-PM requirement. A comp sub ships free (base $0, no charge) — so "a
+ * migration must be billable" does not apply. Reuses translate-lines +
+ * cancel-contract; the customer_id is preserved (no reassignment to a billable
+ * member, since nothing is ever charged). Sets comp=true + every item's
+ * price_override_cents=0 (base $0). The renewal path then ships it free, gated on
+ * the customer's comp_role allowlist. See docs/brain/specs/comp-subscriptions.md.
+ *
+ * Idempotent: a contract already flipped to internal+comp returns ok with its
+ * existing internal id. No migration_audit is recorded (the 8-check audit expects
+ * a billable card, which a comp sub deliberately lacks).
+ */
+export async function migrateContractToInternalComp(
+  workspaceId: string,
+  contractId: string,
+  opts: { compNote?: string } = {},
+): Promise<{ ok: boolean; subId?: string; internalContractId?: string; error?: string }> {
+  const admin = createAdminClient();
+
+  // Find the sub by its Appstle/Shopify contract id within the workspace.
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, shopify_contract_id, status, is_internal, comp, customer_id, items, billing_interval, billing_interval_count, next_billing_date")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub) return { ok: false, error: `subscription not found for contract ${contractId}` };
+
+  // Already an internal comp sub → nothing to do.
+  if (sub.is_internal && sub.comp) {
+    return { ok: true, subId: String(sub.id), internalContractId: String(sub.shopify_contract_id) };
+  }
+
+  const cfg = await getAppstleConfig(workspaceId);
+  if (!cfg) return { ok: false, error: "Appstle not configured" };
+
+  const isCancelled = sub.status === "cancelled";
+  try {
+    // Read the LIVE Appstle contract — source of truth for items/cadence/next date.
+    const live = await (
+      await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${cfg.apiKey}`,
+        { headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
+      )
+    ).json();
+    const liveUsable = !!live && live.status !== "CANCELLED";
+
+    let items: Array<Record<string, unknown>>;
+    let interval: string;
+    let intervalCount: number;
+    let nextBillingDate: string;
+    if (liveUsable) {
+      items = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []);
+      interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
+      intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
+      nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
+
+      // Cancel Appstle FIRST so a later flip failure stops the sub rather than
+      // letting Appstle keep billing it.
+      if (!isCancelled) {
+        const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx (comp)", "ShopCX comp migration");
+        if (!cancelR.success) return { ok: false, error: `Appstle cancel failed: ${cancelR.error}` };
+      }
+    } else {
+      if (!isCancelled) return { ok: false, error: "appstle_unavailable (active/paused sub left alone — re-runnable)" };
+      items = (sub.items as Array<Record<string, unknown>>) || [];
+      interval = String(sub.billing_interval || "week").toLowerCase();
+      intervalCount = Number(sub.billing_interval_count || 1);
+      nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
+    }
+
+    // Comp = base $0: force every line's price_override_cents to 0 (overrides any
+    // grandfathered base inferred above) and strip any baked price.
+    const compItems = items.map((i) => {
+      const { price_cents: _drop, ...rest } = i as Record<string, unknown>;
+      void _drop;
+      return { ...rest, price_override_cents: 0 };
+    });
+
+    // Flip the EXISTING row in place → internal comp. customer_id preserved (comp
+    // never charges, so no billable reassignment). Status preserved.
+    const internalContractId = `internal-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const { error: flipErr } = await admin
+      .from("subscriptions")
+      .update({
+        shopify_contract_id: internalContractId,
+        is_internal: true,
+        comp: true,
+        comp_note: opts.compNote ?? null,
+        status: sub.status,
+        items: compItems,
+        next_billing_date: nextBillingDate,
+        billing_interval: interval,
+        billing_interval_count: intervalCount,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId);
+    if (flipErr) return { ok: false, error: `flip failed (re-run to recover): ${flipErr.message}` };
+
+    // Timeline event. (No migration_audit — a comp sub has no billable card by design.)
+    try {
+      const { logCustomerEvent } = await import("@/lib/customer-events");
+      await logCustomerEvent({
+        workspaceId,
+        customerId: sub.customer_id as string | null,
+        eventType: "subscription.migrated",
+        source: "comp_migration",
+        summary: `Subscription migrated to internal COMP (free) billing — Appstle contract ${contractId} cancelled, now ships free internally (${internalContractId}).`,
+        properties: { subscription_id: String(sub.id), appstle_contract_id: contractId, internal_contract_id: internalContractId, status: sub.status, comp: true, comp_note: opts.compNote ?? null },
+      });
+    } catch (e) {
+      console.error(`[migrate-comp] timeline event failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
+    }
+
+    return { ok: true, subId: String(sub.id), internalContractId };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function migrateCustomerAppstleSubsToInternal(
   workspaceId: string,
   customerId: string,
