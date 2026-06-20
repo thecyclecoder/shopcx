@@ -424,6 +424,14 @@ ${buildPoliciesSection(policies || [])}
 
 ${buildPromptSections(dbPrompts || [])}
 
+DISCOUNT-CLAIM VERIFICATION (hard rule — never agree-and-refund a discount claim):
+When a customer claims they did NOT get a discount / promo / coupon, or that a discount "didn't apply," NEVER agree or compute a refund from their claim. Verify against the order data first:
+- The order's actual applied discount is in its "coupons" field (code + dollar amount) in RECENT ORDERS. If the order already shows a coupon and amount, the discount WAS applied — show the customer the code + the amount, do not refund it again.
+- Quantity-break discounts depend on the cart's total unit count (the storefront tiers are e.g. 0% / 8% / 12% for 1 / 2 / 3 units). A 1-unit order does NOT earn a multi-unit break — never invent a discount the cart never qualified for.
+- The subscribe-&-save percentage applies ONLY to subscription orders, not one-time purchases.
+- The WELCOME code is the one-time signup offer (auto-applied at checkout); it is not stackable with a second percentage.
+Confirm (a) what was actually applied on the order and (b) what the customer was actually eligible for, then answer from that. Only after both check out does any adjustment get considered. Never refund a discount the order already shows, and never grant one the cart never qualified for. If the math is genuinely ambiguous, escalate rather than guess.
+
 When you have enough data, respond with ONLY valid JSON (no tool calls):
 {
   "reasoning": "brief explanation",
@@ -540,7 +548,7 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
     // numbers. We also include subscription_id so each order can be
     // labeled with which sub it belongs to (or "one-time" if null).
     admin.from("orders")
-      .select("order_number, total_cents, line_items, discount_codes, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id")
+      .select("order_number, total_cents, line_items, discount_codes, payment_details, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .gte("created_at", new Date(Date.now() - 180 * 86400000).toISOString())
       .order("created_at", { ascending: false }).limit(25),
@@ -681,8 +689,20 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       // If we leave it off, the LLM cannot tell "this order had no
       // coupon codes" from "this tool doesn't expose coupons", and
       // we've seen Opus mis-frame it as a tool limitation.
-      const couponsList = (o.discount_codes as string[] | null) || [];
-      const coupons = couponsList.length ? ` | coupons: ${couponsList.join(", ")}` : ` | coupons: none`;
+      //
+      // Storefront orders carry the applied code in two places now:
+      // discount_codes[] (populated at checkout going forward + by
+      // backfill) and payment_details.{discount_code,discount_cents}
+      // (always written). Prefer discount_codes; fall back to
+      // payment_details so an un-backfilled legacy order still shows its
+      // coupon. Surface the dollar amount so the AI can answer "did I get
+      // my discount?" from data — the gap that caused ticket 8e9e325e.
+      const pd = (o.payment_details as { discount_code?: string | null; discount_cents?: number | null } | null) || null;
+      let couponsList = (o.discount_codes as string[] | null) || [];
+      if (!couponsList.length && pd?.discount_code) couponsList = [pd.discount_code];
+      const discountCents = pd?.discount_cents || 0;
+      const amountSuffix = discountCents > 0 ? ` (-$${(discountCents / 100).toFixed(2)})` : "";
+      const coupons = couponsList.length ? ` | coupons: ${couponsList.join(", ")}${amountSuffix}` : ` | coupons: none`;
       const isDraft = (o.source_name as string) === "shopify_draft_order";
       const sourceLabel = isDraft ? " [DRAFT — not a renewal, ignore for price comparisons]" : "";
       const subTag = o.subscription_id
