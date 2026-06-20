@@ -46,7 +46,8 @@ stdin (pipe it). On error it prints `{"error":"…"}` and exits 1 — read it an
 | `save-review-analysis <ws> <pid>` ← stdin `{analysis,reviews_analyzed}` | persist analysis |
 | `get-review-analysis <ws> <pid>` | persisted analysis |
 | `save-benefits <ws> <pid>` ← stdin `[{theme_name,role,…,research_ids,customer_review_ids}]` | persist selections |
-| `save-content <ws> <pid>` ← stdin `{hero_headline,…,fda_disclaimer}` | insert draft content version |
+| `save-trust-pills <ws> <pid>` ← stdin `{certifications?:[],allergen_free?:[]}` | write products.certifications/allergen_free as **individual items** (any comma-joined element is split) |
+| `save-content <ws> <pid>` ← stdin `{hero_headline,…,fda_disclaimer,before_after_stories?}` | insert draft content version (incl. up to 2 `before_after_stories` `[{quote,name,variant}]`) |
 | `get-content <ws> <pid>` | latest content (for QA) |
 | `hero-status <ws> <pid> <handle>` | `{locked, exists}` — skip image gen if either is true |
 | `resolve-packshot <ws> <pid> "<name>" "<kw1,kw2>"` | Drive front-facing packshot + Hero Example refs → URLs |
@@ -54,8 +55,12 @@ stdin (pipe it). On error it prints `{"error":"…"}` and exits 1 — read it an
 | `pull-ingredient-images <ws> <pid> <handle>` | download REAL per-ingredient PDP CDN images, match by name → `product_media` slot=`ingredient_{name}` @400×400 |
 | `ingredient-images-fallback <ws> <pid>` ← optional stdin `[{name,visual_description}]` | Nano Banana Pro studio photo ONLY for ingredients still missing a pulled PDP image → `product_media` slot=`ingredient_{name}` @400×400 (PDP pull stays preferred) |
 | `get-media <ws> <pid>` | existing `product_media` slots (with urls) — to find which chapter images (lifestyle_1 / timeline_N) are missing |
-| `save-media <ws> <pid>` ← stdin `{slot,localPath,mimeType,altText}` | upload + persist product_media |
-| `publish <ws> <pid>` | publish content + KB + macros, flip to `published` |
+| `save-media <ws> <pid>` ← stdin `{slot,localPath,mimeType,altText,displayOrder?}` | upload + persist product_media (`displayOrder`>0 = a gallery row, e.g. extra `slot="hero"` slides) |
+| `pdp-images <handle>` | every Shopify-CDN image URL on the live PDP (pick endorsement avatars / before-after photos) |
+| `rehost-image <ws> <pid>` ← stdin `{sourceUrl,slot,displayOrder?,altText?,fit?,width?,height?}` | **download** a Shopify image + **re-host to product-media** (returns OUR Supabase URL — **never hotlink**); `fit:"cover"`+w/h for avatars (400×400), `"none"` for before/after |
+| `resolve-lifestyle <ws> <pid> "<name>" "<kw1,kw2>" [pickIndex]` | Drive `UGC/Photos` lifestyle slide → LOCAL file (vision-confirm, then `save-media` slot=hero displayOrder>0); re-call with next `pickIndex` if it's not real-customer/target-demo |
+| `generate-static-ad <ws> <pid>` ← stdin `{imageUrls:[packUrl,…],prompt,captions:[top,bottom]}` | Nano-Banana Pro static-ad scene + caption overlays → LOCAL file (vision-confirm, then `save-media` slot=hero displayOrder>0) |
+| `publish <ws> <pid>` | publish content + KB + macros (incl. per-variant Supplement Facts → KB mirror), flip to `published` |
 
 ## Media-refresh mode
 
@@ -176,7 +181,15 @@ knowledge_base_article` (markdown), `kb_what_it_doesnt_do` (explicit limits —
 evaluated by the FDA…" disclaimer — **required**), `support_macros`
 (ingredients/dosage/benefits/side_effects/usage), `endorsements` (3 distinct
 nutritionists), `expectation_timeline`. Pipe to `save-content`. Then `set-status …
-content_generated`. Validate against **Amazing Coffee** (the `published`
+content_generated`.
+
+**Trust pills — individual items, never a comma-joined string.** When you set the
+product's `certifications` / `allergen_free` (the storefront chips), pipe them to
+`save-trust-pills` as one item per array element (e.g. `["Non-GMO","3rd Party
+Tested","Made in USA"]`, NOT `["Non-GMO, 3rd Party Tested, Made in USA"]`). The
+renderer draws one chip per element, so a comma-joined element shows as a single
+run-on chip. `save-trust-pills` splits any comma-joined element defensively, but
+emit them already-split. Validate against **Amazing Coffee** (the `published`
 benchmark) for structure/completeness — minus linked products + bundles, which
 are NOT auto-seeded.
 
@@ -285,6 +298,47 @@ ingredient that already has a row). Pass descriptions for **every** ingredient y
 saw in `unmatched` (extras are harmless — already-imaged ones are skipped). Read
 the returned `{generated, skipped, failed}` and note it in your final summary.
 Best-effort — failures here never block publish.
+
+### 6d — Refinement-pass extras (harvest endorsements + before/after, gallery slides)
+These bring a PDP to the "looks fantastic" bar (docs/brain/specs/pdp-refinement-pass.md).
+All best-effort — failures never block publish.
+
+**Harvest REAL endorsements + before/after from the live PDP — re-host every image.**
+The product's own `superfoodscompany.com/products/{handle}` already carries real
+nutritionist endorsements (name/credentials/quote/bullets + headshot) and customer
+before/after transformation stories (paired photos + testimonial). Read the PDP
+text (`fetch-pdp`) and the image URL list (`pdp-images <handle>`) to identify them.
+- **Endorsements** → set `endorsements` in `save-content`; for each headshot,
+  `rehost-image` with `slot:"endorsement_{n}_avatar"`, `fit:"cover"`, `width:400`,
+  `height:400`. These REPLACE any fabricated AI endorsements/avatars.
+- **Before/after** (up to 2 stories) → for each, `rehost-image` the before photo
+  (`slot:"before_{n}"`, `fit:"none"`) and the after photo (`slot:"after_{n}"`),
+  and put the matching testimonial in `save-content` `before_after_stories`
+  (`[{quote,name,variant}]`, index n-1 ↔ before_{n}/after_{n}).
+- 🚫 **Never hotlink the Shopify CDN.** `rehost-image` downloads the bytes and
+  re-uploads to product-media, so `product_media.url` is always a Supabase URL.
+
+**Hero gallery slides — a 4-slide gallery (bag · facts · lifestyle · static ad).**
+Beyond the bag hero (slot `hero`, display_order 0) and the facts slide (rendered
+from `supplement_facts`), add two more `slot="hero"` rows (distinct displayOrder):
+- **Lifestyle** — `resolve-lifestyle <ws> <pid> "<title>" "<variant kw>"` pulls a
+  real photo from the product's Drive `UGC/Photos`, cropped to 1800×1344, to a
+  LOCAL file. Read it; confirm it's a real-customer / target-demo scene (re-call
+  with the next `pickIndex` if not). Then `save-media` (slot `hero`, e.g.
+  `displayOrder:2`).
+- **Static ad** — `generate-static-ad` with `imageUrls:[prioritized-variant
+  packUrl, …refs]`, a prompt for a **top-down kitchen-counter scene** (a hand
+  holding the prioritized-variant pack + a made drink), and `captions:[top hook,
+  bottom payoff]` pulled from the review corpus. Returns a LOCAL file with the
+  caption overlays baked in; vision-confirm, then `save-media` (slot `hero`, e.g.
+  `displayOrder:3`).
+
+**Per-variant Supplement Facts (gated).** When you populate
+`product_variants.supplement_facts` per variant, the storefront facts slide + FAQ
+panel render it, `publish` mirrors it into the KB, and the support AI can quote it
+(`get_product_nutrition`). 🚫 **Nutrition facts are factual/compliance-sensitive —
+do NOT populate or publish them without founder verification** (surface your
+transcription for approval; this is gated outside the auto-publish path).
 
 ### 7 — Self-QA gate (the rail before auto-publish)
 HOLD (do NOT publish; leave at `content_generated`) and report the issue if ANY:

@@ -10,6 +10,48 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 type SupportMacro = { title: string; body_text: string; body_html?: string; question_type: string };
 
+/**
+ * Structural shape of a variant's `supplement_facts` JSONB. Mirrors
+ * `SupplementFacts` in the storefront page-data, kept structural here so server
+ * libs (publish, the orchestrator nutrition tool) can format facts without
+ * importing storefront code.
+ */
+export interface SupplementFactsShape {
+  serving_size?: string;
+  servings_per_container?: number;
+  nutrients?: Array<{ name: string; amount: string; daily_value: string | null; indent?: number }>;
+  proprietary_blend?: { amount: string; daily_value: string; ingredients: string } | null;
+  footer_notes?: string[];
+  other_ingredients?: string | null;
+}
+
+/**
+ * Render a variant's Supplement Facts as plain readable text — for the KB
+ * mirror (so the AI can retrieve nutrition) and the orchestrator nutrition
+ * tool. Returns "" for empty/missing facts so callers can skip cleanly (no
+ * nutrition is ever surfaced until a variant's facts are actually populated +
+ * founder-verified). Plain text, no markdown table — RAG chunks read better flat.
+ */
+export function formatSupplementFactsText(facts: SupplementFactsShape | null | undefined): string {
+  if (!facts) return "";
+  const lines: string[] = [];
+  if (facts.serving_size) lines.push(`Serving size: ${facts.serving_size}`);
+  if (facts.servings_per_container != null) lines.push(`Servings per container: ${facts.servings_per_container}`);
+  for (const n of facts.nutrients || []) {
+    const pad = n.indent ? "  ".repeat(n.indent) : "";
+    const dv = n.daily_value ? ` (${n.daily_value})` : "";
+    lines.push(`${pad}- ${n.name}: ${n.amount}${dv}`);
+  }
+  if (facts.proprietary_blend) {
+    const pb = facts.proprietary_blend;
+    lines.push(`- Proprietary blend: ${pb.amount}${pb.daily_value ? ` (${pb.daily_value})` : ""}`);
+    if (pb.ingredients) lines.push(`  ${pb.ingredients}`);
+  }
+  if (facts.other_ingredients) lines.push(`Other ingredients: ${facts.other_ingredients}`);
+  for (const f of facts.footer_notes || []) lines.push(f);
+  return lines.join("\n").trim();
+}
+
 export function slugify(text: string): string {
   return text
     .toLowerCase()
@@ -63,8 +105,35 @@ export async function publishProductContent(
     });
   }
 
+  // Per-variant Supplement Facts → KB mirror. Only variants whose
+  // `supplement_facts` is actually populated contribute a block, so a product
+  // with no (verified) facts adds nothing — nutrition never ships to the KB
+  // until the facts exist. Gives the support AI retrievable nutrition (sodium,
+  // potassium, caffeine, calories, etc.) so it can answer per-flavor on a ticket.
+  const { data: factVariants } = await admin
+    .from("product_variants")
+    .select("title, option1, position, supplement_facts")
+    .eq("workspace_id", workspace_id)
+    .eq("product_id", product_id)
+    .not("supplement_facts", "is", null)
+    .order("position", { ascending: true });
+  const factsBlocks: string[] = [];
+  for (const v of factVariants || []) {
+    const txt = formatSupplementFactsText(v.supplement_facts as SupplementFactsShape | null);
+    if (!txt) continue;
+    const label = ((v.title || v.option1 || "Supplement Facts") as string).trim();
+    factsBlocks.push(`### ${label}\n${txt}`);
+  }
+
   // KB article.
-  const articleBody = [content.knowledge_base_article || "", "", "## What this product does not do", "", content.kb_what_it_doesnt_do || ""].join("\n");
+  const articleBody = [
+    content.knowledge_base_article || "",
+    "",
+    "## What this product does not do",
+    "",
+    content.kb_what_it_doesnt_do || "",
+    ...(factsBlocks.length ? ["", "## Supplement Facts (per variant)", "", factsBlocks.join("\n\n")] : []),
+  ].join("\n");
   const baseSlug = slugify(product.title);
   const { data: existingKb } = await admin
     .from("knowledge_base")

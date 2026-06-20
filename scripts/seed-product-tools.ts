@@ -111,6 +111,12 @@ async function main() {
     case "get-benefits":
       return out({ benefits: await T.getBenefits(ws, pid) });
 
+    case "save-trust-pills":
+      // save-trust-pills <ws> <pid> ← stdin { certifications?: string[], allergen_free?: string[] }
+      // Writes products.certifications / allergen_free as INDIVIDUAL items (each
+      // comma-joined element is split into separate pills).
+      return out(await T.saveTrustPills(ws, pid, await json<{ certifications?: unknown; allergen_free?: unknown }>()));
+
     case "save-content":
       return out(await T.saveContent(ws, pid, await json<T.GeneratedContent>()));
 
@@ -159,9 +165,40 @@ async function main() {
       return out(await T.getMedia(ws, pid));
 
     case "save-media": {
-      // payload: { slot, localPath, mimeType, altText }
-      const p = await json<{ slot: string; localPath: string; mimeType: string; altText: string }>();
-      return out(await T.saveMedia(ws, pid, p.slot, p.localPath, p.mimeType, p.altText));
+      // payload: { slot, localPath, mimeType, altText, displayOrder? }
+      // displayOrder > 0 saves a gallery row (e.g. extra slot="hero" slides).
+      const p = await json<{ slot: string; localPath: string; mimeType: string; altText: string; displayOrder?: number }>();
+      return out(await T.saveMedia(ws, pid, p.slot, p.localPath, p.mimeType, p.altText, p.displayOrder || 0));
+    }
+
+    case "pdp-images":
+      // pdp-images <handle> — every Shopify-CDN image URL on the live PDP (for
+      // the skill to pick endorsement avatars / before-after photos).
+      return out(await T.getPdpImages(rest[0]));
+
+    case "rehost-image": {
+      // rehost-image <ws> <pid> ← stdin { sourceUrl, slot, displayOrder?, altText?, fit?, width?, height? }
+      // Download a Shopify-CDN image + re-host to product-media (NEVER hotlink).
+      const p = await json<{ sourceUrl: string; slot: string; displayOrder?: number; altText?: string; fit?: T.RehostFit; width?: number; height?: number }>();
+      return out(await T.rehostImage(ws, pid, p.sourceUrl, p.slot, {
+        displayOrder: p.displayOrder, altText: p.altText, fit: p.fit, width: p.width, height: p.height,
+      }));
+    }
+
+    case "resolve-lifestyle": {
+      // resolve-lifestyle <ws> <pid> "<productName>" "<kw1,kw2>" [pickIndex]
+      // Drive UGC/Photos lifestyle slide → LOCAL file (vision-confirm, then save-media slot=hero displayOrder>0).
+      const productName = rest[2] || "";
+      const variantKeywords = (rest[3] || "").split(",").map((s) => s.trim()).filter(Boolean);
+      const pickIndex = rest[4] ? parseInt(rest[4], 10) : 0;
+      return out(await T.resolveLifestyleSlide(ws, pid, productName, variantKeywords, pickIndex));
+    }
+
+    case "generate-static-ad": {
+      // generate-static-ad <ws> <pid> ← stdin { imageUrls:[packUrl,…], prompt, captions:[top,bottom] }
+      // Nano-Banana Pro static-ad scene + caption overlays → LOCAL file (vision-confirm, then save-media slot=hero displayOrder>0).
+      const p = await json<{ imageUrls: string[]; prompt: string; captions?: string[] }>();
+      return out(await T.generateStaticAdSlide(ws, pid, p.imageUrls || [], p.prompt, p.captions || []));
     }
 
     case "publish":

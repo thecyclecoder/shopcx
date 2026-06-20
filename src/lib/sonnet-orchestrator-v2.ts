@@ -14,6 +14,7 @@ import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
 import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
 import { currentDateContext } from "@/lib/ai-date-context";
+import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/product-intelligence/publish";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -110,6 +111,15 @@ function buildToolDefinitions() {
       input_schema: {
         type: "object" as const,
         properties: { query: { type: "string", description: "Search term to focus results (e.g. 'caffeine coffee' or 'return policy')" } },
+        required: [] as string[],
+      },
+    },
+    {
+      name: "get_product_nutrition",
+      description: "Get per-variant Supplement Facts / nutrition for products that have them: serving size, servings per container, each nutrient with its amount and % daily value, the proprietary blend, footer notes, and the 'other ingredients' line. CALL THIS for any nutrition question — calories, sodium, potassium, sugar, carbs, protein, fiber, caffeine amount, ingredient amounts/dosages, 'supplement facts', macros, or whether a product fits a diet (keto, low-sodium, diabetic, etc.). Returns the facts per flavor/variant, so you can quote the exact number for the flavor the customer asks about. Only products with published facts appear — if a product isn't listed, we don't have verified facts for it (say so, don't guess).",
+      input_schema: {
+        type: "object" as const,
+        properties: { query: { type: "string", description: "Product or flavor/variant name to focus on (e.g. 'Superfood Tabs', 'Peach Mango'). Omit to list every product/variant that has facts." } },
         required: [] as string[],
       },
     },
@@ -481,6 +491,8 @@ export async function executeToolCall(
       }
       case "get_product_knowledge":
         return await getProductKnowledge(admin, workspaceId, (input?.query as string) || "");
+      case "get_product_nutrition":
+        return await getProductNutrition(admin, workspaceId, (input?.query as string) || "");
       case "check_inventory":
         return await checkInventory(admin, workspaceId, (input?.query as string) || "");
       case "get_returns":
@@ -845,6 +857,64 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
     parts.push(`\nPOTENTIAL UNLINKED ACCOUNTS: ${unlinked.map(m => m.email).join(", ")}`);
   }
 
+  return parts.join("\n");
+}
+
+/**
+ * Per-variant Supplement Facts for nutrition questions. Reads
+ * `product_variants.supplement_facts` (the same column the storefront panel +
+ * KB mirror use), so the support AI can quote exact numbers per flavor
+ * (sodium, potassium, caffeine, calories…) on a ticket. Only variants with
+ * populated facts are returned — a product with no verified facts simply
+ * isn't listed, and the tool says so rather than letting the AI guess.
+ */
+async function getProductNutrition(admin: Admin, wsId: string, query: string): Promise<string> {
+  const [{ data: variants }, { data: products }] = await Promise.all([
+    admin
+      .from("product_variants")
+      .select("product_id, title, option1, option2, position, supplement_facts")
+      .eq("workspace_id", wsId)
+      .not("supplement_facts", "is", null)
+      .order("position", { ascending: true }),
+    admin.from("products").select("id, title").eq("workspace_id", wsId).eq("status", "active"),
+  ]);
+
+  const titleById = new Map((products || []).map((p) => [p.id as string, (p.title as string) || ""]));
+  let rows = variants || [];
+  if (rows.length === 0) {
+    return "No Supplement Facts are on file for any product yet, so I can't quote nutrition numbers. Don't guess — tell the customer we'll confirm and follow up.";
+  }
+
+  const q = query.trim().toLowerCase();
+  if (q) {
+    const matched = rows.filter((v) => {
+      const pt = (titleById.get(v.product_id as string) || "").toLowerCase();
+      const vt = `${v.title || ""} ${v.option1 || ""} ${v.option2 || ""}`.toLowerCase();
+      return pt.includes(q) || vt.includes(q) || (pt.length > 0 && q.includes(pt));
+    });
+    // Fall back to the full list if the query matched nothing — better to show
+    // everything we have than to claim we have nothing for this product.
+    if (matched.length > 0) rows = matched;
+  }
+
+  const byProduct = new Map<string, typeof rows>();
+  for (const v of rows) {
+    const list = byProduct.get(v.product_id as string) || [];
+    list.push(v);
+    byProduct.set(v.product_id as string, list);
+  }
+
+  const parts: string[] = ["PER-VARIANT SUPPLEMENT FACTS:"];
+  for (const [pid, list] of byProduct) {
+    parts.push(`\n${titleById.get(pid) || "Product"}:`);
+    for (const v of list) {
+      const txt = formatSupplementFactsText(v.supplement_facts as SupplementFactsShape | null);
+      if (!txt) continue;
+      const label = ((v.title || v.option1 || "Default") as string).trim();
+      parts.push(`  ${label}:`);
+      for (const line of txt.split("\n")) parts.push(`    ${line}`);
+    }
+  }
   return parts.join("\n");
 }
 

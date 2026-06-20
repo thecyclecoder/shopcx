@@ -8,8 +8,8 @@
  * Usage (from the box skill):
  *   npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]
  *
- * Tools: get_customer_account · get_product_knowledge · get_returns · get_chargebacks ·
- *        get_email_history · get_crisis_status · get_dunning_status · get_ticket_analysis
+ * Tools: get_customer_account · get_product_knowledge · get_product_nutrition · get_returns ·
+ *        get_chargebacks · get_email_history · get_crisis_status · get_dunning_status · get_ticket_analysis
  *
  * Prints the tool's text result to stdout. See docs/brain/specs/box-ticket-improve.md.
  */
@@ -31,6 +31,7 @@ if (existsSync(envPath)) {
 const READ_TOOLS = new Set([
   "get_customer_account",
   "get_product_knowledge",
+  "get_product_nutrition",
   "get_returns",
   "get_chargebacks",
   "get_email_history",

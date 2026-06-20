@@ -11,7 +11,7 @@ Per-product media (images, videos) with dimensions and roles (hero, gallery, bef
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
 | `product_id` | `uuid` | — | → [[products]].id |
-| `slot` | `text` | — |  |
+| `slot` | `text` | — | image role/position. Known slots: `hero` (the bag hero + extra hero-gallery slides at `display_order` > 0: lifestyle, static-ad), `lifestyle_1`, `timeline_{N}`, `ingredient_{snake_name}`, `endorsement_{n}_avatar` (re-hosted nutritionist headshot), `before`/`after` (legacy single story) and `before_{n}`/`after_{n}` (up to 2 stories, pairs with `product_page_content.before_after_stories`). All harvested/generated images are re-hosted to this bucket — never a Shopify-CDN hotlink |
 | `url` | `text` | ✓ |  |
 | `storage_path` | `text` | ✓ |  |
 | `alt_text` | `text` | ✓ | default: `''` |
@@ -46,7 +46,7 @@ Per-product media (images, videos) with dimensions and roles (hero, gallery, bef
 | `webp_1500_url` | `text` | ✓ |  |
 | `avif_1500_storage_path` | `text` | ✓ |  |
 | `webp_1500_storage_path` | `text` | ✓ |  |
-| `display_order` | `int4` | — | default: `0` |
+| `display_order` | `int4` | — | default: `0` · gallery order within a slot. The hero gallery shares `slot="hero"` across rows: `0` = bag hero, higher orders = lifestyle / Nano-Banana static-ad slides. Storage path gets a `_{order}` suffix when > 0 so multiple images coexist under one slot |
 
 ## Foreign keys
 

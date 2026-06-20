@@ -28,6 +28,12 @@ export function WhatToExpectTimeline({ data }: { data: PageData }) {
     ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
     : null;
 
+  // Desktop column count = min(steps, 5). A fixed 5-col grid left-aligns a
+  // 3- or 4-step timeline (the trailing empty columns pull the row to the
+  // left); sizing the grid to the actual step count keeps it balanced/centered.
+  const displayed = items.slice(0, 5);
+  const desktopCols = Math.min(displayed.length, 5);
+
   return (
     <section data-section="expect" className="w-full bg-zinc-50 py-12 sm:py-16">
       <div className="mx-auto max-w-6xl px-5 md:px-8">
@@ -66,9 +72,14 @@ export function WhatToExpectTimeline({ data }: { data: PageData }) {
           })}
         </ol>
 
-        {/* Desktop: horizontal milestones */}
-        <ol className="hidden md:grid md:grid-cols-3 md:gap-6 lg:grid-cols-5">
-          {items.slice(0, 5).map((it, i, arr) => {
+        {/* Desktop: horizontal milestones. Columns = min(steps, 5) so a
+            sub-5-step timeline stays centered instead of left-aligning in a
+            fixed 5-col grid (the row was previously hard-coded to 5 columns). */}
+        <ol
+          className="hidden md:grid md:gap-6 [grid-template-columns:repeat(var(--timeline-cols),minmax(0,1fr))]"
+          style={{ "--timeline-cols": desktopCols } as React.CSSProperties}
+        >
+          {displayed.map((it, i, arr) => {
             const img = milestoneImage(i);
             return (
               <li key={i} className="relative flex flex-col items-center text-center">

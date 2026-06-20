@@ -316,10 +316,39 @@ export function HeroSection({ data }: { data: PageData }) {
 }
 
 /**
- * "Backed by N studies on M ingredients in {product}" — the credibility
+ * Is `name` a "caffeine-style duplicate" of an ingredient already in the
+ * list? A caffeine card that parenthetically sources an existing superfood
+ * (e.g. "100mg Caffeine (Green Tea)" when "Green Tea" is its own card) is the
+ * SAME superfood surfaced twice — it inflates the count. We detect it (mentions
+ * caffeine + parenthetically references another listed ingredient) so it isn't
+ * double-counted. The card itself is kept; only the credibility COUNT excludes it.
+ */
+function isCaffeineDuplicate(name: string, allNames: string[]): boolean {
+  const lower = name.toLowerCase();
+  if (!lower.includes("caffeine")) return false;
+  const paren = name.match(/\(([^)]+)\)/);
+  if (!paren) return false;
+  const ref = paren[1].trim().toLowerCase();
+  if (!ref) return false;
+  return allNames.some((other) => {
+    const o = other.toLowerCase();
+    if (o === lower) return false;
+    return o.includes(ref) || ref.includes(o);
+  });
+}
+
+/** Count distinct superfoods, collapsing caffeine-style duplicates (16 → 15). */
+export function countDistinctSuperfoods(names: string[]): number {
+  return names.filter((n) => !isCaffeineDuplicate(n, names)).length;
+}
+
+/**
+ * "Backed by N studies on M superfoods in {product}" — the credibility
  * tag that sits under the benefit cards. Numbers come straight from the
- * ingredient_research rows we already loaded for this page; rendering
- * is suppressed when there's nothing meaningful to claim.
+ * ingredient_research rows we already loaded for this page; the superfood
+ * count excludes caffeine-style duplicates of an existing ingredient (so the
+ * Tabs "100mg caffeine (green tea)" card, which duplicates Green Tea, counts
+ * once → 15 not 16). Rendering is suppressed when there's nothing to claim.
  */
 function ResearchCredibility({ data }: { data: PageData }) {
   // Count total citations across every ingredient's research rows.
@@ -327,11 +356,18 @@ function ResearchCredibility({ data }: { data: PageData }) {
     return sum + (Array.isArray(r.citations) ? r.citations.length : 0);
   }, 0);
 
-  // Distinct ingredients that actually have research attached — not the
-  // raw ingredient list, since some may be supporting / unstudied.
-  const ingredientCount = new Set(
-    data.ingredient_research.map((r) => r.ingredient_id),
-  ).size;
+  // Distinct superfoods that actually have research attached — not the raw
+  // ingredient list (some may be supporting / unstudied), and collapsing
+  // caffeine-style duplicates of an existing ingredient so we don't claim
+  // one superfood twice.
+  const allNames = data.ingredients.map((i) => i.name);
+  const researchedIds = new Set(data.ingredient_research.map((r) => r.ingredient_id));
+  const researchedNames = data.ingredients
+    .filter((i) => researchedIds.has(i.id))
+    .map((i) => i.name);
+  const ingredientCount = researchedNames.filter(
+    (n) => !isCaffeineDuplicate(n, allNames),
+  ).length;
 
   if (studyCount < 2 || ingredientCount < 2) return null;
 
@@ -345,7 +381,7 @@ function ResearchCredibility({ data }: { data: PageData }) {
       <span>
         Backed by{" "}
         <span className="font-bold text-zinc-900">{studyCount} clinical studies</span> on{" "}
-        <span className="font-bold text-zinc-900">{ingredientCount} ingredients</span> in {data.product.title}
+        <span className="font-bold text-zinc-900">{ingredientCount} superfoods</span> in {data.product.title}
       </span>
     </p>
   );
