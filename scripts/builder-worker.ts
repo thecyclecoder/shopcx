@@ -1645,6 +1645,10 @@ function extractSpecTestResult(text: string): Record<string, unknown> | null {
 
 // Normalize + re-derive the verdict/summary from the agent's checks so the stamp can never lie (e.g. the
 // agent says "approved" but a check failed). The checks array is the ground truth; counts follow it.
+// `issues` is driven ONLY by evidence-backed `fail`s (auto_fail>0) — a `fail` means the agent observed
+// breakage (see the classification rule in the spec-test prompt/skill); `needs_human`/`inconclusive`
+// never flip the verdict to `issues` and never become regressions. The summary guard holds: an
+// empty/uncertain run (no `pass`) lands on `needs_human`, never `approved`.
 function normalizeSpecTest(parsed: Record<string, unknown> | null): {
   agent_verdict: "approved" | "issues" | "needs_human";
   summary: SpecTestSummary;
@@ -1686,6 +1690,7 @@ async function runSpecTestJob(job: Job) {
     const prompt = [
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is docs/brain/specs/${slug}.md. Read it + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human | mutating→needs-human), and run ONLY the non-destructive checks on the box.`,
+      `🚨 \`fail\` REQUIRES POSITIVE EVIDENCE OF BREAKAGE — you ran a non-destructive check and OBSERVED the feature doing the wrong thing (a column it claims to select isn't there; a route 500s; a role check returns the wrong status). "I couldn't verify this read-only" is NOT a fail. A REAL check you cannot exercise read-only — it needs forcing a failure / fault injection (e.g. "force unparseable output → expect error state"), a mutation (send/charge/create), or visual/UX judgment — is \`needs_human\` (a human can verify it), NEVER \`fail\`. Genuinely undeterminable (missing fixture, ambiguous bullet) → \`inconclusive\`. When the implementing code plainly satisfies a bullet but the runtime path needs a forced fault, prefer \`needs_human\` with a note ("code present at file:line; needs forced fault to confirm") over \`fail\`. Only evidence-backed \`fail\`s become regressions / flip the verdict to \`issues\`; \`needs_human\`/\`inconclusive\` never do.`,
       `You have the box's read-only QA toolkit: repo Read/Grep + \`npx tsc --noEmit\`, the \`gh\` CLI for CI/PR status, the \`vercel\` CLI for deploy READY + logs + \`vercel env ls\`, read-only DB probes via \`npx tsx scripts/spec-test-db-probe.ts "<select …>"\`, and GET/read-only endpoint hits. NEVER mutate prod, NEVER mark the spec verified/archived, NEVER run a mutating check (those are needs_human).`,
       `Final message = ONLY one JSON object (no prose before/after; if fenced, the JSON is the last thing in the message): {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>"}],"report":"<2-4 plain-text sentences>"} — or {"status":"error","error":"<why>"} if you cannot proceed.`,
     ].join("\n");

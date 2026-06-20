@@ -42,11 +42,35 @@ result}.` For **each** bullet decide one category:
   deploy is READY, an env var is present, CI is green.
 - **needs_human** — (a) **visual/UX**: "looks right", "renders the badge", "the page looks fantastic",
   any judgment of appearance; OR (b) **mutating**: would send a message, place/modify an order, charge
-  a card, fire a real email/SMS, write any prod row. NEVER run these — flag them.
+  a card, fire a real email/SMS, write any prod row; OR (c) **fault-injection / forced-failure**: a
+  REAL check whose observable result only appears if you first force a fault — "force unparseable
+  output → expect `error` state", "kill the upstream → expect the fallback", "feed a malformed payload
+  → expect a 400". You cannot inject the fault read-only, so a **human can verify it** → route it to
+  them, NEVER run it, NEVER `fail` it.
 - **inconclusive** — auto in principle, but you couldn't determine it without a side effect or a
-  missing fixture (say why in the evidence).
+  missing fixture, OR the bullet is genuinely ambiguous and it's unclear a human easily can either (say
+  why in the evidence).
 
 When in doubt between auto and mutating, choose **needs_human**. A false "pass" is worse than a deferral.
+
+### 🚨 `fail` requires POSITIVE evidence of breakage — "couldn't verify" is NOT a fail
+
+This is the line that keeps the Regressions list meaningful. `fail` means **you ran a non-destructive
+check and OBSERVED the feature doing the wrong thing** — a column it claims to select isn't there, a
+route 500s, a role check returns the wrong status, a probe shows the row in the wrong state. No
+breakage observed → it is **not** a `fail`.
+
+- A real check you **cannot exercise read-only** — it needs forcing a failure / fault injection (the
+  canonical example: a bullet that says *"force X to fail → expect the error handling"*), a mutation,
+  or visual/UX judgment — is **`needs_human`**, never `fail`. You couldn't inject the fault; a human can.
+- When you can `Read` the implementing code and it **plainly satisfies the bullet** but the runtime
+  path needs a forced fault to exercise, prefer **`needs_human` with a note** —
+  `"code present at file:line; needs forced fault to confirm"` — over `fail`. The code being correct is
+  evidence *for* the feature, not against it; absence of a runtime probe is not breakage evidence.
+- Genuinely undeterminable (missing fixture, ambiguous bullet) → **`inconclusive`**.
+- **A regression = a true `fail` only.** The Regressions list and the `issues` verdict are driven
+  **exclusively** by `fail`s backed by breakage evidence; `needs_human`/`inconclusive` never appear as
+  regressions and never flip the verdict to `issues`.
 
 ## Step 2 — run ONLY the non-destructive checks
 
@@ -74,7 +98,10 @@ Your read-only QA toolkit, all on the box:
 Each verdict MUST carry concrete **evidence**: the query result, the HTTP status, the `file:line`, the
 `vercel`/`gh` line — never just "looks fine". An **auto `fail` on a shipped spec is high-signal** (it
 shipped but fails its own verification = a regression or incomplete build) — surface it loudly in the
-summary, with the probe evidence.
+summary, with the probe evidence. Precisely because it's high-signal, a `fail` must be **earned**: only
+emit it with the breakage evidence above. If you have no such evidence — you merely couldn't run the
+check read-only — it is `needs_human` or `inconclusive`, not `fail`. A phantom regression from a
+"couldn't verify" mis-labeled `fail` is worse than a deferred check.
 
 ## Step 3 — emit ONE JSON object (your entire final message)
 
@@ -109,7 +136,8 @@ One-shot example of a **complete, valid** final message (this is the entire mess
 ```
 
 Rules for the stamp:
-- `agent_verdict = "issues"` if **any** check is `fail`.
+- `agent_verdict = "issues"` if **any** check is `fail` (and `fail` means breakage you OBSERVED — see
+  the rule above; a `needs_human`/`inconclusive` check never makes the verdict `issues`).
 - else `agent_verdict = "approved"` if **at least one** check is `pass` and none failed.
 - else `agent_verdict = "needs_human"` (nothing auto-ran, or only human/inconclusive checks remain).
 - `summary` counts must match the `checks` array. If the spec has **no `## Verification` section**, emit
