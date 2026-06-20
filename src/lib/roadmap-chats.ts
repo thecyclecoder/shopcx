@@ -10,6 +10,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 export type ChatStatus = "active" | "finalized";
+// Per-turn lifecycle for the box-hosted spec chat (box-spec-chat): a turn enqueues a kind='spec-chat'
+// job that runs on the box; the UI polls turn_status while it thinks. idle → thinking → idle (reply
+// landed) or → error (box failed; UI offers a retry that re-resumes the same box session).
+export type TurnStatus = "idle" | "thinking" | "error";
 
 export type RoadmapChat = {
   id: string;
@@ -19,6 +23,10 @@ export type RoadmapChat = {
   title: string | null;
   messages: ChatMsg[];
   status: ChatStatus;
+  // box-spec-chat: the resumable `claude -p` Max session id (null until turn 1 runs) + turn lifecycle.
+  box_session_id: string | null;
+  turn_status: TurnStatus;
+  last_error: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -33,7 +41,8 @@ export type SaveChatInput = {
   status?: ChatStatus;
 };
 
-const ROW_COLUMNS = "id, workspace_id, user_id, spec_slug, title, messages, status, created_at, updated_at";
+const ROW_COLUMNS =
+  "id, workspace_id, user_id, spec_slug, title, messages, status, box_session_id, turn_status, last_error, created_at, updated_at";
 
 function normalizeMessages(value: unknown): ChatMsg[] {
   if (!Array.isArray(value)) return [];
@@ -55,6 +64,9 @@ function toRow(row: Record<string, unknown> | null): RoadmapChat | null {
     title: (row.title as string | null) ?? null,
     messages: normalizeMessages(row.messages),
     status: (row.status as ChatStatus) ?? "active",
+    box_session_id: (row.box_session_id as string | null) ?? null,
+    turn_status: (row.turn_status as TurnStatus) ?? "idle",
+    last_error: (row.last_error as string | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
@@ -123,6 +135,32 @@ export async function loadActiveChatForSlug(workspaceId: string, specSlug: strin
     .eq("status", "active")
     .order("updated_at", { ascending: false })
     .limit(1)
+    .maybeSingle();
+  return toRow(data as Record<string, unknown> | null);
+}
+
+/**
+ * box-spec-chat — append an optional user message and mark the thread "thinking" so the box can pick
+ * up the turn. Clears any prior turn error. Returns the updated row (so the route can echo it back to
+ * the UI). The box (runSpecChatJob) appends the assistant reply + flips turn_status back to 'idle'.
+ */
+export async function markTurnThinking(
+  workspaceId: string,
+  id: string,
+  userMessage?: string,
+): Promise<RoadmapChat | null> {
+  const admin = createAdminClient();
+  const existing = await loadChat(workspaceId, id);
+  if (!existing) return null;
+  const messages = userMessage
+    ? [...existing.messages, { role: "user" as const, content: userMessage }]
+    : existing.messages;
+  const { data } = await admin
+    .from("roadmap_chats")
+    .update({ messages, turn_status: "thinking", last_error: null, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId)
+    .select(ROW_COLUMNS)
     .maybeSingle();
   return toRow(data as Record<string, unknown> | null);
 }

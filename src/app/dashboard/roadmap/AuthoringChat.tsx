@@ -10,21 +10,25 @@ type Session = {
   title: string | null;
   spec_slug: string | null;
   messages: Msg[];
+  status: "active" | "finalized";
+  turn_status: "idle" | "thinking" | "error";
+  last_error: string | null;
   updated_at: string;
 };
 
 /**
- * Opus authoring chat — three modes, all Opus-grounded in the brain (POST /api/roadmap/chat):
+ * Box-hosted authoring chat (box-spec-chat) — three modes, the chat now runs on the build box as a
+ * long-running, resumable `claude -p` session on Max (full repo + brain + WebSearch every turn), NOT
+ * the Anthropic API:
  *  - new:    talk a feature through → save docs/brain/specs/{slug}.md
  *  - refine: pass `slug` → edit an existing spec
- *  - seed ("New spec from brain" / re-hydrate): pass `seed` + an optional `seedSlug` (a brain page —
- *    lifecycle/dashboard/table or an archived entry). Opus reads the CURRENT brain page and drafts a
- *    FRESH spec to extend/fix it (never reactivates a stale snapshot). If no seedSlug, asks for one.
+ *  - seed ("New spec from brain"): pass `seed` + `seedSlug` (a brain page) → draft a fresh spec to extend it.
  *
- * Conversations persist to public.roadmap_chats (POST/GET /api/roadmap/chat-session) — the transcript
- * autosaves (debounced) as you talk, survives closing the modal, and resumes cross-device. On open we
- * offer Resume vs Start fresh (refine: the spec's latest active session; new: a recent-chats list).
- * Finalizing marks the session finalized + links its slug. Owner-only.
+ * Each turn POSTs to /api/roadmap/chat (which appends the message + enqueues a box job) and then POLLS
+ * GET /api/roadmap/chat-session?id= every ~3s while `turn_status='thinking'`; the reply lands when the
+ * box finishes (minutes, not seconds — signposted). The DB (public.roadmap_chats) is the source of truth
+ * for the transcript + resume list, so closing the modal keeps the thread and it resumes cross-device.
+ * On a box error the composer surfaces a Retry (re-resumes the same box session). Owner-only.
  */
 export default function AuthoringChat({
   slug,
@@ -42,65 +46,67 @@ export default function AuthoringChat({
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [thinking, setThinking] = useState(false); // a turn is on the box
+  const [finalizing, setFinalizing] = useState(false); // a finalize is on the box
   const [result, setResult] = useState<{ slug: string; title: string; queued: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retryable, setRetryable] = useState(false); // box error → offer Retry (re-resume the session)
   const [seedValue, setSeedValue] = useState(seedSlug || "");
-  // Persistence: the row id (set once a session exists) + the resume picker (null = proceed to chat).
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [resume, setResume] = useState<{ candidate: Session | null; recent: Session[] } | null>(null);
-  const persisting = useRef(false);
+  const queueBuildRef = useRef(false); // what the in-flight finalize requested (for the result line)
 
   if (workspace.role !== "owner") return null;
 
-  // In seed mode the effective brain page comes from the prop (archived entry) or the input box.
   const activeSeed = seed ? (seedSlug || seedValue.trim()) : undefined;
   const seedReady = !seed || !!activeSeed;
+  const busy = thinking || finalizing;
 
-  // Persist the transcript (upsert). Serialized via persisting ref so the debounced autosave can't
-  // race itself into duplicate rows before the first insert returns an id.
-  async function persist(status?: "active" | "finalized", finalSlug?: string): Promise<string | undefined> {
-    if (persisting.current || messages.length === 0) return sessionId ?? undefined;
-    persisting.current = true;
-    try {
-      const title = slug
-        ? `Refine: ${slug}`
-        : messages.find((m) => m.role === "user")?.content.slice(0, 80) || "New feature";
-      const res = await fetch("/api/roadmap/chat-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: sessionId ?? undefined,
-          spec_slug: finalSlug ?? slug ?? null,
-          title,
-          messages,
-          status,
-        }),
-      });
-      const d = await res.json();
-      if (res.ok && d.id) {
-        if (!sessionId) setSessionId(d.id);
-        return d.id as string;
-      }
-    } catch {
-      // best-effort — a failed autosave shouldn't interrupt the chat
-    } finally {
-      persisting.current = false;
-    }
-    return sessionId ?? undefined;
-  }
-
-  // Debounced autosave as the conversation progresses (not while picking a resume, post-finalize, or empty).
+  // Poll the thread while a turn/finalize is on the box. The box owns the transcript; we mirror it +
+  // clear the spinner when turn_status returns to idle (or surface a Retry on error).
   useEffect(() => {
-    if (!open || resume || result || messages.length === 0) return;
-    const handle = setTimeout(() => void persist(), 800);
-    return () => clearTimeout(handle);
+    if (!open || !sessionId || !busy) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/roadmap/chat-session?id=${encodeURIComponent(sessionId)}`);
+        const d = await res.json();
+        const s = d.session as Session | null;
+        if (!s || stop) return;
+        setMessages(s.messages);
+        if (s.turn_status === "error") {
+          setError(s.last_error || "The box turn failed.");
+          setRetryable(true);
+          setThinking(false);
+          setFinalizing(false);
+          return;
+        }
+        if (s.turn_status === "idle") {
+          if (finalizing && s.status === "finalized" && s.spec_slug) {
+            setResult({ slug: s.spec_slug, title: (s.title || s.spec_slug).replace(/^Refine:\s*/, ""), queued: queueBuildRef.current });
+            setFinalizing(false);
+            router.refresh();
+          } else if (!finalizing) {
+            setThinking(false);
+          }
+        }
+      } catch {
+        // transient — keep polling
+      }
+    };
+    const handle = setInterval(tick, 3000);
+    void tick();
+    return () => {
+      stop = true;
+      clearInterval(handle);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, open, resume, result]);
+  }, [open, sessionId, busy, finalizing]);
 
   async function openChat() {
     setOpen(true);
     setError(null);
+    setRetryable(false);
     if (seed) return; // seed mode drafts fresh from a brain page — no prior session to resume
     try {
       if (slug) {
@@ -122,69 +128,97 @@ export default function AuthoringChat({
     setMessages(s.messages);
     setSessionId(s.id);
     setResume(null);
+    setError(null);
+    setRetryable(false);
+    if (s.turn_status === "thinking") setThinking(true); // a turn was mid-flight on another device
   }
 
   function startFresh() {
     setMessages([]);
     setSessionId(null);
     setResume(null);
+    setError(null);
+    setRetryable(false);
   }
 
   async function send() {
     const text = input.trim();
-    if (!text || loading || !seedReady) return;
-    const next = [...messages, { role: "user" as const, content: text }];
-    setMessages(next);
+    if (!text || busy || !seedReady) return;
+    setMessages((m) => [...m, { role: "user", content: text }]); // optimistic — the poll re-syncs from DB
     setInput("");
-    setLoading(true);
+    setThinking(true);
     setError(null);
+    setRetryable(false);
     try {
       const res = await fetch("/api/roadmap/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: next, slug, seedSlug: activeSeed, action: "chat" }),
+        body: JSON.stringify({ id: sessionId ?? undefined, message: text, slug, seedSlug: activeSeed, action: "chat" }),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || "chat failed");
-      setMessages((m) => [...m, { role: "assistant", content: d.reply }]);
+      if (d.session) {
+        setSessionId(d.session.id);
+        setMessages(d.session.messages);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "chat failed");
-    } finally {
-      setLoading(false);
+      setRetryable(!!sessionId);
+      setThinking(false);
+    }
+  }
+
+  async function retry() {
+    if (busy || !sessionId) return;
+    setThinking(true);
+    setError(null);
+    setRetryable(false);
+    try {
+      const res = await fetch("/api/roadmap/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: sessionId, slug, seedSlug: activeSeed, action: "retry" }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "retry failed");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "retry failed");
+      setRetryable(true);
+      setThinking(false);
     }
   }
 
   async function finalize(queueBuild: boolean) {
-    if (loading || messages.length === 0) return;
-    setLoading(true);
+    if (busy || messages.length === 0 || !sessionId) return;
+    queueBuildRef.current = queueBuild;
+    setFinalizing(true);
     setError(null);
+    setRetryable(false);
     try {
       const res = await fetch("/api/roadmap/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages, slug, seedSlug: activeSeed, action: "finalize", queueBuild }),
+        body: JSON.stringify({ id: sessionId, slug, seedSlug: activeSeed, action: "finalize", queueBuild }),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || "finalize failed");
-      setResult({ slug: d.slug, title: d.title, queued: d.queued });
-      // Mark the session finalized + link its now-known slug (matters for New-feature chats).
-      void persist("finalized", d.slug);
-      router.refresh();
+      // result lands via the poll when turn_status→idle + status→finalized.
     } catch (e) {
       setError(e instanceof Error ? e.message : "finalize failed");
-    } finally {
-      setLoading(false);
+      setFinalizing(false);
     }
   }
 
   function close() {
-    // Persist (don't discard) the in-progress transcript, then clear only local UI state.
-    if (open && !result) void persist();
+    // The transcript lives in the DB (server-owned), so closing only clears local UI state.
     setOpen(false);
     setMessages([]);
     setInput("");
+    setThinking(false);
+    setFinalizing(false);
     setResult(null);
     setError(null);
+    setRetryable(false);
     setSessionId(null);
     setResume(null);
     if (!seedSlug) setSeedValue("");
@@ -282,10 +316,10 @@ export default function AuthoringChat({
                 {messages.length === 0 && !result && (
                   <p className="py-6 text-center text-xs text-zinc-400">
                     {seed
-                      ? "Opus reads the current brain page and drafts a fresh spec to extend or fix it — not a stale snapshot. Set the page above, then describe what to change or add."
+                      ? "Opus-on-Max reads the current brain page + the real code and drafts a fresh spec to extend or fix it. Set the page above, then describe what to change or add."
                       : slug
-                      ? "Describe what to change or add to this spec. Opus will refine it; then Save."
-                      : "Describe the feature you want. Opus will ask questions and shape a spec; then Save (and optionally build it)."}
+                      ? "Describe what to change or add to this spec. Opus-on-Max reads the repo + brain to refine it; then Save."
+                      : "Describe the feature you want. Opus-on-Max reads the code, the brain, and the web, asks questions, and shapes a spec; then Save (and optionally build it)."}
                   </p>
                 )}
                 {messages.map((m, i) => (
@@ -301,7 +335,11 @@ export default function AuthoringChat({
                     </div>
                   </div>
                 ))}
-                {loading && <p className="text-center text-xs text-zinc-400">Opus is thinking…</p>}
+                {busy && (
+                  <p className="text-center text-xs text-zinc-400">
+                    {finalizing ? "Finalizing on the box…" : "Thinking on the box…"} (this takes a minute — it reads the repo + web on Max)
+                  </p>
+                )}
                 {result && (
                   <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-950/20 dark:text-emerald-300">
                     Saved <strong>{result.title || result.slug}</strong> to <code>specs/{result.slug}.md</code>
@@ -309,7 +347,16 @@ export default function AuthoringChat({
                     <a href={`/dashboard/roadmap/${result.slug}`} className="underline">View spec →</a>
                   </div>
                 )}
-                {error && <p className="text-center text-xs text-rose-500">{error}</p>}
+                {error && (
+                  <div className="text-center text-xs text-rose-500">
+                    {error}
+                    {retryable && (
+                      <button onClick={retry} className="ml-2 rounded border border-rose-300 px-2 py-0.5 font-medium text-rose-600 hover:bg-rose-50 dark:border-rose-900/40 dark:hover:bg-rose-950/20">
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -328,7 +375,7 @@ export default function AuthoringChat({
                   />
                   <button
                     onClick={send}
-                    disabled={loading || !input.trim() || !seedReady}
+                    disabled={busy || !input.trim() || !seedReady}
                     className="self-end rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-200 dark:text-zinc-900"
                   >
                     Send
@@ -337,14 +384,14 @@ export default function AuthoringChat({
                 <div className="mt-2 flex justify-end gap-2">
                   <button
                     onClick={() => finalize(false)}
-                    disabled={loading || messages.length === 0}
+                    disabled={busy || messages.length === 0}
                     className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300"
                   >
                     Save spec
                   </button>
                   <button
                     onClick={() => finalize(true)}
-                    disabled={loading || messages.length === 0}
+                    disabled={busy || messages.length === 0}
                     className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
                   >
                     Save &amp; build
