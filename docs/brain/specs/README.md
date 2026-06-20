@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Improve Queue ⏳
+
+**Spec:** [[improve-queue]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** fire off several box **Improve** turns, walk away, and see at a glance which ones the box has answered — a `/dashboard/tickets/improve` queue (by the to-dos) that surfaces each ticket-Improve session by `turn_status` (Answered · Needs approval · Thinking… · Error) with a deep-link to the ticket + a nav count badge. Pure read over [[../tables/ticket_improve_chats]], no schema change. Extends [[box-ticket-improve]].
+
 ## Active project — Box-hosted Spec Chat ⏳
 
 **Spec:** [[box-spec-chat]] · **Owner:** [[../functions/platform]]
