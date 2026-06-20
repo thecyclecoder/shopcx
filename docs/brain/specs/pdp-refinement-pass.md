@@ -29,14 +29,48 @@ A `content+media refresh`-style run ([[box-product-seeding]] modes) that, for th
 - **Nutrition facts must be human-verified** per variant before going live (factual/compliance) — the pass surfaces its transcription for approval.
 
 ## Run #1 — Superfood Tabs (the source of this workflow)
-Tabs carries the concrete instances of B + C captured 2026-06-20: headline above; 16→15; Danielle F. `smart_quote` fix; 8 individual pills; 3-variant supplement facts (Peach Mango prioritized — Sodium 230/Potassium 300/Blend 400mg; Mixed Berry 230/306/457; Strawberry Lemonade 240/310/467 — **pending founder verification**); real endorsements (Lindsey Ray / Teresa Rodriguez / Brenda Gregory, photos re-hosted); 2 before/after stories (Anne B. + one more); 4-slide gallery; full-corpus review analysis.
+The concrete B + C inputs captured 2026-06-20.
+
+**Already applied live (zero-risk DB edits, render with existing code):**
+- Headline → **"Fizz. Drink. Shed Pounds & Fight Bloating."**
+- Danielle F. review `smart_quote` typo → "I realized I enjoyed them so much, it became a non negotiable."
+- Trust pills split to 8 individual items (`certifications` = Non-GMO · 3rd Party Tested · Natural Ingredients; `allergen_free` = Sugar Free · Gluten Free · Soy Free · Dairy Free · Nut Free).
+
+**Pending the P1 build, then the Tabs pass applies:**
+- **16 → 15 superfoods** in all copy (hero_subheadline, mechanism_copy, KB, benefit_bar[5], comparison row, faq[0]) **and** the hero credibility badge (the "100mg caffeine (green tea)" card stays but isn't counted as a distinct superfood). NOT the "12–16 oz water" dosing line.
+- Real endorsements (Lindsey Ray / Teresa Rodriguez / Brenda Gregory) with photos re-hosted Shopify→Supabase.
+- 2 before/after stories (Anne B. — Mixed Berry, 84 lbs — + one more), photos re-hosted.
+- 4-slide hero gallery (bag · Drive lifestyle (woman ~40s holding box) · Nano-Banana static-ad · HTML facts).
+- Full-corpus 4★+ review analysis (3,122 reviews; real category counts).
+
+**Per-variant Supplement Facts (FINAL — locked; serving = 1 Tablet, 30/container; PDP shows the PRIORITIZED variant = Peach Mango; footer: "*Percent Daily Values are based on a 2,000 calorie diet." + "**Daily value not established."; other ingredients identical across all three: Citric acid, natural flavors, hydroxypropyl cellulose, croscarmellose sodium, rebaudioside A, silica, L-leucine, canola oil and magnesium stearate):**
+
+- **Peach Mango (prioritized):** Calories 5 · Total Carbohydrate <1 g (<1%*) · Sodium (as sodium bicarbonate and sodium carbonate) 230 mg (10%) · Potassium (as potassium bicarbonate) 300 mg (6%) · Proprietary Superfood Blend **400 mg** (**): Turmeric root powder, Green tea leaf extract (100 mg caffeine), Beet root, Elderberry fruit 10:1 extract, Matcha tea leaf (Camellia sinensis), Burdock root 4:1 extract, Ginger root 5:1 extract, Dandelion 5:1 extract (whole plant), Lemon balm 4:1 extract (aerial parts), Milk thistle seed extract, Asian ginseng root, Lycium (goji) fruit 5:1 extract, Pomegranate fruit, Aloe vera inner leaf powder, Organic wheat grass, Chlorella algae.
+- **Mixed Berry:** Calories 5 · Total Carbohydrate <1 g (<1%*) · Sodium 230 mg (10%) · Potassium 306 mg (7%) · Proprietary Superfood Blend **457 mg** (**): Elderberry extract, Beet root, Green tea leaf extract (100 mg caffeine), Matcha tea leaf (Camellia sinensis), Burdock root 4:1 extract, Ginger root 5:1 extract, Dandelion 5:1 extract (whole plant), Lemon balm 4:1 extract (aerial parts), Milk thistle seed extract, Asian ginseng root, Lycium (goji) berry fruit 5:1 extract, Pomegranate fruit, Aloe vera inner leaf juice powder, Wheat grass, Chlorella algae.
+- **Strawberry Lemonade:** Calories 5 · Total Carbohydrate <1 g (<1%*) · Sodium 240 mg (10%) · Potassium 310 mg (7%) · Proprietary Superfood Blend **467 mg** (**): Organic beet root, Green tea leaf extract (100 mg caffeine), Elderberry fruit extract, Matcha tea leaf (Camellia sinensis), Burdock root 4:1 extract, Ginger root 5:1 extract, Dandelion 5:1 extract (whole plant), Lemon balm 4:1 extract (aerial parts), Milk thistle seed extract, Asian ginseng root, Lycium (goji) berry fruit 5:1 extract, Pomegranate fruit, Aloe vera inner leaf juice powder, Organic wheat grass, Chlorella algae.
+
+**Nano-Banana static-ad caption overlays (FINAL — hook → benefit → social proof, no specific-weight claim on the ad):** `bloat? gone 🫧` · `15 superfoods · one fizzy tab` · `13,000+ love it ★★★★★`.
 
 ## Verification
+
+### P1 — global build (code-level, after migrations applied)
+- Apply migrations: `npx tsx scripts/apply-pdp-refinement-migrations.ts` → expect `✓ applied 20260620130000_before_after_stories.sql`, `✓ applied 20260620140000_split_trust_pills.sql`. Re-run → same output, no row changes (idempotent).
+- After the split migration, in Supabase SQL: `select certifications from products where array_to_string(certifications, '|') ~ ','` → expect **0 rows** (no element still contains a comma).
+- On a PDP whose timeline has 4 milestones, view desktop → the row is centered/balanced (4 equal columns), not left-aligned with an empty 5th slot. A 5-step timeline still fills 5 columns.
+- On a PDP with `before_1`/`after_1` + `before_2`/`after_2` media and 2 `before_after_stories` → expect two before/after pairs, each beside its own testimonial (quote/name/variant). A PDP with only legacy `before`/`after` still renders one unlabeled pair (Amazing Coffee).
+- On a PDP where one ingredient is a caffeine-source duplicate of another (e.g. Tabs: "100mg Caffeine (Green Tea)" + "Green Tea") → the hero credibility badge reads "…on **15 superfoods**…" (duplicate excluded), and the duplicate ingredient card still renders in "Inside every serving".
+- Box: `npx tsx scripts/seed-product-tools.ts get-reviews <ws> <pid> 0 100` on a product with >1000 4★ reviews → `total` reflects the **full** corpus (thousands, not capped at 1000/2000); paging `offset` 0,100,200… walks all reviews without repeats.
+- Box: `echo '{"sourceUrl":"https://cdn.shopify.com/…/before.jpg","slot":"before_1"}' | npx tsx scripts/seed-product-tools.ts rehost-image <ws> <pid>` → returns a `product-media` Supabase URL; the row's `url` is **not** a Shopify-CDN URL (re-hosted, never hotlinked).
+- Ticket/Improve: ask a nutrition question (e.g. "how much sodium is in Peach Mango Tabs?") → the orchestrator calls `get_product_nutrition`; with no populated `supplement_facts` it returns the "no facts on file — don't guess" message (nothing fabricated). After facts are populated + a republish, the KB article contains a "## Supplement Facts (per variant)" section and the tool quotes the exact number.
+- `npx tsc --noEmit` → clean.
+
+### Per-product pass (prod-facing, P2/P3)
 - Run the pass on a product → trust pills are individual; timeline centered on desktop; review filter counts are realistic (hundreds, not single digits); each variant has a Supplement Facts panel (HTML) + the AI can quote it on a ticket + it's in the KB; endorsements show real people with **Supabase-hosted** photos; up to 2 before/after stories render with re-hosted photos; hero gallery = 4 slides; headline reads punchy. API console flat (Max).
 - Negative: no fabricated endorsements/avatars remain; no Shopify-CDN hotlinks in `product_media`; no nutrition panel ships without verification.
 
 ## Phases
-- ⏳ **P1 — global build:** ship section A (components + skill + seed-tools + orchestrator tool + KB + harvest step), tsc-clean, PR.
+- ✅ **P1 — global build:** section A landed, tsc-clean. Migrations applied (`20260620130000_before_after_stories.sql`, `20260620140000_split_trust_pills.sql` via `scripts/apply-pdp-refinement-migrations.ts`).
+  - **Built:** `WhatToExpectTimeline` centering (cols = min(steps,5)) · `UGCSection`/`BeforeAfterPair` + `before_after_stories` 2-story model (legacy `before`/`after` still works) · `HeroSection` `ResearchCredibility` "N superfoods" badge excludes caffeine-style duplicates · `seed-tools.saveTrustPills` (individual pills) + skill guidance + one-time split migration · `seed-tools.getReviews` range-pagination (no 1000 cap) · `get_product_nutrition` orchestrator tool (improve delegates) + per-variant Supplement-Facts KB mirror in `publishProductContent` · PDP harvest (`getPdpImages` + `rehostImage` — re-host, never hotlink) · gallery slides (`resolveLifestyleSlide` Drive UGC + `generateStaticAdSlide` Nano-Banana w/ caption overlays) + `save-media` displayOrder for gallery rows. All wired into `scripts/seed-product-tools.ts` + the `seed-product` skill.
 - ⏳ **P2 — Tabs run:** execute the pass on Superfood Tabs with its C specifics; verify live.
 - ⏳ **P3 — fan-out:** run the pass on Creamer, Guru, Zen, Creatine, K-Cups, Amazing Coffee (each harvests its own PDP/Drive/reviews).
 

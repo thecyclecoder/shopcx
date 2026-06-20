@@ -13,7 +13,7 @@ The Improve session is **pre-bound to the current ticket**. Opening the tab star
 
 ## Feature parity (must keep — same surface, more powers)
 Everything the current Improve route does still works, on the box:
-- The read-only investigation tools (`get_customer_account`, `get_product_knowledge`, `get_returns`, `get_chargebacks`, `get_email_history`, `get_crisis_status`, `get_dunning_status`, `get_ticket_analysis`) — now the box can *also* `Read`/`Grep` brain + `src/` and `WebSearch`.
+- The read-only investigation tools (`get_customer_account`, `get_product_knowledge`, `get_product_nutrition`, `get_returns`, `get_chargebacks`, `get_email_history`, `get_crisis_status`, `get_dunning_status`, `get_ticket_analysis`) — now the box can *also* `Read`/`Grep` brain + `src/` and `WebSearch`.
 - Proposing + executing the full **direct-action set** (`runImproveActions` / `action-executor.ts`): `partial_refund`, `create_return`, `swap_variant`, `remove_item`, `change_next_date`, `change_frequency`, `update_shipping_address`, `apply_coupon`, `skip_next_order`, `crisis_pause`, `pause_timed`, `reactivate`, `update_line_item_price`, `send_message`.
 - `propose_sonnet_prompt` + `propose_grader_rule` (→ `sonnet_prompts`, `status='proposed'`, `derived_from_ticket_id`).
 - Admin pre-approval fast-path (execute without a round-trip when the human already said "do it").

@@ -6,7 +6,7 @@ Server helpers for the persisted Roadmap authoring chat ([[../tables/roadmap_cha
 
 ## Types
 
-`ChatMsg` (`{ role: "user"｜"assistant"; content: string }`) · `ChatStatus` (`"active"｜"finalized"`) · `RoadmapChat` (a full row) · `SaveChatInput`.
+`ChatMsg` (`{ role: "user"｜"assistant"; content: string }`) · `ChatStatus` (`"active"｜"finalized"`) · `TurnStatus` (`"idle"｜"thinking"｜"error"` — box-spec-chat per-turn lifecycle) · `RoadmapChat` (a full row, now incl. `box_session_id`/`turn_status`/`last_error`) · `SaveChatInput`.
 
 ## Exports
 
@@ -40,10 +40,20 @@ async function listRecentChats(workspaceId: string, userId: string, limit = 20) 
 
 Recent `active` sessions for the user's workspace (resume list), newest first.
 
+### `markTurnThinking` — function
+
+```ts
+async function markTurnThinking(workspaceId: string, id: string, userMessage?: string) : Promise<RoadmapChat | null>
+```
+
+**box-spec-chat** — append an optional user turn to `messages`, set `turn_status='thinking'`, clear `last_error`; returns the updated row. The chat route calls this before enqueuing the `spec-chat` box job; the box (`runSpecChatJob`) later appends the assistant reply + flips `turn_status` back to `idle` (or `error`).
+
 ## Callers
 
 - `src/app/api/roadmap/chat-session/route.ts` (owner-gated POST/GET).
+- `src/app/api/roadmap/chat/route.ts` (owner-gated; `markTurnThinking` + `saveChat`/`loadChat` to drive a box spec-chat turn).
+- `scripts/builder-worker.ts` → `runSpecChatJob` reads/writes the row directly via the service-role admin client (not these helpers).
 
 ## Related
 
-[[../tables/roadmap_chats]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]]
+[[../tables/roadmap_chats]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../specs/box-spec-chat]]

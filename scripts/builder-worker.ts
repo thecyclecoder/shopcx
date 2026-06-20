@@ -51,6 +51,11 @@ const MAX_FOLD = 1;
 // research + ~2000-review analysis + imagery) never occupies a feature-build
 // lane. Each is one long-running claude session, so a small cap is right.
 const MAX_SEED = 2;
+// Spec-chat turns (box-spec-chat) run a long-running, resumable top-level Max `claude -p` (the authoring
+// chat moved off the Anthropic API onto the box). Its OWN concurrency-1 lane: interactive + serialized
+// per box, so a chat turn never occupies a feature-build lane (and vice-versa). One turn at a time is
+// right — the founder converses turn-by-turn, the UI disables the composer while a turn is in flight.
+const MAX_SPEC_CHAT = 1;
 // Ticket-improve turns (box-ticket-improve) run in their OWN concurrency-1 interactive lane: a
 // resumable Max `claude -p` session per ticket, one short job per turn. Serialized so a turn never
 // races the self-update reset of REPO_DIR (it reads brain/src in the main checkout, read-only).
@@ -113,7 +118,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "triage-escalations";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -923,6 +928,229 @@ async function runProductSeedJob(job: Job) {
   }
 }
 
+// ── Box-hosted spec chat (box-spec-chat) ────────────────────────────────────
+// The roadmap authoring chat moved off the Anthropic API onto the box as a long-running, resumable
+// `claude -p` session on Max. A kind='spec-chat' job is ONE user turn (or a finalize/verify). The
+// thread itself is the roadmap_chats row (messages + box_session_id + turn_status). The route enqueues
+// the turn; here we resume the SAME box session so the model keeps the full accumulated context plus
+// live working-tree Read/Grep/Glob over docs/brain/ + src/ and WebSearch — all on Max, $0 marginal.
+//   instructions JSON = { mode: 'turn'|'finalize'|'verify', chat_id?, slug?, seedSlug?, queueBuild? }.
+// The box GENERATES (LLM, on Max); the worker (this deterministic Node code, holding the GH token +
+// DB admin) COMMITS the spec to main + queues the build — never the secret-stripped box session.
+
+interface ChatRow {
+  id: string;
+  spec_slug: string | null;
+  messages: { role: "user" | "assistant"; content: string }[];
+  box_session_id: string | null;
+}
+async function loadChatRow(chatId: string): Promise<ChatRow | null> {
+  const { data } = await db
+    .from("roadmap_chats")
+    .select("id, spec_slug, messages, box_session_id")
+    .eq("id", chatId)
+    .maybeSingle();
+  if (!data) return null;
+  const row = data as Record<string, unknown>;
+  const msgs = Array.isArray(row.messages) ? (row.messages as { role: "user" | "assistant"; content: string }[]) : [];
+  return { id: row.id as string, spec_slug: (row.spec_slug as string | null) ?? null, messages: msgs, box_session_id: (row.box_session_id as string | null) ?? null };
+}
+
+// Render the transcript as plain text for a fresh box session (turn 1 / a chat migrated from the old
+// API flow that has history but no box_session_id yet). On resume we pass ONLY the new user message.
+function renderTranscript(messages: ChatRow["messages"]): string {
+  return messages.map((m) => `${m.role === "user" ? "[Founder]" : "[You]"}: ${m.content}`).join("\n\n");
+}
+
+const SPEC_CHAT_OUTPUT = `Final message = ONLY one JSON object, nothing else: {"status":"replied","reply":"<your plain-text conversational answer to the founder>"}.`;
+
+function specChatFraming(slug?: string, seedSlug?: string): string {
+  const ground = slug
+    ? `You are REFINING the existing spec docs/brain/specs/${slug}.md — Read it from the working tree first as grounding; preserve shipped (✅) phases unless told otherwise.`
+    : seedSlug
+      ? `You are drafting a NEW spec by RE-HYDRATING from the current brain page docs/brain/${seedSlug}.md — Read it first as the source of truth for what exists TODAY, then help shape a fresh spec that EXTENDS or FIXES it (never restate a stale snapshot). Inherit the owner/parent taxonomy where sensible.`
+      : `This is a NEW-feature chat (no existing spec).`;
+  return [
+    `Use the spec-chat skill to spec a ShopCX feature WITH the founder (Dylan). ${ground}`,
+    `Brain-first per the house rule: Read docs/brain/ before grepping src/; Read the real src/ tree to ground specifics; WebSearch competitors/libraries when it helps. Respond as plain conversational prose (no markdown fluff). Do NOT edit files in this turn.`,
+  ].join("\n");
+}
+
+async function runSpecChatJob(job: Job) {
+  const tag = `[spec-chat:${job.id.slice(0, 8)}]`;
+  let params: { mode?: string; chat_id?: string; slug?: string; seedSlug?: string; queueBuild?: boolean } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fall back to a plain turn keyed by spec_slug */
+  }
+  const mode = (params.mode as "turn" | "finalize" | "verify") || "turn";
+  const chatId = params.chat_id || (mode !== "verify" ? job.spec_slug : undefined);
+  const refineSlug = typeof params.slug === "string" ? params.slug : undefined;
+  const seedSlug = typeof params.seedSlug === "string" ? params.seedSlug : undefined;
+
+  // Mark the thread errored + the job failed (turn/finalize). verify has no thread to update.
+  const failTurn = async (reason: string, logTail?: string) => {
+    if (chatId) {
+      await db.from("roadmap_chats").update({ turn_status: "error", last_error: reason.slice(0, 500), updated_at: new Date().toISOString() }).eq("id", chatId);
+    }
+    await update(job.id, { status: "failed", error: reason, log_tail: logTail ?? null });
+  };
+
+  // Load the thread (turn/finalize). verify is standalone (Reads the committed spec; no thread needed).
+  let chat: ChatRow | null = null;
+  if (chatId) {
+    chat = await loadChatRow(chatId);
+    if (!chat) {
+      await failTurn("chat thread not found");
+      return;
+    }
+  }
+  const sessionId = chat?.box_session_id ?? null;
+  const isResume = !!sessionId;
+  console.log(`${tag} ${mode} ${isResume ? "(resume)" : "(fresh)"} chat=${chatId ?? "—"} slug=${refineSlug ?? params.slug ?? "—"}`);
+
+  // Stable per-chat (or per-verify-slug) worktree path so `claude --resume` finds the cwd-scoped session
+  // across turns; recreated on origin/main each turn so brain/code reads are current. Tear down after.
+  const key = (chatId || `verify-${params.slug || job.spec_slug}`).replace(/[^a-zA-Z0-9_-]/g, "");
+  const wt = join(BUILDS_DIR, `spec-chat-${key}`);
+  sh("git", ["fetch", "origin", "main"]);
+  sh("git", ["worktree", "remove", "--force", wt]);
+  const branch = `claude/spec-chat-${key}`;
+  const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
+  if (add.code !== 0) {
+    await failTurn(`worktree add failed: ${add.err.slice(0, 200)}`);
+    return;
+  }
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  try {
+    // ── Build the per-mode prompt ──
+    // finalize/verify: the box WRITES the spec file into the worktree (robust for large markdown — no
+    // JSON-escaping fragility); the worker then reads the changed docs/brain/specs/*.md + commits it to
+    // main (the runPlanJob pattern). turn: the box returns a short conversational reply as JSON.
+    let prompt: string;
+    if (mode === "verify") {
+      const slug = params.slug || "";
+      prompt = [
+        `Use the spec-chat skill in VERIFY mode. Read docs/brain/specs/${slug}.md from the working tree and the brain pages it touches.`,
+        `WRITE an updated docs/brain/specs/${slug}.md that inserts (or refreshes) ONLY a "## Verification" section — a concrete, prod-facing test checklist the OWNER follows to confirm the feature works in production. 3-7 bullets, each "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the spec touched (look them up; never invent). No vague "test it works". Preserve everything else in the file byte-for-byte; put the section before "## Related" if present.`,
+        `Do NOT edit any other file, do NOT run git. Final message = ONLY one JSON object: {"status":"verified","slug":"${slug}"}.`,
+      ].join("\n");
+    } else if (mode === "finalize") {
+      const finalizeAsk = [
+        `Now FINALIZE this spec in FINALIZE mode: WRITE the file docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing file unless the conversation said otherwise` : `pick a short kebab-case slug from the title; all new phases start ⏳`}).`,
+        `It MUST have: an H1 "# <Title> <status emoji>"; directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\`; a one-paragraph summary tied to a business outcome; concrete "## Phase N — name" sections (each line tagged ⏳ planned · 🚧 in progress · ✅ shipped); a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
+        `Write ONLY that one file under docs/brain/specs/; do NOT edit anything else, do NOT run git. Final message = ONLY one JSON object: {"status":"finalized","slug":"<the slug you wrote>"}.`,
+      ].join("\n");
+      prompt = isResume
+        ? finalizeAsk
+        : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, finalizeAsk].join("\n");
+    } else {
+      // turn
+      const latest = [...(chat?.messages ?? [])].reverse().find((m) => m.role === "user")?.content || "";
+      prompt = isResume
+        ? `${latest}\n\n${SPEC_CHAT_OUTPUT}`
+        : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, `Respond to the latest [Founder] message. ${SPEC_CHAT_OUTPUT}`].join("\n");
+    }
+
+    // ── Run the box session (top-level Max claude; secrets stripped; WebSearch allowed) ──
+    const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt);
+    const logTail = raw.slice(-2000);
+    const newSession = session || sessionId;
+    const parsed = parseStatus(resultText) as Record<string, unknown> | null;
+    console.log(`${tag} claude finished — status: ${(parsed?.status as string) ?? "(none)"} isError=${isError}`);
+
+    if (mode === "turn") {
+      const reply = typeof parsed?.reply === "string" ? (parsed.reply as string) : "";
+      if (!reply) {
+        await failTurn("box turn returned no reply", logTail);
+        return;
+      }
+      const fresh = await loadChatRow(chatId!); // re-read to append onto the latest transcript
+      const messages = [...(fresh?.messages ?? chat!.messages), { role: "assistant" as const, content: reply }];
+      await db.from("roadmap_chats").update({
+        messages,
+        box_session_id: newSession,
+        turn_status: "idle",
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      }).eq("id", chatId!);
+      await update(job.id, { status: "completed", log_tail: logTail });
+      console.log(`${tag} ✓ reply appended`);
+      return;
+    }
+
+    // Discover the spec file the box wrote/edited in the worktree (the runPlanJob pattern). The model's
+    // JSON slug is a hint; the changed file under docs/brain/specs/ is the source of truth.
+    const changed = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()
+      .split("\n").map((l) => l.trim().split(/\s+/).pop() || "").filter(Boolean);
+    const specFiles = changed.filter((f) => f.startsWith("docs/brain/specs/") && f.endsWith(".md"));
+
+    if (mode === "verify") {
+      const slug = params.slug || "";
+      const target = `docs/brain/specs/${slug}.md`;
+      if (!specFiles.includes(target)) {
+        await failTurn(`box did not update ${target}`, logTail);
+        return;
+      }
+      const content = readFileSync(join(wt, target), "utf8");
+      const put = await putFileMain(target, content, `verification-guides: generate test plan for ${slug} (box spec-chat)`);
+      if (!put.ok) {
+        await failTurn(`commit failed (${put.status})`, logTail);
+        return;
+      }
+      await update(job.id, { status: "completed", log_tail: `committed ## Verification to specs/${slug}.md` });
+      console.log(`${tag} ✓ verification committed`);
+      return;
+    }
+
+    // finalize — commit the one spec file the box wrote.
+    const hintSlug = typeof parsed?.slug === "string" ? (parsed.slug as string).replace(/[^a-z0-9-]/gi, "") : "";
+    const written =
+      (refineSlug && specFiles.find((f) => f === `docs/brain/specs/${refineSlug}.md`)) ||
+      (hintSlug && specFiles.find((f) => f === `docs/brain/specs/${hintSlug}.md`)) ||
+      specFiles[0];
+    if (!written) {
+      await failTurn("box did not write a spec file", logTail);
+      return;
+    }
+    const slug = written.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
+    const content = readFileSync(join(wt, written), "utf8");
+    const put = await putFileMain(written, content, `spec: ${refineSlug ? "refine" : "create"} ${slug} (box spec-chat)`);
+    if (!put.ok) {
+      await failTurn(`commit failed (${put.status})`, logTail);
+      return;
+    }
+    // Flip the thread finalized + link the slug, store the session, clear thinking.
+    await db.from("roadmap_chats").update({
+      status: "finalized",
+      spec_slug: slug,
+      box_session_id: newSession,
+      turn_status: "idle",
+      last_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", chatId!);
+    // Optionally queue the build — the existing pipeline takes over (its own claude/* PR).
+    let queued = false;
+    if (params.queueBuild) {
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        kind: "build",
+        status: "queued",
+        instructions: refineSlug ? "Refined via box spec-chat" : "Created via box spec-chat",
+        created_by: job.created_by,
+      });
+      queued = !error;
+    }
+    await update(job.id, { status: "completed", log_tail: `finalized ${slug}${queued ? " + queued build" : ""}` });
+    console.log(`${tag} ✓ finalized → specs/${slug}.md${queued ? " (build queued)" : ""}`);
+  } finally {
+    sh("git", ["worktree", "remove", "--force", wt]);
+  }
+}
+
 // ── Box-hosted ticket Improve agent (box-ticket-improve) ─────────────────────
 // A kind='ticket-improve' job is ONE turn of the ticket-bound Improve session. Like product-seed it
 // runs a TOP-LEVEL `claude -p` on Max (web search on, ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
@@ -1315,6 +1543,7 @@ async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
   if (job.kind === "product-seed") return runProductSeedJob(job);
+  if (job.kind === "spec-chat") return runSpecChatJob(job);
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   const slug = job.spec_slug;
@@ -1548,7 +1777,7 @@ async function main() {
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold lane, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage lane, polling every ${POLL_MS}ms`);
 
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
@@ -1558,9 +1787,10 @@ async function main() {
   const active = new Map<string, LaneInfo>();
   const countFold = () => [...active.values()].filter((v) => v.kind === "fold").length;
   const countSeed = () => [...active.values()].filter((v) => v.kind === "product-seed").length;
+  const countSpecChat = () => [...active.values()].filter((v) => v.kind === "spec-chat").length;
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
@@ -1588,6 +1818,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed product-seed ${job.id.slice(0, 8)} → ${countSeed() + 1}/${MAX_SEED} seed lane`);
+        launch(job);
+      }
+      // Fill the spec-chat lane (box-spec-chat; concurrency-1 interactive authoring-chat turns on Max).
+      while (countSpecChat() < MAX_SPEC_CHAT) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["spec-chat"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed spec-chat ${job.id.slice(0, 8)} → ${countSpecChat() + 1}/${MAX_SPEC_CHAT} spec-chat lane`);
         launch(job);
       }
       // Fill the ticket-improve lane (box-ticket-improve): interactive Max turns, concurrency-1.
