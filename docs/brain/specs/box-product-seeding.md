@@ -65,6 +65,31 @@ The box seeds everything Amazing Coffee has **except linked products + bundles**
 - **Linked products** (sibling SKUs of one line — like Amazing Coffee instant ↔ K-Cups): **Ashwavana Guru Focus ↔ Ashwavana Zen Relax** (focus/productivity/caffeinated ↔ relaxation/recovery/caffeine-free). Superfood Tabs + Creatine Prime have **no** linked products.
 - **Bundle offers** (cross-sell): **Superfood Tabs + Ashwavana Zen Relax** · **Creatine Prime + Ashwavana Zen Relax** · **Ashwavana Guru Focus + Ashwavana Zen Relax** (the two Ashwavanas bundle with each other).
 
+## Lander refinements (2026-06-20, round 3 — comparing seeded landers to Amazing Coffee) ⏳
+Four chapter-level refinements. Make each systematic in the pipeline + apply (content+media refresh) to the seeded products; validate vs Amazing Coffee.
+
+**1. Survey chapter — hide unless coffee.** `SurveyChapter.tsx` always renders and is hardcoded coffee-specific ("1 cup/2 cups/3-4 cups", coffee styles). Add `product_page_content.show_survey` (bool, default false) + a render-page guard. Set `true` ONLY for the coffee products (Amazing Coffee, Amazing Coffee K-Cups); `false` for everything else (until product-specific surveys exist).
+
+**2. Comparison chapter — compare against the RIGHT thing.** `ComparisonSection.tsx` hardcodes the rival column "Regular Coffee" — wrong for non-coffee. Add `product_page_content.comparison_competitor_label` + render it. Per-product compare-against + contrast rows:
+- **Guru Focus** → **"Coffee & Energy Drinks"**: clinically-studied adaptogens (Ashwagandha/Rhodiola) vs synthetic caffeine · calm no-jitters energy vs spike-and-crash · supports mood + stress vs just a buzz · no sugar.
+- **Zen Relax** → **"Melatonin & Sleep Aids"**: adaptogens calm stress at the root vs sedate · no morning grogginess · non-habit-forming · caffeine-free.
+- **Creatine Prime** → **"Plain Creatine"**: 5g creatine + Rhodiola (body + mind) vs creatine alone · delicious Black Cherry vs chalky/flavorless · mixes clean, no grit/bloat.
+- **Superfood Tabs** → **"Sugary Sports Drinks"**: real superfoods + cleanse vs sugar + dyes · zero sugar · portable tablet vs bulky bottle.
+- **Amazing Creamer** → **"Regular Creamer"**: collagen + beauty actives vs sugar + seed oils · supports skin/anti-aging · clean, no crash.
+- (Amazing Coffee / K-Cups keep "Regular Coffee".)
+
+**3. Hero headlines — tighter, punchier, benefit-first.** Match Amazing Coffee's style (*"Brew. Sip. Shed Pounds & Fight Aging."*): short, scannable, lead with the ONE benefit the customer most wants (from the lead benefit selections). Direction per product (craft the final copy from the real benefits/reviews):
+- **Guru Focus**: razor focus + clean all-day energy, **zero jitters/crash**.
+- **Zen Relax**: melt stress + deep sleep + wake restored (**caffeine-free** wind-down).
+- **Creatine Prime**: stronger + sharper + **actually delicious** (5g creatine, no chalk).
+- **Superfood Tabs**: **cleansing hydration + energy** in one tablet.
+- **Amazing Creamer**: creamy coffee + **collagen beauty/glow**.
+- Keep Amazing Coffee + K-Cups headlines as-is (already strong).
+
+**4. Chapter images — generate the missing ones from the isolated shots.** Compare each product's *rendered* chapters to Amazing Coffee; for image-bearing chapters that APPLY but are blank, generate via Nano Banana Pro from the product's isolated packshot (consistent studio style): **`lifestyle_1`** (HowItWorks, in-use shot) and **`timeline_1..5`** (only if the timeline renders + Amazing Coffee uses images). **SKIP** `before`/`after` (UGC weight-loss transformation — coffee/weight-loss only) and `survey_q*` (survey hidden). **Do NOT auto-generate `endorsement_*_avatar` faces** — fake AI expert headshots are a misleading-endorsement risk; those need real expert photos (flag for the owner) or hide the endorsement chapter if none.
+
+**Apply:** add a **content+media refresh** path (regenerate headlines + comparison + survey flag + chapter images; keep research/reviews/benefits) and re-run for the seeded products.
+
 ## Image refinements (2026-06-19, round 2 — from reviewing the first pages) ✅ shipped
 - **Hero dimensions: `1800×1344`** (landscape, matching the Amazing Coffee hero gallery). Square `1024×1024` heroes **get cut off** in the storefront hero gallery. **Shipped:** the skill calls `generate-image` for the hero with `aspectRatio:"4:3", width:1800, height:1344`; `generateImage` → `fitOnWhite` pads a near-aspect render to **exactly** 1800×1344 on white (`HERO_WIDTH`/`HERO_HEIGHT`/`HERO_ASPECT` in `seed-tools.ts`). The `lifestyle` shot uses the same landscape size. Re-run via `media-refresh` to regenerate any existing square hero.
 - **Per-ingredient images come FROM the Shopify PDP, not Gemini.** Each PDP's ingredient section serves CDN images named by ingredient (e.g. `Ashwagandha_1.jpg`, `Beet_Root.jpg`, `Chlorella.jpg`, `Grape_Seed_Extract.jpg`, `D3_1.jpg`). **Shipped:** new step 6b — `pull-ingredient-images <ws> <pid> <handle>` (`pullIngredientImages` in `seed-tools.ts`) extracts Shopify-CDN URLs from the raw PDP HTML, matches each filename to a `product_ingredient` by name (exact, else ≥4-char containment; strips size transforms + `_1` index), downloads, normalizes to **400×400** (`INGREDIENT_SIZE`), and writes `product_media` slot **`ingredient_{snake_name}`** — **never Gemini**. Idempotent; returns `{matched, unmatched, pdp_images}` (unmatched ingredients surfaced in the run summary). Fixes round-1 blank ingredient cards.
