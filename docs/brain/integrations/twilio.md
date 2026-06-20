@@ -39,6 +39,8 @@ Inbound SMS + status callbacks: Twilio HMAC signature in `X-Twilio-Signature`. V
 
 Inbound SMS flows into [[../tables/sms_marketing_inbound]] (STOP / HELP / replies). STOP unsubscribes via Shopify marketing consent mutation. See `src/lib/shopify-marketing.ts`.
 
+**Status callback → `storefront_leads` sync.** `POST /api/webhooks/twilio/marketing-status` handles delivery callbacks for *both* campaign sends and the popup-coupon SMS. Marketing sends match [[../tables/sms_campaign_recipients]] by `message_sid`; if no recipient matches, the no-recipient branch matches [[../tables/storefront_leads]] by `sms_message_sid` and syncs `sms_status` + `sms_status_at`. The popup-coupon send (`src/app/api/popup/claim/route.ts`) sends **direct from the short code** (no Messaging Service) so it must pass this route as an explicit per-message `StatusCallback` (`sendSMS(..., { statusCallback })`) — otherwise Twilio fires no delivery callback and `sms_status` freezes at the `queued` written on send even after delivery (ticket 8e9e325e). Reconcile rows sent before that fix with `scripts/backfill-popup-sms-status.ts` (polls the Twilio Messages API for stuck `queued` leads).
+
 ## Verify v2 (customer phone OTP)
 
 Used for storefront passwordless auth + portal verification. `src/lib/twilio-verify.ts`. Don't pass arbitrary phone numbers — Twilio Verify rate-limits per-phone aggressively, and abuse drives up cost.

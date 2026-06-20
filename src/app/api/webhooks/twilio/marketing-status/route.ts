@@ -100,9 +100,10 @@ export async function POST(request: Request) {
     .maybeSingle();
 
   if (!recipient) {
-    // Not a marketing-campaign send. Popup-coupon SMS goes through the same
-    // Messaging Service, so its status callbacks land here too — match the
-    // lead by message sid and record delivery there.
+    // Not a marketing-campaign send. The popup-coupon SMS sends direct from the
+    // short code with this route passed as a per-message StatusCallback (see
+    // src/app/api/popup/claim/route.ts), so its status callbacks land here too —
+    // match the lead by message sid and record delivery there.
     const { data: lead } = await admin
       .from("storefront_leads")
       .select("id")

@@ -21,7 +21,7 @@ Lead-capture events on the storefront. Customer is created/matched, this row log
 | `coupon_code_issued` | `text` | ✓ |  |
 | `fallback_emailed_at` | `timestamptz` | ✓ | Set when the 5-min coupon-email fallback fired (no phone / phone step skipped). |
 | `sms_message_sid` | `text` | ✓ | Twilio SID of the coupon SMS — set by `/api/popup/claim`; lets the status callback match this lead. |
-| `sms_status` | `text` | ✓ | Latest Twilio delivery status: queued/sent/delivered/undelivered/failed. Updated by [[../integrations/twilio]] marketing-status webhook. |
+| `sms_status` | `text` | ✓ | Latest Twilio delivery status: queued/sent/delivered/undelivered/failed. Updated by [[../integrations/twilio]] marketing-status webhook — the popup send passes that route as an explicit `StatusCallback` (direct from the short code, no Messaging Service), without which this stays frozen at `queued` (ticket 8e9e325e). Legacy stuck rows reconciled by `scripts/backfill-popup-sms-status.ts`. |
 | `sms_status_at` | `timestamptz` | ✓ | When `sms_status` last changed. |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |

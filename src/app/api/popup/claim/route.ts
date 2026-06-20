@@ -93,7 +93,16 @@ export async function POST(request: Request) {
     const msg = redeemUrl
       ? `Hi ${first}! Your discount is activated.\n\nTap to shop with it auto-applied:\n${redeemUrl}\n\nJust for you, please don't share.`
       : `Hi ${first}! Your discount is activated. Enter code ${couponCode} at checkout. Just for you - please don't share.`;
-    const sms = await sendSMS(body.workspace_id, e164, msg);
+    // Pass a per-message StatusCallback so Twilio reports delivery back to us.
+    // The popup SMS sends direct from the short code (no Messaging Service), so
+    // it would otherwise inherit NO delivery callback and our sms_status would
+    // stay frozen at the `queued` we write below forever (ticket 8e9e325e). The
+    // marketing-status webhook already matches the lead by MessageSid and syncs
+    // storefront_leads.sms_status, so point Twilio at it explicitly.
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
+    const sms = await sendSMS(body.workspace_id, e164, msg, {
+      statusCallback: `${siteUrl}/api/webhooks/twilio/marketing-status`,
+    });
     // Record the message SID + initial status so the Twilio status callback
     // (marketing-status webhook) can match this lead and log delivery.
     if (sms.success && sms.messageSid) {
