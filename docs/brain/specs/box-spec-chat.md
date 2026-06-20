@@ -1,4 +1,4 @@
-# Box-hosted Spec Chat (long-running Max session) ⏳
+# Box-hosted Spec Chat (long-running Max session) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform" (extends [[../lifecycles/roadmap-build-console]] Phase 1 authoring chat; sibling of [[goal-decomposition-engine]])
 
@@ -55,16 +55,17 @@ A turn is a job; the thread is durable state. The chat is **not** one agent_jobs
 - **Checkout**: dedicated read-only `/home/builder/chat` on `origin/main` vs reuse `REPO_DIR`. Default: dedicated checkout to keep chat reads isolated from build worktrees + self-update.
 
 ## Verification
-- Open a new feature chat → first message → within a couple minutes an assistant reply appears that **cites a real brain page or a real `src/` path it Read** (proves working-tree access), and the API console stays flat while claude.ai/usage moves (proves Max). `agent_jobs` shows a `spec-chat` job `queued→building→completed`; `roadmap_chats.box_session_id` is set.
-- Send a 2nd message → confirm it **resumes** (references earlier turn context without re-stating) and `box_session_id` is unchanged.
-- Ask it to "compare how everydaydose.com positions their coffee" → reply reflects **web search** (proves WebSearch on the box).
-- Finalize → `docs/brain/specs/{slug}.md` committed to main, `roadmap_chats.status='finalized'`, optional build job queued. Re-open the thread on another device → full transcript resumes.
-- Negative: kill the box mid-turn → job `failed`, `turn_status='error'`, UI shows a retry affordance (re-enqueue resumes the same session).
+- On `/dashboard/roadmap` → **✨ New feature**, send a first message → expect the composer to disable + show "thinking on the box…", and within a couple minutes an assistant reply that **cites a real brain page or a real `src/` path it Read** (proves working-tree access). Meanwhile `select kind,status from agent_jobs order by created_at desc limit 1` shows a `spec-chat` row `queued→building→completed`, and `select box_session_id,turn_status from roadmap_chats order by updated_at desc limit 1` shows `box_session_id` set + `turn_status='idle'`. The Anthropic API console stays flat while claude.ai/usage moves (proves Max).
+- In the same chat, send a 2nd message → expect the reply to **reference earlier-turn context without re-stating it** (proves resume) and `roadmap_chats.box_session_id` is **unchanged** from turn 1.
+- Ask "compare how everydaydose.com positions their coffee" → expect the reply to reflect **live web search** facts (proves WebSearch on the box).
+- Click **Save & build** → expect (after the box finishes) `docs/brain/specs/{slug}.md` committed to `main`, `roadmap_chats.status='finalized'` with `spec_slug` set, and a new `kind='build'` `agent_jobs` row `queued`. Re-open the thread on another device (the recent-chats picker) → full transcript resumes.
+- On a spec detail page with no `## Verification`, click **Generate test plan** → expect a `spec-chat` job with `spec_slug='verify:{slug}'` to run and commit a concrete `## Verification` section to `specs/{slug}.md` on `main` (visible after the next deploy).
+- Negative: while a turn is "thinking", `systemctl stop shopcx-builder` (or kill the box `claude`) → expect the `spec-chat` job to end `failed`, `roadmap_chats.turn_status='error'` with `last_error` set, and the chat to show the error + a **Retry** button; clicking Retry re-enqueues a turn that **resumes the same `box_session_id`**.
 
 ## Phases
-- ⏳ **P1 — turn loop:** migration (`box_session_id`/`turn_status`/`last_error`), `spec-chat` kind + lane, `runSpecChatJob` (turn mode, fresh + resume), `spec-chat` skill, chat route rewired to enqueue-not-call-API, `AuthoringChat.tsx` polling + "thinking" UX.
-- ⏳ **P2 — finalize/verify on the box:** resume-to-emit spec markdown + `## Verification`; keep commit/build-enqueue server-side.
-- ⏳ **P3 (optional) — live tool trail:** `stream-json` tail of the box turn's read/grep/web-search activity.
+- ✅ **P1 — turn loop:** migration (`box_session_id`/`turn_status`/`last_error` — `20260620120000_roadmap_chats_box_session.sql`), `spec-chat` kind + concurrency-1 lane (`MAX_SPEC_CHAT`), `runSpecChatJob` (turn mode, fresh + resume, stable per-chat worktree), `.claude/skills/spec-chat/SKILL.md`, chat route rewired to enqueue-not-call-API (`markTurnThinking` + `enqueueSpecChat`), `AuthoringChat.tsx` polling + "thinking on the box…" UX + Retry.
+- ✅ **P2 — finalize/verify on the box:** resume-to-emit full spec markdown (finalize) + `## Verification` (verify); the box GENERATES, the **worker** (`runSpecChatJob`, holding the GH token + DB admin) commits to main via `putFileMain` + queues the `build` job — the deterministic commit stays in trusted worker code, never the secret-stripped box session. `VerificationCard` rewired to the box `verify` job.
+- ❌ **P3 (optional) — live tool trail:** `stream-json` tail of the box turn's read/grep/web-search activity. **Deferred to a v2** — v1 ships the spinner ("thinking on the box…") per the spec; `claude -p --output-format json` is one-shot, so a live trail needs `--output-format stream-json` plumbing not required for parity.
 
 ## Brain updates (same PR)
 [[../tables/roadmap_chats]] (new columns + turn lifecycle) · [[../tables/agent_jobs]] (`spec-chat` kind + lane) · [[../lifecycles/roadmap-build-console]] (authoring chat now box-hosted) · [[../recipes/build-box-setup]] (spec-chat lane) · the new `spec-chat` skill page. On ship, fold this spec into those pages and delete it.

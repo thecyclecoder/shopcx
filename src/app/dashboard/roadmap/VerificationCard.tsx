@@ -9,9 +9,10 @@ import { useWorkspace } from "@/lib/workspace-context";
  * BuildButton's **Mark verified & archive** so the test steps sit where the verify decision happens.
  *
  *  - Has a `## Verification` section → render it as a prominent checklist card (`html` = its rendered md).
- *  - No section → owner-only **Generate test plan** affordance (never silence). It seeds the Opus authoring
- *    path (POST /api/roadmap/chat, action "generate_verification"), which commits a concrete `## Verification`
- *    section to specs/{slug}.md on main. Like the authoring chat, the new section appears after the next deploy.
+ *  - No section → owner-only **Generate test plan** affordance (never silence). It enqueues a box spec-chat
+ *    job (POST /api/roadmap/chat, action "generate_verification"; box-spec-chat) — a Max `claude -p` that
+ *    Reads the spec + its brain homes and emits a concrete `## Verification` section, which the worker commits
+ *    to specs/{slug}.md on main. The section appears after the box commits it + the next deploy.
  */
 export default function VerificationCard({ slug, html }: { slug: string; html: string | null }) {
   const workspace = useWorkspace();
@@ -60,7 +61,7 @@ export default function VerificationCard({ slug, html }: { slug: string; html: s
       {isOwner &&
         (done ? (
           <p className="mt-1 text-[11px] text-emerald-600 dark:text-emerald-400">
-            Generated — committed to <code>specs/{slug}.md</code>. It appears here after the next deploy.
+            Queued on the box — it drafts + commits to <code>specs/{slug}.md</code>. Appears here after it lands + the next deploy.
           </p>
         ) : (
           <button
