@@ -204,8 +204,8 @@ export const metaDecisionEngine = inngest.createFunction(
 // autonomous decisions to iteration_actions, and records the whole thing to
 // iteration_runs (status, timing, counts) with a failure alert. Every stage is
 // idempotent, so a re-run on the same day never double-writes/recommends/acts.
-// Phase 6a (actual Meta execution of the decided actions) is a documented hook
-// here — the actions land status='decided' for Phase 6a to execute. With no
+// Stage 7 executes the decided actions on Meta (Phase 6a — pause/unpause/scale via
+// executeAutonomousActions; only status='decided' rows, idempotent). With no
 // active policy the run does scorecards + 4b recommendations only.
 export const metaIterationRun = inngest.createFunction(
   {

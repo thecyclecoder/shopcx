@@ -7,7 +7,7 @@
  *   ingest (P1) → attribution refresh (P2/2b) → rollups (P3)
  *     → reconcile prior actions (measure outcomes + link reversals)
  *     → autonomous policy actions (4a) → recommendation generation (4b)
- *     → execute autonomous adapters (6a — Phase 6, hook only here)
+ *     → execute autonomous adapters (6a — wired in the Inngest wrapper, stage 7)
  *
  * Every stage is idempotent (each writes its own table on a stable key), so a
  * re-run never double-writes, double-recommends, or double-acts. Per-object
