@@ -1,0 +1,1 @@
+- **Box-hosted Ticket "Improve" Agent (Max session)** · verified 2026-06-20 · → [[tables/ticket_improve_chats]]
