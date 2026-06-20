@@ -19,7 +19,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import sharp from "sharp";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
-import { DriveClient, resolveProductShots, HERO_EXAMPLE_FOLDER_ID, type DriveFile } from "@/lib/google-drive";
+import { DriveClient, resolveProductShots, resolveLifestyleShots, HERO_EXAMPLE_FOLDER_ID, type DriveFile } from "@/lib/google-drive";
 import { publishProductContent } from "@/lib/product-intelligence/publish";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -72,6 +72,65 @@ export async function getProduct(workspace_id: string, product_id: string) {
 export async function setStatus(workspace_id: string, product_id: string, status: IntelligenceStatus) {
   await admin().from("products").update({ intelligence_status: status }).eq("id", product_id).eq("workspace_id", workspace_id);
   return { ok: true, status };
+}
+
+/**
+ * Normalize trust-pill input to ONE item per array element: split any
+ * comma-joined string into separate pills, trim, drop empties, dedup
+ * case-insensitively (first occurrence wins, order preserved). So
+ * `["Non-GMO, 3rd Party Tested", "Made in USA"]` → 3 pills. The storefront
+ * `TrustChipRow` renders one chip per element, so a comma-joined element shows
+ * as a single run-on chip — this guarantees individual chips no matter how the
+ * skill phrases the list.
+ */
+export function splitTrustPills(input: unknown): string[] {
+  const raw: string[] = Array.isArray(input)
+    ? input.flatMap((x) => (typeof x === "string" ? x.split(",") : []))
+    : typeof input === "string"
+      ? input.split(",")
+      : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of raw) {
+    const t = r.trim();
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Persist the product's trust pills (`products.certifications` / `allergen_free`)
+ * as individual items. Each field is normalized through `splitTrustPills`, so the
+ * skill's content step always lands one pill per array element. Only the provided
+ * fields are written. Returns the resulting arrays.
+ */
+export async function saveTrustPills(
+  workspace_id: string,
+  product_id: string,
+  pills: { certifications?: unknown; allergen_free?: unknown },
+): Promise<{ certifications: string[]; allergen_free: string[] }> {
+  const a = admin();
+  const update: Record<string, string[]> = {};
+  if (pills.certifications !== undefined) update.certifications = splitTrustPills(pills.certifications);
+  if (pills.allergen_free !== undefined) update.allergen_free = splitTrustPills(pills.allergen_free);
+  if (Object.keys(update).length > 0) {
+    const { error } = await a.from("products").update(update).eq("id", product_id).eq("workspace_id", workspace_id);
+    if (error) throw new Error(`trust_pills_update: ${error.message}`);
+  }
+  const { data } = await a
+    .from("products")
+    .select("certifications, allergen_free")
+    .eq("id", product_id)
+    .eq("workspace_id", workspace_id)
+    .single();
+  return {
+    certifications: (data?.certifications as string[]) || [],
+    allergen_free: (data?.allergen_free as string[]) || [],
+  };
 }
 
 // ── 1. PDP fetch + ingredients ───────────────────────────────────────────────
@@ -211,8 +270,17 @@ export async function getResearch(workspace_id: string, product_id: string) {
 
 /**
  * A page of the best product-specific reviews (4★+, non-empty body,
- * featured-weighted, longest first) so the skill can read them in chunks and
- * analyze them itself. Returns `{ total, offset, reviews }`.
+ * featured-weighted) so the skill can read them in chunks and analyze them
+ * itself. Returns `{ total, offset, reviews }`.
+ *
+ * Range-based pagination (NOT `.limit(2000)`): PostgREST caps any single
+ * response at the server `max-rows` ceiling (1000), so the old `.limit(2000)`
+ * silently truncated to 1000 — a product with 3,000+ 4★ reviews (Superfood
+ * Tabs) had its review analysis built from a third of the corpus, which is why
+ * benefit-pill category counts read 1–4 instead of hundreds. We now order in
+ * the DB (featured → rating → recency, the weighting the skill wants) and page
+ * with `.range(offset, offset+limit-1)`, so the skill can walk the FULL corpus
+ * one page at a time. `total` is an exact count over the same filter.
  */
 export async function getReviews(
   workspace_id: string,
@@ -221,6 +289,16 @@ export async function getReviews(
   limit = 100,
 ) {
   const a = admin();
+
+  const { count } = await a
+    .from("product_reviews")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspace_id)
+    .eq("product_id", product_id)
+    .in("status", ["published", "featured"])
+    .gte("rating", 4)
+    .not("body", "is", null);
+
   const { data } = await a
     .from("product_reviews")
     .select("id, reviewer_name, rating, title, body, status, featured")
@@ -229,21 +307,16 @@ export async function getReviews(
     .in("status", ["published", "featured"])
     .gte("rating", 4)
     .not("body", "is", null)
+    // Featured first (weighting), then highest rating, then newest. This is the
+    // canonical DB ordering — stable across pages so `.range()` walks the corpus
+    // without gaps or repeats.
     .order("featured", { ascending: false })
     .order("rating", { ascending: false })
     .order("created_at", { ascending: false })
-    .limit(2000);
+    .range(offset, offset + limit - 1);
 
-  const all = (data || [])
-    .filter((r) => (r.body || "").trim().length > 0)
-    .sort((x, y) => {
-      // Featured first, then longest body (richest voice).
-      const fx = x.featured ? 1 : 0;
-      const fy = y.featured ? 1 : 0;
-      if (fx !== fy) return fy - fx;
-      return (y.body || "").length - (x.body || "").length;
-    });
-  return { total: all.length, offset, reviews: all.slice(offset, offset + limit) };
+  const reviews = (data || []).filter((r) => (r.body || "").trim().length > 0);
+  return { total: count || 0, offset, reviews };
 }
 
 export type ReviewAnalysis = {
@@ -382,6 +455,9 @@ export type GeneratedContent = {
   support_macros?: unknown[];
   endorsements?: unknown[];
   expectation_timeline?: unknown[];
+  // Up to 2 before/after testimonials [{quote,name,variant}] — pairs with media
+  // slots before_1/after_1, before_2/after_2 (harvested + re-hosted from the PDP).
+  before_after_stories?: unknown[];
 };
 
 export async function saveContent(
@@ -422,6 +498,7 @@ export async function saveContent(
       support_macros: Array.isArray(content.support_macros) ? content.support_macros : [],
       endorsements: Array.isArray(content.endorsements) ? content.endorsements : [],
       expectation_timeline: Array.isArray(content.expectation_timeline) ? content.expectation_timeline : [],
+      before_after_stories: Array.isArray(content.before_after_stories) ? content.before_after_stories : [],
       raw_ai_response: { source: "box-max-skill" } as Record<string, unknown>,
       status: "draft",
       generated_at: new Date().toISOString(),
@@ -489,6 +566,106 @@ async function fitOnWhite(
   let pipe = sharp(buffer)
     .resize(width, height, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
     .flatten({ background: { r: 255, g: 255, b: 255 } });
+  pipe = isJpeg ? pipe.jpeg({ quality: 90 }) : pipe.png();
+  return { buffer: await pipe.toBuffer(), mimeType: isJpeg ? "image/jpeg" : "image/png" };
+}
+
+/**
+ * Crop-to-fill an image to EXACTLY width×height (`fit: cover` → fills the frame,
+ * cropping overflow, no letterbox). Used for full-bleed lifestyle / scene shots
+ * that should fill the locked 1800×1344 gallery frame, where `fitOnWhite`'s
+ * letterboxing would look wrong. Returns the encoded bytes + mime.
+ */
+async function coverCrop(
+  buffer: Buffer,
+  width: number,
+  height: number,
+  mimeType: string,
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const isJpeg = /jpe?g/i.test(mimeType);
+  let pipe = sharp(buffer).resize(width, height, { fit: "cover", position: "centre" });
+  pipe = isJpeg ? pipe.jpeg({ quality: 90 }) : pipe.png();
+  return { buffer: await pipe.toBuffer(), mimeType: isJpeg ? "image/jpeg" : "image/png" };
+}
+
+/** Escape text for safe embedding in an SVG `<text>` node. */
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/** Greedy word-wrap to ~maxChars per line (approximate — SVG has no auto-wrap). */
+function wrapLines(text: string, maxChars: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    if (cur && (cur.length + 1 + w.length) > maxChars) {
+      lines.push(cur);
+      cur = w;
+    } else {
+      cur = cur ? `${cur} ${w}` : w;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/**
+ * Composite winning-static-ad caption overlays onto an image. The FIRST caption
+ * is the top hook, the SECOND (optional) the bottom payoff — bold white text
+ * with a dark stroke + a translucent gradient band behind each block for
+ * legibility, the look of a high-performing paid-social static. Captions are
+ * word-wrapped and rendered via an SVG composited over the (already exact-size)
+ * image. No-op (returns the input) when there are no captions.
+ */
+async function overlayCaptions(
+  buffer: Buffer,
+  captions: string[],
+  width: number,
+  height: number,
+  mimeType: string,
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const clean = (captions || []).map((c) => (c || "").trim()).filter(Boolean).slice(0, 2);
+  if (clean.length === 0) return { buffer, mimeType };
+
+  const fontSize = Math.round(width * 0.052);
+  const lineHeight = Math.round(fontSize * 1.18);
+  const pad = Math.round(width * 0.04);
+  const maxChars = Math.max(12, Math.floor(width / (fontSize * 0.56)));
+
+  const renderBlock = (text: string, anchor: "top" | "bottom"): string => {
+    const lines = wrapLines(text, maxChars);
+    const blockH = lines.length * lineHeight;
+    const bandH = blockH + pad * 1.5;
+    const bandY = anchor === "top" ? 0 : height - bandH;
+    const firstBaseline =
+      anchor === "top" ? pad + fontSize : height - bandH + pad * 0.75 + fontSize;
+    const gradId = `band_${anchor}`;
+    const stops =
+      anchor === "top"
+        ? `<stop offset="0%" stop-color="black" stop-opacity="0.6"/><stop offset="100%" stop-color="black" stop-opacity="0"/>`
+        : `<stop offset="0%" stop-color="black" stop-opacity="0"/><stop offset="100%" stop-color="black" stop-opacity="0.6"/>`;
+    const tspans = lines
+      .map((ln, i) => `<tspan x="${width / 2}" y="${Math.round(firstBaseline + i * lineHeight)}">${escapeXml(ln)}</tspan>`)
+      .join("");
+    return `
+      <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">${stops}</linearGradient>
+      <rect x="0" y="${Math.round(bandY)}" width="${width}" height="${Math.round(bandH)}" fill="url(#${gradId})"/>
+      <text text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="800" font-size="${fontSize}" fill="white" stroke="black" stroke-width="${Math.max(2, Math.round(fontSize * 0.06))}" paint-order="stroke" letter-spacing="-0.5">${tspans}</text>`;
+  };
+
+  const blocks: string[] = [];
+  blocks.push(renderBlock(clean[0], "top"));
+  if (clean[1]) blocks.push(renderBlock(clean[1], "bottom"));
+
+  const svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg"><defs></defs>${blocks.join("")}</svg>`;
+  const isJpeg = /jpe?g/i.test(mimeType);
+  let pipe = sharp(buffer).composite([{ input: Buffer.from(svg), top: 0, left: 0 }]);
   pipe = isJpeg ? pipe.jpeg({ quality: 90 }) : pipe.png();
   return { buffer: await pipe.toBuffer(), mimeType: isJpeg ? "image/jpeg" : "image/png" };
 }
@@ -568,12 +745,15 @@ export async function saveMedia(
   localPath: string,
   mimeType: string,
   altText: string,
+  displayOrder = 0,
 ): Promise<{ url: string }> {
   const a = admin();
   const { readFileSync } = await import("fs");
   const buffer = readFileSync(localPath);
   const ext = mimeType.includes("jpeg") ? "jpg" : "png";
-  const storagePath = `${product_id}/${slot}.${ext}`;
+  // Gallery rows (display_order > 0) get a distinct storage path so multiple
+  // images can share one slot (e.g. the hero gallery: hero, hero_1, hero_2…).
+  const storagePath = `${product_id}/${slot}${displayOrder ? `_${displayOrder}` : ""}.${ext}`;
   const url = await uploadImage(a, storagePath, buffer, mimeType);
   const meta = await sharp(buffer).metadata().catch(() => null);
   await a.from("product_media").upsert(
@@ -581,7 +761,7 @@ export async function saveMedia(
       workspace_id,
       product_id,
       slot,
-      display_order: 0,
+      display_order: displayOrder,
       url,
       storage_path: storagePath,
       alt_text: altText,
@@ -933,7 +1113,157 @@ export async function generateIngredientImagesFallback(
   return { generated, skipped, failed };
 }
 
-// ── 8. Publish ────────────────────────────────────────────────────────────────
+// ── 7. Harvest from the live Shopify PDP (endorsements + before/after) ────────
+//
+// The product's live superfoodscompany.com PDP already carries the REAL assets
+// this refinement pass wants: nutritionist endorsements (name/credentials/quote
+// + headshot) and customer before/after transformation stories (paired photos +
+// testimonial). The skill reads the PDP text (`fetch-pdp`) + the image URL list
+// (`pdp-images`) to identify them, then re-hosts each image through `rehostImage`
+// and saves the text via `save-content` (endorsements / before_after_stories).
+//
+// 🚫 NEVER hotlink the Shopify CDN — `rehostImage` DOWNLOADS the source bytes and
+// re-uploads them to our `product-media` bucket, so `product_media.url` is always
+// a Supabase URL. (Hotlinking the Shopify CDN would break the moment Shopify is
+// sunset and leak our re-platforming.) Replaces any fabricated AI endorsements.
+
+/** The raw Shopify-CDN image list on the PDP (URL + filename tokens) for the
+ *  skill to pick endorsement avatars / before-after photos from. */
+export async function getPdpImages(handle: string): Promise<{ images: PdpImage[] }> {
+  const html = await fetchPdpHtml(handle);
+  if (!html) throw new Error("pdp_fetch_failed");
+  return { images: extractPdpImages(html) };
+}
+
+export type RehostFit = "contain" | "cover" | "none";
+
+/**
+ * Download an image from its (Shopify CDN) source URL and re-host it to our
+ * `product-media` bucket at `slot`/`displayOrder`, upserting the product_media
+ * row. Returns OUR Supabase URL — the Shopify URL is never persisted. `fit`
+ * `cover`/`contain` (with width+height) normalizes the asset (e.g. avatars →
+ * 400×400 cover); `none` keeps native bytes/proportions (before/after photos).
+ */
+export async function rehostImage(
+  workspace_id: string,
+  product_id: string,
+  sourceUrl: string,
+  slot: string,
+  opts: { displayOrder?: number; altText?: string; fit?: RehostFit; width?: number; height?: number } = {},
+): Promise<{ url: string; slot: string; storage_path: string }> {
+  const a = admin();
+  if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) throw new Error("rehost: bad source url");
+  const dl = await fetch(sourceUrl, { headers: { "User-Agent": "ShopCX-box/1.0 (+product-seeding)" } });
+  if (!dl.ok) throw new Error(`rehost: source fetch ${dl.status}`);
+  const ct = dl.headers.get("content-type") || "image/jpeg";
+  if (!/image\//.test(ct)) throw new Error(`rehost: not an image (${ct})`);
+
+  let buffer: Buffer = Buffer.from(await dl.arrayBuffer());
+  let mimeType = ct;
+  const fit = opts.fit || "none";
+  if (fit !== "none" && opts.width && opts.height) {
+    const norm = fit === "cover"
+      ? await coverCrop(buffer, opts.width, opts.height, mimeType)
+      : await fitOnWhite(buffer, opts.width, opts.height, mimeType);
+    buffer = norm.buffer;
+    mimeType = norm.mimeType;
+  }
+
+  const displayOrder = opts.displayOrder || 0;
+  const ext = mimeType.includes("jpeg") ? "jpg" : mimeType.includes("webp") ? "webp" : "png";
+  const storagePath = `${product_id}/${slot}${displayOrder ? `_${displayOrder}` : ""}.${ext}`;
+  const url = await uploadImage(a, storagePath, buffer, mimeType);
+  const meta = await sharp(buffer).metadata().catch(() => null);
+  await a.from("product_media").upsert(
+    {
+      workspace_id,
+      product_id,
+      slot,
+      display_order: displayOrder,
+      url,
+      storage_path: storagePath,
+      alt_text: opts.altText || "",
+      mime_type: mimeType,
+      width: meta?.width ?? opts.width ?? null,
+      height: meta?.height ?? opts.height ?? null,
+      file_size: buffer.length,
+      uploaded_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "workspace_id,product_id,slot,display_order" },
+  );
+  return { url, slot, storage_path: storagePath };
+}
+
+// ── 8 (was 6). Hero gallery slides — Drive lifestyle + Nano-Banana static ad ──
+//
+// Beyond the bag hero, the gallery gets two more `slot="hero"` rows (saved at
+// display_order > 0 via save-media): a real lifestyle photo from Drive, and a
+// Nano-Banana Pro static-ad scene with caption overlays. Both return a LOCAL
+// temp file so the skill can vision-confirm before save-media (same flow as the
+// hero). Recommended display_order: bag hero = 0, facts slide handled by the
+// renderer, lifestyle = 2, static ad = 3 (skill picks; just keep them distinct).
+
+/**
+ * Resolve a real lifestyle photo from the product's Drive `UGC/Photos`, crop it
+ * to the locked 1800×1344, and write it to a LOCAL temp file (no product_media
+ * row yet). Returns the candidate name + the full candidate list so the skill
+ * can re-call with a different `pickIndex` if the top shot isn't real-customer /
+ * target-demo. Save with `save-media` (slot `hero`, a distinct displayOrder).
+ */
+export async function resolveLifestyleSlide(
+  workspace_id: string,
+  product_id: string,
+  productName: string,
+  variantKeywords: string[],
+  pickIndex = 0,
+): Promise<{ localPath: string; mimeType: string; candidate: string; candidates: string[] }> {
+  const drive = await DriveClient.forWorkspace(workspace_id);
+  if (!drive) throw new Error("google_drive_not_connected (workspace SA key missing)");
+  const candidates = await resolveLifestyleShots(drive, { productName, variantKeywords });
+  if (candidates.length === 0) throw new Error(`no lifestyle/UGC photos found in Drive for "${productName}"`);
+  const idx = Math.min(Math.max(0, pickIndex), candidates.length - 1);
+  const pick = candidates[idx];
+  const dl = await drive.download(pick.id);
+  if (!dl) throw new Error("lifestyle download failed");
+  const fitted = await coverCrop(dl.buffer, HERO_WIDTH, HERO_HEIGHT, dl.mimeType);
+  const ext = fitted.mimeType.includes("jpeg") ? "jpg" : "png";
+  const localPath = join(tmpdir(), `seed-${product_id}-lifestyle-${idx}-${Date.now()}.${ext}`);
+  writeFileSync(localPath, fitted.buffer);
+  return { localPath, mimeType: fitted.mimeType, candidate: pick.name, candidates: candidates.slice(0, 8).map((c) => c.name) };
+}
+
+/**
+ * Generate the Nano-Banana Pro static-ad gallery slide: a top-down kitchen-
+ * counter scene (a hand holding the prioritized-variant pack + a made drink),
+ * in the style of a winning paid-social static, then composite the caption
+ * overlays (`captions[0]` = top hook, `captions[1]` = bottom payoff — copy the
+ * skill pulled from the review corpus). Crops to the locked 1800×1344 and writes
+ * a LOCAL temp file for vision-confirm. Save with `save-media` (slot `hero`,
+ * distinct displayOrder). `imageUrls` = [prioritized-variant packUrl, …refs].
+ */
+export async function generateStaticAdSlide(
+  workspace_id: string,
+  product_id: string,
+  imageUrls: string[],
+  prompt: string,
+  captions: string[] = [],
+): Promise<{ localPath: string; mimeType: string }> {
+  const gen = await generateNanoBananaProCombine({
+    workspaceId: workspace_id,
+    prompt,
+    imageUrls: (imageUrls || []).filter(Boolean),
+    aspectRatio: HERO_ASPECT,
+  });
+  const cropped = await coverCrop(gen.buffer, HERO_WIDTH, HERO_HEIGHT, gen.mimeType);
+  const capped = await overlayCaptions(cropped.buffer, captions, HERO_WIDTH, HERO_HEIGHT, cropped.mimeType);
+  const ext = capped.mimeType.includes("jpeg") ? "jpg" : "png";
+  const localPath = join(tmpdir(), `seed-${product_id}-staticad-${Date.now()}.${ext}`);
+  writeFileSync(localPath, capped.buffer);
+  return { localPath, mimeType: capped.mimeType };
+}
+
+// ── 9. Publish ────────────────────────────────────────────────────────────────
 
 export async function publish(workspace_id: string, product_id: string): Promise<{ ok: boolean; error?: string }> {
   const content = await getContent(workspace_id, product_id);

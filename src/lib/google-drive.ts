@@ -221,3 +221,53 @@ export async function resolveProductShots(
 
   return [...images].sort((a, b) => score(b) - score(a));
 }
+
+// Lifestyle / UGC photos live UNDER the product folder, the opposite of the
+// isolated packshots: `…/{Product}/UGC/Photos`. These are real in-scene shots
+// (a customer holding the product, the made drink on a counter) — used for the
+// hero gallery's lifestyle slide. We never source the isolated hero from here
+// (that's resolveProductShots); this is its complement.
+const LIFESTYLE_FOLDER_KEYWORDS = ["ugc", "lifestyle"];
+const PHOTOS_SUBFOLDER_KEYWORD = "photo";
+
+/**
+ * Resolve candidate lifestyle photos for a product/variant, ranked, from the
+ * product's `UGC/Photos` (or `Lifestyle`) subfolder. Prefers shots that match
+ * the variant and look like real-customer / target-demo scenes; de-prioritizes
+ * obvious 3D renders. Returns ranked DriveFile candidates (best first) — the
+ * caller downloads + vision-confirms the top candidate before using it. Empty
+ * when the product has no UGC/lifestyle folder.
+ */
+export async function resolveLifestyleShots(
+  drive: DriveClient,
+  args: { productName: string; variantKeywords?: string[] },
+): Promise<DriveFile[]> {
+  const { productName, variantKeywords = [] } = args;
+
+  const folders = await drive.findFolders(productName);
+  if (folders.length === 0) return [];
+  const target = folders[0];
+
+  // Find the UGC/Lifestyle subfolder, then prefer a "Photos" subfolder within
+  // it; fall back to images directly in the UGC folder.
+  const subs = await drive.listSubfolders(target.id);
+  const ugc = subs.find((s) => LIFESTYLE_FOLDER_KEYWORDS.some((k) => s.name.toLowerCase().includes(k)));
+  if (!ugc) return [];
+  const ugcSubs = await drive.listSubfolders(ugc.id);
+  const photos = ugcSubs.find((s) => s.name.toLowerCase().includes(PHOTOS_SUBFOLDER_KEYWORD));
+  const images = photos
+    ? await drive.listImagesInFolder(photos.id)
+    : await drive.listImagesInFolder(ugc.id);
+  if (images.length === 0) return [];
+
+  const kws = variantKeywords.map((k) => k.toLowerCase());
+  const score = (f: DriveFile): number => {
+    const n = f.name.toLowerCase();
+    let s = 0;
+    if (kws.some((k) => k && n.includes(k))) s += 5;
+    if (/customer|real|review|ugc|lifestyle|hand|holding|kitchen|home/.test(n)) s += 3;
+    if (/3d|render|mockup|box|carton/.test(n)) s -= 5;
+    return s;
+  };
+  return [...images].sort((a, b) => score(b) - score(a));
+}

@@ -41,6 +41,7 @@ PDP content blocks per product (sections, ordering).
 | `seo_keywords` | `text[]` | ✓ | default: `'{}'` |
 | `expectation_timeline` | `jsonb` | — | default: `'[]'` |
 | `endorsements` | `jsonb` | — | default: `'[]'` |
+| `before_after_stories` | `jsonb` | — | default: `'[]'` · up to 2 transformation testimonials `[{quote,name,variant}]`; index 0 ↔ media slots `before_1`/`after_1`, index 1 ↔ `before_2`/`after_2`. Legacy single `before`/`after` slot pair still renders (unlabeled). Harvested + re-hosted from the product's Shopify PDP (pdp-refinement-pass) |
 
 ## Foreign keys
 

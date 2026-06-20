@@ -137,6 +137,17 @@ export interface PageContent {
     bullets: string[];
   }>;
   expectation_timeline: Array<{ time_label: string; headline: string; body: string }>;
+  // Up to 2 before/after transformation stories. Index 0 pairs with media
+  // slots before_1/after_1, index 1 with before_2/after_2. Empty for products
+  // with no transformation stories (or the legacy single before/after pair).
+  before_after_stories: BeforeAfterStory[];
+}
+
+/** Testimonial text for one before/after transformation story. */
+export interface BeforeAfterStory {
+  quote: string;
+  name: string;
+  variant: string | null;
 }
 
 export interface Ingredient {
@@ -514,7 +525,7 @@ export async function getPageData(
     admin
       .from("product_page_content")
       .select(
-        "id, hero_headline, hero_subheadline, benefit_bar, benefit_bar_intro, benefit_bar_transition, mechanism_copy, ingredient_cards, comparison_table_rows, comparison_competitor_label, show_survey, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsements, expectation_timeline, status, version",
+        "id, hero_headline, hero_subheadline, benefit_bar, benefit_bar_intro, benefit_bar_transition, mechanism_copy, ingredient_cards, comparison_table_rows, comparison_competitor_label, show_survey, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsements, expectation_timeline, before_after_stories, status, version",
       )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)
