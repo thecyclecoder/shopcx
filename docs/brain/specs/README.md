@@ -40,6 +40,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** moves the spec-authoring chat off the **Anthropic API** and onto the build box as a **long-running, resumable `claude -p` session on Max** — same feature set (new/refine chat → finalize-commit-to-main → save-&-build → verification → cross-device resume), but now with full working-tree `Read`/`Grep` over `docs/brain/` + `src/` and `WebSearch` every turn, at $0 marginal. Each user turn is a concurrency-1 `spec-chat` `agent_jobs` job that resumes the session ([[../tables/roadmap_chats]] gains `box_session_id`/`turn_status`); replies take minutes (accepted) in exchange for grounded, code-aware speccing. Sibling of [[goal-decomposition-engine]] on the same box substrate.
 
+## Active project — Box-hosted Ticket "Improve" Agent ⏳
+
+**Spec:** [[box-ticket-improve]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** turns the ticket Improve tab into the founder's "fix-this-weird-ticket" terminal chat, productized — a **ticket-bound, resumable `claude -p` Max session** (auto-carries `ticket_id`) with full brain/`src/`/web powers, that **recommends then acts under one approval**: customer actions + internal notes + close/unassign/unescalate, sonnet-rule + grader changes, ticket re-score, and **code changes routed as ticket-sourced specs to the CS manager** (commissioned in Roadmap, never auto-built). Pivotable mid-conversation. Reuses the [[box-spec-chat]] session primitive + the [[build-approval-gates]] `pending_actions` gate; introduces a `cs_manager` role + [[../functions/cs]]. Replies take minutes (accepted), $0 marginal on Max.
+
 ## Active project — Storefront coupon visibility + WELCOME SMS ⏳
 
 **Spec:** [[storefront-coupon-visibility-and-sms]] · **Owner:** [[../functions/growth]]
