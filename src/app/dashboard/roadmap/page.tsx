@@ -84,7 +84,7 @@ function Card({ spec, job, fold }: { spec: SpecCard; job: AgentJob | null; fold:
       )}
       <CountPills counts={spec.counts} />
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
-      <div className="mt-2 flex items-center justify-between gap-2">
+      <div className="mt-2 space-y-2">
         <StatusControl slug={spec.slug} status={spec.status} />
         <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} />
       </div>
