@@ -29,7 +29,27 @@ A `content+media refresh`-style run ([[box-product-seeding]] modes) that, for th
 - **Nutrition facts must be human-verified** per variant before going live (factual/compliance) — the pass surfaces its transcription for approval.
 
 ## Run #1 — Superfood Tabs (the source of this workflow)
-Tabs carries the concrete instances of B + C captured 2026-06-20: headline above; 16→15; Danielle F. `smart_quote` fix; 8 individual pills; 3-variant supplement facts (Peach Mango prioritized — Sodium 230/Potassium 300/Blend 400mg; Mixed Berry 230/306/457; Strawberry Lemonade 240/310/467 — **pending founder verification**); real endorsements (Lindsey Ray / Teresa Rodriguez / Brenda Gregory, photos re-hosted); 2 before/after stories (Anne B. + one more); 4-slide gallery; full-corpus review analysis.
+The concrete B + C inputs captured 2026-06-20.
+
+**Already applied live (zero-risk DB edits, render with existing code):**
+- Headline → **"Fizz. Drink. Shed Pounds & Fight Bloating."**
+- Danielle F. review `smart_quote` typo → "I realized I enjoyed them so much, it became a non negotiable."
+- Trust pills split to 8 individual items (`certifications` = Non-GMO · 3rd Party Tested · Natural Ingredients; `allergen_free` = Sugar Free · Gluten Free · Soy Free · Dairy Free · Nut Free).
+
+**Pending the P1 build, then the Tabs pass applies:**
+- **16 → 15 superfoods** in all copy (hero_subheadline, mechanism_copy, KB, benefit_bar[5], comparison row, faq[0]) **and** the hero credibility badge (the "100mg caffeine (green tea)" card stays but isn't counted as a distinct superfood). NOT the "12–16 oz water" dosing line.
+- Real endorsements (Lindsey Ray / Teresa Rodriguez / Brenda Gregory) with photos re-hosted Shopify→Supabase.
+- 2 before/after stories (Anne B. — Mixed Berry, 84 lbs — + one more), photos re-hosted.
+- 4-slide hero gallery (bag · Drive lifestyle (woman ~40s holding box) · Nano-Banana static-ad · HTML facts).
+- Full-corpus 4★+ review analysis (3,122 reviews; real category counts).
+
+**Per-variant Supplement Facts (FINAL — locked; serving = 1 Tablet, 30/container; PDP shows the PRIORITIZED variant = Peach Mango; footer: "*Percent Daily Values are based on a 2,000 calorie diet." + "**Daily value not established."; other ingredients identical across all three: Citric acid, natural flavors, hydroxypropyl cellulose, croscarmellose sodium, rebaudioside A, silica, L-leucine, canola oil and magnesium stearate):**
+
+- **Peach Mango (prioritized):** Calories 5 · Total Carbohydrate <1 g (<1%*) · Sodium (as sodium bicarbonate and sodium carbonate) 230 mg (10%) · Potassium (as potassium bicarbonate) 300 mg (6%) · Proprietary Superfood Blend **400 mg** (**): Turmeric root powder, Green tea leaf extract (100 mg caffeine), Beet root, Elderberry fruit 10:1 extract, Matcha tea leaf (Camellia sinensis), Burdock root 4:1 extract, Ginger root 5:1 extract, Dandelion 5:1 extract (whole plant), Lemon balm 4:1 extract (aerial parts), Milk thistle seed extract, Asian ginseng root, Lycium (goji) fruit 5:1 extract, Pomegranate fruit, Aloe vera inner leaf powder, Organic wheat grass, Chlorella algae.
+- **Mixed Berry:** Calories 5 · Total Carbohydrate <1 g (<1%*) · Sodium 230 mg (10%) · Potassium 306 mg (7%) · Proprietary Superfood Blend **457 mg** (**): Elderberry extract, Beet root, Green tea leaf extract (100 mg caffeine), Matcha tea leaf (Camellia sinensis), Burdock root 4:1 extract, Ginger root 5:1 extract, Dandelion 5:1 extract (whole plant), Lemon balm 4:1 extract (aerial parts), Milk thistle seed extract, Asian ginseng root, Lycium (goji) berry fruit 5:1 extract, Pomegranate fruit, Aloe vera inner leaf juice powder, Wheat grass, Chlorella algae.
+- **Strawberry Lemonade:** Calories 5 · Total Carbohydrate <1 g (<1%*) · Sodium 240 mg (10%) · Potassium 310 mg (7%) · Proprietary Superfood Blend **467 mg** (**): Organic beet root, Green tea leaf extract (100 mg caffeine), Elderberry fruit extract, Matcha tea leaf (Camellia sinensis), Burdock root 4:1 extract, Ginger root 5:1 extract, Dandelion 5:1 extract (whole plant), Lemon balm 4:1 extract (aerial parts), Milk thistle seed extract, Asian ginseng root, Lycium (goji) berry fruit 5:1 extract, Pomegranate fruit, Aloe vera inner leaf juice powder, Organic wheat grass, Chlorella algae.
+
+**Nano-Banana static-ad caption overlays (FINAL — hook → benefit → social proof, no specific-weight claim on the ad):** `bloat? gone 🫧` · `15 superfoods · one fizzy tab` · `13,000+ love it ★★★★★`.
 
 ## Verification
 - Run the pass on a product → trust pills are individual; timeline centered on desktop; review filter counts are realistic (hundreds, not single digits); each variant has a Supplement Facts panel (HTML) + the AI can quote it on a ticket + it's in the KB; endorsements show real people with **Supabase-hosted** photos; up to 2 before/after stories render with re-hosted photos; hero gallery = 4 slides; headline reads punchy. API console flat (Max).
