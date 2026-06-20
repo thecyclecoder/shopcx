@@ -255,5 +255,23 @@ async function finalize(
     .from("migration_audits")
     .update({ status, checks, retry_count: retry, last_error: lastError, updated_at: new Date().toISOString() })
     .eq("id", audit.id as string);
+
+  // Event trigger (NOT a cron): the moment a row transitions to `failed`, hand it to the
+  // migration-fix box agent to attempt the judgment fixes auto-heal punts + re-verify. Fire only on
+  // the TRANSITION (prior status !== failed) so a re-audit of an already-failed row doesn't re-queue;
+  // enqueue is idempotent + best-effort — it must never break verification.
+  // See docs/brain/specs/migration-fix-agent.md.
+  if (status === "failed" && String(audit.status) !== "failed") {
+    try {
+      const { enqueueMigrationFixJob } = await import("@/lib/migration-fix");
+      await enqueueMigrationFixJob(admin, {
+        auditId: audit.id as string,
+        subscriptionId: audit.subscription_id as string,
+        workspaceId: audit.workspace_id as string,
+      });
+    } catch (e) {
+      console.error("[migration-audit] enqueue migration-fix failed:", e instanceof Error ? e.message : e);
+    }
+  }
   return { status, checks };
 }

@@ -8,10 +8,18 @@
  * renewal. See specs/appstle-pricing-heal-and-migration-monitor.md § Phase 3.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface Check { key: string; ok: boolean; detail?: string }
+interface FixAction { id: string; fix_kind: string; summary: string; preview?: string; status: string; result?: string }
+interface FixInfo {
+  jobId: string;
+  status: string; // queued|building|needs_approval|completed|failed|needs_attention
+  diagnosis: string | null;
+  error: string | null;
+  actions: FixAction[];
+}
 interface Audit {
   id: string;
   subscription_id: string;
@@ -24,6 +32,7 @@ interface Audit {
   last_error: string | null;
   created_at: string;
   updated_at: string;
+  fix?: FixInfo;
 }
 interface Resp {
   counts: { passed: number; pending: number; failed: number; total: number };
@@ -35,15 +44,19 @@ export default function MigrationsPage() {
   const workspace = useWorkspace();
   const [data, setData] = useState<Resp | null>(null);
   const [loading, setLoading] = useState(true);
+  const isOwner = workspace.role === "owner";
+
+  const load = useCallback(() => {
+    return fetch("/api/migrations")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setData(d))
+      .catch(() => setData(null));
+  }, []);
 
   useEffect(() => {
     setLoading(true);
-    fetch("/api/migrations")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setData(d))
-      .catch(() => setData(null))
-      .finally(() => setLoading(false));
-  }, [workspace.id]);
+    load().finally(() => setLoading(false));
+  }, [workspace.id, load]);
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-8">
@@ -75,7 +88,7 @@ export default function MigrationsPage() {
           ) : (
             <div className="mt-3 space-y-3">
               {data.atRisk.map((a) => (
-                <AuditCard key={a.id} a={a} />
+                <AuditCard key={a.id} a={a} isOwner={isOwner} onChange={load} />
               ))}
             </div>
           )}
@@ -118,7 +131,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone: "zin
   );
 }
 
-function AuditCard({ a }: { a: Audit }) {
+function AuditCard({ a, isOwner, onChange }: { a: Audit; isOwner: boolean; onChange: () => Promise<unknown> }) {
   const failed = (a.checks || []).filter((c) => !c.ok);
   const isFailed = a.status === "failed";
   return (
@@ -146,6 +159,87 @@ function AuditCard({ a }: { a: Audit }) {
         ))}
       </ul>
       {failed.length > 0 && <p className="mt-2 text-xs text-rose-700">{failed.length} check(s) failing.</p>}
+      {a.fix && <FixPanel fix={a.fix} isOwner={isOwner} onChange={onChange} />}
     </article>
+  );
+}
+
+// The migration-fix box agent's diagnosis + (when it proposed a fix) the owner-gated Approve/Decline.
+// On approval the box worker executes the typed fix server-side and re-runs verifyMigration; only a
+// re-pass clears the row. See docs/brain/specs/migration-fix-agent.md.
+function FixPanel({ fix, isOwner, onChange }: { fix: FixInfo; isOwner: boolean; onChange: () => Promise<unknown> }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const diagnosis = fix.diagnosis || fix.error;
+  const label =
+    fix.status === "needs_approval" ? "🤖 fix proposed — awaiting approval"
+    : fix.status === "completed" ? (fix.error ? "🤖 needs a human" : "🤖 worked")
+    : fix.status === "queued" || fix.status === "building" ? "🤖 diagnosing…"
+    : fix.status === "needs_attention" || fix.status === "failed" ? "🤖 attention needed"
+    : `🤖 ${fix.status}`;
+
+  const decide = async (actionId: string, decision: "approve" | "decline") => {
+    setBusy(actionId + decision);
+    setErr(null);
+    try {
+      const res = await fetch("/api/roadmap/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: fix.jobId, actionId, decision }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setErr(j.error || `Failed (${res.status})`);
+      } else {
+        await onChange();
+      }
+    } catch {
+      setErr("Network error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-indigo-200 bg-white/70 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-indigo-700">{label}</span>
+      </div>
+      {diagnosis && <p className="mt-1.5 whitespace-pre-wrap text-xs text-zinc-700">{diagnosis}</p>}
+      {fix.status === "needs_approval" && fix.actions.length > 0 && (
+        <ul className="mt-2 space-y-2">
+          {fix.actions.map((act) => (
+            <li key={act.id} className="rounded-md border border-zinc-200 bg-white p-2">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="rounded bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700">{act.fix_kind}</span>
+                <span className="font-medium text-zinc-800">{act.summary}</span>
+              </div>
+              {act.preview && <p className="mt-1 whitespace-pre-wrap text-[11px] text-zinc-500">{act.preview}</p>}
+              {isOwner && act.status === "pending" && (
+                <div className="mt-2 flex gap-2">
+                  <button
+                    disabled={!!busy}
+                    onClick={() => decide(act.id, "approve")}
+                    className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    {busy === act.id + "approve" ? "Approving…" : "Approve & fix"}
+                  </button>
+                  <button
+                    disabled={!!busy}
+                    onClick={() => decide(act.id, "decline")}
+                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
+                  >
+                    Decline
+                  </button>
+                </div>
+              )}
+              {act.status !== "pending" && <p className="mt-1 text-[11px] text-zinc-500">{act.status}{act.result ? ` — ${act.result}` : ""}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!isOwner && fix.status === "needs_approval" && <p className="mt-1 text-[11px] text-zinc-400">Owner approval required.</p>}
+      {err && <p className="mt-1.5 text-[11px] text-rose-600">{err}</p>}
+    </div>
   );
 }
