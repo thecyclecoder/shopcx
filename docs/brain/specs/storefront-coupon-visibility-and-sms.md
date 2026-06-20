@@ -13,7 +13,7 @@ Harvey ordered 1× Amazing Coffee (SHOPCX19) and emailed *"I never received the 
 
 Resolution for Harvey (done): showed him the breakdown proving the 15%, issued a goodwill 10% refund ($7.99, Braintree `er04x520`), closed.
 
-## Issue 1 — the applied coupon is missing from `orders.discount_codes` (the AI needs it) 🚧 (code ✅, backfill pending approval)
+## Issue 1 — the applied coupon is missing from `orders.discount_codes` (the AI needs it) ✅
 
 `orders.discount_codes` is **empty on 100% of storefront orders** (7/7 sampled with a discount), while the real code lives in `orders.payment_details.discount_code` (+ `discount_cents`). Examples: SHOPCX20 `WELCOME-FJQHZ` (−$16.55), SHOPCX19 `WELCOME-P2RJD` (−$11.99), SHOPCX17 `WELCOME-99RA9` (−$23.75) — all with `discount_codes = []`.
 
@@ -27,7 +27,7 @@ Resolution for Harvey (done): showed him the breakdown proving the 15%, issued a
 **Landed:**
 - `src/app/api/checkout/route.ts` — the order insert now writes `discount_codes: discountCents > 0 && couponCode ? [couponCode] : []` (same string-array shape Shopify orders use), keeping `payment_details.discount_code`/`discount_cents` as before.
 - `src/lib/sonnet-orchestrator-v2.ts` — the order context query now also selects `payment_details`; the per-order `coupons:` line prefers `discount_codes`, **falls back to `payment_details.discount_code`** (so un-backfilled legacy orders still show their code), and appends the dollar amount: `coupons: WELCOME-P2RJD (-$11.99)`.
-- `scripts/backfill-storefront-order-discount-codes.ts` — dry-run-by-default, `--apply` to write; cursor-paginated + idempotent. Sets `discount_codes = [payment_details.discount_code]` for `source_name='storefront'` orders whose `discount_codes` is empty. **Pending owner approval to run against prod.**
+- `scripts/backfill-storefront-order-discount-codes.ts` — dry-run-by-default, `--apply` to write; cursor-paginated + idempotent. Sets `discount_codes = [payment_details.discount_code]` for `source_name='storefront'` orders whose `discount_codes` is empty. **Applied to prod ✅** (owner-approved run).
 
 ## Issue 2 — AI must verify discount claims against order data before agreeing/refunding ✅
 
@@ -75,9 +75,9 @@ Harvey signed up for **both** email (03:23:22) and SMS (03:23:45) via the popup 
 
 ## Status
 
-🚧 **Issue 2 shipped; Issues 1 & 3 code shipped, one gated action + one owner op task remain.**
-- Issue 1 — code landed (checkout write + orchestrator surfacing); the historical backfill is authored and **awaits owner approval** to run against prod.
-- Issue 2 — shipped (system-prompt guardrail + operational-rules sibling). `npx tsc --noEmit` clean.
-- Issue 3 — email-fallback code shipped (new shared helper + `popup-sms-delivery-fallback` Inngest fn + event wiring + brain pages). The Twilio deliverability **root-cause diagnosis remains an owner operational task** (needs Twilio console access, not buildable from the box).
+🚧 **Issues 1 & 2 fully shipped; Issue 3 code shipped — one owner operational task remains.**
+- Issue 1 — ✅ shipped. Checkout write + orchestrator surfacing landed; the historical backfill **ran against prod** (owner-approved).
+- Issue 2 — ✅ shipped (system-prompt guardrail + operational-rules sibling). `npx tsc --noEmit` clean.
+- Issue 3 — email-fallback code shipped (new shared helper + `popup-sms-delivery-fallback` Inngest fn + event wiring + brain pages). The Twilio deliverability **root-cause diagnosis remains an owner operational task** (needs Twilio console access, not buildable from the box) — this is why the issue/title stays 🚧.
 
 Triggered by ticket 8e9e325e; remediated for the one customer manually. Fixes above are the durable work.
