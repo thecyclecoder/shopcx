@@ -785,6 +785,127 @@ export async function pullIngredientImages(
   return { matched, unmatched, pdp_images: images.length };
 }
 
+// ── 6c. Nano Banana Pro FALLBACK for ingredients with NO PDP image ────────────
+//
+// The PDP pull (6b) is the PREFERRED source and stays the default. But some
+// ingredients have no per-ingredient photo on the PDP (e.g. Creatine Prime's
+// Creatine Monohydrate + Rhodiola; a few on other products) → blank ingredient
+// cards. For ANY product_ingredient still missing its `ingredient_{snake}` media
+// row AFTER the pull, generate a clean studio photo of the ingredient in its
+// natural/raw recognizable form via Nano Banana Pro (text-to-image — no input
+// packshot), normalize to 400×400 on white to match the pulled PDP thumbnails,
+// and write product_media. ONLY generates when there is NO pulled image for that
+// ingredient — never overwrites a PDP-sourced (or prior-run) image. The skill
+// (which researched each ingredient) supplies the raw-form visual description; we
+// fall back to a name-only prompt when none is given.
+
+export type IngredientFallbackInput = { name: string; visual_description?: string };
+
+/** The set of `ingredient_{snake}` slots already present (with a URL) in product_media. */
+async function existingIngredientSlots(
+  a: Admin,
+  workspace_id: string,
+  product_id: string,
+): Promise<Set<string>> {
+  const { data } = await a
+    .from("product_media")
+    .select("slot")
+    .eq("workspace_id", workspace_id)
+    .eq("product_id", product_id)
+    .like("slot", "ingredient\\_%")
+    .not("url", "is", null);
+  return new Set((data || []).map((r) => r.slot as string));
+}
+
+/** Studio ingredient-photo prompt matching the look of the pulled PDP thumbnails. */
+function ingredientFallbackPrompt(name: string, visualDescription?: string): string {
+  const form = visualDescription?.trim()
+    ? `, shown in its natural raw recognizable form: ${visualDescription.trim()}`
+    : ` in its natural, raw, recognizable form`;
+  return [
+    `A clean professional studio product photograph of the dietary supplement ingredient "${name}"${form}.`,
+    `Pure seamless white background, soft even diffused lighting, sharp focus, centered composition, photorealistic, square framing.`,
+    `No text, no labels, no packaging, no logos, no hands, no people — just the ingredient itself, like a clean ingredient catalog thumbnail.`,
+  ].join(" ");
+}
+
+/**
+ * Generate Nano Banana Pro studio photos for ingredients still missing a pulled
+ * PDP image (the FALLBACK after `pullIngredientImages`). Idempotent: skips any
+ * ingredient that already has an `ingredient_{snake}` media row, so the PDP pull
+ * always wins. Best-effort per ingredient (a failure never blocks the rest /
+ * publish). Returns generated / skipped (already had an image) / failed.
+ */
+export async function generateIngredientImagesFallback(
+  workspace_id: string,
+  product_id: string,
+  descriptions: IngredientFallbackInput[] = [],
+): Promise<{
+  generated: Array<{ ingredient: string; slot: string; url: string }>;
+  skipped: string[];
+  failed: string[];
+}> {
+  const a = admin();
+  const ingredients = await getIngredients(workspace_id, product_id);
+  if (ingredients.length === 0) return { generated: [], skipped: [], failed: [] };
+
+  const have = await existingIngredientSlots(a, workspace_id, product_id);
+  const descByName = new Map(
+    (descriptions || [])
+      .filter((d) => d && typeof d.name === "string" && d.name.trim())
+      .map((d) => [d.name.trim().toLowerCase(), d.visual_description] as const),
+  );
+
+  const generated: Array<{ ingredient: string; slot: string; url: string }> = [];
+  const skipped: string[] = [];
+  const failed: string[] = [];
+
+  for (const ing of ingredients) {
+    const name = (ing.name as string) || "";
+    const slot = ingredientSlot(name);
+    if (have.has(slot)) {
+      // A PDP-pulled (or prior-run) image exists — PDP stays the preferred source.
+      skipped.push(name);
+      continue;
+    }
+    try {
+      const prompt = ingredientFallbackPrompt(name, descByName.get(name.trim().toLowerCase()) || undefined);
+      const gen = await generateNanoBananaProCombine({
+        workspaceId: workspace_id,
+        prompt,
+        imageUrls: [], // text-to-image — no input packshot
+        aspectRatio: "1:1",
+      });
+      const fitted = await fitOnWhite(gen.buffer, INGREDIENT_SIZE, INGREDIENT_SIZE, gen.mimeType);
+      const ext = fitted.mimeType.includes("jpeg") ? "jpg" : "png";
+      const storagePath = `${product_id}/${slot}.${ext}`;
+      const url = await uploadImage(a, storagePath, fitted.buffer, fitted.mimeType);
+      await a.from("product_media").upsert(
+        {
+          workspace_id,
+          product_id,
+          slot,
+          display_order: 0,
+          url,
+          storage_path: storagePath,
+          alt_text: name,
+          mime_type: fitted.mimeType,
+          width: INGREDIENT_SIZE,
+          height: INGREDIENT_SIZE,
+          file_size: fitted.buffer.length,
+          uploaded_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "workspace_id,product_id,slot,display_order" },
+      );
+      generated.push({ ingredient: name, slot, url });
+    } catch {
+      failed.push(name);
+    }
+  }
+  return { generated, skipped, failed };
+}
+
 // ── 8. Publish ────────────────────────────────────────────────────────────────
 
 export async function publish(workspace_id: string, product_id: string): Promise<{ ok: boolean; error?: string }> {

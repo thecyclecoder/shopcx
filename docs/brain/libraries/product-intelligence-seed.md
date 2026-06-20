@@ -48,7 +48,8 @@ publish. The skill does the thinking; these do the I/O.
 | `resolvePackshot` | 6 | [[google-drive]] front-facing packshot + `Hero Example` refs → storage URLs |
 | `generateImage` | 6 | [[gemini]] `generateNanoBananaProCombine` → a **local file** the skill Reads to vision-QA; pads to `width`×`height` on white when given (heroes → `HERO_WIDTH`×`HERO_HEIGHT` = 1800×1344, `HERO_ASPECT` `4:3`) |
 | `saveMedia` | 6 | upload a vision-approved image → `product_media` (records `width`/`height`/`file_size` via sharp) |
-| `pullIngredientImages` | 6b | pull REAL per-ingredient PDP CDN images (Ashwagandha_1.jpg…), match by name, normalize to `INGREDIENT_SIZE` 400×400 → `product_media` slot=`ingredient_{snake}`. NOT Gemini. Idempotent; `{matched, unmatched, pdp_images}` |
+| `pullIngredientImages` | 6b | pull REAL per-ingredient PDP CDN images (Ashwagandha_1.jpg…), match by name, normalize to `INGREDIENT_SIZE` 400×400 → `product_media` slot=`ingredient_{snake}`. NOT Gemini. Idempotent; `{matched, unmatched, pdp_images}`. The **preferred/default** ingredient-image source |
+| `generateIngredientImagesFallback` | 6b | **FALLBACK** for ingredients with NO PDP image — [[gemini]] Nano Banana Pro text-to-image studio photo (raw recognizable form, white bg) → 400×400 → `product_media` slot=`ingredient_{snake}`. ONLY for ingredients still missing a row after the pull (PDP wins; never overwrites). Optional `[{name,visual_description}]` from the skill; idempotent/best-effort; `{generated, skipped, failed}` |
 | `publish` | 8 | delegates to `publish.ts` |
 
 **Image refinements (round 2):** heroes render **landscape 1800×1344** (`HERO_ASPECT`
@@ -71,11 +72,29 @@ when **every** distinctive ingredient token appears in (or as) a filename token
 (containment requires the contained side ≥3 chars, so a stray 1–2-char filename
 token can't spuriously match). This handles divergent PDP conventions —
 `Ashwagandha_1.jpg` (TitleCase_underscore) and `creamer-ingredient-collagen.jpg`
-(lowercase-dashed-prefixed) alike. **`media-refresh`
-mode** (`agent_jobs` instructions `{product_id, mode:"media-refresh"}`) re-runs
-ONLY the image stages (step 6 + 6b) on a published product — `runProductSeedJob`
-builds a media-refresh prompt; the skill skips research/reviews/content and never
-touches `intelligence_status` (still honoring the locked-hero guard).
+(lowercase-dashed-prefixed) alike.
+
+**Ingredient-image fallback (Nano Banana Pro):** the PDP pull stays the
+**default/preferred** source, but ingredients with no per-ingredient PDP photo
+(e.g. Creatine Prime's Creatine Monohydrate + Rhodiola) were left as blank cards.
+`generateIngredientImagesFallback` runs **after** `pullIngredientImages` and, for
+**only** the ingredients still missing an `ingredient_{snake}` media row, generates
+a clean studio photo of the ingredient in its natural/raw recognizable form via
+[[gemini]] Nano Banana Pro (text-to-image, no input packshot — all LLM/image on
+Max + the workspace Gemini key), normalizes to 400×400 on white to match the
+pulled PDP thumbnails, and writes `product_media` slot=`ingredient_{snake}`. It
+**never overwrites** a PDP-sourced (or prior-run) image — it skips any ingredient
+that already has a row — so the PDP pull always wins. The skill (which researched
+each ingredient) passes a `[{name,visual_description}]` payload describing the raw
+form; absent a description it falls back to a name-only prompt. Idempotent +
+best-effort (a failure never blocks publish); returns `{generated, skipped, failed}`.
+
+**`media-refresh` mode**
+(`agent_jobs` instructions `{product_id, mode:"media-refresh"}`) re-runs
+ONLY the image stages (step 6 + 6b, including the ingredient fallback) on a
+published product — `runProductSeedJob` builds a media-refresh prompt; the skill
+skips research/reviews/content and never touches `intelligence_status` (still
+honoring the locked-hero guard).
 
 ## `scripts/seed-product-tools.ts` — the tool CLI
 

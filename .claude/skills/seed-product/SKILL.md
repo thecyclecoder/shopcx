@@ -52,6 +52,7 @@ stdin (pipe it). On error it prints `{"error":"…"}` and exits 1 — read it an
 | `resolve-packshot <ws> <pid> "<name>" "<kw1,kw2>"` | Drive front-facing packshot + Hero Example refs → URLs |
 | `generate-image <ws> <pid>` ← stdin `{prompt,imageUrls,slot,aspectRatio,width?,height?}` | Nano Banana Pro → LOCAL file path (pads to `width`×`height` on white when given) |
 | `pull-ingredient-images <ws> <pid> <handle>` | download REAL per-ingredient PDP CDN images, match by name → `product_media` slot=`ingredient_{name}` @400×400 |
+| `ingredient-images-fallback <ws> <pid>` ← optional stdin `[{name,visual_description}]` | Nano Banana Pro studio photo ONLY for ingredients still missing a pulled PDP image → `product_media` slot=`ingredient_{name}` @400×400 (PDP pull stays preferred) |
 | `save-media <ws> <pid>` ← stdin `{slot,localPath,mimeType,altText}` | upload + persist product_media |
 | `publish <ws> <pid>` | publish content + KB + macros, flip to `published` |
 
@@ -59,7 +60,8 @@ stdin (pipe it). On error it prints `{"error":"…"}` and exits 1 — read it an
 
 If your prompt says **MEDIA-REFRESH mode** (params `"mode":"media-refresh"`), run
 **ONLY the image stages** — **step 6** (hero + lifestyle) and **step 6b**
-(ingredient images) — on an already-`published` product. **Skip** web research,
+(PDP ingredient pull + the Nano Banana Pro ingredient fallback) — on an
+already-`published` product. **Skip** web research,
 review analysis, benefit selection, and content (steps 1–5), and **do NOT change
 `intelligence_status`** (no `set-status`). Still honor the locked-hero guard
 (never regenerate the 3 locked heroes; you *may* still add their
@@ -185,9 +187,24 @@ ingredient (e.g. `Ashwagandha_1.jpg`, `Beet_Root.jpg`, `Chlorella.jpg`,
 pull the real ones: run `pull-ingredient-images <ws> <pid> <handle>`. It matches
 each PDP image to a `product_ingredient` by name, downloads it, normalizes to
 400×400, and writes `product_media` slot=`ingredient_{snake_name}` (matching
-Amazing Coffee). Read the returned `{matched, unmatched, pdp_images}` and note any
-`unmatched` ingredients in your final summary (a blank ingredient card is a known
-round-1 gap this step fixes). Best-effort — failures here never block publish.
+Amazing Coffee). Read the returned `{matched, unmatched, pdp_images}`.
+
+**Then — Nano Banana Pro FALLBACK for any ingredient with NO PDP image.** Some
+ingredients have no per-ingredient photo on the PDP (e.g. Creatine Prime's
+Creatine Monohydrate + Rhodiola) → they'd be left as blank cards. For those, pipe
+a `[{name, visual_description}]` array to `ingredient-images-fallback <ws> <pid>`,
+where `visual_description` is the ingredient in its **natural/raw recognizable
+form** (you know this from your step-2 research — e.g. creatine = "fine white
+crystalline powder in a small scoop", rhodiola = "dried golden-brown rhodiola
+root pieces", a botanical = "the dried herb/root/berry"). The tool generates a
+clean studio photo on a pure white background, normalizes to 400×400 to match the
+pulled PDP thumbnails, and writes `product_media` slot=`ingredient_{snake_name}`.
+**It generates ONLY for ingredients still missing an image — the PDP pull stays
+the default/preferred source and is never overwritten** (the tool skips any
+ingredient that already has a row). Pass descriptions for **every** ingredient you
+saw in `unmatched` (extras are harmless — already-imaged ones are skipped). Read
+the returned `{generated, skipped, failed}` and note it in your final summary.
+Best-effort — failures here never block publish.
 
 ### 7 — Self-QA gate (the rail before auto-publish)
 HOLD (do NOT publish; leave at `content_generated`) and report the issue if ANY:
