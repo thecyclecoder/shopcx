@@ -1,4 +1,4 @@
-# Spec-Test Classification — `fail` needs positive evidence, not "couldn't verify" ⏳
+# Spec-Test Classification — `fail` needs positive evidence, not "couldn't verify" ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[spec-test-agent]]. Found 2026-06-20: the spec-test agent marked a [[spec-test-json-robustness]] check `fail` → surfaced a phantom **Regression**, when the feature was correct — the check just required **forcing unparseable output** (fault injection) the non-destructive agent can't do.
 
@@ -15,9 +15,13 @@ The agent conflates **"I verified this is broken"** with **"I couldn't verify th
 - Keep the existing summary guard: `auto_fail` counts only real fails; an empty/uncertain run is never `approved`.
 
 ## Verification
-- Re-run the [[spec-test-json-robustness]] spec-test → the "force unparseable output → error state" bullet now classifies **`needs_human`** (with a code-present note), **not `fail`** → it leaves the Regressions list and moves to Needs-human.
-- A spec with a genuinely broken check (a claimed-selected column that isn't) still classifies `fail` with the probe evidence → still a real regression.
-- `needs_human`/`inconclusive` checks never appear under Regressions or flip the verdict to `issues`.
+- In `.claude/skills/spec-test/SKILL.md` Step 1, `grep -n "fault-injection\|POSITIVE evidence of breakage" SKILL.md` → expect the new `needs_human` fault-injection category + the dedicated `fail`-needs-evidence block with the "force X to fail → `needs_human`" canonical example present. In `scripts/builder-worker.ts` `runSpecTestJob`, `grep -n "POSITIVE EVIDENCE OF BREAKAGE" builder-worker.ts` → expect the same rule inline in the classification prompt.
+- On `/dashboard/developer/spec-tests`, **Test now** on [[spec-test-json-robustness]] → after the box run, query `select verdict, evidence from spec_test_runs … checks` for that slug → expect the "force unparseable output → `error` state" bullet now records **`needs_human`** (category `needs_human`, evidence noting code-present / needs-forced-fault), **NOT `fail`** → it leaves the Regressions banner and appears under the Human-test queue's **👤 Needs human testing**.
+- On a spec with a genuinely broken check (a claimed-selected column a read-only probe shows isn't there) → expect it still classifies **`fail`** with the probe evidence → still a real regression with `agent_verdict='issues'`.
+- On `/dashboard/developer/spec-tests/human-queue`, confirm a run whose only non-pass checks are `needs_human`/`inconclusive` shows **no Regressions banner** and `agent_verdict ≠ 'issues'` → expect `needs_human`/`inconclusive` never appear under Regressions or flip the verdict to `issues`.
+- On any empty/uncertain run (no `pass` check) → expect `agent_verdict='needs_human'`, never `approved` (summary guard unchanged).
 
-## Phase 1 — classification rule + regression gating ⏳
+## Phase 1 — classification rule + regression gating ✅
 Tighten the `spec-test` skill's verdict rules (fail = breakage evidence; un-runnable-read-only → needs_human/inconclusive) + ensure the Regressions list / `issues` verdict are driven only by evidence-backed `fail`s. Brain: [[spec-test-agent]] + the `spec-test` skill page + [[../dashboard/spec-tests]]. Fold on ship.
+
+**Built:** the `spec-test` `SKILL.md` Step 1 now carries a fourth classify category — **fault-injection / forced-failure → `needs_human`** — plus a dedicated **"`fail` requires POSITIVE evidence of breakage"** block (canonical example: *"force X to fail → expect the error handling"* is `needs_human`, never `fail`; code-plainly-satisfies-but-needs-forced-fault → `needs_human` with a `"code present at file:line; needs forced fault to confirm"` note; undeterminable → `inconclusive`), and Step 2/3 reinforce it (a `fail` must be *earned* with breakage evidence; `needs_human`/`inconclusive` never flip the verdict to `issues`). `runSpecTestJob`'s classification prompt gained the same rule inline. No code-path change was needed for the gating itself — `normalizeSpecTest` already derives `issues` iff `auto_fail>0` (empty/uncertain run → `needs_human`, never `approved`) and `getHumanTestQueue` already keys regressions off `fail` checks only; comments now lock the invariant. The fix is squarely in the agent's classification guidance, which is where the phantom-regression originated.
