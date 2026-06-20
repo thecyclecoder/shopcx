@@ -1591,6 +1591,45 @@ async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: 
 type SpecTestCheck = { text: string; verdict: string; category?: string; evidence?: string };
 type SpecTestSummary = { auto_pass: number; auto_fail: number; needs_human: number; inconclusive: number };
 
+// The spec-test skill is contracted to emit ONLY the result JSON as its final message, fenced-or-last.
+// In practice a Max session sometimes wraps it in prose, so we extract defensively: whole-message parse
+// first, then the LAST fenced ```json block that parses, then a scan for the LAST balanced {...} that
+// parses (tolerating leading AND trailing prose). Returns null only if nothing parses — the caller then
+// re-prompts once and, failing that, records an honest `error` run (never a silent 0-check approved row).
+function extractSpecTestResult(text: string): Record<string, unknown> | null {
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try {
+      const o = JSON.parse(s);
+      return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const whole = tryParse(text.trim());
+  if (whole) return whole;
+  // Last fenced ```json block that parses (the contract says fenced JSON is the last thing in the message).
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (let i = fences.length - 1; i >= 0; i--) {
+    const o = tryParse(fences[i][1].trim());
+    if (o) return o;
+  }
+  // Scan for the LAST parseable balanced {...}: walk candidate close braces from the end, and for each,
+  // candidate open braces from the start — the first hit is the outermost-latest object (skips prose braces).
+  const opens: number[] = [];
+  for (let i = text.indexOf("{"); i >= 0; i = text.indexOf("{", i + 1)) opens.push(i);
+  const closes: number[] = [];
+  for (let i = text.indexOf("}"); i >= 0; i = text.indexOf("}", i + 1)) closes.push(i);
+  for (let e = closes.length - 1; e >= 0; e--) {
+    const end = closes[e];
+    for (const start of opens) {
+      if (start >= end) break;
+      const o = tryParse(text.slice(start, end + 1));
+      if (o) return o;
+    }
+  }
+  return null;
+}
+
 // Normalize + re-derive the verdict/summary from the agent's checks so the stamp can never lie (e.g. the
 // agent says "approved" but a check failed). The checks array is the ground truth; counts follow it.
 function normalizeSpecTest(parsed: Record<string, unknown> | null): {
@@ -1635,31 +1674,50 @@ async function runSpecTestJob(job: Job) {
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is docs/brain/specs/${slug}.md. Read it + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human | mutating→needs-human), and run ONLY the non-destructive checks on the box.`,
       `You have the box's read-only QA toolkit: repo Read/Grep + \`npx tsc --noEmit\`, the \`gh\` CLI for CI/PR status, the \`vercel\` CLI for deploy READY + logs + \`vercel env ls\`, read-only DB probes via \`npx tsx scripts/spec-test-db-probe.ts "<select …>"\`, and GET/read-only endpoint hits. NEVER mutate prod, NEVER mark the spec verified/archived, NEVER run a mutating check (those are needs_human).`,
-      `Final message = ONLY one JSON object: {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>"}],"report":"<2-4 plain-text sentences>"} — or {"status":"error","error":"<why>"} if you cannot proceed.`,
+      `Final message = ONLY one JSON object (no prose before/after; if fenced, the JSON is the last thing in the message): {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>"}],"report":"<2-4 plain-text sentences>"} — or {"status":"error","error":"<why>"} if you cannot proceed.`,
     ].join("\n");
 
-    const { session, resultText, isError, raw } = await runSpecTestClaude(prompt, null, REPO_DIR);
+    // Records the run as a distinct, retryable `error` state (NOT a 0-check approved/empty row): the
+    // Developer page shows "Run errored — retry" with the raw tail, and "Test now" re-runs it.
+    const writeErrorRun = async (reason: string, transcript: string, status: string, jobError?: string) => {
+      await db.from("spec_test_runs").insert({
+        workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
+        agent_verdict: "error", summary: {}, checks: [],
+        transcript: transcript.slice(-8000), error: reason,
+      });
+      await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
+    };
+
+    let { session, resultText, isError, raw } = await runSpecTestClaude(prompt, null, REPO_DIR);
     if (session) await update(job.id, { claude_session_id: session });
-    const parsed = extractJson<Record<string, unknown>>(resultText);
+    let parsed = extractSpecTestResult(resultText);
+
+    // Parse-repair: the contract is strict JSON, but a Max session occasionally returns prose. Re-prompt
+    // ONCE on the same session for ONLY the JSON before giving up — a cheap self-heal that turns most
+    // would-be "no parseable JSON" runs into real verdicts.
+    if (!parsed) {
+      console.log(`${tag} no parseable JSON on first pass — re-prompting once for strict JSON`);
+      const repair = [
+        `Your previous message could not be parsed as JSON. Return ONLY one valid JSON object matching this schema — no prose, no commentary, no markdown around it, and if fenced it must be the last thing in the message:`,
+        `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>"}],"report":"<2-4 plain-text sentences>"}`,
+        `Reuse the checks you already determined; do not re-run anything. If you genuinely could not proceed, return ONLY {"status":"error","error":"<why>"}.`,
+      ].join("\n");
+      const retry = await runSpecTestClaude(repair, session, REPO_DIR);
+      if (retry.session) { session = retry.session; await update(job.id, { claude_session_id: session }); }
+      resultText = retry.resultText; isError = retry.isError; raw = retry.raw;
+      parsed = extractSpecTestResult(resultText);
+    }
+
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
     if (parsed?.status === "error") {
-      await db.from("spec_test_runs").insert({
-        workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
-        agent_verdict: "needs_human", summary: {}, checks: [],
-        transcript: raw.slice(-8000), error: String(parsed.error || "agent reported error"),
-      });
-      await update(job.id, { status: "completed", log_tail: `spec-test error: ${String(parsed.error || "").slice(0, 300)}` });
+      await writeErrorRun(String(parsed.error || "agent reported error"), raw, "completed", `spec-test error: ${String(parsed.error || "").slice(0, 300)}`);
       return;
     }
 
     if (!parsed) {
-      await db.from("spec_test_runs").insert({
-        workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
-        agent_verdict: "needs_human", summary: {}, checks: [],
-        transcript: raw.slice(-8000), error: "agent produced no parseable JSON",
-      });
-      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "spec-test produced no parseable JSON", log_tail: raw.slice(-2000) });
+      // Still unparseable after the one repair pass — honest terminal `error` state, never a clean-pass row.
+      await writeErrorRun("agent produced no parseable JSON (after one repair re-prompt)", raw, isError ? "failed" : "needs_attention", "spec-test produced no parseable JSON");
       return;
     }
 
@@ -1678,7 +1736,7 @@ async function runSpecTestJob(job: Job) {
     try {
       await db.from("spec_test_runs").insert({
         workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
-        agent_verdict: "needs_human", summary: {}, checks: [], transcript: null, error: `error: ${msg}`,
+        agent_verdict: "error", summary: {}, checks: [], transcript: null, error: `error: ${msg}`,
       });
     } catch { /* audit best-effort */ }
     await update(job.id, { status: "failed", error: msg });

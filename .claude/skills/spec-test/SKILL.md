@@ -78,6 +78,15 @@ summary, with the probe evidence.
 
 ## Step 3 — emit ONE JSON object (your entire final message)
 
+🚨 **Strict output contract — the worker parses your final message, not a human.** Your final message
+MUST be **ONLY** the result JSON object below — nothing else. No preamble ("Here is the result…"), no
+trailing commentary, no explanation, no markdown headings around it. If you fence it, the JSON object
+must be the **last** thing in the message (a single ```json fenced block with nothing after the closing
+fence). Prose anywhere makes the run unparseable, and the worker records it as a wasted **`error`** run.
+Do all your thinking/tool-calls in earlier turns; the **final** message is the JSON and only the JSON.
+
+This exact schema (fill in the values; keep the keys):
+
 ```json
 {
   "status": "completed",
@@ -93,6 +102,12 @@ summary, with the probe evidence.
 }
 ```
 
+One-shot example of a **complete, valid** final message (this is the entire message — nothing before or after):
+
+```json
+{"status":"completed","agent_verdict":"approved","summary":{"auto_pass":2,"auto_fail":0,"needs_human":1,"inconclusive":0},"checks":[{"text":"Route /api/foo exists","verdict":"pass","category":"auto","evidence":"src/app/api/foo/route.ts:1 — GET handler present"},{"text":"Migration applied: column bar present","verdict":"pass","category":"auto","evidence":"spec-test-db-probe: select bar from baz limit 1 → returns column"},{"text":"The page looks fantastic","verdict":"needs_human","category":"needs_human","evidence":"visual/UX judgment — owner must eyeball"}],"report":"Both automatable checks pass; the route and migration landed. The owner still needs to eyeball the page styling."}
+```
+
 Rules for the stamp:
 - `agent_verdict = "issues"` if **any** check is `fail`.
 - else `agent_verdict = "approved"` if **at least one** check is `pass` and none failed.
@@ -100,8 +115,8 @@ Rules for the stamp:
 - `summary` counts must match the `checks` array. If the spec has **no `## Verification` section**, emit
   zero checks, `agent_verdict: "needs_human"`, and say so in `report`.
 
-If you genuinely cannot proceed (spec missing, repo unreadable), emit
-`{"status":"error","error":"<why>"}` and stop. Never guess a verdict you didn't actually test.
+If you genuinely cannot proceed (spec missing, repo unreadable), your final message is ONLY
+`{"status":"error","error":"<why>"}` and nothing else. Never guess a verdict you didn't actually test.
 
 ## Related
 `docs/brain/specs/spec-test-agent.md` · `scripts/builder-worker.ts` → `runSpecTestJob` ·

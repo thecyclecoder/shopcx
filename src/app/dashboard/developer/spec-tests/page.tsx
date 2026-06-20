@@ -95,7 +95,7 @@ export default async function SpecTestsPage() {
                       {s.title}
                     </Link>
                     {run ? <AgentTestedStamp verdict={run.agent_verdict} /> : <span className="text-[11px] text-zinc-400">not yet tested</span>}
-                    {run && <TestChip summary={run.summary} />}
+                    {run && run.agent_verdict !== "error" && <TestChip summary={run.summary} />}
                   </div>
                   <div className="flex items-center gap-2">
                     {run?.agent_verdict === "issues" && <ProposeFixButton slug={s.slug} compact />}
@@ -103,7 +103,26 @@ export default async function SpecTestsPage() {
                     <TestNowButton slug={s.slug} />
                   </div>
                 </div>
-                {run?.error && <p className="mt-2 text-xs text-rose-500">{run.error}</p>}
+                {run?.agent_verdict === "error" ? (
+                  <div className="mt-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs dark:border-zinc-700 dark:bg-zinc-800/40">
+                    <p className="font-medium text-zinc-600 dark:text-zinc-300">
+                      Run errored — retry. <span className="font-normal text-zinc-500 dark:text-zinc-400">{run.error || "the agent produced no parseable verdict"}</span>
+                    </p>
+                    {run.transcript && (
+                      <details className="mt-1.5">
+                        <summary className="cursor-pointer select-none text-[11px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300">
+                          raw output tail
+                        </summary>
+                        <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-white p-1.5 text-[11px] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
+                          {run.transcript}
+                        </pre>
+                      </details>
+                    )}
+                    <p className="mt-1.5 text-[11px] text-zinc-400">Use <span className="font-medium">Test now</span> to re-run.</p>
+                  </div>
+                ) : (
+                  run?.error && <p className="mt-2 text-xs text-rose-500">{run.error}</p>
+                )}
                 {run && run.checks.length > 0 && (
                   <details className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
                     <summary className="cursor-pointer select-none text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">

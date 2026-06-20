@@ -25,16 +25,19 @@ const VERDICT_DOT: Record<string, string> = {
   approved: "bg-emerald-500",
   issues: "bg-rose-500",
   needs_human: "bg-amber-500",
+  error: "bg-zinc-400",
 };
 const VERDICT_LABEL: Record<string, string> = {
   approved: "Agent-tested",
   issues: "Agent-tested · issues",
   needs_human: "Needs human",
+  error: "Run errored — retry",
 };
 const VERDICT_CLASS: Record<string, string> = {
   approved: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   issues: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
   needs_human: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+  error: "bg-zinc-200 text-zinc-600 dark:bg-zinc-700/40 dark:text-zinc-300",
 };
 
 /** The distinct "Agent-tested ✅ / ⚠️ issues" stamp — sits NEXT TO (never replaces) the human Verified state. */

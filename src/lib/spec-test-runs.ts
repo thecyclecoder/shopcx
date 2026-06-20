@@ -14,7 +14,10 @@ import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
 
 export type CheckVerdict = "pass" | "fail" | "needs_human" | "inconclusive";
 export type CheckCategory = "auto" | "needs_human" | "inconclusive";
-export type AgentVerdict = "approved" | "issues" | "needs_human";
+// `error` = the run could not produce a parseable verdict (the agent returned prose / unparseable JSON
+// even after one repair re-prompt, reported it couldn't proceed, or the worker threw). A distinct,
+// retryable terminal state — NEVER a silent 0-check `approved`/empty row that reads like a clean pass.
+export type AgentVerdict = "approved" | "issues" | "needs_human" | "error";
 
 export interface SpecTestCheck {
   text: string;
