@@ -22,6 +22,9 @@ const nextConfig: NextConfig = {
     "/dashboard/roadmap/goals": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md"],
     "/dashboard/roadmap/goals/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
     "/dashboard/roadmap/functions/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    // The Developer → Spec Tests page (spec-test-agent) reads specs + archive.d to list shipped-unverified
+    // specs (getRoadmap / listArchivedSlugs); the board card chip needs them too (already covered above).
+    "/dashboard/developer/spec-tests": ["./docs/brain/specs/**/*.md", "./docs/brain/archive.d/**/*.md"],
     "/dashboard/brain": ["./docs/brain/**/*.md"],
     "/dashboard/brain/[...slug]": ["./docs/brain/**/*.md"],
     // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into

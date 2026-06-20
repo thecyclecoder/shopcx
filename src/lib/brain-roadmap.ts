@@ -391,6 +391,21 @@ export async function getArchive(): Promise<ArchiveEntry[]> {
 }
 
 /**
+ * Slugs of every archived (verified + folded) spec — the `docs/brain/archive.d/{slug}.md` filenames.
+ * A spec is "shipped but not archived" when it's still in specs/ AND its slug isn't here. Used by the
+ * spec-test cron (spec-test-agent) to skip specs already past the verify gate. Empty if archive.d/ is absent.
+ */
+export async function listArchivedSlugs(): Promise<string[]> {
+  try {
+    return (await fs.readdir(ARCHIVE_DIR))
+      .filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")
+      .map((f) => f.replace(/\.md$/, ""));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Pull the body of a top-level "## {heading}" section out of spec markdown (everything between
  * the heading and the next "## " / EOF). Returns the trimmed body, or null if the heading is absent.
  * Used to lift the "## Verification" test plan out of a spec for the detail page's verify card.
