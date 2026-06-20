@@ -1,4 +1,4 @@
-# Improve must be able to do anything to a customer the orchestrator can — via the same executor ⏳
+# Improve must be able to do anything to a customer the orchestrator can — via the same executor ✅
 
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `3bb28cfd-b86a-4099-a3c3-145b947e4f78`
 
@@ -8,9 +8,21 @@ Today Improve runs a parallel, hand-maintained executor: src/lib/improve-actions
 The CX co-pilot's action scope is narrower than the orchestrator's because Improve uses a separate, partial executor (improve-actions.ts) instead of the production one (action-executor.ts executeSonnetDecision). The founder cannot ask Improve to launch a journey, run a playbook/workflow/macro, escalate, or use any direct action outside the hand-maintained subset, and even shared actions can drift (e.g. send_message doesn't email portal customers). On this ticket that meant the cancel journey could not be sent to the customer from Improve at all despite the delivery path being fixed.
 
 ## Phases
-- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — implement the fix** — `orchestrator_action` plan kind + typed `SonnetDecision` ([[../tables/ticket_improve_chats|ticket-improve-chats.ts]]); executed via `executeSonnetDecision` in [[../libraries/improve-plan-executor]]; portal-aware delivery sink [[../libraries/ticket-delivery]]; [[../libraries/improve-actions]] direct cases delegate to the shared `directActionHandlers` registry; docs + skill updated. `npx tsc --noEmit` clean.
+
+## What landed
+- **`orchestrator_action` plan kind** + `decision: SonnetDecision` field on `ImprovePlanAction` (`src/lib/ticket-improve-chats.ts`). The execute route already spreads `...a`, so the typed decision rides through to the executor unchanged.
+- **`improve-plan-executor.ts`**: new step 1b runs each approved `orchestrator_action` by building an `ActionContext` from the ticket (`workspaceId`, `ticketId`, `customerId`, `channel` from `tickets.channel`, `sandbox` from `workspaces.sandbox_mode`) and calling `executeSonnetDecision` — the exact production path. Logs the decision + reasoning as an internal note first (North star). Sets the session `resolved` if the decision closed the ticket.
+- **`src/lib/ticket-delivery.ts`** (new lib + brain page): `deliverTicketMessage` — portal-aware per-channel send that fixes the old `send_message` gap (it only emailed when `channel==='email'`). It's the `send` sink passed to `executeSonnetDecision`.
+- **`improve-actions.ts`**: subscription/refund/coupon/price/marketing/address direct cases now delegate to the shared `directActionHandlers` registry via `dispatchDirectAction` — one customer-action code path. `create_return`, indefinite `pause`, `cancel`, `send_message`, and the rule/close cases stay bespoke (documented why in [[../libraries/improve-actions]]).
+- **Approval card** already renders `label` + `detail`; the box puts its rationale there, and the executor logs the decision reasoning to the thread.
+- Docs: `.claude/skills/ticket-improve/SKILL.md`, [[../orchestrator-tools]] § Improve parity, [[../lifecycles/ai-analysis]] Status/open work.
 
 ## Verification
-- Reproduce the ticket scenario → confirm the fixed behavior, and that the ticket that surfaced it would now be handled correctly.
+- On a portal ticket (the surfacing ticket `3bb28cfd…`, Krystin), in the **Improve** tab ask to "send the cancel subscription journey," approve the proposed `orchestrator_action` → expect the cancel-journey CTA to (a) appear in the portal thread, (b) be emailed via `sendPortalThreadEmail`, and (c) show in the conversation window — i.e. `launchJourneyForTicket` runs through `executeSonnetDecision` exactly as the orchestrator's.
+- On any ticket, propose `{"kind":"orchestrator_action","decision":{"action_type":"direct_action","actions":[{"type":"apply_coupon","contract_id":"…","code":"…"}],"reasoning":"…"}}` and approve → expect an internal note `[Improve] Running orchestrator action direct_action. Reasoning: …`, the coupon applied through `directActionHandlers.apply_coupon` (Appstle call logged to `appstle_api_calls`), and a result line on the approval card.
+- On an `orchestrator_action` with `action_type:"escalate"` → expect the ticket's `escalated_at` set and a holding message delivered on the ticket channel.
+- On a `customer_action` `partial_refund` (now delegated) → expect the refund issued via `directActionHandlers.partial_refund` (Slack notified, `refund_amount` available to a chained `send_message`), confirming the migrated path is behavior-equivalent.
+- Build gate: `npx tsc --noEmit` → expect no errors.
 
 > Authored by the box Improve agent from ticket `3bb28cfd-b86a-4099-a3c3-145b947e4f78`. Commission the build from the Roadmap board (owner = cs).

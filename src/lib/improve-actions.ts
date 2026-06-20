@@ -12,6 +12,9 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import type { ActionContext, ActionParams, ActionResult } from "@/lib/action-executor";
+
+type Admin = ReturnType<typeof createAdminClient>;
 
 export interface ImproveAction {
   type: string;
@@ -21,6 +24,55 @@ export interface ImproveAction {
 export interface ImproveActionResult {
   results: string[];
   actionContext: Record<string, string>;
+}
+
+/**
+ * Dispatch ONE direct action through the orchestrator's directActionHandlers
+ * registry — the SAME code path handleDirectAction uses in production. This is
+ * how the Improve tab and the orchestrator share a single customer-action path
+ * (no drift): the Appstle / Shopify / loyalty execution lives only in
+ * action-executor.ts. Mirrors the UUID→contract resolution + per-action call
+ * logging the orchestrator does. See docs/brain/specs/improve-orchestrator-action-parity.md.
+ */
+async function dispatchDirectAction(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  type: string,
+  params: Record<string, unknown>,
+): Promise<ActionResult> {
+  const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
+  if (!t?.customer_id) return { success: false, error: "no customer on ticket" };
+
+  const { directActionHandlers } = await import("@/lib/action-executor");
+  const { withActionContext } = await import("@/lib/appstle-call-log");
+  const handler = directActionHandlers[type];
+  if (!handler) return { success: false, error: `Unknown action type: ${type}` };
+
+  const ctx: ActionContext = {
+    admin, workspaceId, ticketId, customerId: t.customer_id, channel: t.channel || "email", sandbox: false,
+  };
+  const action = { type, ...params } as ActionParams;
+  // Resolve internal subscription UUID → Shopify contract id (mirrors handleDirectAction).
+  if (action.contract_id && action.contract_id.includes("-")) {
+    const { data: sub } = await admin.from("subscriptions")
+      .select("shopify_contract_id").eq("id", action.contract_id).maybeSingle();
+    if (sub?.shopify_contract_id) action.contract_id = sub.shopify_contract_id;
+  }
+  return withActionContext(
+    { workspaceId, ticketId, customerId: t.customer_id, actionType: type },
+    () => handler(ctx, action),
+  );
+}
+
+/** Pull customer-facing result fields into actionContext so a chained send_message can substitute them. */
+function captureContext(actionContext: Record<string, string>, result: ActionResult): void {
+  if (!result.success) return;
+  if (result.refundAmountCents != null) actionContext.refund_amount = `$${(result.refundAmountCents / 100).toFixed(2)}`;
+  if (result.labelUrl) actionContext.label_url = result.labelUrl;
+  if (result.trackingNumber) actionContext.tracking_number = result.trackingNumber;
+  if (result.carrier) actionContext.carrier = result.carrier;
+  if (result.couponCode) actionContext.coupon_code = result.couponCode;
 }
 
 const ctaButton = (url: string, label: string): string =>
@@ -41,10 +93,11 @@ export async function runImproveActions(
       const a = action as any;
       switch (action.type) {
         case "partial_refund": {
-          const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
-          const r = await partialRefundByAmount(workspaceId, a.shopify_order_id, a.amount_cents, a.reason);
-          results.push(r.success ? `Refund of $${(a.amount_cents / 100).toFixed(2)} issued` : `Refund failed: ${r.error}`);
-          if (r.success) actionContext.refund_amount = `$${(a.amount_cents / 100).toFixed(2)}`;
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "partial_refund", {
+            shopify_order_id: a.shopify_order_id, amount_cents: a.amount_cents, reason: a.reason,
+          });
+          captureContext(actionContext, r);
+          results.push(r.success ? (r.summary || `Refund of $${(a.amount_cents / 100).toFixed(2)} issued`) : `Refund failed: ${r.error}`);
           break;
         }
         case "create_return": {
@@ -102,94 +155,41 @@ export async function runImproveActions(
           break;
         }
         case "swap_variant": {
-          const { subSwapVariant } = await import("@/lib/subscription-items");
-          const r = await subSwapVariant(workspaceId, a.contract_id, a.old_variant_id, a.new_variant_id, a.quantity || 1);
-          results.push(r.success ? `Variant swapped (${a.old_variant_id} → ${a.new_variant_id})` : `Swap failed: ${r.error}`);
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "swap_variant", {
+            contract_id: a.contract_id, old_variant_id: a.old_variant_id, new_variant_id: a.new_variant_id, quantity: a.quantity || 1,
+          });
+          results.push(r.success ? (r.summary || `Variant swapped (${a.old_variant_id} → ${a.new_variant_id})`) : `Swap failed: ${r.error}`);
           break;
         }
         case "remove_item": {
-          // Removes every line of a variant from the sub. Loops because
-          // the same product can be split across multiple line_items
-          // (e.g. Channing Choate's Salted Caramel x2 AND x1).
-          const variantId = a.variant_id || a.variantId;
-          const lineId = a.line_id || a.lineId;
-          if (!a.contract_id || (!variantId && !lineId)) {
-            results.push(`remove_item: missing contract_id or variant_id/line_id`);
-            break;
-          }
-          const { subRemoveItem, getAppstleConfig } = await import("@/lib/subscription-items");
-          if (lineId && !variantId) {
-            const r = await subRemoveItem(workspaceId, a.contract_id, { lineGid: lineId });
-            results.push(r.success ? `Removed line ${lineId}` : `Remove failed: ${r.error}`);
-            break;
-          }
-          // Variant-driven: enumerate lines on the contract, remove ALL
-          // matching. Stops on first failure to avoid hammering Appstle
-          // if its creds died mid-loop.
-          const cfg = await getAppstleConfig(workspaceId);
-          if (!cfg) { results.push(`remove_item: Appstle not configured`); break; }
-          const cRes = await fetch(
-            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${a.contract_id}?api_key=${cfg.apiKey}`,
-            { cache: "no-store" },
-          );
-          if (!cRes.ok) { results.push(`remove_item: contract fetch ${cRes.status}`); break; }
-          const cJson = await cRes.json();
-          type Line = { id?: string; variantId?: string };
-          const lines = ((cJson.lines?.nodes || []) as Line[]).filter((l) => {
-            const vid = String(l.variantId || "").split("/").pop();
-            return vid === String(variantId);
+          // Delegates to the registry handler, which enumerates every line of
+          // the variant on the contract and removes them all (Channing Choate's
+          // Salted Caramel x2 AND x1 case), or removes a single line by id.
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "remove_item", {
+            contract_id: a.contract_id, variant_id: a.variant_id || a.variantId, line_id: a.line_id || a.lineId,
           });
-          if (lines.length === 0) {
-            results.push(`remove_item: no lines matching variant ${variantId} on contract`);
-            break;
-          }
-          let removed = 0;
-          let failure: string | null = null;
-          for (const ln of lines) {
-            if (!ln.id) continue;
-            const r = await subRemoveItem(workspaceId, a.contract_id, { lineGid: ln.id });
-            if (!r.success) { failure = r.error || "unknown"; break; }
-            removed++;
-          }
-          if (failure) {
-            results.push(`remove_item: removed ${removed} of ${lines.length}, then failed: ${failure}`);
-          } else {
-            results.push(`Removed ${removed} line${removed > 1 ? "s" : ""} of variant ${variantId}`);
-          }
+          results.push(r.success ? (r.summary || "Item removed") : `Remove failed: ${r.error}`);
           break;
         }
         case "change_next_date": {
-          const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
-          const r = await appstleUpdateNextBillingDate(workspaceId, a.contract_id, a.date);
-          results.push(r.success ? `Next billing date set to ${a.date}` : `Date change failed: ${r.error}`);
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "change_next_date", {
+            contract_id: a.contract_id, date: a.date,
+          });
+          results.push(r.success ? (r.summary || `Next billing date set to ${a.date}`) : `Date change failed: ${r.error}`);
           break;
         }
         case "change_frequency": {
-          const { appstleUpdateBillingInterval } = await import("@/lib/appstle");
-          const r = await appstleUpdateBillingInterval(workspaceId, a.contract_id, a.interval, Number(a.interval_count));
-          results.push(r.success ? `Frequency: every ${a.interval_count} ${a.interval}` : `Frequency failed: ${r.error}`);
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "change_frequency", {
+            contract_id: a.contract_id, interval: a.interval, interval_count: a.interval_count,
+          });
+          results.push(r.success ? (r.summary || `Frequency: every ${a.interval_count} ${a.interval}`) : `Frequency failed: ${r.error}`);
           break;
         }
         case "update_shipping_address": {
-          const { executeSonnetDecision } = await import("@/lib/action-executor");
-          const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
-          if (!t?.customer_id) { results.push(`update_shipping_address: no customer on ticket`); break; }
-          await executeSonnetDecision(
-            { admin, workspaceId, ticketId, customerId: t.customer_id, channel: t.channel || "email", sandbox: false },
-            {
-              reasoning: "Admin improve: update shipping address",
-              action_type: "direct_action",
-              actions: [{ type: "update_shipping_address", contract_id: a.contract_id, address: a.address }],
-            },
-            null,
-            async () => { /* no customer-facing message — admin's send_message handles it */ },
-            async (m) => {
-              await admin.from("ticket_messages").insert({
-                ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: m,
-              });
-            },
-          );
-          results.push(`Shipping address updated`);
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "update_shipping_address", {
+            contract_id: a.contract_id, address: a.address,
+          });
+          results.push(r.success ? (r.summary || "Shipping address updated") : `Address update failed: ${r.error}`);
           break;
         }
         case "propose_sonnet_prompt": {
@@ -252,67 +252,57 @@ export async function runImproveActions(
           break;
         }
         case "reactivate": {
-          const { appstleSubscriptionAction } = await import("@/lib/appstle");
-          const r = await appstleSubscriptionAction(workspaceId, a.contract_id, "resume");
-          results.push(r.success ? "Subscription reactivated" : `Reactivation failed: ${r.error}`);
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "reactivate", {
+            contract_id: a.contract_id, variant_id: a.variant_id,
+          });
+          results.push(r.success ? (r.summary || "Subscription reactivated") : `Reactivation failed: ${r.error}`);
           break;
         }
         case "update_line_item_price": {
-          const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-          const r = await subUpdateLineItemPrice(workspaceId, a.contract_id, a.variant_id || "", a.base_price_cents);
-          results.push(r.success ? `Base price updated to $${(a.base_price_cents / 100).toFixed(2)}` : `Price update failed: ${r.error}`);
+          // Registry handler is the robust path — resolves the live line GID
+          // from Appstle and self-heals stale crisis-swap variants.
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "update_line_item_price", {
+            contract_id: a.contract_id, variant_id: a.variant_id, base_price_cents: a.base_price_cents,
+          });
+          results.push(r.success ? (r.summary || `Base price updated to $${(a.base_price_cents / 100).toFixed(2)}`) : `Price update failed: ${r.error}`);
           break;
         }
         case "apply_coupon": {
-          const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-          const { getAppstleConfig } = await import("@/lib/subscription-items");
-          const config = await getAppstleConfig(workspaceId);
-          if (config) {
-            const r = await applyDiscountWithReplace(config.apiKey, a.contract_id, a.code);
-            results.push(r.success ? `Coupon ${a.code} applied` : `Coupon failed: ${r.error}`);
-          } else results.push("Appstle not configured");
+          // Registry handler adds LOYALTY-* self-heal routing on top of the raw apply.
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "apply_coupon", {
+            contract_id: a.contract_id, code: a.code,
+          });
+          captureContext(actionContext, r);
+          results.push(r.success ? (r.summary || `Coupon ${a.code} applied`) : `Coupon failed: ${r.error}`);
           break;
         }
         case "skip_next_order": {
-          const { appstleSkipNextOrder } = await import("@/lib/appstle");
-          const r = await appstleSkipNextOrder(workspaceId, a.contract_id);
-          results.push(r.success ? "Next order skipped" : `Skip failed: ${r.error}`);
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "skip_next_order", {
+            contract_id: a.contract_id,
+          });
+          results.push(r.success ? (r.summary || "Next order skipped") : `Skip failed: ${r.error}`);
           break;
         }
         case "crisis_pause": {
-          const { appstleSubscriptionAction } = await import("@/lib/appstle");
-          const r = await appstleSubscriptionAction(workspaceId, a.contract_id, "pause", "Crisis pause via admin improve");
-          results.push(r.success ? "Subscription paused (crisis)" : `Pause failed: ${r.error}`);
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "crisis_pause", {
+            contract_id: a.contract_id, crisis_action_id: a.crisis_action_id,
+          });
+          results.push(r.success ? (r.summary || "Subscription paused (crisis)") : `Pause failed: ${r.error}`);
           break;
         }
         case "pause_timed": {
-          // Timed pause — pauses now and schedules auto-resume in N days.
-          // Reuses the conversation orchestrator's pause_timed handler so
-          // the same Appstle + scheduling machinery runs.
-          const { executeSonnetDecision } = await import("@/lib/action-executor");
-          const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
-          if (!t?.customer_id) { results.push(`pause_timed: no customer on ticket`); break; }
-          await executeSonnetDecision(
-            { admin, workspaceId, ticketId, customerId: t.customer_id, channel: t.channel || "email", sandbox: false },
-            {
-              reasoning: "Admin improve: timed pause",
-              action_type: "direct_action",
-              actions: [{ type: "pause_timed", contract_id: a.contract_id, pause_days: a.pause_days || 30 }],
-            },
-            null,
-            async () => { /* no customer-facing message — admin's send_message handles it */ },
-            async (m) => {
-              await admin.from("ticket_messages").insert({
-                ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: m,
-              });
-            },
-          );
-          results.push(`Subscription paused for ${a.pause_days || 30} days (${a.contract_id})`);
+          // Timed pause — pauses now and schedules auto-resume in N days. The
+          // registry handler runs the same Appstle + scheduling machinery.
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, "pause_timed", {
+            contract_id: a.contract_id, pause_days: a.pause_days || 30,
+          });
+          results.push(r.success ? (r.summary || `Subscription paused for ${a.pause_days || 30} days`) : `Pause failed: ${r.error}`);
           break;
         }
         case "pause": {
-          // Indefinite pause (no auto-resume). Use pause_timed when you
-          // want a specific resume date.
+          // Indefinite pause (no auto-resume). Kept bespoke: the registry `pause`
+          // handler only supports 30/60-day timed pauses, whereas Improve allows
+          // an open-ended pause. Use pause_timed for a specific resume date.
           const { appstleSubscriptionAction } = await import("@/lib/appstle");
           const r = await appstleSubscriptionAction(workspaceId, a.contract_id, "pause");
           results.push(r.success ? "Subscription paused" : `Pause failed: ${r.error}`);
@@ -338,38 +328,12 @@ export async function runImproveActions(
         case "unsubscribe_sms_marketing":
         case "unsubscribe_all_marketing":
         case "marketing_signup": {
-          // Route through the direct-action executor so the same code path
-          // serves both the AI orchestrator and the admin Improve tab.
-          // Keeps Shopify-side mutations + customer-row updates in one
-          // place. The handlers also touch Klaviyo/Twilio side effects
-          // where applicable; we don't want to re-implement that here.
-          const { executeSonnetDecision } = await import("@/lib/action-executor");
-          const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
-          if (!t?.customer_id) { results.push(`${action.type}: no customer on ticket`); break; }
-          await executeSonnetDecision(
-            { admin, workspaceId, ticketId, customerId: t.customer_id, channel: t.channel || "email", sandbox: false },
-            {
-              reasoning: `Admin improve: ${action.type}`,
-              action_type: "direct_action",
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              actions: [{ type: action.type, code: a.code, reason: a.reason } as any],
-            },
-            null,
-            async () => { /* admin handles customer-facing message via send_message */ },
-            async (m) => {
-              await admin.from("ticket_messages").insert({
-                ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: m,
-              });
-            },
-          );
-          // Reflect the change on the customer row immediately so the
-          // Improve panel UI shows the new status without waiting for a
-          // Shopify webhook round-trip.
-          const patch: Record<string, string> = {};
-          if (action.type === "unsubscribe_email_marketing" || action.type === "unsubscribe_all_marketing") patch.email_marketing_status = "unsubscribed";
-          if (action.type === "unsubscribe_sms_marketing" || action.type === "unsubscribe_all_marketing") patch.sms_marketing_status = "unsubscribed";
-          if (Object.keys(patch).length) await admin.from("customers").update(patch).eq("id", t.customer_id);
-          results.push(`${action.type} executed`);
+          // Route through the registry handler so the same code path serves
+          // both the AI orchestrator and the admin Improve tab. The handlers
+          // own the Shopify-side mutation + customers-row update + any
+          // Klaviyo/Twilio side effects — we don't re-implement that here.
+          const r = await dispatchDirectAction(admin, workspaceId, ticketId, action.type, { code: a.code, reason: a.reason });
+          results.push(r.success ? (r.summary || `${action.type} executed`) : `${action.type} failed: ${r.error}`);
           break;
         }
         default:

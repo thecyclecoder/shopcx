@@ -11,6 +11,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { ImproveAction } from "@/lib/improve-actions";
+import type { SonnetDecision } from "@/lib/action-executor";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 export type TurnStatus = "idle" | "thinking" | "error" | "awaiting_approval";
@@ -19,6 +20,9 @@ export type SessionStatus = "active" | "resolved";
 /** The kinds of action the box can propose in a plan. Each maps to a server-side executor on approval. */
 export type ImprovePlanActionKind =
   | "customer_action" // any direct-action (refund/return/sub-change/coupon/message…) via runImproveActions
+  | "orchestrator_action" // a full SonnetDecision driven through executeSonnetDecision — the EXACT production
+  //   path the orchestrator uses (journey/playbook/workflow/macro/escalate + every direct action) with
+  //   production-correct per-channel (portal/email/chat/sms) delivery. See improve-plan-executor.ts.
   | "sonnet_prompt" // propose a conversation-AI rule (sonnet_prompts, status='proposed')
   | "grader_rule" // propose a grader calibration rule (grader_prompts, status='proposed')
   | "rescore" // force re-analysis of THIS ticket (analyzeTicket)
@@ -32,6 +36,7 @@ export interface ImprovePlanAction {
   label: string; // one-line human summary for the approval card
   detail?: string; // optional longer explanation
   action?: ImproveAction; // customer_action: the direct-action {type, ...params}
+  decision?: SonnetDecision; // orchestrator_action: the full {action_type, handler_name?, actions?, response_message?, reasoning}
   prompt?: { title: string; content: string; category?: string }; // sonnet_prompt
   rule?: { title: string; content: string }; // grader_rule
   spec?: { slug: string; title: string; intent: string; problem: string }; // ticket_spec
