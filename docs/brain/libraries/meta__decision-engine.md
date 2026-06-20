@@ -36,11 +36,14 @@ scorecards ([[../tables/iteration_scorecards_daily]]) + the active policy into
 ### `runDecisionEngine` — function
 
 ```ts
-async function runDecisionEngine(p: DecisionEngineParams, opts?: { snapshotDate?: string }): Promise<DecisionEngineResult>
+async function runDecisionEngine(p: DecisionEngineParams, opts?: { snapshotDate?: string; minSpendCents?: number; minSessions?: number }): Promise<DecisionEngineResult>
 ```
 Orchestrator: resolve snapshot date (latest scorecard day if absent) → read scorecards
 → load active policy → 4a `computeAutonomousActions` → 4b `generateRecommendations` +
 `persistRecommendations`. `DecisionEngineParams = { workspaceId, adAccountId (our uuid) }`.
+`minSpendCents`/`minSessions` are the **Phase 5 noise floors** — when set, objects below
+the threshold are skipped for BOTH 4a actions and 4b recommendations (spend gates
+ad/adset/campaign rows, sessions gates variant rows); undefined ⇒ no filter.
 Returns `{ snapshotDate, policy_active, policy_version_id, autonomous: { actions, escalations, counts }, recommendations: { generated, persisted, byType, byPersona } }`.
 
 ### `computeAutonomousActions` — function (pure)
@@ -93,7 +96,9 @@ it never writes [[../tables/iteration_policies]].
 ## Callers
 
 - `src/lib/inngest/meta-performance.ts` (`meta-decision-engine`, fired after each
-  `meta-scorecards-refresh`).
+  `meta-scorecards-refresh`; and `meta-iteration-run` — the Phase 5 daily run — which
+  calls `runDecisionEngine` with the noise floors then `persistActions` after it returns).
+- [[meta__iteration-run]] (Phase 5 reconcile/reversal links onto the same ledger).
 - Review surface: `src/app/api/ads/iteration-recommendations/route.ts` (GET list) +
   `[id]/route.ts` (POST approve/reject).
 

@@ -836,7 +836,18 @@ const ZERO_COUNTS = (): Record<AutonomousActionType, number> => ({
  */
 export async function runDecisionEngine(
   p: DecisionEngineParams,
-  opts?: { snapshotDate?: string },
+  opts?: {
+    snapshotDate?: string;
+    /**
+     * Phase 5 noise floors. When set, objects below the threshold are skipped for
+     * BOTH 4a autonomous actions and 4b recommendations — not enough signal to act
+     * on. `minSpendCents` gates ad/adset/campaign rows (trailing-window spend);
+     * `minSessions` gates variant rows (trailing-window sessions). Undefined ⇒ no
+     * filter (preserves the Phase 4 behavior).
+     */
+    minSpendCents?: number;
+    minSessions?: number;
+  },
 ): Promise<DecisionEngineResult> {
   const admin = createAdminClient();
 
@@ -864,6 +875,22 @@ export async function runDecisionEngine(
       .order("object_id", { ascending: true }),
   );
 
+  // ── Phase 5 noise floors — skip objects below the min spend / min sessions
+  // thresholds for BOTH autonomous actions and recommendations. Undefined ⇒ keep.
+  const { minSpendCents, minSessions } = opts ?? {};
+  const passesThreshold = (r: ScorecardRow) => {
+    if (
+      minSpendCents != null &&
+      (r.level === "ad" || r.level === "adset" || r.level === "campaign") &&
+      r.spend_cents < minSpendCents
+    ) {
+      return false;
+    }
+    if (minSessions != null && r.level === "variant" && r.sessions < minSessions) return false;
+    return true;
+  };
+  const actionableRows = allRows.filter(passesThreshold);
+
   // ── 4a — autonomous actions (only when a policy is active) ────────────────────
   const policy = await loadActivePolicy(p.workspaceId, p.adAccountId);
   let actions: ComputedAction[] = [];
@@ -871,7 +898,7 @@ export async function runDecisionEngine(
   const counts = ZERO_COUNTS();
 
   if (policy) {
-    const adsetCampaignRows = allRows.filter((r) => r.level === "adset" || r.level === "campaign");
+    const adsetCampaignRows = actionableRows.filter((r) => r.level === "adset" || r.level === "campaign");
     const budgets = await loadBudgets(p.adAccountId, adsetCampaignRows);
     const lookbackDays = Math.max(policy.unpause_lookback_days, Math.ceil(policy.per_object_cooldown_hours / 24), 7);
     const recentActions = await loadRecentActions(
@@ -892,7 +919,7 @@ export async function runDecisionEngine(
   }
 
   // ── 4b — recommendations (always; zero external side effects) ─────────────────
-  const recs = await generateRecommendations(p, allRows);
+  const recs = await generateRecommendations(p, actionableRows);
   const persisted = await persistRecommendations(p, snapshotDate, recs);
   const byType: Partial<Record<RecommendationType, number>> = {};
   const byPersona: Partial<Record<Persona, number>> = {};
