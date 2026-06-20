@@ -65,6 +65,11 @@ The box seeds everything Amazing Coffee has **except linked products + bundles**
 - **Linked products** (sibling SKUs of one line — like Amazing Coffee instant ↔ K-Cups): **Ashwavana Guru Focus ↔ Ashwavana Zen Relax** (focus/productivity/caffeinated ↔ relaxation/recovery/caffeine-free). Superfood Tabs + Creatine Prime have **no** linked products.
 - **Bundle offers** (cross-sell): **Superfood Tabs + Ashwavana Zen Relax** · **Creatine Prime + Ashwavana Zen Relax** · **Ashwavana Guru Focus + Ashwavana Zen Relax** (the two Ashwavanas bundle with each other).
 
+## Image refinements (2026-06-19, round 2 — from reviewing the first pages)
+- **Hero dimensions: `1800×1344`** (landscape, matching the Amazing Coffee hero gallery). Square `1024×1024` heroes **get cut off** in the storefront hero gallery. Nano Banana Pro must render the hero at this aspect/size; existing square heroes are re-generated to match.
+- **Per-ingredient images come FROM the Shopify PDP, not Gemini.** Each PDP's ingredient section serves CDN images named by ingredient (e.g. `Ashwagandha_1.jpg`, `Beet_Root.jpg`, `Chlorella.jpg`, `Grape_Seed_Extract.jpg`, `D3_1.jpg`). The seed downloads them, uploads to Supabase, and writes `product_media` slot **`ingredient_{name}`** (~`400×400`, matching Amazing Coffee). These were missing on the first round → blank ingredient cards.
+- **`media-refresh` mode** — re-run the **image stages only** (hero + lifestyle + `ingredient_{name}` set) on an already-`published` product, **without** re-doing web research / reviews / content. For cheap iteration + backfilling the first-round pages. Still honors the locked-hero guard (never regenerate the 3 locked heroes).
+
 ## Completion criteria
 - **Amazing Coffee is the proof-of-correctness benchmark** — every seeded page is validated against its `published` done state (structure + completeness), the only intentional gaps being **linked products + bundles** (above).
 - One "Auto-populate" action on a product → a `product-seed` box job that drives it `none → published`: PDP-extracted ingredients, research, review analysis, triangulated benefit selections (framing + research ∩ reviews, evidence-backed), page content + KB + macros + SEO, and Nano Banana Pro hero/lifestyle/ingredient media — unattended, QA-gated. The target products complete this way, matching Amazing Coffee minus relationships.
