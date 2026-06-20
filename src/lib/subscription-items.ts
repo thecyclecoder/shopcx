@@ -139,7 +139,7 @@ export async function appstleRemoveLineItem(
   workspaceId: string,
   contractId: string,
   variantOrLine: { variantId?: string; lineGid?: string },
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }> {
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
@@ -182,6 +182,14 @@ export async function appstleRemoveLineItem(
       }
 
       if (!line?.id) {
+        // A *numeric* variant id that isn't on the live contract means the line
+        // is already gone — the removal goal is satisfied. Report idempotent
+        // success (alreadyAbsent) so the portal self-serves instead of surfacing
+        // a raw GID error and escalating a ticket. Title-based orchestrator calls
+        // (non-numeric) keep the descriptive error so a genuine mismatch stays visible.
+        if (isNumeric) {
+          return { success: true, alreadyAbsent: true };
+        }
         const available = lines.map((l) => String(l.variantId || "").split("/").pop()).join(", ");
         return { success: false, error: `Variant "${variantOrLine.variantId}" not found on contract. Available variants: ${available || "(none)"}` };
       }
@@ -352,7 +360,7 @@ export async function subRemoveItem(
   workspaceId: string,
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }> {
   const arg = typeof variantOrLine === "string" ? { variantId: variantOrLine } : variantOrLine;
   // Internal subs are matched by variant_id (no Appstle line gids). Check
   // internal FIRST so a lineId-only call can't silently fall through to the
