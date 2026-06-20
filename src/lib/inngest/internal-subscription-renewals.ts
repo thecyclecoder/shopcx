@@ -84,6 +84,261 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
     const admin = createAdminClient();
 
+    // ── 0. Comp branch ──────────────────────────────────────────
+    // A comp sub ships FREE on schedule: no payment method, no Braintree charge,
+    // no Avalara/shipping — base $0 by design (item price_override_cents=0). It is
+    // gated FAIL-CLOSED on the allowlist: a comp sub whose customer has no valid
+    // `comp_role` does NOT ship — it records a failed `comp` transaction + event
+    // and stops (no $0 leak). Branch before load-context, which hard-requires a PM.
+    const comp = await step.run("load-comp-context", async () => {
+      const { data: sub } = await admin
+        .from("subscriptions")
+        .select("id, workspace_id, customer_id, items, comp, comp_note, is_internal, status, billing_interval, billing_interval_count, next_billing_date, shopify_contract_id, shipping_address, shipping_method_code")
+        .eq("id", subscription_id)
+        .single();
+      if (!sub?.comp) return { isComp: false } as const;
+      if (!sub.is_internal || sub.status !== "active" || !sub.customer_id) {
+        return { isComp: true, blocked: `inactive_${sub.status}` } as const;
+      }
+
+      const { data: customer } = await admin
+        .from("customers")
+        .select("id, email, first_name, last_name, phone, shopify_customer_id, default_address, comp_role")
+        .eq("id", sub.customer_id)
+        .single();
+      if (!customer) return { isComp: true, blocked: "customer_not_found" } as const;
+
+      const { data: lastOrder } = await admin
+        .from("orders")
+        .select("shipping_address, billing_address")
+        .eq("customer_id", sub.customer_id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const resolvedShipping =
+        (sub.shipping_address as Record<string, unknown> | null) ||
+        (lastOrder?.shipping_address as Record<string, unknown> | null) ||
+        (customer.default_address as Record<string, unknown> | null) ||
+        null;
+
+      return {
+        isComp: true,
+        sub,
+        customer,
+        comp_role: (customer.comp_role as string | null) ?? null,
+        shipping_address: resolvedShipping,
+        billing_address: (lastOrder?.billing_address as Record<string, unknown> | null) || resolvedShipping,
+      } as const;
+    });
+
+    if (comp.isComp) {
+      if ("blocked" in comp && comp.blocked) {
+        return { skipped: true, reason: comp.blocked };
+      }
+      // narrow: full comp context
+      const c = comp as Extract<typeof comp, { sub: unknown }>;
+
+      // ── Allowlist gate (FAIL-CLOSED) ──────────────────────────
+      const VALID_COMP_ROLES = ["employee", "influencer", "investor", "owner"];
+      const allowlisted = !!c.comp_role && VALID_COMP_ROLES.includes(c.comp_role);
+      if (!allowlisted) {
+        // Surface — failed `comp` transaction + timeline event. Do NOT ship, do
+        // NOT advance. Catches a $0 sub that shouldn't be free (misconfig, stale
+        // flag, abuse) instead of leaking product.
+        await step.run("comp-gate-failed-transaction", async () => {
+          await admin.from("transactions").insert({
+            workspace_id,
+            customer_id: c.sub.customer_id,
+            subscription_id,
+            type: "comp",
+            status: "failed",
+            amount_cents: 0,
+            currency: "USD",
+            error_message: `comp renewal blocked — customer not on comp allowlist (comp_role=${c.comp_role ?? "null"})`,
+            metadata: { needs_attention: true, reason: "comp_not_allowlisted", comp_role: c.comp_role },
+          });
+        });
+        await step.run("comp-gate-failed-event", async () => {
+          const { logCustomerEvent } = await import("@/lib/customer-events");
+          await logCustomerEvent({
+            workspaceId: workspace_id,
+            customerId: c.sub.customer_id as string | null,
+            eventType: "subscription.comp_renewal_failed",
+            source: "internal_subscription_renewal",
+            summary: "Comp renewal blocked — customer is not on the comp allowlist (no valid comp_role). No free shipment sent.",
+            properties: { subscription_id, comp_role: c.comp_role, needs_attention: true },
+          });
+        });
+        return { ok: false, failed: true, reason: "comp_not_allowlisted" };
+      }
+
+      // ── Resolve items (all $0 by design) ──────────────────────
+      const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+      const pricing = await resolveSubscriptionPricing(workspace_id, c.sub);
+      const compItems = pricing.lines
+        .filter((l) => l.kind === "product")
+        .map((l) => ({
+          variant_id: l.variant_id,
+          sku: l.sku || undefined,
+          title: l.title,
+          variant_title: l.variant_title || undefined,
+          quantity: l.quantity,
+          price_cents: 0, // comp = free by design
+        }));
+
+      const compOrderNumber = await step.run("comp-reserve-order-number", async () => {
+        return generateOrderNumber(workspace_id);
+      });
+
+      // ── $0 renewal order — a clear marker that does NOT trip dunning ───
+      const compOrder = await step.run("comp-create-order", async () => {
+        const { data: order, error } = await admin
+          .from("orders")
+          .insert({
+            workspace_id,
+            customer_id: c.sub.customer_id,
+            shopify_customer_id: c.customer.shopify_customer_id || null,
+            shopify_order_id: null,
+            order_number: compOrderNumber,
+            email: c.customer.email,
+            total_cents: 0,
+            currency: "USD",
+            financial_status: "paid", // $0 paid — a comp marker, never a failed payment
+            fulfillment_status: null,
+            line_items: compItems,
+            source_name: "internal_subscription_comp_renewal",
+            shipping_address: c.shipping_address,
+            billing_address: c.billing_address || c.shipping_address,
+            subscription_id,
+            payment_details: {
+              comp: true,
+              comp_role: c.comp_role,
+              subtotal_cents: 0,
+              discount_cents: 0,
+              shipping_cents: 0,
+              protection_cents: 0,
+              tax_cents: 0,
+              gateway: "comp",
+            },
+          })
+          .select("id, order_number")
+          .single();
+        if (error || !order) throw new Error(`comp_order_insert_failed: ${error?.message}`);
+        return { id: order.id as string, order_number: order.order_number as string };
+      });
+
+      // ── Ledger row: type='comp', $0, no Braintree id ──────────
+      await step.run("comp-transaction", async () => {
+        await admin.from("transactions").insert({
+          workspace_id,
+          customer_id: c.sub.customer_id,
+          subscription_id,
+          order_id: compOrder.id,
+          type: "comp",
+          status: "succeeded",
+          amount_cents: 0,
+          currency: "USD",
+          settled_at: new Date().toISOString(),
+          metadata: { comp: true, comp_role: c.comp_role, comp_note: c.sub.comp_note ?? null },
+        });
+      });
+
+      // ── Advance next_billing_date (drop spent one-time items) ──
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const compDroppedOneTime = ((c.sub.items as any[]) || []).some((i) => i?.one_time_next_renewal === true);
+      await step.run("comp-advance-next-billing-date", async () => {
+        const interval = (c.sub.billing_interval || "day").toLowerCase();
+        const count = c.sub.billing_interval_count || 1;
+        const current = c.sub.next_billing_date ? new Date(c.sub.next_billing_date) : new Date();
+        const next = new Date(current);
+        if (interval === "day") next.setUTCDate(next.getUTCDate() + count);
+        else if (interval === "week") next.setUTCDate(next.getUTCDate() + count * 7);
+        else if (interval === "month") next.setUTCMonth(next.getUTCMonth() + count);
+        else if (interval === "year") next.setUTCFullYear(next.getUTCFullYear() + count);
+        else next.setUTCDate(next.getUTCDate() + count * 28);
+        const update: Record<string, unknown> = {
+          next_billing_date: next.toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        if (compDroppedOneTime) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          update.items = ((c.sub.items as any[]) || []).filter((i) => !i?.one_time_next_renewal);
+        }
+        await admin.from("subscriptions").update(update).eq("id", subscription_id);
+      });
+
+      // ── Hand off to Amplifier (free fulfillment) ──────────────
+      await step.run("comp-amplifier-order", async () => {
+        type Item2 = { variant_id?: string; sku?: string; title?: string; variant_title?: string; quantity?: number; price_cents?: number };
+        const lineItemsForAmplifier = compItems.map((l: Item2) => ({
+          sku: (l.sku as string) || undefined,
+          title: l.title,
+          description: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title,
+          quantity: l.quantity,
+          unit_price_cents: 0,
+          reference_id: l.variant_id ? String(l.variant_id) : undefined,
+        }));
+
+        let packingSlipMessage: string | undefined;
+        try {
+          const { buildPackingSlipMessage } = await import("@/lib/packing-slip-message");
+          const distinctProducts = new Set(compItems.map((l: Item2) => String(l.variant_id || l.sku || l.title))).size;
+          packingSlipMessage = await buildPackingSlipMessage({
+            workspaceId: workspace_id,
+            customerId: c.sub.customer_id as string,
+            orderId: compOrder.id,
+            firstName: c.customer.first_name || "",
+            productCount: distinctProducts,
+          });
+        } catch (e) {
+          console.warn(`[comp-renewal] packing slip message failed for ${compOrder.order_number}:`, e instanceof Error ? e.message : e);
+        }
+
+        const amplifierRes = await createAmplifierOrder({
+          workspaceId: workspace_id,
+          orderNumber: compOrder.order_number,
+          orderDate: new Date().toISOString(),
+          shippingAddress: c.shipping_address as Record<string, string> | null,
+          billingAddress: c.billing_address as Record<string, string> | null,
+          email: c.customer.email,
+          phone: c.customer.phone || null,
+          lineItems: lineItemsForAmplifier,
+          totalCents: 0,
+          subtotalCents: 0,
+          shippingCents: 0,
+          taxCents: 0,
+          packingSlipMessage,
+        });
+        if (amplifierRes.success && amplifierRes.amplifier_order_id) {
+          await admin
+            .from("orders")
+            .update({
+              amplifier_order_id: amplifierRes.amplifier_order_id,
+              amplifier_received_at: new Date().toISOString(),
+            })
+            .eq("id", compOrder.id);
+        } else {
+          console.warn(`[comp-renewal] Amplifier order create failed for ${compOrder.order_number}:`, amplifierRes.error, amplifierRes.details);
+        }
+      });
+
+      // ── Timeline event ────────────────────────────────────────
+      await step.run("comp-shipped-event", async () => {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId: workspace_id,
+          customerId: c.sub.customer_id as string | null,
+          eventType: "subscription.comp_shipped",
+          source: "internal_subscription_renewal",
+          summary: `Comp subscription shipped free (role: ${c.comp_role}).`,
+          properties: { subscription_id, order_id: compOrder.id, order_number: compOrder.order_number, comp_role: c.comp_role },
+        });
+      });
+
+      return { ok: true, comp: true, order_id: compOrder.id, order_number: compOrder.order_number };
+    }
+
     // ── 1. Load sub + customer + default payment method ──────────
     const ctx = await step.run("load-context", async () => {
       const { data: sub } = await admin

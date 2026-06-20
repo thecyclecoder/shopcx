@@ -124,6 +124,22 @@ gateway.transaction.sale({
 2. **Fire `dunning/payment-failed`** event → [[dunning]] takes over. Pass `subscription_id`, `customer_id`, error code, billing attempt id (we generate a synthetic id for internal subs since there's no Shopify billing_attempt to reference).
 3. **Don't advance `next_billing_date`** — dunning will reset state on recovery.
 
+## Comp subscriptions (free product — employee / influencer / investor / owner)
+
+A **comp sub** ships free on schedule: base $0, **no saved payment method**, **no charge attempted**. Marker: [[../tables/subscriptions]].`comp=true` (with `is_internal=true` + every item `price_override_cents=0`). The allowlist + role live on [[../tables/customers]].`comp_role` (enum `employee｜influencer｜investor｜owner`, null = not comp-eligible) + `comp_note`.
+
+**The $0-renewal gate (fail-closed).** A $0 renewal is **only** allowed for an allowlisted customer. [[../inngest/internal-subscription-renewals]] takes a dedicated comp branch (`load-comp-context`, **before** the normal load-context which hard-requires a PM):
+
+1. **Gate first.** If the sub's customer has a null/invalid `comp_role` → **FAIL**: insert a `type='comp'` `status='failed'` transaction (`metadata.needs_attention=true`) + a `subscription.comp_renewal_failed` [[../tables/customer_events]] event, and **return without shipping or advancing**. Catches a $0 sub that shouldn't be free (misconfig, stale flag, abuse) instead of leaking product.
+2. **Allowlisted → ship free.** Skip the `no_payment_method` early-return, skip the `totalCents<=0` (`zero_total`) skip, skip Braintree `transaction.sale`, skip Avalara + shipping pricing entirely. Resolve items via the pricing engine ($0 by override), then:
+   - Create the renewal [[../tables/orders]] at `total_cents=0`, `financial_status='paid'`, `source_name='internal_subscription_comp_renewal'`, `payment_details.comp=true`. A $0 *paid* order is a clear comp marker that does **not** read as a failed payment and does **not** trip dunning.
+   - Record a `type='comp'` `status='succeeded'` $0 transaction (no Braintree id) for the ledger.
+   - **Advance `next_billing_date`** (same cadence math; drops spent one-time items).
+   - Hand off to **Amplifier** (free fulfillment) with the Haiku packing-slip note.
+   - Log a `subscription.comp_shipped` event. **Never** closes/opens a dunning cycle.
+
+**Comp ≠ broken payment.** The comp branch is entirely separate from the decline→dunning path, so a comp sub is never marked failed or routed into dunning. Comp is set deliberately (owner/admin) — the standing roster is visible on Customers → Comp Subscriptions (Phase 2).
+
 ## Legacy Appstle path
 
 For `is_internal=false`:
@@ -144,6 +160,8 @@ For `is_internal=false`:
 5. **Verify** ([[migration-audit]]) — record a [[../tables/migration_audits]] row + run the 8-check checklist; the `/dashboard/migrations` monitor surfaces anything stuck, and the retry cron re-verifies pending rows.
 
 Cancelled subs migrate too (using the local row when Appstle is unreadable). The Appstle webhook handler ignores `is_internal` subs so a stale cancel can't clobber a migrated row.
+
+**Comp migration (no-PM path).** `migrateContractToInternalComp(workspaceId, contractId, { compNote })` ([[migrate-to-internal]]) flips **one** Appstle contract → internal **comp** sub **without** the billable-PM requirement (a comp sub never charges, so "must be billable" doesn't apply). Reuses translate-lines + cancel-contract, then sets `comp=true` + `comp_note` + every item `price_override_cents=0` (base $0), preserving items/cadence/next date and the `customer_id` (no billable reassignment). **No `migration_audit` is recorded** — the 8-check audit's `card_pinned` check expects a billable card a comp sub deliberately lacks.
 
 ## Pause / resume / skip — both paths
 
