@@ -1884,16 +1884,40 @@ function migrationFixPrompt(audit: Record<string, unknown>, brief: string): stri
     `  • pricing_preserved mismatch → recompute the true grandfathered base (inferAppstleLineBase logic over the LIVE Appstle line: pricingPolicy.basePrice if present, else currentPrice/(1−sns)) and propose a price_reconcile that sets each grandfathered line's item.price_override_cents so the internal engine product_subtotal ≈ pre_migration_charge_cents (±2¢/line). payload: {"overrides":[{"variant_id":"<the catalog UUID on the sub item>","price_override_cents":<int>}]}.`,
     `  • items_on_uuids unresolved variant (an item points at a Shopify variant with NO product_variants row) → propose a variant_backfill that INSERTS the missing catalog row + remaps the item to the new UUID (never loosen the check). payload: {"variant":{"product_id":"<uuid>","shopify_variant_id":"<id>","title":"...","sku":"...","price_cents":<int>},"item_match":{"shopify_variant_id":"<id>","sku":"..."}}.`,
     `  • appstle_cancelled / no_double_bill (the old Appstle contract is still ACTIVE → double-bill risk) → propose an appstle_cancel. payload: {"appstle_contract_id":"<old id, defaults to the audit's>","reason":"migrated to shopcx"}.`,
-    `  • card_pinned / no billable card → you CANNOT invent a card. Do NOT propose a fix; surface human_needed with a concrete diagnosis (the customer must add a card, or it's a comp sub).`,
+    `  • card_pinned / no billable card → you CANNOT invent a card. This is OUT-OF-SYSTEM (the customer must act) → status "human_needed" with a ONE-LINE plain instruction, e.g. "Ask {customer} to add a card; this sub can't bill until then." NOT a check-jargon dump.`,
     ``,
-    `If every failing check has a safe typed fix → status "propose" with the actions. If ANY failing check is unfixable (no card, ambiguous pricing history) → status "human_needed" with a written diagnosis a human can act on (do NOT propose a partial fix that re-bills blindly).`,
+    `Two human paths — pick the right one:`,
+    `  • HUMAN-JUDGMENT (a decision YOU can't make but the OWNER can — e.g. an ambiguous grandfathered price, conflicting records, an unclear intended base) → DON'T dump check-jargon. Pause on status "needs_input" with ONE plain-language, actionable question that names the concrete choice and the specific values, e.g. "This customer's locked-in price is unclear — our records show $39 and $49 for their coffee. What should we bill per unit?" — NOT "pricing_preserved failed: engine subtotal ≠ pre_migration_charge ±2¢/line." Reuse the questions [{id,q}] shape. The owner answers inline on /dashboard/migrations and you'll be resumed WITH the answer to propose the concrete fix.`,
+    `  • OUT-OF-SYSTEM (nothing the owner can type fixes it — e.g. no card anywhere) → status "human_needed" with a ONE-LINE plain instruction (no technical dump).`,
     ``,
     `CODE-GAP escalation: if the root cause is a RECURRING code/data gap — a CLASS of missing catalog rows (not just this sub's one variant), or a pricing-inference edge case inferAppstleLineBase can't cover — don't just hand it to a human one sub at a time. Status "code_gap": author a permanent fix spec so the box commits docs/brain/specs/{slug}.md (surfaced on Roadmap to commission a build, like box-escalation-triage routes analyzer fixes). Use a STABLE, gap-descriptive slug (NOT the sub/audit id — recurring failures must converge on ONE spec, e.g. "migration-variant-backfill-from-appstle"), so the same gap doesn't spawn a duplicate spec per sub. The migration still fails-closed to a human (the spec fixes the class, not this renewal) — put what to do for THIS sub in the diagnosis.`,
     ``,
+    `If every failing check has a safe typed fix → status "propose" with the actions. If a failing check needs an owner DECISION → status "needs_input" with the plain question. If it's out-of-system → status "human_needed". If it's a recurring code/data gap → status "code_gap". Never propose a partial fix that re-bills blindly.`,
+    ``,
     `Final message = ONLY one JSON object:`,
     `  {"status":"propose","diagnosis":"<plain-text: what failed + what each fix does + the numbers>","actions":[{"fix_kind":"price_reconcile|variant_backfill|appstle_cancel","summary":"<one line>","preview":"<the concrete change + values>","payload":{...}}]}`,
-    `  {"status":"human_needed","diagnosis":"<why it can't be auto-fixed + what a human must do>"}`,
+    `  {"status":"needs_input","questions":[{"id":"q1","q":"<ONE plain, actionable question naming the choice + specific values — no check names>"}]}`,
+    `  {"status":"human_needed","diagnosis":"<ONE-LINE plain instruction for an out-of-system case>"}`,
     `  {"status":"code_gap","diagnosis":"<the recurring gap + what to do for THIS sub now>","spec":{"slug":"<stable gap-class slug>","title":"...","intent":"<one paragraph>","problem":"<concrete, grounded in the failing check + the live state>","target":"src/lib/<the file/fn to fix>"}}`,
+  ].join("\n");
+}
+
+// Resume prompt after the owner answered the needs_input question: re-diagnose WITH the answer and
+// propose the concrete gated fix. We resume the same Max session (the brief + the question are already
+// in context); the brief is re-attached so a lost session still has everything it needs.
+function migrationFixAnswerPrompt(audit: Record<string, unknown>, brief: string, answers: unknown): string {
+  return [
+    `Use the migration-fix skill (cwd is the repo root). You previously paused this FAILED migration on a human-judgment question; the OWNER has now ANSWERED. Use the answer to resolve the judgment call and propose the concrete typed fix — same payload shapes, same final JSON protocol as before.`,
+    `OWNER ANSWERS: ${JSON.stringify(answers)}`,
+    ``,
+    brief,
+    ``,
+    `With the owner's answer resolving the decision, propose the concrete gated fix (price_reconcile / variant_backfill / appstle_cancel) so the engine re-verifies. Show your arithmetic in the preview. If the answer still leaves it genuinely under-specified, ask ONE more plain follow-up (needs_input); if it's out-of-system, surface human_needed with a one-line plain instruction.`,
+    ``,
+    `Final message = ONLY one JSON object:`,
+    `  {"status":"propose","diagnosis":"<plain-text + the numbers>","actions":[{"fix_kind":"price_reconcile|variant_backfill|appstle_cancel","summary":"<one line>","preview":"<concrete change + values>","payload":{...}}]}`,
+    `  {"status":"needs_input","questions":[{"id":"q1","q":"<ONE plain follow-up question>"}]}`,
+    `  {"status":"human_needed","diagnosis":"<ONE-LINE plain instruction>"}`,
   ].join("\n");
 }
 
@@ -1997,9 +2021,13 @@ async function runMigrationFixJob(job: Job) {
     return;
   }
 
-  // Resume = the owner has approved/declined the proposed plan → execute approved actions + re-verify.
-  const isResume = (job.pending_actions || []).some((a) => a.status === "approved" || a.status === "declined");
-  console.log(`${tag} ${isResume ? "executing approved fix + re-verifying" : "diagnosing"} audit ${auditId.slice(0, 8)}`);
+  // Two resume modes (checked before a fresh diagnosis):
+  //  • approval resume — the owner approved/declined the proposed plan → execute approved actions + re-verify.
+  //  • answer resume — the owner answered a needs_input judgment question → re-diagnose WITH the answer and
+  //    propose the concrete fix (no decision on any action yet, but answers are present).
+  const isApprovalResume = (job.pending_actions || []).some((a) => a.status === "approved" || a.status === "declined");
+  const isAnswerResume = !isApprovalResume && (job.answers || []).length > 0;
+  console.log(`${tag} ${isApprovalResume ? "executing approved fix + re-verifying" : isAnswerResume ? "re-diagnosing with owner answer" : "diagnosing"} audit ${auditId.slice(0, 8)}`);
 
   const { data: audit } = await db.from("migration_audits").select("*").eq("id", auditId).maybeSingle();
   if (!audit) {
@@ -2008,7 +2036,7 @@ async function runMigrationFixJob(job: Job) {
   }
 
   try {
-    if (isResume) {
+    if (isApprovalResume) {
       // ── Execute the owner-approved typed fixes via the deterministic executor, then re-verify. ──
       const { applyMigrationFix } = await import("../src/lib/migration-fix");
       const actions = (job.pending_actions || []).map((a) => ({ ...a }));
@@ -2062,14 +2090,17 @@ async function runMigrationFixJob(job: Job) {
       return;
     }
 
-    // ── Fresh: diagnose read-only on Max + propose a typed fix plan (or surface human-needed). ──
+    // ── Fresh diagnosis OR answer-resume: diagnose read-only on Max → propose / needs_input / human-needed. ──
     if (audit.status === "passed") {
       await update(job.id, { status: "completed", log_tail: "audit already passed — nothing to fix" });
       return;
     }
     const brief = await loadMigrationFixBrief(audit as Record<string, unknown>);
-    const prompt = migrationFixPrompt(audit as Record<string, unknown>, brief);
-    const { session, resultText, isError, raw } = await runMigrationFixClaude(prompt, null, REPO_DIR);
+    const prompt = isAnswerResume
+      ? migrationFixAnswerPrompt(audit as Record<string, unknown>, brief, job.answers || [])
+      : migrationFixPrompt(audit as Record<string, unknown>, brief);
+    // On an answer-resume, resume the same Max session (the prior question + brief are in context).
+    const { session, resultText, isError, raw } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -2084,6 +2115,15 @@ async function runMigrationFixJob(job: Job) {
       }
       await update(job.id, { status: "needs_approval", pending_actions: proposed, log_tail: diagnosis.slice(-2000) || "(fix proposed)" });
       console.log(`${tag} proposed ${proposed.length} fix(es) → awaiting approval`);
+      return;
+    }
+    if (parsed?.status === "needs_input") {
+      // Human-JUDGMENT case: pause with the plain question; the owner answers inline on /dashboard/migrations
+      // (POST /api/roadmap/answer → queued_resume) and we resume via the answer path above.
+      const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      const diagnosis = String(parsed.diagnosis || "");
+      await update(job.id, { status: "needs_input", questions, log_tail: diagnosis.slice(-2000) || "(awaiting owner answer)" });
+      console.log(`${tag} needs_input — asked ${questions.length} plain question(s), awaiting owner answer`);
       return;
     }
     if (parsed?.status === "human_needed") {

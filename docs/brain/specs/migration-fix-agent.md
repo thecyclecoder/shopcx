@@ -16,7 +16,8 @@ A box agent that **fixes internal subs stuck in migration** — the Appstle→in
   - **`pricing_preserved` mismatch** → recompute the true grandfathered base (`inferAppstleLineBase` logic) and reconcile the item `price_override_cents` so the internal engine subtotal ≈ pre-migration charge (the judgment fix auto-heal refuses).
   - **`items_on_uuids` unresolved variant** → the item points at a Shopify variant with **no `product_variants` row** → **backfill the catalog row** (never loosen the check) + remap the item to the UUID. (The fix the 2026-06-10 incident did by hand.)
   - **`appstle_cancelled` / `no_double_bill`** → force-cancel the lingering Appstle contract (double-bill risk).
-  - **`card_pinned` / no billable card** → cannot be invented → surface as **human-needed** (the customer must add a card; or it's a comp sub → see [[comp-subscriptions]]).
+  - **`card_pinned` / no billable card** → cannot be invented → **out-of-system**, surfaced as terminal **human-needed** with a one-line plain instruction (the customer must add a card; or it's a comp sub → see [[comp-subscriptions]]).
+  - **human-JUDGMENT** (an owner decision the box can't make — ambiguous grandfathered price) → pause on **`needs_input`** with ONE plain question the owner answers inline; the box resumes WITH the answer and proposes the concrete fix. See [[migration-fix-human-input]].
 - After fixing, **re-run `verifyMigration(audit_id)`**: `passed` → the audit clears and the dashboard goes green; still failing → surface.
 
 ## Guardrails (supervisable autonomy)
