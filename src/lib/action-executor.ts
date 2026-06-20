@@ -1985,15 +1985,20 @@ export async function executeSonnetDecision(
   personality: { name?: string; tone?: string; sign_off?: string | null } | null,
   send: SendFn,
   sysNote: SysNoteFn,
-): Promise<{ messageSent: boolean; escalated: boolean; closed: boolean }> {
+): Promise<{ messageSent: boolean; escalated: boolean; closed: boolean; statusManaged: boolean }> {
   // Handle clarification first — applies regardless of action_type
   if (decision.needs_clarification && decision.clarification_question) {
     await send(decision.clarification_question, ctx.sandbox);
-    return { messageSent: true, escalated: false, closed: false };
+    return { messageSent: true, escalated: false, closed: false, statusManaged: false };
   }
 
   // Track whether a customer-facing message was sent
   let messageSent = false;
+  // Track whether a sub-executor already set the authoritative final
+  // ticket status (e.g. the workflow executor closes account_login and
+  // leaves return_to_sender open). When true the post-execute status
+  // block in unified-ticket-handler must NOT override it.
+  let statusManaged = false;
   const trackedSend: SendFn = async (m, sb) => { messageSent = true; await send(m, sb); };
 
   switch (decision.action_type) {
@@ -2013,7 +2018,12 @@ export async function executeSonnetDecision(
       break;
 
     case "workflow":
-      await handleWorkflow(ctx, decision, send, sysNote);
+      // The workflow executor sets the authoritative final status itself
+      // (sendReply: closed for account_login, open for return_to_sender).
+      // Signal statusManaged so the post-execute block doesn't reopen a
+      // legitimately-closed ticket (Mindy Freeman a89dcf76: magic-link
+      // sent + closed, then orchestrator reopened it as "no message sent").
+      statusManaged = await handleWorkflow(ctx, decision, send, sysNote);
       break;
 
     case "macro":
@@ -2053,6 +2063,7 @@ export async function executeSonnetDecision(
     messageSent,
     escalated: ctx._escalatedThisRun === true,
     closed: ctx._closedThisRun === true,
+    statusManaged,
   };
 }
 
@@ -2541,15 +2552,20 @@ async function handlePlaybook(
 
 // ── Handler: Workflow ──
 
+// Returns true when a workflow actually ran — the workflow executor sets
+// the authoritative ticket status (closed/open) inside executeWorkflow, so
+// the caller must treat the status as managed and not override it. Returns
+// false on the failure paths (missing handler_name, or workflow-not-found
+// which escalates instead), where the normal post-execute logic applies.
 async function handleWorkflow(
   ctx: ActionContext,
   decision: SonnetDecision,
   send: SendFn,
   sysNote: SysNoteFn,
-): Promise<void> {
+): Promise<boolean> {
   if (!decision.handler_name) {
     await sysNote("Workflow action missing handler_name.");
-    return;
+    return false;
   }
 
   // Look up workflow by name, trigger_tag, or template — case-insensitive
@@ -2573,12 +2589,12 @@ async function handleWorkflow(
     await sysNote(reason);
     await escalateTicket(ctx, reason);
     await send(decision.response_message || "I need a little time to work on this and I'll get back to you.", ctx.sandbox);
-    return;
+    return false;
   }
 
   const { executeWorkflow } = await import("@/lib/workflow-executor");
   await executeWorkflow(ctx.workspaceId, ctx.ticketId, workflow.trigger_tag);
-
+  return true;
 }
 
 // ── Handler: Macro ──
