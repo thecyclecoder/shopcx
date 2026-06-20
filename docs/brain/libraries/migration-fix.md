@@ -16,7 +16,11 @@
 | `variant_backfill` | `{ variant: { product_id, shopify_variant_id, title?, sku?, price_cents?, option1-3? }, item_match: { shopify_variant_id?, sku? } }` | Inserts the missing [[../tables/product_variants]] row (idempotent — reuses an existing row for that Shopify id), then remaps the matched sub item onto the new UUID + `product_id`. **Never loosens the `items_on_uuids` check** — backfills the row. The fix the 2026-06-10 incident did by hand. |
 | `appstle_cancel` | `{ appstle_contract_id?, reason? }` | `appstleSubscriptionAction(workspaceId, <old contract id>, 'cancel', reason, 'ShopCX migration-fix')` — cancels the lingering Appstle contract (double-bill risk). |
 
-`card_pinned` / no billable card has **no fix** — the box surfaces `human_needed` instead (never invents a card).
+`card_pinned` / no billable card has **no fix** — it's **out-of-system** (the customer must act), so the box surfaces terminal `human_needed` with a **one-line plain instruction** (never invents a card).
+
+## Human-judgment pause + inline answer ([[../specs/migration-fix-human-input]])
+
+When a failing check needs an owner **decision** (not an out-of-system block) — e.g. an ambiguous grandfathered price — the box doesn't dump check-jargon. It pauses the job on **`needs_input`** with **one plain-language question** parked in [[../tables/agent_jobs]]`.questions [{id,q}]`. The owner answers inline on [[../dashboard/migrations]] (`POST /api/roadmap/answer` → `queued_resume`). `runMigrationFixJob` then takes the **answer-resume** path (`answers` present, no approved/declined action): it re-runs the `migration-fix` skill **resuming the same Max session** with the owner's answer baked in, so the box proposes the concrete gated fix (the normal `propose` → `needs_approval` → **Approve & fix** flow). The deterministic executor here (`applyMigrationFix`) is unchanged — the human-input handshake is all in the worker + the skill.
 
 ## Callers
 
