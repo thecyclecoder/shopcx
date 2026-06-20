@@ -817,12 +817,25 @@ async function runProductSeedJob(job: Job) {
   // media-refresh: re-run ONLY the image stages (hero + lifestyle + ingredient
   // images) on an already-published product, skipping web research/reviews/content.
   const isMediaRefresh = params.mode === "media-refresh";
+  // content-refresh (round-3 lander refinements): re-author content (punchier
+  // headlines + comparison rows/competitor label + survey flag) AND refresh the
+  // chapter images, KEEPING the existing research/reviews/benefits. For re-running
+  // already-published products whose landers need the round-3 treatment.
+  const isContentRefresh = params.mode === "content-refresh";
   console.log(
-    `${tag} ${isResume ? "resuming" : isMediaRefresh ? "media-refreshing" : "seeding"} product ${productId} on Max (job ${job.id})`,
+    `${tag} ${isResume ? "resuming" : isMediaRefresh ? "media-refreshing" : isContentRefresh ? "content-refreshing" : "seeding"} product ${productId} on Max (job ${job.id})`,
   );
 
   const prompt = isResume
     ? `Resuming. Continue the product-seed for product_id=${productId} (workspace_id=${job.workspace_id}) and finish. Same rules and the same final JSON output protocol as before.`
+    : isContentRefresh
+      ? [
+          `Use the seed-product skill in CONTENT-REFRESH mode for product_id=${productId} (workspace_id=${job.workspace_id}) (cwd is the repo root).`,
+          `Params: { "product_id": "${productId}", "workspace_id": "${job.workspace_id}", "mode": "content-refresh" }`,
+          `KEEP the existing research, reviews, and benefit selections (do NOT redo steps 1–4). Re-author ONLY the page content with the round-3 refinements — punchier benefit-first hero headline, comparison_table_rows + comparison_competitor_label for the RIGHT rival, and show_survey (true ONLY for coffee) — then refresh the chapter images (hero + lifestyle_1 + timeline_N if the timeline renders + ingredient_{name}). Do NOT generate endorsement avatar faces. Reach the DB / Drive / Gemini ONLY through scripts/seed-product-tools.ts. You are on Max — never call the Anthropic API; never spawn a nested claude.`,
+          `Honor the locked-hero guard: never regenerate amazing-coffee / amazing-coffee-pods / amazing-creamer heroes. Vision-QA any hero you generate. Re-publish the refreshed content version at the end.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_attention","summary":"…"}.`,
+        ].join("\n")
     : isMediaRefresh
       ? [
           `Use the seed-product skill in MEDIA-REFRESH mode for product_id=${productId} (workspace_id=${job.workspace_id}) (cwd is the repo root).`,

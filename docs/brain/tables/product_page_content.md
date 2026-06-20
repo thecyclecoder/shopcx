@@ -20,6 +20,8 @@ PDP content blocks per product (sections, ordering).
 | `mechanism_copy` | `text` | ✓ |  |
 | `ingredient_cards` | `jsonb` | ✓ | default: `'[]'` |
 | `comparison_table_rows` | `jsonb` | ✓ | default: `'[]'` |
+| `comparison_competitor_label` | `text` | ✓ | round-3 lander refinement — the rival *category* the comparison chapter compares against (e.g. "Coffee & Energy Drinks", "Plain Creatine"); null → `ComparisonSection` falls back to "Regular Coffee" (the coffee default) |
+| `show_survey` | `bool` | — | default: `false` — gates the (hardcoded coffee-specific) `SurveyChapter`; `render-page` only renders it when true. Backfilled `true` for `amazing-coffee` + `amazing-coffee-pods` only |
 | `faq_items` | `jsonb` | ✓ | default: `'[]'` |
 | `guarantee_copy` | `text` | ✓ |  |
 | `fda_disclaimer` | `text` | — |  |

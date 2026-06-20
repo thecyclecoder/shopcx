@@ -250,8 +250,12 @@ export function StorefrontPage({
             {/* Survey chapter — interactive lead-capture quiz placed right
                 after the hero to rescue the ~70% hero→ch1 drop-off, capture
                 zero-party data, and gate the signup code behind email/phone.
-                Replaces the (structurally dead) quiz popup variant. */}
-            <SurveyChapter data={data} />
+                Replaces the (structurally dead) quiz popup variant. Hardcoded
+                coffee-specific ("1 cup/2 cups", coffee styles), so it only
+                renders for products with show_survey=true (the coffee products)
+                — non-coffee products would show a nonsensical survey otherwise.
+                (Lander refinements round 3.) */}
+            {data.page_content?.show_survey && <SurveyChapter data={data} />}
             {/* Shared content body — the full chapter set, identical across
                 the standard PDP and the ad variants (see StandardChapters). */}
             <StandardChapters data={data} reviewSlug={reviewSlug} />
