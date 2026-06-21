@@ -1,0 +1,1 @@
+- **Box-hosted Spec Chat (long-running Max session)** · verified 2026-06-21 · → [[lifecycles/roadmap-build-console]]
