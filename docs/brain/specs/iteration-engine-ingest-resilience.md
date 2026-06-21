@@ -1,22 +1,23 @@
-# Iteration Engine Ingest Resilience ⏳
+# Iteration Engine Ingest Resilience 🚧
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
 
 Summary: The Storefront Iteration Engine's daily run ([[../inngest/meta-performance]] `meta-iteration-run`) dies at stage 1 (ingest) on Meta's transient `meta_400: Service temporarily unavailable` (Graph error code 2) — confirmed in production on 2026-06-21 for account `d6d619a5-3a8d-47d7-baea-a7170b783ad0` (`Stage reached: 0`). The token resolved fine (not a credential/account problem); the failure is the **first-run 90-day, day-incremented, ad-level insights pull** being too heavy for Meta to serve synchronously, made **fatal and self-perpetuating** because the Graph client ([[../libraries/meta__performance]] `graphGet`) has no retry/backoff and the backfill never lands a row to flip itself off — so every subsequent daily run re-attempts the same heavy backfill and fails identically, and DMs the owners each time. This spec makes ingestion resilient (retry transient Meta errors) and self-healing (chunk the backfill so requests stay light and partial progress disables the first-run path). Business outcome: the engine actually runs daily and produces the scorecards/decisions paid-social optimization depends on, instead of failing silently-to-Slack every morning.
 
-## Phase 1 — Transient-error retry/backoff in the Graph client ⏳
+## Phase 1 — Transient-error retry/backoff in the Graph client ✅
 Goal: a routine Meta wobble no longer fails the whole daily run.
-- ⏳ In `graphGet` (`src/lib/meta/performance.ts`) and the sibling `metaGet`/`metaPost` (`src/lib/meta-ads.ts`), stop discarding Meta's error detail — capture `error.code`, `error.error_subcode`, and `error.is_transient` from the Graph JSON (today only `error.message` survives).
-- ⏳ Classify transient vs fatal: retry when `error.is_transient === true`, `error.code === 2` ("Service temporarily unavailable"), `error.code === 1` ("unknown, retry later"), HTTP `429`, or HTTP `5xx`. Do **not** retry fatal errors (`190` invalid/expired token, `200`/`10`/`803` permissions, `400` validation) — those still fail fast so a real misconfiguration surfaces immediately.
-- ⏳ Bounded exponential backoff with jitter (e.g. 3–4 attempts, base ~1s, capped) before giving up; a real outage still throws after attempts are exhausted (the run records `failed` + DMs owners exactly as today — resilience, not silent swallowing).
-- ⏳ Surface the decision: on a transient retry, `console.warn` the code/subcode/attempt so the behavior is legible in logs (matches the engine's "supervisable, not silent" invariant).
+Shared wrapper `src/lib/meta/graph-retry.ts` (`graphFetchJson` / `isTransientGraphError` / `graphError`), documented at [[../libraries/meta__graph-retry]]. `graphGet` ([[../libraries/meta__performance]]) and `metaGet`/`metaPost` ([[../libraries/meta-ads]]) all route through it.
+- ✅ `graphFetchJson` parses the Graph JSON and preserves Meta's error detail — `error.code`, `error.error_subcode`, `error.is_transient` (and `error_user_title`/`msg`); `graphError` stamps `metaCode`/`metaSubcode` on the thrown Error (no longer only `error.message`).
+- ✅ Classify transient vs fatal (`isTransientGraphError`): retry when `error.is_transient === true`, `error.code === 2` ("Service temporarily unavailable"), `error.code === 1` ("unknown, retry later"), HTTP `429`, or HTTP `5xx` — note code 2 arrives on an HTTP 400, so classification is on the Graph code, not the HTTP status. Fatal errors (`190` token, `200`/`10`/`803` permissions, plain `400` validation) still fail fast.
+- ✅ Bounded exponential backoff with jitter (4 attempts, base ~1s, capped 8s) before giving up; a real outage still throws after attempts are exhausted (the run records `failed` + DMs owners exactly as today — resilience, not silent swallowing).
+- ✅ Surface the decision: on a transient retry, `console.warn` logs `code`/`subcode`/`attempt`/`http` (matches the engine's "supervisable, not silent" invariant).
 
-## Phase 2 — Chunked, resumable backfill ⏳
+## Phase 2 — Chunked, resumable backfill ✅
 Goal: the first-run 90-day pull never trips code 2, and the engine self-heals without a manual re-trigger.
-- ⏳ In `syncMetaInsightsForLevel` / `syncMetaInsights` (`src/lib/meta/performance.ts`), slice the requested `[startDate, endDate]` into small sub-windows (≤14 days) and pull each sub-window per level, rather than one synchronous request spanning the whole range. Day-incremented ad-level insights over a short window is light enough for Meta to serve.
-- ⏳ Upsert each sub-window's rows as it lands (the existing idempotent upsert on `(workspace_id, meta_object_id, level, snapshot_date)` is preserved) so partial progress is durable — a failure mid-backfill keeps the slices already written.
-- ⏳ Self-healing first-run flag: because `ingestMetaPerformance` derives `backfilled = !count` from `meta_insights_daily`, once the early slices write rows the next run's window collapses to the light 3-day incremental path automatically — no human re-trigger needed to recover.
-- ⏳ Order slices newest-first so the most recent (decision-relevant) days land before older history if the backfill is interrupted.
+- ✅ `syncMetaInsights` (`src/lib/meta/performance.ts`) slices `[startDate, endDate]` into ≤14-day sub-windows (`sliceInsightsWindows`, `MAX_INSIGHTS_WINDOW_DAYS=14`) and pulls each `(sub-window × level)` via `syncMetaInsightsForLevel`, rather than one synchronous request spanning the whole range. Slice-outer / level-inner so the most recent days for all levels land first.
+- ✅ Each sub-window upserts its rows as it lands (the existing idempotent upsert on `(workspace_id, meta_object_id, level, snapshot_date)` is preserved) so partial progress is durable — a failure mid-backfill keeps the slices already written.
+- ✅ Self-healing first-run flag: because `ingestMetaPerformance` derives `backfilled = !count` from `meta_insights_daily`, once the early slices write rows the next run's window collapses to the light 3-day incremental path automatically — no human re-trigger needed to recover.
+- ✅ Slices ordered newest-first so the most recent (decision-relevant) days land before older history if the backfill is interrupted.
 
 ## Phase 3 — Asynchronous insights for large pulls ⏳ (deferred)
 Goal: use Meta's sanctioned path for long date ranges; not required to fix the 2026-06-21 failure (Phases 1–2 do that).

@@ -12,6 +12,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { graphFetchJson } from "@/lib/meta/graph-retry";
 
 const GRAPH_BASE = "https://graph.facebook.com/v21.0";
 
@@ -38,18 +39,13 @@ export async function getMetaUserToken(workspaceId: string): Promise<string | nu
 
 const actId = (id: string) => (id.startsWith("act_") ? id : `act_${id.replace(/^act_/, "")}`);
 
+// Both Graph clients retry transient Meta errors (code 1/2, is_transient, 429,
+// 5xx) with bounded backoff and surface error_user_title/msg detail on fatal
+// errors — see graph-retry.ts.
 async function metaGet(path: string, token: string): Promise<any> {
   const sep = path.includes("?") ? "&" : "?";
-  const res = await fetch(`${GRAPH_BASE}/${path}${sep}access_token=${encodeURIComponent(token)}`);
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.error) throw new Error(`meta_${res.status}: ${json.error?.message || "graph_error"}`);
-  return json;
-}
-
-function metaErr(status: number, error: any): Error {
-  // Meta's useful detail is in error_user_title/msg, not the terse `message`.
-  const detail = error?.error_user_title ? `${error.error_user_title}: ${error.error_user_msg || ""}` : error?.message || "graph_error";
-  return new Error(`meta_${status}: ${detail}`.trim());
+  const url = `${GRAPH_BASE}/${path}${sep}access_token=${encodeURIComponent(token)}`;
+  return graphFetchJson(() => fetch(url), `GET ${path}`);
 }
 
 async function metaPost(path: string, body: Record<string, unknown>, token: string): Promise<any> {
@@ -59,10 +55,7 @@ async function metaPost(path: string, body: Record<string, unknown>, token: stri
     params.append(k, typeof v === "object" ? JSON.stringify(v) : String(v));
   }
   params.append("access_token", token);
-  const res = await fetch(`${GRAPH_BASE}/${path}`, { method: "POST", body: params });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.error) throw metaErr(res.status, json.error);
-  return json;
+  return graphFetchJson(() => fetch(`${GRAPH_BASE}/${path}`, { method: "POST", body: params }), `POST ${path}`);
 }
 
 

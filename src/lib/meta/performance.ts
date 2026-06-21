@@ -14,6 +14,7 @@
  * See docs/brain/specs/storefront-iteration-engine.md (Phase 1).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { graphFetchJson } from "@/lib/meta/graph-retry";
 
 const GRAPH_BASE = "https://graph.facebook.com/v21.0";
 const actId = (id: string) => (id.startsWith("act_") ? id : `act_${id.replace(/^act_/, "")}`);
@@ -24,10 +25,10 @@ async function graphGet(path: string, params: Record<string, string>, token: str
   const url = new URL(`${GRAPH_BASE}/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set("access_token", token);
-  const res = await fetch(url.toString());
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.error) throw new Error(`meta_${res.status}: ${json.error?.message || "graph_error"}`);
-  return json;
+  // Retries transient Meta errors (code 1/2, is_transient, 429, 5xx) with
+  // bounded backoff so a routine wobble no longer fails the daily run; fatal
+  // errors (token/permission/validation) still fail fast. See graph-retry.ts.
+  return graphFetchJson(() => fetch(url.toString()), `GET ${path}`);
 }
 
 /** Page through a Graph edge, following cursor pagination, collecting all rows. */
@@ -222,16 +223,51 @@ export async function syncMetaInsightsForLevel(
   return { rows: records.length };
 }
 
-/** Pull all three levels of insights for the date window. */
+/** Max span of a single insights sub-window — keeps each Graph request light. */
+const MAX_INSIGHTS_WINDOW_DAYS = 14;
+
+/**
+ * Slice [startDate, endDate] into sub-windows of ≤ MAX_INSIGHTS_WINDOW_DAYS,
+ * ordered NEWEST-FIRST so the most recent (decision-relevant) days land before
+ * older history if a long backfill is interrupted.
+ */
+function sliceInsightsWindows(startDate: string, endDate: string): { since: string; until: string }[] {
+  const startMs = Date.parse(startDate);
+  const slices: { since: string; until: string }[] = [];
+  let untilMs = Date.parse(endDate);
+  while (untilMs >= startMs) {
+    const sinceMs = Math.max(startMs, untilMs - (MAX_INSIGHTS_WINDOW_DAYS - 1) * 86400000);
+    slices.push({ since: dayStr(new Date(sinceMs)), until: dayStr(new Date(untilMs)) });
+    untilMs = sinceMs - 86400000; // step to the day before this slice's start
+  }
+  return slices;
+}
+
+/**
+ * Pull all three levels of insights for the date window. The window is sliced
+ * into ≤14-day sub-windows (newest-first) and each (sub-window × level) is pulled
+ * and upserted independently — so the first-run 90-day backfill never issues one
+ * heavy synchronous request (which trips Meta's transient code 2 "Service
+ * temporarily unavailable"), and partial progress is durable: rows already
+ * written persist if a later slice fails, and the next run self-heals to the
+ * light incremental path (`ingestMetaPerformance` flips `backfilled` off once any
+ * `meta_insights_daily` row exists).
+ */
 export async function syncMetaInsights(
   p: SyncParams,
   startDate: string,
   endDate: string,
 ): Promise<{ campaign: number; adset: number; ad: number }> {
-  const campaign = await syncMetaInsightsForLevel(p, "campaign", startDate, endDate);
-  const adset = await syncMetaInsightsForLevel(p, "adset", startDate, endDate);
-  const ad = await syncMetaInsightsForLevel(p, "ad", startDate, endDate);
-  return { campaign: campaign.rows, adset: adset.rows, ad: ad.rows };
+  const levels: Level[] = ["campaign", "adset", "ad"];
+  const totals = { campaign: 0, adset: 0, ad: 0 };
+  // Slice outer, level inner: the most recent days for ALL levels land first.
+  for (const slice of sliceInsightsWindows(startDate, endDate)) {
+    for (const level of levels) {
+      const r = await syncMetaInsightsForLevel(p, level, slice.since, slice.until);
+      totals[level] += r.rows;
+    }
+  }
+  return totals;
 }
 
 // ── Reconciliation ─────────────────────────────────────────────────────────--
