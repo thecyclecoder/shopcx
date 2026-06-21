@@ -11,7 +11,13 @@ ticket-csat-cron (every 15 min) selects:
   status='closed' AND closed_at <= now() - 48h
   AND csat_sent_at IS NULL AND customer_id IS NOT NULL
   ↓
-For each: stamp csat_sent_at NOW (idempotency lock), then send email
+Eligibility guard (skip + stamp, send nothing) if ANY:
+  - no customer-facing outbound message ever sent
+    (no ticket_messages direction='outbound' AND visibility != 'internal')
+  - tickets.do_not_reply = true
+  - tags overlap SKIP_TAGS (outreach / cls:outreach / spam:bot)
+  ↓
+Otherwise: stamp csat_sent_at NOW (idempotency lock), then send email
   ↓
 Customer clicks CTA → /csat/{ticket_id}?token={hmac}
   ↓
@@ -49,6 +55,9 @@ The cron polls the [[../tables/tickets]] table every 15 minutes. The marker colu
 - Refunds take 5-10 business days to appear, so even 72h won't help there — accept that physical-money outcomes lag
 
 The 7d upper bound prevents the migration-day backlog from blasting CSAT emails on every closed ticket since the dawn of time (those read as spam to the recipient). Tickets older than 7d with `csat_sent_at IS NULL` are stamped as skipped on the first cron tick, so they stop showing up in the query.
+
+### 3a. Only survey tickets we actually answered
+The cron used to survey every closed ticket with a `customer_id`, with no check on whether we engaged the customer. OOF / auto-reply / spam tickets the AI correctly ignored still got "how did we do?" emails — and the auto-responder's mailbox rated 1, polluting the CSAT average (origin: ticket `f5d1be18`, an OOF reply to a marketing blast with zero customer-facing outbound). The eligibility guard now skips (and stamps `csat_sent_at` so they leave the scan window) any ticket that is missing a customer-facing outbound message (the load-bearing, universal signal — `ticket_messages` has no `direction='outbound' AND visibility != 'internal'` row), is `do_not_reply = true`, or carries a `SKIP_TAGS` tag. `SKIP_TAGS` lives in `src/lib/ticket-tags.ts`, shared with the ticket-analyzer so the two consumers can't drift. Note `ai_turn_count` is NOT a usable signal — it's 0 on legit angry-customer tickets too.
 
 ### 4. Points conditional on COMPLETION, not on RATING
 500 loyalty points (~$5 value) awarded for completing the rating regardless of stars given. Awarding only on positive ratings would be paying for positive reviews — gross, and Klaviyo / FTC would call that bait. Points are NOT awarded on the reopen path (you don't pay someone for opening a complaint).

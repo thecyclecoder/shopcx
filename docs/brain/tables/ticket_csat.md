@@ -74,6 +74,7 @@ const { data } = await admin.from("ticket_csat")
 - **Send marker lives on tickets.** `tickets.csat_sent_at` is set by the cron when the email goes out — used for response-rate calcs.
 - **Cron is the trigger, not Inngest events.** `ticket-csat-cron` ([[../inngest/ticket-csat]]) runs every 15 min, finds closed tickets where `closed_at` is 48h-7d old AND `csat_sent_at IS NULL`, sends, stamps. Sleep-step pattern was replaced because long sleeps are fragile.
 - **Eligibility window: 48h-7d.** Tickets closed >7d ago with `csat_sent_at IS NULL` get auto-stamped as skipped (prevents the migration-day backlog from triggering blast emails on tickets from months ago, which read as spam). A ticket that closes and reopens before 48h doesn't get a CSAT this cycle; if it closes again later, the same 48h-7d window applies.
+- **CSAT is only sent for tickets we actually answered.** The cron's eligibility guard skips (and stamps `csat_sent_at` on) any ticket with no customer-facing outbound message (`ticket_messages` has no `direction='outbound' AND visibility != 'internal'` row), `do_not_reply = true`, or a `SKIP_TAGS` tag (`outreach`/`cls:outreach`/`spam:bot`). OOF/auto-reply/spam/do_not_reply tickets the AI correctly ignored never get a "how did we do?" email — they were polluting the CSAT average with the auto-responder's 1-star. The `SKIP_TAGS` set lives in `src/lib/ticket-tags.ts`, shared with the ticket-analyzer.
 
 ## Related
 

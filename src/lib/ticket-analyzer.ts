@@ -18,14 +18,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { cleanEmailBody } from "@/lib/email-cleaner";
+import { SKIP_TAGS } from "@/lib/ticket-tags";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GRADER_MODEL = SONNET_MODEL;
-
-// Tickets we don't waste a Sonnet call on
-const SKIP_TAGS = new Set(["spam:bot", "outreach", "cls:outreach"]);
 
 // "Severe issue" types that force escalation regardless of overall score
 const SEVERE_ISSUE_TYPES = new Set(["inaccuracy", "false_promise", "broken_action"]);
