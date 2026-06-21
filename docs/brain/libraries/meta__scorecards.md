@@ -34,7 +34,8 @@ async function computeScorecards(p: ScorecardParams, snapshotDate: string, windo
 ```
 Aggregates all five levels for the window and upserts on
 `(workspace_id, level, object_id, snapshot_date)`. `ScorecardParams = { workspaceId, adAccountId (our uuid) }`.
-Returns `{ snapshotDate, windowDays, rows, counts: {ad,adset,campaign,variant,angle}, variant_attribution_coverage }`.
+Returns `{ snapshotDate, windowDays, rows, counts: {ad,adset,campaign,variant,angle}, variant_attribution_coverage }`
+where **`rows` is the actually-persisted count** (see FK-resilience gotcha).
 
 ### `refreshScorecards` — function
 
@@ -57,6 +58,19 @@ Thin wrapper: defaults `snapshotDate` to today and `windowDays` to 7, delegates 
   the engine reads only [[../tables/iteration_scorecards_daily]], per the "read metrics from
   scorecards" invariant.
 - **Idempotent** — re-running a day re-upserts the same keys; no duplicate rows.
+- **Persist is FK-resilient + never lies about `rows`** (iteration-scorecard-upsert-resilience).
+  `.upsert()` is **all-or-nothing per batch**, so one dangling FK would reject all ~500
+  rows. Before writing, the persist step **nulls any unresolved reference** —
+  `angle_id`→[[../tables/product_ad_angles]], `advertorial_page_id`→[[../tables/advertorial_pages]]
+  (the two real FKs, `on delete set null`), plus the text `parent_adset_id`/`parent_campaign_id`
+  — resolved against the rows this run already fetched (a scorecard row is valid with a null
+  ref; we drop the pointer, not the row). On a batch error it **falls back to per-row upsert**
+  so a single bad record is isolated + logged, then **throws** with the PG `code message` and
+  the `persisted/total` count. The returned `rows` is the **persisted** count, never
+  `records.length` — a run can no longer report scorecards written when 0 landed (the prior bug:
+  swallowed `{ error }` + `rows: records.length` → reported 7, persisted 0).
+- **Backfill:** `scripts/backfill-iteration-scorecards.ts` replays the rollup for accounts with
+  attribution but 0 scorecards (dry-run default; `--apply` to write).
 - `frequency` is the **average** of daily frequency (it can't be summed across days).
 - Variant ATC denominator is the attributed-session count; `atc_rate` is **capped at 1.0**
   to absorb the small mismatch with lander-session counts.

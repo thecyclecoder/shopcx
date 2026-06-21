@@ -98,6 +98,13 @@ Indexes: `(meta_ad_account_id, snapshot_date)`, `(workspace_id, level, snapshot_
   [[product_benefit_selections]] row (`role='lead' AND science_confirmed=true`).
 - `frequency` is an **average of daily** frequency (Meta frequency = impressions/reach
   can't be summed across days; reach isn't stored).
+- **The upsert is FK-resilient** (iteration-scorecard-upsert-resilience). `angle_id`
+  and `advertorial_page_id` are real FKs (`on delete set null`), so a dangling pointer
+  (an angle/page deleted after attribution stamped it) would reject the whole ~500-row
+  batch — `.upsert()` is all-or-nothing. [[../libraries/meta__scorecards]] now **nulls
+  any unresolved ref** before writing and falls back to per-row upsert on a batch error,
+  so one bad ref can't drop its neighbors, and the run's reported `rows` is the count
+  that actually persisted (never `records.length` when the write failed).
 
 ---
 

@@ -474,10 +474,69 @@ export async function computeScorecards(
     });
   }
 
+  // ── FK-resilience — null any reference column whose target row isn't present ──
+  // `.upsert()` is all-or-nothing per batch, so a single dangling foreign key
+  // (angle_id → product_ad_angles, advertorial_page_id → advertorial_pages) would
+  // otherwise reject all ~500 rows in the batch and the whole rollup would persist
+  // 0 rows. A scorecard row is still valid with a null ref, so we drop the dangling
+  // pointer rather than the row. We resolve "exists" against the rows this run
+  // already fetched: product_ad_angles (angleMeta), advertorial_pages
+  // (variantByPageId), meta_adsets/meta_campaigns (the structure maps). The two
+  // uuid columns are real FKs; the two text parent columns aren't constrained but
+  // we keep them legible by only emitting resolvable ids.
+  const knownAngleIds = new Set(angleMeta.keys());
+  const knownPageIds = new Set(variantByPageId.keys());
+  const knownAdsetIds = new Set(adsetMeta.keys());
+  const knownCampaignIds = new Set(campMeta.keys());
+  for (const r of records) {
+    if (r.angle_id != null && !knownAngleIds.has(r.angle_id as string)) r.angle_id = null;
+    if (r.advertorial_page_id != null && !knownPageIds.has(r.advertorial_page_id as string)) r.advertorial_page_id = null;
+    if (r.parent_adset_id != null && !knownAdsetIds.has(r.parent_adset_id as string)) r.parent_adset_id = null;
+    if (r.parent_campaign_id != null && !knownCampaignIds.has(r.parent_campaign_id as string)) r.parent_campaign_id = null;
+  }
+
+  // ── Persist — capture every batch's { error }; NEVER report rows we didn't write ──
+  // On a batch error, fall back to per-row upsert so one bad record is isolated +
+  // logged instead of dropping its 499 neighbors. `persisted` is the count that
+  // actually landed; on any unrecoverable error we throw with the PG code+message
+  // so the run fails loudly (and names the offending constraint) rather than
+  // reporting success with 0 written.
+  let persisted = 0;
+  let firstError: { code: string | null; message: string } | null = null;
+  const noteError = (e: { code?: string | null; message?: string }, ctx: string) => {
+    const code = e.code ?? null;
+    const message = e.message ?? "unknown error";
+    if (!firstError) firstError = { code, message };
+    console.error(`[scorecards] iteration_scorecards_daily upsert failed ${ctx}: ${code ?? "?"} ${message}`);
+  };
   for (let i = 0; i < records.length; i += 500) {
-    await admin
+    const batch = records.slice(i, i + 500);
+    const { error } = await admin
       .from("iteration_scorecards_daily")
-      .upsert(records.slice(i, i + 500), { onConflict: "workspace_id,level,object_id,snapshot_date" });
+      .upsert(batch, { onConflict: "workspace_id,level,object_id,snapshot_date" });
+    if (!error) {
+      persisted += batch.length;
+      continue;
+    }
+    // Batch rejected as a unit — isolate the offending record(s).
+    console.error(
+      `[scorecards] batch upsert failed (rows ${i}..${i + batch.length - 1}): ` +
+        `${(error as { code?: string }).code ?? "?"} ${error.message} — retrying per-row`,
+    );
+    for (const rec of batch) {
+      const { error: rowErr } = await admin
+        .from("iteration_scorecards_daily")
+        .upsert([rec], { onConflict: "workspace_id,level,object_id,snapshot_date" });
+      if (rowErr) noteError(rowErr, `${rec.level}/${rec.object_id}`);
+      else persisted += 1;
+    }
+  }
+  if (firstError) {
+    const { code, message } = firstError;
+    throw new Error(
+      `iteration_scorecards_daily upsert persisted ${persisted}/${records.length} rows; ` +
+        `${records.length - persisted} failed: ${code ?? "?"} ${message}`,
+    );
   }
 
   const counts: Record<ScorecardLevel, number> = {
@@ -487,7 +546,7 @@ export async function computeScorecards(
     variant: variantAcc.size,
     angle: records.filter((r) => r.level === "angle").length,
   };
-  return { snapshotDate, windowDays, rows: records.length, counts, variant_attribution_coverage };
+  return { snapshotDate, windowDays, rows: persisted, counts, variant_attribution_coverage };
 }
 
 // ── Orchestration ──────────────────────────────────────────────────────────--
