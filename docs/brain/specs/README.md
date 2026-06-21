@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Escalate to the AI Routine by Default ⏳
+
+**Spec:** [[escalate-to-routine-by-default]] · **Owner:** [[../functions/cs]]
+
+**Why this matters:** the hourly escalation-triage cron has been idle because nothing is escalated *to the routine* — every escalation path round-robins to a human (`escalated_to = assignee`), but the cron triages `escalated_at` set + `escalated_to IS NULL`. Fix: system escalations default to `escalated_to = null` (route to routine), add a first-class "🤖 AI Routine" option to the escalate UI + display, no-quorum still hands up to a human. No schema change (NULL = routine; `escalated_to` FKs auth.users). Completes [[box-escalation-triage]].
+
 ## Active project — Spec-Test Deep Verification ⏳
 
 **Spec:** [[spec-test-deep-verification]] · **Owner:** [[../functions/platform]]
