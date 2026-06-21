@@ -78,5 +78,13 @@ the same values on a re-run.
 - `linkReversals` must run **after** `persistActions` (it looks up the reversing row by
   its natural key for this snapshot).
 - [[../tables/iteration_runs]] is append-only run history — a re-run is a new row.
+- **Depends on scorecards actually persisting.** `reconcilePriorActions` and the decision
+  engine read [[../tables/iteration_scorecards_daily]] only — if the Phase-3 rollup writes 0
+  rows they reconcile/decide on nothing (fly blind). A prior bug had
+  [[meta__scorecards]] swallow the upsert `{ error }` and report `rows: records.length`
+  while a dangling FK dropped the whole batch (reported 7, persisted 0). Fixed
+  (iteration-scorecard-upsert-resilience): the rollup now nulls unresolved refs, isolates
+  bad rows per-row, and **throws** on a real error, so the run fails loudly instead of
+  feeding this stage an empty table.
 
 See [[../specs/storefront-iteration-engine]] (Phase 5) · [[meta__decision-engine]].
