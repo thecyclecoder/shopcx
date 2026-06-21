@@ -1,0 +1,1 @@
+- **Base Price Never Above MSRP (invariant + cap)** · verified 2026-06-21 · → [[lifecycles/subscription-billing]]
