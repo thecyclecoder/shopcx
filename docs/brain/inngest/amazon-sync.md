@@ -30,6 +30,8 @@ _None._
 ## Tables written
 
 - [[../tables/amazon_asins]]
+- [[../tables/daily_amazon_order_snapshots]] (aggregate, via `processOrderReport`)
+- [[../tables/daily_amazon_product_snapshots]] (per-product layer, via `processOrderReport`)
 
 ## Tables read (not written)
 
