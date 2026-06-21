@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Clear Escalation Flags on Resolve/Close ⏳
+
+**Spec:** [[clear-escalation-on-resolve]] · **Owner:** [[../functions/cs]]
+
+**Why this matters:** closing/resolving a ticket never clears `escalated_at`, so resolved tickets linger on the Escalated list (one sat 16 days post-close — Sheryl Dickey "Wrong product delivered"). Fix: clear escalation flags on resolve/close in the status-write paths + filter the Escalated view to non-terminal statuses + a gated stale sweep (currently 0). Completes [[box-escalation-triage]].
+
 ## Active project — Escalate to the AI Routine by Default ⏳
 
 **Spec:** [[escalate-to-routine-by-default]] · **Owner:** [[../functions/cs]]
