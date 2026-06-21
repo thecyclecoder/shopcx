@@ -17,9 +17,9 @@ Both hooks + the cron share one guard (factor it out): **skip a (workspace, slug
 
 ## Verification
 - Move a planned/in-progress spec to **Shipped** via the board's status control → within a poll cycle a `spec-test` job appears for that slug and a `spec_test_runs` row follows (no waiting for the daily cron).
-- Merge a build whose PR ships a spec → the same spec-test fires on reconcile.
+- ✅ Merge a build whose PR ships a spec → the same spec-test fires on reconcile.
 - Do both (or add the cron tick) for one slug in a short window → only **one** run (dedupe holds). Change the spec + re-ship → a fresh run is allowed.
-- The daily cron, with the event trigger live, enqueues only specs lacking a recent run.
+- ✅ The daily cron, with the event trigger live, enqueues only specs lacking a recent run.
 
 ## Phase 1 — event triggers + shared dedupe ✅
 Factored the cron's "shipped-unverified + not-recently-run" check into a shared `enqueueSpecTestIfDue(workspaceId, slug, knownStatus?)` helper in [[../libraries/agent-jobs]] (dedupe = no in-flight `spec-test` job + no fresh `spec_test_runs` row ~20h). Called from (a) `/api/roadmap/status` after a commit whose `deriveSpecStatus` yields `shipped` (new `deriveSpecStatus` export on [[../libraries/brain-roadmap]] derives over the just-committed content, since the deployed bundle's disk is stale), and (b) `reconcileMergedJobs` when a merged `build` job's spec — fetched from `main` — is now shipped. The daily cron calls the same helper per backlog slug (passing `'shipped'`). Brain updated: [[spec-test-agent]] (event trigger) + [[../inngest/spec-test-cron]] (backlog-only) + new [[../libraries/agent-jobs]] page. Fold on ship.
