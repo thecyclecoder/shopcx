@@ -84,6 +84,14 @@ const MAX_MIGRATION_FIX = 1;
 // One migration-fix pass: diagnose the failing checks read-only (re-fetch live Appstle, the sub, the
 // catalog) + propose a typed fix. Minutes — same ballpark as a ticket-improve turn, not the seed ceiling.
 const MIGRATION_FIX_TIMEOUT_MS = 15 * 60 * 1000;
+// Developer Message Center turns (developer-message-center) run in their OWN concurrency-1 interactive
+// lane: a resumable Max `claude -p` session per thread that carries read-only DB access AND WebSearch
+// (the founder's "ask the box anything" analyst/planner). Serialized so a turn never races the per-thread
+// worktree's self-update (git reset --hard origin/main) of an in-flight read; its own pool, so it must
+// not starve the 5 build/plan lanes. A turn can be a long DB-analytics + investigation pass — give it a
+// build-sized ceiling so a heavy join + a few read probes never get cut short.
+const MAX_DEV_ASK = 1;
+const DEV_ASK_TIMEOUT_MS = 20 * 60 * 1000;
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -139,7 +147,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -2160,6 +2168,270 @@ async function runMigrationFixJob(job: Job) {
   }
 }
 
+// ── Developer Message Center (developer-message-center) ──────────────────────
+// A kind='dev-ask' job is ONE turn of a founder-facing, read-only "ask the box anything" thread. Like
+// ticket-improve it runs a TOP-LEVEL `claude -p` on Max (ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
+// the DB/crypto secrets — but it ALSO leans on WebSearch (the analyst/planner use case). It runs in a
+// per-thread git worktree recreated fresh on origin/main each turn so brain/code reads are current. The
+// box is REPORT-BACK, never a builder: reads (SELECT/join/analysis via throwaway uncommitted scripts/_*.ts)
+// are silent; every proposed DB write / migration / spec handoff stops at a pending_actions approval card
+// the owner must click. Only deterministic worker code (mode:'approve_action') executes an approved card.
+async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: string) {
+  // KEEP the full env (DB/crypto creds for read-only probes + the throwaway query scripts) — only strip
+  // the API key so ALL LLM is Max-billed (never the Anthropic API). WebSearch stays on (analyst/planner).
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: DEV_ASK_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+interface DevThreadRow {
+  id: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+  box_session_id: string | null;
+  pending_actions: PendingAction[];
+}
+async function loadDevThread(threadId: string): Promise<DevThreadRow | null> {
+  const { data } = await db
+    .from("dev_message_threads")
+    .select("id, messages, box_session_id, pending_actions")
+    .eq("id", threadId)
+    .maybeSingle();
+  if (!data) return null;
+  const row = data as Record<string, unknown>;
+  const msgs = Array.isArray(row.messages) ? (row.messages as { role: "user" | "assistant"; content: string }[]) : [];
+  const actions = Array.isArray(row.pending_actions) ? (row.pending_actions as PendingAction[]) : [];
+  return { id: row.id as string, messages: msgs, box_session_id: (row.box_session_id as string | null) ?? null, pending_actions: actions };
+}
+
+// The model's final JSON for a turn. A pure investigation/analytics answer carries just {reply}. When the
+// answer needs a DB write (db_mutation) or it spots a gap worth a spec (spec), it ALSO returns a typed
+// pending_actions card — it NEVER executes the write/migration/handoff itself.
+function normalizeDevActions(raw: unknown, ts: string): PendingAction[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PendingAction[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[i] as Record<string, unknown>;
+    if (!a || typeof a !== "object") continue;
+    const t = a.type;
+    if (t === "db_mutation") {
+      const cmd = typeof a.cmd === "string" ? a.cmd : "";
+      if (!cmd) continue; // a write with no command to run is not executable — drop it
+      out.push({
+        id: `da${ts}${i}`,
+        type: "run_prod_script",
+        summary: String(a.summary || "Proposed database write"),
+        cmd,
+        preview: typeof a.preview === "string" ? a.preview : undefined,
+        status: "pending",
+      });
+    } else if (t === "spec") {
+      const slug = typeof a.slug === "string" ? a.slug.replace(/[^a-z0-9-]/gi, "") : "";
+      const content = typeof a.content === "string" ? a.content : "";
+      if (!slug || !content) continue; // a spec handoff needs both a slug and the file body
+      out.push({
+        id: `da${ts}${i}`,
+        type: "spec",
+        summary: String(a.summary || `Spec handoff: ${slug}`),
+        preview: content.slice(0, 2000),
+        status: "pending",
+        spec: {
+          slug,
+          title: String(a.title || slug),
+          owner: String(a.owner || ""),
+          parent: String(a.parent || ""),
+          intent: content, // carry the full markdown body on the proposal so approval is deterministic
+        },
+        // stash the Send & build choice on the action's payload (read back at approval time).
+        payload: { queueBuild: a.queueBuild === true },
+      });
+    }
+  }
+  return out;
+}
+
+const DEV_ASK_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer to the founder — grounded in what you actually read/queried>"}`,
+  `  — for a pure investigation / analytics / planning answer (you already ran any read-only query in-session via a throwaway scripts/_*.ts; reads are silent, never asked).`,
+  `{"status":"replied","reply":"<answer>","pending_actions":[{"type":"db_mutation","summary":"<what & why>","cmd":"<a SELF-CONTAINED shell command the worker will run on approval — e.g. write a scripts/_apply.ts via heredoc that bootstraps createAdminClient and runs the write, then 'npx tsx scripts/_apply.ts'>","preview":"<the exact statement/rows it changes>"}]}`,
+  `  — when the answer REQUIRES an INSERT/UPDATE/DELETE. NEVER run the write yourself; stop and propose it.`,
+  `{"status":"replied","reply":"<answer>","pending_actions":[{"type":"spec","summary":"<the gap>","slug":"<kebab-slug>","title":"<Title>","owner":"[[../functions/{fn}]]","parent":"<a function mandate or a goal milestone>","content":"<the FULL docs/brain/specs/{slug}.md markdown, in the house spec format>","queueBuild":false}]}`,
+  `  — when you spot a code/capability gap worth a spec. The worker commits the spec to main on approval (and queues a build if queueBuild).`,
+  `Schema changes (new table/column/migration) ride the spec→build handoff, NOT a db_mutation. Never run DDL.`,
+].join("\n");
+
+function devAskFraming(): string {
+  return [
+    `You are the ShopCX Developer Message Center — a founder-facing, READ-ONLY "ask the box anything" analyst + planner for Dylan. You have the whole brain (docs/brain/), the full repo (src/), READ access to the production database, and WebSearch. You are a REPORT-BACK system, NOT a builder: you never write product/committed code and never silently mutate anything.`,
+    `House rule first: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Read docs/brain/recipes/dev-message-center-db.md for the DB-query convention before any analytics question.`,
+    `DB reads are FREE and SILENT — to answer an analytics/state question, write a THROWAWAY scripts/_*.ts in this worktree that bootstraps createAdminClient (per scripts/_bootstrap.ts / the script-conventions skill), runs the SELECT/join/aggregation, prints the result, then run it with 'npx tsx'. These scripts are scratch: NEVER commit them, never edit docs/brain/ or src/. SELECT-only discipline — never write/UPDATE/DELETE from a query script.`,
+    `"Does {feature} work right now?" = a grounded read-only investigation: Read the code + brain + probe recent Inngest runs / error rows read-only; report what you found. No mutation.`,
+    `If answering REQUIRES a DB write, a migration, or you find a gap worth a spec — STOP and emit a pending_actions card (below). The owner approves; the worker executes. You never execute a mutation or commit a spec yourself.`,
+    DEV_ASK_OUTPUT,
+  ].join("\n\n");
+}
+
+function renderDevTranscript(messages: DevThreadRow["messages"]): string {
+  return messages.map((m) => `${m.role === "user" ? "[Founder]" : "[You]"}: ${m.content}`).join("\n\n");
+}
+
+async function runDeveloperMessageJob(job: Job) {
+  const tag = `[dev-ask:${job.id.slice(0, 8)}]`;
+  let params: { thread_id?: string; mode?: string } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fall back to a plain turn keyed by spec_slug */
+  }
+  const mode = (params.mode as "turn" | "approve_action") || "turn";
+  const threadId = params.thread_id || job.spec_slug;
+  if (!threadId) {
+    await update(job.id, { status: "failed", error: "dev-ask job missing thread_id" });
+    return;
+  }
+
+  const failTurn = async (reason: string, logTail?: string) => {
+    await db.from("dev_message_threads").update({ turn_status: "error", last_error: reason.slice(0, 500), updated_at: new Date().toISOString() }).eq("id", threadId);
+    await update(job.id, { status: "failed", error: reason, log_tail: logTail ?? null });
+  };
+
+  const thread = await loadDevThread(threadId);
+  if (!thread) {
+    await failTurn("dev-ask thread not found");
+    return;
+  }
+  const sessionId = thread.box_session_id;
+  const isResume = !!sessionId;
+  console.log(`${tag} ${mode} ${isResume ? "(resume)" : "(fresh)"} thread=${threadId}`);
+
+  // Per-thread worktree recreated on origin/main each turn so brain/code reads are current. Tear down after.
+  const key = threadId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const wt = join(BUILDS_DIR, `dev-ask-${key}`);
+  sh("git", ["fetch", "origin", "main"]);
+  sh("git", ["worktree", "remove", "--force", wt]);
+  const branch = `claude/dev-ask-${key}`;
+  const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
+  if (add.code !== 0) {
+    await failTurn(`worktree add failed: ${add.err.slice(0, 200)}`);
+    return;
+  }
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  try {
+    // ── mode:'approve_action' — the owner approved/declined cards; the WORKER executes them. ──
+    if (mode === "approve_action") {
+      const actions = (thread.pending_actions || []).map((a) => ({ ...a }));
+      const notes: string[] = [];
+      for (const a of actions) {
+        if (a.status === "declined") { a.result = a.result || "declined by owner"; continue; }
+        if (a.status !== "approved") continue;
+        try {
+          if (a.type === "spec" && a.spec) {
+            const slug = a.spec.slug;
+            const filePath = `docs/brain/specs/${slug}.md`;
+            const content = String(a.spec.intent || ""); // the full markdown body parked on the proposal
+            if (!content) { a.status = "failed"; a.result = "no spec content"; notes.push(`${a.summary} → failed (no content)`); continue; }
+            const put = await putFileMain(filePath, content, `spec: create ${slug} (developer message center)`);
+            if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
+            let queued = false;
+            const wantBuild = !!(a.payload && (a.payload as { queueBuild?: boolean }).queueBuild);
+            if (wantBuild) {
+              const { error } = await db.from("agent_jobs").insert({
+                workspace_id: job.workspace_id,
+                spec_slug: slug,
+                kind: "build",
+                status: "queued",
+                instructions: "Created via developer message center",
+                created_by: job.created_by,
+              });
+              queued = !error;
+            }
+            a.status = "done";
+            a.result = `committed specs/${slug}.md${queued ? " + queued build" : ""}`;
+            notes.push(`Spec ${slug} → committed${queued ? " + build queued" : ""}`);
+          } else if (a.cmd) {
+            // db_mutation (type 'run_prod_script'): the worker runs the captured self-contained command
+            // in the fresh worktree, holding prod creds. The model is NOT in the loop here.
+            const r = await shAsync("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd: wt });
+            a.status = r.code === 0 ? "done" : "failed";
+            a.result = (r.out + r.err).slice(-500);
+            notes.push(`${a.summary} → ${a.status}`);
+          } else {
+            a.status = "failed";
+            a.result = "no command to run";
+            notes.push(`${a.summary} → failed (no command)`);
+          }
+        } catch (e) {
+          a.status = "failed";
+          a.result = e instanceof Error ? e.message : String(e);
+          notes.push(`${a.summary} → failed: ${a.result}`);
+        }
+      }
+      const fresh = await loadDevThread(threadId);
+      const summary = notes.length ? notes.join("; ") : "No approved actions to execute.";
+      const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: `Done: ${summary}` }];
+      await db.from("dev_message_threads").update({
+        messages,
+        pending_actions: actions,
+        turn_status: "idle",
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      }).eq("id", threadId);
+      await update(job.id, { status: "completed", log_tail: `approve_action — ${summary}`.slice(-2000) });
+      console.log(`${tag} ✓ executed approved actions: ${summary}`);
+      return;
+    }
+
+    // ── mode:'turn' — run the box session (read-only investigation/analytics/planning). ──
+    const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
+    const prompt = isResume
+      ? `${latest}\n\n${DEV_ASK_OUTPUT}`
+      : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
+
+    const { session, resultText, isError, raw } = await runDevAskClaude(prompt, sessionId, wt);
+    const logTail = raw.slice(-2000);
+    const newSession = session || sessionId;
+    const parsed = parseStatus(resultText) as Record<string, unknown> | null;
+    console.log(`${tag} claude finished — status: ${(parsed?.status as string) ?? "(none)"} isError=${isError}`);
+
+    const reply = typeof parsed?.reply === "string" ? (parsed.reply as string) : "";
+    if (!reply) {
+      await failTurn(isError ? "dev-ask run errored" : "box turn returned no reply", logTail);
+      return;
+    }
+    const ts = Date.now().toString(36);
+    const newActions = normalizeDevActions(parsed?.pending_actions, ts);
+    const fresh = await loadDevThread(threadId);
+    const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: reply }];
+    await db.from("dev_message_threads").update({
+      messages,
+      box_session_id: newSession,
+      turn_status: "idle",
+      last_error: null,
+      pending_actions: newActions, // replace: the latest turn's cards supersede any stale pending ones
+      updated_at: new Date().toISOString(),
+    }).eq("id", threadId);
+    await update(job.id, { status: "completed", log_tail: logTail });
+    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} pending action[s])` : ""}`);
+  } finally {
+    sh("git", ["worktree", "remove", "--force", wt]);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -2169,6 +2441,7 @@ async function runJob(job: Job) {
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   if (job.kind === "spec-test") return runSpecTestJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
+  if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -2400,7 +2673,7 @@ async function main() {
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix lane, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix + ${MAX_DEV_ASK} dev-ask lane, polling every ${POLL_MS}ms`);
 
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
@@ -2415,7 +2688,8 @@ async function main() {
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix").length;
+  const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     runJob(job)
@@ -2483,6 +2757,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed migration-fix ${job.id.slice(0, 8)} → ${countMigrationFix() + 1}/${MAX_MIGRATION_FIX} migration-fix lane`);
+        launch(job);
+      }
+      // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
+      while (countDevAsk() < MAX_DEV_ASK) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["dev-ask"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed dev-ask ${job.id.slice(0, 8)} → ${countDevAsk() + 1}/${MAX_DEV_ASK} dev-ask lane`);
         launch(job);
       }
       // Fill the build/plan pool.

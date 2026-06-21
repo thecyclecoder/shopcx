@@ -50,6 +50,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 
 - [[fire-an-inngest-event]] — `inngest.send({name, data})`
 - [[write-a-migration-apply-script]] — `scripts/apply-*.ts` pattern using `pg` client
+- [[dev-message-center-db]] — read-only prod-DB queries from the Developer Message Center (throwaway `scripts/_*.ts`, SELECT-only, never committed)
 
 ## Build & ops skills (committed Claude Code skills)
 
