@@ -1,0 +1,31 @@
+# Spec-Test Deep Verification (browser + sandboxed behavioral checks) ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** extends [[spec-test-agent]] (+ [[spec-test-maximize-machine-coverage]]). Reviewed the 55 needs-human checks (2026-06-21): ~30 are behavioral E2E ("fire event/call API/approve → assert DB+events") the agent punts only because it's read-only; ~8 are UI render/click-flow it can't do without a browser; ~15 are genuinely human (real customer/$/carrier side effects, fault-injection, aesthetics).
+
+Give the spec-test agent two new **non-destructive-on-real-data** powers so most of those ~38 become machine checks, shrinking the human queue to the truly-human ~15. **Hard line preserved:** anything that hits a **real** customer, dollar, live Meta ad, or external carrier stays `needs_human` — the sandbox only ever touches dedicated test fixtures, never prod customers.
+
+## Phase 1 — Headless-browser verification (Playwright) ⏳
+The agent can only `GET` endpoints today, so "the page shows X / click → Y" bullets get punted. Add a **headless-browser check tool** to the `spec-test` skill: load a dashboard page authed as the owner, assert rendered DOM / interact, screenshot on failure.
+- **Box provisioning (owner/root op — I handle it, like the Vercel CLI):** `npx playwright install --with-deps chromium` on the box as root; add `playwright` to `package.json` so the builder env has the library.
+- **Headless owner auth (no human creds):** mint an owner Supabase session server-side via the service-role admin (`admin.auth.admin.generateLink` / a minted session for the owner user) and inject the cookie into the Playwright context — so the browser loads owner-gated pages without a password. Read-only navigation by default.
+- **Skill classification:** a bullet asserting **rendered UI** ("card shows the Agent-tested stamp + chip", "VerificationCard renders per-bullet verdicts", "composer textarea ≥5 rows / auto-grows", "non-owner doesn't see the nav item") becomes a **browser check** (pass/fail with a screenshot as evidence), not `needs_human`. Pure click-flows that don't mutate real data (open a tab, expand a section, see a 403) run here too.
+- **Guardrail:** the browser session is **owner-authed but read-only on prod** — it navigates + asserts; it does NOT submit forms that mutate real customer/billing data (those route to Phase 2's sandbox or stay human).
+
+## Phase 2 — Sandboxed behavioral verification ⏳
+The big bucket: "fire renewal-attempt → $0 comp order + event", "force-escalate → triage job + verdict + `triage_runs` row", "POST approve → job flips `queued_resume`", "`✓ Tested` upserts a row". All doable by driving the flow + asserting — **on test fixtures, never live customers.**
+- **Dedicated test fixtures (I seed them via DB):** a flagged **test workspace** + test customer / ticket / subscription / audit rows (an `is_test`/sentinel marker), isolated from real data. The agent operates only within this fixture set.
+- **Controlled-trigger capability** added to the box's spec-test toolkit (it KEEPS secrets, like the migration-fix agent): fire **Inngest events** (e.g. `internal-subscription/renewal-attempt`), call **internal POST endpoints** (`/api/roadmap/answer`, `/api/developer/spec-test/human-queue`, approve routes), and read back **DB rows + `customer_events`/`triage_runs`** to assert. Then it cleans up the fixture state (idempotent re-runnable).
+- **🚨 External side-effect firewall (the core safety rule):** the sandbox runs a flow **only if every side effect stays internal** (DB writes + events). A flow that would call an **external API with real effect** — Amplifier fulfillment, Braintree charge/refund, Appstle mutation, Resend/Twilio send, a live Meta ad pause — is **NOT run**; it's classified `needs_human` (or deferred until a true sandbox tenant with test creds exists). The agent must prove a flow is internal-only before driving it. Comp-renewal's *event + DB + `type='comp'` txn + advance* is assertable; its *Amplifier handoff* is the external edge → assert up to the handoff, flag the handoff itself human.
+- **Skill classification:** a behavioral bullet whose mutations are internal-only → **sandbox check** (drive on a test fixture, assert, clean up). Real-customer/$/external → stays `needs_human`.
+
+## Setup ownership (answering "do I need to set anything up?")
+**No — I do all of it.** Phase 1: I provision Playwright/Chromium on the box (root SSH) + the build wires the minted-owner-session + browser tool. Phase 2: I seed the test fixtures via the admin DB client + the build wires the controlled-trigger toolkit. The **only** thing that would need you is later automating the *external-mutation* tests (sandbox Braintree/Appstle/Meta creds) — explicitly **out of scope** here; those stay human.
+
+## Verification
+- Phase 1: a UI bullet (e.g. Spec-Test Agent's "shipped card shows the Agent-tested stamp + chip") runs as a **browser check** with a screenshot evidence, recorded `pass`/`fail` — no longer in the human queue. A non-owner-gated page asserts the 403/hidden-nav via the browser.
+- Phase 2: Comp Subscriptions' "fire renewal-attempt → $0 `type='comp'` order + `subscription.comp_shipped` event + advance" runs against a **test comp sub**, asserts the rows/events, and the human queue loses it; the **Amplifier handoff** sub-assertion remains flagged human. The fail-closed negative (comp + null `comp_role` → `failed` txn + event, no order) runs fully in-sandbox.
+- Negative / safety: a check whose flow would issue a real refund / apply a real coupon / pause a live Meta ad / send a real email is **never executed** — it stays `needs_human`. The sandbox touches only `is_test` fixtures (assert: zero writes to non-test workspace rows during a sandbox check).
+- The needs-human queue drops from ~55 toward ~15 (the genuinely-human residual); re-running the suite reclassifies the browser + sandbox-eligible checks.
+
+## Brain updates (same PRs)
+[[spec-test-agent]] (the two new check categories + the external firewall) · the `spec-test` skill page · [[../recipes/build-box-setup]] (Playwright provisioning + the test-fixture seed) · [[../dashboard/spec-tests]] (browser screenshot evidence rendering) · a `spec_test_fixtures` note if a table is added. Fold on ship.

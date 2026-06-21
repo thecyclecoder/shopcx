@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Spec-Test Deep Verification ⏳
+
+**Spec:** [[spec-test-deep-verification]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** of the ~55 "needs human" spec-test checks, ~38 aren't truly human — ~30 are behavioral E2E (fire event/call API/approve → assert DB+events) the agent punts only because it's read-only, ~8 are UI render/click it can't do without a browser. Two new powers: **P1 headless-browser (Playwright)** for UI checks (minted owner session, read-only nav), **P2 sandboxed behavioral triggers** (fire Inngest events + internal POSTs against dedicated `is_test` fixtures, assert, clean up). Hard firewall: any real-customer/$/external-API/live-Meta side effect stays `needs_human`. Shrinks the human queue ~55 → ~15. All setup is self-owned (Playwright provisioning + test fixtures); no owner action. Extends [[spec-test-agent]].
+
 ## Active project — Iteration Scorecard Upsert Resilience ⏳
 
 **Spec:** [[iteration-scorecard-upsert-resilience]] · **Owner:** [[../functions/cmo]]
