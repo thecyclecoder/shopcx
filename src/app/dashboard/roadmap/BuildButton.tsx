@@ -49,6 +49,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
   const [showIssue, setShowIssue] = useState(false);
   const [issueText, setIssueText] = useState("");
   const [reporting, setReporting] = useState(false);
+  const [issueNotice, setIssueNotice] = useState<string | null>(null);
   const [confirmVerify, setConfirmVerify] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -175,6 +176,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
   async function reportIssue() {
     if (reporting || !issueText.trim()) return;
     setReporting(true);
+    setIssueNotice(null);
     try {
       const res = await fetch("/api/roadmap/build", {
         method: "POST",
@@ -182,12 +184,29 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
         body: JSON.stringify({ slug, instructions: `Fix this reported issue — do ONLY this, do not rebuild the whole spec:\n\n${issueText.trim()}` }),
       });
       const d = await res.json();
-      if (d.job) {
+      if (!res.ok) {
+        setIssueNotice(d.error ? `Couldn't queue your issue: ${d.error}` : "Couldn't queue your issue — please try again.");
+        return;
+      }
+      if (d.queuedBehindActive && d.job) {
+        // A build is already running for this spec — the issue was enqueued as a distinct follow-up build
+        // (never dropped). Keep the dialog open with a clear confirmation; the new job runs after the
+        // current one finishes (the box serializes per-spec).
+        setIssueText("");
+        setIssueNotice(`Issue queued as build ${String(d.job.id).slice(0, 8)} — it'll run after the current build finishes.`);
+        router.refresh();
+      } else if (d.job && !d.alreadyActive) {
+        // Fresh fix-build queued.
         setJob(d.job);
         setShowIssue(false);
         setIssueText("");
         router.refresh();
+      } else {
+        // alreadyActive with no new job (a plain coalesce) — do NOT clear+close as a phantom success.
+        setIssueNotice("A build is already running — your issue couldn't be queued. Please try again once it finishes.");
       }
+    } catch {
+      setIssueNotice("Couldn't queue your issue — please try again.");
     } finally {
       setReporting(false);
     }
@@ -280,9 +299,9 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
         </div>
       )}
       {/* Report issue + Mark verified & archive get their own full-width row so they
-          aren't jammed in with the status chip / PR / build controls above. */}
-      {!active && (
-        <div className="mt-2 flex gap-2">
+          aren't jammed in with the status chip / PR / build controls above. Report issue is
+          available even while a build is active — a scoped fix is enqueued behind it, never dropped. */}
+      <div className="mt-2 flex gap-2">
           <button
             type="button"
             onClick={() => setShowIssue((v) => !v)}
@@ -300,8 +319,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
               {confirmVerify ? "Cancel" : "Mark verified & archive"}
             </button>
           )}
-        </div>
-      )}
+      </div>
       {canVerify && confirmVerify && (
         <div className="mt-2 space-y-2 rounded-md border border-emerald-200 bg-emerald-50/50 p-2 text-left dark:border-emerald-900/40 dark:bg-emerald-950/20">
           <p className="text-[11px] text-emerald-800 dark:text-emerald-300">
@@ -363,10 +381,12 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
           ))}
         </div>
       )}
-      {showIssue && !active && (
+      {showIssue && (
         <div className="mt-2 space-y-2 rounded-md border border-zinc-200 bg-zinc-50/60 p-2 text-left dark:border-zinc-700 dark:bg-zinc-900">
           <label className="block text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-            Describe the issue or fix — queues a scoped fix-build (the spec stays as-is):
+            {active
+              ? "Describe the issue or fix — a build is running, so this queues a follow-up fix-build that runs next (the spec stays as-is):"
+              : "Describe the issue or fix — queues a scoped fix-build (the spec stays as-is):"}
           </label>
           <textarea
             rows={2}
@@ -382,6 +402,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
           >
             {reporting ? "Queuing…" : "Queue fix"}
           </button>
+          {issueNotice && <p className="text-[11px] text-zinc-600 dark:text-zinc-400">{issueNotice}</p>}
         </div>
       )}
     </div>

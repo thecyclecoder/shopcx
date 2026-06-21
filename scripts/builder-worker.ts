@@ -247,7 +247,7 @@ async function runSeedClaude(prompt: string, sessionId: string | null, cwd: stri
   return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
 }
 
-function parseStatus(text: string): { status: string; questions?: unknown[]; summary?: string } | null {
+function parseStatus(text: string): { status: string; questions?: unknown[]; summary?: string; no_changes_reason?: string } | null {
   const tryParse = (s: string) => {
     try {
       const o = JSON.parse(s);
@@ -2495,7 +2495,7 @@ async function runJob(job: Job) {
           `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
-          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}. If you make NO file edits (nothing to build / already implemented), still return {"status":"completed","summary":"…","no_changes_reason":"why nothing changed"} — never claim done with no changes and no reason.`,
         ].join("\n");
 
     const { session, resultText, isError, raw } = await runClaude(prompt, job.claude_session_id, wt);
@@ -2614,7 +2614,15 @@ async function runJob(job: Job) {
         }
         await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR" });
       } else {
-        await update(job.id, { status: "completed", log_tail: "no file changes; nothing to commit" });
+        // No PR AND no changes → the build made zero edits and there's nothing to merge. Don't let it
+        // masquerade as `completed` with no PR (3 such builds slipped through silently): surface
+        // needs_attention carrying the agent's reason so the card shows a Retry. (fix-report-issue-dropped Phase 3)
+        const noChangeReason =
+          (typeof parsed?.no_changes_reason === "string" && parsed.no_changes_reason.trim()) ||
+          (typeof parsed?.summary === "string" && parsed.summary.trim()) ||
+          "build finished with no file changes — nothing committed and no PR";
+        await update(job.id, { status: "needs_attention", error: noChangeReason, log_tail: logTail });
+        console.error(`${tag} no changes + no PR → needs_attention: ${noChangeReason}`);
       }
       return;
     }

@@ -270,10 +270,13 @@ async function handleHomeBuild(
   if (!result.ok) return notice("Couldn't build", `Couldn't queue \`${slug}\`: ${result.error}`);
 
   await republishHome(workspaceId, token, slackUserId);
-  const msg = result.alreadyActive
-    ? `\`${slug}\` already has an active build (${result.job.status}). One build per spec.`
-    : `🛠️ Queued a build for \`${slug}\`.`;
-  return notice(result.alreadyActive ? "Already building" : "Queued", msg);
+  const msg = result.queuedBehindActive
+    ? `\`${slug}\` already has an active build — queued your scoped fix as build \`${result.job.id.slice(0, 8)}\` to run next (nothing dropped).`
+    : result.alreadyActive
+      ? `\`${slug}\` already has an active build (${result.job.status}). One build per spec.`
+      : `🛠️ Queued a build for \`${slug}\`.`;
+  const title = result.queuedBehindActive ? "Queued behind active" : result.alreadyActive ? "Already building" : "Queued";
+  return notice(title, msg);
 }
 
 /** Re-publish the Home view so a row's status chip reflects a just-queued build/verify immediately. */
