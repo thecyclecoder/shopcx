@@ -34,6 +34,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** a layer above specs — write a huge company goal (a BHAG) and a **planner** agent does gap-analysis against the brain, proposes a milestone → spec tree, and (once you approve the branches) auto-authors the leaf specs + queues their builds. Where `build-spec` turns a spec into a PR, the planner turns a goal into specs — same box-worker substrate ([[roadmap-build-console]], [[../tables/agent_jobs]]), one altitude up. Decomposition is human-gated (propose → approve direction → build → merge). First inhabitant: [[../goals/ceo-mode|CEO mode]], whose first plan pass surfaces the data/integration gaps (Amazon, COGS/supplier, a unified metrics spine) as proposed specs.
 
+## Active project — Iteration Scorecard Upsert Resilience ⏳
+
+**Spec:** [[iteration-scorecard-upsert-resilience]] · **Owner:** [[../functions/cmo]]
+
+**Why this matters:** real regression on [[storefront-iteration-engine]] — `computeScorecards` swallows the `iteration_scorecards_daily` upsert error + returns `rows: records.length` regardless, so a failing batch (one bad record — likely an unresolved `angle_id`/`advertorial_page_id`/`parent_*` FK; upsert is all-or-nothing) persists **0 rows** while reporting 7. The whole ad-iteration decision engine then reads 0 scorecards. Fix: check the error + fail loud + return real count; null unresolved FKs / per-row fallback so one bad row can't drop the batch; backfill once. Probe-confirmed it's not a schema fault.
+
 ## Active project — Base Price Never Above MSRP ⏳
 
 **Spec:** [[base-price-never-above-msrp]] · **Owner:** [[../functions/retention]]

@@ -1,0 +1,20 @@
+# Iteration Scorecard Upsert — Stop Swallowing Errors + FK-Resilient ⏳
+
+**Owner:** [[../functions/cmo]] · **Parent:** CMO mandate — ad-iteration integrity ([[../libraries/meta-scorecards]] / [[../lifecycles/ad-render]]). Found by the spec-test agent as a real regression on [[storefront-iteration-engine]].
+
+**The bug.** `computeScorecards` (`src/lib/meta/scorecards.ts`, ~L477) upserts the per-level rows into `iteration_scorecards_daily` but **never checks the result `{ error }`**, then returns `rows: records.length` regardless. So when the batch fails, the run reports success (`counts.scorecard_rows = 7`) while **0 rows persist**. Measured in prod (2026-06-21): an iteration_run reports `scorecard_rows=7`, yet `select count(*) from iteration_scorecards_daily = 0` across **all** levels despite `meta_attribution_daily` holding 96 rows. **Downstream the whole decision engine reads 0 scorecards** ([[../libraries/meta-iteration-run]] `reconcilePriorActions` + the decision engine all `select … from iteration_scorecards_daily`) → it's flying blind.
+
+**Root cause (probed).** A clean record (real account UUID, null FKs, valid types) upserts fine — so it is **not** a schema/type fault. The real batch fails on a **data-dependent error**, and `.upsert()` is **all-or-nothing per batch**, so one bad record drops all 7. The likely culprit is an **unresolved foreign key** on a record — `angle_id → product_ad_angles`, `advertorial_page_id → advertorial_pages`, or `parent_adset_id`/`parent_campaign_id` — pointing at a row that doesn't exist (a 22P02/FK/`23503` violation), since the only difference between the clean probe and the real rows is those reference columns.
+
+## Fix
+1. **Stop swallowing the error (the core fix).** Capture each batch's `{ error }`; on error **throw** with the PG code+message (so the run fails loudly + the message names the offending constraint), and **return the actually-persisted count**, not `records.length`. A run can never again report scorecards written when 0 landed. This alone converts silent data-loss into a visible, diagnosable failure.
+2. **Make the batch FK-resilient (so one bad row can't drop the rest).** Before upsert, **null any reference column whose target doesn't resolve** — `angle_id`, `advertorial_page_id`, `parent_adset_id`, `parent_campaign_id` (a scorecard row is still valid with a null ref; we never want a dangling FK to nuke the whole rollup). Equivalently/additionally, fall back to **per-row upsert on a batch error** so a single bad record is isolated + logged, not silently dropped with its 6 neighbors. (Resolve the actual FK culprit the surfaced error names, then keep the guard so it can't recur.)
+3. **Backfill once.** After the fix, re-run the rollup for the current account/snapshot so `iteration_scorecards_daily` populates from the existing 96 `meta_attribution_daily` rows → the decision engine + `/dashboard/ad-scorecard` see real data again.
+
+## Verification
+- Run `computeScorecards` for the prod account/snapshot → `iteration_scorecards_daily` row count > 0 (matches the built `rows`), and the returned `rows` equals the **persisted** count (probe-confirmed: a valid record persists).
+- Inject a record with a non-existent `angle_id` → the row's `angle_id` is nulled (or that one row is isolated + logged) and the **other rows still persist**; the run does **not** silently report success with 0 written — on an unrecoverable error it throws with the PG message.
+- `reconcilePriorActions` + the decision engine now read non-zero scorecards for the account; the [[storefront-iteration-engine]] spec-test's "P3 per-level sanity: scorecard rows exist when attribution exists" passes.
+
+## Phase 1 — error check + FK-resilience + backfill ⏳
+The `{ error }` check + throw + real-count return at `scorecards.ts` ~L477; null-unresolved-FK (or per-row fallback) guard; one-time rollup backfill for the live account. Brain: [[../libraries/meta-scorecards]] + [[../libraries/meta-iteration-run]] + [[storefront-iteration-engine]] (status/open-work). Fold on ship.
