@@ -4,7 +4,13 @@ import { marked } from "marked";
 import { getSpec, listSpecSlugs, extractSpecSection, stripSpecSection, type Phase } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
-import { getLatestSpecTestRuns, type SpecTestRun } from "@/lib/spec-test-runs";
+import {
+  getLatestSpecTestRuns,
+  getHumanCheckResolutions,
+  parseVerificationBullets,
+  deriveGreenBullets,
+  type SpecTestRun,
+} from "@/lib/spec-test-runs";
 import StatusControl from "../StatusControl";
 import AuthoringChat from "../AuthoringChat";
 import BuildButton from "../BuildButton";
@@ -36,12 +42,28 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const [spec, specSlugs, workspaceId] = await Promise.all([getSpec(slug), listSpecSlugs(), getActiveWorkspaceId()]);
   if (!spec) notFound();
 
-  const [jobsBySlug, folds, testRuns] = workspaceId
-    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId)])
-    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>];
+  const [jobsBySlug, folds, testRuns, resolutions] = workspaceId
+    ? await Promise.all([
+        getLatestJobsBySlug(workspaceId),
+        getPendingFolds(workspaceId),
+        getLatestSpecTestRuns(workspaceId),
+        getHumanCheckResolutions(workspaceId),
+      ])
+    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, new Map()];
   const job = jobsBySlug[slug] ?? null;
   const fold = folds[slug] ?? null;
   const testRun = testRuns[slug] ?? null;
+
+  // Phase 3 (spec-test-maximize-machine-coverage): live per-bullet green state — green when the agent
+  // passed it OR the owner marked it ✓ Tested. Lets the founder watch the card fill in before the
+  // ✅ writeback's commit + next deploy reflects it on the markdown itself.
+  const greenBullets = deriveGreenBullets(
+    parseVerificationBullets(spec.raw).map((b) => b.text),
+    testRun,
+    resolutions,
+    slug,
+  );
+  const allGreen = greenBullets.length > 0 && greenBullets.every((g) => g.green);
 
   // The "## Verification" test plan (verification-guides) is lifted out of the body and shown as a
   // prominent card beside the verify button; strip it from the article so it isn't rendered twice.
@@ -105,6 +127,8 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
                   slug={slug}
                   html={verificationHtml}
                   run={testRun ? { agent_verdict: testRun.agent_verdict, summary: testRun.summary, checks: testRun.checks, run_at: testRun.run_at } : null}
+                  greenBullets={greenBullets}
+                  allGreen={allGreen}
                 />
               </div>
             </div>

@@ -125,6 +125,94 @@ export function checkKey(text: string): string {
   return createHash("sha1").update(normalized).digest("hex").slice(0, 16);
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * Phase 3 (spec-test-maximize-machine-coverage) — green-check derivation.
+ * A `## Verification` bullet is GREEN when its latest-agent check is `pass` OR the owner marked it
+ * `✓ Tested` (`spec_test_human_checks` resolution='verified'). Derived per bullet by the same `checkKey`
+ * hash the human-queue uses, so it survives re-runs + matches owner resolutions. The green state is
+ * rendered live on the VerificationCard and written back onto the spec markdown as a leading ✅ by
+ * `reflectSpecGreenChecks` (src/lib/spec-green-writeback.ts). See docs/brain/specs/spec-test-maximize-machine-coverage.md.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** The ✅ marker prepended to a green verification bullet in the spec markdown. */
+export const GREEN_CHECK = "✅";
+
+export interface VerificationBullet {
+  /** Bullet content, with the `- ` prefix and any leading ✅ stripped, whitespace-collapsed (keys cleanly). */
+  text: string;
+  /** Index of the bullet's first line (`- …`) in the raw spec markdown's line array (for the writeback edit). */
+  startLine: number;
+  /** Whether that first line already carries a leading ✅ (idempotency — avoid a no-op commit). */
+  hasCheck: boolean;
+}
+
+/**
+ * Parse the top-level `- ` bullets of a spec's `## Verification` section out of its raw markdown.
+ * Continuation lines (indented / nested) fold into the current bullet's text so a multi-line bullet
+ * keys the same as the agent's verbatim `check.text`. Returns [] when there's no Verification section.
+ */
+export function parseVerificationBullets(raw: string): VerificationBullet[] {
+  const lines = String(raw).split("\n");
+  const start = lines.findIndex((l) => /^##\s+Verification\b/i.test(l));
+  if (start === -1) return [];
+  const greenRe = new RegExp(`^${GREEN_CHECK}\\s+`);
+  const bullets: VerificationBullet[] = [];
+  let cur: { startLine: number; parts: string[]; hasCheck: boolean } | null = null;
+  const flush = () => {
+    if (cur) {
+      bullets.push({ text: cur.parts.join(" ").replace(/\s+/g, " ").trim(), startLine: cur.startLine, hasCheck: cur.hasCheck });
+      cur = null;
+    }
+  };
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^##\s/.test(line)) break; // next section
+    const m = /^- (.*)$/.exec(line); // a top-level bullet (no leading whitespace)
+    if (m) {
+      flush();
+      let body = m[1];
+      const hasCheck = greenRe.test(body);
+      if (hasCheck) body = body.replace(greenRe, "");
+      cur = { startLine: i, parts: [body], hasCheck };
+    } else if (cur && line.trim() !== "" && /^\s+\S/.test(line)) {
+      cur.parts.push(line.trim()); // indented continuation of the current bullet
+    } else {
+      flush(); // blank line / non-indented prose ends the bullet
+    }
+  }
+  flush();
+  return bullets;
+}
+
+export interface GreenBullet {
+  text: string;
+  green: boolean;
+  via: "agent" | "owner" | null;
+}
+
+/**
+ * Per-bullet green state: green iff the latest agent run has a `pass` check with the same `checkKey`,
+ * OR the owner resolved it `verified`. `resolutions` is the `${slug}:${check_key}` map from
+ * getHumanCheckResolutions. Pure — drives both the live VerificationCard render and the file writeback.
+ */
+export function deriveGreenBullets(
+  bulletTexts: string[],
+  run: SpecTestRun | null,
+  resolutions: Map<string, HumanCheckRow>,
+  slug: string,
+): GreenBullet[] {
+  const passKeys = new Set<string>();
+  for (const c of run?.checks ?? []) {
+    if (c.verdict === "pass") passKeys.add(checkKey(c.text));
+  }
+  return bulletTexts.map((text) => {
+    const key = checkKey(text);
+    if (passKeys.has(key)) return { text, green: true, via: "agent" };
+    if (resolutions.get(`${slug}:${key}`)?.resolution === "verified") return { text, green: true, via: "owner" };
+    return { text, green: false, via: null };
+  });
+}
+
 export interface HumanCheckRow {
   spec_slug: string;
   check_key: string;

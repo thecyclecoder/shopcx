@@ -15,6 +15,13 @@ export interface SpecTestRunLite {
   run_at: string;
 }
 
+/** Live per-bullet green state (spec-test-maximize-machine-coverage Phase 3) — structural, no server import. */
+export interface GreenBulletLite {
+  text: string;
+  green: boolean;
+  via: "agent" | "owner" | null;
+}
+
 /**
  * The "how to test this" card on a spec detail page (verification-guides), rendered right beside
  * BuildButton's **Mark verified & archive** so the test steps sit where the verify decision happens.
@@ -27,7 +34,19 @@ export interface SpecTestRunLite {
  *  - `run` (spec-test-agent): the box QA agent's latest run — render the Agent-tested stamp + per-bullet
  *    verdicts + a distinct "Needs human testing" list, so the owner does only those, then verifies.
  */
-export default function VerificationCard({ slug, html, run }: { slug: string; html: string | null; run?: SpecTestRunLite | null }) {
+export default function VerificationCard({
+  slug,
+  html,
+  run,
+  greenBullets,
+  allGreen,
+}: {
+  slug: string;
+  html: string | null;
+  run?: SpecTestRunLite | null;
+  greenBullets?: GreenBulletLite[];
+  allGreen?: boolean;
+}) {
   const workspace = useWorkspace();
   const router = useRouter();
   const [generating, setGenerating] = useState(false);
@@ -96,9 +115,46 @@ export default function VerificationCard({ slug, html, run }: { slug: string; ht
     </div>
   ) : null;
 
+  // Phase 3 (spec-test-maximize-machine-coverage): live green state of each verification bullet — green
+  // when the agent passed it OR the owner marked it ✓ Tested. The founder watches it fill in here; the
+  // same state is written back onto the spec markdown (leading ✅) + committed to main by the box.
+  const bullets = greenBullets ?? [];
+  const greenCount = bullets.filter((b) => b.green).length;
+  const greenBlock =
+    bullets.length > 0 ? (
+      <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 dark:border-emerald-900/40 dark:bg-emerald-950/20">
+        <div className="mb-1.5 flex items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">
+            Verification progress — {greenCount}/{bullets.length} green
+          </span>
+        </div>
+        {allGreen ? (
+          <div className="mb-2 rounded-md border border-emerald-300 bg-emerald-100/70 px-2 py-1.5 text-[11px] font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">
+            ✅ All checks green — ready to archive. Mark verified &amp; archive with confidence.
+          </div>
+        ) : null}
+        <ul className="space-y-1">
+          {bullets.map((b, i) => (
+            <li key={i} className="flex items-start gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+              <span className="mt-px shrink-0" aria-hidden>
+                {b.green ? "✅" : "◻️"}
+              </span>
+              <span className={b.green ? "text-emerald-700 dark:text-emerald-400" : undefined}>
+                {b.text}
+                {b.green && b.via ? (
+                  <span className="ml-1 text-[10px] text-zinc-400">({b.via === "owner" ? "you tested" : "agent"})</span>
+                ) : null}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ) : null;
+
   if (html) {
     return (
       <div>
+        {greenBlock}
         <div className="rounded-lg border border-teal-200 bg-teal-50/60 p-3 dark:border-teal-900/40 dark:bg-teal-950/20">
           <div className="mb-1.5 text-xs font-semibold text-teal-800 dark:text-teal-300">✅ How to verify in prod</div>
           <div
@@ -113,6 +169,7 @@ export default function VerificationCard({ slug, html, run }: { slug: string; ht
 
   return (
     <div>
+      {greenBlock}
       <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50/60 p-3 text-center dark:border-zinc-700 dark:bg-zinc-900">
         <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">No test plan yet</div>
         {isOwner &&
