@@ -1,0 +1,52 @@
+# Spec-test: maximize machine coverage + green-check the spec file ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform" (box-agent family). Extends [[spec-test-agent]] + [[spec-test-classification]]. Found 2026-06-21 (founder, Developer Message Center): the spec-test agent is parking far too many checks as "needs human" — checks a Claude session could run — forcing the owner to manually QA things a machine can verify.
+
+The founder's mandate, verbatim intent: *"If a machine can test it I want the machine to do it."* Human testing should be reserved for genuine visual/aesthetic judgment ("does the landing page look good," "is the chat window big enough") — not migration-presence probes, DB-state assertions, or fault-injection on pure functions.
+
+## The evidence (read-only probe, 2026-06-21)
+Latest run per shipped-unverified spec: **144 `needs_human` checks** vs **79 `auto_pass`** (4 `fail`, 1 `inconclusive`) across **33 specs**; 32 of 33 specs carry ≥1 human check. Many are plainly machine-testable and mis-routed:
+- `spec-test-agent` — *"apply scripts/apply-spec-test-runs-migration.ts → expect `spec_test_runs table present: true`"* → a one-line read-only `information_schema` / probe-db SELECT, yet `needs_human`.
+- `storefront-iteration-engine` (15 human checks) — *"meta_attribution_daily rows after a run; variant/spend conservation"*, *"insert two status='active' global rows ⇒ second fails partial unique index"*, every *"apply each migration → confirm ✓ applied"* → all read-only probes or local constraint checks.
+- `storefront-coupon-visibility-and-sms` — *"order context line reads '… | coupons: WELCOME-XXXXX (-$11.99) | …'"* → a read-only probe of an existing prod order's orchestrator context, not a human eyeball.
+- Fault-injection bullets (*"force unparseable output → expect `error` state"*, *"feed a malformed payload → 400"*) → exercisable in a **non-destructive local harness** (import the pure parser, feed crafted input), never touching prod.
+
+## Root cause
+The classifier ([[spec-test-classification]] + the `spec-test` skill Step 1 + the `runSpecTestJob` prompt) over-defers on three axes:
+1. **Action vs. outcome conflation.** A bullet shaped *"do X (mutation) → expect Y (observable)"* is routed to `needs_human` because X mutates — even when **Y is already observable in prod from real traffic** and can be probed read-only. The agent should verify the *outcome*, not refuse because the *action* is mutating.
+2. **No local-harness execution mode.** Fault-injection / forced-failure is auto-classified human-only because the agent is read-only **against prod**. But authoring a throwaway local script that imports a pure function / parser / classifier and feeds it crafted (incl. malformed) input is **non-destructive and machine-doable** — it never touches prod. This mode doesn't exist in the skill, so the whole fault-injection bucket defers.
+3. **"When in doubt → needs_human."** The current tie-breaker biases toward deferral. It should bias toward *attempting a non-destructive verification first* (read-only outcome probe → local harness) and deferring **only** when neither is possible.
+
+## Non-goals / invariants kept
+- **The owner's Verify gate and read-only-against-PROD discipline are untouched.** The agent still never writes prod, never sends a message/charge/order, never flips a spec to verified. "Maximize machine coverage" means *more non-destructive verification*, NOT relaxing the prod-write ban.
+- The `fail` = positive-breakage-evidence rule from [[spec-test-classification]] stays. Local-harness checks that observe breakage are legitimate `fail`s; ones that pass are `pass`.
+- Truly-visual and truly-irreversible-with-no-observable-trace checks remain `needs_human` — the founder still wants those (landing page aesthetics, chat-window sizing, "this SMS actually left Twilio and hit a carrier").
+
+## Phase 1 — reclassification policy + local-harness execution mode ⏳
+Rewrite the `spec-test` skill (`.claude/skills/spec-test/SKILL.md` Step 1+2) and the inline classification prompt in `scripts/builder-worker.ts` → `runSpecTestJob`:
+- **New execution mode — non-destructive local harness/replay (`auto`).** The agent MAY author a throwaway local script (scratch, never committed; same `_`-prefix discipline as [[../recipes/dev-message-center-db]]) that imports a pure function / parser / classifier / validator from `src/` and exercises it — including **fault injection** (malformed payload, forced parse error) — entirely locally. No prod write, no network side-effect → it's `auto`. Record the harness output as evidence. This converts the fault-injection bucket from `needs_human` to `auto` *whenever the logic under test is reachable as a pure/local unit*.
+- **Outcome-not-action framing.** For a *"do X → expect observable Y"* bullet, the agent first asks: *is Y already observable read-only?* (a prod row in the expected state from real traffic, a column populated, a context string rendered). If yes → probe it read-only and `pass`/`fail` on the evidence; do NOT defer because X is a mutation. Only when the observable **requires the agent itself to perform an irreversible prod mutation** (and no real-traffic instance exists) → `needs_human`.
+- **Tighten `needs_human` to two cases only:** (a) genuine **visual/aesthetic** judgment (looks good / big enough / renders nicely — anything where the pass condition is human taste), and (b) an **irreversible prod side-effect with no already-observable evidence AND no local-harness equivalent** (e.g. a real SMS/email/charge actually reaching an external carrier/processor). Everything else attempts a non-destructive verification.
+- **Replace the tie-breaker.** *"When in doubt → needs_human"* → *"When in doubt, attempt a read-only outcome probe, then a non-destructive local harness; defer to needs_human ONLY if both are impossible."*
+- Update [[spec-test-classification]] and [[spec-test-agent]] brain pages to document the new third mode + the narrowed `needs_human` definition.
+
+## Phase 2 — backlog re-sweep under the new rules ⏳
+One-time: enqueue a fresh `spec-test` run for **every shipped-but-not-archived spec** (the same `enqueueSpecTestIfDue` path / `spec-test-cron` catch-all, bypassing the ~20h freshness guard for this sweep) so all 33 specs reclassify under Phase 1. Expectation to assert: total `needs_human` across latest runs drops sharply (target: the large majority of today's 144 reclassify to `auto`/`pass`), and the residual `needs_human` set is dominated by genuinely-visual/irreversible bullets. Log the before/after counts.
+
+## Phase 3 — green ✅ reflected onto the spec file ⏳
+Today a green check lives only in DB (`spec_test_runs.checks[].verdict='pass'` for agent passes; `spec_test_human_checks` for owner-marked-tested) — the spec markdown never changes, so the founder never sees the file turn green before archive.
+- A **bullet is green** when its check is `pass` (agent) OR the owner marked it `✓ Tested` (`spec_test_human_checks` resolution='verified'). Compute this per `## Verification` bullet (keyed by the existing `checkKey` hash so it survives re-runs).
+- **Reflect it on the spec file's verification bullets.** When the owner marks a check tested (and when an agent run lands passes), annotate the corresponding `- ` bullet in `docs/brain/specs/{slug}.md` with a leading ✅ (a writer that the box commits to main — a content writeback, gated like other box commits). The VerificationCard (`src/app/dashboard/roadmap/VerificationCard.tsx`) renders each bullet's green state live so the founder watches it fill in.
+- **All-green → archive-ready.** When every verification bullet is green, surface an "all checks green — ready to archive" state on the VerificationCard / the spec card, so "Mark verified & archive" is a confident one-click and the folded/archived spec reads fully green. (Design choice for the build: live-annotate vs. annotate-on-archive — but the founder MUST see green accumulate on the spec as he tests, not only after archive.)
+
+## Verification
+- In `.claude/skills/spec-test/SKILL.md` Step 1, `grep -n "local harness\|outcome" SKILL.md` → the new non-destructive-local-harness `auto` mode + the outcome-not-action framing present; the `needs_human` definition is narrowed to visual/aesthetic + irreversible-no-observable only; the old "when in doubt → needs_human" tie-breaker is replaced. Same rule inline in `scripts/builder-worker.ts` `runSpecTestJob`.
+- Re-run spec-test on `spec-test-agent` itself → its *"apply migration → table present"* bullet now records `pass` (category `auto`, evidence = the read-only table-presence probe), NOT `needs_human`.
+- Re-run on a spec with a fault-injection bullet over a pure function (e.g. [[spec-test-json-robustness]] *"force unparseable output → error state"*) → now `pass`/`fail` via a local harness with the harness output as evidence, NOT `needs_human` (unless the logic genuinely isn't reachable locally, then it stays deferred with that reason).
+- After the Phase 2 sweep, query latest-run summaries → total `needs_human` dropped substantially from 144; the residual set is dominated by visual/irreversible bullets (spot-check a sample). No spec gained a phantom `fail` (the breakage-evidence rule held).
+- Owner clicks `✓ Tested` on a human check → its bullet shows ✅ on the VerificationCard AND the ✅ lands on the bullet in `docs/brain/specs/{slug}.md` (committed to main). Re-open → the ✅ clears.
+- A spec whose every verification bullet is green → the VerificationCard shows the "all green — ready to archive" state; after "Mark verified & archive" the folded record reads fully green.
+- Negative / invariant: a run still never writes prod, never sends a message/charge/order, never flips a spec to verified; the local harness only ever imports + exercises code locally (no prod network write); the spec-file ✅ writeback only annotates verification bullets (never edits spec logic) and only on a green check or owner action.
+
+## Brain updates (same PR)
+[[spec-test-agent]] (new local-harness execution mode + narrowed needs_human + the spec-file green-check writeback) · [[spec-test-classification]] (outcome-not-action framing + the new tie-breaker) · the `spec-test` skill page · [[../tables/spec_test_runs]] + [[../tables/spec_test_human_checks]] (green-state derivation) · [[../dashboard/spec-tests]] / [[../dashboard/roadmap]] (VerificationCard green reflection + all-green archive-ready state). Fold on ship.
