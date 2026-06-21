@@ -1,4 +1,4 @@
-# pricing_preserved must account for internal quantity breaks (Appstle baseline lacks them) ⏳
+# pricing_preserved must account for internal quantity breaks (Appstle baseline lacks them) ✅
 
 **Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" · **Derived-from-migration:** `9505e4a3-9819-44ea-ac71-b51288edc494`
 
@@ -10,9 +10,12 @@ Audit 9505e4a3 (sub 7390b640): 2× Superfood Tabs, both base $79.95 = MSRP, not 
 **Likely target:** `src/lib/migration-audit.ts (pricing_preserved check in runChecks; baseline capture in src/lib/migrate-to-internal.ts preCharge)`
 
 ## Phases
-- ⏳ **P1 — close the gap** — scope from the problem above; land the code/data fix + its brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — close the gap** — `pricing_preserved` in `src/lib/migration-audit.ts` now compares the engine's **break-removed** subtotal (Σ `round(base_cents × (1 − sns_pct))` over `kind === 'product'` lines, on the engine's own bases) against `pre_migration_charge_cents`, instead of the charged subtotal. The tolerated shortfall equals the catalog quantity break the rule grants for the line's mix-and-match qty — it does NOT blanket-accept `engine < pre` (a wrong/too-high base → break-removed subtotal > `pre` → still fails as "charged MORE"; underpricing not explained by the break → break-removed subtotal < `pre` → still fails). Subs with no break are unchanged (break-removed = charged). No schema/migration; baseline capture in [[../libraries/migrate-to-internal]] is untouched (Option B from the problem). Brain page [[../libraries/migration-audit]] check 6 updated. `npx tsc --noEmit` clean.
 
 ## Verification
-- Re-run `verifyMigration` on a migration that hit this gap → expect it to auto-heal/pass without a hand fix, and confirm the class of failure no longer recurs.
+- On a migrated multi-unit sub on a rule WITH a quantity break (the seed case: audit `9505e4a3-9819-44ea-ac71-b51288edc494`, sub `7390b640-e64b-4a33-9751-9dc4cfc24bb1`, 2× Superfood Tabs, base = MSRP $79.95, rule `ed8ae5b4` 8% buy-2), re-run `verifyMigration(auditId)` → expect `pricing_preserved` **ok**, detail reading `engine 11034¢ (+958¢ qty-break = 11992¢ pre-break) vs pre 11992¢`, and the row to flip `passed` (assuming other checks pass) without any hand fix.
+- On any single-unit / no-break migrated sub, re-run `verifyMigration` → expect `pricing_preserved` unchanged from prior behavior (break-removed subtotal equals the charged subtotal, so the comparison is identical to before).
+- Negative guard — on a sub whose migrated base is genuinely wrong (e.g. an erroneous override pricing it below S&S-on-catalog with no break to explain it), `verifyMigration` → expect `pricing_preserved` to STILL fail (break-removed subtotal ≠ `pre`), confirming the fix didn't mask real underpricing.
+- Negative guard — on a sub the engine would charge MORE than the Appstle baseline (base above MSRP), `verifyMigration` → expect `pricing_preserved` to STILL fail (break-removed subtotal > `pre` beyond tolerance).
 
 > Authored by the box migration-fix routine from failed migration `9505e4a3-9819-44ea-ac71-b51288edc494`. Commission the build from the Roadmap board (owner = retention).
