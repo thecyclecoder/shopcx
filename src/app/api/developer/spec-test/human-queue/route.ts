@@ -21,6 +21,7 @@ import {
   checkKey,
   isHumanResolution,
 } from "@/lib/spec-test-runs";
+import { reflectSpecGreenChecks } from "@/lib/spec-green-writeback";
 
 export const dynamic = "force-dynamic";
 
@@ -71,7 +72,9 @@ export async function POST(request: Request) {
   if (body.clear) {
     const { error } = await clearHumanCheckResolution(workspaceId, slug, key);
     if (error) return NextResponse.json({ error }, { status: 500 });
-    return NextResponse.json({ ok: true, cleared: true });
+    // Re-open → strip the ✅ from this bullet on the spec markdown (best-effort, never blocks the click).
+    const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
+    return NextResponse.json({ ok: true, cleared: true, allGreen: green?.allGreen ?? false });
   }
 
   // Integrity: the key must be the hash of the supplied bullet text (no writing arbitrary keys).
@@ -92,5 +95,8 @@ export async function POST(request: Request) {
     userId: user.id,
   });
   if (error) return NextResponse.json({ error }, { status: 500 });
-  return NextResponse.json({ ok: true, resolution });
+  // Owner marked ✓ Tested (or another resolution) → reflect green state onto the spec markdown: a
+  // `verified` resolution lands a leading ✅ on the bullet (committed to main); any other clears it.
+  const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
+  return NextResponse.json({ ok: true, resolution, allGreen: green?.allGreen ?? false });
 }
