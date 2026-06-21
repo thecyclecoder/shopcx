@@ -49,6 +49,8 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
   const [showIssue, setShowIssue] = useState(false);
   const [issueText, setIssueText] = useState("");
   const [reporting, setReporting] = useState(false);
+  // Enqueue confirmation / failure banner — a dropped Report-Issue submit must never look successful.
+  const [notice, setNotice] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [confirmVerify, setConfirmVerify] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -175,19 +177,27 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
   async function reportIssue() {
     if (reporting || !issueText.trim()) return;
     setReporting(true);
+    setNotice(null);
     try {
       const res = await fetch("/api/roadmap/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ slug, instructions: `Fix this reported issue — do ONLY this, do not rebuild the whole spec:\n\n${issueText.trim()}` }),
       });
-      const d = await res.json();
-      if (d.job) {
+      const d = await res.json().catch(() => ({}));
+      // Only treat it as queued when the server actually returns the created job. A non-2xx response,
+      // a network drop, or a missing job id all mean nothing enqueued — surface that, never a false "done".
+      if (res.ok && d.job?.id) {
         setJob(d.job);
         setShowIssue(false);
         setIssueText("");
+        setNotice({ kind: "ok", text: `Issue queued as build ${d.job.id.slice(0, 8)}` });
         router.refresh();
+      } else {
+        setNotice({ kind: "err", text: d.error ? `Couldn't queue: ${d.error}` : "Couldn't queue the issue — nothing was submitted. Try again." });
       }
+    } catch {
+      setNotice({ kind: "err", text: "Couldn't reach the server — the issue was not queued. Try again." });
     } finally {
       setReporting(false);
     }
@@ -285,7 +295,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
         <div className="mt-2 flex gap-2">
           <button
             type="button"
-            onClick={() => setShowIssue((v) => !v)}
+            onClick={() => { setShowIssue((v) => !v); setNotice(null); }}
             className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-[12px] font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300"
           >
             {showIssue ? "Cancel" : "Report issue"}
@@ -382,6 +392,18 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
           >
             {reporting ? "Queuing…" : "Queue fix"}
           </button>
+        </div>
+      )}
+      {notice && (
+        <div
+          className={`mt-2 rounded-md px-2 py-1.5 text-[11px] font-medium ${
+            notice.kind === "ok"
+              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400"
+              : "bg-rose-50 text-rose-700 dark:bg-rose-950/30 dark:text-rose-400"
+          }`}
+        >
+          {notice.kind === "ok" ? "✓ " : "⚠ "}
+          {notice.text}
         </div>
       )}
     </div>

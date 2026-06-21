@@ -247,7 +247,7 @@ async function runSeedClaude(prompt: string, sessionId: string | null, cwd: stri
   return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
 }
 
-function parseStatus(text: string): { status: string; questions?: unknown[]; summary?: string } | null {
+function parseStatus(text: string): { status: string; questions?: unknown[]; summary?: string; no_changes_reason?: string } | null {
   const tryParse = (s: string) => {
     try {
       const o = JSON.parse(s);
@@ -2495,7 +2495,8 @@ async function runJob(job: Job) {
           `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
-          `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
+          `If you finish having made NO file edits (the spec was already satisfied, or there is nothing to do), you MUST return completed WITH a "no_changes_reason" explaining why nothing changed — a no-change build never silently looks shipped.`,
+          `Final message = ONLY one JSON object: {"status":"completed","summary":"…","no_changes_reason":"…only when you made no edits…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}.`,
         ].join("\n");
 
     const { session, resultText, isError, raw } = await runClaude(prompt, job.claude_session_id, wt);
@@ -2599,6 +2600,25 @@ async function runJob(job: Job) {
 
     const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
     if (!dirty) {
+      // Distinguish a real build that committed during a pause from a genuine no-op. A build that
+      // committed everything during a needs_approval/needs_input pause has commits ahead of main
+      // (un-draft its existing PR → real completed). A build with ZERO commits and a clean tree
+      // produced nothing — never silently mark that `completed` with no PR (it reads as a phantom
+      // 'done' on the board); surface it for a human with the agent's stated reason (Phase 1).
+      const commitsAhead = sh("git", ["rev-list", "--count", "origin/main..HEAD"], { cwd: wt }).out.trim();
+      if (commitsAhead === "" || commitsAhead === "0") {
+        const reason =
+          (typeof parsed?.no_changes_reason === "string" && parsed.no_changes_reason.trim()) ||
+          (typeof parsed?.summary === "string" && parsed.summary.trim()) ||
+          "build reported completed but produced no file changes — no reason given";
+        await update(job.id, {
+          status: "needs_attention",
+          error: `Build made no changes — ${reason}`,
+          log_tail: logTail,
+        });
+        console.log(`${tag} no-op build (0 commits, clean tree) → needs_attention: ${reason}`);
+        return;
+      }
       // No NEW changes — typically because the build committed everything during a needs_approval/needs_input
       // pause and the resume only had the worker apply a migration. A draft PR already exists from that pause,
       // so we must STILL ensure it's ready-for-review + linked, or the job completes stuck as a draft (PR#80).
@@ -2614,7 +2634,8 @@ async function runJob(job: Job) {
         }
         await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR" });
       } else {
-        await update(job.id, { status: "completed", log_tail: "no file changes; nothing to commit" });
+        // Commits exist but PR creation failed — a human must look, don't paper over it as completed.
+        await update(job.id, { status: "needs_attention", error: "branch has commits but PR creation failed", log_tail: logTail });
       }
       return;
     }

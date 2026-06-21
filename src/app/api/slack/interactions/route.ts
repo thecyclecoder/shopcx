@@ -272,7 +272,7 @@ async function handleHomeBuild(
   await republishHome(workspaceId, token, slackUserId);
   const msg = result.alreadyActive
     ? `\`${slug}\` already has an active build (${result.job.status}). One build per spec.`
-    : `🛠️ Queued a build for \`${slug}\`.`;
+    : `🛠️ Queued build \`${result.job.id.slice(0, 8)}\` for \`${slug}\`.`;
   return notice(result.alreadyActive ? "Already building" : "Queued", msg);
 }
 

@@ -31,7 +31,7 @@ The build queue for the [[../specs/roadmap-build-console]] "do it" button. One r
 
 ## `status` enum
 
-`queued` → `building` (claimed) → `completed` (PR open) · or pauses at → `needs_input` (product questions) / `needs_approval` (gated prod actions in `pending_actions`) → `queued_resume` (owner answered/approved; worker executes approved actions then `--resume`s) → `building` … · terminal failures: `failed`, `needs_attention` (pushed but PR failed). Active = `queued|claimed|building|needs_input|needs_approval|queued_resume` (one active build per spec).
+`queued` → `building` (claimed) → `completed` (PR open) · or pauses at → `needs_input` (product questions) / `needs_approval` (gated prod actions in `pending_actions`) → `queued_resume` (owner answered/approved; worker executes approved actions then `--resume`s) → `building` … · terminal failures: `failed`, `needs_attention`. `needs_attention` covers: branch pushed but PR creation failed; the auto-settle loop guard; **and a no-op build** — a build that returned `completed` but produced **zero commits ahead of `origin/main` on a clean tree** is flipped to `needs_attention` with `error = "Build made no changes — <reason>"` (the agent's `no_changes_reason`/`summary`) rather than a silent PR-less `completed` ([[../specs/build-no-op-visibility]]). Active = `queued|claimed|building|needs_input|needs_approval|queued_resume` (one active build per spec).
 
 ## `claim_agent_job(p_kinds text[] default null)`
 

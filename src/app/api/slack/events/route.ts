@@ -120,5 +120,6 @@ async function handleBuild(workspaceId: string, slackUserId: string, text: strin
   if (result.alreadyActive) {
     return ephemeral(`\`${slug}\` already has an active build (${result.job.status}). One build per spec — let it finish first.`);
   }
-  return ephemeral(isBug ? `🐛 Queued a fix-build for \`${slug}\`. I'll post here when it needs you.` : `🛠️ Queued a build for \`${slug}\`. I'll post here when it needs you.`);
+  const buildId = result.job.id.slice(0, 8);
+  return ephemeral(isBug ? `🐛 Issue queued as build \`${buildId}\` for \`${slug}\`. I'll post here when it needs you.` : `🛠️ Queued build \`${buildId}\` for \`${slug}\`. I'll post here when it needs you.`);
 }
