@@ -58,7 +58,7 @@ export async function queueRoadmapBuild(
   workspaceId: string,
   userId: string,
   opts: { slug: string; instructions?: string | null; verify?: boolean },
-): Promise<ActionResult<{ job: AgentJob; alreadyActive?: boolean; fold?: boolean }>> {
+): Promise<ActionResult<{ job: AgentJob; alreadyActive?: boolean; queuedBehindActive?: boolean; fold?: boolean }>> {
   const gate = await assertOwner(workspaceId, userId);
   if (!gate.ok) return gate;
 
@@ -83,7 +83,7 @@ export async function queueRoadmapBuild(
 
   const instructions = typeof opts.instructions === "string" && opts.instructions.trim() ? opts.instructions : null;
 
-  // One active build per spec.
+  // One active build per spec — but only for a plain Build tap (no new instructions).
   const { data: existing } = await admin
     .from("agent_jobs")
     .select("*")
@@ -93,7 +93,21 @@ export async function queueRoadmapBuild(
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (existing) return { ok: true, job: existing as AgentJob, alreadyActive: true };
+  if (existing) {
+    // A plain Build tap (no instructions) coalesces into the live build — re-building the whole spec
+    // while it's already building is pointless. But a Report Issue / scoped fix carries NEW, distinct
+    // instructions that must NEVER be silently dropped (the bug this fixes): enqueue a distinct follow-up
+    // `build` row that the box runs after the active build (it serializes per-spec). See
+    // docs/brain/specs/fix-report-issue-dropped.md.
+    if (!instructions) return { ok: true, job: existing as AgentJob, alreadyActive: true };
+    const { data: followUp, error: followErr } = await admin
+      .from("agent_jobs")
+      .insert({ workspace_id: workspaceId, spec_slug: slug, status: "queued", instructions, created_by: userId })
+      .select("*")
+      .single();
+    if (followErr) return { ok: false, status: 500, error: followErr.message };
+    return { ok: true, job: followUp as AgentJob, queuedBehindActive: true };
+  }
 
   const { data: job, error } = await admin
     .from("agent_jobs")

@@ -117,6 +117,9 @@ async function handleBuild(workspaceId: string, slackUserId: string, text: strin
   const instructions = isBug ? `Fix-build (bug reported via Slack): ${detail}` : detail || null;
   const result = await queueRoadmapBuild(workspaceId, actor!.userId, { slug, instructions });
   if (!result.ok) return ephemeral(`Couldn't queue \`${slug}\`: ${result.error}`);
+  if (result.queuedBehindActive) {
+    return ephemeral(`🐛 \`${slug}\` already has an active build — queued your fix as build \`${result.job.id.slice(0, 8)}\` to run next (nothing dropped).`);
+  }
   if (result.alreadyActive) {
     return ephemeral(`\`${slug}\` already has an active build (${result.job.status}). One build per spec — let it finish first.`);
   }

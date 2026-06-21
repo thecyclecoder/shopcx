@@ -13,7 +13,7 @@ The dashboard routes (`/api/roadmap/{build,answer,approve}`, `/api/branches/[num
 Every function returns `ActionResult<T>` = `({ ok: true } & T) | { ok: false; status: number; error: string }` so a route maps it straight to `NextResponse` and a Slack handler maps it to an ephemeral.
 
 ### `queueRoadmapBuild(workspaceId, userId, { slug, instructions?, verify? })`
-Owner-gated build dispatch. `verify:true` → `enqueue_fold` (coalesced batch fold-build). Otherwise enforces **one active build per spec** (returns `{ job, alreadyActive:true }` if one is live) then inserts a `queued` [[../tables/agent_jobs]] row. `instructions` scopes a fix-build (used by Slack `/bug`).
+Owner-gated build dispatch. `verify:true` → `enqueue_fold` (coalesced batch fold-build). Otherwise, when a build is already live for the spec the behaviour **branches on `instructions`**: a plain Build tap (no instructions) coalesces → `{ job, alreadyActive:true }` (re-building the whole spec mid-build is pointless); a **Report Issue / scoped fix** (with `instructions`) inserts a **distinct** follow-up `queued` row → `{ job, queuedBehindActive:true }` so the new instructions are **never dropped** (the box serializes per-spec, running it after the active build). With no live build, inserts a fresh `queued` [[../tables/agent_jobs]] row. `instructions` scopes a fix-build (Slack `/bug`, dashboard Report Issue, per-phase build). See [[../specs/fix-report-issue-dropped]].
 
 ### `answerRoadmapBuild(workspaceId, userId, { jobId, answers })`
 Writes `answers` + flips a `needs_input` job to `queued_resume`. 409 if the job isn't awaiting input.

@@ -45,6 +45,16 @@ export default function MessageCenterChat() {
   const [recent, setRecent] = useState<Thread[]>([]);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow the composer with its content (within max-h-64), so a long Report Issue / question isn't
+  // cramped into a 2-row box. Resets back to the min height when the input is cleared after a send.
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [input]);
 
   const isOwner = workspace.role === "owner";
 
@@ -299,12 +309,13 @@ export default function MessageCenterChat() {
       <div className="mt-3">
         <div className="flex gap-2">
           <textarea
-            rows={2}
+            ref={composerRef}
+            rows={5}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }}
             placeholder="Ask the box… (⌘/Ctrl+Enter to send)"
-            className="flex-1 resize-none rounded-md border border-zinc-200 px-2 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+            className="min-h-28 max-h-64 flex-1 resize-none overflow-auto rounded-md border border-zinc-200 px-2 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-950"
           />
           <button
             onClick={send}

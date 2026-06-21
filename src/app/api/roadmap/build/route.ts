@@ -47,5 +47,5 @@ export async function POST(request: Request) {
     verify: body.verify === true,
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  return NextResponse.json({ job: result.job, alreadyActive: result.alreadyActive, fold: result.fold });
+  return NextResponse.json({ job: result.job, alreadyActive: result.alreadyActive, queuedBehindActive: result.queuedBehindActive, fold: result.fold });
 }
