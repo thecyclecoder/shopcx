@@ -29,7 +29,11 @@ async function syncMetaInsightsForLevel(p: SyncParams, level: "campaign"|"adset"
 ```ts
 async function syncMetaInsights(p: SyncParams, startDate: string, endDate: string): Promise<{ campaign: number; adset: number; ad: number }>
 ```
-All three levels for the window.
+All three levels for the window. The window is **sliced into ≤14-day sub-windows
+(newest-first)** and each `(sub-window × level)` is pulled + upserted independently
+— so the first-run 90-day backfill never issues one heavy synchronous request
+(which trips Meta's transient code 2 "Service temporarily unavailable"), and
+partial progress is durable.
 
 ### `reconcileInsightsVsSpend` — function
 
@@ -56,6 +60,11 @@ Full per-account ingest: structure → insights → reconcile. Backfills 90 days
 - Token via `getMetaUserToken(workspaceId)` in [[meta-ads]] (decrypt + workspace fallback).
 - Budgets from Meta are already minor units (no ×100); spend/cpc/revenue are dollars (×100).
 - `roas` is derived (`revenue/spend`), not Meta's `purchase_roas`.
+- `graphGet` routes through [[meta__graph-retry]] `graphFetchJson` — transient Meta
+  errors (code 1/2, `is_transient`, 429, 5xx) retry with bounded backoff; fatal
+  errors (token/permission/validation) still fail fast. Combined with the chunked
+  backfill, `ingestMetaPerformance` self-heals to the incremental path once any
+  `meta_insights_daily` row lands (`backfilled = !count`).
 
 ---
 

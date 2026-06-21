@@ -28,6 +28,14 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 
 [[../inngest/ad-tool]] `adToolPublishToMeta`; the API routes `/api/ads/meta` + `/api/ads/campaigns/[id]/{meta-copy,publish}`; [[meta__execution]] (`updateObjectStatus`/`updateObjectBudget`, Iteration Engine 6a).
 
+## Gotchas
+
+- `metaGet`/`metaPost` route through [[meta__graph-retry]] `graphFetchJson` —
+  transient Meta errors (code 1/2, `is_transient`, 429, 5xx) retry with bounded
+  backoff; fatal errors (token/permission/validation) fail fast with
+  `error_user_title`/`msg` detail. The multipart `adimages` upload uses a raw
+  `fetch` (FormData body) and is NOT wrapped.
+
 ## Related
 
-[[../lifecycles/ad-publish]] · [[../integrations/meta-marketing]] · [[../tables/ad_publish_jobs]] · [[crypto]]
+[[../lifecycles/ad-publish]] · [[../integrations/meta-marketing]] · [[../tables/ad_publish_jobs]] · [[crypto]] · [[meta__graph-retry]]
