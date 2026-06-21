@@ -22,6 +22,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendCsatEmail } from "@/lib/email";
+import { SKIP_TAGS } from "@/lib/ticket-tags";
 import { createHmac } from "crypto";
 
 const CSAT_DELAY_HOURS = 48;
@@ -73,7 +74,7 @@ export const ticketCsatCron = inngest.createFunction(
     const due = await step.run("find-due", async () => {
       const { data } = await admin
         .from("tickets")
-        .select("id, workspace_id, customer_id, subject")
+        .select("id, workspace_id, customer_id, subject, do_not_reply, tags")
         .eq("status", "closed")
         .is("csat_sent_at", null)
         .not("customer_id", "is", null)
@@ -85,11 +86,44 @@ export const ticketCsatCron = inngest.createFunction(
       return data || [];
     });
 
-    if (!due.length) return { sent: 0, skipped_too_old: skippedCount };
+    if (!due.length) return { sent: 0, skipped_too_old: skippedCount, skipped_no_reply: 0 };
 
     let sent = 0;
+    let skippedNoReply = 0;
     for (const t of due) {
-      await step.run(`send-${t.id}`, async () => {
+      const result = await step.run(`send-${t.id}`, async () => {
+        // ── Eligibility guard ──
+        // Only survey tickets we actually engaged. Skip — and stamp
+        // csat_sent_at so the ticket leaves the scan window (mirrors the
+        // too-old skip path) — when ANY of:
+        //   1. We never sent the customer a customer-facing outbound
+        //      message (no outbound row with non-internal visibility).
+        //      The principled, universal signal: nothing to rate.
+        //   2. do_not_reply — the AI intentionally didn't reply (wrong
+        //      company / spam); same flag the analyzer skips on.
+        //   3. Tags overlap SKIP_TAGS (outreach / auto-reply / spam) —
+        //      cheap early filter, shared with the analyzer.
+        const tags = (t.tags as string[] | null) || [];
+        let ineligible = t.do_not_reply === true || tags.some(tag => SKIP_TAGS.has(tag));
+
+        if (!ineligible) {
+          const { count } = await admin
+            .from("ticket_messages")
+            .select("id", { count: "exact", head: true })
+            .eq("ticket_id", t.id)
+            .eq("direction", "outbound")
+            .neq("visibility", "internal");
+          ineligible = (count ?? 0) === 0;
+        }
+
+        if (ineligible) {
+          // Stamp so it leaves the scan window; send nothing.
+          await admin.from("tickets")
+            .update({ csat_sent_at: new Date().toISOString() })
+            .eq("id", t.id);
+          return "skipped_no_reply" as const;
+        }
+
         // Stamp first so a partial-failure doesn't re-fire next tick.
         await admin.from("tickets")
           .update({ csat_sent_at: new Date().toISOString() })
@@ -99,7 +133,7 @@ export const ticketCsatCron = inngest.createFunction(
           admin.from("customers").select("email").eq("id", t.customer_id!).single(),
           admin.from("workspaces").select("name").eq("id", t.workspace_id).single(),
         ]);
-        if (!customer?.email) return;
+        if (!customer?.email) return "no_email" as const;
 
         const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
         const token = generateCsatToken(t.id);
@@ -112,10 +146,12 @@ export const ticketCsatCron = inngest.createFunction(
           csatUrl,
           workspaceName: workspace?.name || "ShopCX",
         });
-        sent++;
+        return "sent" as const;
       });
+      if (result === "sent") sent++;
+      else if (result === "skipped_no_reply") skippedNoReply++;
     }
 
-    return { sent, skipped_too_old: skippedCount, batch_size: due.length };
+    return { sent, skipped_too_old: skippedCount, skipped_no_reply: skippedNoReply, batch_size: due.length };
   },
 );
