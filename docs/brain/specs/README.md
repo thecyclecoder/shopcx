@@ -40,6 +40,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** closing/resolving a ticket never clears `escalated_at`, so resolved tickets linger on the Escalated list (one sat 16 days post-close — Sheryl Dickey "Wrong product delivered"). Fix: clear escalation flags on resolve/close in the status-write paths + filter the Escalated view to non-terminal statuses + a gated stale sweep (currently 0). Completes [[box-escalation-triage]].
 
+## Active project — "AI Investigation" Ticket Visibility ⏳
+
+**Spec:** [[ai-investigation-ticket-visibility]] · **Owner:** [[../functions/cs]]
+
+**Why this matters:** a routine-escalated ticket (`escalated_to=null`) gives a human agent no visual signal it's escalated or that triage is on it. Adds a prominent **"🔍 Escalated → AI Investigation"** badge (header + list + Escalated view, "· triage in progress" when a job is live) + `[AI Investigation]` internal notes when the routine starts working it and on outcome (proposed todos / no-quorum / mis-escalation). Humans can still intervene. Queue after [[escalate-to-routine-by-default]] merges (shared ticket UI). Refines [[box-escalation-triage]].
+
 ## Active project — Escalate to the AI Routine by Default ⏳
 
 **Spec:** [[escalate-to-routine-by-default]] · **Owner:** [[../functions/cs]]
