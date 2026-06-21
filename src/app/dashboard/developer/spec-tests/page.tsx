@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { getRoadmap, listArchivedSlugs, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestSpecTestRuns, getHumanCheckResolutions, checkKey, type SpecTestRun } from "@/lib/spec-test-runs";
-import { AgentTestedStamp, TestChip, CheckList } from "./SpecTestView";
+import { getLatestSpecTestRuns, getHumanCheckResolutions, checkKey, signSpecTestScreenshot, type SpecTestRun } from "@/lib/spec-test-runs";
+import { AgentTestedStamp, TestChip, CheckList, type Check } from "./SpecTestView";
 import TestNowButton from "./TestNowButton";
 import ProposeFixButton from "./ProposeFixButton";
 
@@ -45,6 +45,23 @@ export default async function SpecTestsPage() {
   }
 
   const tested = shipped.filter((s) => runs[s.slug]).length;
+
+  // Sign browser-check screenshots (spec-test-deep-verification Phase 1) server-side — the private
+  // evidence bucket is signed per-render (short TTL); a stored signed URL would expire. Enrich each
+  // run's checks with the signed `screenshotUrl` so the client CheckList can render the image.
+  const signedChecksBySlug: Record<string, Check[]> = {};
+  await Promise.all(
+    shipped.map(async (s) => {
+      const run = runs[s.slug];
+      if (!run) return;
+      signedChecksBySlug[s.slug] = await Promise.all(
+        run.checks.map(async (c) => ({
+          ...c,
+          screenshotUrl: c.screenshot ? await signSpecTestScreenshot(c.screenshot) : null,
+        })),
+      );
+    }),
+  );
 
   return (
     <div className="mx-auto w-full max-w-5xl p-6">
@@ -136,7 +153,7 @@ export default async function SpecTestsPage() {
                       {run.checks.length} check{run.checks.length === 1 ? "" : "s"}
                     </summary>
                     <div className="mt-2">
-                      <CheckList checks={run.checks} />
+                      <CheckList checks={signedChecksBySlug[s.slug] ?? run.checks} />
                     </div>
                   </details>
                 )}

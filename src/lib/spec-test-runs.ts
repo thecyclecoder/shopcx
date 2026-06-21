@@ -24,6 +24,13 @@ export interface SpecTestCheck {
   verdict: CheckVerdict;
   category?: CheckCategory;
   evidence?: string;
+  /**
+   * Phase 1 (spec-test-deep-verification) — for a BROWSER check, the private-bucket storage path of the
+   * screenshot the headless-browser tool captured (`spec-test-evidence/<slug>/<file>.png`). Rendered on
+   * the Developer → Spec Tests page via a short-lived signed URL (signSpecTestScreenshot), never a
+   * public URL — dashboard screenshots can contain real customer data. Undefined for non-browser checks.
+   */
+  screenshot?: string;
 }
 
 export interface SpecTestSummary {
@@ -103,6 +110,36 @@ export async function hasActiveSpecTestJob(workspaceId: string, specSlug: string
 /** The compact board chip text — "✅ 8 · ✗ 1 · 👤 1" — from a run's summary. */
 export function chipParts(s: SpecTestSummary): { pass: number; fail: number; human: number; inconclusive: number } {
   return { pass: s.auto_pass, fail: s.auto_fail, human: s.needs_human, inconclusive: s.inconclusive };
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Phase 1 (spec-test-deep-verification) — headless-browser check screenshot evidence.
+ * The browser-check tool (scripts/spec-test-browser-check.ts) captures a screenshot of the
+ * owner-authed page it asserts and stores it in a PRIVATE bucket; a check carries the storage path in
+ * `screenshot`. The Developer → Spec Tests page signs it for rendering. Private (not public) because a
+ * dashboard screenshot can contain real customer data. See docs/brain/specs/spec-test-deep-verification.md.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Private bucket holding spec-test browser-check screenshots (QA evidence only — never customer assets). */
+export const SPEC_TEST_EVIDENCE_BUCKET = "spec-test-evidence";
+
+/** Ensure the private evidence bucket exists (idempotent — the browser-check tool calls this before upload). */
+export async function ensureSpecTestEvidenceBucket(): Promise<void> {
+  const admin = createAdminClient();
+  const { data } = await admin.storage.getBucket(SPEC_TEST_EVIDENCE_BUCKET);
+  if (!data) await admin.storage.createBucket(SPEC_TEST_EVIDENCE_BUCKET, { public: false });
+}
+
+/** Short-lived signed URL for a stored screenshot path; null if it's missing/unsignable (render-safe). */
+export async function signSpecTestScreenshot(path: string, ttlSec = 3600): Promise<string | null> {
+  if (!path) return null;
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin.storage.from(SPEC_TEST_EVIDENCE_BUCKET).createSignedUrl(path, ttlSec);
+    return error || !data ? null : data.signedUrl;
+  } catch {
+    return null;
+  }
 }
 
 /* ──────────────────────────────────────────────────────────────────────────

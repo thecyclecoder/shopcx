@@ -13,6 +13,10 @@ export interface Check {
   verdict: Verdict | string;
   category?: string;
   evidence?: string;
+  /** Browser-check screenshot storage path (raw) — present on the row but not directly renderable. */
+  screenshot?: string;
+  /** Server-signed URL for the screenshot (spec-test-deep-verification Phase 1) — what we actually render. */
+  screenshotUrl?: string | null;
 }
 export interface Summary {
   auto_pass?: number;
@@ -87,14 +91,27 @@ export function CheckList({ checks }: { checks: Check[] }) {
               <span className={`mt-0.5 flex-shrink-0 font-medium ${m.cls}`}>{m.icon}</span>
               <div className="min-w-0">
                 <span className="text-zinc-700 dark:text-zinc-300">{c.text}</span>
-                {c.evidence && (
+                {(c.evidence || c.screenshotUrl) && (
                   <details className="mt-0.5">
                     <summary className="cursor-pointer select-none text-[11px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300">
-                      evidence
+                      evidence{c.screenshotUrl ? " · 📷 screenshot" : ""}
                     </summary>
-                    <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-zinc-50 p-1.5 text-[11px] text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-400">
-                      {c.evidence}
-                    </pre>
+                    {c.evidence && (
+                      <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-zinc-50 p-1.5 text-[11px] text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-400">
+                        {c.evidence}
+                      </pre>
+                    )}
+                    {c.screenshotUrl && (
+                      // Browser-check screenshot evidence (spec-test-deep-verification Phase 1).
+                      <a href={c.screenshotUrl} target="_blank" rel="noreferrer" className="mt-1 block">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={c.screenshotUrl}
+                          alt="browser check screenshot"
+                          className="max-h-80 w-full rounded border border-zinc-200 object-contain object-top dark:border-zinc-700"
+                        />
+                      </a>
+                    )}
                   </details>
                 )}
               </div>
