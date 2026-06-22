@@ -17,6 +17,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Appstle webhook 500 on subscription.billing-* events** · verified 2026-06-22 · → [[integrations/appstle]]
 - **Build Console: No Silent No-Op Builds + Report-Issue Enqueue Confirmation** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
 - **Clear Escalation Flags on Resolve/Close** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
+- **Client-Side Error Capture — storefront + portal → Control Tower** · verified 2026-06-22 · → [[libraries/client-error-reporter]]
 - **Comp Transaction Type Constraint Fix** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
 - **Control Tower: a failed beats read must not false-fire never_fired** · verified 2026-06-22 · → [[libraries/control-tower]]
 - **control_tower_loop_beats RPC — stop the 500 (bound the scan via lateral join)** · verified 2026-06-22 · → [[libraries/control-tower]]
