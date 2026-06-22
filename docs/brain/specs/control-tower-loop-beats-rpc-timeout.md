@@ -1,4 +1,4 @@
-# control_tower_loop_beats must not full-scan 5.2M rows — index-backed latest-N read ⏳
+# control_tower_loop_beats must not full-scan 5.2M rows — index-backed latest-N read ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower-monitor-accuracy]] + [[../specs/control-tower-beats-read-failure-guard]] + [[../specs/control-tower]] · **Repair-signature:** `loop:portal-action-healer` · **Verdict:** monitor-false-positive
 
@@ -9,10 +9,15 @@ control_tower_loop_beats (supabase/migrations/20260622160000_control_tower_loop_
 
 **Likely target:** `supabase/migrations/* (rewrite public.control_tower_loop_beats RPC) + src/lib/control-tower/monitor.ts:588 (capture the RPC error)`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
+**Shipped:** rewrote `public.control_tower_loop_beats(p_history_limit)` (`supabase/migrations/20260622180000_control_tower_loop_beats_skipscan.sql`, apply: `scripts/apply-control-tower-loop-beats-skipscan-migration.ts`) so it no longer windows over the whole 5.22M-row table. The new body drives a **recursive index skip-scan** over distinct `loop_id`s (≈one index seek per loop), then a **LATERAL** that index-range-seeks each loop's newest `p_history_limit` beats; `rn`/`total_count` are now windows over that ≤10-row per-loop set. Output contract is unchanged (same columns + ordering); `total_count` is now a presence signal (1..limit), which is all the monitor reads (`everBeatCount === 0`). No new index/retention needed — the existing `(loop_id, ran_at desc)` index covers both reads. The snapshot-side error capture (`beatsError`/`beatsReadFailed` at `monitor.ts:595`) already shipped in [[control-tower-beats-read-failure-guard]], so it keeps a transient read failure conservative (amber) while this rewrite removes the timeout that caused it.
+
 ## Verification
-- Re-trigger the originating condition (signature `loop:portal-action-healer`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- Apply the migration, then in psql run `select count(*), max(loop_id) from public.control_tower_loop_beats(10)` against the live 5.22M-row table → expect it to return rows in **well under 1s** (was 8101ms → statement timeout → null), with ≤10 rows per loop.
+- In psql run `explain (analyze, buffers) select * from public.control_tower_loop_beats(10)` → expect **no Seq Scan on loop_heartbeats** and no full sort of the table; the plan should show index-only/index scans on `loop_heartbeats_loop_ran_idx` for both the recursive CTE and the LATERAL.
+- On the Control Tower dashboard (`/dashboard/control-tower`), reload after deploy → expect the `loop:portal-action-healer`, `meta-capi-dispatch-cron`, `slack-roadmap-notify`, and `ticket-unsnooze` tiles to show **green** with their real latest beats (not amber "beat read unavailable" and not red `never_fired`).
+- After a control-tower-monitor cron tick → expect **no new `error_events` row** for signature `loop:portal-action-healer` and **no `loop_alert`** opened with reason `never_fired` for a cron that has live beats.
 
 > Authored by the box Repair Agent from Control Tower signature `loop:portal-action-healer` (verdict: monitor-false-positive). Commission the build from the Control Tower / Roadmap board.
