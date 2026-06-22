@@ -10,6 +10,8 @@ _TODO: page purpose._
 
 **Rendering:** `"use client"` component (client-side state + fetch).
 
+**Running experiments panel:** surfaces active [[../tables/storefront_experiments]] (status `running`/`promoted`) with each arm's sessions / CVR / sub-attach and posterior **win-probability vs control** — computed in the funnel API route via [[../libraries/storefront-bandit]] `winProbabilityVsControl` and returned as `runningExperiments`. The supervisable surface for the bandit (storefront-experiment-bandit-framework Phase 4).
+
 ## Sub-routes
 
 _None._

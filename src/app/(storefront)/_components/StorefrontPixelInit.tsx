@@ -19,6 +19,7 @@
 
 import { useEffect } from "react";
 import { initPixel, track } from "@/lib/storefront-pixel";
+import type { ExperimentExposureMeta } from "@/lib/storefront/experiments";
 
 interface Props {
   workspaceId: string;
@@ -29,6 +30,9 @@ interface Props {
   /** When true, pack-select skips /customize and goes straight to /checkout
    *  (the friction-reducing bypass). add_to_cart still fires below. */
   skipCustomize?: boolean;
+  /** Storefront-experiment exposures resolved server-side (sticky assignment).
+   *  Each fires one `experiment_exposure` event on mount. */
+  experimentExposures?: ExperimentExposureMeta[];
 }
 
 interface CtaPayload {
@@ -45,6 +49,7 @@ export function StorefrontPixelInit({
   customerId,
   metaPixelId,
   skipCustomize,
+  experimentExposures = [],
 }: Props) {
   useEffect(() => {
     initPixel({ workspaceId, customerId: customerId || null, metaPixelId: metaPixelId || null });
@@ -54,6 +59,18 @@ export function StorefrontPixelInit({
       product_id: productId,
       product_handle: productHandle,
     });
+
+    // ── experiment_exposure (one per active experiment) ───────────
+    // Sticky arm assignment is resolved server-side; we just log the exposure.
+    // The pixel route drops these for is_internal/is_bot sessions.
+    for (const exp of experimentExposures) {
+      track("experiment_exposure", {
+        product_id: exp.product_id,
+        experiment_id: exp.experiment_id,
+        variant_id: exp.variant_id,
+        is_holdout: exp.is_holdout,
+      });
+    }
 
     // ── pdp_engaged (first of three triggers) ─────────────────────
     let engaged = false;
