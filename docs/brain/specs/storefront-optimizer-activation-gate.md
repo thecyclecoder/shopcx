@@ -1,10 +1,10 @@
-# Storefront Optimizer — activation + product-scope gate (OFF by default) 🚧
+# Storefront Optimizer — activation + product-scope gate (OFF by default) ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** the control surface for [[../goals/storefront-optimizer]]; gates [[storefront-optimizer-agent|M4]] + [[storefront-experiment-bandit-framework|M1]]. · **Found in design 2026-06-22:** the optimizer specs say the agent "auto-runs within policy" + scope is "Amazing Coffee" — but **no policy object / on-switch / enforced scope exists**. As spec'd, once M4's cron ships it would **auto-run live experiments on customer traffic with no explicit owner enablement** — violating supervisable autonomy. The ad iteration engine got this right (`iteration_policies.policy_active` → "no active policy, zero autonomous actions"); the storefront side must mirror it.
 
-## ✅ Phase 1 convergence FIXED in code (2026-06-22 by dev-message-center) — pending re-apply
+## ✅ Phase 1 convergence FIXED + RE-APPLIED (2026-06-22 by dev-message-center)
 
-The migration now **leads with `drop table if exists public.storefront_optimizer_policy;`** (preferred fix — table is empty + unshipped), so the `create table` below always rebuilds the full 16-column shape and the apply is convergent on every re-run. The apply-script now **asserts all 16 columns AND exactly 1 seeded Superfoods row before reporting OK** (fails loudly otherwise). Re-running `npx tsx scripts/apply-storefront-optimizer-policy-migration.ts` against the pooler will heal the stale prod table and seed the Superfoods policy. (Original blocker, for the record, below.)
+The migration now **leads with `drop table if exists public.storefront_optimizer_policy;`** (preferred fix — table is empty + unshipped), so the `create table` below always rebuilds the full 16-column shape and the apply is convergent on every re-run. The apply-script now **asserts all 16 columns AND exactly 1 seeded Superfoods row before reporting OK** (fails loudly otherwise). `npx tsx scripts/apply-storefront-optimizer-policy-migration.ts` was re-run against the pooler: it dropped the stale 10-column table, rebuilt the full 16-column shape, and seeded the Superfoods policy `active=true, product_scope=[amazing-coffee], auto_run_reversible=false`. Phase 1 shipped. (Original blocker, for the record, below.)
 
 ## ⚠️ Phase 1 BLOCKED — stale table, migration not convergent (found 2026-06-22 by dev-message-center)
 
@@ -33,5 +33,5 @@ The control model the owner chose (2026-06-22): the agent **proposes** campaigns
 - `active=false` → the agent doesn't propose at all (idle). An offer/structural lever stays approval-gated regardless of `auto_run_reversible`.
 - Negative: with no approval tap, there is no path by which a campaign mutates live storefront content or assigns a live variant.
 
-## Phase 1 — the policy table + per-campaign-approval gate + product scope + seed + toggle 🚧
+## Phase 1 — the policy table + per-campaign-approval gate + product scope + seed + toggle ✅
 `storefront_optimizer_policy` (table default `active=false`; **SEED the Superfoods workspace `active=true`, `product_scope=[amazing-coffee]`, `auto_run_reversible=false`** in the migration/apply script). **The migration must be convergent against the pre-existing stale table (see ⚠️ block above) — drop-and-recreate the empty table OR add-column-if-not-exists for all 16 columns.** M4 proposes each campaign as a `needs_approval` card (the Build/Approve tap runs it) reading this policy + enforcing scope; M1 only assigns a live variant for an approved (`running`) experiment; dashboard on/off + scope + `auto_run_reversible` toggle. Brain: [[../goals/storefront-optimizer]] · [[storefront-optimizer-agent]] · [[storefront-experiment-bandit-framework]] · [[../operational-rules]] (§ North star) · mirrors [[storefront-iteration-engine]] `iteration_policies`.
