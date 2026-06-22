@@ -1,0 +1,1 @@
+- **Comp Transaction Type Constraint Fix** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
