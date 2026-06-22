@@ -140,6 +140,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[box-lane-show-phase]] (platform) — with Build-all chaining, a box lane shows only the slug; surface which phase ('slug · Phase 2'). Worker derives phase from the job (LaneRow.phase) → box API passes it → box/page.tsx renders it.
 
+## Active project — Storefront Optimizer activation gate ⏳
+
+[[storefront-optimizer-activation-gate]] (growth) — closes a safety gap: the optimizer specs say "auto-run within policy" + "scope: Amazing Coffee" but define NO on-switch or enforced scope, so M4's cron would auto-run live experiments on customers with no explicit enablement. Add storefront_optimizer_policy (active=false default, product_scope=Amazing Coffee, guardrails) mirroring iteration_policies: OFF ⇒ propose-only (zero live experiments); flip on = the owner's "go"; scope enforced not narrative. GATES M4.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
