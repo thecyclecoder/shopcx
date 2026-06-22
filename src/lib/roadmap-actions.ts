@@ -10,8 +10,8 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
-import { ACTIVE_STATUSES, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
-import { getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
+import { ACTIVE_STATUSES, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
+import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
 
 export type ActionResult<T> =
   | ({ ok: true } & T)
@@ -58,8 +58,8 @@ async function assertOwner(workspaceId: string, userId: string): Promise<{ ok: t
 export async function queueRoadmapBuild(
   workspaceId: string,
   userId: string,
-  opts: { slug: string; instructions?: string | null; verify?: boolean },
-): Promise<ActionResult<{ job: AgentJob; alreadyActive?: boolean; queuedBehindActive?: boolean; fold?: boolean }>> {
+  opts: { slug: string; instructions?: string | null; verify?: boolean; chainPhases?: boolean },
+): Promise<ActionResult<{ job: AgentJob; alreadyActive?: boolean; queuedBehindActive?: boolean; fold?: boolean; chainPhases?: boolean }>> {
   const gate = await assertOwner(workspaceId, userId);
   if (!gate.ok) return gate;
 
@@ -82,7 +82,27 @@ export async function queueRoadmapBuild(
     return { ok: true, job, fold: true };
   }
 
-  const instructions = typeof opts.instructions === "string" && opts.instructions.trim() ? opts.instructions : null;
+  let instructions = typeof opts.instructions === "string" && opts.instructions.trim() ? opts.instructions : null;
+
+  // "Build all phases" (build-all-phases-chain Phase 1): queue the spec's FIRST ⏳ phase, tagged
+  // chain_phases so the post-merge step (reconcileMergedJobs → queueNextChainedPhase) auto-queues the next
+  // ⏳ phase once this one merges (composing with auto-ship-pipeline auto-merge), chaining to all-✅ with no
+  // owner clicks between phases. Scope the build to that one phase (same instruction the per-phase Build and
+  // the chain step use). A spec with no phase structure falls through to a normal whole-spec build.
+  let chainPhases = false;
+  if (opts.chainPhases === true) {
+    const spec = await getSpec(slug);
+    const phases = spec?.card.phases ?? [];
+    const next = phases.find((p) => p.status === "planned");
+    if (next) {
+      chainPhases = true;
+      instructions = phaseScopedInstructions(next.title);
+    } else if (phases.length > 0) {
+      // Every phase already shipped/cut — nothing left to chain.
+      return { ok: false, status: 409, error: "All phases are already built — nothing to chain." };
+    }
+    // phases.length === 0 → no phase structure to chain; fall through to a normal whole-spec build.
+  }
 
   // Build gate (spec-blockers): refuse to enqueue a build for a spec whose prerequisites haven't shipped.
   // This is the single enqueue chokepoint — BuildButton, the Slack `/build`, and the planner all route
@@ -107,12 +127,12 @@ export async function queueRoadmapBuild(
     .limit(1)
     .maybeSingle();
   if (existing) {
-    // A plain Build tap (no instructions) coalesces into the live build — re-building the whole spec
-    // while it's already building is pointless. But a Report Issue / scoped fix carries NEW, distinct
-    // instructions that must NEVER be silently dropped (the bug this fixes): enqueue a distinct follow-up
-    // `build` row that the box runs after the active build (it serializes per-spec). See
-    // docs/brain/specs/fix-report-issue-dropped.md.
-    if (!instructions) return { ok: true, job: existing as AgentJob, alreadyActive: true };
+    // A plain Build tap (no instructions) OR a "Build all" chain coalesces into the live build — re-building
+    // the whole spec (or re-chaining) while it's already building is pointless, and the chain advances itself
+    // once the active build merges. But a Report Issue / scoped fix carries NEW, distinct instructions that
+    // must NEVER be silently dropped (the bug this fixes): enqueue a distinct follow-up `build` row the box
+    // runs after the active build (it serializes per-spec). See docs/brain/specs/fix-report-issue-dropped.md.
+    if (!instructions || chainPhases) return { ok: true, job: existing as AgentJob, alreadyActive: true };
     const { data: followUp, error: followErr } = await admin
       .from("agent_jobs")
       .insert({ workspace_id: workspaceId, spec_slug: slug, status: "queued", instructions, created_by: userId })
@@ -122,13 +142,17 @@ export async function queueRoadmapBuild(
     return { ok: true, job: followUp as AgentJob, queuedBehindActive: true };
   }
 
+  // Only reference chain_phases when actually chaining — a normal build omits it so the DB default
+  // (false) applies and the insert doesn't break if it lands before the chain_phases migration.
+  const row: Record<string, unknown> = { workspace_id: workspaceId, spec_slug: slug, status: "queued", instructions, created_by: userId };
+  if (chainPhases) row.chain_phases = true;
   const { data: job, error } = await admin
     .from("agent_jobs")
-    .insert({ workspace_id: workspaceId, spec_slug: slug, status: "queued", instructions, created_by: userId })
+    .insert(row)
     .select("*")
     .single();
   if (error) return { ok: false, status: 500, error: error.message };
-  return { ok: true, job: job as AgentJob };
+  return { ok: true, job: job as AgentJob, chainPhases: chainPhases || undefined };
 }
 
 // ── Create PR for a build whose branch pushed but `gh pr create` failed (build-recover-pr-create) ──

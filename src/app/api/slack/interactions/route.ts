@@ -266,7 +266,10 @@ async function handleHomeBuild(
     instructions = `Build only ${phaseTitle} of this spec — do ONLY that phase, not the whole spec.`;
   }
 
-  const result = await queueRoadmapBuild(workspaceId, actor!.userId, { slug, instructions });
+  // The "Build all" button (non-phase) chains the phases (build-all-phases-chain): queue the first ⏳
+  // phase tagged chain_phases so each subsequent phase auto-queues on merge until all ✅. A per-phase
+  // "Build N" stays a single scoped build (no chain).
+  const result = await queueRoadmapBuild(workspaceId, actor!.userId, { slug, instructions, chainPhases: !isPhase });
   if (!result.ok) return notice("Couldn't build", `Couldn't queue \`${slug}\`: ${result.error}`);
 
   await republishHome(workspaceId, token, slackUserId);

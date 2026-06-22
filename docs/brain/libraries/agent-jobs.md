@@ -30,7 +30,23 @@ The **single dedupe chokepoint** shared by all three spec-test enqueue paths: th
 async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void>
 ```
 
-Self-heal: a `completed` job whose PR was merged/closed **outside** the dashboard still shows a stale "Squash & merge" button. Checks GitHub; if the PR is no longer open, flips the job to `merged` (in place + persisted). **spec-drift Part A (root fix):** when a merged (`pr.merged`) `kind='build'` job is flipped, it calls `reconcileSpecDrift(workspace, slug)` ([[spec-drift]]) — the per-phase, evidence-gated reconciler that stamps ✅ on phases whose code is verifiably on `main` (a merged build now exists for the spec), leaving genuinely-pending phases. This is where drift originates; closing it on merge means the [[../inngest/spec-drift-reconcile]] cron rarely has work. If the corrected phases now derive `shipped`, it then calls `enqueueSpecTestIfDue(...,'shipped')` **then** `autoQueueUnblockedBy(...)` (spec-blockers Phase 2) — the reconciler's returned status replaces the old `fetchSpecFromMain` + `deriveSpecStatus` check. **fix-ship-retests-origin:** in the same `pr.merged && kind='build'` block it also calls `retestOriginIfFixMerged(workspace, slug)` (best-effort, own try/catch, independent of the drift flip) — re-tests the **origin** spec when this merged build is a proposed fix. Called on board load ([[../dashboard/roadmap]]) and the merge path (`/api/roadmap/build`).
+Self-heal: a `completed` job whose PR was merged/closed **outside** the dashboard still shows a stale "Squash & merge" button. Checks GitHub; if the PR is no longer open, flips the job to `merged` (in place + persisted). **spec-drift Part A (root fix):** when a merged (`pr.merged`) `kind='build'` job is flipped, it calls `reconcileSpecDrift(workspace, slug)` ([[spec-drift]]) — the per-phase, evidence-gated reconciler that stamps ✅ on phases whose code is verifiably on `main` (a merged build now exists for the spec), leaving genuinely-pending phases. This is where drift originates; closing it on merge means the [[../inngest/spec-drift-reconcile]] cron rarely has work. If the corrected phases now derive `shipped`, it then calls `enqueueSpecTestIfDue(...,'shipped')` **then** `autoQueueUnblockedBy(...)` (spec-blockers Phase 2) — the reconciler's returned status replaces the old `fetchSpecFromMain` + `deriveSpecStatus` check. **fix-ship-retests-origin:** in the same `pr.merged && kind='build'` block it also calls `retestOriginIfFixMerged(workspace, slug)` (best-effort, own try/catch, independent of the drift flip) — re-tests the **origin** spec when this merged build is a proposed fix. **build-all-phases-chain Phase 1:** also in that block (outside the shipped-check — a mid-spec phase merge leaves the spec in_progress), when the merged build carries `chain_phases` it calls `queueNextChainedPhase(workspace, slug)` to advance the "Build all" chain. Called on board load ([[../dashboard/roadmap]]) and the merge path (`/api/roadmap/build`).
+
+### `queueNextChainedPhase` — function  *(build-all-phases-chain Phase 1)*
+
+```ts
+async function queueNextChainedPhase(workspaceId: string, slug: string): Promise<string | null>
+```
+
+Advance a **"Build all" chain**. A `chain_phases` build for `slug` just merged (its phase landed on `main` + flipped ✅); this reads the spec from `main` (`getSpec`), finds the **next ⏳ phase**, and queues it as a fresh `queued` `kind='build'` row — also `chain_phases:true`, scoped to that phase (`phaseScopedInstructions`), built on fresh `main` atop the prior phase's code. The chain runs hands-off: each phase builds → auto-merges ([[../specs/auto-ship-pipeline]]) → queues the next, until no ⏳ phase remains (every phase ✅ = chain complete → null). **Stops/pauses for free:** a phase that **fails** or hits **needs_approval** never reaches `merged`, so this is never called for it (chain stops/pauses; resuming + merging the phase resumes the chain). **De-duped:** skips when any build job for the spec is already in flight (`status` ∈ ACTIVE_STATUSES) — `reconcileMergedJobs` flips a job completed→merged once so this normally fires once per phase; the guard covers concurrent board loads. Returns the queued phase title, or null. Best-effort. Called from `reconcileMergedJobs`.
+
+### `phaseScopedInstructions` — function  *(build-all-phases-chain Phase 1)*
+
+```ts
+function phaseScopedInstructions(phaseTitle: string): string
+```
+
+The build instruction scoping a build to ONE phase (`Implement ONLY this phase of the spec: "…". Mark that phase's emoji ✅ when done. Do not modify other phases.`) — shared by the dashboard per-phase Build, the "Build all" first-phase queue ([[roadmap-actions]] `queueRoadmapBuild`), and `queueNextChainedPhase`, so all three drive the box identically.
 
 ### `retestOriginIfFixMerged` — function  *(fix-ship-retests-origin)*
 

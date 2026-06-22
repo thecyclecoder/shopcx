@@ -140,10 +140,13 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
     if (busy || blocked) return; // server gate refuses anyway; don't even fire the request
     setBusy(true);
     try {
+      // "Build all" (build-all-phases-chain): chain the phases — queue the first ⏳ phase tagged
+      // chain_phases so the next ⏳ phase auto-queues on each merge, until all phases ✅ (no clicks between).
+      // A single/zero-phase spec degrades to a normal whole-spec build server-side.
       const res = await fetch("/api/roadmap/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug }),
+        body: JSON.stringify({ slug, chainPhases: true }),
       });
       const d = await res.json();
       if (d.job) {
@@ -410,7 +413,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
               title={blockedTooltip}
               className="w-full rounded-md bg-indigo-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {busy ? "…" : blocked ? "🔒 Blocked" : job ? "Rebuild" : "Build"}
+              {busy ? "…" : blocked ? "🔒 Blocked" : job ? "Rebuild" : "Build all"}
             </button>
           </div>
         )
