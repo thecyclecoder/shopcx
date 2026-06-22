@@ -64,6 +64,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Worker Orphan-Reaper ⏳
+
+**Spec:** [[worker-orphan-reaper]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** when the box worker restarts (self-update / deploy / crash) its in-flight jobs are orphaned — the new worker only claims `queued`, so old `building` rows sit stuck forever + trip the Control Tower stuck-jobs alert (hit live: 7 spec-tests piled up across deploys). Fix: reap on startup — reset re-runnable kinds (spec-test/triage/migration-fix/dev-ask/pr-resolve) to queued, mark producer kinds (build/plan/fold/…) failed (→ failed-builds callout + Create-PR recovery), cutoff-gated by the worker's started_at so live jobs are untouched.
+
 ## Active project — Build Recover: Create PR ⏳
 
 **Spec:** [[build-recover-pr-create]] · **Owner:** [[../functions/platform]]
