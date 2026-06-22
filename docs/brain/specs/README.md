@@ -124,6 +124,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[box-multi-account-failover]] (platform) — survive the Max usage wall: the box (same account as the owner) capped → 12 builds failed at once with no recovery until reset. Wire the worker to select CLAUDE_CONFIG_DIR per build from an account pool + auto-fail-over to a 2nd account on a usage-cap signal (vs the existing 529-transient retry); all-capped → blocked_on_usage that auto-resumes (no manual rebuild). + the claude2 alias / ~/.claude-personal login for manual use. Owner's idea, made automatic.
 
+## Active project — Fold guard (live build) ⏳
+
+[[fold-guard-live-build]] (platform) — a spec (control-tower-escalation-idle-grace) was folded+archived while a needs_input build was live → orphaned build showed as "paused" on the box with a 404 link. Guard: the fold path refuses/defers folding a spec with a non-terminal job; archiving a spec cancels its orphaned jobs; the box callout tolerates a missing spec. Matters more once auto-fold runs.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
