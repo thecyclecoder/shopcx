@@ -1,4 +1,4 @@
-# Dunning payday-retry cron: emit Control Tower heartbeat on empty (no-due-cycle) runs ⏳
+# Dunning payday-retry cron: emit Control Tower heartbeat on empty (no-due-cycle) runs ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/inngest/dunning.ts::real-bug`
@@ -11,7 +11,7 @@ src/lib/inngest/dunning.ts gates its only emitCronHeartbeat('dunning-payday-retr
 
 **Likely target:** `src/lib/inngest/dunning.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅ (build #248 merged — heartbeat now in try/finally, fires on the no_active_cycles path)
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
