@@ -1,4 +1,4 @@
-# Fix the Inngest in-code-vs-registered diff — wrong REST endpoint (404) ⏳
+# Fix the Inngest in-code-vs-registered diff — wrong REST endpoint (404) 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** fixes the ⚠️-flagged gap in [[control-tower-complete-coverage]] (P2 self-audit).
 
@@ -14,5 +14,5 @@
 - Serve a new function in code without deploying/syncing it to Inngest → it appears in `missing` (the gap the check exists to catch).
 - No key → still `unverified`, no false alarm (unchanged).
 
-## Phase 1 — correct endpoint + id-keyed parsing ⏳
-Fix `diffInngestRegistered` (`src/lib/control-tower/self-audit.ts`): endpoint `/v1/apps/shopcx/functions`, parse the flat `id`-keyed array, match against served ids. Brain: [[../libraries/control-tower-self-audit]] · [[../integrations/inngest]] · [[control-tower-complete-coverage]].
+## Phase 1 — correct endpoint + id-keyed parsing ✅
+Fixed `fetchInngestRegisteredFnIds` (`src/lib/control-tower/self-audit.ts`): endpoint now `GET /v1/apps/shopcx/functions`, parses the flat array (each function keyed by an app-prefixed `id`, no `slug`), strips the `shopcx-` prefix, and matches against the served ids — so `diffInngestRegistered` reaches `status:'ok'` instead of always falling to `'unverified'`. Fail-safe unchanged (no key / non-2xx / unexpected shape ⇒ `unverified`). `npx tsc --noEmit` clean. Brain library page [[../libraries/control-tower-self-audit]] updated. Awaiting prod verification (see ## Verification — needs `INNGEST_SIGNING_KEY`, no creds on the build box). Brain: [[../libraries/control-tower-self-audit]] · [[../integrations/inngest]] · [[control-tower-complete-coverage]].

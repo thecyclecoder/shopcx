@@ -110,26 +110,25 @@ async function fetchInngestRegisteredFnIds(): Promise<Set<string> | null> {
   if (!key) return null; // not configured (local / preview) — no-op, no false alarm.
   const base = process.env.INNGEST_API_BASE_URL || "https://api.inngest.com";
   try {
-    const res = await fetch(`${base}/v1/apps`, {
+    // The per-app functions endpoint returns a FLAT array of the ~136 registered functions,
+    // each keyed by an app-prefixed `id` (e.g. "shopcx-sync-shopify") and no `slug` field.
+    // (`GET /v1/apps` 404s — see inngest-registered-diff-endpoint-fix.)
+    const res = await fetch(`${base}/v1/apps/${INNGEST_APP_ID}/functions`, {
       headers: { Authorization: `Bearer ${key}` },
       cache: "no-store",
     });
     if (!res.ok) return null;
     const body: unknown = await res.json();
-    const apps: unknown[] = Array.isArray(body)
+    const fns: unknown[] = Array.isArray(body)
       ? body
       : Array.isArray((body as { data?: unknown[] })?.data)
         ? (body as { data: unknown[] }).data
         : [];
     const ids = new Set<string>();
-    for (const app of apps) {
-      const fns = (app as { functions?: unknown[] })?.functions;
-      if (!Array.isArray(fns)) continue;
-      for (const fn of fns) {
-        const f = fn as { slug?: unknown; id?: unknown };
-        const raw = typeof f.slug === "string" ? f.slug : typeof f.id === "string" ? f.id : null;
-        if (raw) ids.add(stripAppPrefix(raw));
-      }
+    for (const fn of fns) {
+      const f = fn as { id?: unknown; slug?: unknown };
+      const raw = typeof f.id === "string" ? f.id : typeof f.slug === "string" ? f.slug : null;
+      if (raw) ids.add(stripAppPrefix(raw));
     }
     return ids.size ? ids : null; // empty/unexpected ⇒ unverified, not "all missing".
   } catch {
