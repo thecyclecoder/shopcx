@@ -3,6 +3,7 @@
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/app/api/webhooks/vercel-logs/route.ts::monitor-false-positive`
 **Repair-signature:** `vercel:ebdf493a37c60c34`
+**Repair-signature:** `vercel:b1daa612f563f5e9`
 
 Stop the Vercel log-drain capture from recording a function's bare Lambda lifecycle/REPORT block as its own error incident. A single failed request currently lands twice in the feed — once as the app's actionable console.error (which already gets a stable signature + repair spec) and once as a non-actionable platform 502 wrapper (START/END/REPORT RequestId + Duration/Memory). Scope the capture so the lifecycle scaffolding is stripped before signature-grouping, collapsing all proxy-5xx-on-a-route entries to one stable signature (or suppressing them when the function error is already captured), eliminating the redundant noise without touching any product code.
 
