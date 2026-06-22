@@ -26,16 +26,16 @@ directly-editable surface, not a supersede-on-activate policy history.
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `id` | `uuid` | — | PK · default `gen_random_uuid()` |
-| `workspace_id` | `uuid` | — | → [[workspaces]].id · **unique** (one policy per workspace) |
+| `workspace_id` | `uuid` | — | → [[workspaces]].id · **unique** (`storefront_optimizer_policy_ws_key`) — one policy per workspace |
 | `active` | `boolean` | — | default **`false`** · "the agent proposes campaigns at all." OFF ⇒ fully idle |
-| `product_scope` | `uuid[]` | — | default `{}` · enforced allowlist of [[products]].id the optimizer may touch |
+| `product_scope` | `jsonb` | — | default `[]` · enforced allowlist of [[products]].id (uuid strings) the optimizer may touch · `jsonb` array (not `uuid[]`) to match the shipped storefront tables |
 | `auto_run_reversible` | `boolean` | — | default **`false`** · later opt-in: reversible levers may auto-run without the per-campaign tap (offers/structural stay gated regardless) |
-| `max_concurrent_experiments` | `int` | — | default `3` · run-wide cap on live experiments |
-| `min_sample` | `int` | — | default `200` · min per-arm exposures before a decision |
-| `holdout_pct` | `numeric` | — | default `0.10` · sacred control band per experiment (fraction) |
-| `auto_rollback_ltv_tolerance` | `numeric` | — | default `0.15` · LTV-proxy regression tolerance vs control (fraction) |
-| `auto_rollback_windows` | `int` | — | default `2` · consecutive regressing windows before auto-rollback |
-| `auto_rollback_refund_spike_delta` | `numeric` | — | default `0.10` · refund-rate spike over control that rolls back (fraction) |
+| `max_concurrent_experiments` | `integer` | — | default `3` · run-wide cap on live experiments |
+| `min_sample` | `integer` | — | default `200` · min per-arm exposures before a decision |
+| `holdout_pct` | `double precision` | — | default `0.10` · sacred control band per experiment (fraction) |
+| `auto_rollback_ltv_tolerance` | `double precision` | — | default `0.15` · LTV-proxy regression tolerance vs control (fraction) |
+| `auto_rollback_windows` | `integer` | — | default `2` · consecutive regressing windows before auto-rollback |
+| `auto_rollback_refund_spike_delta` | `double precision` | — | default `0.10` · refund-rate spike over control that rolls back (fraction) |
 | `created_by` | `text` | — | `agent` \| `human` (CHECK, default `human`) — lets the Growth director self-author later |
 | `updated_by` | `uuid` | ✓ | an `auth.users`.id (plain uuid, **no FK** — the pooler apply role lacks REFERENCES on the `auth` schema) · who last edited the policy |
 | `rationale` | `text` | ✓ | why this policy is set as it is (Growth legibility) |
@@ -44,8 +44,7 @@ directly-editable surface, not a supersede-on-activate policy history.
 
 ## Indexes
 
-- partial `(workspace_id) where active = true` — fast lookup of switched-on workspaces.
-- `unique (workspace_id)` (column constraint) — one policy row per workspace.
+- `unique (workspace_id)` — `storefront_optimizer_policy_ws_key`, the one-policy-per-workspace constraint + upsert target.
 
 ## Seed
 

@@ -47,11 +47,11 @@ async function main() {
       await c.query(
         `insert into public.storefront_optimizer_policy
            (workspace_id, active, product_scope, auto_run_reversible, created_by, rationale)
-         values ($1, true, array[$2::uuid], false, 'human', $3)
+         values ($1, true, $2::jsonb, false, 'human', $3)
          on conflict (workspace_id) do nothing`,
         [
           prod[0].workspace_id,
-          AMAZING_COFFEE_ID,
+          JSON.stringify([AMAZING_COFFEE_ID]),
           "Seed: optimizer ON in propose-and-approve mode, scoped to Amazing Coffee — proposes campaigns, owner taps Build to run each test.",
         ],
       );

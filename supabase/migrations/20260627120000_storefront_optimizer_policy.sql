@@ -2,10 +2,10 @@
 --
 -- The control surface for the Storefront Optimizer agent (M4) — the on-switch,
 -- the enforced product scope, and the editable guardrails the agent reads to bound
--- every campaign. This is the storefront analogue of `iteration_policies` (the ad
--- engine's Growth-Director control surface): agent-LEGIBLE + agent-WRITABLE (typed
--- fields, rationale, authorship) so the future Growth director operates it later —
--- but the engine READS it read-only and NEVER writes its own policy.
+-- every campaign. The storefront analogue of `iteration_policies` (the ad engine's
+-- Growth-Director control surface): agent-LEGIBLE + agent-WRITABLE (typed fields,
+-- rationale, authorship) so the future Growth director operates it later — but the
+-- engine READS it read-only and NEVER writes its own policy.
 --
 -- Governance contract (see docs/brain/specs/storefront-optimizer-activation-gate.md):
 --   - `active=false` (table default) ⇒ the agent does NOT even propose (fully idle).
@@ -20,22 +20,25 @@
 --     for an out-of-scope product is refused in code, not just unscheduled.
 --   - The GROWTH DIRECTOR (or a human) edits this row; the engine never writes it.
 --
--- One row per workspace (unique workspace_id). RLS: workspace-member SELECT,
+-- One row per workspace (unique index on workspace_id). RLS: workspace-member SELECT,
 -- service-role write. Read by src/lib/storefront/optimizer-policy.ts
--- (`loadOptimizerPolicy` / `evaluateProposalGate`).
+-- (`loadOptimizerPolicy` / `evaluateProposalGate`). Mirrors the type vocabulary of
+-- the shipped storefront tables (storefront_ltv_reconciler / storefront_experiments):
+-- integer/double precision/boolean/jsonb/text/uuid, separate unique index, public.* refs.
 
 create table if not exists public.storefront_optimizer_policy (
   id uuid primary key default gen_random_uuid(),
-  workspace_id uuid not null unique references public.workspaces(id) on delete cascade,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
 
   -- ── the on-switch ────────────────────────────────────────────────────────────
   -- "the agent proposes campaigns at all." Default OFF (safe for any new workspace).
   active boolean not null default false,
 
   -- ── enforced product scope ───────────────────────────────────────────────────
-  -- Allowlist of products the optimizer may touch (→ public.products.id). Empty ⇒
-  -- nothing in scope. Checked on every proposal + activation, never narrative.
-  product_scope uuid[] not null default '{}',
+  -- Allowlist of product ids (→ public.products.id, as a jsonb array of uuid strings)
+  -- the optimizer may touch. Empty ⇒ nothing in scope. Checked on every proposal +
+  -- activation, never narrative. jsonb (not uuid[]) to match the shipped storefront tables.
+  product_scope jsonb not null default '[]'::jsonb,
 
   -- ── the later opt-in (default false) ─────────────────────────────────────────
   -- When true, REVERSIBLE levers (copy/hero/chapter) may auto-run without the
@@ -43,12 +46,12 @@ create table if not exists public.storefront_optimizer_policy (
   auto_run_reversible boolean not null default false,
 
   -- ── editable guardrails (the bounded proxy the engine optimizes within) ──────
-  max_concurrent_experiments int not null default 3,    -- run-wide cap on live experiments
-  min_sample int not null default 200,                  -- min per-arm exposures before a decision
-  holdout_pct numeric not null default 0.10,            -- sacred control band per experiment (0.10 = 10%)
-  auto_rollback_ltv_tolerance numeric not null default 0.15, -- LTV-proxy regression tolerance vs control (fraction)
-  auto_rollback_windows int not null default 2,         -- consecutive regressing windows before auto-rollback
-  auto_rollback_refund_spike_delta numeric not null default 0.10, -- refund-rate spike over control that rolls back
+  max_concurrent_experiments integer not null default 3,        -- run-wide cap on live experiments
+  min_sample integer not null default 200,                      -- min per-arm exposures before a decision
+  holdout_pct double precision not null default 0.10,           -- sacred control band per experiment (0.10 = 10%)
+  auto_rollback_ltv_tolerance double precision not null default 0.15, -- LTV-proxy regression tolerance vs control (fraction)
+  auto_rollback_windows integer not null default 2,             -- consecutive regressing windows before auto-rollback
+  auto_rollback_refund_spike_delta double precision not null default 0.10, -- refund-rate spike over control that rolls back
 
   -- ── authorship / legibility (agent-writable later, human for now) ────────────
   created_by text not null default 'human' check (created_by in ('agent', 'human')),
@@ -56,15 +59,16 @@ create table if not exists public.storefront_optimizer_policy (
   -- the pooler apply role lacks REFERENCES on the auth schema, and the shipped sibling
   -- storefront tables likewise carry no FK to auth.users.
   updated_by uuid,
-  rationale text,                                       -- why this policy is set as it is (Growth legibility)
+  rationale text,                                               -- why this policy is set as it is (Growth legibility)
 
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
-create index if not exists storefront_optimizer_policy_active_idx
-  on public.storefront_optimizer_policy (workspace_id)
-  where active = true;
+-- One policy row per workspace — the upsert target (separate unique index, mirroring
+-- storefront_ltv_calibration_ws_key).
+create unique index if not exists storefront_optimizer_policy_ws_key
+  on public.storefront_optimizer_policy (workspace_id);
 
 -- ── RLS — workspace-member SELECT, service-role write (mirror storefront_experiments) ──
 alter table public.storefront_optimizer_policy enable row level security;
