@@ -1,0 +1,1 @@
+- **Client-Side Error Capture — storefront + portal → Control Tower** · verified 2026-06-22 · → [[libraries/client-error-reporter]]
