@@ -40,6 +40,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** closing/resolving a ticket never clears `escalated_at`, so resolved tickets linger on the Escalated list (one sat 16 days post-close — Sheryl Dickey "Wrong product delivered"). Fix: clear escalation flags on resolve/close in the status-write paths + filter the Escalated view to non-terminal statuses + a gated stale sweep (currently 0). Completes [[box-escalation-triage]].
 
+## Active project — Spec Blockers ⏳
+
+**Spec:** [[spec-blockers]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** formalizes the manual "queue after X merges" chaining (and prevents the parallel-build dirty-PR collisions we kept hitting). A spec declares `**Blocked-by:** [[other-spec]]`; the build enqueue chokepoint (`queueRoadmapBuild`) **refuses to queue** until every blocker has shipped; the board disables Build with a "🔒 Blocked by …" chip. P2 auto-queues the dependent build when the last blocker merges (native version of the watchers I launch by hand). Extends [[roadmap-build-console]].
+
 ## Active project — Control Tower (autonomous-loop observability) ⏳
 
 **Spec:** [[control-tower]] · **Owner:** [[../functions/platform]]
