@@ -35,7 +35,13 @@ const BUILDS_DIR = resolve(REPO_DIR, "../builds"); // each build gets its own wo
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN || "";
 const POLL_MS = 5000;
-const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
+// Build liveness (build-all-phases-chain Part B): a multi-phase build can legitimately work for
+// 40+ min, so don't guillotine on wall-clock. Instead kill only if the build subprocess goes
+// SILENT for BUILD_IDLE_TIMEOUT_MS (hung), with BUILD_HARD_CAP_MS as a generous backstop against a
+// process that emits noise forever. Requires the streaming runner (stream-json, see runClaude) so
+// that active work keeps producing output and "building" is distinguishable from "stuck".
+const BUILD_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // no output for 10 min ⇒ hung ⇒ kill + fail
+const BUILD_HARD_CAP_MS = 60 * 60 * 1000;     // absolute ceiling, even while still emitting output
 // Product-seed runs the full Engine to completion on Max (per-ingredient web
 // research + ~2000-review analysis + content + imagery) — give it a long ceiling.
 const SEED_TIMEOUT_MS = 90 * 60 * 1000;
@@ -208,17 +214,31 @@ function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string 
 
 // Async (NON-blocking) exec — REQUIRED for the long-running claude/tsc/apply steps so concurrent
 // build lanes actually overlap. spawnSync freezes the whole event loop and would serialize lanes.
-function shAsync(cmd: string, args: string[], opts: { timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ code: number; out: string; err: string }> {
+function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: opts.cwd || REPO_DIR, env: opts.env || process.env });
     let out = "";
     let err = "";
+    let killed: "idle" | "hardcap" | undefined;
     const cap = 64 * 1024 * 1024;
-    child.stdout?.on("data", (d) => { out += d.toString(); if (out.length > cap) out = out.slice(-cap); });
-    child.stderr?.on("data", (d) => { err += d.toString(); if (err.length > cap) err = err.slice(-cap); });
-    const timer = opts.timeout ? setTimeout(() => child.kill("SIGKILL"), opts.timeout) : null;
-    child.on("close", (code) => { if (timer) clearTimeout(timer); resolve({ code: code ?? -1, out, err }); });
-    child.on("error", (e) => { if (timer) clearTimeout(timer); resolve({ code: -1, out, err: err + String(e) }); });
+    // Hard cap (opts.timeout): absolute wall-clock backstop — kills even a process that keeps
+    // emitting output forever.
+    const hardTimer = opts.timeout ? setTimeout(() => { killed = "hardcap"; child.kill("SIGKILL"); }, opts.timeout) : null;
+    // Idle/hang detection (opts.idleTimeout): reset on every chunk of output; if the process goes
+    // silent for idleTimeout it's hung → kill. Liveness, not a wall-clock guillotine. Off unless a
+    // caller opts in.
+    let idleTimer: NodeJS.Timeout | null = null;
+    const bumpIdle = () => {
+      if (!opts.idleTimeout) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { killed = "idle"; child.kill("SIGKILL"); }, opts.idleTimeout);
+    };
+    bumpIdle();
+    child.stdout?.on("data", (d) => { out += d.toString(); if (out.length > cap) out = out.slice(-cap); bumpIdle(); });
+    child.stderr?.on("data", (d) => { err += d.toString(); if (err.length > cap) err = err.slice(-cap); bumpIdle(); });
+    const cleanup = () => { if (hardTimer) clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); };
+    child.on("close", (code) => { cleanup(); resolve({ code: code ?? -1, out, err, killed }); });
+    child.on("error", (e) => { cleanup(); resolve({ code: -1, out, err: err + String(e), killed }); });
   });
 }
 
@@ -242,18 +262,41 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string) 
     env[k] = v;
   }
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: BUILD_TIMEOUT_MS });
+  // stream-json (not json): the build must emit output continuously while it works so the hang
+  // detector can tell "actively building" from "stuck". Plain json buffers the whole run and prints
+  // once at the very end — zero liveness signal, so idle detection would kill every long build.
+  // --verbose is required by stream-json. The final {type:"result"} event carries the result text.
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
+  const r = await shAsync("claude", args, { cwd, env, idleTimeout: BUILD_IDLE_TIMEOUT_MS, timeout: BUILD_HARD_CAP_MS });
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-  } catch {
+  // stream-json output is newline-delimited JSON events; the final {type:"result"} carries the
+  // result text + session_id + is_error. Parse line-by-line; the last result event wins.
+  let parsedResult = false;
+  for (const line of (r.out || "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let obj: { type?: string; session_id?: string; result?: unknown; is_error?: boolean };
+    try { obj = JSON.parse(trimmed); } catch { continue; }
+    if (typeof obj.session_id === "string") session = obj.session_id;
+    if (obj.type === "result") {
+      resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+      isError = isError || obj.is_error === true;
+      parsedResult = true;
+    }
+  }
+  if (!parsedResult) {
+    // No result event — killed mid-run (hang/cap) or non-stream output. Surface raw + treat as error.
     resultText = (r.out || "") + (r.err || "");
+    isError = true;
+  }
+  if (r.killed === "idle") {
+    isError = true;
+    resultText = `[build killed: no output for ${Math.round(BUILD_IDLE_TIMEOUT_MS / 60000)} min — treated as hung]\n` + resultText;
+  } else if (r.killed === "hardcap") {
+    isError = true;
+    resultText = `[build killed: exceeded the ${Math.round(BUILD_HARD_CAP_MS / 60000)} min hard cap]\n` + resultText;
   }
   return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
 }
