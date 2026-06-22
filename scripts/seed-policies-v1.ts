@@ -334,7 +334,7 @@ NEVER tell a customer "you don't have Shipping Protection" or deny on those grou
 2. Missing item (shipped less than billed)
 3. Expired / near-expiration product (any "expires soon" or short shelf-life complaint)
 4. Never received / carrier-lost (delivery confirmed but customer doesn't have it)
-5. Allergy/safety override — customer reports allergy/medical reaction; replacement OR refund, same turn, no clarification
+5. Allergy/safety override — customer reports an allergy/medical reaction. SAFETY-CRITICAL anomaly: acknowledge the concern every turn and ESCALATE for human safety review (action_type='escalate'). Do NOT pre-commit a same-turn cash refund or pick the resolution for them. A replacement may be offered if the customer explicitly wants one (see matrix); any cash refund routes through the Refund playbook (return required on a fulfilled order; void/cancel an unfulfilled order — never refund-to-card without a return).
 6. Recurring fulfillment issue (same item missing across 2+ consecutive renewals)
 
 ## NOT a Replacement Trigger
@@ -358,13 +358,14 @@ NEVER tell a customer "you don't have Shipping Protection" or deny on those grou
 - Expired → YES, prepaid label, refund_amount=0
 - Never received → NO (no item exists)
 - Allergy/safety (replacement chosen) → YES, prepaid label, refund_amount=0
+- Allergy/safety (refund/cash chosen) → ESCALATE for human safety review first. NO refund-to-card without a return: route any approved cash refund through the Refund playbook — return required on a fulfilled order; void/cancel an UNFULFILLED (never-shipped) order instead of refunding-to-card.
 - Recurring fulfillment → NO (re-fulfillment, no defective item)
 
 ## Limits & Escalation
 - Replacements over 2 units → ESCALATE. AI summarizes what needs to be replaced + creates the escalation. Agent reviews. Future: agent leaves internal note "replacement approved" → AI executes.
 
 ## Allergy Override Priority
-- Allergy/medical reaction in the customer's message: HIGHEST PRIORITY. Replacement OR refund same turn. NEVER close as resolved without acknowledging the safety concern. If unable to execute the action, escalate with "allergy/safety report — needs immediate review."`,
+- Allergy/medical reaction in the customer's message: HIGHEST PRIORITY for acknowledgment + safety — but a genuine reaction is a safety-critical anomaly, NOT a self-serve refund trigger (tickets are anomalies: do NOT pre-commit a refund or replacement). Required behavior: (1) acknowledge the safety concern warmly, every turn; (2) action_type='escalate' for human safety review, escalation_reason "allergy/safety report — needs immediate review"; (3) NEVER auto-issue a same-turn cash refund to the card, and NEVER close as resolved without human review. A replacement may be offered only if the customer explicitly wants one (prepaid return + refund_amount=0, see matrix). Any cash refund — including an unwanted-renewal dispute riding on the same ticket — goes through the Refund playbook, which requires a return on a fulfilled order and voids/cancels an UNFULFILLED (never-shipped) order rather than refunding-to-card.`,
     rules: [
       { id: "exchanges.shipping_protection_required", value: false, note: "Marketing framing only; never enforced" },
       { id: "exchanges.valid_triggers", value: ["damaged", "missing", "expired", "never_received", "allergy_safety", "recurring_fulfillment"] },
@@ -372,7 +373,8 @@ NEVER tell a customer "you don't have Shipping Protection" or deny on those grou
       { id: "exchanges.return_required_by_trigger", value: { damaged: true, missing: false, expired: true, never_received: false, allergy_safety: true, recurring_fulfillment: false } },
       { id: "exchanges.refund_amount_on_return", value: 0, note: "Replacement IS the refund; return is for inventory only" },
       { id: "exchanges.unit_escalation_threshold", value: 2 },
-      { id: "exchanges.allergy_override_priority", value: "highest" },
+      { id: "exchanges.allergy_override_priority", value: "highest", action: "escalate", note: "Acknowledge safety + escalate for human review; never auto cash refund; replacement optional same turn; cash refund only via Refund playbook (return on fulfilled, void/cancel on unfulfilled)" },
+      { id: "exchanges.allergy_refund_requires_return", value: true, note: "No refund-to-card on an allergy report without a return. Fulfilled → return via Refund playbook; unfulfilled → void/cancel; genuine reaction → escalate for human safety review." },
       { id: "exchanges.playbook_id", value: "0937d507-82ea-4d04-a4eb-c69b169255e3" },
     ],
   },

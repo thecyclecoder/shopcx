@@ -95,6 +95,19 @@ If either blocks, the orchestrator escalates without ever starting this playbook
 
 [[../tables/playbook_policies]] has 0 rows for this playbook. [[../tables/playbook_exceptions]] has 0 rows. The "policy" is implicit: shipped wrong / didn't arrive → fix.
 
+## Allergy / safety reports → escalate, never auto-refund
+
+A customer reporting an allergy or medical reaction is a **safety-critical anomaly, not a self-serve refund trigger**. The active `exchanges` policy (slug=`exchanges`, § *Allergy Override Priority* + the *Return-required matrix*) governs the behavior; the orchestrator reads it via `buildPoliciesSection` in `src/lib/sonnet-orchestrator-v2.ts`. Required behavior:
+
+- **Acknowledge the safety concern warmly, every turn**, and `action_type='escalate'` for human safety review (`escalation_reason="allergy/safety report — needs immediate review"`). Aligns with `sonnet_prompts` #e0147885 ("tickets are anomalies — do NOT pre-commit a refund/replacement").
+- **Never auto-issue a same-turn cash refund to the card**, and never close as resolved without a human review.
+- **Replacement-chosen path** is unchanged: prepaid EasyPost return label + `refund_amount=0` (the replacement IS the refund).
+- **Refund-chosen path** (the matrix gap this closed): no refund-to-card without a return. Any approved cash refund routes through the [[refund]] playbook — return required on a **fulfilled** order; **void/cancel** an UNFULFILLED (never-shipped) order instead of refunding-to-card.
+
+`exchanges.rules`: `allergy_override_priority` carries `action:"escalate"`; `allergy_refund_requires_return:true`.
+
+_Root cause: ticket 46471a76 (Myra Eppright, 2026-06) — "deathly ill" report. The orchestrator treated her unwanted, never-shipped June 20 renewal (SC133069, $64.91, unfulfilled) as an "allergy refund", fired a direct `partial_refund` to the card with no return, no refund-playbook, and no escalation, then told her twice "someone will be in touch" while never escalating. Fixed by amending the exchanges Allergy Override from "replacement OR refund same turn, no clarification" to escalate-for-safety-review. See [[../specs/allergy-safety-escalate-not-auto-refund]]._
+
 ## Replacement vs return
 
 This playbook is for cases where we replace; the [[refund]] playbook is for cases where we refund. Different complaint shapes:
