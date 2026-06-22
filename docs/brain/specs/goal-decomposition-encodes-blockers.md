@@ -1,4 +1,4 @@
-# Goal-decomposition planner encodes Blocked-by (self-sequencing plans) ⏳
+# Goal-decomposition planner encodes Blocked-by (self-sequencing plans) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[goal-decomposition-engine]] + [[spec-blockers]]. · **Found in use 2026-06-22:** the engine's first real run (the [[../goals/storefront-optimizer]] tree) proposed a correct 7-spec decomposition but **set no dependencies** — so approving all 7 would fan out 7 builds at once and M4 (the agent) would build before M1 (its framework) exists. The owner had to approve in manual waves.
 
@@ -16,5 +16,9 @@ The whole [[spec-blockers]] mechanism is already built — a spec's `**Blocked-b
 - Decline a branch that others depended on → those dependents' `**Blocked-by:**` drops the declined slug (not left dangling-blocked forever).
 - Negative: a flat goal with independent specs → all `blocked_by: []`, all queue immediately (no false serialization).
 
-## Phase 1 — emit blocked_by in propose + write Blocked-by on author ⏳
-Add the dependency instruction + `blocked_by` to the planner's propose prompt/schema; write the `**Blocked-by:**` header (approved-blockers-only) during resume authoring. Brain: [[goal-decomposition-engine]] · [[spec-blockers]] · [[../libraries/roadmap-actions]] · [[../libraries/brain-roadmap]].
+## Phase 1 — emit blocked_by in propose + write Blocked-by on author ✅
+- ✅ Added the self-sequencing dependency instruction + `blocked_by` to the planner's propose prompt + JSON schema (`runPlanJob` propose branch, `scripts/builder-worker.ts`); carried `blocked_by` (string-slug list, malformed entries dropped) onto the `ProposedSpec` interface + the pending-action `spec` object.
+- ✅ Resume authoring now computes an **approved-blockers-only** list per spec (drops any blocker slug the owner declined; keeps approved siblings + already-existing specs) and instructs the authoring agent to write the `**Blocked-by:** [[slug]], [[slug]]` header (the exact format `brain-roadmap.ts` parses) immediately after the Owner/Parent line — only when the spec declares blockers.
+- Enforcement is unchanged: `queueRoadmapBuild` already refuses an uncleared blocker and spec-blockers Phase 2 auto-queues dependents as blockers ship, so approving the whole tree self-sequences with no manual waving.
+
+Brain: [[goal-decomposition-engine]] · [[spec-blockers]] · [[../libraries/roadmap-actions]] · [[../libraries/brain-roadmap]].
