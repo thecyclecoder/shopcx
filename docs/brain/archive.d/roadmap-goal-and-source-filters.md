@@ -1,0 +1,1 @@
+- **Roadmap filters — focused goal-progress view + filter by source** · verified 2026-06-22 · → [[dashboard/roadmap]]
