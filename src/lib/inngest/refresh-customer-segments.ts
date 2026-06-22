@@ -37,6 +37,7 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // Customers per keyset page = one step.run = one HTTP invocation. Tuned so a
 // single page (≈90 chunked sub-queries) finishes well under maxDuration; ~70
@@ -251,6 +252,13 @@ export const refreshCustomerSegmentsCron = inngest.createFunction(
       data: { workspace_id: w.id as string },
     }));
     if (events.length) await step.sendEvent("fan-out-workspaces", events);
-    return { fanned_out: events.length };
+    const result = { fanned_out: events.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("refresh-customer-segments-cron", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

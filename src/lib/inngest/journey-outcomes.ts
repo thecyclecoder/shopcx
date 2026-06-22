@@ -3,6 +3,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
+import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const journeySessionCompleted = inngest.createFunction(
   {
@@ -11,6 +12,9 @@ export const journeySessionCompleted = inngest.createFunction(
     triggers: [{ event: "journey/session.completed" }],
   },
   async ({ event, step }) => {
+    // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw). (control-tower-complete-coverage P1.)
+    let __ctOk = true;
+    try {
     const { session_id, outcome, workspace_id } = event.data as {
       session_id: string;
       outcome: string;
@@ -246,6 +250,12 @@ export const journeySessionCompleted = inngest.createFunction(
     });
 
     return { outcome, action_taken: true };
+    } catch (e) {
+      __ctOk = false;
+      throw e;
+    } finally {
+      await emitReactiveHeartbeat("journey-session-completed", { ok: __ctOk });
+    }
   }
 );
 

@@ -3,6 +3,7 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const monthlyRevenueSnapshot = inngest.createFunction(
   {
@@ -28,7 +29,14 @@ export const monthlyRevenueSnapshot = inngest.createFunction(
       });
     }
 
-    return { workspaces: workspaces.length };
+    const result = { workspaces: workspaces.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("monthly-revenue-snapshot", { ok: true, produced: result });
+    });
+
+    return result;
   }
 );
 

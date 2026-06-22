@@ -28,6 +28,7 @@ import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
+import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -588,6 +589,11 @@ export const unifiedTicketHandler = inngest.createFunction(
     };
     const t0 = new Date().toISOString();
     const admin = createAdminClient();
+
+    // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw). THE crucial loop —
+    // if this handler silently stops, customers go unanswered. (control-tower-complete-coverage P1.)
+    let __ctOk = true;
+    try {
 
     // ── 0a. System-sentinel short-circuit ──
     // Journey completion paths fire ticket/inbound-message with synthetic
@@ -2021,6 +2027,12 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     });
     return { status: "routed", intent: ai.intent, confidence: ai.confidence };
     ── END OLD PIPELINE ── */
+    } catch (e) {
+      __ctOk = false;
+      throw e;
+    } finally {
+      await emitReactiveHeartbeat("unified-ticket-handler", { ok: __ctOk });
+    }
   },
 );
 

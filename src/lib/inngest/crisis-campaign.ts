@@ -10,6 +10,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTicketReply } from "@/lib/email";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import crypto from "crypto";
 
 /** Get inReplyTo message ID for email threading on a ticket */
@@ -278,7 +279,14 @@ export const crisisDailyCampaign = inngest.createFunction(
 
     }
 
-    return { new_tier1: totalNew, crises_processed: crises.length };
+    const result = { new_tier1: totalNew, crises_processed: crises.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("crisis-daily-campaign", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );
 

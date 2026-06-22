@@ -17,6 +17,7 @@
  */
 import { inngest } from "./client";
 import { regenerateBrainIndex, type RegenFile } from "@/lib/brain-index";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import path from "path";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
@@ -84,6 +85,13 @@ export const brainIndexRefresh = inngest.createFunction(
       results.push(r);
     }
 
-    return { committed: results.filter((r) => r.committed).map((r) => r.path), results };
+    const result = { committed: results.filter((r) => r.committed).map((r) => r.path), results };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("brain-index-refresh", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

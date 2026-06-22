@@ -1,5 +1,6 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /**
  * ONE-OFF operational gate for the Founder's VIP sale (June 2026).
@@ -98,6 +99,13 @@ export const foundervipFollowupGate = inngest.createFunction(
       .update({ status: "scheduled", scheduled_at: new Date().toISOString() })
       .eq("id", FOLLOWUP_ID);
 
-    return { buyers_excluded: buyerIds.length };
+    const result = { buyers_excluded: buyerIds.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("foundervip-followup-gate", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

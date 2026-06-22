@@ -9,6 +9,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { bucketOrder } from "@/lib/order-bucketing";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // Self-heal cron — runs at 7 AM Central (after the 1 AM snapshot + after our
 // Shopify→DB orders sync typically catches up). Looks at the last 7 days of
@@ -45,7 +46,14 @@ export const dailyOrderSnapshotSelfHeal = inngest.createFunction(
       data: { date: r.snapshot_date as string, workspace_id: r.workspace_id as string },
     })));
 
-    return { rerun: flagged.length, dates: flagged.map(r => r.snapshot_date) };
+    const result = { rerun: flagged.length, dates: flagged.map(r => r.snapshot_date) };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("daily-order-snapshot-self-heal", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );
 
@@ -263,6 +271,13 @@ export const dailyOrderSnapshot = inngest.createFunction(
       });
     }
 
-    return { workspaces: workspaces.length };
+    const result = { workspaces: workspaces.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("daily-order-snapshot", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

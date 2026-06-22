@@ -22,6 +22,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { closeReturn } from "@/lib/shopify-returns";
+import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── returns/process-delivery ──
 // Triggered by EasyPost webhook when tracker → delivered. Verifies
@@ -36,6 +37,9 @@ export const returnsProcessDelivery = inngest.createFunction(
     triggers: [{ event: "returns/process-delivery" }],
   },
   async ({ event, step }) => {
+    // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw). (control-tower-complete-coverage P1.)
+    let __ctOk = true;
+    try {
     const { workspace_id, return_id } = event.data as {
       workspace_id: string;
       return_id: string;
@@ -69,6 +73,12 @@ export const returnsProcessDelivery = inngest.createFunction(
     });
 
     return { success: true, return_id };
+    } catch (e) {
+      __ctOk = false;
+      throw e;
+    } finally {
+      await emitReactiveHeartbeat("returns-process-delivery", { ok: __ctOk });
+    }
   },
 );
 
