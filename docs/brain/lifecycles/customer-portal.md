@@ -179,4 +179,6 @@ When a customer clicks "Cancel subscription" in the portal, the handler does NOT
 
 ## Related
 
-[[cancel-flow]] · [[dunning]] · [[storefront-checkout]] · [[blog-resources]] · [[customer-link-confirmation]] · [[../libraries/portal__handlers__index]] · [[../integrations/twilio]] · [[../integrations/braintree]] · [[../integrations/shopify]] · [[../tables/customer_events]] · [[../tables/auth_otp_sessions]]
+[[cancel-flow]] · [[dunning]] · [[storefront-checkout]] · [[blog-resources]] · [[customer-link-confirmation]] · [[../libraries/portal__handlers__index]] · [[../libraries/client-error-reporter]] · [[../integrations/twilio]] · [[../integrations/braintree]] · [[../integrations/shopify]] · [[../tables/customer_events]] · [[../tables/auth_otp_sessions]]
+
+Both portal surfaces (in-house `portal/[slug]/layout.tsx` + the Shopify-extension Preact bundle) report client-side render crashes to `/api/client-errors` as `error_events` `source='client'`, `surface='portal'` — the Preact bundle posts cross-origin to the absolute app origin. See [[../libraries/client-error-reporter]].
