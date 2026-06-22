@@ -38,7 +38,7 @@ export async function POST(request: Request) {
   if ("error" in c) return c.error;
   const { user, workspaceId } = c;
 
-  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; instructions?: unknown; verify?: unknown; jobId?: unknown; recoverPr?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; instructions?: unknown; verify?: unknown; jobId?: unknown; recoverPr?: unknown; chainPhases?: unknown };
 
   // Create PR recovery (build-recover-pr-create): a build that pushed its branch but failed `gh pr create`
   // sits in needs_attention. Open the PR for that pushed branch instead of discarding it via Rebuild.
@@ -53,7 +53,8 @@ export async function POST(request: Request) {
     slug: typeof body.slug === "string" ? body.slug : "",
     instructions: typeof body.instructions === "string" ? body.instructions : null,
     verify: body.verify === true,
+    chainPhases: body.chainPhases === true,
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  return NextResponse.json({ job: result.job, alreadyActive: result.alreadyActive, queuedBehindActive: result.queuedBehindActive, fold: result.fold });
+  return NextResponse.json({ job: result.job, alreadyActive: result.alreadyActive, queuedBehindActive: result.queuedBehindActive, fold: result.fold, chainPhases: result.chainPhases });
 }

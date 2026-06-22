@@ -83,8 +83,22 @@ export interface AgentJob {
   log_tail: string | null;
   error: string | null;
   claimed_at: string | null;
+  // build-all-phases-chain Phase 1: a "Build all" build → its first ⏳ phase is tagged true; the
+  // post-merge step queues the next ⏳ phase (also chain_phases) on merge, until all phases ✅. Default
+  // false (single-phase / non-chained builds). May be undefined on a pre-migration row read.
+  chain_phases?: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The instruction text scoping a build to ONE phase — shared by the dashboard per-phase Build, the
+ * "Build all" first-phase queue (queueRoadmapBuild), and the post-merge chain step
+ * (queueNextChainedPhase) so all three drive the box the same way. Kept in sync with the dashboard
+ * PhaseList's inline copy.
+ */
+export function phaseScopedInstructions(phaseTitle: string): string {
+  return `Implement ONLY this phase of the spec: "${phaseTitle}". Mark that phase's emoji ✅ when done. Do not modify other phases.`;
 }
 
 /** Statuses where a job is live (no new job should be queued for the same spec/goal). */
@@ -280,6 +294,65 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
 }
 
 /**
+ * build-all-phases-chain Phase 1 — advance a "Build all" chain. A chain-tagged build for `slug` just
+ * merged (its phase's PR landed on `main` + the phase flipped ✅); queue the spec's NEXT ⏳ phase, also
+ * `chain_phases`, scoped to that phase and built on fresh `main` (atop the prior phase's code). The chain
+ * runs hands-off: each phase builds → auto-merges (auto-ship-pipeline) → queues the next, until none ⏳
+ * remain (every phase ✅ = chain complete). A phase that FAILS or hits needs_approval never reaches
+ * `merged`, so this is never called for it — the chain stops/pauses there with no explicit stop logic.
+ *
+ * Reads the spec from `main` via getSpec so it sees the just-merged phase as ✅ (and so a phase a prior
+ * build left ⏳ is picked up next). Race/dup-guarded: skips if any build job for the spec is already in
+ * flight (a chain already advanced, or a manual build is running) — reconcileMergedJobs flips a job
+ * completed→merged once, so this normally fires once per phase; the guard covers concurrent board loads.
+ * Returns the queued phase title, or null (chain done / nothing to queue). Best-effort; never throws.
+ */
+export async function queueNextChainedPhase(workspaceId: string, slug: string): Promise<string | null> {
+  const spec = await getSpec(slug);
+  if (!spec) return null;
+  const next = spec.card.phases.find((p) => p.status === "planned");
+  if (!next) return null; // no ⏳ phase left → the chain is complete (all phases ✅)
+  const scoped = phaseScopedInstructions(next.title);
+
+  const admin = createAdminClient();
+  // Idempotency: never (re-)queue a phase that already has a build job (any status). Covers a re-run on a
+  // later board load, an in-flight build of this phase, AND the narrow race where a few-seconds-stale `main`
+  // read still shows the just-merged phase as ⏳ — the just-merged job carries this exact scoped instruction,
+  // so it matches here and we skip rather than rebuilding the phase we just shipped.
+  const { data: dup } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .eq("instructions", scoped)
+    .limit(1);
+  if (dup && dup.length) return null;
+  // Don't stack on any other in-flight build for this spec (e.g. a manual build running concurrently).
+  const { data: active } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .in("status", ACTIVE_STATUSES)
+    .limit(1);
+  if (active && active.length) return null;
+
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    spec_slug: slug,
+    kind: "build",
+    status: "queued",
+    created_by: null,
+    chain_phases: true,
+    instructions: scoped,
+  });
+  if (error) return null;
+  return next.title;
+}
+
+/**
  * fix-ship-retests-origin: a just-merged build whose spec carries a machine-readable `Fixes: {origin}`
  * link (stamped by the propose-fix flow) should auto-re-test the ORIGIN spec — the fix is now live, so the
  * origin's previously-failing spec-test check can flip ✅ and its stale "Agent-tested · issues" badge clears
@@ -343,6 +416,19 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
               }
             } catch {
               /* event missed → the daily backlog + spec-drift crons mop it up */
+            }
+            // build-all-phases-chain Phase 1: if THIS merged build was part of a "Build all" chain, queue
+            // the next ⏳ phase (on fresh main, atop this phase's code). Outside the shipped-check above:
+            // most phase merges leave the spec in_progress (more ⏳ phases remain) — the chain advances on
+            // every phase merge, not only the final one. queueNextChainedPhase no-ops when no ⏳ phase is
+            // left (all ✅ = chain done) or a build is already in flight (dedupe). A failed/needs_approval
+            // phase never reaches `merged`, so the chain stops/pauses there with no explicit stop logic.
+            if (j.chain_phases) {
+              try {
+                await queueNextChainedPhase(j.workspace_id, j.spec_slug);
+              } catch {
+                /* best-effort — the owner can re-tap Build all to resume the chain */
+              }
             }
             // fix-ship-retests-origin: if THIS merged build's spec carries a `Fixes: {origin}` link, re-test
             // the origin so its stale "issues" badge clears once the fix is live (deduped; no link → no-op).
