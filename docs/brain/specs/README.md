@@ -64,6 +64,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Roadmap Reads Specs from Git ⏳
+
+**Spec:** [[roadmap-reads-specs-from-git]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** the roadmap board reads spec phase emojis from the docs baked into the deployed build, so a phase that flips on main (build merges / spec-drift stamps ✅ / fold lands) shows stale until the next deploy — minutes-to-hours of lag (observed: error-feed-monitoring showed P2 planned while main had P2 ✅). Fix: read spec content from main at request time, SHA-keyed cache (1 commit-SHA call/request, full re-fetch only when main moves), with a baked-in fs fallback so the board never breaks. Lag drops from next-deploy to next-request.
+
 ## Active project — Spec-Drift Agent ⏳
 
 **Spec:** [[spec-drift-agent]] · **Owner:** [[../functions/platform]]
