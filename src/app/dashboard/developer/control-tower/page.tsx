@@ -28,7 +28,7 @@ interface OpenAlert {
 }
 interface LoopStatus {
   id: string;
-  kind: "worker" | "cron" | "agent-kind";
+  kind: "worker" | "cron" | "agent-kind" | "inline-agent";
   label: string;
   description: string;
   expectedCadence: string;
@@ -103,6 +103,7 @@ const KIND_LABEL: Record<string, string> = {
   worker: "Worker",
   cron: "Crons",
   "agent-kind": "Agent lanes",
+  "inline-agent": "Inline AI agents",
 };
 
 function HistoryStrip({ history }: { history: HistoryRow[] }) {
@@ -262,7 +263,7 @@ export default function ControlTowerPage() {
     );
   }
 
-  const groups: LoopStatus["kind"][] = ["worker", "cron", "agent-kind"];
+  const groups: LoopStatus["kind"][] = ["worker", "cron", "agent-kind", "inline-agent"];
 
   return (
     <div className="mx-auto w-full max-w-screen-xl p-6">
@@ -273,9 +274,9 @@ export default function ControlTowerPage() {
         </Link>
       </div>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-        Every autonomous loop, watching itself — liveness, cron freshness, stuck jobs, and output assertions
-        (idle-while-work + false-success). A red tile pages the owners on Slack; a healthy or genuinely-idle loop
-        is green. Polls every ~15s.
+        Every autonomous loop, watching itself — worker liveness, cron freshness, stuck jobs, inline-agent
+        liveness-when-work-exists + error-rate, and output assertions (idle-while-work + false-success). A red tile
+        pages the owners on Slack; a healthy or genuinely-idle loop is green. Polls every ~15s.
       </p>
 
       {loading && !snap ? (

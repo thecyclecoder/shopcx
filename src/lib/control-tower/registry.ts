@@ -16,9 +16,17 @@
  *                  lane is healthy/green); alerted only when a job is STUCK
  *                  (queued/building past `stuckThresholdMs`). Its heartbeats
  *                  (loop_id = `agent:<kind>`) feed last-ran / history on the tile.
+ *   - inline-agent — a server-side, event-driven AI agent that runs per-ticket /
+ *                  per-order / per-journey (NOT on a queue or a cron). No fixed
+ *                  cadence, so a genuinely-idle agent (no work waiting) is GREEN.
+ *                  Each beats once at the END of every run (loop_id = `ai:<agent>`,
+ *                  try/finally — ok:true on success, ok:false on throw). Alerted on
+ *                  (a) liveness-when-work-exists — upstream work waits in the window
+ *                  but 0 SUCCESSFUL beats — or (b) error-rate — errored beats over
+ *                  the window past `errorRateThreshold`. (control-tower-agent-coverage spec.)
  */
 
-export type LoopKind = "worker" | "cron" | "agent-kind";
+export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent";
 
 /**
  * Phase 2 output-assertion id. Phase 1 catches "the loop went SILENT" (liveness /
@@ -36,6 +44,35 @@ export type LoopKind = "worker" | "cron" | "agent-kind";
  *                          the past) — the renewal cron ran but didn't advance them.
  */
 export type OutputAssertionId = "escalation-idle" | "spec-test-persisted" | "renewal-integrity";
+
+/**
+ * Inline-agent work-exists probe id (control-tower-agent-coverage spec, Phase 1). Each
+ * names a READ-ONLY, INDEPENDENT upstream-demand count the monitor evaluates: "is there
+ * work that should have driven this agent in its window?". The liveness-when-work-exists
+ * assertion fires only when this count > 0 AND the agent had 0 successful beats in the
+ * window — the exact silent-death (a QC/decision agent stopped while work piled up) the
+ * cron/agent-kind checks can't see. Implemented in monitor.ts → fetchInlineAgentState.
+ *
+ *   - tickets-awaiting-qc       — closed AI-handled tickets never analyzed (last_analyzed_at
+ *                                 null) updated within the window — what the ticket-analysis
+ *                                 cron feeds analyzeTicket.
+ *   - journeys-awaiting-delivery — journey_sessions created within the window (each is created
+ *                                 inside launchJourneyForTicket right before delivery, so a
+ *                                 created session with no successful delivery beat = silent).
+ *   - orders-awaiting-fraud-screen — orders created within the window (every new order fires
+ *                                 the per-order fraud screen).
+ */
+export type InlineWorkSignalId =
+  | "tickets-awaiting-qc"
+  | "journeys-awaiting-delivery"
+  | "orders-awaiting-fraud-screen";
+
+/** Stable inline-agent loop ids (loop_id on loop_heartbeats; matches the registry entries). */
+export const INLINE_AGENT_IDS = {
+  ticketAnalyzer: "ai:ticket-analyzer",
+  journeyDelivery: "ai:journey-delivery",
+  fraudDetector: "ai:fraud-detector",
+} as const;
 
 export interface MonitoredLoop {
   /** Heartbeat loop_id: the worker box id, a cron's inngest fn id, or `agent:<kind>`. */
@@ -62,6 +99,16 @@ export interface MonitoredLoop {
    * violation even if the loop is otherwise fresh/healthy on the Phase 1 checks.
    */
   outputAssertion?: OutputAssertionId;
+  /**
+   * inline-agent only: the read-only "is there work that should have triggered this agent
+   * in the window?" probe. Liveness-when-work-exists fires only when this count > 0 AND the
+   * agent had 0 successful beats in `livenessWindowMs` (genuinely-idle ⇒ green, no false alarm).
+   */
+  inlineWorkSignal?: InlineWorkSignalId;
+  /** inline-agent only: errored/total beat fraction over the window that trips the error-rate alert. Default 0.5. */
+  errorRateThreshold?: number;
+  /** inline-agent only: minimum beats in the window before the error-rate check is meaningful (avoids 1/1 = 100%). Default 5. */
+  minRunsForErrorRate?: number;
 }
 
 const MIN = 60_000;
@@ -156,6 +203,45 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:spec-test", kind: "agent-kind", agentKind: "spec-test", label: "Agent — spec test", description: "Non-destructive spec QA pass.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:migration-fix", kind: "agent-kind", agentKind: "migration-fix", label: "Agent — migration fix", description: "Event-fired billing repair diagnosis.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:dev-ask", kind: "agent-kind", agentKind: "dev-ask", label: "Agent — dev ask", description: "Read-only developer message-center turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+
+  // ── Inline event-driven AI agents (loop_heartbeats, loop_id = `ai:<agent>`) ──
+  // Server-side AI agents that run per-ticket / per-order / per-journey, not on a queue or
+  // cron. Each beats once at the END of every run (try/finally). No fixed cadence ⇒ a
+  // genuinely-idle agent (no work waiting) is GREEN; red only on liveness-when-work-exists
+  // (upstream work waits but 0 successful beats in the window) or an error-rate spike.
+  {
+    id: INLINE_AGENT_IDS.ticketAnalyzer,
+    kind: "inline-agent",
+    label: "AI ticket analyzer",
+    description: "Per-ticket QC grader (analyzeTicket) — scores handled tickets, escalates ≤5 / severe types.",
+    expectedCadence: "per handled ticket",
+    livenessWindowMs: 2 * HOUR, // the analysis cron runs every 30m — 4 cycles of grace.
+    inlineWorkSignal: "tickets-awaiting-qc",
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+  {
+    id: INLINE_AGENT_IDS.journeyDelivery,
+    kind: "inline-agent",
+    label: "AI journey delivery",
+    description: "Delivers journeys to a ticket/portal per channel (launchJourneyForTicket).",
+    expectedCadence: "per journey launch",
+    livenessWindowMs: 6 * HOUR,
+    inlineWorkSignal: "journeys-awaiting-delivery",
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+  {
+    id: INLINE_AGENT_IDS.fraudDetector,
+    kind: "inline-agent",
+    label: "AI fraud detector",
+    description: "Per-order fraud QC screen (checkOrderForFraud) — rules + AI screen + ring signals.",
+    expectedCadence: "per new order",
+    livenessWindowMs: 6 * HOUR,
+    inlineWorkSignal: "orders-awaiting-fraud-screen",
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
 ];
 
 /** The agent-kind heartbeat loop_id for a given agent_jobs.kind. */

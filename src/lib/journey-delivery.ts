@@ -19,6 +19,8 @@ import { markFirstTouch } from "@/lib/first-touch";
 import { getDeliveryChannel } from "@/lib/delivery-channel";
 import crypto from "crypto";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
+import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -64,10 +66,44 @@ interface LaunchParams {
 // Single path now: send a CTA, mini-site rebuilds at click.
 
 /**
+ * Public entry — the inline journey-delivery AI agent (`ai:journey-delivery` in the Control
+ * Tower registry). Runs launchJourneyForTicketInner and emits ONE loop_heartbeats beat at the
+ * END of the run in a try/finally (control-tower-agent-coverage spec). ok:false on a thrown
+ * run OR a non-delivery (returned false) — except a `social_comments` channel, where journeys
+ * are N/A by design (an intentional skip ⇒ ok:true).
+ */
+export async function launchJourneyForTicket(params: LaunchParams): Promise<boolean> {
+  const startedAt = Date.now();
+  let delivered: boolean | null = null;
+  let threw: unknown = null;
+  try {
+    delivered = await launchJourneyForTicketInner(params);
+    return delivered;
+  } catch (e) {
+    threw = e;
+    throw e;
+  } finally {
+    const intentionalSkip = delivered === false && params.channel === "social_comments";
+    await emitInlineAgentHeartbeat(INLINE_AGENT_IDS.journeyDelivery, {
+      ok: !threw && (delivered === true || intentionalSkip),
+      produced: threw ? { error: "exception" } : { delivered: delivered === true, journey: params.journeyName, ticket: params.ticketId, channel: params.channel },
+      detail: threw
+        ? `threw: ${threw instanceof Error ? threw.message : String(threw)}`
+        : delivered
+        ? `launched ${params.journeyName} via ${params.channel}`
+        : intentionalSkip
+        ? "skipped (social_comments — journeys N/A)"
+        : `not delivered (${params.journeyName} / ${params.channel})`,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
+/**
  * Launch a journey for a ticket via the appropriate channel delivery.
  * Returns true if launched, false if channel doesn't support journeys.
  */
-export async function launchJourneyForTicket(params: LaunchParams): Promise<boolean> {
+async function launchJourneyForTicketInner(params: LaunchParams): Promise<boolean> {
   const { workspaceId, ticketId, customerId, journeyId, journeyName, triggerIntent, channel, leadIn, ctaText, prependAccountLinking, subscriptionId } = params;
   const admin = createAdminClient();
 

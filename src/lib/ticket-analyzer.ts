@@ -19,6 +19,8 @@ import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { cleanEmailBody } from "@/lib/email-cleaner";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
+import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
+import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -228,6 +230,7 @@ interface AnalyzeResult {
   ok: boolean;
   reason?: string;
   analysis?: AnalysisResult;
+  analysis_id?: string;
   cost_cents?: number;
   ai_message_count?: number;
 }
@@ -340,11 +343,50 @@ async function buildPlaybookContextForGrader(
 }
 
 /**
+ * Public entry — the inline QC-grader AI agent (`ai:ticket-analyzer` in the Control Tower
+ * registry). Runs analyzeTicketInner and emits ONE loop_heartbeats beat at the END of the
+ * run in a try/finally (control-tower-agent-coverage spec). ok:false ONLY on a real failure —
+ * a thrown exception or a grader HTTP / parse error; an INTENTIONAL skip (no AI messages,
+ * spam tag, merged, …) is a SUCCESSFUL run (the agent correctly decided not to grade) so it
+ * never spuriously trips the error-rate alert. produced carries the analysis id + score.
+ */
+export async function analyzeTicket(
+  ticketId: string,
+  trigger: "auto_close" | "manual_close" | "reopen_close" | "manual" = "auto_close",
+): Promise<AnalyzeResult> {
+  const startedAt = Date.now();
+  let result: AnalyzeResult | null = null;
+  let threw: unknown = null;
+  try {
+    result = await analyzeTicketInner(ticketId, trigger);
+    return result;
+  } catch (e) {
+    threw = e;
+    throw e;
+  } finally {
+    // A grader HTTP / parse error is a real failure; every other non-ok reason is an
+    // intentional skip (ok:true — the agent ran and correctly chose not to grade).
+    const isError = !!threw || (!!result && !result.ok && /^grader_http_|^parse_failed$/.test(result.reason || ""));
+    const produced = threw
+      ? { error: "exception" }
+      : result?.ok
+      ? { analysis_id: result.analysis_id ?? null, score: result.analysis?.score ?? null, ai_messages: result.ai_message_count ?? null }
+      : { skipped: result?.reason ?? "unknown" };
+    await emitInlineAgentHeartbeat(INLINE_AGENT_IDS.ticketAnalyzer, {
+      ok: !isError,
+      produced,
+      detail: threw ? `threw: ${threw instanceof Error ? threw.message : String(threw)}` : result?.reason ?? undefined,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
+/**
  * Analyze a single ticket. Returns ok=false with a reason when we
  * intentionally skip (no AI messages, spam tags, etc.) — caller should
  * still mark `last_analyzed_at` so we don't re-check.
  */
-export async function analyzeTicket(
+async function analyzeTicketInner(
   ticketId: string,
   trigger: "auto_close" | "manual_close" | "reopen_close" | "manual" = "auto_close",
 ): Promise<AnalyzeResult> {
@@ -542,7 +584,7 @@ export async function analyzeTicket(
   // Severity actions
   await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, inserted?.id);
 
-  return { ok: true, analysis, cost_cents: costCents, ai_message_count: aiMessageCount };
+  return { ok: true, analysis, analysis_id: inserted?.id ?? undefined, cost_cents: costCents, ai_message_count: aiMessageCount };
 }
 
 /**
