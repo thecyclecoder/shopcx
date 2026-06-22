@@ -855,7 +855,32 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
     const emailStatus = profile.email_marketing_status || "unknown";
     const smsStatus = profile.sms_marketing_status || "unknown";
     const noShopify = !profile.shopify_customer_id;
-    parts.push(`\nMARKETING CONSENT: email=${emailStatus}, sms=${smsStatus}${noShopify ? " [WARNING: no shopify_customer_id — unsubscribe actions cannot push to Shopify; escalate so a human can remove from any external lists]" : ""}`);
+    // A channel only has something left to unsubscribe if it is currently
+    // 'subscribed' (definitely on a list) or 'unknown' (we can't prove it's
+    // off). 'not_subscribed' means nothing remains to remove on that channel.
+    const stillOptedIn = (s: string) => s === "subscribed" || s === "unknown";
+    const anyToRemove = stillOptedIn(emailStatus) || stillOptedIn(smsStatus);
+    const emptyShell = !(subs?.length) && !(orders?.length);
+
+    let consentHint = "";
+    if (noShopify && anyToRemove) {
+      // There is a real opt-in we cannot push to Shopify. Note the platform
+      // limitation WITHOUT instructing the orchestrator to escalate — the
+      // No-data-guard / ground-truth-wins rules should let it reply (confirm
+      // we've recorded the opt-out internally) unless something else forces a
+      // human. Decoupling "cannot push to Shopify" from "escalate" stops this
+      // line from over-riding every deterministic + sonnet_prompt rule (the
+      // bug behind ticket 3d828685, where an already-unsubscribed empty shell
+      // was escalated purely on this hint).
+      consentHint = " [NOTE: no shopify_customer_id — an unsubscribe recorded here cannot be pushed to Shopify or external lists by an automated action. We can still record the opt-out internally and reply; only escalate if the customer specifically needs removal from an external/third-party list we cannot reach.]";
+    } else if (noShopify && !anyToRemove) {
+      // Both channels are already not_subscribed and there's no Shopify push
+      // target. Nothing to unsubscribe — steer toward a reply, not escalation.
+      consentHint = emptyShell
+        ? " [NOTE: already fully unsubscribed on every channel, and this customer has no orders and no subscriptions — there is nothing to unsubscribe and nothing to cancel on our side. Reply rather than escalate; any recurring charges the customer describes are not ours.]"
+        : " [NOTE: already fully unsubscribed on every channel — there is nothing left to remove. No unsubscribe action is needed or possible; reply rather than escalate.]";
+    }
+    parts.push(`\nMARKETING CONSENT: email=${emailStatus}, sms=${smsStatus}${consentHint}`);
   }
 
   // Linked accounts
