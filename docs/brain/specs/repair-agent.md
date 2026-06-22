@@ -13,6 +13,8 @@ The error appearing *is* the trigger — no polling.
 ## Its own queue
 One `repair` `agent_jobs` per **distinct signature** (deduped exactly like error_events groups), on a concurrency-limited **`repair` lane** on the box. N errors at once → N queued jobs draining a few at a time. Skip-enqueue if: a `repair` job for that signature is already active, OR an **open fix spec already exists** for it (don't re-diagnose/re-spec the same thing).
 
+**Dedup discipline (shipped follow-on — `repair-agent-dedup`, folded into [[../libraries/repair-agent]] § Dedup discipline):** after the first live run over-produced (8 specs / 6 PRs for ~3 root causes), four guards landed — **root-cause grouping** (sibling signatures → one spec carrying N `Repair-signature:` lines), an **already-fixed skip** (a re-fire of a signature already addressed by a recent spec resolves "pending deploy", no re-diagnosis), **auto-build dedup** (≤1 build per slug), and a **per-cycle cluster cap** (a burst → one `cluster:repair` job).
+
 ## The agent (box `claude -p`, read-only investigation)
 Per error/alert:
 1. **Investigate (READ-ONLY):** pull the signature + sample + the implicated route/cron/function; trace the root cause in the codebase. No prod writes during triage.

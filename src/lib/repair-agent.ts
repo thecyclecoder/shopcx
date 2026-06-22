@@ -52,6 +52,64 @@ export function isRepairAutobuildKind(verdict: string): boolean {
   return Object.prototype.hasOwnProperty.call(REPAIR_AUTOBUILD_KINDS, verdict);
 }
 
+// ── Dedup discipline (repair-agent-dedup Phase 1) ────────────────────────────
+// The first live run over-produced: 8 specs + 6 PRs for ~3 root causes + 1 bug. Three guards harden
+// it — root-cause grouping (sibling signatures → one spec), an already-fixed skip (don't re-diagnose
+// a problem whose fix already shipped/is in-flight), and a per-cycle cluster cap (a burst → one
+// "investigate this cluster" job, not K independent ones). The keys + constants live here; the box's
+// `runRepairJob` (scripts/builder-worker.ts) wires them into the queue.
+
+/** Beyond this many live repair jobs queued inside one burst window, fold further signatures into a
+ *  single `cluster:repair` "investigate this cluster" job (they likely share one cause). K. */
+export const REPAIR_CLUSTER_CAP = 5;
+/** A "burst" = repair jobs queued within this window of each other (the monitor tick / error storm). */
+export const REPAIR_CLUSTER_WINDOW_MS = 10 * 60 * 1000;
+/** The stable spec_slug of the single batched cluster job (find-or-append, never N of them). */
+export const REPAIR_CLUSTER_SLUG = "cluster:repair";
+/** "Recently shipped" window for the already-fixed skip — a fix authored within this is "pending deploy". */
+export const REPAIR_RECENT_FIX_WINDOW_MS = 24 * 60 * 60 * 1000; // N hours
+
+/**
+ * Normalize an implicated file path so equivalent targets compare equal: lowercase, drop a leading
+ * `./` or `src/`-less prefix junk, strip a `:line[:col]` suffix and stray quoting. Empty/unknown → "".
+ */
+export function normalizeImplicatedFile(target?: string | null): string {
+  if (!target) return "";
+  let f = String(target).trim().toLowerCase();
+  f = f.replace(/[`"'<>]/g, "").trim();
+  f = f.replace(/^\.\//, "").replace(/^\/+/, "");
+  f = f.replace(/:\d+(:\d+)?$/, ""); // a `file.ts:42` or `file.ts:42:7` suffix
+  return f.trim();
+}
+
+/**
+ * A stable ROOT-CAUSE key = implicated file + failure mode (verdict). Two signatures with the same
+ * key are siblings of ONE root cause → they collapse onto one spec (N `Repair-signature:` lines, one
+ * spec) rather than N specs. An empty target degrades to `?` so unknown-target verdicts never falsely
+ * group together.
+ */
+export function rootCauseKey(target: string | null | undefined, verdict: string): string {
+  const file = normalizeImplicatedFile(target) || "?";
+  const mode = String(verdict || "").trim() || "?";
+  return `${file}::${mode}`;
+}
+
+/**
+ * Parse a repair-authored spec body for its machine markers: the `Repair-root-cause:` key (for
+ * grouping) and every `Repair-signature:` it already carries (so we never append a dup). Used by the
+ * box to decide group-onto-existing vs author-new.
+ */
+export function parseRepairSpecMeta(markdown: string): { rootCause: string | null; signatures: string[] } {
+  const rc = markdown.match(/\*\*Repair-root-cause:\*\*\s*`([^`]+)`/);
+  const signatures: string[] = [];
+  const re = /\*\*Repair-signature:\*\*\s*`([^`]+)`/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(markdown)) !== null) {
+    if (!signatures.includes(m[1])) signatures.push(m[1]);
+  }
+  return { rootCause: rc ? rc[1] : null, signatures };
+}
+
 /**
  * Statuses that mean a repair item for a signature is still "live" — either being worked
  * (active) or surfaced and awaiting the owner's Build/Dismiss (needs_approval is in the active
@@ -117,6 +175,22 @@ export async function enqueueRepairJob(admin: Admin, input: EnqueueRepairInput):
     const workspaceId = await resolveRepairWorkspace(admin);
     if (!workspaceId) return { enqueued: false, reason: "no workspace to attach the repair job to" };
 
+    // ── Per-cycle cluster cap ──────────────────────────────────────────────
+    // A burst (one monitor tick / error storm) that would spawn more than K live repair jobs likely
+    // shares ONE cause — so beyond K, fold further signatures into a single `cluster:repair`
+    // "investigate this cluster" job instead of N independent diagnoses. (The over-produce guard.)
+    const sinceIso = new Date(Date.now() - REPAIR_CLUSTER_WINDOW_MS).toISOString();
+    const { count: liveBurst } = await admin
+      .from("agent_jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("kind", "repair")
+      .neq("spec_slug", REPAIR_CLUSTER_SLUG)
+      .in("status", LIVE_REPAIR_STATUSES)
+      .gte("created_at", sinceIso);
+    if ((liveBurst ?? 0) >= REPAIR_CLUSTER_CAP) {
+      return foldIntoClusterJob(admin, workspaceId, input);
+    }
+
     const { error } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
       spec_slug: input.signature,
@@ -139,6 +213,73 @@ export async function enqueueRepairJob(admin: Admin, input: EnqueueRepairInput):
     console.warn("[repair-agent] enqueueRepairJob threw:", err instanceof Error ? err.message : err);
     return { enqueued: false, reason: "threw" };
   }
+}
+
+/** Shape of a `cluster:repair` job's `instructions` JSON — the batched list of signatures the box
+ *  must investigate together. */
+interface ClusterInstructions {
+  source: "cluster";
+  signature: string; // == REPAIR_CLUSTER_SLUG, the dedupe key
+  title: string;
+  members: Array<{ source: string; signature: string; title: string; errorEventId?: string | null; loopAlertId?: string | null }>;
+}
+
+/**
+ * Cluster-cap overflow: find-or-append into the SINGLE live `cluster:repair` job rather than spawning
+ * another per-signature job. If a live cluster job exists, append this signature to its `members`
+ * (deduped); else open one seeded with this signature. One cluster job per burst, never K.
+ */
+async function foldIntoClusterJob(admin: Admin, workspaceId: string, input: EnqueueRepairInput): Promise<{ enqueued: boolean; reason?: string }> {
+  const member = {
+    source: input.source,
+    signature: input.signature,
+    title: input.title.slice(0, 300),
+    errorEventId: input.errorEventId ?? null,
+    loopAlertId: input.loopAlertId ?? null,
+  };
+  const { data: cluster } = await admin
+    .from("agent_jobs")
+    .select("id, instructions")
+    .eq("kind", "repair")
+    .eq("spec_slug", REPAIR_CLUSTER_SLUG)
+    .in("status", LIVE_REPAIR_STATUSES)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (cluster) {
+    let instr: ClusterInstructions;
+    try {
+      instr = JSON.parse(String((cluster as { instructions?: string }).instructions || "{}")) as ClusterInstructions;
+    } catch {
+      instr = { source: "cluster", signature: REPAIR_CLUSTER_SLUG, title: "Repair cluster", members: [] };
+    }
+    const members = Array.isArray(instr.members) ? instr.members : [];
+    if (members.some((m) => m.signature === input.signature)) {
+      return { enqueued: false, reason: "signature already in the live cluster" };
+    }
+    members.push(member);
+    const { error } = await admin
+      .from("agent_jobs")
+      .update({
+        instructions: JSON.stringify({ ...instr, source: "cluster", signature: REPAIR_CLUSTER_SLUG, title: `Repair cluster (${members.length} signatures)`, members }),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", (cluster as { id: string }).id);
+    if (error) return { enqueued: false, reason: error.message };
+    return { enqueued: true, reason: `folded into cluster job (${members.length} signatures)` };
+  }
+
+  const seed: ClusterInstructions = { source: "cluster", signature: REPAIR_CLUSTER_SLUG, title: "Repair cluster (1 signature)", members: [member] };
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    spec_slug: REPAIR_CLUSTER_SLUG,
+    kind: "repair",
+    status: "queued",
+    instructions: JSON.stringify(seed),
+  });
+  if (error) return { enqueued: false, reason: error.message };
+  return { enqueued: true, reason: "opened cluster job" };
 }
 
 // ── Dashboard surface (read-only) ────────────────────────────────────────────
