@@ -1,4 +1,4 @@
-# Treat Appstle 'last subscription product' 400 as a handled would_remove_last_item, not a server ERR ⏳
+# Treat Appstle 'last subscription product' 400 as a handled would_remove_last_item, not a server ERR ✅
 
 **Owner:** [[../functions/retention]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/subscription-items.ts (appstleremovelineitem: detect status===400 with body matching must be present in a subscription / usergeneratederror, log at warn not console.error, return { success:false, error:would_remove_last_item }; and src/lib/portal/handlers/remove-line-item.ts: map that error to the existing friendly 400)::real-bug`
@@ -11,8 +11,10 @@ appstleRemoveLineItem (src/lib/subscription-items.ts:221-225) treats every non-2
 
 **Likely target:** `src/lib/subscription-items.ts (appstleRemoveLineItem: detect status===400 with body matching 'must be present in a subscription' / 'UserGeneratedError', log at warn not console.error, return { success:false, error:'would_remove_last_item' }; and src/lib/portal/handlers/remove-line-item.ts: map that error to the existing friendly 400)`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+Shipped 2026-06-22: `appstleRemoveLineItem` (`src/lib/subscription-items.ts`) now detects a `400` whose body matches `"must be present in a subscription"` / `"UserGeneratedError"`, logs at `console.warn` (not `console.error`), and returns `{ success: false, error: "would_remove_last_item" }`. The remove-line-item handler (`src/lib/portal/handlers/remove-line-item.ts`) maps that error to the existing friendly `400` instead of `handleAppstleError`'s opaque `502`. Brain pages [[../libraries/subscription-items]] + [[../libraries/portal__handlers__remove-line-item]] updated. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `vercel:0dda1c7b9495ebb1`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
