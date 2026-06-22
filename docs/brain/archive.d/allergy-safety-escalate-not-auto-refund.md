@@ -1,0 +1,1 @@
+- **Allergy/safety override: escalate to a human; never auto-refund without a return** · verified 2026-06-22 · → [[playbooks/replacement-order]]
