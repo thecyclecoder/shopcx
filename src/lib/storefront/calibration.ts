@@ -34,31 +34,36 @@ export interface CalibrationState {
   calibrated: boolean;
   /** The proxy-weights version a metric row should stamp (Phase 3 bumps it on recalibration). */
   weights_version: number;
+  /** Recalibration correction the fast loop multiplies onto est_sub_ltv. 1.0 until M3's
+   *  slow loop reconciles once; < 1 down-weights a proxy that was over-predicting. */
+  sub_ltv_factor: number;
 }
 
 /**
  * The calibration signal M3's fast loop reads when persisting a `storefront_ltv_metrics`
- * row: whether the proxy has been calibrated, and the proxy-weights version to stamp.
- * Reads the (Phase-3) `storefront_ltv_calibration` row DEFENSIVELY — before that table
- * exists the metric is honestly uncalibrated at the initial weights version (the safe,
- * conservative default; `calibrated` mirrors the inverse of `isConservative`).
+ * row: whether the proxy has been calibrated, the proxy-weights version to stamp, and the
+ * est-sub-LTV correction (`sub_ltv_factor`) the slow loop fit. Reads the `storefront_ltv_calibration`
+ * row DEFENSIVELY — before that table exists (or before any reconciliation) the metric is
+ * honestly uncalibrated at the initial weights version with an identity correction (the
+ * safe, conservative default; `calibrated` mirrors the inverse of `isConservative`).
  */
 export async function getCalibrationState(workspaceId: string): Promise<CalibrationState> {
   try {
     const admin = createAdminClient();
     const { data } = await admin
       .from("storefront_ltv_calibration")
-      .select("calibrated_at, weights_version")
+      .select("calibrated_at, weights_version, sub_ltv_factor")
       .eq("workspace_id", workspaceId)
       .order("calibrated_at", { ascending: false, nullsFirst: false })
       .limit(1)
       .maybeSingle();
-    const row = data as { calibrated_at: string | null; weights_version: number | null } | null;
+    const row = data as { calibrated_at: string | null; weights_version: number | null; sub_ltv_factor: number | null } | null;
     return {
       calibrated: !!row?.calibrated_at,
       weights_version: row?.weights_version ?? INITIAL_WEIGHTS_VERSION,
+      sub_ltv_factor: row?.sub_ltv_factor ?? 1,
     };
   } catch {
-    return { calibrated: false, weights_version: INITIAL_WEIGHTS_VERSION };
+    return { calibrated: false, weights_version: INITIAL_WEIGHTS_VERSION, sub_ltv_factor: 1 };
   }
 }

@@ -16,4 +16,4 @@ The fast-loop refresh for the predicted-LTV-per-visitor metric (Phase 2 of the s
 - **Not its own cron.** [[storefront-experiments]] `storefront-experiments-refresh` fires `storefront/ltv-metrics-refresh` (via `step.sendEvent`) immediately AFTER its per-workspace attribution rollup completes — so the metric always reads the fresh attribution the spec requires ("daily refresh after the M1 attribution rollup"), with no cron-timing race. A manual experiments-refresh re-trigger cascades here too (idempotent, safe).
 
 ## Gotchas
-- **Uncalibrated until M3 Phase 3.** Each row stamps `calibrated` + `weights_version` from [[../libraries/storefront-calibration]] `getCalibrationState`; both stay at the conservative default (`false` / `1`) until the slow-loop reconciler lands.
+- **Uncalibrated until reconciled.** Each row stamps `calibrated` + `weights_version` and applies `sub_ltv_factor` from [[../libraries/storefront-calibration]] `getCalibrationState`; all stay at the conservative default (`false` / `1` / `1`) until the slow-loop reconciler ([[storefront-ltv-reconcile]]) lands, then carry the bumped version + corrected factor.

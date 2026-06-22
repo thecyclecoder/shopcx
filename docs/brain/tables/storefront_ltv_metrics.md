@@ -24,7 +24,7 @@ One row per `(workspace × product × lander_type × audience × snapshot_date)`
 | `weights_version` | int | the proxy-weights version this row was computed under; Phase 3 bumps it on recalibration (auditable / reproducible) |
 | `calibrated` | bool | `false` until M3's slow loop (Phase 3) reconciles once; downstream runs conservatively while false |
 | `est_sub_ltv_sample_size` | int | realized subscribers sampled for `est_sub_ltv_cents` (low-confidence when small) |
-| `flags` | jsonb | `cogs_source_missing`, `audience_not_segmentable`, `insufficient_sub_history`, `no_exposures` — honest, never guessed |
+| `flags` | jsonb | `cogs_source_missing`, `audience_not_segmentable`, `insufficient_sub_history`, `no_exposures`, plus the applied `sub_ltv_factor` (Phase-3 recalibration correction) — honest, never guessed |
 | `created_at` / `updated_at` | timestamptz | |
 
 **Indexes:** unique `(workspace_id, product_id, lander_type, audience, snapshot_date)` — the snapshot/upsert key; `(workspace_id, snapshot_date desc)` — the dashboard week-over-week read.
