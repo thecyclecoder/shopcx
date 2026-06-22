@@ -9,8 +9,10 @@ Loop flipped red never_fired at 2026-06-22T12:45:12Z but the cron is healthy: pr
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** `buildControlTowerSnapshot` now captures the `control_tower_loop_beats` RPC error (`{ data: beats, error: beatsError }`, monitor.ts:588) and derives `beatsReadFailed`. `evalCron` takes a `beatsReadFailed` arg and short-circuits to amber ("beats read unavailable — staying conservative") instead of false-firing `never_fired`/`cron_freshness` reds when the all-time beats read itself failed — mirroring the existing `deployAgeMs==null` guard. Brain page [[../libraries/control-tower]] updated. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:meta-capi-dispatch-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
