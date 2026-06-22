@@ -133,6 +133,13 @@ create index if not exists pricing_rule_offer_events_offer_idx
 -- at renewal. Deactivation reverts the sub to base pricing with NOTHING baked to un-bake
 -- (the "reversible on real renewals" invariant). FK set-null so a deleted offer can't
 -- dangle the sub (it just reverts to base).
+--
+-- subscriptions is a large, HOT table: a plain (validating) FK add takes an ACCESS
+-- EXCLUSIVE lock AND a full-table scan, which contends with live renewals and can time
+-- out. We add the column (instant — nullable, no default) and the FK NOT VALID (brief
+-- lock, NO scan of existing rows — all are NULL, so nothing to validate anyway). New
+-- writes are still enforced; the constraint is then VALIDATEd in a separate, lock-light
+-- step. Idempotent: drop-if-exists before each add.
 alter table public.subscriptions
   add column if not exists pricing_rule_offer_id uuid;
 alter table public.subscriptions
@@ -140,7 +147,10 @@ alter table public.subscriptions
 alter table public.subscriptions
   add constraint subscriptions_pricing_rule_offer_fk
   foreign key (pricing_rule_offer_id)
-  references public.pricing_rule_offers(id) on delete set null;
+  references public.pricing_rule_offers(id) on delete set null
+  not valid;
+alter table public.subscriptions
+  validate constraint subscriptions_pricing_rule_offer_fk;
 
 -- ── storefront_optimizer_policy — the configured renewal-margin floor ─────────────
 -- The agent may never PROPOSE an offer whose modeled renewal margin drops below this; a

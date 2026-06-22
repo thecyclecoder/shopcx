@@ -65,19 +65,42 @@ async function main() {
   }
   try {
     // ── DDL — one statement at a time so a failure names the offending statement ──
+    // Two statements are NON-FATAL: the `validate constraint` on the large/hot subscriptions
+    // table (the NOT VALID FK above it already enforces new writes; existing rows are all NULL,
+    // so validity holds regardless — a lock/statement timeout here must not abort the apply) and
+    // the `storefront_levers` lever seed (cosmetic taxonomy row). Everything else is fatal.
+    // The CORE offer model (pricing_rule_offers + _events + the subscriptions binding column/FK)
+    // is fatal — those are what the engine + checkout need. The optimizer-policy floor column +
+    // the lever seed + the subscriptions FK VALIDATE are ENHANCEMENTS the code degrades around
+    // (the floor defaults in renewal-offers.ts; the optimizer stays safely OFF without the column;
+    // the NOT VALID FK already enforces new writes), so a failure there must not block the core.
+    const isNonFatal = (s: string) => {
+      const t = s.replace(/\s+/g, " ").toLowerCase();
+      return (
+        t.startsWith("alter table public.subscriptions validate constraint") ||
+        t.startsWith("alter table public.storefront_optimizer_policy") ||
+        t.startsWith("insert into public.storefront_levers")
+      );
+    };
     const stmts = statements(readFileSync(resolve(__dirname, "../supabase/migrations", MIGRATION), "utf8"));
+    const softFails: string[] = [];
     for (let i = 0; i < stmts.length; i++) {
       const head = stmts[i].replace(/\s+/g, " ").slice(0, 70);
       try {
         await c.query(stmts[i]);
         console.log(`  ✓ [${i + 1}/${stmts.length}] ${head}`);
       } catch (e) {
+        if (isNonFatal(stmts[i])) {
+          console.warn(`  ⚠ [${i + 1}/${stmts.length}] NON-FATAL "${head}…" — ${pgTail(e)}`);
+          softFails.push(head);
+          continue;
+        }
         verdict(`DDL statement ${i + 1}/${stmts.length} FAILED — "${head}…" — ${pgTail(e)}`);
         await c.end().catch(() => {});
         process.exit(1);
       }
     }
-    console.log(`✓ applied ${MIGRATION} (${stmts.length} statements)`);
+    console.log(`✓ applied ${MIGRATION} (${stmts.length} statements${softFails.length ? `, ${softFails.length} non-fatal skipped` : ""})`);
 
     // ── Verify the shape landed ──────────────────────────────────────────────
     const { rows: offerCols } = await c.query(
@@ -93,15 +116,21 @@ async function main() {
     const { rows: lever } = await c.query(
       "select 1 from public.storefront_levers where lever_key='renewal_offer'",
     );
+    const { rows: eventsTbl } = await c.query(
+      "select 1 from information_schema.tables where table_schema='public' and table_name='pricing_rule_offer_events'",
+    );
     await c.end();
-    if (!bind.length || !floor.length) {
-      verdict(`apply INCOMPLETE — pricing_rule_offers cols=${offerCols[0].n}, sub_binding=${!!bind.length}, margin_floor=${!!floor.length}`);
+    // CORE requirement: the offer tables + the subscriptions binding column. Floor + lever are
+    // enhancements — reported, never fatal.
+    if (!offerCols[0].n || !eventsTbl.length || !bind.length) {
+      verdict(`apply INCOMPLETE (core) — pricing_rule_offers cols=${offerCols[0].n}, events_table=${!!eventsTbl.length}, sub_binding=${!!bind.length}`);
       process.exit(1);
     }
     verdict(
       `OK — pricing_rule_offers (${offerCols[0].n} cols) + pricing_rule_offer_events created · ` +
-        `subscriptions.pricing_rule_offer_id ✓ · storefront_optimizer_policy.renewal_margin_floor_pct ✓ · ` +
-        `renewal_offer lever seeded=${!!lever.length}`,
+        `subscriptions.pricing_rule_offer_id ✓ · storefront_optimizer_policy.renewal_margin_floor_pct=${!!floor.length} · ` +
+        `renewal_offer lever seeded=${!!lever.length}` +
+        (softFails.length ? ` · ⚠ ${softFails.length} non-fatal skipped (${softFails.join("; ")})` : ""),
     );
   } catch (e) {
     await c.end().catch(() => {});
