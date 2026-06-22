@@ -1,0 +1,1 @@
+- **Goal-decomposition planner encodes Blocked-by (self-sequencing plans)** · verified 2026-06-22 · → [[tables/agent_jobs]]

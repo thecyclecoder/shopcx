@@ -1,0 +1,1 @@
+- **Control Tower — finish the renewal-integrity assertions (outcome distribution + stuck dunning)** · verified 2026-06-22 · → [[libraries/control-tower]]
