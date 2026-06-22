@@ -349,7 +349,19 @@ export default function Sidebar({
                     {section.items.map(item => {
                       if (item.adminOnly && !["owner", "admin"].includes(workspace.role)) return null;
                       if (item.ownerOnly && workspace.role !== "owner") return null;
-                      const isActive = pathname === item.href || (item.href !== "#" && pathname.startsWith(item.href));
+                      // Most-specific-wins: a parent (e.g. /dashboard/roadmap) isn't active when a longer
+                      // sibling (e.g. /dashboard/roadmap/box) also matches — otherwise both light up. Use a
+                      // "/" boundary so /dashboard/roadmap doesn't match /dashboard/roadmap-foo.
+                      const isActive =
+                        pathname === item.href ||
+                        (item.href !== "#" &&
+                          pathname.startsWith(item.href + "/") &&
+                          !section.items.some(
+                            (o) =>
+                              o.href !== "#" &&
+                              o.href.length > item.href.length &&
+                              (pathname === o.href || pathname.startsWith(o.href + "/")),
+                          ));
                       return (
                         <Link
                           key={item.href + item.label}

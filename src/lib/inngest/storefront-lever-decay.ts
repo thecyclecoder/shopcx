@@ -14,6 +14,7 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { decayLeverImportance, applyReconciliationSignal } from "@/lib/storefront/lever-memory";
 
 export const storefrontLeverDecayCron = inngest.createFunction(
@@ -29,7 +30,12 @@ export const storefrontLeverDecayCron = inngest.createFunction(
         await inngest.send({ name: "storefront/lever-decay", data: { workspace_id: workspaceId } });
       });
     }
-    return { workspaces: workspaceIds.length };
+    // Control Tower heartbeat on every daily tick (incl. the empty path) — no early return above.
+    const result = { workspaces: workspaceIds.length };
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("storefront-lever-decay-cron", { ok: true, produced: result });
+    });
+    return result;
   },
 );
 

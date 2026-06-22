@@ -14,6 +14,7 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { refreshStorefrontExperiments } from "@/lib/storefront/experiment-refresh";
 
 export const storefrontExperimentsRefreshCron = inngest.createFunction(
@@ -35,7 +36,13 @@ export const storefrontExperimentsRefreshCron = inngest.createFunction(
         });
       });
     }
-    return { workspaces: workspaceIds.length };
+    // Control Tower heartbeat on EVERY tick (incl. the common no-running-experiments path) so the
+    // freshness/never-fired monitor sees a daily beat. No early return above, so this covers all runs.
+    const result = { workspaces: workspaceIds.length };
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("storefront-experiments-refresh-cron", { ok: true, produced: result });
+    });
+    return result;
   },
 );
 
