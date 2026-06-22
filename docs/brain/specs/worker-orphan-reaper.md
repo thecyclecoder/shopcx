@@ -1,4 +1,4 @@
-# Worker Orphan-Reaper — reset in-flight jobs left by a dead worker ⏳
+# Worker Orphan-Reaper — reset in-flight jobs left by a dead worker ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[roadmap-build-console]] + [[../recipes/build-box-setup]]. Box-worker reliability.
 
@@ -16,10 +16,10 @@ On worker startup (before the poll loop), find every job **claimed by a previous
 - **Conservative on producers:** a build is failed (visible + recoverable), never blindly re-queued, so we never double-push a branch.
 
 ## Verification
-- Claim a `spec-test` (it goes `building`), restart the worker (`systemctl restart shopcx-builder`) → on boot the orphaned spec-test is **reset to `queued`** and re-runs; no row lingers in `building`; the Control Tower stuck-jobs alert never fires. (Re-validates the 7-orphan incident.)
-- Same with a `build` mid-flight → boot marks it `failed` ("orphaned by worker restart"); the failed-builds callout shows it; if its branch was pushed, **Create PR** recovers it.
-- A clean restart with no in-flight jobs → reaper logs "0 reaped", no-op.
-- A job the *current* worker is actively building (claimed after `started_at`) → never touched.
+- With a `spec-test` job sitting in `building` (`claimed_at` older than the next boot), restart the worker (`systemctl restart shopcx-builder`) → the boot log shows `[reaper] reaped 1 orphan(s) … re-queued: spec-test×1; failed: none`, the row is back to `status='queued'` with `claimed_at=null`, it re-runs, and the Control Tower "N jobs stuck in building" alert never fires. (Re-validates the 7-orphan incident.)
+- With a `build` job in `building` (old `claimed_at`) at boot → reaper log shows `failed: build×1`, the row is `status='failed'` with `error='orphaned by worker restart'`, the failed-builds callout on [[../dashboard/roadmap]] surfaces it, and if its branch was pushed, **Create PR** ([[build-recover-pr-create]]) recovers the work — no rebuild.
+- Restart the worker with no in-flight jobs → boot log reads `[reaper] 0 reaped — no orphaned in-flight jobs from a previous instance`; no rows change.
+- Confirm a job the *current* instance owns is never reaped: while the worker is actively running a job (its `claimed_at ≥ WORKER_STARTED_AT`), the reap query (`status IN ('building','claimed','queued_resume') AND claimed_at < WORKER_STARTED_AT`) excludes it — verify in the DB that an actively-building job's status is untouched across the boot reap.
 
-## Phase 1 — startup reaper ⏳
-The boot-time reap in `scripts/builder-worker.ts` (before the poll loop): query orphans (`building`/`claimed`/`queued_resume` with `claimed_at < started_at`), reset re-runnable kinds → `queued`, fail producer kinds, log the counts. Brain: [[../recipes/build-box-setup]] · [[../tables/agent_jobs]] · [[control-tower]] (the stuck-jobs check this removes the false-positive source for) · [[build-recover-pr-create]] (recovers failed-producer orphans).
+## Phase 1 — startup reaper ✅
+Shipped in `scripts/builder-worker.ts`: `reapOrphans()` runs in `main()` **before the poll loop** (best-effort, wrapped so a reaper failure never blocks startup). It queries orphans (`status IN ('building','claimed','queued_resume')` AND `claimed_at < WORKER_STARTED_AT` — the heartbeat cutoff, so nothing the current instance owns is touched), then per kind: re-runnable kinds (`RERUNNABLE_KINDS` = `spec-test`/`triage-escalations`/`migration-fix`/`dev-ask`/`pr-resolve`) → reset to `queued` + clear `claimed_at`; work-producer kinds (`build`/`plan`/`fold`/`product-seed`/`spec-chat`/`ticket-improve`) → `failed` with `error='orphaned by worker restart'`; logs the counts by kind (`0 reaped` on a clean boot). `RERUNNABLE_KINDS` is the single shared source of truth — the self-update `sacrosanctActive` check (lanes a restart may interrupt) now reads the same constant, so the "safe to re-run" definition can't drift between reaper and self-update. No migration (free-text `kind`, existing columns). Brain: [[../recipes/build-box-setup]] · [[../tables/agent_jobs]] · [[control-tower]] (the stuck-jobs check this removes the false-positive source for) · [[build-recover-pr-create]] (recovers failed-producer orphans).
