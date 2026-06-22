@@ -1,0 +1,1 @@
+- **Automated Organic Social Scheduler** · verified 2026-06-22 · → [[lifecycles/social-scheduler]]
