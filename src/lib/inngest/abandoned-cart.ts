@@ -127,7 +127,18 @@ export const abandonedCartReminder = inngest.createFunction(
       ];
     });
 
-    if (due.length === 0) return { sent: 0, scanned: 0 };
+    if (due.length === 0) {
+      // Idle tick: still beat so Control Tower reads green. The heartbeat means
+      // "Inngest invoked me", independent of whether there was work — without it
+      // a healthy-but-idle cron writes no loop_heartbeats row during off-peak
+      // windows and control-tower-monitor false-flags cron_freshness RED.
+      // Matches the empty-path beat in deliver-pending-send.ts + ticket-csat.ts.
+      const result = { sent: 0, scanned: 0 };
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("abandoned-cart-reminder", { ok: true, produced: result });
+      });
+      return result;
+    }
 
     // Cache workspace branding + customer first-name lookups so the
     // batch shares a single round trip per workspace.
