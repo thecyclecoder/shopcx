@@ -72,7 +72,6 @@ Webhook HMAC verified with Client Secret.
 - **`shopify_customer_id` / `shopify_order_id` etc. stored as numeric strings**, never as ints. Joins to our tables use UUIDs — see [[../tables/customers]] gotchas.
 - **Webhook delivery is at-least-once.** Handlers must be idempotent.
 - **Multipass tokens are short-lived** (5 min). Generate fresh per portal redirect.
-- **Don't push during active syncs.** Vercel deployment kills running Inngest functions mid-flight.
 
 ## Files
 

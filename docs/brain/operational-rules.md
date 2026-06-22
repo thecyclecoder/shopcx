@@ -73,7 +73,7 @@ Critical for the `amazon_reseller` fraud rule which compares ship vs bill — ne
 ## Inngest + Vercel patterns
 
 - **Don't fire-and-forget in Vercel serverless.** A pending HTTP response gets the function killed mid-flight when Vercel reaps it. Either `await` the work inline, or fire an Inngest event and let the durable runtime handle it.
-- **Don't push to Vercel during active Inngest syncs** — Vercel's deploy reaps in-flight functions. Wait for syncs to drain.
+- **Deploys are safe during Inngest activity — push freely.** (Retired 2026-06-22.) The old "wait for syncs to drain" rule was about monolithic long-running Shopify full-syncs that lost progress when a deploy reaped them mid-step — those are sunset. Routine Inngest functions are **step-durable**: a deploy mid-run just retries the current step and resumes. There's also no clean signal for "a sync is running" (crons fire constantly). Don't reintroduce a sync-gate on pushes/merges.
 - **Dylan reviews on the live deployment, not localhost.** When he "can't see" a change, it's almost always undeployed — not missing code. To show a change, commit + push to `main` (Vercel auto-deploys production); don't spin up a local dev server to demo. Scope each commit to its own feature; leave his unrelated in-progress edits uncommitted.
 
 ## Control Tower — register every autonomous loop (hard rule)

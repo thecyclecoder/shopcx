@@ -76,7 +76,6 @@ concurrency: [{ limit: 1, key: "event.data.ticket_id" }]
 - **Names are exact strings.** Typos silently drop. Triple-check.
 - **Don't fan-out from a request handler.** If you have N events to fire, send them all in one batch: `await inngest.send([event1, event2, ...])`.
 - **Idempotency**: at-least-once delivery is the rule. Functions must be idempotent.
-- **Don't push during active runs.** Vercel deploy kills in-flight Inngest functions. See CLAUDE.md.
 
 ## Related
 

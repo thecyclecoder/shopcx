@@ -37,7 +37,6 @@ These can't live in a wiki page — they're project-wide invariants:
 - **User-facing names: `display_name` from `workspace_members`**, never full name.
 - **Mini-site and live chat must produce identical ticket messages.** Only rendering differs.
 - **`npx tsc --noEmit` before commits.** Migrations: `supabase/migrations/YYYYMMDDNNNNNN_description.sql`.
-- **Don't push during active Inngest syncs** — Vercel deploy kills running functions.
 - **Portal builds:** after editing `shopify-extension/portal-src/`, run `node scripts/build-all-portals.js`.
 - **Customer-referenced tables:** when adding a `customer_id` column, add a Sonnet data tool in `sonnet-orchestrator-v2.ts`.
 - **Journeys + cancel-flow + remedies + coupon mappings:** all DB-driven, never hardcoded.
