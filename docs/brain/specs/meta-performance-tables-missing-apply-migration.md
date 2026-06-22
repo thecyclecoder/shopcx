@@ -1,4 +1,4 @@
-# meta-structure-upsert fails PGRST205 — meta_campaigns/adsets/ads/insights_daily tables never created in prod (skipped migration) ⏳
+# meta-structure-upsert fails PGRST205 — meta_campaigns/adsets/ads/insights_daily tables never created in prod (skipped migration) ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** fixes a deploy gap in [[../specs/storefront-iteration-engine]]; root cause behind [[../specs/meta-insights-ingest-empty-fix]]; surfaced via [[../specs/error-feed-monitoring]] + [[../specs/control-tower]] · **Verdict:** real-bug
 **Repair-root-cause:** `supabase/migrations/20260618140000_meta_performance_tables.sql (apply to prod via its apply-script + notify pgrst, reload schema; verifies writers in src/lib/meta/performance.ts then succeed, then re-fire meta/sync-performance for account d6d619a5)::real-bug`
@@ -12,10 +12,10 @@ Direct information_schema inspection of prod shows public.meta_campaigns, meta_a
 
 **Likely target:** `supabase/migrations/20260618140000_meta_performance_tables.sql (apply to prod via its apply-script + `notify pgrst, 'reload schema'`; verifies writers in src/lib/meta/performance.ts then succeed, then re-fire meta/sync-performance for account d6d619a5)`
 
-## Phase 1 — close it ⏳
-Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+## Phase 1 — close it ✅
+**Resolved 2026-06-22 (manual apply — exactly as the Repair Agent prescribed).** Applied `20260618140000_meta_performance_tables.sql` to prod via a direct PG connection + `NOTIFY pgrst, 'reload schema'`, then re-fired `meta/sync-performance` for account `d6d619a5`. The four tables now exist and populate: `meta_campaigns` 67, `meta_adsets` 133, `meta_ads` 791, `meta_insights_daily` 1611 rows; `iteration_scorecards_daily` now has `ad`/`adset`/`campaign` levels (the previously-empty primary grain). The originating `supabase:a83daae8cafbcf4c` / `inngest:d2d9c97c049e2b0b` error_events are resolved. Recurrence is now guarded by [[control-tower-migration-drift-check]] (diffs migration-created tables vs the live schema). The fail-loud that surfaced this in the first place shipped in [[meta-insights-ingest-empty-fix]].
 
 ## Verification
-- Re-trigger the originating condition (signature `supabase:a83daae8cafbcf4c`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- ✅ `meta_campaigns`/`meta_adsets`/`meta_ads`/`meta_insights_daily` exist + populated; no new PGRST205 on `meta/sync-performance`; the Control Tower supabase feed has no open `meta-structure-upsert` incident.
 
 > Authored by the box Repair Agent from Control Tower signature `supabase:a83daae8cafbcf4c` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.
