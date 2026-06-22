@@ -70,6 +70,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the bounded-read RPC from control-tower-monitor-accuracy is itself 500-ing (×15) — its `row_number()`/`count(*) OVER partition` scans + sorts ALL cron/agent beats unbounded → statement timeout (the same full-sort degradation it replaced). control-tower-beats-read-failure-guard (#203) makes the snapshot tolerate it (amber), but the monitor then flies blind. Fix: lateral join (distinct loop × index-limited latest-N) + drop the costly all-time count (presence ⇒ ever-beaten). Found while investigating the live RPC-500; re-creates the fix wrongly deleted in the repair-agent dedup cleanup.
 
+## Active project — Control Tower triage round 2 (from the queue workflow) ⏳
+
+Two real bugs the human-queue verification workflow surfaced (2026-06-22):
+- [[inngest-registered-diff-endpoint-fix]] (platform) — diffInngestRegistered hits GET /v1/apps (404); correct = /v1/apps/shopcx/functions (id-keyed). The registration-gap check is dead until fixed (the spec's own ⚠️).
+- [[control-tower-renewal-integrity-assertions]] (retention) — control-tower P2 renewal-integrity only built the overdue check; outcome-distribution (decline/no-PM spike) + stuck-dunning assertions were never implemented. Renewal breaks silently.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
