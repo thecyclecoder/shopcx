@@ -847,6 +847,20 @@ export const directActionHandlers: Record<
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
     if (p.base_price_cents == null) return { success: false, error: "Missing base_price_cents" };
 
+    // Internal subs aren't on Appstle — restore the grandfathered base by
+    // writing price_override_cents directly. Route here FIRST, before the
+    // Appstle config / live-contract fetch below (which would fail with
+    // "Appstle not configured" for an internal sub). subUpdateLineItemPrice
+    // delegates to internalSubUpdateLineItemPrice for these.
+    const { isInternalSubscription } = await import("@/lib/internal-subscription");
+    if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
+      if (!p.variant_id) return { success: false, error: "Internal subscription requires a variant_id to restore price" };
+      const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, String(p.variant_id), p.base_price_cents);
+      return r.success
+        ? { ...r, summary: `Restored base price to $${((p.base_price_cents || 0) / 100).toFixed(2)} on variant ${p.variant_id} (internal price_override_cents)` }
+        : r;
+    }
+
     // Build candidate variants in priority order:
     //   1. Sonnet's explicit p.variant_id (most accurate when actions are chained)
     //   2. Crisis tier2 / tier1 swap targets

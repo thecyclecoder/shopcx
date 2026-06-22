@@ -197,6 +197,10 @@ If a sub is in an active [[../tables/dunning_cycles]] when its `next_billing_dat
 
 This avoids double-charging during recovery.
 
+## Overcharge detection + remediation
+
+A renewal can charge **above** the customer's grandfathered/established rate — a silent price creep, or a dropped grandfathered base now billing at/above MSRP (the `pricingPolicy: null` landmine). [[../libraries/subscription-overcharge]] detects this read-only and emits the `{charged, expected, delta, dropped_base}` signal, surfaced into BOTH the orchestrator account context ([[../libraries/subscription-overcharge]] callers) and the [[../specs/box-escalation-triage]] solver brief. On any subscription cancel / refund / "wrong price" ticket the agent **checks for an overcharge before reaching for create_return / cancel**. When detected, the remediation playbook is: (1) `partial_refund(charged − expected)` on the overcharging order; (2) `update_line_item_price` to restore the grandfathered base going forward — Appstle heal in place (`subUpdateLineItemPrice → healOnTouch`) or `price_override_cents` for internal subs, **NEVER migrate-to-internal**; (3) a `customer_reply` (caught it, refunded the difference, fixed the sub, no cancel needed). The established baseline is clamped to the 50%-MSRP floor so remediation never contradicts the floor policy.
+
 ## Tax handling on refunds
 
 When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeline]], the Avalara transaction must be **voided** (or partial-adjusted) — else we over-remit tax to the state.
@@ -232,6 +236,8 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 **Known gaps / not yet shipped:**
 - **Phase 1b — consolidate stray direct Appstle fetches onto real wrappers.** The ~9 direct-`fetch` sites currently carry a `healOnTouch` guard (functional chokepoint); the cleaner end state is one literal path through `appstleMutate`. Deferred (touches dunning/journey-complete/action-executor); dunning's strays fold into the separate dunning rework. See [[appstle-pricing]].
 - Per `feedback_no_double_billing_framing` memory: customer comms must not frame parallel-sub charges as "double billing." That rule lives in sonnet_prompts, not in this lifecycle — but flag it for anyone touching billing UX.
+
+**Subscription overcharge remediation** ([[../specs/subscription-overcharge-remediation]], [[../libraries/subscription-overcharge]]): detection signal `{charged, expected, delta, dropped_base}` surfaced into the orchestrator + escalation-triage; remediation = partial_refund(delta) → restore grandfathered base (Appstle heal / internal `price_override_cents`, never migrate-to-internal) → customer_reply. `update_line_item_price` direct action now routes internal subs.
 
 **Recent activity:**
 - `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents (touches transactions)

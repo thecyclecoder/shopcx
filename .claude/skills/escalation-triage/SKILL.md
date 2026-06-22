@@ -70,6 +70,36 @@ only when you've confirmed the wrong record is a true empty shell, `link_custome
 is **founder-gated** (owner-only) and the executor **refuses** unless the duplicate is a real empty shell —
 never propose merging two accounts that both have history.
 
+### Known pattern — subscription overcharge (refund + heal, never cancel/return)
+On ANY subscription **cancel / refund / "wrong price" / "charged too much"** ticket, CHECK the brief for
+an **`OVERCHARGE DETECTED`** block *before* proposing `create_return` or `cancel`. An overcharge is a
+renewal that charged materially above the customer's grandfathered/established rate (silent price creep,
+or a dropped grandfathered base now billing at/above MSRP). When the brief shows OVERCHARGE DETECTED,
+the fix is a **`customer_fix`** with these `customer_action`s (params come straight from the block), then
+a `customer_reply`:
+1. `partial_refund {shopify_order_id, amount_cents: <delta>, reason}` — refund charged − expected on the
+   overcharging order.
+2. `update_line_item_price {contract_id, variant_id, base_price_cents: <restore base>}` — restore the
+   grandfathered base going forward. This heals the sub in place (Appstle pricing-policy heal; or
+   price_override_cents for internal subs). **NEVER** propose migrate-to-internal as the fix — a pricing
+   error is healed on Appstle, not migrated (migration needs a saved Braintree PM and is for a different
+   problem).
+3. `customer_reply` — we caught the pricing error, refunded the difference, fixed the subscription, no
+   need to cancel.
+If the brief shows **no** overcharge, don't invent one (a renewal matching prior renewals, or a
+below-floor price raised to the 50% floor, is NOT an overcharge — that's policy, explain it in a reply).
+
+### Never contradict an active policy; always reply on the immediate ticket
+- **NEVER author a `spec` (code_gap / system_gap) that contradicts an active policy** ([[tables/policies]]
+  + [[operational-rules]]). Before proposing a `spec`, check the live policies in the brief: if a policy
+  already governs the scenario, the answer is a **`customer_reply` invoking that policy**, not a feature
+  to build. E.g. the order-cancellation policy means "we can't cancel a shipped order" is a *reply*, not a
+  code gap — never spec "build a cancel-shipped-order feature."
+- **ALWAYS propose a `customer_reply` for the immediate ticket even when you escalate a code gap.** A
+  `system_gap` / `escalation_false_positive` spec fixes the system for next time; it does nothing for the
+  customer waiting now. Pair the `spec` with a `customer_reply` todo (and any safe `customer_action`s) so
+  the ticket gets a human-quality answer this turn. Don't leave a customer hanging behind a roadmap item.
+
 ### Customer voice (hard rules for `customer_reply`)
 Plain text, **no markdown**. Max 2 sentences per paragraph. Mirror the customer's language. Don't
 apologize for what the customer did. Sign off as a teammate, not "AI".
@@ -81,6 +111,8 @@ apologize for what the customer did. Sign off as a teammate, not "AI".
   Action types mirror the orchestrator: `remove_item` · `add_item` · `swap_variant` ·
   `change_frequency` · `change_next_date` · `pause_timed {pause_days:30|60}` · `skip_next_order` ·
   `partial_refund {shopify_order_id, amount_cents, reason}` · `create_return {order_number, free_label}` ·
+  `update_line_item_price {contract_id, variant_id, base_price_cents}` (restore a grandfathered base —
+  heals Appstle in place / sets internal price_override_cents; the overcharge-remediation fix) ·
   `apply_coupon {contract_id, code}`. **Account-repair (Improve-only) types** for the duplicate-account
   login pattern (see below): `reassign_ticket_customer {to_customer_id, reason}` ·
   `send_magic_link {}` · `link_customer_accounts {primary_customer_id, duplicate_customer_id, reason}`.

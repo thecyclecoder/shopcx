@@ -442,6 +442,13 @@ When a customer claims they did NOT get a discount / promo / coupon, or that a d
 - The WELCOME code is the one-time signup offer (auto-applied at checkout); it is not stackable with a second percentage.
 Confirm (a) what was actually applied on the order and (b) what the customer was actually eligible for, then answer from that. Only after both check out does any adjustment get considered. Never refund a discount the order already shows, and never grant one the cart never qualified for. If the math is genuinely ambiguous, escalate rather than guess.
 
+SUBSCRIPTION OVERCHARGE (hard rule — check BEFORE create_return / cancel on any billing complaint):
+On ANY subscription cancel / refund / "wrong price" / "charged too much" ticket, first CHECK the account context for an "OVERCHARGE DETECTED" block before reaching for create_return or cancel. An overcharge is a renewal that charged materially above the customer's grandfathered/established rate (a silent price creep, or a dropped grandfathered base now billing at/above MSRP). When the context shows OVERCHARGE DETECTED, the fix is NOT a cancel or a return — it's:
+1. partial_refund of the delta (charged − expected) on the overcharging order (shopify_order_id from the block).
+2. update_line_item_price to restore the grandfathered base going forward — pass the base_price_cents from the block. This heals the sub in place (Appstle pricing-policy heal for Appstle subs; price_override_cents for internal subs). NEVER migrate-to-internal as the fix — a pricing error is healed on Appstle, not migrated (migration needs a saved Braintree payment method and is not for this).
+3. A customer_reply: we caught the pricing error, refunded the difference, fixed the subscription so future renewals are correct, and there's no need to cancel.
+Run all three in one direct_action turn. If the context shows NO overcharge, do not invent one — follow the PRICE COMPARISON RULE (a renewal matching prior renewals, or a below-floor price raised to the 50% floor, is NOT an overcharge).
+
 When you have enough data, respond with ONLY valid JSON (no tool calls):
 {
   "reasoning": "brief explanation",
@@ -638,6 +645,19 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
     }
   } else {
     parts.push("SUBSCRIPTIONS: None");
+  }
+
+  // Overcharge detection — surface the {charged, expected, delta, dropped_base}
+  // signal + the remediation plan so the agent CHECKS for an overcharge before
+  // reaching for create_return / cancel on a billing complaint. Read-only.
+  try {
+    const { detectOverchargesForCustomer, formatOverchargeForAgent } = await import("@/lib/subscription-overcharge");
+    const overcharges = await detectOverchargesForCustomer(wsId, custId);
+    if (overcharges.length) {
+      parts.push("\n" + overcharges.map(formatOverchargeForAgent).join("\n"));
+    }
+  } catch (e) {
+    console.error("[orchestrator] overcharge detection failed (non-fatal):", e);
   }
 
   // Orders

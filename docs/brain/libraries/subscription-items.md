@@ -98,6 +98,7 @@ async function subSwapVariant(workspaceId: string, contractId: string, oldVarian
 - `subUpdateLineItemPrice` has the 0.75 SubSave multiplier **baked in** — pass the visible MSRP, the helper applies × 0.75 before sending to Appstle. If you compute the SubSave price first, you'll end up at 0.5625 of MSRP.
 - Every helper checks `isInternalSubscription()` first. Internal subs bypass Appstle.
 - Variant ids must be Shopify variant ids when crossing into Appstle — internal UUIDs won't work.
+- `subUpdateLineItemPrice` is the **restore-the-grandfathered-base** step of subscription overcharge remediation ([[subscription-overcharge]]): it heals the Appstle sub in place (`healOnTouch` first) or sets `price_override_cents` for internal subs. The `update_line_item_price` direct action ([[action-executor]]) now **routes internal subs first** (before the Appstle config/lineId fetch, which would fail with "Appstle not configured" for an internal sub).
 
 ---
 
