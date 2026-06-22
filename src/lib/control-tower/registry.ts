@@ -190,6 +190,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every 15 min (*/15 * * * *)",
     livenessWindowMs: 45 * MIN,
   },
+  {
+    id: "supabase-log-poll-cron",
+    kind: "cron",
+    label: "Supabase log poll",
+    description: "Polls the Supabase Management Logs API for DB-level errors (error-feed Phase 2).",
+    expectedCadence: "every 15 min (*/15 * * * *)",
+    livenessWindowMs: 45 * MIN,
+  },
 
   // ── Box agent-kind lanes (loop_heartbeats, loop_id = `agent:<kind>`) ───────
   // Idle = green. Alerted only on a STUCK job past the per-kind threshold.

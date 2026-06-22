@@ -106,6 +106,7 @@ import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 import { creativeFinderDailyCron, creativeFinderManualSweep } from "@/lib/inngest/creative-finder";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
+import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 
 // 800s (Fluid Compute max) — single Inngest steps can run a long Sonnet call
 // (per-ingredient research, per-chunk review analysis). 300s timed those out
@@ -229,5 +230,6 @@ export const { GET, POST, PUT } = serve({
     creativeFinderManualSweep,
     controlTowerMonitor,
     inngestFailureCapture,
+    supabaseLogPollCron,
   ],
 });

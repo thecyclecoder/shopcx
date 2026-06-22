@@ -40,7 +40,7 @@ interface LoopStatus {
   history: HistoryRow[];
   openAlert: OpenAlert | null;
 }
-type ErrorSource = "vercel" | "inngest" | "supabase";
+type ErrorSource = "vercel" | "inngest" | "supabase" | "supabase-logs";
 interface ErrorIncident {
   id: string;
   source: ErrorSource;
@@ -175,11 +175,13 @@ const ERROR_SOURCE_LABEL: Record<ErrorSource, string> = {
   vercel: "Vercel errors",
   inngest: "Inngest failures",
   supabase: "Supabase errors (app-layer)",
+  "supabase-logs": "Supabase errors (DB logs)",
 };
 const ERROR_SOURCE_HINT: Record<ErrorSource, string> = {
   vercel: "prod runtime errors / 500s via the log drain",
   inngest: "functions that failed after exhausting retries",
   supabase: "DB errors our code reported (reportDbError)",
+  "supabase-logs": "Postgres/auth/API error logs via the Management API",
 };
 
 function ErrorPanel({ panel }: { panel: ErrorFeedPanel }) {
@@ -326,9 +328,10 @@ export default function ControlTowerPage() {
                 Errors
               </h2>
               <p className="mb-3 text-[11px] text-zinc-400">
-                The three hidden surfaces — Vercel runtime errors, Inngest failed runs, and app-layer Supabase
-                errors — grouped by signature. A new signature or a re-firing spike pages the owners (rate-limited:
-                a burst of the same error = one page). Green = no errors in the last 7 days.
+                The hidden surfaces — Vercel runtime errors, Inngest failed runs, app-layer Supabase errors, and
+                DB-level Supabase logs (Postgres/auth/API) via the Management API — grouped by signature. A new
+                signature or a re-firing spike pages the owners (rate-limited: a burst of the same error = one
+                page). Green = no errors in the last 7 days.
               </p>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {snap.errorFeed.panels.map((p) => (
