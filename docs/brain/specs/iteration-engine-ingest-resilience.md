@@ -1,4 +1,4 @@
-# Iteration Engine Ingest Resilience 🚧
+# Iteration Engine Ingest Resilience ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO"
 
@@ -19,10 +19,7 @@ Goal: the first-run 90-day pull never trips code 2, and the engine self-heals wi
 - ✅ Self-healing first-run flag: because `ingestMetaPerformance` derives `backfilled = !count` from `meta_insights_daily`, once the early slices write rows the next run's window collapses to the light 3-day incremental path automatically — no human re-trigger needed to recover.
 - ✅ Slices ordered newest-first so the most recent (decision-relevant) days land before older history if the backfill is interrupted.
 
-## Phase 3 — Asynchronous insights for large pulls ⏳ (deferred)
-Goal: use Meta's sanctioned path for long date ranges; not required to fix the 2026-06-21 failure (Phases 1–2 do that).
-- ⏳ For the first-run backfill window, submit an **async insights report** (`POST /act_{id}/insights` → `report_run_id`, poll `GET /{report_run_id}` until `job_status='Job Completed'`, then page results) instead of synchronous GET; keep synchronous GET for the small daily incremental window.
-- ⏳ Gate behind a flag so it ships independently of Phases 1–2 and can be enabled per account.
+> **Originally-deferred Phase 3 (async insights reports) split out → [[iteration-ingest-async-reports]].** P1+P2 fully fixed the failure and handle large pulls via ≤14-day chunking; the async-report path is a future optimization, not part of this fix — moved to its own follow-on card so this spec reads shipped.
 
 ## Safety / invariants
 - **No change to any write path.** This spec only hardens the READ/ingest path (`graphGet` + insights pulls). All DB writes remain the existing idempotent upserts; all Meta *writes* (pause/scale/draft) are untouched and still bounded by the active policy + approved-build flow.

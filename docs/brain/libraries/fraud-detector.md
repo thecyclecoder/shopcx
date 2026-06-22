@@ -40,6 +40,7 @@ Several signals (`email_domain_velocity`, `surname_velocity`, the repeat-offende
 ## Gotchas
 
 - **Don't re-introduce a hand-maintained domain list.** A short inline `Set` will silently miss providers and flag real customers as a ring. Edit the vendored JSON / supplement instead.
+- **Control Tower coverage (`ai:fraud-detector`).** `checkOrderForFraud` is a public wrapper around `checkOrderForFraudInner` (returns whether a case fired) that emits ONE [[../tables/loop_heartbeats]] beat in a try/finally at the end of every per-order screen ([[../specs/control-tower-agent-coverage]] · [[control-tower]]). `ok:true` on a clean screen whether or not it flagged; `ok:false` only when the screen threw; `produced` carries `{order, flagged}`. The monitor's liveness-when-work-exists alert fires when [[../tables/orders]] were created in the window but 0 successful fraud-screen beats landed.
 
 ---
 

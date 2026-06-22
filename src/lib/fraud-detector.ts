@@ -4,6 +4,8 @@ import { addOrderTags } from "@/lib/shopify-order-tags";
 import { zipDistance, extractZip } from "@/lib/geo-distance";
 import { normalizeReseller } from "@/lib/known-resellers";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
+import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 import freemailDomains from "@/lib/freemail-domains.json";
 
 // Public / shared email providers — freemail, ISP, and disposable domains that
@@ -488,11 +490,41 @@ async function detectHighVelocity(
 
 // ── Targeted checks for real-time triggers ──
 
+/**
+ * Public entry — the inline per-order fraud-screen AI agent (`ai:fraud-detector` in the
+ * Control Tower registry). Runs checkOrderForFraudInner and emits ONE loop_heartbeats beat at
+ * the END of the run in a try/finally (control-tower-agent-coverage spec): ok:true on a clean
+ * screen (whether or not it flagged), ok:false only when the screen threw. produced carries
+ * the order id + whether a fraud case fired.
+ */
 export async function checkOrderForFraud(
   workspaceId: string,
   orderId: string,
   customerId: string | null
 ): Promise<void> {
+  const startedAt = Date.now();
+  let flagged: boolean | null = null;
+  let threw: unknown = null;
+  try {
+    flagged = await checkOrderForFraudInner(workspaceId, orderId, customerId);
+  } catch (e) {
+    threw = e;
+    throw e;
+  } finally {
+    await emitInlineAgentHeartbeat(INLINE_AGENT_IDS.fraudDetector, {
+      ok: !threw,
+      produced: threw ? { error: "exception", order: orderId } : { order: orderId, flagged: flagged === true },
+      detail: threw ? `threw: ${threw instanceof Error ? threw.message : String(threw)}` : flagged ? "flagged" : "clean",
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
+async function checkOrderForFraudInner(
+  workspaceId: string,
+  orderId: string,
+  customerId: string | null
+): Promise<boolean> {
   const admin = createAdminClient();
   const { data: rules } = await admin
     .from("fraud_rules")
@@ -500,7 +532,7 @@ export async function checkOrderForFraud(
     .eq("workspace_id", workspaceId)
     .eq("is_active", true);
 
-  if (!rules?.length) return;
+  if (!rules?.length) return false;
 
   const { data: workspace } = await admin
     .from("workspaces")
@@ -516,7 +548,7 @@ export async function checkOrderForFraud(
     .eq("id", orderId)
     .single();
 
-  if (!order) return;
+  if (!order) return false;
 
   // Fetch billing address + card details from Shopify when missing. We need the
   // card BIN for bin-velocity, so fetch whenever it isn't captured yet — not just
@@ -882,6 +914,8 @@ Respond with EXACTLY "FRAUD" or "OK".`;
   if (flagged && order.shopify_order_id) {
     await addOrderTags(workspaceId, order.shopify_order_id, ["suspicious"]);
   }
+
+  return flagged;
 }
 
 // ── Velocity signals (real-time, rule-independent) ──────────────────────────

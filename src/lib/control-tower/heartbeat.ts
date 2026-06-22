@@ -53,3 +53,12 @@ export function emitCronHeartbeat(functionId: string, input: HeartbeatInput = {}
 export function emitAgentHeartbeat(agentKind: string, input: HeartbeatInput = {}): Promise<void> {
   return emitLoopHeartbeat(agentLoopId(agentKind), "agent-kind", input);
 }
+
+/**
+ * Convenience: emit an inline event-driven AI agent's end-of-run beat (loop_id = `ai:<agent>`,
+ * e.g. INLINE_AGENT_IDS.ticketAnalyzer). Call from a try/finally so a thrown run still beats
+ * with ok:false — that's what the error-rate + liveness-when-work-exists assertions read.
+ */
+export function emitInlineAgentHeartbeat(agentId: string, input: HeartbeatInput = {}): Promise<void> {
+  return emitLoopHeartbeat(agentId, "inline-agent", input);
+}

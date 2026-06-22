@@ -21,15 +21,22 @@ Two layers:
 - **Vercel:** nothing — I create the Log Drain via our token after the endpoint ships.
 - **Supabase:** the app-layer reporter needs nothing; the **Management Logs API needs you to generate a Supabase access token** (one paste, like the Vercel token) — that's the lone owner action, and it's deferred to P2.
 
-## Phase 1 — Inngest + Vercel feeds + app-layer DB reporter ⏳
-The `inngest/function.failed` handler; the `/api/webhooks/vercel-logs` endpoint (signature-verified, grouped, rate-limited) + I create the Vercel Log Drain; the `reportDbError` app-layer reporter; all three wired into Control Tower alerts + a dashboard "Errors" section (Vercel · Inngest · Supabase-app panels). Brain: [[control-tower]] · new `inngest/inngest-failure-capture` page · new webhook page · [[../operational-rules]] (don't swallow DB errors — call `reportDbError`).
+## Phase 1 — Inngest + Vercel feeds + app-layer DB reporter ✅
+Shipped. The `inngest/function.failed` handler ([[../inngest/inngest-failure-capture]], registered in `src/app/api/inngest/route.ts`); the `/api/webhooks/vercel-logs` endpoint (HMAC-SHA1 signature-verified, batch-grouped, rate-limited — [[../integrations/vercel-log-drain]]); the `reportDbError` + `recordError` app-layer reporter (`src/lib/control-tower/error-feed.ts`, [[../libraries/control-tower]]) wired into the swallowed scorecard-upsert class (`src/lib/meta/scorecards.ts`); all three grouped into the new [[../tables/error_events]] store (migration `20260622150000_error_events.sql`), paging owners on a new-signature/spike (rate-limited, [[../libraries/notify-ops-alert]]) + a dashboard **Errors** section (Vercel · Inngest · Supabase-app panels) on [[../dashboard/control-tower]]. Brain: [[../tables/error_events]] · [[../inngest/inngest-failure-capture]] · [[../integrations/vercel-log-drain]] · [[../libraries/control-tower]] · [[../dashboard/control-tower]] · [[../operational-rules]] (don't swallow DB errors — call `reportDbError`).
+
+**Owner setup remaining (one-time, not a build step):** (1) generate a `VERCEL_LOG_DRAIN_SECRET` + create the Vercel Log Drain via our token pointed at `/api/webhooks/vercel-logs` (until set, the endpoint is live but returns `503`); (2) set the secret in the Vercel env. The Inngest + Supabase-app feeds need nothing.
 
 ## Phase 2 — Supabase Management Logs API ⏳
 Once the owner provides a Supabase access token (stored encrypted): poll/stream Postgres/API/auth error logs into the Control Tower (DB-level errors our app never sees — constraint violations behind RLS, auth failures, slow-query/timeouts). Dashboard "Supabase errors" panel + alerting.
 
 ## Verification
-- **Inngest:** force an Inngest function to fail (throw past retries) → a Control Tower alert + the failure on the Inngest panel within a cycle; owners paged once (not per-retry).
-- **Vercel:** trigger a prod route 500 → the Log Drain delivers to `/api/webhooks/vercel-logs`, a grouped incident + alert appears; a burst of the same error = one incident (rate-limited), a new signature = a new alert.
-- **Supabase (app-layer):** a code path that gets a Supabase `{ error }` and calls `reportDbError` → it shows on the Control Tower (the scorecard-class is now visible, not swallowed).
-- **Supabase (P2):** with the token set, a DB-level error (e.g. a constraint violation) surfaces on the Supabase panel even when no app code reported it.
-- Healthy state → panels green, no alert noise.
+
+### Phase 1 (shipped ✅)
+- **Migration:** after applying `20260622150000_error_events.sql`, on the DB expect `public.error_events` to exist with the `(source, signature)` unique index and RLS on (authenticated select + service-role all). `scripts/apply-error-events-migration.ts` prints `error_events table present: 1/1`.
+- **Inngest:** force a registered Inngest function to throw past its retries → Inngest fires `inngest/function.failed` → on `/dashboard/developer/control-tower` the **Inngest failures** panel shows a `×1` incident titled `<function_id>: <message>` within a poll, and the owners get **one** Slack DM "Control Tower: Inngest failure 🔴" (not one per retry — it fires only after the final retry). Re-fail the same function within 30 min → the incident `count` bumps, **no** second DM (rate-limited).
+- **Vercel:** with `VERCEL_LOG_DRAIN_SECRET` set and the drain wired, trigger a prod route 500 → `POST /api/webhooks/vercel-logs` (valid `x-vercel-signature`) returns `{ received, incidents }`, the **Vercel errors** panel shows the grouped incident, and a new signature pages once. Send a batch of N identical 500s → **one** incident with `count += N` (grouped client-side + by signature), one page. A `POST` with a bad signature → `401`; with no secret configured → `503`.
+- **Supabase (app-layer):** drive `refreshScorecards` into a persist error (e.g. a constraint violation on `iteration_scorecards_daily`) → `reportDbError` fires → the **Supabase errors (app-layer)** panel shows a `scorecard-upsert (iteration_scorecards_daily): …` incident + a page. (The swallowed-upsert class is now visible at the source, not silently reported as success.)
+- **Healthy state:** with no recent errors, all three panels are **green** ("No errors in the last 7 days") — no alert noise. A panel goes red only with an error in the last hour (amber within 24 h).
+
+### Phase 2 (planned ⏳ — needs an owner Supabase access token)
+- With the token stored encrypted, a **DB-level** error our app never saw (e.g. a constraint violation behind RLS, an auth failure, a slow-query/timeout) surfaces on a Supabase panel via the Management/Logs API poll — even when no app code reported it.
