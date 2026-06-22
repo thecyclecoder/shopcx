@@ -145,6 +145,13 @@ function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus
   if (behindTooLong) {
     return { ...base, color: "red", statusText: `behind origin/main — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker is running ${running} but origin/main is ${deployed.slice(0, 7)} — self-update stuck for ${elapsed(row.started_at)}.` } };
   }
+  // Behind but BUSY (active build in flight) ⇒ the worker is intentionally deferring
+  // self-update until its lanes clear (sacrosanct — never kill an in-flight build). That's
+  // healthy, not a warning — keep it GREEN so a normal post-deploy build doesn't false-amber.
+  if (behind && !idle) {
+    return { ...base, color: "green", statusText: `building — update deferred (${running} → ${deployed.slice(0, 7)} when idle)`, detail: row.detail ?? null, violation: null };
+  }
+  // Behind + IDLE but within grace ⇒ it should self-update on its next poll; brief amber.
   if (behind) {
     return { ...base, color: "amber", statusText: `updating — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: null };
   }
