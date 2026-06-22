@@ -1,0 +1,1 @@
+- **Active OOS crisis overrides stale inventory_quantity in orchestrator stock checks** · verified 2026-06-22 · → [[libraries/sonnet-orchestrator-v2]]
