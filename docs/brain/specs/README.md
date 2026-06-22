@@ -64,6 +64,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Repair Agent ⏳
+
+**Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** the standing agent-form of the manual Control-Tower triage loop. Event-triggered (a new error_events signature / loop_alert → a `repair` job, deduped, own lane), it investigates read-only, classifies (real bug / false-positive / noise / transient), and **authors a fix spec + surfaces it for one-tap owner Build** — does NOT auto-queue builds (North star: don't let a proxy-optimizer spawn code builds from a noisy feed), except a narrow `REPAIR_AUTOBUILD_KINDS` allow-list for mechanical/self-evident classes. "Escalation-triage, but for the Control Tower."
+
 ## Active project — Control Tower triage (2026-06-22) ⏳
 
 Born from a full Control Tower audit. Each fixes a real red/error or a monitor false-positive:
