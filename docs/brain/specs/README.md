@@ -104,6 +104,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[worker-orphan-reaper-worktree-prune]] (platform) — the box never cleans git worktrees: (1) a resume's `git worktree add` fails "already used by worktree" when the first run left one (caused the auto-ship-pipeline build failure), and (2) stale worktrees for merged/terminal branches accumulate (3 found by hand). Fix: idempotent worktree-add (force-remove existing first) + reap worktrees whose job is terminal / branch deleted, in reapOrphans. Never touches active builds.
 
+## Active project — spec-drift-reconcile not firing ⏳
+
+[[spec-drift-reconcile-not-firing]] (platform) — the every-30min drift backstop has NEVER fired (0 heartbeats), so roadmap cards drift (ticket-csat #219, portal-auto-resume #218 sat stale). Not a code bug (manual sweep works) nor a registration gap (it's in Inngest's registered set) — a registered cron with a valid schedule simply isn't executing, and the Control Tower only checks served-but-not-registered, not registered-but-never-firing. Fix the firing + add the zero-beats-past-window guard.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
