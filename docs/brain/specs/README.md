@@ -64,6 +64,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — control_tower_loop_beats RPC perf ⏳
+
+**Spec:** [[control-tower-loop-beats-rpc-perf]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** the bounded-read RPC from control-tower-monitor-accuracy is itself 500-ing (×15) — its `row_number()`/`count(*) OVER partition` scans + sorts ALL cron/agent beats unbounded → statement timeout (the same full-sort degradation it replaced). control-tower-beats-read-failure-guard (#203) makes the snapshot tolerate it (amber), but the monitor then flies blind. Fix: lateral join (distinct loop × index-limited latest-N) + drop the costly all-time count (presence ⇒ ever-beaten). Found while investigating the live RPC-500; re-creates the fix wrongly deleted in the repair-agent dedup cleanup.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
