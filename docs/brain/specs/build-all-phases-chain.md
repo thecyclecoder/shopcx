@@ -1,4 +1,4 @@
-# Build-all-phases chain + hang-based build timeout ✅
+# Build-all-phases chain + hang-based build timeout 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends the box build pipeline + [[auto-ship-pipeline]] (auto-merge is what advances the chain). Removes the "babysit phase-by-phase builds" toil for milestone/multi-phase specs.
 
@@ -32,5 +32,7 @@ The hard `BUILD_TIMEOUT_MS = 30 min` kills a legit long phase mid-work. Replace 
 
 **Shipped.** `agent_jobs` grew `chain_phases boolean not null default false` (migration `20260622200000_agent_jobs_chain_phases.sql` applied; apply script `scripts/apply-agent-jobs-chain-phases-migration.ts`). **"Build all"** = `queueRoadmapBuild(..., { chainPhases:true })` ([[../libraries/roadmap-actions]]): reads the spec from `main`, queues the **first ⏳ phase** scoped (shared `phaseScopedInstructions`, [[../libraries/agent-jobs]]) with `chain_phases:true` (degrades to a whole-spec build for a phaseless spec; refuses when every phase is already built). Wired from the dashboard **Build all** button ([[../dashboard/roadmap|BuildButton]] → `POST /api/roadmap/build {chainPhases:true}`) and the Slack App Home **🛠️ Build all** ([[../libraries/slack-home]] `HOME.build`); per-phase **Build N** stays a single non-chained build. **Post-merge chain step:** `reconcileMergedJobs` ([[../libraries/agent-jobs]]) — when a `chain_phases` build flips completed→merged (after the per-phase drift-reconcile flips its phase ✅), `queueNextChainedPhase` reads `main`, queues the next ⏳ phase (also `chain_phases`, on fresh main atop the prior phase's code), de-duped against any in-flight build for the spec. **Stops/pauses for free:** a failed / needs_approval phase never reaches `merged` (chain stops/pauses; resuming + merging the phase resumes it); no ⏳ phase left ⇒ chain complete (all ✅). Single-phase / non-chained builds (no `chain_phases`) are untouched.
 
-## Phase 2 — hang-based build timeout ✅
+## Phase 2 — hang-based build timeout ⏳
 Replace the hard `BUILD_TIMEOUT_MS` wall with output-idle hang detection (~10 min idle kill) + a 60-min hard cap, in `scripts/builder-worker.ts`. Brain: [[../recipes/build-the-box]] (if present) · [[../operational-rules]].
+
+> **Status correction (2026-06-22):** the Phase-1 build (#245) flipped this phase ✅ **without implementing it** — `builder-worker.ts` still has the hard `BUILD_TIMEOUT_MS = 30 * 60 * 1000` wall and no idle/hang detection. Reverted to ⏳; real build re-queued.
