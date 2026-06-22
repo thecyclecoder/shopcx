@@ -1,0 +1,1 @@
+- **Box-driven Product Seeding** · verified 2026-06-22 · → [[lifecycles/product-intelligence]]

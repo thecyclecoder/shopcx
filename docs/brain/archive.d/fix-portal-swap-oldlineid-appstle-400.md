@@ -1,0 +1,1 @@
+- **Portal item swap fails with Appstle 400 — oldLineId built from a non-line id** · verified 2026-06-22 · → [[lifecycles/customer-portal]]

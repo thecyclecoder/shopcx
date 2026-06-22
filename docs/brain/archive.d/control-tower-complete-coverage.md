@@ -1,0 +1,1 @@
+- **Control Tower — Complete Coverage + Department Rollups** · verified 2026-06-22 · → [[dashboard/control-tower]]

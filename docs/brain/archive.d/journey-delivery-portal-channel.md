@@ -1,0 +1,1 @@
+- **Journey delivery on portal tickets must post to the thread and email the customer** · verified 2026-06-22 · → [[lifecycles/customer-portal]]

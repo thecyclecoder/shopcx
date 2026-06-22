@@ -55,6 +55,31 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
   latest run of each shipped-unverified spec **+ the Regressions list** (keyed off evidence-backed `fail` checks
   only — `needs_human`/`inconclusive` never appear there, [[../specs/spec-test-classification|the classification rule]]).
 
+## Classification policy — "if a machine can test it, the machine does it"
+
+The `CheckCategory` a bullet lands in is decided by a policy that biases hard toward non-destructive
+verification (the founder's mandate: human testing is reserved for genuine visual/aesthetic judgment, not
+migration-presence probes or fault-injection). It lives in the `spec-test` skill (Step 1) + the inline
+classification prompt in `runSpecTestJob` (`scripts/builder-worker.ts`); this is its brain home.
+
+- **`auto` spans three non-destructive modes.** (1) **Read-only probe** — `information_schema` / probe-db
+  SELECT, GET endpoint, repo `grep`/`tsc`, CI/deploy status. (2) **Outcome probe** — for a *"do X (mutation)
+  → expect observable Y"* bullet, verify **Y read-only** if it's already observable in prod from real traffic
+  (a row in the expected state, a populated column, a rendered context string); do NOT defer just because X
+  mutates. (3) **Non-destructive local harness** — author a throwaway `_`-prefixed scratch `npx tsx` script
+  that imports a pure function/parser/classifier from `src/` and exercises it, **including fault injection**
+  (malformed payload, forced parse error), entirely locally with no prod write or network side-effect; record
+  the harness output as evidence. A local-harness check that observes breakage is a legitimate `fail`.
+- **`needs_human` is narrowed to exactly two cases:** (a) genuine **visual/aesthetic** judgment (looks good /
+  big enough / renders nicely), and (b) an **irreversible prod side-effect with no already-observable evidence
+  AND no local-harness equivalent** (e.g. a real SMS/email/charge actually reaching an external carrier).
+- **Tie-breaker:** *not* "when in doubt → needs_human" — instead **attempt a read-only outcome probe, then a
+  non-destructive local harness; defer to `needs_human` ONLY if both are impossible.**
+- **Invariant kept:** the agent still never writes prod, never sends a message/charge/order, never flips a spec
+  to verified. "Maximize machine coverage" means *more non-destructive verification*, never relaxing the
+  prod-write ban. The richer browser + sandboxed behavioral modes layered on top live in
+  [[spec-test-sandbox]] ([[../specs/spec-test-deep-verification]]).
+
 ## Callers
 
 - `scripts/builder-worker.ts` → `runSpecTestJob` — writes runs; calls `reflectSpecGreenChecks` after.

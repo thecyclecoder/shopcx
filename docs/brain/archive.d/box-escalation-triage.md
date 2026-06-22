@@ -1,0 +1,1 @@
+- **Box-hosted Escalation Triage (hourly solver→skeptic→quorum)** · verified 2026-06-22 · → [[inngest/triage-escalations]]

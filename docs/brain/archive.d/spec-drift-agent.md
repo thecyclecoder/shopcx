@@ -1,0 +1,1 @@
+- **Spec-Drift Agent — keep phase emojis in sync with shipped code** · verified 2026-06-22 · → [[libraries/spec-drift]]
