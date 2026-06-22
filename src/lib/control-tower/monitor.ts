@@ -26,6 +26,7 @@ import {
   type LoopKind,
   type MonitoredLoop,
 } from "@/lib/control-tower/registry";
+import { buildCoverageAudit, type CoverageAudit } from "@/lib/control-tower/self-audit";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -68,6 +69,8 @@ export interface ControlTowerSnapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
   loops: LoopStatus[];
+  /** Phase 2 coverage self-audit: crons in code with no tile + the in-code↔Inngest-registered diff. */
+  selfAudit: CoverageAudit;
 }
 
 const HISTORY_LIMIT = 10;
@@ -85,6 +88,15 @@ function elapsed(iso: string | null | undefined): string {
 function ageMs(iso: string | null | undefined): number {
   if (!iso) return Infinity;
   return Date.now() - new Date(iso).getTime();
+}
+
+/** Compact duration string from a millisecond span (e.g. "3m", "2h", "1d"). */
+function fmtDur(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86_400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86_400)}d`;
 }
 
 interface WorkerRow {
@@ -158,7 +170,23 @@ function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus
   return { ...base, color: "green", statusText: `healthy · ${running || "?"} · last poll ${elapsed(row.last_poll_at)} ago`, detail: row.detail ?? null, violation: null };
 }
 
-function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null): Omit<LoopStatus, "history" | "openAlert"> {
+/**
+ * A trustworthy lower bound on how long the CURRENT deploy has been live, or null when we
+ * can't tell (so callers stay conservative — never a false red). The box build worker
+ * self-updates to origin/main and restarts on adopting a new SHA, so once its running_sha
+ * matches the deployed SHA (VERCEL_GIT_COMMIT_SHA), worker.started_at is ~when this code
+ * went live. Used by the never-fired cron check below. (control-tower-complete-coverage P2.)
+ */
+function deployRefAgeMs(worker: WorkerRow | null): number | null {
+  const deployed = process.env.VERCEL_GIT_COMMIT_SHA || "";
+  if (!deployed) return null; // local / unknown — never red on a missing first beat.
+  if (!worker?.started_at || !worker.running_sha) return null;
+  const caughtUp = deployed.slice(0, worker.running_sha.length) === worker.running_sha;
+  if (!caughtUp) return null; // box still self-updating to this deploy — be conservative.
+  return ageMs(worker.started_at);
+}
+
+function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null): Omit<LoopStatus, "history" | "openAlert"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -169,9 +197,25 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null): Omit<Loop
     lastProduced: latest?.produced ?? null,
     detail: latest?.detail ?? null,
   };
-  // No beat yet ⇒ amber (awaiting first run), never red — so a freshly-shipped
-  // cron doesn't false-alarm before its first scheduled tick.
+  // No beat yet: distinguish NEVER-FIRED-PAST-GRACE (red) from AWAITING-FIRST-TICK (amber).
+  // A registered cron whose deploy has been live longer than its cadence+grace (livenessWindowMs)
+  // but has 0 heartbeats is NOT awaiting its first tick — Inngest isn't invoking it (the exact
+  // control-tower-monitor "awaiting first run for days" gap). Red + page. Only flips red with a
+  // trustworthy deploy-age reference (prod + box caught up); otherwise a genuinely-fresh cron
+  // (or unknown deploy age) stays amber so a just-shipped cron never false-alarms.
   if (!latest) {
+    const window = loop.livenessWindowMs ?? 26 * 60 * 60_000;
+    if (deployAgeMs != null && deployAgeMs > window) {
+      return {
+        ...base,
+        color: "red",
+        statusText: `registered but has never run (deploy ${fmtDur(deployAgeMs)} old)`,
+        violation: {
+          reason: "never_fired",
+          detail: `Cron ${loop.id} is registered in code but has never emitted a heartbeat — ${fmtDur(deployAgeMs)} after deploy, past its ${fmtDur(window)} cadence+grace (expected ${loop.expectedCadence}). Inngest is not invoking it — a deploy may not have re-synced the app.`,
+        },
+      };
+    }
     return { ...base, color: "amber", statusText: "no heartbeat yet — awaiting first run", violation: null };
   }
   const stale = ageMs(latest.ran_at) > (loop.livenessWindowMs ?? 26 * 60 * 60_000);
@@ -511,7 +555,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState] = await Promise.all([
+  const [{ data: workerRow }, { data: beats }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
     // Exclude inline-agent + reactive beats here: they're high-volume (one per ticket/order/journey/
     // event) and would crowd this 600-row window, starving low-frequency crons of their latest beat.
@@ -521,7 +565,11 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     admin.from("agent_jobs").select("id, kind, status, created_at, claimed_at, updated_at").in("status", ["queued", "claimed", "building", "queued_resume"]),
     fetchAssertionInputs(admin),
     fetchInlineAgentState(admin),
+    buildCoverageAudit(),
   ]);
+
+  // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
+  const deployAgeMs = deployRefAgeMs(workerRow as WorkerRow | null);
 
   // Group heartbeats by loop_id (already newest-first).
   const byLoop = new Map<string, LoopHistoryRow[]>();
@@ -550,7 +598,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs);
     else core = evalAgentKind(loop, latest, activeJobs);
     // Phase 2: layer the output assertion on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it).
@@ -563,8 +611,12 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
 
   const counts = { green: 0, amber: 0, red: 0 };
   for (const l of loops) counts[l.color]++;
+  // Fold the self-audit findings into the honest amber count: every cron in code with no tile
+  // ("unregistered loop: X") and every in-code↔Inngest-registered gap is a coverage warning,
+  // so the header never reads "all healthy" while the watchdog itself has a blind spot.
+  counts.amber += selfAudit.unregistered.length + selfAudit.inngestRegistration.missing.length;
 
-  return { generatedAt: new Date().toISOString(), counts, loops };
+  return { generatedAt: new Date().toISOString(), counts, loops, selfAudit };
 }
 
 /** Distinct workspaces with at least one Slack-connected owner/admin to page. */
@@ -606,6 +658,15 @@ export interface MonitorResult {
 export async function runControlTowerMonitor(): Promise<MonitorResult> {
   const admin = createAdminClient();
   const snap = await buildControlTowerSnapshot(admin);
+
+  // Self-audit findings are amber (surfaced on the dashboard + folded into counts), not a page —
+  // but log them so a coverage gap is greppable in the cron's run output too.
+  if (snap.selfAudit.unregistered.length) {
+    console.warn(`[control-tower] self-audit: ${snap.selfAudit.unregistered.length} unregistered cron(s) in code with no tile: ${snap.selfAudit.unregistered.map((u) => u.id).join(", ")}`);
+  }
+  if (snap.selfAudit.inngestRegistration.status === "ok" && snap.selfAudit.inngestRegistration.missing.length) {
+    console.warn(`[control-tower] self-audit: ${snap.selfAudit.inngestRegistration.missing.length} fn(s) served in code but not registered with Inngest: ${snap.selfAudit.inngestRegistration.missing.join(", ")}`);
+  }
 
   let opened = 0;
   let resolved = 0;
