@@ -25,6 +25,10 @@ Every Appstle **mutation** path heals first (so no modification lands on an unst
 
 `PUT /api/external/v2/subscription-contracts-update-line-item-pricing-policy?contractId=&lineId=&basePrice=` · header `X-API-Key` · body = cycles array (max 2) `[{afterCycle:0, discountType:"PERCENTAGE", value:25}]`. **Per-line** (`lineId` required — no all-lines variant). Validated live on huntb1: `$47.97 flat / null` → `basePrice $63.96 + 25% cycle → $47.97` (charge preserved, structure added).
 
+## Overcharge remediation
+
+`resolveLineSnsPct` is reused by [[subscription-overcharge]] to compute the `restore_base_cents` for an overcharged line (`base = expected / (1 − sns)`), and the heal is the "fix the sub going forward" half of the remediation playbook: `subUpdateLineItemPrice → healOnTouch` restores the grandfathered base on Appstle in place. **The remediation NEVER migrates to internal** — a pricing error is healed on Appstle (migration needs a saved Braintree PM and solves a different problem). See [[subscription-overcharge]].
+
 ---
 
-[[../README]] · [[migrate-to-internal]] · [[pricing]] · [[../integrations/appstle]]
+[[../README]] · [[migrate-to-internal]] · [[pricing]] · [[subscription-overcharge]] · [[../integrations/appstle]]

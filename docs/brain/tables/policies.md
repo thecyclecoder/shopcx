@@ -57,6 +57,8 @@ const { count } = await admin.from("policies")
 
 - 5 canonical policies. Replaces ~60 scattered `sonnet_prompts` rules.
 - Consumed by orchestrator + storefront. Playbook executor migration is pending.
+- **Active policies are a hard rail for the escalation-triage solver** ([[../specs/box-escalation-triage]]): NEVER author a `spec` (code_gap / system_gap) that contradicts an active policy. If a policy already governs the scenario, the answer is a **`customer_reply` invoking that policy**, not a feature to build — e.g. the order-cancellation policy means "we can't cancel a shipped order" is a *reply*, not a code gap. And ALWAYS pair any escalated code-gap spec with a `customer_reply` for the immediate ticket.
+- **Subscription pricing / 50%-MSRP floor:** the floor (a price the cleanup raised everyone to) is the rail [[../libraries/subscription-overcharge]] clamps the established baseline to — overcharge remediation never restores a customer below the floor, so detection never contradicts this policy.
 
 ---
 

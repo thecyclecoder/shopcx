@@ -301,6 +301,20 @@ export async function loadTriageBrief(admin: Admin, workspaceId: string, ticketI
         lines.push(`  - #${o.order_number} (shopify ${o.shopify_order_id}) $${((o.total_cents || 0) / 100).toFixed(2)} ${o.financial_status} ${o.created_at?.slice(0, 10)}`);
       }
     }
+
+    // Overcharge detection — surface the {charged, expected, delta, dropped_base}
+    // signal + remediation plan so the solver CHECKS for an overcharge before
+    // proposing create_return / cancel on a billing complaint.
+    try {
+      const { detectOverchargesForCustomer, formatOverchargeForAgent } = await import("@/lib/subscription-overcharge");
+      const overcharges = await detectOverchargesForCustomer(workspaceId, ticket.customer_id);
+      if (overcharges.length) {
+        lines.push("");
+        lines.push(overcharges.map(formatOverchargeForAgent).join("\n"));
+      }
+    } catch (e) {
+      console.error("[triage] overcharge detection failed (non-fatal):", e);
+    }
   }
 
   const { data: analysis } = await admin
