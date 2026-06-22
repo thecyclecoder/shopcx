@@ -15,6 +15,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const specTestCron = inngest.createFunction(
   {
@@ -51,6 +52,11 @@ export const specTestCron = inngest.createFunction(
         }
       }
       return { workspaces: workspaceIds.length, candidates: slugs.length, enqueued };
+    });
+
+    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("spec-test-cron", { ok: true, produced: result });
     });
 
     return result;
