@@ -18,6 +18,27 @@ interface LaneRow {
   since: string;
   phase?: string | null; // "Phase N" for a chained/per-phase build, else null (box-lane-show-phase)
 }
+interface AccountSlot {
+  label: string;
+  in_flight: number;
+  capped: boolean;
+  capped_until: string | null;
+}
+interface AccountEvent {
+  at: string;
+  type: string; // cap | failover | all_capped | recovered
+  account: string;
+  detail: string;
+}
+// Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). null on a single-account box.
+interface AccountsSnapshot {
+  pool: AccountSlot[];
+  healthy: number;
+  total: number;
+  all_capped: boolean;
+  soonest_reset: string | null;
+  events: AccountEvent[];
+}
 interface Worker {
   running_sha: string | null;
   status: string;
@@ -28,6 +49,7 @@ interface Worker {
   build_lanes: number;
   fold_lanes: number;
   lanes: LaneRow[];
+  accounts: AccountsSnapshot | null;
 }
 interface Job {
   id: string;
@@ -106,6 +128,81 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
         {lane.spec_slug}
         {lane.phase && <span className="text-zinc-400 dark:text-zinc-500"> · {lane.phase}</span>}
       </Link>
+    </div>
+  );
+}
+
+const EVENT_CHIP: Record<string, string> = {
+  cap: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300",
+  all_capped: "bg-rose-200 text-rose-800 dark:bg-rose-900/50 dark:text-rose-200",
+  failover: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
+  recovered: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
+};
+
+// Per-account Max load + cap/failover events (box-multi-account-failover Phase 2): show how each account's
+// 5-hour quota is burning, an all-accounts-capped banner (builds parked, auto-resume — not a failure), and
+// the recent cap/failover/recovery breadcrumbs so a silent "everything's capped" is visible.
+function AccountsPanel({ accounts }: { accounts: AccountsSnapshot }) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Max accounts</h3>
+        <span className="text-xs tabular-nums text-zinc-400">
+          {accounts.healthy}/{accounts.total} healthy
+        </span>
+      </div>
+
+      {accounts.all_capped && (
+        <div className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-900/40 dark:bg-rose-900/20 dark:text-rose-300">
+          ⚠ All Max accounts capped — builds parked (<code>blocked_on_usage</code>) and auto-resume
+          {accounts.soonest_reset ? ` ~${elapsed(accounts.soonest_reset)} from cap` : ""}. No manual rebuild needed.
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
+        {accounts.pool.map((a) => (
+          <div
+            key={a.label}
+            className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs shadow-sm ${
+              a.capped
+                ? "border-rose-200 bg-rose-50 dark:border-rose-900/40 dark:bg-rose-900/20"
+                : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium text-zinc-700 dark:text-zinc-200">{a.label}</span>
+              <span
+                className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                  a.capped
+                    ? "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300"
+                    : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                }`}
+              >
+                {a.capped ? "capped" : "healthy"}
+              </span>
+            </div>
+            <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
+              {a.in_flight} in flight
+              {a.capped && a.capped_until ? ` · resets ~${elapsed(a.capped_until)} away` : ""}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {accounts.events.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {accounts.events.slice(0, 6).map((e, i) => (
+            <li key={`${e.at}-${i}`} className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+              <span className="tabular-nums text-zinc-400">{elapsed(e.at)} ago</span>
+              <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${EVENT_CHIP[e.type] || EVENT_CHIP.failover}`}>
+                {e.type.replace("_", " ")}
+              </span>
+              <span className="text-zinc-600 dark:text-zinc-300">{e.account}</span>
+              <span className="truncate">— {e.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -244,8 +341,9 @@ export default function BoxPage() {
             {worker.detail && <span className="opacity-80">· {worker.detail}</span>}
           </div>
 
-          {/* Lane grid */}
+          {/* Lane grid + per-account Max load */}
           <div className="space-y-5">
+            {worker.accounts && <AccountsPanel accounts={worker.accounts} />}
             <LaneRowGrid label="Build / plan lanes" total={worker.build_lanes} lanes={buildLanes} />
             <LaneRowGrid label="Fold lane" total={worker.fold_lanes} lanes={foldLanes} />
           </div>

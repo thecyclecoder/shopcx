@@ -135,6 +135,15 @@ function fmtDur(ms: number): string {
   return `${Math.floor(sec / 86_400)}d`;
 }
 
+// Per-account Max load the box worker writes onto its heartbeat (box-multi-account-failover Phase 2). The
+// box tile reads `all_capped` to surface a (non-silent) all-accounts-capped state, and shows per-account load.
+interface AccountsSnapshot {
+  pool?: { label: string; in_flight: number; capped: boolean; capped_until: string | null }[];
+  healthy?: number;
+  total?: number;
+  all_capped?: boolean;
+  soonest_reset?: string | null;
+}
 interface WorkerRow {
   running_sha: string | null;
   status: string | null;
@@ -142,6 +151,7 @@ interface WorkerRow {
   detail: string | null;
   last_poll_at: string | null;
   started_at: string | null;
+  accounts: AccountsSnapshot | null;
 }
 
 interface ActiveJob {
@@ -169,7 +179,9 @@ function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus
     description: loop.description,
     expectedCadence: loop.expectedCadence,
     lastRanAt: row?.last_poll_at ?? null,
-    lastProduced: row ? { active_builds: row.active_builds ?? 0 } : null,
+    // Per-account Max load rides lastProduced so the box tile shows how each account's quota is burning
+    // (box-multi-account-failover Phase 2) alongside the lane count.
+    lastProduced: row ? { active_builds: row.active_builds ?? 0, accounts: row.accounts ?? null } : null,
   };
   if (!row || !row.last_poll_at) {
     return { ...base, color: "red", statusText: "no heartbeat — box never reported", detail: row?.detail ?? null, violation: { reason: "liveness", detail: "Box build worker has no heartbeat — it never reported in." } };
@@ -180,6 +192,14 @@ function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus
   }
   if (row.status === "needs_attention") {
     return { ...base, color: "red", statusText: `needs attention — ${row.detail ?? "crash-loop"}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker flagged needs_attention: ${row.detail ?? "crash-loop guard tripped"}.` } };
+  }
+  // All Max accounts capped (box-multi-account-failover Phase 2): builds are parked `blocked_on_usage` and
+  // auto-resume at the soonest reset — NOT a failure (no manual rebuild), so AMBER not red. The point is that
+  // an "everything's capped" state is no longer silent: a green box tile that's actually building nothing
+  // because every account hit its wall would hide a real throughput stall.
+  if (row.accounts?.all_capped) {
+    const reset = row.accounts.soonest_reset ? ` — soonest reset ${elapsed(row.accounts.soonest_reset)} away` : "";
+    return { ...base, color: "amber", statusText: `all Max accounts capped — builds parked, auto-resume${reset}`, detail: row.detail ?? null, violation: null };
   }
   // running_sha behind origin/main (deployed SHA) for longer than the grace window
   // ⇒ self-update is broken (the worker is alive but stuck on old code). Only pages
@@ -803,7 +823,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const admin = adminClient ?? createAdminClient();
 
   const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }] = await Promise.all([
-    admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
+    admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at, accounts").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly read (control-tower-loop-beats-rpc-perf P1): a lateral join takes
     // the distinct cron + agent-kind loop_ids and, per loop, reads only its latest HISTORY_LIMIT
     // beats off the (loop_id, ran_at desc) index — ≤N index rows per loop, no global scan/sort. It

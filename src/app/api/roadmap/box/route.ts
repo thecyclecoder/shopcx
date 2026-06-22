@@ -27,6 +27,18 @@ interface LaneRow {
   phase?: string | null;
 }
 
+// Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). Written by the worker's
+// heartbeat as a single jsonb blob; passed through as-is so the box-health view can show how each account's
+// 5-hour quota is burning + an all-capped state.
+interface AccountsSnapshot {
+  pool: { label: string; in_flight: number; capped: boolean; capped_until: string | null }[];
+  healthy: number;
+  total: number;
+  all_capped: boolean;
+  soonest_reset: string | null;
+  events: { at: string; type: string; account: string; detail: string }[];
+}
+
 /**
  * Pull the human-readable failure reason out of a job's log_tail. A `claude -p` run stores its
  * result JSON (`{is_error, api_error_status, result}`) — surface the 529 / Max-limit / API message
@@ -64,7 +76,7 @@ export async function GET() {
   const admin = createAdminClient();
   const { data: hb } = await admin
     .from("worker_heartbeats")
-    .select("running_sha, status, active_builds, detail, last_poll_at, started_at, build_lanes, fold_lanes, lanes")
+    .select("running_sha, status, active_builds, detail, last_poll_at, started_at, build_lanes, fold_lanes, lanes, accounts")
     .eq("id", "box")
     .maybeSingle();
   const worker = hb
@@ -78,6 +90,9 @@ export async function GET() {
         build_lanes: (hb.build_lanes as number | null) ?? 0,
         fold_lanes: (hb.fold_lanes as number | null) ?? 0,
         lanes: (hb.lanes as LaneRow[] | null) ?? [],
+        // accounts is `{}` until the worker first writes a snapshot; normalize to null so the UI shows
+        // nothing (rather than an empty grid) on a single-account / legacy box.
+        accounts: (hb.accounts && (hb.accounts as AccountsSnapshot).pool ? (hb.accounts as AccountsSnapshot) : null),
       }
     : null;
 
