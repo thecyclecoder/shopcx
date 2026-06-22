@@ -216,15 +216,136 @@ function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activ
   return { ...base, color: "green", statusText: latest ? `idle · last ran ${elapsed(latest.ran_at)} ago` : "idle · never run", violation: null };
 }
 
+// ── Phase 2: output assertions (false-success + idle-while-work) ─────────────
+// Phase 1 catches a loop that went SILENT (no/stale heartbeat). These catch the
+// Goodhart failure it can't: the loop RAN (fresh beat, green on P1) but silently
+// did nothing/the wrong thing. Each is a read-only state-check; on violation the
+// tile flips red and the monitor opens an alert + pages, exactly like a P1 red.
+
+/** Extra read-only state the output assertions need (one cheap query each). */
+interface AssertionInputs {
+  /** open, routine-owned escalated tickets waiting (escalated_at set, escalated_to null). */
+  escalatedWaiting: number;
+  /** most-recent triage-escalations agent_jobs.created_at (any status), or null. */
+  latestTriageJobAt: string | null;
+  /** most-recent spec-test agent_jobs.created_at (any status), or null. */
+  latestSpecTestJobAt: string | null;
+  /** active internal subs whose next_billing_date is already in the past (overdue). */
+  overdueInternalSubs: number;
+}
+
+/** Pull a numeric counter out of a loop_heartbeats.produced jsonb blob (0 if absent). */
+function producedCount(produced: unknown, key: string): number {
+  if (produced && typeof produced === "object" && !Array.isArray(produced)) {
+    const v = (produced as Record<string, unknown>)[key];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+  }
+  return 0;
+}
+
+/**
+ * The Phase 2 expected-output check for a loop. Returns a red override (statusText
+ * + violation) when the loop ran but failed its assertion, else null (assertion
+ * holds — leave the Phase 1 tile as-is). Pure given (loop, latest beat, inputs).
+ */
+function evalOutputAssertion(
+  loop: MonitoredLoop,
+  latest: LoopHistoryRow | null,
+  inputs: AssertionInputs,
+): { statusText: string; violation: { reason: string; detail: string } } | null {
+  switch (loop.outputAssertion) {
+    case "escalation-idle": {
+      // Idle-while-work: tickets wait but no triage job enqueued within the cadence.
+      if (inputs.escalatedWaiting <= 0) return null;
+      const windowMs = loop.livenessWindowMs ?? 2 * 60 * 60_000;
+      const enqueuedRecently = inputs.latestTriageJobAt != null && ageMs(inputs.latestTriageJobAt) <= windowMs;
+      if (enqueuedRecently) return null;
+      const n = inputs.escalatedWaiting;
+      return {
+        statusText: `idle while ${n} ticket${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""}`,
+        violation: {
+          reason: "idle_while_work",
+          detail: `Escalation triage idle while ${n} routine-escalated ticket${n === 1 ? "" : "s"} wait — no triage-escalations job enqueued in the last ${Math.round(windowMs / 60_000)}m (last enqueue ${elapsed(inputs.latestTriageJobAt)} ago).`,
+        },
+      };
+    }
+    case "spec-test-persisted": {
+      // False-success: the beat reports enqueued>0 but no spec-test job actually landed.
+      const enqueued = producedCount(latest?.produced, "enqueued");
+      if (!latest || enqueued <= 0) return null;
+      const SLACK_MS = 10 * 60_000; // tolerate clock skew between the cron beat and the insert.
+      const persisted =
+        inputs.latestSpecTestJobAt != null &&
+        new Date(inputs.latestSpecTestJobAt).getTime() >= new Date(latest.ran_at).getTime() - SLACK_MS;
+      if (persisted) return null;
+      return {
+        statusText: `reported ${enqueued} enqueued, persisted 0`,
+        violation: {
+          reason: "false_success",
+          detail: `Spec-test reported ${enqueued} job${enqueued === 1 ? "" : "s"} enqueued at ${latest.ran_at} but 0 spec-test agent_jobs persisted (last spec-test job ${elapsed(inputs.latestSpecTestJobAt)} ago).`,
+        },
+      };
+    }
+    case "renewal-integrity": {
+      // Renewal integrity: active internal subs overdue ⇒ the cron ran but didn't advance them.
+      if (inputs.overdueInternalSubs <= 0) return null;
+      const n = inputs.overdueInternalSubs;
+      return {
+        statusText: `${n} internal sub${n === 1 ? "" : "s"} overdue — not renewed`,
+        violation: {
+          reason: "renewal_integrity",
+          detail: `${n} active internal subscription${n === 1 ? "" : "s"} have next_billing_date in the past (before today UTC) — the renewal cron ran but did not advance ${n === 1 ? "it" : "them"}.`,
+        },
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** READ-ONLY: fetch the extra state the Phase 2 output assertions evaluate against. */
+async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
+  const startOfToday = new Date();
+  startOfToday.setUTCHours(0, 0, 0, 0);
+
+  const [escalated, triageJob, specTestJob, overdueSubs] = await Promise.all([
+    // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
+    admin
+      .from("tickets")
+      .select("id", { count: "exact", head: true })
+      .not("escalated_at", "is", null)
+      .is("escalated_to", null)
+      .not("status", "in", '("archived","closed")'),
+    admin.from("agent_jobs").select("created_at").eq("kind", "triage-escalations").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    admin.from("agent_jobs").select("created_at").eq("kind", "spec-test").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    // Overdue = strictly before today 00:00 UTC ⇒ a full renewal window has passed
+    // (no false positive on a sub merely due today that the async attempt hasn't processed yet).
+    admin
+      .from("subscriptions")
+      .select("id", { count: "exact", head: true })
+      .eq("is_internal", true)
+      .eq("status", "active")
+      .lt("next_billing_date", startOfToday.toISOString()),
+  ]);
+
+  return {
+    escalatedWaiting: escalated.count ?? 0,
+    latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
+    latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,
+    overdueInternalSubs: overdueSubs.count ?? 0,
+  };
+}
+
 /** READ-ONLY: evaluate every registered loop → tiles. Used by the dashboard + the monitor. */
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats }, { data: openAlerts }, { data: jobs }] = await Promise.all([
+  const [{ data: workerRow }, { data: beats }, { data: openAlerts }, { data: jobs }, assertionInputs] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
     admin.from("loop_heartbeats").select("loop_id, ran_at, ok, produced, detail, duration_ms").order("ran_at", { ascending: false }).limit(600),
     admin.from("loop_alerts").select("id, loop_id, reason, detail, opened_at, last_seen_at").eq("status", "open"),
     admin.from("agent_jobs").select("id, kind, status, created_at, claimed_at, updated_at").in("status", ["queued", "claimed", "building", "queued_resume"]),
+    fetchAssertionInputs(admin),
   ]);
 
   // Group heartbeats by loop_id (already newest-first).
@@ -249,6 +370,12 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
     else if (loop.kind === "cron") core = evalCron(loop, latest);
     else core = evalAgentKind(loop, latest, activeJobs);
+    // Phase 2: layer the output assertion on top. Only escalates green/amber → red
+    // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it).
+    if (loop.outputAssertion && core.color !== "red") {
+      const a = evalOutputAssertion(loop, latest, assertionInputs);
+      if (a) core = { ...core, color: "red", statusText: a.statusText, violation: a.violation };
+    }
     return { ...core, history, openAlert: alertByLoop.get(loop.id) ?? null };
   });
 
