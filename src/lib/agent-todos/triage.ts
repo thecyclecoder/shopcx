@@ -150,6 +150,79 @@ export async function selectEscalatedForTriage(
   return { selected: eligible.slice(0, cap), deferred: Math.max(0, eligible.length - cap), eligible: eligible.length };
 }
 
+/** Resolve a real human to hand a ticket up to — workspace owner, else any admin/agent. */
+async function resolveWorkspaceHuman(admin: Admin, workspaceId: string): Promise<string | null> {
+  const { data } = await admin
+    .from("workspace_members")
+    .select("user_id, role")
+    .eq("workspace_id", workspaceId)
+    .in("role", ["owner", "admin", "agent"]);
+  const rows = (data || []) as { user_id: string; role: string }[];
+  return rows.find((r) => r.role === "owner")?.user_id || rows[0]?.user_id || null;
+}
+
+/**
+ * No-quorum hand-up. A routine-owned escalated ticket (escalated_at set, escalated_to null) that has
+ * hit `maxNoQuorumAttempts` no-quorum triage runs without ever materializing an outcome is genuinely
+ * stuck — the routine can't resolve it. Hand it UP to a real human: set `escalated_to` to the
+ * workspace owner so it leaves the routine pool (selectEscalatedForTriage requires escalated_to IS
+ * NULL) and surfaces in the human escalation queue. Keeps escalated_at; appends the give-up note to
+ * escalation_reason. Idempotent — once escalated_to is set the ticket no longer matches. Returns the
+ * ids handed up.
+ */
+export async function handUpExhaustedTriage(
+  admin: Admin,
+  workspaceId: string,
+  maxNoQuorumAttempts = 3,
+): Promise<string[]> {
+  const { data: tickets } = await admin
+    .from("tickets")
+    .select("id, escalation_reason")
+    .eq("workspace_id", workspaceId)
+    .not("escalated_at", "is", null)
+    .is("escalated_to", null)
+    .not("status", "in", '("archived","closed")');
+  const rows = (tickets || []) as { id: string; escalation_reason: string | null }[];
+  if (!rows.length) return [];
+  const ids = rows.map((t) => t.id);
+
+  const { data: activeTodos } = await admin
+    .from("agent_todos")
+    .select("source_ticket_id")
+    .in("source_ticket_id", ids)
+    .in("status", ["pending", "approved", "executed"]);
+  const active = new Set((activeTodos || []).map((t) => t.source_ticket_id as string));
+
+  const { data: priorRuns } = await admin
+    .from("triage_runs")
+    .select("ticket_id, materialized")
+    .in("ticket_id", ids);
+  const materialized = new Set<string>();
+  const noQuorumCount = new Map<string, number>();
+  for (const r of priorRuns || []) {
+    const tid = r.ticket_id as string;
+    if (r.materialized) materialized.add(tid);
+    else noQuorumCount.set(tid, (noQuorumCount.get(tid) || 0) + 1);
+  }
+
+  const stuck = rows.filter(
+    (t) => !active.has(t.id) && !materialized.has(t.id) && (noQuorumCount.get(t.id) || 0) >= maxNoQuorumAttempts,
+  );
+  if (!stuck.length) return [];
+
+  const human = await resolveWorkspaceHuman(admin, workspaceId);
+  if (!human) return []; // no human to hand to — leave escalated to the routine
+
+  const now = new Date().toISOString();
+  const handed: string[] = [];
+  for (const t of stuck) {
+    const reason = `${t.escalation_reason ? `${t.escalation_reason} · ` : ""}AI Routine reached no quorum after ${maxNoQuorumAttempts} attempts — handed to a human.`;
+    await admin.from("tickets").update({ escalated_to: human, escalation_reason: reason, updated_at: now }).eq("id", t.id);
+    handed.push(t.id);
+  }
+  return handed;
+}
+
 // ── Context brief (baked into the solver prompt) ─────────────────────────────
 
 /** The live conversation rules the orchestrator actually reads every turn (status=approved, enabled). */

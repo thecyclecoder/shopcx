@@ -32,6 +32,10 @@ async function analyzeTicket(ticketId: string, trigger: "auto_close" | "manual_c
 
 - `src/lib/inngest/ticket-analysis-cron.ts`
 
+## Escalation routing
+
+`analyzeTicket`'s severity actions (≤5 → escalate + notify; 6 → escalate silently) now escalate to the **AI Routine**, not a human: the re-open sets `escalated_to = null` with `escalated_at` + `escalation_reason` set (it no longer round-robins to a workspace member or pre-assigns `assigned_to`). That `escalated_at`-set + `escalated_to`-null state is exactly what [[../inngest/triage-escalations]]'s cron picks up — the idle-triage routine then runs solver→skeptic→quorum and produces approval-gated todos, handing **up** to a human only on no-quorum. The orchestrator (`action-executor.ts`), workflow executor (`workflow-executor.ts`), and portal remediation (`portal/remediation.ts`) escalations default the same way. See [[../specs/escalate-to-routine-by-default]].
+
 ## Gotchas
 
 - **The `customerThreat` scan must use the CLEANED body, not raw `body`.** Inbound email replies quote the message they're replying to. Our own order-confirmation emails carry a "Join our Facebook group!" footer, so every reply to one quotes it — and `CUSTOMER_ESCALATION_KEYWORDS` contains the bare substring `"facebook"`. Scanning raw `body` substring-matched that quoted footer → `customerThreat` true → silent force-escalate of a positively-closed ticket. Seen on ticket `246163b4` (Melissa Sachs, 2026-06-19, score **9** — "handled correctly, customer closed positively"). **Fixed:** the scan now reads `m.body_clean || cleanEmailBody(m.body)` ([[email-cleaner]] strips quoted history + signatures), so only the customer's actual new text is checked. This was systemic — any email reply quoting our Facebook footer would have tripped it.

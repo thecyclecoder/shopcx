@@ -65,7 +65,9 @@ export async function GET(request: Request) {
       query = query.contains("tags", tagList);
     }
   }
-  if (escalated === "true") query = query.not("escalated_to", "is", null);
+  // "Escalated" means escalated_at set — includes routine escalations
+  // (escalated_to null), not just human-targeted ones.
+  if (escalated === "true") query = query.not("escalated_at", "is", null);
   if (snoozed === "true") {
     query = query.gt("snoozed_until", new Date().toISOString());
   } else if (snoozed !== "all") {

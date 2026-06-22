@@ -25,6 +25,10 @@ import FraudCasesList from "@/components/shared/FraudCasesList";
 import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
 import { TicketAnalysisPanel } from "@/components/TicketAnalysisPanel";
 
+// Sentinel <option> value for "escalate to the AI Routine" — escalated_at set
+// with escalated_to null. Distinct from "" (not escalated, both null).
+const ESCALATE_ROUTINE_VALUE = "__ai_routine__";
+
 interface Member {
   user_id: string;
   display_name: string | null;
@@ -2629,7 +2633,7 @@ export default function TicketDetailPage() {
             {/* Escalation */}
             <div>
               <label className="flex items-center gap-1.5 text-sm text-zinc-500">
-                {ticket.escalated_to && (
+                {(ticket.escalated_to || ticket.escalated_at) && (
                   <svg className="h-3 w-3 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M3 6a3 3 0 013-3h10l-4 4 4 4H6a3 3 0 01-3-3V6z" clipRule="evenodd" />
                   </svg>
@@ -2637,31 +2641,38 @@ export default function TicketDetailPage() {
                 Escalated To
               </label>
               <select
-                value={ticket.escalated_to || ""}
+                value={ticket.escalated_to || (ticket.escalated_at ? ESCALATE_ROUTINE_VALUE : "")}
                 onChange={(e) => {
-                  if (e.target.value && !ticket.escalated_to) {
+                  const v = e.target.value;
+                  if (v === ESCALATE_ROUTINE_VALUE) {
+                    // Escalate to the AI Routine (escalated_at set + escalated_to null).
+                    handlePatch({ escalate_to_routine: true });
+                  } else if (v && v !== ticket.escalated_to) {
                     const reason = prompt("Escalation reason (optional):");
-                    handlePatch({ escalated_to: e.target.value, escalation_reason: reason || null });
-                  } else {
-                    handlePatch({ escalated_to: e.target.value || null, escalation_reason: null });
+                    handlePatch({ escalated_to: v, escalation_reason: reason || null });
+                  } else if (!v) {
+                    handlePatch({ escalated_to: null, escalation_reason: null });
                   }
                 }}
                 className={`mt-1 w-full rounded-md border px-2 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${
-                  ticket.escalated_to
+                  ticket.escalated_to || ticket.escalated_at
                     ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300"
                     : "border-zinc-300 bg-white text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 }`}
               >
+                <option value={ESCALATE_ROUTINE_VALUE}>🤖 AI Routine</option>
                 <option value="">Not escalated</option>
                 {members.map((m) => (
                   <option key={m.user_id} value={m.user_id}>{m.display_name || m.email}</option>
                 ))}
               </select>
-              {ticket.escalated_to && ticket.escalation_reason && (
+              {(ticket.escalated_to || ticket.escalated_at) && ticket.escalation_reason && (
                 <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">Reason: {ticket.escalation_reason}</p>
               )}
-              {ticket.escalated_to && ticket.escalated_at && (
-                <p className="mt-0.5 text-sm text-zinc-400">Escalated {formatDate(ticket.escalated_at)}</p>
+              {(ticket.escalated_to || ticket.escalated_at) && ticket.escalated_at && (
+                <p className="mt-0.5 text-sm text-zinc-400">
+                  Escalated {formatDate(ticket.escalated_at)}{!ticket.escalated_to && " to AI Routine"}
+                </p>
               )}
             </div>
             <div>

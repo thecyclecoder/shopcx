@@ -46,6 +46,7 @@ export interface TicketRow {
   created_at: string;
   assigned_to: string | null;
   escalated_to: string | null;
+  escalated_at: string | null;
   tags: string[] | null;
 }
 
@@ -279,37 +280,25 @@ async function addTag(admin: SupabaseClient, ticket: TicketRow, tag: string) {
 }
 
 /**
- * Resolve the workspace owner — escalations always route to the owner, mirroring
- * src/app/api/todos/[id]/reject/route.ts.
- */
-async function workspaceOwner(admin: SupabaseClient, workspaceId: string): Promise<string | null> {
-  const { data: owner } = await admin
-    .from("workspace_members")
-    .select("user_id")
-    .eq("workspace_id", workspaceId)
-    .eq("role", "owner")
-    .limit(1)
-    .maybeSingle();
-  return owner?.user_id ?? null;
-}
-
-/**
- * Escalate a portal-action-failed ticket to a human. Sets `escalated_to` (the
- * workspace owner), `escalated_at`, and `escalation_reason` so the ticket enters
- * the escalation queue that `/api/escalated` and the `escalated=true` ticket
- * filter surface — a needs-human tag alone was invisible to every human queue,
- * so triaged tickets piled up unseen.
+ * Escalate a portal-action-failed ticket to the AI Routine. Sets `escalated_at`
+ * + `escalation_reason` with `escalated_to = null` (the idle-triage cron's
+ * "routine-owned" signal) so the ticket enters the escalation queue that
+ * `/api/escalated` and the `escalated=true` ticket filter surface — a
+ * needs-human tag alone was invisible to every human queue. The routine triages
+ * it next tick (solver→skeptic→quorum) and its no-quorum path is what hands up
+ * to a real human.
  *
- * Setting `escalated_to` also becomes the idempotency guard: the hand-off check
+ * Setting `escalated_at` also becomes the idempotency guard: the hand-off check
  * at the top of `remediatePortalTicket()` short-circuits once it's set, so the
- * cron never re-runs the action on an already-escalated ticket.
+ * cron never re-runs the action on an already-escalated ticket. (Previously the
+ * guard keyed on `escalated_to`; now that routine escalations leave that null,
+ * the guard keys on `escalated_at`.)
  */
 async function escalate(admin: SupabaseClient, ticket: TicketRow, reason: string) {
-  const ownerId = await workspaceOwner(admin, ticket.workspace_id);
   const now = new Date().toISOString();
   await admin
     .from("tickets")
-    .update({ escalated_to: ownerId, escalated_at: now, escalation_reason: reason, updated_at: now })
+    .update({ escalated_to: null, escalated_at: now, escalation_reason: reason, updated_at: now })
     .eq("id", ticket.id);
 }
 
@@ -328,9 +317,11 @@ export async function remediatePortalTicket(
   admin: SupabaseClient,
   ticket: TicketRow,
 ): Promise<RemediationOutcome> {
-  // A human has it (assigned or already escalated) — hands off. The escalated_to
-  // check is also the idempotency guard for our own escalations below.
-  if (ticket.assigned_to || ticket.escalated_to) {
+  // A human has it (assigned or escalated to a specific person), or it's already
+  // escalated (to the routine or a human) — hands off. The escalated_at check is
+  // the idempotency guard for our own routine escalations below (which leave
+  // escalated_to null).
+  if (ticket.assigned_to || ticket.escalated_to || ticket.escalated_at) {
     return { action: "skipped", reason: "human-assigned" };
   }
   // Legacy backlog: before escalation existed, tickets triaged to a human were
@@ -444,7 +435,7 @@ export async function fetchOpenPortalFailures(
   const since = new Date(Date.now() - windowDays * 86_400_000).toISOString();
   const { data } = await admin
     .from("tickets")
-    .select("id, workspace_id, customer_id, subject, created_at, assigned_to, escalated_to, tags")
+    .select("id, workspace_id, customer_id, subject, created_at, assigned_to, escalated_to, escalated_at, tags")
     .eq("workspace_id", workspaceId)
     .contains("tags", [PORTAL_FAIL_TAG])
     .eq("status", "open")

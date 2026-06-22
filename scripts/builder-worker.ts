@@ -1497,9 +1497,14 @@ function triageRevisePrompt(critique: string, concerns: string[]): string {
 async function runEscalationTriageJob(job: Job) {
   const tag = `[triage:${job.id.slice(0, 8)}]`;
   const wsId = job.workspace_id;
-  const { selectEscalatedForTriage, loadTriageBrief, materializeTriageOutcome, recordTriageRun } = await import(
+  const { selectEscalatedForTriage, loadTriageBrief, materializeTriageOutcome, recordTriageRun, handUpExhaustedTriage } = await import(
     "../src/lib/agent-todos/triage"
   );
+
+  // No-quorum hand-up: tickets the routine has failed to resolve after the give-up cap are escalated
+  // UP to a real human (escalated_to set) so they leave the routine pool and reach a person.
+  const handedUp = await handUpExhaustedTriage(db, wsId);
+  if (handedUp.length) console.log(`${tag} handed ${handedUp.length} no-quorum ticket(s) up to a human`);
 
   const sel = await selectEscalatedForTriage(db, wsId, TRIAGE_CAP);
   console.log(`${tag} ${sel.selected.length}/${sel.eligible} eligible escalated ticket(s) this sweep (deferred ${sel.deferred})`);
