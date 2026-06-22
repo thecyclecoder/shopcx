@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import { AiInvestigationBadge } from "@/components/ai-investigation-badge";
+import { useTriageInProgress } from "@/lib/use-triage-in-progress";
 
 interface TicketRow {
   id: string;
@@ -61,6 +63,7 @@ const PAGE_SIZE = 25;
 
 export default function TicketsPage() {
   const workspace = useWorkspace();
+  const triageInProgress = useTriageInProgress();
   const router = useRouter();
   const searchParams = useSearchParams();
   const viewId = searchParams.get("view");
@@ -837,16 +840,25 @@ export default function TicketsPage() {
                           {new Date(t.snoozed_until).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                         </span>
                       )}
-                      {(t.escalated_to || t.escalated_at) && (
+                      {/* Routine-escalated (escalated_to IS NULL) → prominent AI-Investigation badge;
+                          human-escalated → the amber escalate icon. */}
+                      {t.escalated_at && !t.escalated_to ? (
+                        <AiInvestigationBadge
+                          escalatedAt={t.escalated_at}
+                          escalatedTo={t.escalated_to}
+                          triageInProgress={triageInProgress}
+                          compact
+                        />
+                      ) : t.escalated_to ? (
                         <svg
                           className="h-3.5 w-3.5 text-amber-500"
                           fill="currentColor"
                           viewBox="0 0 20 20"
                         >
-                          <title>{t.escalated_to ? "Escalated" : "Escalated to AI Routine"}</title>
+                          <title>Escalated</title>
                           <path fillRule="evenodd" d="M3 6a3 3 0 013-3h10l-4 4 4 4H6a3 3 0 01-3-3V6z" clipRule="evenodd" />
                         </svg>
-                      )}
+                      ) : null}
                     </div>
                   </td>
                   <td className="max-w-xs px-4 py-3 text-sm" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>

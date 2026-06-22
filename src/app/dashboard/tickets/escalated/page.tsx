@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { AiInvestigationBadge } from "@/components/ai-investigation-badge";
+import { useTriageInProgress } from "@/lib/use-triage-in-progress";
 
 interface Row {
   id: string;
@@ -49,6 +51,7 @@ function formatDate(s: string): string {
 
 export default function EscalatedPage() {
   const workspace = useWorkspace();
+  const triageInProgress = useTriageInProgress();
   const [rows, setRows] = useState<Row[]>([]);
   const [chips, setChips] = useState<Chips | null>(null);
   const [uid, setUid] = useState("");
@@ -140,9 +143,18 @@ export default function EscalatedPage() {
                     </td>
                     <td className="px-3 py-2 text-xs text-zinc-500">{r.escalation_reason || "—"}</td>
                     <td className="px-3 py-2">
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${badge.cls}`}>
-                        {badge.label(r)}
-                      </span>
+                      {r.routed_to === "routine" ? (
+                        <AiInvestigationBadge
+                          escalatedAt={r.escalated_at}
+                          escalatedTo={r.escalated_to}
+                          triageInProgress={triageInProgress}
+                          compact
+                        />
+                      ) : (
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${badge.cls}`}>
+                          {badge.label(r)}
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-xs text-zinc-500">{formatDate(r.escalated_at)}</td>
                   </tr>
