@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Base Price Never Above MSRP (invariant + cap)** · verified 2026-06-21 · → [[lifecycles/subscription-billing]]
+- **Box-hosted Spec Chat (long-running Max session)** · verified 2026-06-21 · → [[lifecycles/roadmap-build-console]]
 - **Box-hosted Ticket "Improve" Agent (Max session)** · verified 2026-06-20 · → [[tables/ticket_improve_chats]]
 - **Improve Queue (answered-by-the-box surfacing)** · verified 2026-06-20 · → [[dashboard/tickets__improve]]
 - **Authoring chat persistence — save + resume Opus chats (cross-device)** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
