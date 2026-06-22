@@ -13,7 +13,7 @@
 ## Verification
 - ✅ Force the agent to emit prose + JSON → the runner extracts the JSON and records a real verdict.
 - Force unparseable output → after one repair re-prompt it still fails → the run is `error` (not approved/empty), shows "retry" on the Developer page, and **Test now** re-runs.
-- ✅ Re-run the `improve-queue-mark-read` spec-test → it produces a parseable verdict with real checks.
+- Re-run the `improve-queue-mark-read` spec-test → it produces a parseable verdict with real checks.
 
 ## Phase 1 — strict contract + parse-repair + error state ✅
 Skill output contract + `runSpecTestJob` parse/repair/retry + the `error` terminal state + Developer-page "retry" rendering + summary-from-checks guard. Brain: [[spec-test-agent]] + the `spec-test` skill page + [[../tables/spec_test_runs]]. Fold on ship.
