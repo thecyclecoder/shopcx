@@ -1,0 +1,1 @@
+- **Fold guard — don't archive a spec with a live build; reconcile jobs on archive** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
