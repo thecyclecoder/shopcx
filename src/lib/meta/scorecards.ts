@@ -23,6 +23,7 @@
  * See docs/brain/specs/storefront-iteration-engine.md (Phase 3).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { reportDbError } from "@/lib/control-tower/error-feed";
 import { UNRESOLVED_VARIANT } from "@/lib/meta/attribution";
 
 export type ScorecardLevel = "ad" | "adset" | "campaign" | "variant" | "angle";
@@ -533,6 +534,12 @@ export async function computeScorecards(
   }
   if (firstError) {
     const { code, message } = firstError;
+    // Surface the swallowed-error class to the Control Tower error feed at the source
+    // (error-feed-monitoring Phase 1) — best-effort, before we throw loudly.
+    await reportDbError(
+      { code: code ?? undefined, message },
+      { op: "scorecard-upsert", table: "iteration_scorecards_daily", persisted, total: records.length },
+    );
     throw new Error(
       `iteration_scorecards_daily upsert persisted ${persisted}/${records.length} rows; ` +
         `${records.length - persisted} failed: ${code ?? "?"} ${message}`,

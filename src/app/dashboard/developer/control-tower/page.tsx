@@ -40,10 +40,33 @@ interface LoopStatus {
   history: HistoryRow[];
   openAlert: OpenAlert | null;
 }
+type ErrorSource = "vercel" | "inngest" | "supabase";
+interface ErrorIncident {
+  id: string;
+  source: ErrorSource;
+  signature: string;
+  title: string;
+  detail: string | null;
+  count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+interface ErrorFeedPanel {
+  source: ErrorSource;
+  color: LoopColor;
+  incidents: ErrorIncident[];
+  activeSignatures: number;
+  totalOccurrences: number;
+}
+interface ErrorFeedSnapshot {
+  generatedAt: string;
+  panels: ErrorFeedPanel[];
+}
 interface Snapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
   loops: LoopStatus[];
+  errorFeed?: ErrorFeedSnapshot;
 }
 
 function elapsed(iso: string | null | undefined): string {
@@ -147,6 +170,63 @@ function LoopTile({ loop }: { loop: LoopStatus }) {
   );
 }
 
+const ERROR_SOURCE_LABEL: Record<ErrorSource, string> = {
+  vercel: "Vercel errors",
+  inngest: "Inngest failures",
+  supabase: "Supabase errors (app-layer)",
+};
+const ERROR_SOURCE_HINT: Record<ErrorSource, string> = {
+  vercel: "prod runtime errors / 500s via the log drain",
+  inngest: "functions that failed after exhausting retries",
+  supabase: "DB errors our code reported (reportDbError)",
+};
+
+function ErrorPanel({ panel }: { panel: ErrorFeedPanel }) {
+  return (
+    <div className={`rounded-lg border p-3.5 ${TILE[panel.color]}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT[panel.color]}`} />
+            <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              {ERROR_SOURCE_LABEL[panel.source]}
+            </h3>
+          </div>
+          <p className="mt-0.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+            {ERROR_SOURCE_HINT[panel.source]}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-400">
+          {panel.activeSignatures} active · {panel.totalOccurrences} total
+        </span>
+      </div>
+
+      {panel.incidents.length === 0 ? (
+        <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">No errors in the last 7 days.</p>
+      ) : (
+        <ul className="mt-2 space-y-1.5">
+          {panel.incidents.map((inc) => (
+            <li
+              key={inc.id}
+              className="rounded-md border border-zinc-200/70 bg-white/60 px-2 py-1.5 text-[11px] dark:border-zinc-800/70 dark:bg-zinc-900/30"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <span className="truncate font-medium text-zinc-700 dark:text-zinc-200" title={inc.title}>
+                  {inc.title}
+                </span>
+                <span className="shrink-0 rounded-full bg-rose-100 px-1.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">
+                  ×{inc.count}
+                </span>
+              </div>
+              <p className="mt-0.5 text-[10px] text-zinc-400">last seen {elapsed(inc.last_seen_at)} ago</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function ControlTowerPage() {
   const workspace = useWorkspace();
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -238,6 +318,24 @@ export default function ControlTowerPage() {
               );
             })}
           </div>
+
+          {snap.errorFeed && (
+            <div className="mt-8">
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Errors
+              </h2>
+              <p className="mb-3 text-[11px] text-zinc-400">
+                The three hidden surfaces — Vercel runtime errors, Inngest failed runs, and app-layer Supabase
+                errors — grouped by signature. A new signature or a re-firing spike pages the owners (rate-limited:
+                a burst of the same error = one page). Green = no errors in the last 7 days.
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {snap.errorFeed.panels.map((p) => (
+                  <ErrorPanel key={p.source} panel={p} />
+                ))}
+              </div>
+            </div>
+          )}
 
           <p className="mt-6 text-[11px] text-zinc-400">
             SHA comparison uses the deployed commit ({" "}
