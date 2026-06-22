@@ -269,7 +269,7 @@ async function sysNote(admin: SupabaseClient, ticketId: string, body: string) {
 async function closeTicket(admin: SupabaseClient, ticketId: string) {
   await admin
     .from("tickets")
-    .update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null })
     .eq("id", ticketId);
 }
 

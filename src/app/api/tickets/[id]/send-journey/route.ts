@@ -71,8 +71,8 @@ export async function POST(
     ctaText: `${journey.name} →`,
   });
 
-  // Close ticket after manual journey send
-  await admin.from("tickets").update({ status: "closed" }).eq("id", ticketId);
+  // Close ticket after manual journey send (clears escalation — closing ends it)
+  await admin.from("tickets").update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", ticketId);
 
   return NextResponse.json({ sent: launched, journey: journey.name });
 }

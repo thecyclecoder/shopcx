@@ -369,6 +369,10 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
   if (statusAfterReply === "closed") {
     statusUpdates.resolved_at = new Date().toISOString();
     statusUpdates.closed_at = new Date().toISOString();
+    // Closing ends escalation — clear the flags so it drops off the Escalated list.
+    statusUpdates.escalated_at = null;
+    statusUpdates.escalated_to = null;
+    statusUpdates.escalation_reason = null;
   }
   await admin.from("tickets").update(statusUpdates).eq("id", context.ticketId);
 

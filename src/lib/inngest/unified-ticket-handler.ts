@@ -432,7 +432,7 @@ async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string
 // escalation time. This avoids tickets sitting in "pending" forever
 // when the customer doesn't reply.
 const setStatus = (admin: Admin, tid: string, _autoResolve: boolean) =>
-  admin.from("tickets").update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", tid);
+  admin.from("tickets").update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", tid);
 
 // Pure decision for the post-execute status block. Kept separate from the
 // DB writes so it can be unit-checked (scripts/_regress-workflow-status-authoritative.ts).
@@ -650,7 +650,7 @@ export const unifiedTicketHandler = inngest.createFunction(
         );
         if (/^YES/i.test(verdict.trim())) {
           await addTicketTag(tid, "spam:bot");
-          await admin.from("tickets").update({ status: "closed" }).eq("id", tid);
+          await admin.from("tickets").update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", tid);
           await sysNote(admin, tid, `[System] Bot/spam contact-form drop detected — closed silently. (Subject + body both match alphanumeric token pattern; Haiku confirmed.)`);
           return { status: "skipped", reason: "spam_bot" };
         }
@@ -758,7 +758,7 @@ export const unifiedTicketHandler = inngest.createFunction(
             "<p>We're sorry, but we've noticed unusual activity on your account and we are unable to provide further assistance.</p>",
             cfg.sandbox);
           await addTicketTag(tid, "fraud_customer");
-          await admin.from("tickets").update({ status: "closed" }).eq("id", tid);
+          await admin.from("tickets").update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", tid);
         });
         return { status: "banned_customer" };
       }

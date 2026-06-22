@@ -11,7 +11,7 @@ This routine optimizes a **bounded proxy — well-formed, double-checked *propos
 
 ## Trigger + sweep
 - **Hourly Inngest cron** (the box has no internal ticker; cron-enqueue is the precedent, cf. `portal-auto-resume`) inserts one `agent_jobs` row `kind='triage-escalations'`, `status='queued'`. The box claims it (`claim_agent_job(['triage-escalations'])`, own concurrency-1 lane) and runs the sweep — a top-level `claude -p` on Max, web search on, in a repo checkout.
-- **Queue selection** (reuse the current routine's filter): tickets with `escalated_at IS NOT NULL` AND `escalated_to IS NULL` (routine-owned, not human-assigned) AND **no active `agent_todos` group** (one active group per ticket — dedupe). Cap per run (e.g. N tickets/hour) to bound cost; log what was deferred (no silent truncation).
+- **Queue selection** (reuse the current routine's filter): tickets with `escalated_at IS NOT NULL` AND `escalated_to IS NULL` (routine-owned, not human-assigned) AND **no active `agent_todos` group** (one active group per ticket — dedupe). Cap per run (e.g. N tickets/hour) to bound cost; log what was deferred (no silent truncation). (Closing a ticket now clears `escalated_at` at every status-write path — see [[clear-escalation-on-resolve]] — so resolved tickets drop out of this queue automatically.)
 
 ## Per-ticket loop (solver → skeptic → quorum)
 1. **Solver** (Max `claude -p`): loads full context (the `ticket_messages`, customer + subs + orders, latest `ticket_analyses`, the brain brief + the live `sonnet_prompts` rules) and asks *why did this escape every rule?* Then branches (same taxonomy the reasoning pass already uses):
