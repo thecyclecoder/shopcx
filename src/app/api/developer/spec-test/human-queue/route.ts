@@ -20,6 +20,7 @@ import {
   clearHumanCheckResolution,
   checkKey,
   isHumanResolution,
+  autoFoldVerifiedSpecs,
 } from "@/lib/spec-test-runs";
 import { reflectSpecGreenChecks } from "@/lib/spec-green-writeback";
 
@@ -74,6 +75,9 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error }, { status: 500 });
     // Re-open → strip the ✅ from this bullet on the spec markdown (best-effort, never blocks the click).
     const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
+    // Auto-fold Gate B (auto-ship-pipeline Phase 2): a resolution change can flip a spec all-green →
+    // auto-archive it (or, here on a re-open, it simply finds nothing newly-eligible). Best-effort.
+    await autoFoldVerifiedSpecs(workspaceId).catch(() => null);
     return NextResponse.json({ ok: true, cleared: true, allGreen: green?.allGreen ?? false });
   }
 
@@ -98,5 +102,8 @@ export async function POST(request: Request) {
   // Owner marked ✓ Tested (or another resolution) → reflect green state onto the spec markdown: a
   // `verified` resolution lands a leading ✅ on the bullet (committed to main); any other clears it.
   const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
+  // Auto-fold Gate B (auto-ship-pipeline Phase 2): the owner resolving the LAST waiting human check can
+  // flip a spec all-green — auto-archive it without a second click. All-green-only; best-effort.
+  await autoFoldVerifiedSpecs(workspaceId).catch(() => null);
   return NextResponse.json({ ok: true, resolution, allGreen: green?.allGreen ?? false });
 }

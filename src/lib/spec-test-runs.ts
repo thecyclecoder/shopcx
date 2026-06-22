@@ -11,6 +11,10 @@
 import { createHash } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
+import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
+import { AUTO_FOLD_GATE_LOOP_ID } from "@/lib/control-tower/registry";
+
+type Admin = ReturnType<typeof createAdminClient>;
 
 export type CheckVerdict = "pass" | "fail" | "needs_human" | "inconclusive";
 export type CheckCategory = "auto" | "needs_human" | "inconclusive";
@@ -435,4 +439,155 @@ export async function getHumanTestQueue(workspaceId: string): Promise<HumanTestQ
     regressions,
     counts: { waiting, resolved: items.length - waiting, regressions: regressions.length },
   };
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Gate B — auto-fold fully-verified specs (auto-ship-pipeline spec, Phase 2).
+ *
+ * The mirror of the auto-merge gate, one rung up the pipeline: where Gate A automates the owner's
+ * rubber-stamp "merge" click on green PRs, Gate B automates the owner's rubber-stamp "Mark verified &
+ * archive" click on ALL-GREEN shipped specs — the exact state the owner archives on. It optimizes a
+ * bounded proxy (fold-when-all-pass), the owner still owns the objective + can pause it (the
+ * `workspaces.auto_fold_enabled` kill-switch), and every fold is surfaced (Control Tower heartbeat +
+ * log). It NEVER skips the human checks — it just stops making the owner click once the human is done.
+ * A spec with ONE waiting / failed human check or a regression is left alone (hitting a rail = leave it).
+ * Coalesces into the SAME batch fold-build the manual verify uses (enqueue_fold).
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Kill-switch: is auto-fold enabled for a workspace? Default ENABLED (true) — the gate automates the
+ * owner's verify-&-archive click, the flag exists to PAUSE it. Read via `select("*")` so a deploy that
+ * lands before the `auto_fold_enabled` migration applies degrades gracefully (column absent ⇒ undefined ⇒
+ * enabled), and a read failure also defaults to enabled (best-effort; the fold is still guarded all-green).
+ * Only an explicit `auto_fold_enabled === false` pauses the gate. Mirrors isAutoMergeEnabled.
+ */
+export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin): Promise<boolean> {
+  try {
+    const admin = adminClient || createAdminClient();
+    const { data } = await admin.from("workspaces").select("*").eq("id", workspaceId).maybeSingle();
+    const flag = (data as Record<string, unknown> | null)?.auto_fold_enabled;
+    return flag !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The set of shipped-but-not-archived specs that are FULLY verified for a workspace — the all-green state
+ * the owner archives on:
+ *   - the latest spec_test run is agent-verdict `approved` (its automatable checks all pass), AND
+ *   - 0 human checks waiting (no `needs_human` check the owner hasn't resolved), AND
+ *   - 0 human checks failed (no resolution === 'failed' for the spec — a confirmed-broken bullet), AND
+ *   - 0 regressions (no unresolved auto-`fail` check — same definition the human-test queue uses).
+ * Pure read; mirrors the per-spec board-chip / human-queue derivation so it can never disagree with what
+ * the owner sees. A spec missing a run, or agent-verdict `issues`/`needs_human`/`error`, is NOT eligible.
+ */
+export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
+  const [{ specs }, archived, runs, resolutions] = await Promise.all([
+    getRoadmap(),
+    listArchivedSlugs(),
+    getLatestSpecTestRuns(workspaceId),
+    getHumanCheckResolutions(workspaceId),
+  ]);
+  const archivedSet = new Set(archived);
+  const eligible: string[] = [];
+  for (const s of specs) {
+    if (s.status !== "shipped" || archivedSet.has(s.slug)) continue;
+    const run = runs[s.slug];
+    if (!run || run.agent_verdict !== "approved") continue;
+
+    let blocked = false;
+    for (const c of run.checks) {
+      const key = checkKey(c.text);
+      const res = resolutions.get(`${s.slug}:${key}`);
+      // a needs_human check the owner hasn't resolved (waiting), or an unresolved auto-fail (regression)
+      if (c.verdict === "needs_human" && !res?.resolution) { blocked = true; break; }
+      if (c.verdict === "fail" && !res?.resolution) { blocked = true; break; }
+    }
+    if (blocked) continue;
+
+    // 0 human checks FAILED: any resolution === 'failed' for this spec (a confirmed-broken bullet) blocks.
+    let hasFailed = false;
+    for (const [k, row] of resolutions) {
+      if (k.startsWith(`${s.slug}:`) && row.resolution === "failed") { hasFailed = true; break; }
+    }
+    if (hasFailed) continue;
+
+    eligible.push(s.slug);
+  }
+  return eligible;
+}
+
+export interface AutoFoldResult {
+  enabled: boolean;
+  /** shipped-but-not-archived specs that are fully verified (all-green) this pass. */
+  eligible: number;
+  /** specs newly enqueued for the batch fold-build (excludes ones already pending/folding). */
+  folded: number;
+  foldedSlugs: string[];
+}
+
+/**
+ * Gate B: enqueue a batch fold-build for every fully-verified shipped spec in a workspace.
+ *
+ * Guardrails (supervisable autonomy):
+ *  - kill-switch: no-op when `auto_fold_enabled === false` on the workspace.
+ *  - ALL-GREEN only — agent-verdict approved + 0 human checks waiting/failed + 0 regressions
+ *    (getAutoFoldEligibleSlugs). A spec with one open/failed/waiting check is left for the human.
+ *  - Idempotent: skips a spec already pending/folding (a fold job already owns it); enqueue_fold itself
+ *    coalesces every eligible spec into ONE queued batch fold-build (no fan-out of N fold PRs).
+ *  - requested_by = null (no human clicked — this is the gate). Surfaces the pass as a Control Tower
+ *    heartbeat (loop_id = AUTO_FOLD_GATE_LOOP_ID) + a console log of each folded spec.
+ */
+export async function autoFoldVerifiedSpecs(workspaceId: string, adminClient?: Admin): Promise<AutoFoldResult> {
+  const admin = adminClient || createAdminClient();
+  const result: AutoFoldResult = { enabled: true, eligible: 0, folded: 0, foldedSlugs: [] };
+  let ok = true;
+  try {
+    result.enabled = await isAutoFoldEnabled(workspaceId, admin);
+    if (!result.enabled) return result;
+
+    const eligibleSlugs = await getAutoFoldEligibleSlugs(workspaceId);
+    result.eligible = eligibleSlugs.length;
+    if (!eligibleSlugs.length) return result;
+
+    // Skip specs a fold job already owns (pending/folding) — enqueue_fold no-ops those rows anyway, but
+    // skipping keeps the surfaced `folded` count to genuinely-new folds.
+    const { data: pendingRows } = await admin
+      .from("pending_folds")
+      .select("spec_slug")
+      .eq("workspace_id", workspaceId)
+      .in("status", ["pending", "folding"]);
+    const pending = new Set((pendingRows ?? []).map((r) => String((r as { spec_slug: string }).spec_slug)));
+
+    for (const slug of eligibleSlugs) {
+      if (pending.has(slug)) continue;
+      const { error } = await admin.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: slug, p_user: null });
+      if (error) {
+        ok = false;
+        console.warn(`[auto-fold] enqueue_fold failed for ${slug}: ${error.message}`);
+        continue;
+      }
+      result.folded++;
+      result.foldedSlugs.push(slug);
+      console.log(`[auto-fold] enqueued fold for fully-verified spec ${slug}`);
+    }
+    return result;
+  } catch (e) {
+    ok = false;
+    console.error("[auto-fold] gate failed:", e instanceof Error ? e.message : e);
+    return result;
+  } finally {
+    // Control Tower liveness + action surfacing: one beat per pass (idle = ok:true/green; a failed
+    // enqueue = ok:false, feeding the error-rate assertion). Best-effort — never breaks the gate.
+    await emitReactiveHeartbeat(AUTO_FOLD_GATE_LOOP_ID, {
+      ok,
+      produced: {
+        enabled: result.enabled,
+        eligible: result.eligible,
+        folded: result.folded,
+        foldedSlugs: result.foldedSlugs,
+      },
+    });
+  }
 }

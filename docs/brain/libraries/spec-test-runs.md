@@ -55,6 +55,19 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
   latest run of each shipped-unverified spec **+ the Regressions list** (keyed off evidence-backed `fail` checks
   only — `needs_human`/`inconclusive` never appear there, [[../specs/spec-test-classification|the classification rule]]).
 
+### Auto-fold gate — Gate B ([[../specs/auto-ship-pipeline]] Phase 2)
+- `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the **all-green** shipped-not-archived specs: latest run
+  agent-verdict `approved` · 0 waiting `needs_human` checks · 0 human checks resolved `failed` · 0 unresolved
+  auto-`fail` regressions. Reuses the SAME per-spec derivation as the board chip / human-test queue, so the gate
+  can never disagree with what the owner sees.
+- `isAutoFoldEnabled(workspaceId, admin?)` → `boolean` — the owner kill-switch (`workspaces.auto_fold_enabled`,
+  default ON; `select("*")` so a pre-migration deploy degrades to enabled). Mirrors `isAutoMergeEnabled`.
+- `autoFoldVerifiedSpecs(workspaceId, admin?)` → `AutoFoldResult` — for each eligible spec not already
+  `pending`/`folding`, calls `enqueue_fold(p_user:null)` (coalesced into the ONE batch fold-build, [[../specs/fold-build-batching]]);
+  emits the `auto-fold-gate` reactive Control Tower heartbeat ([[control-tower]], `AUTO_FOLD_GATE_LOOP_ID`). The
+  all-green mirror of `autoMergeReadyPrs` ([[github-pr-resolve]]), one rung up the pipeline. Triggered reactively by
+  the worker after a spec-test run + by the human-queue POST, and periodically by [[../inngest/spec-test-cron]].
+
 ## Classification policy — "if a machine can test it, the machine does it"
 
 The `CheckCategory` a bullet lands in is decided by a policy that biases hard toward non-destructive
@@ -82,9 +95,10 @@ classification prompt in `runSpecTestJob` (`scripts/builder-worker.ts`); this is
 
 ## Callers
 
-- `scripts/builder-worker.ts` → `runSpecTestJob` — writes runs; calls `reflectSpecGreenChecks` after.
+- `scripts/builder-worker.ts` → `runSpecTestJob` — writes runs; calls `reflectSpecGreenChecks` then `autoFoldVerifiedSpecs` after.
 - `src/app/dashboard/developer/spec-tests/**` + `VerificationCard` + the roadmap board cards — read via `getLatestSpecTestRuns` / `getHumanTestQueue` / `signSpecTestScreenshot`.
-- `src/app/api/developer/spec-test/human-queue/route.ts` — `getHumanTestQueue` (GET) + the upsert/clear helpers (POST, owner-only).
+- `src/app/api/developer/spec-test/human-queue/route.ts` — `getHumanTestQueue` (GET) + the upsert/clear helpers (POST, owner-only); POST also fires `autoFoldVerifiedSpecs` (Gate B).
+- `src/lib/inngest/spec-test-cron.ts` — daily periodic backstop sweep calling `autoFoldVerifiedSpecs` per workspace.
 - `src/lib/spec-drift.ts` — uses `checkKey` to match a fix spec's `**Fixes:**` check hashes.
 
 ## Gotchas

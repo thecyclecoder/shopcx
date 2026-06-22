@@ -169,6 +169,17 @@ export type InlineWorkSignalId =
  */
 export const AUTO_MERGE_GATE_LOOP_ID = "auto-merge-gate";
 
+/**
+ * loop_heartbeats.loop_id the Auto-Ship Pipeline's auto-FOLD gate beats under (auto-ship-pipeline spec,
+ * Phase 2 / Gate B). The mirror of the auto-merge gate, one rung up: where Gate A automates the owner's
+ * "merge" click on green PRs, Gate B automates the owner's "Mark verified & archive" click on all-green
+ * shipped specs (agent-verdict approved · 0 human checks waiting · 0 failed · 0 regressions) → enqueue_fold.
+ * NOT an Inngest fn / box lane — it runs reactively (on a spec-test completing / a human-check resolving)
+ * + periodically (the spec-test cron). Beats once per pass (kind 'reactive', end-of-run try/finally:
+ * ok:true on a clean pass / idle, ok:false on a failed enqueue). Idle = green (event-driven, no cadence).
+ */
+export const AUTO_FOLD_GATE_LOOP_ID = "auto-fold-gate";
+
 /** Stable inline-agent loop ids (loop_id on loop_heartbeats; matches the registry entries). */
 export const INLINE_AGENT_IDS = {
   ticketAnalyzer: "ai:ticket-analyzer",
@@ -502,6 +513,26 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
       "Squash-merges ready (mergeable + all-checks-green) claude/* build PRs from the GitHub webhook — serialized (one per pass), sync-aware, owner kill-switch (workspaces.auto_merge_enabled). The dirty-PR resolver's READY mirror.",
     expectedCadence: "per GitHub push/PR/check webhook",
     livenessWindowMs: 24 * HOUR,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+
+  // ── Auto-Ship Pipeline — auto-fold gate (loop_heartbeats, loop_id = AUTO_FOLD_GATE_LOOP_ID) ──
+  // Gate B (auto-ship-pipeline spec, Phase 2): auto-folds fully-verified shipped specs (agent-verdict
+  // approved + 0 human checks waiting/failed + 0 regressions) via enqueue_fold — the all-green mirror of
+  // the owner's "Mark verified & archive" click. Runs reactively (spec-test completion / human-check
+  // resolution) + periodically (the spec-test cron), so it's a `reactive` loop: idle = green, beats once
+  // per pass (ok:false on a failed enqueue, feeding the error-rate assertion). No work-exists signal —
+  // error-rate only (the eligible-spec set is the demand, but there's no independent upstream count probe).
+  {
+    id: AUTO_FOLD_GATE_LOOP_ID,
+    kind: "reactive",
+    owner: "platform",
+    label: "Auto-fold gate",
+    description:
+      "Auto-folds fully-verified shipped specs (agent-verdict approved + 0 human checks waiting/failed + 0 regressions) via enqueue_fold — the all-green mirror of the owner's Mark-verified-&-archive click. Owner kill-switch (workspaces.auto_fold_enabled), coalesced into the batch fold-build.",
+    expectedCadence: "per spec-test completion / human-check resolution + daily sweep",
+    livenessWindowMs: 30 * HOUR,
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
   },
