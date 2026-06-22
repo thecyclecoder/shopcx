@@ -99,7 +99,6 @@ async function main() {
 - **Service role doesn't work here.** This is direct Postgres auth, not Supabase API. Use the DB password.
 - **For idempotent scripts**, prefer `INSERT … ON CONFLICT DO NOTHING` or `UPDATE … WHERE foo IS NULL` patterns so re-runs are safe.
 - **Connection limit.** Don't open multiple clients — one per script.
-- **Don't run during active Inngest syncs.** Long-running migrations can block writes the sync needs. See CLAUDE.md.
 - **After apply**: drop the file into `supabase/migrations/` if you want it in the migration history, or delete the apply script if it was a one-off backfill.
 
 ## Related

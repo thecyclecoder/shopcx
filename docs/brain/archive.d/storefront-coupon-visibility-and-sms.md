@@ -1,0 +1,1 @@
+- **Storefront coupon visibility + WELCOME SMS delivery** · verified 2026-06-22 · → [[lifecycles/storefront-checkout]]

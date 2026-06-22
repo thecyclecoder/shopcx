@@ -1,0 +1,1 @@
+- **Portal removeLineItem: resolve by variantId when lineId isn't a real Appstle line** · verified 2026-06-22 · → [[lifecycles/customer-portal]]

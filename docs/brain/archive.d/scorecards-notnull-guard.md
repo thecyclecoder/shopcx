@@ -1,0 +1,1 @@
+- **Scorecards upsert — guard the NOT-NULL violation (23502)** · verified 2026-06-22 · → [[tables/iteration_scorecards_daily]]

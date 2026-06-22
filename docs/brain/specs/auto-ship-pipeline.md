@@ -9,8 +9,8 @@ Two bottlenecks are pure rubber-stamps — the owner clicks "merge" on green PRs
 - **Condition:** a `claude/*` **build** PR (box-authored) that is **mergeable (no conflicts) AND all checks green** → **squash-merge + delete branch** (mirrors the owner's manual action + the watcher pattern used all session).
 - **Guardrails:**
   - `claude/*` build/fix PRs only — never a human PR, never a non-build branch.
-  - **Serialize:** merge ONE at a time (a queue), never fan out N merges → N simultaneous Vercel deploys.
-  - **Skip while an Inngest sync is active** (a deploy kills running functions — the standing rule); defer to the next safe window.
+  - **Serialize:** merge ONE at a time (a queue), never fan out N merges → N simultaneous Vercel deploys. (This alone prevents deploy storms.)
+  - **No sync-gating** (owner directive, 2026-06-22): the old "don't deploy during an Inngest sync" concern was about monolithic long-running Shopify syncs that lost progress when a deploy killed them mid-step — those are sunset. Routine Inngest functions are **step-durable** (a deploy mid-run just retries the current step and resumes), so auto-merge does NOT defer for Inngest activity.
   - Conflicting PRs are left for [[dirty-pr-resolver-agent]] (not force-merged).
   - The post-merge [[spec-test-on-ship]] is the safety net: a bad-but-green build surfaces as a regression → the existing fix/repair flow. Auto-merge doesn't need to *judge* the code (the owner didn't either) — it needs to ship what's ready and let the spec-test catch what's wrong.
 

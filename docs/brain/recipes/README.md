@@ -65,7 +65,7 @@ The committed catalog, by tier:
 - **P2:** `regenerate-brain` (the `_gen-brain-*.ts` generators), `verify-schema`, `edit-shopify-theme` ([[edit-shopify-theme]]), `build-portals`, `run-orchestrator-action` (`apply-coupon-via-executor.ts`), `fire-inngest-event` ([[fire-an-inngest-event]]).
 - **P3:** `render-static` ([[../lifecycles/ad-static]]), `generate-ad` ([[generate-ad]]). _(Later additions `plan-goal` follow the same shape.)_
 
-**Invariants:** `build-spec` uses native tools only — never spawns a *nested* `claude` (recursion / the `CLAUDECODE=1` guard); on the box it *is* the top-level `claude -p`, Max-billed (no `ANTHROPIC_API_KEY` in the build env). `probe-db` is read-only, always. `write-migration`/`backfill`/`customer-remedy` are idempotent + dry-run-first, never run during active Inngest syncs. Internal joins use UUIDs, never `shopify_*_id`. All DB writes go through `createAdminClient()`.
+**Invariants:** `build-spec` uses native tools only — never spawns a *nested* `claude` (recursion / the `CLAUDECODE=1` guard); on the box it *is* the top-level `claude -p`, Max-billed (no `ANTHROPIC_API_KEY` in the build env). `probe-db` is read-only, always. `write-migration`/`backfill`/`customer-remedy` are idempotent + dry-run-first. Internal joins use UUIDs, never `shopify_*_id`. All DB writes go through `createAdminClient()`.
 
 ## Related
 

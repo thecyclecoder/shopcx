@@ -1,0 +1,1 @@
+- **Spec-test: maximize machine coverage + green-check the spec file** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]

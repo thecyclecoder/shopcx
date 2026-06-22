@@ -89,13 +89,21 @@ export const OWNER_FUNCTIONS: { id: OwnerFunction; label: string; healthLabel: s
  *                          next_retry_at — the retry engine ran but isn't advancing it to
  *                          recovered/exhausted. A sub correctly mid-dunning (within schedule)
  *                          is NOT flagged. On the dunning payday-retry cron.
+ *   - migration-drift    — a table a migration CREATES is absent from the live public schema
+ *                          (a silently-skipped migration: the code references the table, every
+ *                          upsert hits PGRST205). Detected on the BOX (where the .sql files +
+ *                          DB coexist) and carried in the loop's heartbeat `produced.missing`;
+ *                          the assertion reads that list and flips the tile red. On the
+ *                          box-emitted migration-drift-check loop.
+ *                          (control-tower-migration-drift-check P1.)
  */
 export type OutputAssertionId =
   | "escalation-idle"
   | "spec-test-persisted"
   | "renewal-integrity"
   | "renewal-outcome-distribution"
-  | "stuck-dunning";
+  | "stuck-dunning"
+  | "migration-drift";
 
 /**
  * Per-sub renewal outcome taxonomy (control-tower-renewal-integrity-assertions, Phase 1). Every
@@ -230,6 +238,16 @@ const DAY = 24 * HOUR;
 /** Singleton box id — matches scripts/builder-worker.ts WORKER_BOX_ID default. */
 export const WORKER_BOX_ID = "box";
 
+/**
+ * loop_heartbeats.loop_id (and MONITORED_LOOPS id) of the migration-drift check
+ * (control-tower-migration-drift-check P1). NOT an Inngest cron — the deployed Next runtime can't
+ * read the `supabase/migrations/*.sql` files (they aren't bundled), so the parse-migrations →
+ * diff-live-schema check runs on the BOX (where the repo working tree + an admin DB connection both
+ * exist) and writes a `kind:'cron'` beat under this id, carrying the missing tables in `produced`.
+ * The monitor's `migration-drift` output assertion reads that beat and flips the tile red on drift.
+ */
+export const MIGRATION_DRIFT_LOOP_ID = "migration-drift-check";
+
 export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ── The box build worker (worker_heartbeats) ──────────────────────────────
   {
@@ -329,6 +347,20 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Per-phase emoji↔code reconciler — flips shipped phases ✅, surfaces ambiguous drift.",
     expectedCadence: "every ~30 min (20,50 * * * *)",
     livenessWindowMs: 90 * MIN,
+  },
+  {
+    // BOX-EMITTED cron (not an Inngest fn): the deployed runtime can't read the .sql files, so the
+    // parse-migrations → diff-live-schema check runs on the box and beats here (control-tower-
+    // migration-drift-check P1). Freshness keeps a DEAD check visible; the migration-drift output
+    // assertion reads the beat's produced.missing and flips red when a created table is absent.
+    id: MIGRATION_DRIFT_LOOP_ID,
+    kind: "cron",
+    owner: "platform",
+    label: "Migration drift check",
+    description: "Box job: diffs every migration-created table against the live public schema — a missing one = a silently-skipped migration.",
+    expectedCadence: "every ~30 min (box job)",
+    livenessWindowMs: 90 * MIN,
+    outputAssertion: "migration-drift",
   },
 
   // ── Full Inngest cron coverage (control-tower-complete-coverage spec, Phase 1) ──

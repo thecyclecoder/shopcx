@@ -522,6 +522,26 @@ function badOutcomeCount(c: RenewalOutcomeCounts): number {
   return RENEWAL_BAD_OUTCOMES.reduce((sum, k) => sum + c[k as keyof RenewalOutcomeCounts], 0);
 }
 
+/**
+ * Read the migration-drift check's missing-tables list out of its heartbeat `produced` jsonb.
+ * Detection happens on the box (it reads the .sql files + live schema); the monitor only reads the
+ * conveyed result. Defensive against any shape — an unparseable blob ⇒ [] (no false drift alert).
+ */
+function readMissingTables(produced: unknown): Array<{ table: string; migration: string }> {
+  if (!produced || typeof produced !== "object" || Array.isArray(produced)) return [];
+  const raw = (produced as Record<string, unknown>).missing;
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ table: string; migration: string }> = [];
+  for (const item of raw) {
+    if (item && typeof item === "object") {
+      const t = (item as Record<string, unknown>).table;
+      const mg = (item as Record<string, unknown>).migration;
+      if (typeof t === "string" && t) out.push({ table: t, migration: typeof mg === "string" ? mg : "unknown" });
+    }
+  }
+  return out;
+}
+
 /** Pull a numeric counter out of a loop_heartbeats.produced jsonb blob (0 if absent). */
 function producedCount(produced: unknown, key: string): number {
   if (produced && typeof produced === "object" && !Array.isArray(produced)) {
@@ -642,6 +662,24 @@ function evalOutputAssertion(
         violation: {
           reason: "stuck_dunning",
           detail: `${n} dunning_cycle${n === 1 ? " is" : "s are"} still 'retrying' more than ${graceH}h past next_retry_at — the retry engine isn't advancing ${n === 1 ? "it" : "them"} to recovered/exhausted on schedule.`,
+        },
+      };
+    }
+    case "migration-drift": {
+      // The box's migration-drift check parses every supabase/migrations/*.sql for the tables they
+      // CREATE (net of drops) and diffs the live public schema; an expected-but-absent table = a
+      // silently-skipped migration. Detection runs on the box (the deployed runtime can't read the
+      // .sql files); the result rides this loop's heartbeat `produced.missing`. Allowlisted/sunset
+      // tables are already excluded box-side, so any entry here is a genuine, alertable drift.
+      const missing = readMissingTables(latest?.produced);
+      if (!latest || missing.length === 0) return null;
+      const n = missing.length;
+      const list = missing.slice(0, 5).map((m) => `${m.table} (${m.migration})`).join(", ");
+      return {
+        statusText: `${n} migration table${n === 1 ? "" : "s"} missing from live schema`,
+        violation: {
+          reason: "migration_drift",
+          detail: `Migration drift: ${n} table${n === 1 ? "" : "s"} that a migration creates ${n === 1 ? "is" : "are"} absent from the live public schema — ${list}${n > 5 ? `, +${n - 5} more` : ""}. A migration was silently skipped in the apply pipeline (the code references the table; every upsert hits PGRST205). Re-apply the migration${n === 1 ? "" : "s"}.`,
         },
       };
     }

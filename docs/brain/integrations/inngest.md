@@ -67,7 +67,7 @@ Default is 3. Set to 0 for "fire once, don't retry on failure" (rare). Failed ru
 
 ## Gotchas
 
-- **Vercel kills running functions on deploy.** Don't push during an active sync. See CLAUDE.md.
+- **Deploys are safe — functions are step-durable.** A deploy mid-run retries the current step and resumes, so push freely (the old "don't push during a sync" rule was retired 2026-06-22 — it was about monolithic Shopify syncs, now sunset).
 - **`step.run` requires a *stable* step name** — if you name it dynamically with a timestamp, the memoization breaks on retry.
 - **Don't `await` Promises outside `step.run`** — they're not durable. Wrap any side effect (DB write, API call, email send) in a step.
 - **Concurrency key must be on `event.data.X`** — Inngest cannot dereference into nested fields in some SDK versions.

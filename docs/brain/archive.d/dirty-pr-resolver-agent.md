@@ -1,0 +1,1 @@
+- **Dirty-PR Resolver Agent (auto-clean conflicting build PRs)** · verified 2026-06-22 · → [[libraries/github-pr-resolve]]

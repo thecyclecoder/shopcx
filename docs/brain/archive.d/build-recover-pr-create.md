@@ -1,0 +1,1 @@
+- **Build Done but PR-Create Failed → "Create PR" (recover, don't discard)** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
