@@ -92,6 +92,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[goal-decomposition-encodes-blockers]] (platform) — dogfood finding from the engine's first real run (the storefront-optimizer tree): it decomposed perfectly but set NO dependencies, so the owner had to approve in manual waves. spec-blockers enforcement already exists (Blocked-by header → build-gate + auto-queue-on-unblock); the planner just needs to EMIT blocked_by. Then a goal plan is self-sequencing — approve the whole tree, builds fire in order.
 
+## Active project — Control Tower migration-drift check ⏳
+
+[[control-tower-migration-drift-check]] (platform) — dogfood finding: migration 20260618140000_meta_performance_tables was silently skipped in prod → meta_campaigns/adsets/ads/insights_daily never existed → swallowed PGRST205 → empty ROAS data for weeks, found only by manual investigation. Add a Control Tower check that diffs migration-created tables vs the live schema + alerts on any missing (drop-aware, sunset-allowlisted). Runs on the box (has files + DB).
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
