@@ -132,6 +132,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[dirty-pr-resolver-duplicate-detection]] (platform) — storefront-lever-importance-memory built twice (account-switch recovery): #252 merged, #249 left a duplicate that's permanently CONFLICTING (work already on main), so the resolver spawned 9 unresolvable pr-resolve jobs in a loop (burning Max tokens). Fix: resolver closes a PR whose spec already merged via a sibling (instead of looping); dedupe build/PR-create + requeue on a merged build PR per spec; cap pr-resolve retries with owner surfacing.
 
+## Active project — Chain + card-state under auto-merge ⏳
+
+[[chain-and-cardstate-under-automerge]] (platform) — "Build all" on storefront-ltv-proxy-reconciler: P1 auto-merged but card stayed Planned (should be In progress) AND P2 never queued. Two bugs: (A) merge-write stored H1-derived status not a phase_states rollup; (B) the chain-continue + card-state-write live in reconcileMergedJobs (board-render), but auto-ship merges via webhook server-side → job already merged → both skipped. Fix: rollup status from phases + fire chain-continue/card-write on the auto-merge path itself.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
