@@ -61,8 +61,10 @@ export interface PendingAction {
  * | 'fold' (batch fold-build — fold every pending-fold spec into the brain in one PR, fold-build-batching)
  * | 'product-seed' (box-product-seeding — drive one product none→published on Max)
  * | 'ticket-improve' (box-ticket-improve — one turn of a ticket-bound Improve session on Max)
- * | 'migration-fix' (migration-fix-agent — fix a failed Appstle→internal migration on Max, gated). */
-export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix";
+ * | 'migration-fix' (migration-fix-agent — fix a failed Appstle→internal migration on Max, gated)
+ * | 'pr-resolve' (dirty-pr-resolver-agent — webhook-fired: merge main into a dirty claude/* PR, resolve
+ *   conflicts, tsc-gate + push, or rebuild-on-main / surface to the owner). */
+export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve";
 
 export interface AgentJob {
   id: string;

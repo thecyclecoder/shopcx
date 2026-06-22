@@ -203,6 +203,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:spec-test", kind: "agent-kind", agentKind: "spec-test", label: "Agent — spec test", description: "Non-destructive spec QA pass.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:migration-fix", kind: "agent-kind", agentKind: "migration-fix", label: "Agent — migration fix", description: "Event-fired billing repair diagnosis.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:dev-ask", kind: "agent-kind", agentKind: "dev-ask", label: "Agent — dev ask", description: "Read-only developer message-center turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  { id: "agent:pr-resolve", kind: "agent-kind", agentKind: "pr-resolve", label: "Agent — PR resolve", description: "Webhook-fired dirty-PR resolver: merge main + resolve conflicts, tsc-gate, push (or rebuild/surface).", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
 
   // ── Inline event-driven AI agents (loop_heartbeats, loop_id = `ai:<agent>`) ──
   // Server-side AI agents that run per-ticket / per-order / per-journey, not on a queue or

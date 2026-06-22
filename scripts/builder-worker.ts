@@ -92,6 +92,17 @@ const MIGRATION_FIX_TIMEOUT_MS = 15 * 60 * 1000;
 // build-sized ceiling so a heavy join + a few read probes never get cut short.
 const MAX_DEV_ASK = 1;
 const DEV_ASK_TIMEOUT_MS = 20 * 60 * 1000;
+// PR-resolve jobs (dirty-pr-resolver-agent) run in their OWN concurrency-1 lane: event-fired by the
+// GitHub webhook the moment a push to main dirties an open claude/* build PR. A top-level `claude -p`
+// on Max (git available, prod secrets stripped — NO prod creds) merges origin/main into the PR branch
+// + resolves the (usually additive) conflicts in a throwaway worktree; the worker then runs the tsc
+// GATE + pushes (never a non-compiling merge), or — on a heavy parallel-rewrite divergence / a merge
+// that can't compile — rebuilds the spec on main (close + re-queue) or surfaces it to the owner.
+// Serialized: a resolve mutates a shared branch, and one box session per PR is right (event-driven).
+const MAX_PR_RESOLVE = Number(process.env.AGENT_TODO_MAX_PR_RESOLVE || 1);
+// One resolve pass: git merge + LLM conflict resolution + ≤2 tsc attempts. Build-sized ceiling so a
+// big merge + a couple tsc runs never gets cut short.
+const PR_RESOLVE_TIMEOUT_MS = 20 * 60 * 1000;
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -147,7 +158,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -2493,6 +2504,235 @@ async function runDeveloperMessageJob(job: Job) {
   }
 }
 
+// ── Dirty-PR resolver (dirty-pr-resolver-agent) ─────────────────────────────
+// A Max `claude -p` that merges origin/main into a dirty claude/* PR + resolves the conflicts. Same
+// sandbox as a feature build (no ANTHROPIC_API_KEY, prod secrets stripped — NO prod creds), but it only
+// runs LOCAL git + tsc + file edits: it does NOT push (the worker re-verifies + pushes) and has no gh.
+async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k === "ANTHROPIC_API_KEY") continue;
+    if (/^NEXT_PUBLIC_/.test(k)) { env[k] = v; continue; }
+    if (SECRET_RE.test(k)) continue; // drops GITHUB_TOKEN too → the LLM can't push; the worker does
+    env[k] = v;
+  }
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: PR_RESOLVE_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+// Surface a PR that can't be auto-resolved (and isn't a re-buildable spec build) to the owner — a
+// Control Tower / Slack note per the North Star ("escalate, don't guess"). Best-effort.
+async function surfacePrToOwner(workspaceId: string, prNumber: number, prUrl: string, why: string) {
+  try {
+    const { notifyOpsAlert } = await import("../src/lib/notify-ops-alert");
+    await notifyOpsAlert(workspaceId, {
+      title: `Control Tower: PR #${prNumber} needs a human merge`,
+      severity: "warning",
+      lines: [why, prUrl],
+    });
+  } catch (e) {
+    console.error(`[pr-resolve] surface PR #${prNumber} failed:`, e instanceof Error ? e.message : String(e));
+  }
+}
+
+// Resolve ONE dirty claude/* PR: worktree the branch → claude merges origin/main + resolves additively
+// → the WORKER runs the tsc GATE + correctness checks + pushes (never a non-compiling merge). On a
+// heavy parallel-rewrite divergence or a merge that can't compile, it does NOT force a wrong merge:
+// it rebuilds the originating spec on main (close PR + re-queue off clean main) or — if it can't
+// identify the spec — surfaces "needs a human merge: {why}" to the owner. Capped, idempotent, deduped.
+async function runPrResolveJob(job: Job) {
+  const tag = `[pr-resolve:${job.id.slice(0, 8)}]`;
+  const wsId = job.workspace_id;
+  let params: { pr_number?: number; branch?: string; reason?: string } = {};
+  try { params = job.instructions ? JSON.parse(job.instructions) : {}; } catch { /* not JSON */ }
+  const prNumber = params.pr_number ?? job.pr_number ?? Number(String(job.spec_slug).replace(/\D/g, ""));
+  const branch = params.branch || job.spec_branch || "";
+
+  // Guardrail: claude/* build branches ONLY — never touch a human PR or main.
+  if (!branch || !branch.startsWith("claude/")) {
+    await update(job.id, { status: "completed", error: "skipped: not a claude/* branch", log_tail: `refused to touch non-claude branch ${branch || "(none)"}` });
+    console.log(`${tag} refused non-claude branch "${branch}" — skipping`);
+    return;
+  }
+  if (!prNumber || Number.isNaN(prNumber)) {
+    await update(job.id, { status: "failed", error: "no PR number in job", log_tail: job.instructions || "" });
+    return;
+  }
+
+  // Re-check PR state (idempotent / de-duped): only act on an OPEN, not-already-MERGEABLE PR. mergeable
+  // can be null (GitHub still computing) → re-check briefly; if still unknown, attempt anyway (the
+  // webhook flagged it CONFLICTING). already mergeable / merged / closed → no-op completed.
+  const prResp = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
+  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; head?: { ref?: string } };
+  const prUrl = pr.html_url || `https://github.com/${REPO}/pull/${prNumber}`;
+  if (!prResp.ok || pr.state !== "open" || pr.merged) {
+    await update(job.id, { status: "completed", pr_url: prUrl, pr_number: prNumber, log_tail: `PR #${prNumber} no longer open (state=${pr.state} merged=${pr.merged}) — nothing to resolve` });
+    console.log(`${tag} PR #${prNumber} not open (state=${pr.state}) — no-op`);
+    return;
+  }
+  if (pr.head?.ref && pr.head.ref !== branch) {
+    await update(job.id, { status: "completed", error: "branch changed", log_tail: `PR #${prNumber} head is now ${pr.head.ref}, expected ${branch}` });
+    return;
+  }
+  let mergeable = pr.mergeable;
+  for (let i = 0; mergeable == null && i < 3; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const re = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
+    mergeable = (re.json as { mergeable?: boolean | null }).mergeable ?? null;
+  }
+  if (mergeable === true) {
+    await update(job.id, { status: "completed", pr_url: prUrl, pr_number: prNumber, log_tail: `PR #${prNumber} is already MERGEABLE — nothing to resolve` });
+    console.log(`${tag} PR #${prNumber} already mergeable — no-op`);
+    return;
+  }
+
+  const wt = join(BUILDS_DIR, job.id);
+  sh("git", ["fetch", "origin"]);
+  sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
+  const add = sh("git", ["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
+  if (add.code !== 0) {
+    await update(job.id, { status: "failed", error: "worktree add failed", log_tail: add.err.slice(-2000) });
+    return;
+  }
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  try {
+    const prompt = [
+      `You are the box's dirty-PR resolver, on Max. You are in a git worktree at the repo root, checked out on branch \`${branch}\` — a build PR (#${prNumber}). \`origin/main\` has moved ahead and this PR is CONFLICTING. Resolve it so the PR compiles and goes green — OR decide it can't be safely auto-resolved and say so. Do NOT guess.`,
+      ``,
+      `Steps:`,
+      `1. Run \`git merge origin/main\`. If it merges with NO conflicts, skip to step 4.`,
+      `2. Resolve EVERY conflict. The vast majority are ADDITIVE — both sides appended a registry entry / enum case / list item / import / doc section → KEEP BOTH (the union of the two additions). For a doc add/add on the same heading, keep the SHIPPED (origin/main) side. NEVER resolve a conflict by deleting code to "win" — that destroys the other build's work.`,
+      `3. \`git add\` each resolved file.`,
+      `4. Commit the merge: \`git commit --no-edit\` (only if a merge is in progress; a clean merge auto-commits).`,
+      `5. Run \`npx tsc --noEmit\`. Fix ONLY errors the merge introduced and re-run — at most 2 attempts total. The merge MUST compile.`,
+      `6. Do NOT \`git push\` and do NOT open/modify any PR — the worker re-verifies and pushes. Leave the merge committed on \`${branch}\`.`,
+      ``,
+      `DECISION — never force a semantically-wrong merge:`,
+      `  • Simple/additive union that compiles → status "resolved".`,
+      `  • The two sides are heavily-diverged PARALLEL REWRITES of the same logic (not a clean union), OR tsc still fails after 2 attempts → do NOT guess: run \`git merge --abort\` to leave the branch clean, then status "escalate" with a one-line \`reason\` (what diverged / why it can't compile).`,
+      ``,
+      `Final message = ONLY one JSON object:`,
+      `  {"status":"resolved","summary":"<what you merged + how you resolved each conflict + the files>"}`,
+      `  {"status":"escalate","reason":"<why it needs a human merge or a rebuild — one line>"}`,
+    ].join("\n");
+
+    const { session, resultText, isError, raw } = await runPrResolveClaude(prompt, null, wt);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = parseStatus(resultText) as { status?: string; reason?: string; summary?: string } | null;
+    const reason = String(parsed?.reason || parsed?.summary || "").slice(0, 500);
+    console.log(`${tag} claude finished — status=${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    // Escalate (rebuild-on-main if we can identify the spec build, else surface to the owner) for any
+    // non-"resolved" outcome OR a failed worker gate. Capped: no pr-resolve retry loop — a rebuild
+    // re-queues a fresh BUILD (clean base), a surface leaves needs_attention for a human.
+    const escalate = async (why: string) => {
+      sh("git", ["merge", "--abort"], { cwd: wt }); // leave the branch clean (best-effort; no-op if already committed)
+      const { data: buildJob } = await db
+        .from("agent_jobs")
+        .select("spec_slug, instructions, workspace_id, created_by")
+        .eq("spec_branch", branch)
+        .eq("kind", "build")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const specSlug = buildJob?.spec_slug as string | undefined;
+      if (specSlug && buildJob) {
+        // rebuild-on-main: close the dirty PR + re-queue the build off a clean main (deduped).
+        await gh("PATCH", `/repos/${REPO}/pulls/${prNumber}`, { state: "closed" });
+        const { data: existing } = await db
+          .from("agent_jobs")
+          .select("id")
+          .eq("workspace_id", buildJob.workspace_id)
+          .eq("kind", "build")
+          .eq("spec_slug", specSlug)
+          .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_approval"])
+          .limit(1)
+          .maybeSingle();
+        let requeued = false;
+        if (!existing) {
+          const { error: insErr } = await db.from("agent_jobs").insert({
+            workspace_id: buildJob.workspace_id,
+            spec_slug: specSlug,
+            kind: "build",
+            status: "queued",
+            instructions: buildJob.instructions ?? null,
+            created_by: buildJob.created_by ?? null,
+          });
+          requeued = !insErr;
+        }
+        try {
+          const { notifyOpsAlert } = await import("../src/lib/notify-ops-alert");
+          await notifyOpsAlert(wsId, {
+            title: `Dirty-PR resolver: rebuilt ${specSlug} on main`,
+            severity: "warning",
+            lines: [`PR #${prNumber} couldn't be auto-merged (${why}) → closed it and ${requeued ? "re-queued the build" : "a build is already queued"} off a clean main.`, prUrl],
+          });
+        } catch { /* slack best-effort */ }
+        await update(job.id, { status: "completed", pr_url: prUrl, pr_number: prNumber, error: `rebuilt-on-main: ${why}`, log_tail: `${why}\n→ closed PR #${prNumber}; ${requeued ? "re-queued" : "build already queued for"} ${specSlug} off main.\n\n${raw.slice(-1500)}` });
+        console.log(`${tag} rebuild-on-main: closed PR #${prNumber}, re-queued ${specSlug}`);
+      } else {
+        // Can't identify the spec → a human must merge. Surface + needs_attention.
+        await surfacePrToOwner(wsId, prNumber, prUrl, why);
+        await update(job.id, { status: "needs_attention", pr_url: prUrl, pr_number: prNumber, error: `needs a human merge: ${why}`, log_tail: `${why}\n\n${raw.slice(-1500)}` });
+        console.log(`${tag} surfaced PR #${prNumber} to owner: ${why}`);
+      }
+    };
+
+    if (parsed?.status !== "resolved") {
+      await escalate(reason || (isError ? "resolver run errored" : "resolver could not safely resolve the conflict"));
+      return;
+    }
+
+    // ── Worker-enforced GATE (never trust the LLM to have pushed a compiling, complete merge) ──
+    // 1) origin/main must actually be merged in (deterministic proof the merge happened).
+    if (sh("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { cwd: wt }).code !== 0) {
+      await escalate("merge incomplete — origin/main is not an ancestor of the resolved HEAD");
+      return;
+    }
+    // 2) no unmerged paths left behind.
+    if (sh("git", ["ls-files", "-u"], { cwd: wt }).out.trim()) {
+      await escalate("unresolved conflicts remain (unmerged paths after the merge)");
+      return;
+    }
+    // 3) no leftover conflict markers in tracked files (never resolve by leaving markers).
+    const markers = sh("git", ["grep", "-l", "-E", "^(<<<<<<<|>>>>>>>) "], { cwd: wt }).out.trim();
+    if (markers) {
+      await escalate(`leftover conflict markers in: ${markers.split("\n").slice(0, 5).join(", ")}`);
+      return;
+    }
+    // 4) the resolved merge MUST compile — the tsc gate. Never push a broken merge.
+    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    if (tsc.code !== 0) {
+      await escalate(`tsc failed on the resolved merge: ${(tsc.out + tsc.err).slice(-400)}`);
+      return;
+    }
+    // 5) all gates pass → push the resolved merge → the PR flips CONFLICTING → MERGEABLE (green).
+    const push = sh("git", ["push", "origin", `HEAD:${branch}`], { cwd: wt });
+    if (push.code !== 0) {
+      await escalate(`push failed: ${push.err.slice(-300)}`);
+      return;
+    }
+    await update(job.id, { status: "completed", pr_url: prUrl, pr_number: prNumber, error: null, log_tail: `resolved + pushed: ${parsed?.summary || reason}\n${raw.slice(-1500)}` });
+    console.log(`${tag} ✓ resolved PR #${prNumber}, pushed ${branch} → green`);
+  } finally {
+    sh("git", ["worktree", "remove", "--force", wt]);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -2503,6 +2743,7 @@ async function runJob(job: Job) {
   if (job.kind === "spec-test") return runSpecTestJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
+  if (job.kind === "pr-resolve") return runPrResolveJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -2742,7 +2983,7 @@ async function main() {
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix + ${MAX_DEV_ASK} dev-ask lane, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix + ${MAX_DEV_ASK} dev-ask + ${MAX_PR_RESOLVE} pr-resolve lane, polling every ${POLL_MS}ms`);
 
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
@@ -2758,7 +2999,8 @@ async function main() {
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask").length;
+  const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     const startedAt = Date.now();
@@ -2849,6 +3091,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed dev-ask ${job.id.slice(0, 8)} → ${countDevAsk() + 1}/${MAX_DEV_ASK} dev-ask lane`);
+        launch(job);
+      }
+      // Fill the pr-resolve lane (dirty-pr-resolver-agent): webhook-fired dirty claude/* PR resolve, concurrency-1.
+      while (countPrResolve() < MAX_PR_RESOLVE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["pr-resolve"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed pr-resolve ${job.id.slice(0, 8)} → ${countPrResolve() + 1}/${MAX_PR_RESOLVE} pr-resolve lane`);
         launch(job);
       }
       // Fill the build/plan pool.
