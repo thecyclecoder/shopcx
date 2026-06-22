@@ -340,17 +340,26 @@ async function gh(method: string, path: string, body?: unknown) {
 
 async function ensurePr(branch: string, title: string, draft: boolean, body?: string): Promise<{ url: string; number: number } | null> {
   const owner = REPO.split("/")[0];
-  const created = await gh("POST", `/repos/${REPO}/pulls`, {
-    title,
-    head: branch,
-    base: "main",
-    body: body ?? `Automated build of \`docs/brain/specs/${title}\` by the box worker. ${draft ? "**Draft — has open questions.**" : ""}`,
-    draft,
-  });
-  if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number };
-  const existing = await gh("GET", `/repos/${REPO}/pulls?head=${owner}:${branch}&state=open`);
-  if (existing.ok && Array.isArray(existing.json) && existing.json.length) {
-    return { url: existing.json[0].html_url as string, number: existing.json[0].number as number };
+  const prBody = body ?? `Automated build of \`docs/brain/specs/${title}\` by the box worker. ${draft ? "**Draft — has open questions.**" : ""}`;
+  // Retry `gh pr create` a few times with backoff — most failures are transient (GitHub 5xx / secondary
+  // rate-limit), so the manual Create-PR recovery (build-recover-pr-create) is the rare fallback, not the
+  // norm. Before each retry adopt an already-open PR for the branch (idempotent: a prior attempt may have
+  // actually created one despite a flaky response). Only after the retries are exhausted do we return
+  // null → the caller flags `needs_attention` "branch pushed but PR creation failed" (recoverable).
+  const backoffs = [1000, 3000, 8000];
+  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
+    const created = await gh("POST", `/repos/${REPO}/pulls`, { title, head: branch, base: "main", body: prBody, draft });
+    if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number };
+    const existing = await gh("GET", `/repos/${REPO}/pulls?head=${owner}:${branch}&state=open`);
+    if (existing.ok && Array.isArray(existing.json) && existing.json.length) {
+      return { url: existing.json[0].html_url as string, number: existing.json[0].number as number };
+    }
+    if (attempt < backoffs.length) {
+      console.error(
+        `[ensurePr] create PR for ${branch} failed (${created.status}: ${JSON.stringify(created.json).slice(0, 160)}) — retry ${attempt + 1}/${backoffs.length} in ${backoffs[attempt]}ms`,
+      );
+      await new Promise((r) => setTimeout(r, backoffs[attempt]));
+    }
   }
   return null;
 }

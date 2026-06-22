@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs } from "@/lib/agent-jobs";
-import { queueRoadmapBuild } from "@/lib/roadmap-actions";
+import { queueRoadmapBuild, createPrForJob } from "@/lib/roadmap-actions";
 
 async function ctx() {
   const supabase = await createClient();
@@ -38,7 +38,15 @@ export async function POST(request: Request) {
   if ("error" in c) return c.error;
   const { user, workspaceId } = c;
 
-  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; instructions?: unknown; verify?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; instructions?: unknown; verify?: unknown; jobId?: unknown; recoverPr?: unknown };
+
+  // Create PR recovery (build-recover-pr-create): a build that pushed its branch but failed `gh pr create`
+  // sits in needs_attention. Open the PR for that pushed branch instead of discarding it via Rebuild.
+  if (body.recoverPr === true) {
+    const result = await createPrForJob(workspaceId, user.id, { jobId: typeof body.jobId === "string" ? body.jobId : "" });
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+    return NextResponse.json({ job: result.job, adopted: result.adopted });
+  }
 
   // Shared, owner-gated, server-revalidated logic (also called by the Slack Roadmap Console).
   const result = await queueRoadmapBuild(workspaceId, user.id, {

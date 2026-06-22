@@ -131,6 +131,110 @@ export async function queueRoadmapBuild(
   return { ok: true, job: job as AgentJob };
 }
 
+// ── Create PR for a build whose branch pushed but `gh pr create` failed (build-recover-pr-create) ──
+
+/** The exact `error` string the worker stamps when a build succeeds + pushes its branch but the final
+ * `gh pr create` step fails (builder-worker.ts). Recovering this re-opens the PR for the pushed branch
+ * instead of discarding the completed build via Rebuild. Kept in sync with BuildButton's client gate. */
+export const PR_CREATE_FAILED_ERROR = "branch pushed but PR creation failed";
+
+/**
+ * Cheap status/error/branch gate the card uses to offer **Create PR** instead of Rebuild. Branch
+ * existence on origin is the real, evidence-gated check — re-verified server-side in `createPrForJob`.
+ */
+export function isPrCreateRecoverable(job: Pick<AgentJob, "status" | "error" | "spec_branch" | "kind">): boolean {
+  // build-kind only — a fold/plan PR-create failure carries extra state (pending_folds) this path
+  // wouldn't reconcile, and the spec scopes recovery to already-pushed `claude/*` BUILD branches.
+  return (
+    job.kind === "build" &&
+    job.status === "needs_attention" &&
+    job.error === PR_CREATE_FAILED_ERROR &&
+    !!job.spec_branch?.startsWith("claude/")
+  );
+}
+
+/**
+ * Recover a build that succeeded and pushed its `claude/*` branch but whose `gh pr create` failed: open a
+ * PR for that already-pushed branch against `main`, then flip the job → `completed` with the new PR. Never
+ * pushes code, never touches `main` — it only opens a PR for work already on origin. Idempotent: if a PR
+ * already exists for the branch it adopts it (attaches its url/number) instead of erroring on a duplicate.
+ *
+ * Evidence-gated: refuses unless the job is the recoverable PR-create-failed sub-case AND the branch still
+ * exists on origin — a genuinely-stuck `needs_attention` (no pushed branch, dirty-resolver human-merge) keeps
+ * its human-attention treatment, never a misleading Create PR.
+ */
+export async function createPrForJob(
+  workspaceId: string,
+  userId: string,
+  opts: { jobId: string },
+): Promise<ActionResult<{ job: AgentJob; adopted: boolean }>> {
+  const gate = await assertOwner(workspaceId, userId);
+  if (!gate.ok) return gate;
+  if (typeof opts.jobId !== "string" || !opts.jobId) return { ok: false, status: 400, error: "bad jobId" };
+  if (!ghToken()) return { ok: false, status: 400, error: "GitHub not configured" };
+
+  const admin = createAdminClient();
+  const { data: jobRow } = await admin
+    .from("agent_jobs")
+    .select("*")
+    .eq("id", opts.jobId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  const job = jobRow as AgentJob | null;
+  if (!job) return { ok: false, status: 404, error: "job not found" };
+  if (!isPrCreateRecoverable(job)) return { ok: false, status: 409, error: "job is not a recoverable PR-create failure" };
+  const branch = job.spec_branch as string;
+
+  // Guardrail: only ever a claude/* build branch that EXISTS on origin — never push, never touch main.
+  if (!branch.startsWith("claude/")) return { ok: false, status: 403, error: "Only claude/* build branches can be recovered" };
+  const ref = await gh("GET", `/repos/${REPO}/git/ref/heads/${branch}`);
+  if (!ref.ok) {
+    return { ok: false, status: 409, error: `Branch ${branch} not found on origin (${ref.status}) — nothing pushed to open a PR for` };
+  }
+
+  const owner = REPO.split("/")[0];
+  const findOpen = async (): Promise<{ url: string; number: number } | null> => {
+    const res = await gh("GET", `/repos/${REPO}/pulls?head=${owner}:${branch}&state=open`);
+    if (res.ok && Array.isArray(res.json) && (res.json as unknown[]).length) {
+      const pr = (res.json as unknown as Array<{ html_url: string; number: number }>)[0];
+      return { url: pr.html_url, number: pr.number };
+    }
+    return null;
+  };
+
+  // Idempotent adopt-existing, else create.
+  let adopted = false;
+  let pr = await findOpen();
+  if (pr) {
+    adopted = true;
+  } else {
+    const created = await gh("POST", `/repos/${REPO}/pulls`, {
+      title: job.spec_slug,
+      head: branch,
+      base: "main",
+      body: `Recovered PR for an already-pushed build branch — the build succeeded but the original \`gh pr create\` failed (transient). Opened via the Create PR card action. See docs/brain/specs/build-recover-pr-create.md.`,
+      draft: false,
+    });
+    if (created.ok) {
+      pr = { url: created.json.html_url as string, number: created.json.number as number };
+    } else {
+      // A create can fail on a duplicate-PR race — re-check for an open PR before surfacing an error.
+      pr = await findOpen();
+      if (pr) adopted = true;
+      else return { ok: false, status: 502, error: `PR create failed (${created.status}: ${(created.json.message as string) || ""})` };
+    }
+  }
+
+  const { data: updated, error } = await admin
+    .from("agent_jobs")
+    .update({ status: "completed", pr_url: pr.url, pr_number: pr.number, error: null, updated_at: new Date().toISOString() })
+    .eq("id", job.id)
+    .select("*")
+    .single();
+  if (error) return { ok: false, status: 500, error: error.message };
+  return { ok: true, job: updated as AgentJob, adopted };
+}
+
 // ── Answer open questions (mirrors POST /api/roadmap/answer) ──
 
 export async function answerRoadmapBuild(
