@@ -16,6 +16,7 @@ The bandit-refresh loop for the storefront experiment framework (Phases 4–5 of
 - **Retries:** 2 · **Concurrency:** `[{ limit: 1, key: "event.data.workspace_id" }]`
 - **Event data:** `{ workspace_id, trigger?: "cron"|"manual", window_days? }`
 - Calls `refreshStorefrontExperiments()` — attribution recompute → Phase-5 rollback guardrail → Phase-4 promote/kill decision → run record. The manual-trigger entry point too (fire this event with `trigger:"manual"` to force a refresh).
+- After the rollup it fires `storefront/ltv-metrics-refresh` (`step.sendEvent`) to recompute the M3 predicted-LTV-per-visitor metric ([[storefront-ltv-metrics]]) on the fresh attribution.
 
 ## Gotchas
 - **Conservative until M3 calibrates.** Reads `isConservative()` ([[../libraries/storefront-calibration]]) per run; tighter promote thresholds + a higher exposure floor until the LTV-proxy reconciler lands.

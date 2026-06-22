@@ -66,6 +66,13 @@ export const storefrontExperimentsRefresh = inngest.createFunction(
         windowDays: window_days,
       }),
     );
+    // M3 fast loop — recompute predicted-LTV-per-visitor right AFTER the attribution rollup
+    // this run just refreshed (the spec's "daily refresh after the M1 attribution rollup").
+    // Idempotent downstream, so a manual re-trigger is safe.
+    await step.sendEvent("refresh-ltv-metrics", {
+      name: "storefront/ltv-metrics-refresh",
+      data: { workspace_id, window_days },
+    });
     console.log(
       `[storefront-experiments] ws=${workspace_id} evaluated=${result.experiments_evaluated} ` +
         `promoted=${result.counts.promoted} killed=${result.counts.killed} rolled_back=${result.counts.rolled_back} ` +
