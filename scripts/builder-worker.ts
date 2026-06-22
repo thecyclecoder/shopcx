@@ -403,6 +403,25 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
   }
 }
 
+// Control Tower (control-tower spec, Phase 1): one loop_heartbeats row at the END of every
+// agent-kind run (loop_id = `agent:<kind>`). The control-tower-monitor cron reads the latest
+// beat for last-ran/history; the STUCK-JOB alert is driven off agent_jobs, not this beat — so a
+// genuinely-idle lane stays green. Best-effort: a heartbeat write must never break the poll loop.
+async function writeLoopHeartbeat(loopId: string, ok: boolean, produced: unknown, durationMs: number) {
+  try {
+    await db.from("loop_heartbeats").insert({
+      loop_id: loopId,
+      kind: "agent-kind",
+      ok,
+      produced: produced ?? null,
+      duration_ms: durationMs,
+      ran_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("[loop-heartbeat] write failed:", e instanceof Error ? e.message : String(e));
+  }
+}
+
 // Idle self-update: ONLY when no build/fold lane is running (active === 0 — in-flight work is sacrosanct).
 // Fetch origin, and if local HEAD is behind origin/main, hard-reset the MAIN repo (worktrees live in a
 // sibling dir, so this never touches a running build), npm ci if deps changed, then exit(0) — systemd
@@ -2723,12 +2742,27 @@ async function main() {
   const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
+    const startedAt = Date.now();
+    let errored = false;
     runJob(job)
       .catch(async (e) => {
+        errored = true;
         console.error(`[${job.spec_slug}] failed:`, e);
         await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
       })
-      .finally(() => active.delete(job.id));
+      .finally(async () => {
+        active.delete(job.id);
+        // Control Tower: end-of-run agent-kind heartbeat. ok = ran without a thrown error AND
+        // the job didn't land on a terminal failure status.
+        let ok = !errored;
+        let status: string | undefined;
+        try {
+          const { data } = await db.from("agent_jobs").select("status").eq("id", job.id).maybeSingle();
+          status = (data?.status as string | undefined) ?? undefined;
+          if (status === "failed" || status === "needs_attention") ok = false;
+        } catch { /* status read best-effort */ }
+        await writeLoopHeartbeat(`agent:${job.kind}`, ok, { status: status ?? (errored ? "failed" : "completed") }, Date.now() - startedAt);
+      });
   };
 
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter

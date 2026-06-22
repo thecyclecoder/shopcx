@@ -18,6 +18,7 @@ import { ensureStoryRatio } from "@/lib/social/story-ratio";
 import { generateCaption, type PostType } from "@/lib/social/generate-caption";
 import { publishScheduledPost, type ScheduledPostRow } from "@/lib/social/publish";
 import { loadSlotSignals, pickBestSlot } from "@/lib/social/optimizer";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 function localHourOf(iso: string, tz: string): number {
   const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false }).format(new Date(iso)));
@@ -248,6 +249,10 @@ export const socialSchedulerPlan = inngest.createFunction(
       const n = await step.run(`plan-${ws.id}`, () => planWorkspace(ws.id, ws.config));
       total += n;
     }
+    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("social-scheduler-plan", { ok: true, produced: { workspaces: workspaces.length, created: total } });
+    });
     return { workspaces: workspaces.length, created: total };
   },
 );

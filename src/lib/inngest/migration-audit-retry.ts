@@ -7,6 +7,7 @@
 // monitor to surface. See specs/appstle-pricing-heal-and-migration-monitor.md.
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const migrationAuditRetryCron = inngest.createFunction(
   {
@@ -28,7 +29,12 @@ export const migrationAuditRetryCron = inngest.createFunction(
       return (data || []).map((r) => r.id as string);
     });
 
-    if (!pending.length) return { rechecked: 0 };
+    if (!pending.length) {
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("migration-audit-retry-cron", { ok: true, produced: { rechecked: 0 } });
+      });
+      return { rechecked: 0 };
+    }
 
     let passed = 0;
     let stillPending = 0;
@@ -43,6 +49,10 @@ export const migrationAuditRetryCron = inngest.createFunction(
       else stillPending++;
     }
 
-    return { rechecked: pending.length, passed, stillPending, failed };
+    const result = { rechecked: pending.length, passed, stillPending, failed };
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("migration-audit-retry-cron", { ok: true, produced: result });
+    });
+    return result;
   },
 );

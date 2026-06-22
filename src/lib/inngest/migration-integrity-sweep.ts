@@ -12,6 +12,7 @@
 // See specs/appstle-pricing-heal-and-migration-monitor.md.
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const migrationIntegritySweepCron = inngest.createFunction(
   {
@@ -39,7 +40,12 @@ export const migrationIntegritySweepCron = inngest.createFunction(
       return subs.filter((s) => !auditedSet.has(s.id as string));
     });
 
-    if (!unaudited.length) return { seeded: 0 };
+    if (!unaudited.length) {
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("migration-integrity-sweep-cron", { ok: true, produced: { seeded: 0 } });
+      });
+      return { seeded: 0 };
+    }
 
     let passed = 0;
     let flagged = 0;
@@ -64,6 +70,10 @@ export const migrationIntegritySweepCron = inngest.createFunction(
       else flagged++;
     }
 
-    return { seeded: unaudited.length, passed, flagged };
+    const result = { seeded: unaudited.length, passed, flagged };
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("migration-integrity-sweep-cron", { ok: true, produced: result });
+    });
+    return result;
   },
 );
