@@ -1,0 +1,1 @@
+- **Iteration Scorecard Upsert — Stop Swallowing Errors + FK-Resilient** · verified 2026-06-22 · → [[libraries/meta__scorecards]]

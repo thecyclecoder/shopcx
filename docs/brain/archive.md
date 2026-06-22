@@ -13,6 +13,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Build Console: No Silent No-Op Builds + Report-Issue Enqueue Confirmation** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
+- **Developer Message Center** · verified 2026-06-22 · → [[tables/dev_message_threads]]
+- **Improve Queue — Mark-as-Read / Dismiss** · verified 2026-06-22 · → [[dashboard/tickets__improve]]
+- **Migration-Fix: Remove a Line Item (`remove_line` fix_kind)** · verified 2026-06-22 · → [[libraries/migration-fix]]
 - **Base Price Never Above MSRP (invariant + cap)** · verified 2026-06-21 · → [[lifecycles/subscription-billing]]
 - **Box-hosted Spec Chat (long-running Max session)** · verified 2026-06-21 · → [[lifecycles/roadmap-build-console]]
 - **Box-hosted Ticket "Improve" Agent (Max session)** · verified 2026-06-20 · → [[tables/ticket_improve_chats]]

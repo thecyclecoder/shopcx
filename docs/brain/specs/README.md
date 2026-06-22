@@ -64,6 +64,24 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Build Recover: Create PR ⏳
+
+**Spec:** [[build-recover-pr-create]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** when a build succeeds + pushes its branch but `gh pr create` fails (transient), the job goes needs_attention and the card only offers Rebuild — which discards a completed build (hit live with control-tower P1 / #185). Fix: worker retries pr-create first; the card offers **Create PR** (open the PR for the pushed branch → job completed) for the recoverable case, Rebuild stays secondary.
+
+## Active project — Fix Ships → Re-test Origin ⏳
+
+**Spec:** [[fix-ship-retests-origin]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** propose-fix → fix ships → but the origin spec's card keeps showing stale "Agent-tested · issues" because nothing re-tests it (observed: comp-subscriptions stayed red after comp-transaction-type-constraint shipped the fix). Fix: stamp a machine-readable `Fixes: {origin} ({check_keys})` in the proposed-fix spec; on the fix build's merge, auto-enqueue the origin's spec-test → the previously-failing check re-runs and the badge clears (or stays red, honestly, if the fix didn't resolve it).
+
+## Active project — Error-Feed Honest Panels ⏳
+
+**Spec:** [[error-feed-honest-panels]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** the Control Tower's Vercel/Inngest/Supabase panels show green "0 errors" even when the source isn't connected (forward-only + unwired) — a disconnected monitor reading "all clear" is the exact Goodhart silent-failure the Control Tower exists to catch. Fix: connection-aware states — amber "not configured" / "awaiting first event" vs green "connected · 0 errors"; header health count excludes unconfigured panels.
+
 ## Active project — Roadmap Reads Specs from Git ⏳
 
 **Spec:** [[roadmap-reads-specs-from-git]] · **Owner:** [[../functions/platform]]

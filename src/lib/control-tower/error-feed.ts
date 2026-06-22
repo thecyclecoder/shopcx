@@ -179,6 +179,37 @@ export async function reportDbError(
   );
 }
 
+// ── Liveness heartbeats (error-feed-honest-panels Phase 1) ───────────────────
+// Each feeder records a lightweight "received a delivery" beat — SEPARATE from error
+// rows — so a panel can tell "we're watching and it's clean" (green) from "we're not
+// watching" (amber). Stored in loop_heartbeats under loop_id `feed:<source>`, kind
+// 'feed' (kind is free text — these ids aren't in MONITORED_LOOPS so the monitor
+// ignores them). Best-effort: a liveness write must never break the feed it reports on.
+
+/** The loop_heartbeats loop_id a source's "received a delivery" beats are written under. */
+export function feedLoopId(source: ErrorSource): string {
+  return `feed:${source}`;
+}
+
+/**
+ * Record that a feed source RECEIVED a delivery (a clean Vercel batch, a successful
+ * Supabase-logs poll) — proof the feed is wired + live, independent of whether the
+ * delivery contained any errors. Best-effort, never throws.
+ */
+export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admin): Promise<void> {
+  try {
+    const admin = adminClient ?? createAdminClient();
+    await admin.from("loop_heartbeats").insert({
+      loop_id: feedLoopId(source),
+      kind: "feed",
+      ok: true,
+      ran_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, e instanceof Error ? e.message : e);
+  }
+}
+
 /** Page the owners of every Slack-connected workspace about an error incident. */
 async function pageOwners(admin: Admin, input: RecordErrorInput, signature: string, total: number): Promise<void> {
   const { data } = await admin
@@ -216,9 +247,18 @@ export interface ErrorIncident {
 
 export type PanelColor = "green" | "amber" | "red";
 
+/**
+ * Connection state of a feed — the honesty layer (error-feed-honest-panels):
+ *   - not-configured — the feed's secret/token isn't set; we CAN'T observe it. Amber.
+ *   - awaiting       — configured but zero deliveries ever; not yet verified live. Amber.
+ *   - connected      — received deliveries + zero errors in the window. The only true green.
+ *   - errors         — errors present in the window (red/amber by recency, today's behavior).
+ */
+export type PanelConnectionState = "not-configured" | "awaiting" | "connected" | "errors";
+
 export interface ErrorFeedPanel {
   source: ErrorSource;
-  /** red if any incident in the last hour, amber if any in the last 24h, else green. */
+  /** errors→red/amber by recency · not-configured/awaiting→amber · connected→green. */
   color: PanelColor;
   /** incidents seen in the lookback window. */
   incidents: ErrorIncident[];
@@ -226,6 +266,16 @@ export interface ErrorFeedPanel {
   activeSignatures: number;
   /** total occurrences across active signatures. */
   totalOccurrences: number;
+  /** is the feed's secret/token wired so we can actually observe it? */
+  configured: boolean;
+  /** last "received a delivery" beat (proof the feed is live), or null. */
+  lastReceivedAt: string | null;
+  /** the honesty state driving color + copy. */
+  connectionState: PanelConnectionState;
+  /** human-readable one-liner for the panel (e.g. "connected · 0 errors (last delivery 5m ago)"). */
+  statusText: string;
+  /** one-line "how to wire" hint, set only when not-configured. */
+  hint: string | null;
 }
 
 export interface ErrorFeedSnapshot {
@@ -240,36 +290,172 @@ const PANEL_INCIDENT_LIMIT = 8;
 
 const SOURCES: ErrorSource[] = ["vercel", "inngest", "supabase", "supabase-logs"];
 
-/** READ-ONLY: the per-source error panels for the Control Tower dashboard. */
+/**
+ * Which sources need a "received a delivery" proof before they can go green.
+ *   - vercel / supabase-logs — wired feeds with an observable clean delivery (a drain
+ *     POST / a successful poll) — need a `feed:<source>` beat.
+ *   - inngest — failure-only (no clean delivery to observe); liveness is proxied by the
+ *     freshness of Inngest itself (any recent cron beat) — needs that proxy beat.
+ *   - supabase (app-layer) — reportDbError is wired unconditionally into live code paths
+ *     (no setup, no separate delivery to observe); it's connected whenever it's clean.
+ */
+const REQUIRES_RECEIPT: Record<ErrorSource, boolean> = {
+  vercel: true,
+  inngest: true,
+  supabase: false,
+  "supabase-logs": true,
+};
+
+/** One-line "how to wire" hint shown when a source isn't configured. */
+const NOT_CONFIGURED_HINT: Record<ErrorSource, string> = {
+  vercel: "Set VERCEL_LOG_DRAIN_SECRET and create the Vercel log drain pointed at /api/webhooks/vercel-logs.",
+  inngest: "Deploy the inngest-failure-capture function so failed runs are captured.",
+  supabase: "reportDbError is wired in code — no setup needed.",
+  "supabase-logs": "Paste a Supabase Management access token in the Control Tower (owner-only) to poll DB logs.",
+};
+
+/** Compact elapsed string from an ISO timestamp to now (e.g. "3m", "2h", "1d"). */
+function elapsedSince(iso: string | null | undefined): string {
+  if (!iso) return "never";
+  const sec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86_400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86_400)}d`;
+}
+
+/** Is the Supabase Management-logs poller configured (a token is stored)? Inlined here
+ *  to avoid a circular import with supabase-log-poll (which imports recordError). */
+async function isSupabaseLogsConfigured(admin: Admin): Promise<boolean> {
+  try {
+    const { data } = await admin
+      .from("error_feed_supabase_config")
+      .select("access_token_encrypted")
+      .eq("id", "singleton")
+      .maybeSingle();
+    return Boolean((data as { access_token_encrypted: string | null } | null)?.access_token_encrypted);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * READ-ONLY: the per-source error panels for the Control Tower dashboard.
+ *
+ * Connection-aware (error-feed-honest-panels): a panel is green ONLY when its feed is
+ * configured AND has received a delivery AND has zero errors in the window — "we're
+ * watching and it's clean". A feed we can't observe (no secret/token) or haven't yet
+ * seen a delivery from says so in amber, NOT a misleading green "0 errors".
+ */
 export async function buildErrorFeedSnapshot(adminClient?: Admin): Promise<ErrorFeedSnapshot> {
   const admin = adminClient ?? createAdminClient();
   const since = new Date(Date.now() - FEED_LOOKBACK_MS).toISOString();
 
-  const { data } = await admin
-    .from("error_events")
-    .select("id, source, signature, title, detail, count, first_seen_at, last_seen_at")
-    .gte("last_seen_at", since)
-    .order("last_seen_at", { ascending: false })
-    .limit(300);
+  const [errRes, feedRes, cronRes, supabaseLogsConfigured] = await Promise.all([
+    admin
+      .from("error_events")
+      .select("id, source, signature, title, detail, count, first_seen_at, last_seen_at")
+      .gte("last_seen_at", since)
+      .order("last_seen_at", { ascending: false })
+      .limit(300),
+    // Latest "received a delivery" beats for the feeds that emit them.
+    admin
+      .from("loop_heartbeats")
+      .select("loop_id, ran_at")
+      .in("loop_id", [feedLoopId("vercel"), feedLoopId("supabase-logs")])
+      .order("ran_at", { ascending: false })
+      .limit(50),
+    // Inngest liveness proxy: any recent cron beat proves Inngest is delivering (and the
+    // failure-capture fn, registered alongside, would catch a failure).
+    admin
+      .from("loop_heartbeats")
+      .select("ran_at")
+      .eq("kind", "cron")
+      .order("ran_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    isSupabaseLogsConfigured(admin),
+  ]);
 
-  const rows = (data ?? []) as Array<ErrorIncident>;
+  const rows = (errRes.data ?? []) as Array<ErrorIncident>;
+
+  // Most-recent beat per feed loop_id (rows arrive newest-first).
+  const feedLatest = new Map<string, string>();
+  for (const b of (feedRes.data ?? []) as Array<{ loop_id: string; ran_at: string }>) {
+    if (!feedLatest.has(b.loop_id)) feedLatest.set(b.loop_id, b.ran_at);
+  }
+  const latestCronAt = (cronRes.data as { ran_at: string } | null)?.ran_at ?? null;
+
+  const configuredBy: Record<ErrorSource, boolean> = {
+    vercel: Boolean(process.env.VERCEL_LOG_DRAIN_SECRET),
+    inngest: true, // the capture fn is registered in code with the deploy.
+    supabase: true, // reportDbError needs no setup — always wired.
+    "supabase-logs": supabaseLogsConfigured,
+  };
+  const receivedAtBy: Record<ErrorSource, string | null> = {
+    vercel: feedLatest.get(feedLoopId("vercel")) ?? null,
+    inngest: latestCronAt,
+    supabase: null,
+    "supabase-logs": feedLatest.get(feedLoopId("supabase-logs")) ?? null,
+  };
+
   const panels: ErrorFeedPanel[] = SOURCES.map((source) => {
     const incidents = rows.filter((r) => r.source === source);
-    let color: PanelColor = "green";
-    for (const inc of incidents) {
-      const age = Date.now() - new Date(inc.last_seen_at).getTime();
-      if (age <= RED_MS) {
-        color = "red";
-        break;
+    const activeSignatures = incidents.length;
+    const totalOccurrences = incidents.reduce((s, r) => s + (r.count ?? 0), 0);
+    const configured = configuredBy[source];
+    const lastReceivedAt = receivedAtBy[source];
+
+    let connectionState: PanelConnectionState;
+    let color: PanelColor;
+    let statusText: string;
+    let hint: string | null = null;
+
+    if (incidents.length > 0) {
+      // Errors present → red/amber by recency (today's behavior, unchanged). Errors imply
+      // the feed is live, so this always beats the connection states.
+      color = "green";
+      for (const inc of incidents) {
+        const age = Date.now() - new Date(inc.last_seen_at).getTime();
+        if (age <= RED_MS) {
+          color = "red";
+          break;
+        }
+        if (age <= AMBER_MS) color = "amber";
       }
-      if (age <= AMBER_MS) color = "amber";
+      connectionState = "errors";
+      statusText = `${activeSignatures} active signature${activeSignatures === 1 ? "" : "s"} · ${totalOccurrences} occurrence${totalOccurrences === 1 ? "" : "s"}`;
+    } else if (!configured) {
+      // Can't observe the source → amber, never a misleading green "0 errors".
+      connectionState = "not-configured";
+      color = "amber";
+      statusText = "not configured — not watching this source";
+      hint = NOT_CONFIGURED_HINT[source];
+    } else if (REQUIRES_RECEIPT[source] && !lastReceivedAt) {
+      // Configured but no delivery seen yet → not verified live.
+      connectionState = "awaiting";
+      color = "amber";
+      statusText = "awaiting first event — not yet verified live";
+    } else {
+      // Configured + receiving (or no receipt needed) + clean → the only true green.
+      connectionState = "connected";
+      color = "green";
+      statusText = lastReceivedAt
+        ? `connected · 0 errors (last delivery ${elapsedSince(lastReceivedAt)} ago)`
+        : "connected · 0 errors";
     }
+
     return {
       source,
       color,
       incidents: incidents.slice(0, PANEL_INCIDENT_LIMIT),
-      activeSignatures: incidents.length,
-      totalOccurrences: incidents.reduce((s, r) => s + (r.count ?? 0), 0),
+      activeSignatures,
+      totalOccurrences,
+      configured,
+      lastReceivedAt,
+      connectionState,
+      statusText,
+      hint,
     };
   });
 
