@@ -36,6 +36,7 @@ interface Job {
   pr_url: string | null;
   pr_number: number | null;
   created_at: string;
+  spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 interface FailedJob {
   id: string;
@@ -44,15 +45,19 @@ interface FailedJob {
   error: string | null;
   detail: string | null;
   updated_at: string;
+  spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 
 // Route a paused/failed job to where you actually approve/act on it. A spec page (/dashboard/roadmap/{slug})
 // only exists for build-kind jobs whose slug is a real spec — so repair (slug = error signature), plan
 // (slug = goal slug), and migration-fix (slug = fix id) all 404'd there. Send each to its real surface.
-function approvalHref(kind: string, specSlug: string): string {
+// fold-guard-live-build (Phase 1): a build/spec-test job whose spec was folded/archived/deleted (spec_missing)
+// would 404 at /dashboard/roadmap/{slug} too — route it to the board (always resolves), never a dead link.
+function approvalHref(kind: string, specSlug: string, specMissing?: boolean): string {
   if (kind === "repair" || kind === "triage-escalations") return "/dashboard/developer/control-tower";
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
   if (kind === "migration-fix") return "/dashboard/migrations";
+  if (specMissing) return "/dashboard/roadmap";
   return `/dashboard/roadmap/${specSlug}`;
 }
 
@@ -264,11 +269,12 @@ export default function BoxPage() {
                   <li key={j.id} className="flex flex-col gap-1.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <Link
-                        href={approvalHref(j.kind, j.spec_slug)}
+                        href={approvalHref(j.kind, j.spec_slug, j.spec_missing)}
                         className="font-medium text-red-800 underline decoration-dotted underline-offset-2 hover:text-red-900 dark:text-red-300 dark:hover:text-red-200"
                       >
                         {j.spec_slug}
                       </Link>
+                      {j.spec_missing && <span className="text-[10px] text-red-600/70 dark:text-red-400/70">(spec archived)</span>}
                       <span className="text-xs text-red-600/80 dark:text-red-400/80">{j.error ?? "failed"} · {elapsed(j.updated_at)} ago</span>
                       <button
                         onClick={() => retry(j.spec_slug)}
@@ -305,11 +311,12 @@ export default function BoxPage() {
                       {j.kind}
                     </span>
                     <Link
-                      href={approvalHref(j.kind, j.spec_slug)}
+                      href={approvalHref(j.kind, j.spec_slug, j.spec_missing)}
                       className="font-medium underline decoration-dotted underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
                     >
                       {j.spec_slug}
                     </Link>
+                    {j.spec_missing && <span className="text-[10px] text-amber-700/70 dark:text-amber-300/70">(spec archived)</span>}
                   </li>
                 ))}
               </ul>

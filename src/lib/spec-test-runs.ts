@@ -11,6 +11,7 @@
 import { createHash } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
+import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_FOLD_GATE_LOOP_ID } from "@/lib/control-tower/registry";
 
@@ -483,16 +484,29 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  * the owner sees. A spec missing a run, or agent-verdict `issues`/`needs_human`/`error`, is NOT eligible.
  */
 export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
-  const [{ specs }, archived, runs, resolutions] = await Promise.all([
+  const admin = createAdminClient();
+  const [{ specs }, archived, runs, resolutions, liveRows] = await Promise.all([
     getRoadmap(),
     listArchivedSlugs(),
     getLatestSpecTestRuns(workspaceId),
     getHumanCheckResolutions(workspaceId),
+    // fold-guard-live-build (Phase 1): a spec with a live build/spec-test job is NOT eligible — auto-folding
+    // it would orphan the running build (its spec page 404s the moment the fold merges). The re-test/build
+    // completes and re-triggers the gate, so this defers the fold, never drops it. Mirror of the manual
+    // verify guard (getLiveJobForSlug) so the gate and the owner's click can never disagree.
+    admin
+      .from("agent_jobs")
+      .select("spec_slug")
+      .eq("workspace_id", workspaceId)
+      .in("kind", ["build", "spec-test"])
+      .in("status", ACTIVE_STATUSES),
   ]);
   const archivedSet = new Set(archived);
+  const liveSlugs = new Set(((liveRows.data ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug));
   const eligible: string[] = [];
   for (const s of specs) {
     if (s.status !== "shipped" || archivedSet.has(s.slug)) continue;
+    if (liveSlugs.has(s.slug)) continue;
     const run = runs[s.slug];
     if (!run || run.agent_verdict !== "approved") continue;
 

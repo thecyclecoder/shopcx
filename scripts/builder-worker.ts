@@ -512,6 +512,22 @@ async function reapOrphans() {
   console.log(`[reaper] reaped ${orphans.length} orphan(s) from a previous instance — re-queued: ${fmt(reset)}; failed: ${fmt(failed)}`);
 }
 
+// fold-guard-live-build (Phase 1) — cleanup backstop. Cancel any still-non-terminal build/spec-test job
+// whose spec has been ARCHIVED (folded into the brain → moved to docs/brain/archive.d/): it's an orphan
+// whose spec page 404s and whose paused/active card is a dead link. The preventive guard (the fold path
+// refusing a live spec) makes this rare; this catches a fold that raced a build. Best-effort — a failure
+// here must never break worker startup.
+async function reapArchivedSpecJobs() {
+  try {
+    const { cancelJobsForArchivedSpecs } = await import("../src/lib/agent-jobs");
+    const { cancelled, slugs } = await cancelJobsForArchivedSpecs();
+    if (cancelled > 0) console.log(`[reaper] cancelled ${cancelled} orphaned job(s) for archived spec(s): ${slugs.join(", ")}`);
+    else console.log("[reaper] 0 archived-spec orphans — no non-terminal job points at an archived spec");
+  } catch (e) {
+    console.error("[reaper] archived-spec reap failed (non-fatal):", e instanceof Error ? e.message : String(e));
+  }
+}
+
 // ── Heartbeat + self-update (worker-self-update) ─────────────────────────────
 // Upsert the singleton worker_heartbeats row so the dashboard can show "worker: <sha>, healthy Ns ago"
 // (and surface a crash-loop) without SSH. Best-effort: a heartbeat write must never break the poll loop.
@@ -2053,6 +2069,14 @@ async function runSpecTestJob(job: Job) {
     } catch (e) {
       console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
+    // Mark THIS spec-test job terminal BEFORE the auto-fold gate runs. fold-guard-live-build (Phase 1)
+    // makes a spec with a live build/spec-test job ineligible for auto-fold — and this very job is a live
+    // spec-test job for `slug` until it's completed. Flipping it first means the gate sees no live job for
+    // the spec it just tested (only a genuinely-separate in-flight build would block it, which is correct).
+    await update(job.id, {
+      status: "completed",
+      log_tail: `${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}. ${report}`.slice(-2000),
+    });
     // Auto-fold Gate B (auto-ship-pipeline Phase 2): an `approved` run with no waiting/failed human checks
     // + no regressions just made this spec all-green → auto-archive it (enqueue_fold), no owner click.
     // All-green-only + kill-switched inside the gate. Best-effort — never fail the spec-test run.
@@ -2063,10 +2087,6 @@ async function runSpecTestJob(job: Job) {
     } catch (e) {
       console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
-    await update(job.id, {
-      status: "completed",
-      log_tail: `${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}. ${report}`.slice(-2000),
-    });
     console.log(`${tag} ✓ ${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -3777,6 +3797,8 @@ async function main() {
   } catch (e) {
     console.error("[reaper] reap failed (continuing):", e instanceof Error ? e.message : e);
   }
+  // fold-guard-live-build (Phase 1): cancel any orphaned non-terminal job whose spec was archived.
+  await reapArchivedSpecJobs();
 
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
   for (;;) {

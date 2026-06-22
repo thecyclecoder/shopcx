@@ -10,7 +10,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
-import { ACTIVE_STATUSES, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
+import { ACTIVE_STATUSES, getLiveJobForSlug, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
 import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
 
 export type ActionResult<T> =
@@ -72,6 +72,18 @@ export async function queueRoadmapBuild(
 
   // "Mark verified & archive" → coalesce into ONE batch fold-build (enqueue_fold). Mirrors the route.
   if (opts.verify === true) {
+    // fold-guard-live-build (Phase 1): refuse to archive a spec while a build/spec-test job for it is still
+    // live — folding it would orphan the running build (its spec markdown moves to archive.d/, so a paused
+    // build's spec page 404s the instant the fold merges). The owner re-taps once the build is terminal; the
+    // auto-fold gate likewise skips a slug with a live job. Verify is the manual mirror of that gate.
+    const live = await getLiveJobForSlug(workspaceId, slug, admin);
+    if (live) {
+      return {
+        ok: false,
+        status: 409,
+        error: `Can't archive — a ${live.kind} build for this spec is still live (${live.status}). It'll fold once that build finishes.`,
+      };
+    }
     const { data: foldData, error: foldErr } = await admin.rpc("enqueue_fold", {
       p_workspace: workspaceId,
       p_slug: slug,
