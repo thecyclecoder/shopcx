@@ -120,6 +120,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[spec-card-db-companion]] (platform) — SUPERSEDES the disabled [[roadmap-reads-specs-from-git]]. Move live PM state into a spec_card_state DB table the board reads instantly (no deploy lag, no GitHub quota): merge/drift/owner/build events write status+flags the moment they happen. Markdown stays canonical for content (brain rule holds); DB is the live board mirror + transient flags. "shipped · deploying" flag via VERCEL_GIT_COMMIT_SHA vs the card's merge SHA (no webhook). Retires the git-reads machinery.
 
+## Active project — Box multi-account failover ⏳
+
+[[box-multi-account-failover]] (platform) — survive the Max usage wall: the box (same account as the owner) capped → 12 builds failed at once with no recovery until reset. Wire the worker to select CLAUDE_CONFIG_DIR per build from an account pool + auto-fail-over to a 2nd account on a usage-cap signal (vs the existing 529-transient retry); all-capped → blocked_on_usage that auto-resumes (no manual rebuild). + the claude2 alias / ~/.claude-personal login for manual use. Owner's idea, made automatic.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
