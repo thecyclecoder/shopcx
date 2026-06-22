@@ -14,6 +14,7 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildControlTowerSnapshot } from "@/lib/control-tower/monitor";
+import { buildErrorFeedSnapshot } from "@/lib/control-tower/error-feed";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,9 @@ export async function GET() {
     return NextResponse.json({ error: "Only the workspace owner can view the Control Tower" }, { status: 403 });
   }
 
-  const snapshot = await buildControlTowerSnapshot(admin);
-  return NextResponse.json(snapshot);
+  const [snapshot, errorFeed] = await Promise.all([
+    buildControlTowerSnapshot(admin),
+    buildErrorFeedSnapshot(admin),
+  ]);
+  return NextResponse.json({ ...snapshot, errorFeed });
 }
