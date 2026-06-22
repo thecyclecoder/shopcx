@@ -94,9 +94,12 @@ async function isSandbox(admin: Admin, wsId: string): Promise<boolean> {
 async function executeCustomerReply(admin: Admin, todo: AgentTodo): Promise<ExecutionResult> {
   const tid = todo.source_ticket_id;
   if (!tid) return { ok: false, error: "customer_reply has no source_ticket_id" };
-  const payload = todo.payload as { body_html?: string };
-  const html = (payload.body_html || "").trim();
-  if (!html) return { ok: false, error: "customer_reply payload missing body_html" };
+  const payload = todo.payload as { body_html?: string; response_message?: string };
+  // Fallback: some todos stored the reply under `response_message` (the orchestrator's key) instead of
+  // body_html — accept it so the reply still sends instead of erroring (plain text → <p> paragraphs).
+  const raw = (payload.body_html || "").trim() || (payload.response_message || "").trim();
+  const html = /<[a-z][\s\S]*>/i.test(raw) ? raw : raw.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+  if (!html) return { ok: false, error: "customer_reply payload missing body_html/response_message" };
 
   const { data: t } = await admin
     .from("tickets")

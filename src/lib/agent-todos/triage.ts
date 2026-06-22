@@ -436,6 +436,17 @@ export async function materializeTriageOutcome(
   const out: MaterializeResult = { summary: "", todoCount: 0 };
 
   // 1. agent_todos group (customer_fix / no_action / analysis_gap).
+  // The triage LLM sometimes emits a customer_reply body under `response_message` (the orchestrator's
+  // key) instead of the agent_todos standard `body_html` — which the UI preview + the executor BOTH read.
+  // Normalize so the reply renders AND can actually send (plain text → <p> paragraphs, no markdown).
+  const normalizeReplyPayload = (actionType: string, payload: Record<string, unknown>): Record<string, unknown> => {
+    if (actionType !== "customer_reply") return payload;
+    if (typeof payload.body_html === "string" && payload.body_html.trim()) return payload;
+    const msg = typeof payload.response_message === "string" ? payload.response_message.trim() : "";
+    if (!msg) return payload;
+    const body_html = /<[a-z][\s\S]*>/i.test(msg) ? msg : msg.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+    return { ...payload, body_html };
+  };
   const validTodos = (proposal.todos || []).filter((t) => TRIAGE_TODO_ACTION_TYPES.includes(t.action_type));
   if (validTodos.length) {
     const groupId = randomUUID();
@@ -447,7 +458,7 @@ export async function materializeTriageOutcome(
       source_ticket_id: ticketId,
       group_id: groupId,
       action_type: t.action_type,
-      payload: t.payload || {},
+      payload: normalizeReplyPayload(t.action_type, t.payload || {}),
       summary: t.summary,
       context_what_happened: proposal.context_what_happened || null,
       context_what_we_propose: proposal.context_what_we_propose || null,
