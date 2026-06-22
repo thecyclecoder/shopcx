@@ -1,0 +1,1 @@
+- **Fix the Inngest in-code-vs-registered diff — wrong REST endpoint (404)** · verified 2026-06-22 · → [[libraries/control-tower-self-audit]]
