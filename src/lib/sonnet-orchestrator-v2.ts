@@ -956,6 +956,7 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
   const [
     { data: products },
     { data: variantRows },
+    { data: crises },
     { data: workspace },
     ragResults,
   ] = await Promise.all([
@@ -964,6 +965,14 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
       .select("product_id, title, option1, option2, sku, inventory_quantity, available, position, shopify_variant_id")
       .eq("workspace_id", wsId)
       .order("position"),
+    // An active OOS crisis is the authoritative truth for a variant's stock —
+    // inventory_quantity can lag Shopify and read positive on a SKU that's
+    // really gone (ticket 9a7f9481: Mixed Berry showed qty 3746 mid-crisis,
+    // so Opus told the customer it was back in stock and promised a reship
+    // that could never ship). Fetch active crises and override `available`.
+    admin.from("crisis_events")
+      .select("affected_product_title, affected_variant_id, affected_sku, expected_restock_date")
+      .eq("workspace_id", wsId).eq("status", "active"),
     admin.from("workspaces").select("shopify_primary_domain").eq("id", wsId).maybeSingle(),
     retrieveContext(wsId, searchQuery, 10),
   ]);
@@ -980,17 +989,36 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
 
   const parts: string[] = [];
 
+  const titleById = new Map((products || []).map((p) => [p.id, p.title as string]));
+
+  // An active crisis matches a variant by Shopify variant id
+  // (crisis_events.affected_variant_id is a Shopify id, not our UUID), then
+  // SKU, then product title as a fallback. Returns the matching crisis so the
+  // restock date can be surfaced inline.
+  const crisisForVariant = (
+    productTitle: string,
+    v: { shopify_variant_id?: string | null; sku?: string | null },
+  ) =>
+    (crises || []).find((c) =>
+      (v.shopify_variant_id && c.affected_variant_id && String(c.affected_variant_id) === String(v.shopify_variant_id)) ||
+      (v.sku && c.affected_sku && c.affected_sku === v.sku) ||
+      (c.affected_product_title && productTitle && c.affected_product_title.toLowerCase() === productTitle.toLowerCase()));
+
   // Group variants by product_id (source of truth — legacy products.variants
   // JSONB is a mirror that doesn't always include freshly-added flavors).
-  const variantsByProduct = new Map<string, Array<{ name: string; sku: string | null; qty: number | null; available: boolean; shopify_variant_id: string | null }>>();
+  const variantsByProduct = new Map<string, Array<{ name: string; sku: string | null; qty: number | null; available: boolean; shopify_variant_id: string | null; restock: string | null }>>();
   for (const v of variantRows || []) {
     const list = variantsByProduct.get(v.product_id) || [];
+    const productTitle = (titleById.get(v.product_id) || "") as string;
+    const crisis = crisisForVariant(productTitle, { shopify_variant_id: (v.shopify_variant_id as string | null) || null, sku: v.sku as string | null });
     list.push({
       name: (v.title || v.option1 || "Default") as string,
       sku: v.sku as string | null,
       qty: v.inventory_quantity as number | null,
-      available: v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0),
+      // An active crisis forces OUT OF STOCK regardless of a stale positive qty.
+      available: !crisis && v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0),
       shopify_variant_id: (v.shopify_variant_id as string | null) || null,
+      restock: (crisis?.expected_restock_date as string | null) || null,
     });
     variantsByProduct.set(v.product_id, list);
   }
@@ -1017,11 +1045,15 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
     // Opus ask the admin for the ID instead of executing the action.
     const fmt = (v: { name: string; shopify_variant_id: string | null }) =>
       v.shopify_variant_id ? `${v.name} [variant_id: ${v.shopify_variant_id}]` : v.name;
+    // OOS flavors surface their crisis restock date so Opus never claims a
+    // crised SKU is back in stock or promises an imminent reship.
+    const fmtOos = (v: { name: string; shopify_variant_id: string | null; restock: string | null }) =>
+      `${fmt(v)}${v.restock ? ` (active OOS crisis — expected restock ${v.restock})` : ""}`;
     if (inStock.length) {
       parts.push(`    available: ${inStock.map(fmt).join(", ")}`);
     }
     if (oos.length) {
-      parts.push(`    OUT OF STOCK: ${oos.map(fmt).join(", ")}`);
+      parts.push(`    OUT OF STOCK: ${oos.map(fmtOos).join(", ")}`);
     }
   }
 
@@ -1070,7 +1102,7 @@ async function checkInventory(admin: Admin, wsId: string, query: string): Promis
   const [{ data: products }, { data: variants }, { data: crises }, { data: ws }] = await Promise.all([
     admin.from("products").select("id, title, inventory_updated_at").eq("workspace_id", wsId).eq("status", "active"),
     admin.from("product_variants")
-      .select("product_id, title, option1, sku, inventory_quantity, available, position")
+      .select("product_id, title, option1, sku, inventory_quantity, available, position, shopify_variant_id")
       .eq("workspace_id", wsId).order("position"),
     admin.from("crisis_events")
       .select("affected_product_title, affected_variant_id, affected_sku, expected_restock_date")
@@ -1086,20 +1118,35 @@ async function checkInventory(admin: Admin, wsId: string, query: string): Promis
     return t === spTitle || t.includes("shipping protection");
   };
   const titleById = new Map((products || []).map((p) => [p.id, p.title as string]));
-  const isInStock = (v: { available?: boolean | null; inventory_quantity?: number | null }) =>
-    v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0);
-  const restockFor = (productTitle: string, sku: string | null) => {
-    const c = (crises || []).find((c) =>
-      (sku && c.affected_sku && c.affected_sku === sku) ||
+  // An active OOS crisis is the authoritative truth for a variant's stock —
+  // inventory_quantity can lag Shopify and read positive on a SKU that's really
+  // gone (ticket 9a7f9481: Mixed Berry showed qty 3746 mid-crisis, so the
+  // orchestrator promised a reship that could never ship). Match by Shopify
+  // variant id (crisis_events.affected_variant_id is a Shopify id, not our
+  // UUID), then SKU, then product title as a fallback.
+  const crisisFor = (productTitle: string, v: { shopify_variant_id?: string | null; sku?: string | null }) =>
+    (crises || []).find((c) =>
+      (v.shopify_variant_id && c.affected_variant_id && String(c.affected_variant_id) === String(v.shopify_variant_id)) ||
+      (v.sku && c.affected_sku && c.affected_sku === v.sku) ||
       (c.affected_product_title && productTitle && c.affected_product_title.toLowerCase() === productTitle.toLowerCase()));
-    return c?.expected_restock_date ? ` (expected restock: ${c.expected_restock_date})` : "";
-  };
-  const fmt = (productTitle: string, v: { title?: string | null; option1?: string | null; sku?: string | null; inventory_quantity?: number | null; available?: boolean | null }) => {
+  const isInStock = (productTitle: string, v: { available?: boolean | null; inventory_quantity?: number | null; shopify_variant_id?: string | null; sku?: string | null }) =>
+    !crisisFor(productTitle, v) &&
+    v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0);
+  const fmt = (productTitle: string, v: { title?: string | null; option1?: string | null; sku?: string | null; inventory_quantity?: number | null; available?: boolean | null; shopify_variant_id?: string | null }) => {
     const variantName = (v.title || v.option1 || "").toString();
     const label = variantName && variantName !== "Default Title" ? `${productTitle} — ${variantName}` : productTitle;
     const qty = v.inventory_quantity == null ? "untracked" : `${v.inventory_quantity}`;
-    const status = isInStock(v) ? "in stock" : "OUT OF STOCK";
-    return `- ${label}: ${status} (qty ${qty})${isInStock(v) ? "" : restockFor(productTitle, (v.sku as string | null) || null)}`;
+    const inStock = isInStock(productTitle, v);
+    const crisis = inStock ? undefined : crisisFor(productTitle, v);
+    const status = inStock ? "in stock" : "OUT OF STOCK";
+    // When a crisis drives the OOS call, say so and flag the inventory count as
+    // non-authoritative — otherwise a stale positive qty reads as a contradiction.
+    const note = inStock
+      ? ""
+      : crisis
+        ? ` — active OOS crisis (inventory count is not authoritative)${crisis.expected_restock_date ? ` (expected restock: ${crisis.expected_restock_date})` : ""}`
+        : "";
+    return `- ${label}: ${status} (qty ${qty})${note}`;
   };
 
   // Tokenized match: any token (≥3 chars) hits the product OR variant name/sku.
@@ -1125,7 +1172,7 @@ async function checkInventory(admin: Admin, wsId: string, query: string): Promis
     parts.push("");
   }
 
-  const oos = real.filter((v) => !isInStock(v));
+  const oos = real.filter((v) => !isInStock(titleById.get(v.product_id) || "", v));
   if (oos.length) {
     parts.push("ALL CURRENTLY OUT-OF-STOCK ITEMS:");
     for (const v of oos) parts.push(fmt(titleById.get(v.product_id) || "Product", v));

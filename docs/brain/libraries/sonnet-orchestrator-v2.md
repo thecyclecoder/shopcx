@@ -59,6 +59,7 @@ The monitor's **work-exists** probe for this loop is inbound customer messages (
 
 - The cached `system` prefix must stay below the cache-min only matters in reverse — it's well above the 4096-token (Opus) / 2048 (Sonnet) minimum, so it caches; but a workspace with almost no rules/policies could fall under and silently not cache (`cache_creation_input_tokens: 0`).
 - Per-channel/personality variation fragments the system cache into a few entries per workspace (one per channel) — expected and fine.
+- **Crisis overrides inventory_quantity in stock checks.** `inventory_quantity` can lag Shopify and read positive on a SKU that's really gone. Both `checkInventory` and `getProductKnowledge` therefore treat an **active `crisis_events` row** (status `active`) as authoritative: a variant matched by Shopify variant id (`affected_variant_id`, a Shopify id — not our UUID) → `affected_sku` → `affected_product_title` is forced OUT OF STOCK with its `expected_restock_date` inline, regardless of qty. Without this the orchestrator told a customer a crised Mixed Berry SKU (stale qty 3746) was back in stock and promised a reship that could never ship (ticket 9a7f9481). [[../tables/crisis_events]] · [[../orchestrator-tools]].
 
 ---
 
