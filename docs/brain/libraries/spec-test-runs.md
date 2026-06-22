@@ -59,7 +59,10 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
 - `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the **all-green** shipped-not-archived specs: latest run
   agent-verdict `approved` · 0 waiting `needs_human` checks · 0 human checks resolved `failed` · 0 unresolved
   auto-`fail` regressions. Reuses the SAME per-spec derivation as the board chip / human-test queue, so the gate
-  can never disagree with what the owner sees.
+  can never disagree with what the owner sees. **fold-guard-live-build:** a slug with a live `build`/`spec-test`
+  `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also excluded** — auto-folding it would orphan the running build
+  (its spec page 404s the moment the fold merges), so the fold is deferred until the job is terminal (the next gate
+  pass re-picks it up), never dropped. This mirrors the manual verify guard `getLiveJobForSlug` ([[agent-jobs]]).
 - `isAutoFoldEnabled(workspaceId, admin?)` → `boolean` — the owner kill-switch (`workspaces.auto_fold_enabled`,
   default ON; `select("*")` so a pre-migration deploy degrades to enabled). Mirrors `isAutoMergeEnabled`.
 - `autoFoldVerifiedSpecs(workspaceId, admin?)` → `AutoFoldResult` — for each eligible spec not already
