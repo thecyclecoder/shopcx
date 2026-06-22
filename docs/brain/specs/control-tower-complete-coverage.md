@@ -52,5 +52,15 @@ The detection layer (smaller, focused): the **self-audit** (enumerate `createFun
 - After a deploy, `scripts/builder-worker.ts` logs `[inngest-sync] Inngest sync ok …` (PUT `/api/inngest`) on restart; `npx tsx scripts/sync-inngest.ts` PUTs the serve endpoint on demand → expect Inngest re-registers newly-added functions.
 - With `INNGEST_SIGNING_KEY` set in prod, the CODE↔INNGEST-registered diff reports `status:'ok'` + 0 missing once synced (the section shows no "Not registered with Inngest" tiles); without the key it shows the "unverified" note and never false-alarms. ⚠️ The Inngest REST shape (`GET /v1/apps`) is parsed defensively but **needs prod verification** — confirm the diff returns `ok` against the live API.
 
-## Phase 3 — department rollups ⏳
+## Phase 3 — department rollups ✅
 `owner` function on every registry entry; the Control Tower dashboard groups by function with a per-department rollup health tile (Platform/Growth/Retention/CS/CMO Health), CEO-glance-on-top + drill-in. Brain: [[../dashboard/control-tower]] · [[../goals/ceo-mode]] · [[../project-management]].
+
+**Shipped:**
+- `src/lib/control-tower/registry.ts` — `OwnerFunction` type (`platform | growth | retention | cs | cmo`) + an `OWNER_FUNCTIONS` ordered list (id + label + `healthLabel` "X Health"); a required `owner` field on `MonitoredLoop`, set on **all 71** registry entries (Platform 22 · Growth 10 · Retention 16 · CS 13 · CMO 10).
+- `src/lib/control-tower/monitor.ts` — `owner` on `LoopStatus` (carried through at the merge point); `DepartmentRollup` type + `buildDepartmentRollups()` (worst-of color per function — red > amber > green — with healthy/total + open-alert counts, departments with 0 loops omitted); `buildControlTowerSnapshot` returns `departments` alongside `loops`.
+- `src/app/dashboard/developer/control-tower/page.tsx` — leads with a **Department health** row of CEO-glance rollup tiles (`DepartmentRollupTile`), then a `<details>` **drill-in per department** (`DepartmentSection`, auto-open when not green) listing that function's loops sub-grouped by kind. The API passes `departments` through unchanged.
+- Brain: [[../dashboard/control-tower]] updated (Department-health surface + owner mapping).
+
+**Phase 3 verification:**
+- On `/dashboard/developer/control-tower`, the page leads with **Platform / Growth / Retention / CS / CMO Health** rollup tiles; each shows "N/M healthy" + any alerting/warning/open-alert chips. A red loop turns its department's rollup amber/red (worst-of); expanding a department lists its loops (sub-grouped by kind).
+- `npx tsx`-validated: all 71 `MONITORED_LOOPS` carry a valid `owner`, spread across all five functions (no unowned/invalid).

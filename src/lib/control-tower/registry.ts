@@ -38,6 +38,31 @@
 export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent" | "reactive";
 
 /**
+ * The org-chart function that OWNS each loop (control-tower-complete-coverage spec, Phase 3 —
+ * department rollups). Every spec already declares an owner function ([[../project-management]] ·
+ * the [[../functions]] org chart); we carry that to loops so the Control Tower can group them by
+ * department and show a per-function rollup health tile (the CEO-glance: which org function is
+ * healthy?). A loop's owner = the function that owns the system it monitors (e.g. the renewal /
+ * dunning / portal crons → retention; the meta + social loops → growth/cmo; the ticket handler +
+ * triage → cs; the build/spec-test/migration-fix agents + the data-infra/monitoring crons → platform).
+ */
+export type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo";
+
+/**
+ * The departments in CEO-glance order, with the rollup-tile health label the dashboard shows
+ * ("Platform Health", "Growth Health", …). The Control Tower leads with these rollups (worst-of
+ * each function's loops) before drilling into the individual cron/agent cards. Maps onto
+ * [[../goals/ceo-mode]] — a CEO sees org-function health, then drills in.
+ */
+export const OWNER_FUNCTIONS: { id: OwnerFunction; label: string; healthLabel: string }[] = [
+  { id: "platform", label: "Platform", healthLabel: "Platform Health" },
+  { id: "growth", label: "Growth", healthLabel: "Growth Health" },
+  { id: "retention", label: "Retention", healthLabel: "Retention Health" },
+  { id: "cs", label: "CS", healthLabel: "CS Health" },
+  { id: "cmo", label: "CMO", healthLabel: "CMO Health" },
+];
+
+/**
  * Phase 2 output-assertion id. Phase 1 catches "the loop went SILENT" (liveness /
  * cron-freshness / stuck-jobs). An output assertion catches the Goodhart failure
  * Phase 1 can't see: the loop RAN (fresh heartbeat, green on P1) but silently did
@@ -93,6 +118,8 @@ export interface MonitoredLoop {
   /** Heartbeat loop_id: the worker box id, a cron's inngest fn id, or `agent:<kind>`. */
   id: string;
   kind: LoopKind;
+  /** Phase 3: the org-chart function that owns this loop (drives the department rollups). */
+  owner: OwnerFunction;
   label: string;
   description: string;
   /** Human-readable cadence for the dashboard ("hourly", "every 10 min", "daily"). */
@@ -147,6 +174,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: WORKER_BOX_ID,
     kind: "worker",
+    owner: "platform",
     label: "Box build worker",
     description: "The self-hosted build worker poll loop (scripts/builder-worker.ts).",
     expectedCadence: "polls every ~5s",
@@ -158,6 +186,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "triage-escalations-cron",
     kind: "cron",
+    owner: "cs",
     label: "Escalation triage enqueue",
     description: "Hourly enqueue of the box escalation-triage sweep.",
     expectedCadence: "hourly (30 * * * *)",
@@ -167,6 +196,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "spec-test-cron",
     kind: "cron",
+    owner: "platform",
     label: "Spec-test QA enqueue",
     description: "Daily enqueue of box QA over shipped-unverified specs.",
     expectedCadence: "daily (45 10 * * *)",
@@ -176,6 +206,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "migration-audit-retry-cron",
     kind: "cron",
+    owner: "retention",
     label: "Migration audit retry",
     description: "Re-verifies pending migration audits.",
     expectedCadence: "every 10 min (*/10 * * * *)",
@@ -184,6 +215,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "migration-integrity-sweep-cron",
     kind: "cron",
+    owner: "retention",
     label: "Migration integrity sweep",
     description: "Daily back-audit of never-audited internal subs.",
     expectedCadence: "daily (30 4 * * *)",
@@ -192,6 +224,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "internal-subscription-renewal-cron",
     kind: "cron",
+    owner: "retention",
     label: "Internal subscription renewals",
     description: "Daily fan-out of due internal-subscription renewals.",
     expectedCadence: "daily (0 9 * * *)",
@@ -201,6 +234,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "social-scheduler-plan",
     kind: "cron",
+    owner: "cmo",
     label: "Social scheduler planner",
     description: "Daily organic-social calendar planner (rolling 7-day window).",
     expectedCadence: "daily (0 9 * * *)",
@@ -209,6 +243,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "control-tower-monitor",
     kind: "cron",
+    owner: "platform",
     label: "Control Tower monitor",
     description: "The watchdog itself — so a dead monitor is visible too.",
     expectedCadence: "every 15 min (*/15 * * * *)",
@@ -217,6 +252,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "supabase-log-poll-cron",
     kind: "cron",
+    owner: "platform",
     label: "Supabase log poll",
     description: "Polls the Supabase Management Logs API for DB-level errors (error-feed Phase 2).",
     expectedCadence: "every 15 min (*/15 * * * *)",
@@ -225,6 +261,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "spec-drift-reconcile",
     kind: "cron",
+    owner: "platform",
     label: "Spec-drift reconciler",
     description: "Per-phase emoji↔code reconciler — flips shipped phases ✅, surfaces ambiguous drift.",
     expectedCadence: "every ~30 min (20,50 * * * *)",
@@ -235,54 +272,54 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // Every remaining `inngest.createFunction` cron, registered so the dashboard shows
   // them all + the watchdog catches any that go stale. Window = cadence + grace.
   // ─ Sub-minute / minute crons (window ~10 min) ─
-  { id: "deliver-pending-sends", kind: "cron", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
-  { id: "marketing-text-campaign-send-tick", kind: "cron", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
-  { id: "meta-capi-dispatch-cron", kind: "cron", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
-  { id: "slack-roadmap-notify", kind: "cron", label: "Slack roadmap notify", description: "Pushes pending roadmap/build notifications to Slack.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
+  { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
+  { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
+  { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
+  { id: "slack-roadmap-notify", kind: "cron", owner: "platform", label: "Slack roadmap notify", description: "Pushes pending roadmap/build notifications to Slack.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   // ─ Every-5-min crons (window ~20 min) ─
-  { id: "today-sync", kind: "cron", label: "Today sync (Amazon + Meta)", description: "Keeps today's Amazon + Meta spend/order snapshots fresh.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
-  { id: "ticket-unsnooze", kind: "cron", label: "Ticket unsnooze", description: "Wakes snoozed tickets whose snooze window has passed.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
+  { id: "today-sync", kind: "cron", owner: "growth", label: "Today sync (Amazon + Meta)", description: "Keeps today's Amazon + Meta spend/order snapshots fresh.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
+  { id: "ticket-unsnooze", kind: "cron", owner: "cs", label: "Ticket unsnooze", description: "Wakes snoozed tickets whose snooze window has passed.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
   // ─ Every-10-min crons (window ~40 min) ─
-  { id: "abandoned-cart-reminder", kind: "cron", label: "Abandoned-cart reminder", description: "Sends abandoned-cart reminder sends on the rolling schedule.", expectedCadence: "every 10 min (*/10 * * * *)", livenessWindowMs: 40 * MIN },
+  { id: "abandoned-cart-reminder", kind: "cron", owner: "cmo", label: "Abandoned-cart reminder", description: "Sends abandoned-cart reminder sends on the rolling schedule.", expectedCadence: "every 10 min (*/10 * * * *)", livenessWindowMs: 40 * MIN },
   // ─ Every-15-min crons (window ~45 min) ─
-  { id: "portal-action-healer", kind: "cron", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
-  { id: "ticket-csat-cron", kind: "cron", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
+  { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
+  { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   // ─ Every-30-min crons (window ~90 min) ─
-  { id: "ticket-analysis-cron", kind: "cron", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
+  { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
   // ─ Hourly crons (window ~2h) ─
-  { id: "dunning-payday-retry-cron", kind: "cron", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
-  { id: "sync-inventory", kind: "cron", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
-  { id: "portal-auto-resume-cron", kind: "cron", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
+  { id: "dunning-payday-retry-cron", kind: "cron", owner: "retention", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
+  { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
+  { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
   // ─ Daily crons (window ~26h) ─
-  { id: "amazon-daily-sync", kind: "cron", label: "Amazon daily sync", description: "Daily sync of the last 3 days of Amazon orders/spend.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "tickets-auto-archive", kind: "cron", label: "Tickets auto-archive", description: "Archives stale resolved tickets.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "auto-blog-generate", kind: "cron", label: "Auto blog generator", description: "Daily SEO blog/content generation pass.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "brain-index-refresh", kind: "cron", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "chargeback-evidence-reminder", kind: "cron", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "creative-finder-daily-cron", kind: "cron", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "crisis-daily-campaign", kind: "cron", label: "Crisis campaign tick", description: "Advances active crisis-comms campaigns.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "demographics-enrich-batch", kind: "cron", label: "Demographics enrich batch", description: "Daily customer-demographics enrichment batch.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "daily-analysis-report-cron", kind: "cron", label: "Daily analysis report", description: "Builds the daily AI ops/analysis report.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "daily-order-snapshot", kind: "cron", label: "Daily order snapshot", description: "Pre-computes the prior day's order snapshot.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "daily-order-snapshot-self-heal", kind: "cron", label: "Order snapshot self-heal", description: "Back-fills any missing daily order snapshots.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "delivery-nightly-audit", kind: "cron", label: "Delivery nightly audit", description: "Audits shipment delivery state nightly.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "featured-review-cards", kind: "cron", label: "Featured review cards", description: "Refreshes featured-review card generation.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "fraud-nightly-scan", kind: "cron", label: "Fraud nightly scan", description: "Nightly batch fraud re-scan across recent orders.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "klaviyo-engagement-sync", kind: "cron", label: "Klaviyo engagement sync", description: "Daily Klaviyo engagement metrics sync.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "marketing-coupon-auto-disable", kind: "cron", label: "Marketing coupon auto-disable", description: "Auto-disables expired/over-budget marketing coupons.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "meta-performance-daily", kind: "cron", label: "Meta performance pipeline", description: "Daily Meta ad performance iteration pipeline.", expectedCadence: "daily (30 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "meta-daily-sync", kind: "cron", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "monthly-revenue-snapshot", kind: "cron", label: "Revenue snapshot", description: "Pre-computes monthly revenue snapshots from daily data.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "refresh-customer-segments-cron", kind: "cron", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "social-insights-sync", kind: "cron", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "sonnet-prompt-auto-review", kind: "cron", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "sync-klaviyo-reviews", kind: "cron", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "amazon-daily-sync", kind: "cron", owner: "growth", label: "Amazon daily sync", description: "Daily sync of the last 3 days of Amazon orders/spend.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "tickets-auto-archive", kind: "cron", owner: "cs", label: "Tickets auto-archive", description: "Archives stale resolved tickets.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "auto-blog-generate", kind: "cron", owner: "cmo", label: "Auto blog generator", description: "Daily SEO blog/content generation pass.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "crisis-daily-campaign", kind: "cron", owner: "cmo", label: "Crisis campaign tick", description: "Advances active crisis-comms campaigns.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "demographics-enrich-batch", kind: "cron", owner: "growth", label: "Demographics enrich batch", description: "Daily customer-demographics enrichment batch.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "daily-analysis-report-cron", kind: "cron", owner: "platform", label: "Daily analysis report", description: "Builds the daily AI ops/analysis report.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "daily-order-snapshot", kind: "cron", owner: "platform", label: "Daily order snapshot", description: "Pre-computes the prior day's order snapshot.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "daily-order-snapshot-self-heal", kind: "cron", owner: "platform", label: "Order snapshot self-heal", description: "Back-fills any missing daily order snapshots.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "delivery-nightly-audit", kind: "cron", owner: "retention", label: "Delivery nightly audit", description: "Audits shipment delivery state nightly.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "featured-review-cards", kind: "cron", owner: "cmo", label: "Featured review cards", description: "Refreshes featured-review card generation.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "fraud-nightly-scan", kind: "cron", owner: "platform", label: "Fraud nightly scan", description: "Nightly batch fraud re-scan across recent orders.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "klaviyo-engagement-sync", kind: "cron", owner: "cmo", label: "Klaviyo engagement sync", description: "Daily Klaviyo engagement metrics sync.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "marketing-coupon-auto-disable", kind: "cron", owner: "cmo", label: "Marketing coupon auto-disable", description: "Auto-disables expired/over-budget marketing coupons.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "meta-performance-daily", kind: "cron", owner: "growth", label: "Meta performance pipeline", description: "Daily Meta ad performance iteration pipeline.", expectedCadence: "daily (30 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "monthly-revenue-snapshot", kind: "cron", owner: "platform", label: "Revenue snapshot", description: "Pre-computes monthly revenue snapshots from daily data.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "social-insights-sync", kind: "cron", owner: "cmo", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "sonnet-prompt-auto-review", kind: "cron", owner: "cs", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "sync-klaviyo-reviews", kind: "cron", owner: "cmo", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 26 * HOUR },
   // ─ Weekly crons (window ~8 days) ─
-  { id: "demographics-snapshot-builder", kind: "cron", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 8 * DAY },
-  { id: "reseller-discovery-weekly", kind: "cron", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
-  { id: "reviews/tag-cancel-relevance-cron", kind: "cron", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
+  { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 8 * DAY },
+  { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
+  { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
   // ─ Yearly cron (window ~370 days) ─
-  { id: "foundervip-followup-gate", kind: "cron", label: "FounderVIP follow-up gate", description: "Annual FounderVIP follow-up gate (fires once a year).", expectedCadence: "yearly (0 12 15 6 *)", livenessWindowMs: 370 * DAY },
+  { id: "foundervip-followup-gate", kind: "cron", owner: "retention", label: "FounderVIP follow-up gate", description: "Annual FounderVIP follow-up gate (fires once a year).", expectedCadence: "yearly (0 12 15 6 *)", livenessWindowMs: 370 * DAY },
 
   // ── Reactive event-driven Inngest agents (loop_heartbeats, loop_id = inngest fn id) ──
   // Event-driven (not crons, not the box queue). Idle = green; alerted on
@@ -291,6 +328,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "unified-ticket-handler",
     kind: "reactive",
+    owner: "cs",
     label: "Inbound ticket handler",
     description: "THE inbound pipeline — every customer message, all channels (unifiedTicketHandler). If it silently stops, customers go unanswered.",
     expectedCadence: "per inbound customer message",
@@ -302,6 +340,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "dunning-payment-failed",
     kind: "reactive",
+    owner: "retention",
     label: "Dunning — payment failed",
     description: "Opens/advances a dunning cycle on a failed subscription payment (card-rotation recovery + retries).",
     expectedCadence: "per failed payment event",
@@ -312,6 +351,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "returns-process-delivery",
     kind: "reactive",
+    owner: "retention",
     label: "Returns — process delivery",
     description: "Processes a returned-item delivery → triggers the refund flow.",
     expectedCadence: "per return delivery event",
@@ -322,6 +362,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "journey-session-completed",
     kind: "reactive",
+    owner: "retention",
     label: "Journey outcomes",
     description: "Records the outcome of a completed journey session (retention/save attribution).",
     expectedCadence: "per journey completion",
@@ -332,6 +373,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "agent-todo-execute",
     kind: "reactive",
+    owner: "cs",
     label: "Agent to-do executor",
     description: "Executes an approved agent to-do action via the real orchestrator executor.",
     expectedCadence: "per approved to-do",
@@ -342,6 +384,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: "chargeback-received",
     kind: "reactive",
+    owner: "retention",
     label: "Chargeback received",
     description: "Handles an inbound chargeback — cancels subs, assembles evidence, notifies.",
     expectedCadence: "per chargeback event",
@@ -352,17 +395,17 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
 
   // ── Box agent-kind lanes (loop_heartbeats, loop_id = `agent:<kind>`) ───────
   // Idle = green. Alerted only on a STUCK job past the per-kind threshold.
-  { id: "agent:build", kind: "agent-kind", agentKind: "build", label: "Agent — build", description: "Spec → PR feature builds (Max).", expectedCadence: "on demand", stuckThresholdMs: 2 * HOUR },
-  { id: "agent:plan", kind: "agent-kind", agentKind: "plan", label: "Agent — plan", description: "Goal-decomposition planning passes.", expectedCadence: "on demand", stuckThresholdMs: 1 * HOUR },
-  { id: "agent:fold", kind: "agent-kind", agentKind: "fold", label: "Agent — fold", description: "Spec → brain fold batches.", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
-  { id: "agent:product-seed", kind: "agent-kind", agentKind: "product-seed", label: "Agent — product seed", description: "Product none → published pipeline.", expectedCadence: "on demand", stuckThresholdMs: 90 * MIN },
-  { id: "agent:spec-chat", kind: "agent-kind", agentKind: "spec-chat", label: "Agent — spec chat", description: "Roadmap authoring-chat turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
-  { id: "agent:ticket-improve", kind: "agent-kind", agentKind: "ticket-improve", label: "Agent — ticket improve", description: "CX ticket-improve turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
-  { id: "agent:triage-escalations", kind: "agent-kind", agentKind: "triage-escalations", label: "Agent — triage sweep", description: "Solver→skeptic→quorum escalation sweep.", expectedCadence: "hourly when work exists", stuckThresholdMs: 90 * MIN },
-  { id: "agent:spec-test", kind: "agent-kind", agentKind: "spec-test", label: "Agent — spec test", description: "Non-destructive spec QA pass.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
-  { id: "agent:migration-fix", kind: "agent-kind", agentKind: "migration-fix", label: "Agent — migration fix", description: "Event-fired billing repair diagnosis.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
-  { id: "agent:dev-ask", kind: "agent-kind", agentKind: "dev-ask", label: "Agent — dev ask", description: "Read-only developer message-center turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
-  { id: "agent:pr-resolve", kind: "agent-kind", agentKind: "pr-resolve", label: "Agent — PR resolve", description: "Webhook-fired dirty-PR resolver: merge main + resolve conflicts, tsc-gate, push (or rebuild/surface).", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
+  { id: "agent:build", kind: "agent-kind", owner: "platform", agentKind: "build", label: "Agent — build", description: "Spec → PR feature builds (Max).", expectedCadence: "on demand", stuckThresholdMs: 2 * HOUR },
+  { id: "agent:plan", kind: "agent-kind", owner: "platform", agentKind: "plan", label: "Agent — plan", description: "Goal-decomposition planning passes.", expectedCadence: "on demand", stuckThresholdMs: 1 * HOUR },
+  { id: "agent:fold", kind: "agent-kind", owner: "platform", agentKind: "fold", label: "Agent — fold", description: "Spec → brain fold batches.", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
+  { id: "agent:product-seed", kind: "agent-kind", owner: "platform", agentKind: "product-seed", label: "Agent — product seed", description: "Product none → published pipeline.", expectedCadence: "on demand", stuckThresholdMs: 90 * MIN },
+  { id: "agent:spec-chat", kind: "agent-kind", owner: "platform", agentKind: "spec-chat", label: "Agent — spec chat", description: "Roadmap authoring-chat turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", label: "Agent — ticket improve", description: "CX ticket-improve turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  { id: "agent:triage-escalations", kind: "agent-kind", owner: "cs", agentKind: "triage-escalations", label: "Agent — triage sweep", description: "Solver→skeptic→quorum escalation sweep.", expectedCadence: "hourly when work exists", stuckThresholdMs: 90 * MIN },
+  { id: "agent:spec-test", kind: "agent-kind", owner: "platform", agentKind: "spec-test", label: "Agent — spec test", description: "Non-destructive spec QA pass.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
+  { id: "agent:migration-fix", kind: "agent-kind", owner: "retention", agentKind: "migration-fix", label: "Agent — migration fix", description: "Event-fired billing repair diagnosis.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
+  { id: "agent:dev-ask", kind: "agent-kind", owner: "platform", agentKind: "dev-ask", label: "Agent — dev ask", description: "Read-only developer message-center turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  { id: "agent:pr-resolve", kind: "agent-kind", owner: "platform", agentKind: "pr-resolve", label: "Agent — PR resolve", description: "Webhook-fired dirty-PR resolver: merge main + resolve conflicts, tsc-gate, push (or rebuild/surface).", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
 
   // ── Inline event-driven AI agents (loop_heartbeats, loop_id = `ai:<agent>`) ──
   // Server-side AI agents that run per-ticket / per-order / per-journey, not on a queue or
@@ -372,6 +415,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: INLINE_AGENT_IDS.ticketAnalyzer,
     kind: "inline-agent",
+    owner: "cs",
     label: "AI ticket analyzer",
     description: "Per-ticket QC grader (analyzeTicket) — scores handled tickets, escalates ≤5 / severe types.",
     expectedCadence: "per handled ticket",
@@ -383,6 +427,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: INLINE_AGENT_IDS.journeyDelivery,
     kind: "inline-agent",
+    owner: "retention",
     label: "AI journey delivery",
     description: "Delivers journeys to a ticket/portal per channel (launchJourneyForTicket).",
     expectedCadence: "per journey launch",
@@ -398,6 +443,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   {
     id: INLINE_AGENT_IDS.fraudDetector,
     kind: "inline-agent",
+    owner: "platform",
     label: "AI fraud detector",
     description: "Per-order fraud QC screen (checkOrderForFraud) — rules + AI screen + ring signals.",
     expectedCadence: "per new order",
@@ -420,6 +466,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     // (control-tower-agent-coverage spec, Phase 2.)
     id: INLINE_AGENT_IDS.orchestrator,
     kind: "inline-agent",
+    owner: "cs",
     label: "AI orchestrator",
     description: "Per-ticket decision agent (callSonnetOrchestratorV2) — picks reply/action/journey/playbook/escalate.",
     expectedCadence: "per inbound customer message",

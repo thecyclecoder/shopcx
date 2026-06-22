@@ -11,6 +11,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 const REPO = "thecyclecoder/shopcx";
 
 type LoopColor = "green" | "amber" | "red";
+type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo";
 
 interface HistoryRow {
   ran_at: string;
@@ -29,6 +30,7 @@ interface OpenAlert {
 interface LoopStatus {
   id: string;
   kind: "worker" | "cron" | "agent-kind" | "inline-agent" | "reactive";
+  owner: OwnerFunction;
   label: string;
   description: string;
   expectedCadence: string;
@@ -90,10 +92,21 @@ interface CoverageAudit {
   unregistered: UnregisteredLoop[];
   inngestRegistration: InngestRegistrationDiff;
 }
+interface DepartmentRollup {
+  owner: OwnerFunction;
+  label: string;
+  healthLabel: string;
+  color: LoopColor;
+  total: number;
+  healthy: number;
+  counts: { green: number; amber: number; red: number };
+  openAlerts: number;
+}
 interface Snapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
   loops: LoopStatus[];
+  departments?: DepartmentRollup[];
   selfAudit?: CoverageAudit;
   errorFeed?: ErrorFeedSnapshot;
   specDrift?: SpecDriftRow[];
@@ -136,6 +149,81 @@ const KIND_LABEL: Record<string, string> = {
   "agent-kind": "Agent lanes",
   "inline-agent": "Inline AI agents",
 };
+// The kind sub-groups inside each department drill-in, in display order.
+const KIND_ORDER: LoopStatus["kind"][] = ["worker", "cron", "reactive", "agent-kind", "inline-agent"];
+
+const ROLLUP_TILE: Record<LoopColor, string> = {
+  green: "border-emerald-300 bg-emerald-50 dark:border-emerald-800/60 dark:bg-emerald-900/20",
+  amber: "border-amber-300 bg-amber-50 dark:border-amber-800/60 dark:bg-amber-900/20",
+  red: "border-rose-300 bg-rose-50 dark:border-rose-800/60 dark:bg-rose-900/20",
+};
+
+// Phase 3: the CEO-glance rollup tile per org function — worst-of health across its loops, with
+// a healthy/total count + open-alert count. The dashboard leads with these, then drills in.
+function DepartmentRollupTile({ dept }: { dept: DepartmentRollup }) {
+  return (
+    <div className={`rounded-lg border p-3.5 ${ROLLUP_TILE[dept.color]}`}>
+      <div className="flex items-center gap-2">
+        <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT[dept.color]}`} />
+        <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{dept.healthLabel}</h3>
+      </div>
+      <p className="mt-2 text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+        {dept.healthy}/{dept.total} <span className="text-xs font-normal text-zinc-500 dark:text-zinc-400">healthy</span>
+      </p>
+      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+        {dept.counts.red > 0 && (
+          <span className="rounded-full bg-rose-100 px-1.5 py-0.5 font-medium text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">
+            {dept.counts.red} alerting
+          </span>
+        )}
+        {dept.counts.amber > 0 && (
+          <span className="rounded-full bg-amber-100 px-1.5 py-0.5 font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+            {dept.counts.amber} warning
+          </span>
+        )}
+        {dept.openAlerts > 0 && (
+          <span className="rounded-full bg-rose-100 px-1.5 py-0.5 font-medium text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">
+            ⛔ {dept.openAlerts} open
+          </span>
+        )}
+        {dept.color === "green" && <span className="text-emerald-700 dark:text-emerald-300">all healthy</span>}
+      </div>
+    </div>
+  );
+}
+
+// Phase 3: one drill-in block per department — its loops, sub-grouped by kind, collapsible.
+function DepartmentSection({ dept, loops }: { dept: DepartmentRollup; loops: LoopStatus[] }) {
+  return (
+    <details className="rounded-lg border border-zinc-200 dark:border-zinc-800" open={dept.color !== "green"}>
+      <summary className="flex cursor-pointer items-center gap-2 px-3.5 py-2.5 text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+        <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT[dept.color]}`} />
+        {dept.label}
+        <span className="text-[11px] font-normal text-zinc-400">
+          {dept.healthy}/{dept.total} healthy
+          {dept.counts.red > 0 ? ` · ${dept.counts.red} alerting` : ""}
+          {dept.counts.amber > 0 ? ` · ${dept.counts.amber} warning` : ""}
+        </span>
+      </summary>
+      <div className="space-y-4 px-3.5 pb-3.5">
+        {KIND_ORDER.map((k) => {
+          const kindLoops = loops.filter((l) => l.kind === k);
+          if (!kindLoops.length) return null;
+          return (
+            <div key={k}>
+              <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{KIND_LABEL[k]}</h3>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {kindLoops.map((l) => (
+                  <LoopTile key={l.id} loop={l} />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
 
 function HistoryStrip({ history }: { history: HistoryRow[] }) {
   if (!history.length) return null;
@@ -444,7 +532,7 @@ export default function ControlTowerPage() {
     );
   }
 
-  const groups: LoopStatus["kind"][] = ["worker", "cron", "reactive", "agent-kind", "inline-agent"];
+  const departments = snap?.departments ?? [];
 
   return (
     <div className="mx-auto w-full max-w-screen-xl p-6">
@@ -482,23 +570,29 @@ export default function ControlTowerPage() {
             <span className="text-xs text-zinc-400">updated {elapsed(snap.generatedAt)} ago</span>
           </div>
 
-          <div className="space-y-6">
-            {groups.map((g) => {
-              const loops = snap.loops.filter((l) => l.kind === g);
-              if (!loops.length) return null;
-              return (
-                <div key={g}>
-                  <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                    {KIND_LABEL[g]}
-                  </h2>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {loops.map((l) => (
-                      <LoopTile key={l.id} loop={l} />
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+          {/* Phase 3: department rollups (CEO glance) lead — one health tile per org function. */}
+          {departments.length > 0 && (
+            <div className="mb-6">
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Department health
+              </h2>
+              <p className="mb-3 text-[11px] text-zinc-400">
+                Each org function&apos;s loops rolled up worst-of (a single red loop turns its department amber/red).
+                The CEO glance — which function is healthy? — then expand a department below to drill into its loops.
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                {departments.map((d) => (
+                  <DepartmentRollupTile key={d.owner} dept={d} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Drill-in: per-department loop cards, sub-grouped by kind. */}
+          <div className="space-y-3">
+            {departments.map((d) => (
+              <DepartmentSection key={d.owner} dept={d} loops={snap.loops.filter((l) => l.owner === d.owner)} />
+            ))}
           </div>
 
           {snap.errorFeed && (
