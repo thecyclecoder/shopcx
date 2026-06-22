@@ -1,4 +1,4 @@
-# Box multi-account round-robin + failover — survive (and outrun) the Max usage wall ⏳
+# Box multi-account round-robin + failover — survive (and outrun) the Max usage wall ✅
 
 > **Do not build until 4:15pm PR time (owner hold, 2026-06-22)** — the box account just reset; let it stabilize first.
 
@@ -26,9 +26,12 @@
 - A resume whose owning account is capped → **starts fresh** on a healthy account (clears `claude_session_id` + stored dir), not a hard fail.
 - A NEW session records its owning account; a later resume of it reads that account back and pins to it.
 - A normal 529/overloaded transient still uses the existing retry (NOT treated as a cap / account switch).
-- `claude2` alias + `~/.claude-personal` login work for a manual `claude2 -p` on the box.
-- The Control Tower shows per-account load + surfaces an all-capped state; a cap/failover event is logged.
-- Negative: with one healthy account, builds run normally on it (no spurious switching / no false cap).
+- On the box over the tailnet, after the one-time `CLAUDE_CONFIG_DIR=/home/builder/.claude-personal claude` → `/login`, run `claude2 -p "say hi"` → expect a reply under account #2 (its usage moves at claude.ai/settings/usage, the API console stays flat).
+- On `/dashboard/roadmap/box` with both accounts healthy → expect a **Max accounts** panel showing each account's `N in flight` + a green "healthy" chip, and `2/2 healthy`.
+- After a cap (or a forced `cappedUntil`) on one account → expect that account's card to flip red "capped · resets ~Nh away" on `/dashboard/roadmap/box` and a `cap` (and `failover`) row in the recent-events list; the other account keeps building.
+- With BOTH accounts capped → on `/dashboard/roadmap/box` expect the rose "All Max accounts capped — builds parked, auto-resume" banner, and on `/dashboard/developer/control-tower` expect the **box** tile to be **amber** "all Max accounts capped — builds parked, auto-resume" (not red, not a false green).
+- On a cap window expiring (account reset) → expect a `recovered` event row to appear and the account card to return to "healthy".
+- Negative: with one healthy account, builds run normally on it (no spurious switching / no false cap); a single-account box (`accounts:{}`) shows no Max-accounts panel.
 
 ## Phase 1 — round-robin assignment + usage-cap rotation + session pinning in the worker ✅
 Account pool + least-recently-used/round-robin `CLAUDE_CONFIG_DIR` selection **for new sessions only**; **persist the session's owning config dir** (`claude_session_config_dir`) and **pin every resume to it** (never cross-account `--resume`); usage-cap detection (vs 529-transient) pulls an account from rotation; a resume whose account is capped starts fresh (clear session + stored dir); `blocked_on_usage` auto-resuming state when all capped. Brain: [[../recipes/build-the-box]] (if present) · [[../operational-rules]] · [[control-tower]].
@@ -44,5 +47,14 @@ Account pool + least-recently-used/round-robin `CLAUDE_CONFIG_DIR` selection **f
 - **Migration:** `supabase/migrations/20260622210000_agent_jobs_session_config_dir.sql` adds `agent_jobs.claude_session_config_dir text` (apply-script `scripts/apply-agent-jobs-session-config-dir-migration.ts`).
 - **Phase-1 boundary:** the round-robin/failover is wired into the **build + plan pool** (the source of the 12-build pileup). The concurrency-1 `dev-ask` / `pr-resolve` lanes still call `runClaude` without a `configDir` (default account `~/.claude`) — wiring those (and Control Tower surfacing + the `~/.claude-personal` login) is **Phase 2**.
 
-## Phase 2 — second-account setup + Control Tower surfacing ⏳
-Document/perform the `~/.claude-personal` login + `claude2` alias on the box; surface active-account + all-capped + failover events to the Control Tower box-health. Brain: [[../libraries/control-tower]] · [[../recipes/build-the-box]].
+## Phase 2 — second-account setup + Control Tower surfacing ✅
+Document/perform the `~/.claude-personal` login + `claude2` alias on the box; surface active-account + all-capped + failover events to the Control Tower box-health. Brain: [[../libraries/control-tower]] · [[../recipes/build-box-setup]].
+
+**Shipped (surfacing — `scripts/builder-worker.ts` + box-health + Control Tower):**
+- **Per-account snapshot on the heartbeat.** The worker writes `accountsSnapshot(now)` onto its [[../tables/worker_heartbeats]] row each tick (new `accounts` jsonb column): per-account `in_flight` + `capped`/`capped_until`, the `healthy`/`total` counts, an `all_capped` flag + `soonest_reset`, and a recent **event ring** (`events: [{ at, type, account, detail }]`, ≤12, newest first). `accountLabel(dir, idx)` renders a path-free label ("account 2 · personal").
+- **Cap/failover events logged.** `recordAccountEvent(type, dir, detail)` records `cap` (in `markAccountCapped`, once per cap window), `failover` / `all_capped` (in `handlePoolUsageCap`), and `recovered` (`noteAccountRecoveries`, run each poll tick when a cap window expires) — so a reset rejoining rotation isn't silent. In-memory ring (operational breadcrumbs; a restart re-derives state from live failures).
+- **box-health view** (`/dashboard/roadmap/box` ← `GET /api/roadmap/box`): a **Max accounts** panel above the lane grid — per-account load + capped state, an **all-capped banner** ("builds parked `blocked_on_usage`, auto-resume — no manual rebuild"), and the recent cap/failover/recovery events. `accounts:{}` (single-account/legacy box) ⇒ normalized to null ⇒ panel hidden.
+- **Control Tower box tile** ([[../libraries/control-tower]] `evalWorker`): reads `accounts.all_capped` → **amber** "all Max accounts capped — builds parked, auto-resume" (NOT red — `blocked_on_usage` auto-resumes), so a green box tile can't hide an everything's-capped throughput stall; per-account load rides the tile's `lastProduced`.
+- **Migration:** `supabase/migrations/20260622220000_worker_heartbeats_accounts.sql` adds `worker_heartbeats.accounts jsonb default '{}'` (apply-script `scripts/apply-worker-heartbeats-accounts-migration.ts`).
+- **Second-account login + `claude2` alias** documented in [[../recipes/build-box-setup]] § Multi-account round-robin + usage-cap failover (the one-time owner op: `CLAUDE_CONFIG_DIR=/home/builder/.claude-personal claude` → `/login`; `alias claude2='CLAUDE_CONFIG_DIR=… claude'` for manual runs). The login itself is an **owner op** (interactive `/login`, no automatable creds) — the box worker can't perform it; this spec ships the runbook + the surfacing.
+- **Phase-2 boundary:** the concurrency-1 `dev-ask` / `pr-resolve` lanes still call their own `runClaude` variants without a pool `configDir` (default account `~/.claude`) — they're low-volume serial lanes, not the build-pool pileup the round-robin targets, and are intentionally left on the default account. Wiring them into the pool (each needs its own session-pinning, as those lanes are resumable) is deferred; the build + plan pool — the source of the 12-build pileup — has the full round-robin/failover.

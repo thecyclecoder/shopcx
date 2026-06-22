@@ -289,9 +289,62 @@ interface AccountState {
   inFlight: number;       // builds currently running on this account — least-loaded wins the round-robin
   lastAssignedAt: number; // tie-break: least-recently-used
   cappedUntil: number;    // 0 = healthy; else epoch-ms until which it's pulled from rotation
+  capEventLogged: boolean; // a `cap` event was already recorded for the CURRENT cap window (so recovery logs once)
 }
-const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0 }));
+const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0, capEventLogged: false }));
 const accountByDir = new Map(accounts.map((a) => [a.configDir, a]));
+
+// A short, human label for an account ("account 1 · personal") derived from its config dir basename, so
+// the box-health surface doesn't leak the full path. `~/.claude` → "account 1 · default"; a "-personal"
+// suffix → "personal". Index keeps two same-named dirs distinguishable.
+function accountLabel(dir: string, idx: number): string {
+  const base = dir.replace(/\/+$/, "").split("/").pop() || dir;
+  const suffix = base === ".claude" ? "default" : base.replace(/^\.claude-?/, "") || base;
+  return `account ${idx + 1} · ${suffix}`;
+}
+
+// Recent cap/failover events (box-multi-account-failover Phase 2) — a small in-memory ring surfaced on the
+// heartbeat so the Control Tower / box-health view shows WHY load shifted (a cap, a failover, an
+// all-capped park, a reset recovery), not just the current per-account numbers. In-memory: a restart
+// re-derives state from live failures, and these are operational breadcrumbs, not a durable audit log.
+type AccountEvent = { at: string; type: "cap" | "failover" | "all_capped" | "recovered"; account: string; detail: string };
+const accountEvents: AccountEvent[] = [];
+const ACCOUNT_EVENTS_MAX = 12;
+function recordAccountEvent(type: AccountEvent["type"], dir: string, detail: string) {
+  const idx = accounts.findIndex((a) => a.configDir === dir);
+  accountEvents.push({ at: new Date().toISOString(), type, account: accountLabel(dir, idx < 0 ? 0 : idx), detail });
+  if (accountEvents.length > ACCOUNT_EVENTS_MAX) accountEvents.splice(0, accountEvents.length - ACCOUNT_EVENTS_MAX);
+}
+
+// Detect accounts whose cap window has expired and log ONE `recovered` event each (so a reset rejoining
+// the rotation is visible, not silent). Called each poll tick. Best-effort, never throws.
+function noteAccountRecoveries(now: number) {
+  for (const a of accounts) {
+    if (a.capEventLogged && a.cappedUntil <= now) {
+      a.capEventLogged = false;
+      recordAccountEvent("recovered", a.configDir, "usage wall reset — back in rotation");
+    }
+  }
+}
+
+// The per-account snapshot the worker writes onto its heartbeat (box-multi-account-failover Phase 2). Carries
+// per-account in-flight load + capped state, the healthy count, the all-capped flag, and the recent event
+// ring — everything the box-health view + Control Tower box tile need to show how each Max account is burning.
+function accountsSnapshot(now: number) {
+  return {
+    pool: accounts.map((a, i) => ({
+      label: accountLabel(a.configDir, i),
+      in_flight: a.inFlight,
+      capped: a.cappedUntil > now,
+      capped_until: a.cappedUntil > now ? new Date(a.cappedUntil).toISOString() : null,
+    })),
+    healthy: healthyAccounts(now).length,
+    total: accounts.length,
+    all_capped: allAccountsCapped(now),
+    soonest_reset: allAccountsCapped(now) ? new Date(soonestReset(now)).toISOString() : null,
+    events: accountEvents.slice().reverse(), // newest first
+  };
+}
 
 function healthyAccounts(now: number): AccountState[] {
   return accounts.filter((a) => a.cappedUntil <= now);
@@ -313,7 +366,12 @@ function pickNewSessionAccount(now: number): AccountState | null {
 }
 function markAccountCapped(dir: string, now: number) {
   const a = accountByDir.get(dir);
-  if (a) a.cappedUntil = now + USAGE_CAP_COOLDOWN_MS;
+  if (!a) return;
+  a.cappedUntil = now + USAGE_CAP_COOLDOWN_MS;
+  if (!a.capEventLogged) {
+    a.capEventLogged = true; // record the `cap` once per window; noteAccountRecoveries logs the matching `recovered`
+    recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ~${new Date(a.cappedUntil).toISOString()}`);
+  }
 }
 // Distinguish a Max usage-WALL (pull the account from rotation) from a transient 529/overloaded (which
 // the existing retry owns — NOT a cap, NOT an account switch). Conservative: a 529/overloaded mention
@@ -388,9 +446,11 @@ async function requeueBlockedOnUsage() {
 async function handlePoolUsageCap(jobId: string, tag: string, configDir: string, hadSession: boolean, logTail: string): Promise<boolean> {
   markAccountCapped(configDir, Date.now());
   if (allAccountsCapped(Date.now())) {
+    recordAccountEvent("all_capped", configDir, "all Max accounts capped — job parked blocked_on_usage, auto-resumes at reset");
     await update(jobId, { status: "blocked_on_usage", error: "Max usage wall hit on all accounts — auto-resumes at reset", log_tail: logTail });
     console.warn(`${tag} usage cap on ${configDir} → all accounts capped → blocked_on_usage`);
   } else {
+    recordAccountEvent("failover", configDir, `failing over — re-dispatching ${hadSession ? "resume" : "build"} on a healthy account`);
     await update(jobId, { status: hadSession ? "queued_resume" : "queued", error: null, log_tail: logTail });
     console.warn(`${tag} usage cap on ${configDir} → re-dispatching on a healthy account`);
   }
@@ -797,6 +857,9 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling)
       fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane)
       lanes, // [{ kind, job_id, spec_slug, since, phase }] for every in-flight lane this tick
+      // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2): surfaces how each
+      // account's quota is burning + an all-capped state to the box-health view + Control Tower box tile.
+      accounts: accountsSnapshot(Date.now()),
       started_at: WORKER_STARTED_AT,
       last_poll_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -4186,6 +4249,7 @@ async function main() {
       // an account has reset — flip it back to queued/queued_resume so the lanes below re-claim it. No
       // manual re-queue / rebuild. Best-effort.
       try {
+        noteAccountRecoveries(Date.now()); // log a `recovered` event for any account whose cap window expired
         await requeueBlockedOnUsage();
       } catch (e) {
         console.error("[multi-account] blocked_on_usage requeue failed (continuing):", e instanceof Error ? e.message : e);

@@ -13,6 +13,25 @@ The box that runs autonomous spec builds on the **Max subscription** for the [[.
 - **No inbound.** The box only reaches *out* (to Supabase + GitHub). Public SSH (:22) is firewalled; the trigger is a DB row the worker polls, never an HTTP call in.
 - **One worker.** Only the `shopcx-builder` service runs the worker (don't also start a `nohup` copy).
 
+## Multi-account round-robin + usage-cap failover (box-multi-account-failover)
+
+A single Max account hits a **5-hour usage wall**; with one account a burst of builds caps it and *everything* fails until the reset (the 2026-06-22 "12 builds failed at once"). So the box keeps a **pool of `CLAUDE_CONFIG_DIR`s** — each an isolated, once-logged-in Max account — round-robins **new** sessions across them (~2× sustained throughput, each account hits its wall ~2× slower), pulls a capped account from rotation until its estimated reset, **pins every resume to the account that created its session** (a cross-account `claude --resume` is a guaranteed "No conversation found"), and parks `blocked_on_usage` (auto-resumes, never a hard fail) only when **all** accounts are capped. The worker logic is in `scripts/builder-worker.ts` (the `ACCOUNT_POOL` / `accounts` block). The pool is `CLAUDE_CONFIG_DIRS` (comma-separated; default `/home/builder/.claude,/home/builder/.claude-personal`).
+
+**Set up the second account (one-time, owner op — over the tailnet):**
+
+```bash
+# Log the SECOND Max account into its own isolated config dir (so two accounts coexist on the box).
+sudo -u builder CLAUDE_CONFIG_DIR=/home/builder/.claude-personal claude   # → /login → sign in with account #2; creds persist in ~/.claude-personal
+# A convenience alias for ad-hoc MANUAL runs / debugging under account #2 (the manual escape hatch):
+echo "alias claude2='CLAUDE_CONFIG_DIR=/home/builder/.claude-personal claude'" >> /home/builder/.bashrc
+# Verify each account independently (each is its OWN Max login, never an API key):
+claude2 -p "say hi"      # runs under account #2
+```
+
+The **alias never reaches the worker** — it `spawn`s `claude` directly (no interactive shell), so the worker selects the config dir in the `env` object it builds for each lane (`runClaude(..., configDir)`). The alias is only for *your* manual runs. As with account #1: **no `ANTHROPIC_API_KEY`** in either login (still Max, never per-token).
+
+**Surfaced (box-multi-account-failover Phase 2):** the worker writes a per-account snapshot onto its [[../tables/worker_heartbeats|heartbeat]] (`accounts` column — per-account in-flight load + capped state, healthy/all-capped flags, soonest-reset, and a recent cap/failover/recovery event ring). [[../dashboard/roadmap]] `/dashboard/roadmap/box` renders a **Max accounts** panel (per-account load + an all-capped banner + recent events) and the [[../dashboard/control-tower]] box tile flips **amber** "all Max accounts capped — builds parked, auto-resume" so a silent everything's-capped state is visible. See [[../libraries/control-tower]] (`evalWorker`).
+
 ## Day-to-day ops (over the tailnet)
 
 ```bash
