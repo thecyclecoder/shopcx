@@ -100,6 +100,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[auto-ship-pipeline]] (platform) — automate the two rubber-stamp clicks the owner makes without review: (A) auto-merge ready claude/* PRs (mergeable + green → serialized squash-merge; conflicting ones still go to the dirty-PR-resolver) and (B) auto-fold fully-verified specs (shipped + agent-approved + 0 waiting/failed human checks + 0 regressions → enqueue_fold). Bounded proxies, owner kill-switch per gate, both registered as Control Tower loops, post-merge spec-test is the safety net.
 
+## Active project — Worker-orphan-reaper worktree prune ⏳
+
+[[worker-orphan-reaper-worktree-prune]] (platform) — the box never cleans git worktrees: (1) a resume's `git worktree add` fails "already used by worktree" when the first run left one (caused the auto-ship-pipeline build failure), and (2) stale worktrees for merged/terminal branches accumulate (3 found by hand). Fix: idempotent worktree-add (force-remove existing first) + reap worktrees whose job is terminal / branch deleted, in reapOrphans. Never touches active builds.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
