@@ -100,7 +100,19 @@ export async function POST(request: NextRequest) {
     requested,
   });
   if (!verifyRes.success) {
-    return NextResponse.json({ error: "verify_send_failed", details: verifyRes.error }, { status: 502 });
+    // A failed OTP send (bad number + no/failed email, after the SMS→email
+    // fallback in startVerificationWithFallback) is an expected per-request
+    // outcome, not a server fault. The login client treats a non-eligible
+    // body as "route to magic-link" (LoginClient.handleEmailSubmit), which
+    // is exactly the right recovery here. Return a structured non-5xx so
+    // this handled condition doesn't trip the >=500 Vercel-errors alert
+    // (src/app/api/webhooks/vercel-logs/route.ts) and page the owner.
+    return NextResponse.json({
+      eligible: false,
+      suggest_magic_link: true,
+      error: "verify_send_failed",
+      details: verifyRes.error,
+    });
   }
   const channel = verifyRes.channel;
   const maskedDestination = channel === "sms" ? maskPhone(verifyRes.destination) : maskEmail(verifyRes.destination);

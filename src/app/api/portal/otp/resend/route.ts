@@ -59,7 +59,13 @@ export async function POST(request: NextRequest) {
     requested,
   });
   if (!verifyRes.success) {
-    return NextResponse.json({ error: "verify_send_failed", details: verifyRes.error }, { status: 502 });
+    // A failed OTP send (after the SMS→email fallback) is an expected
+    // per-request outcome, not a server fault — the customer can still
+    // switch to the magic-link escape hatch. Return a structured 422 so
+    // the login surfaces the failure (res.ok === false) without tripping
+    // the >=500 Vercel-errors alert that pages the owner
+    // (src/app/api/webhooks/vercel-logs/route.ts).
+    return NextResponse.json({ error: "verify_send_failed", details: verifyRes.error }, { status: 422 });
   }
   const channel = verifyRes.channel;
   const maskedDestination = channel === "sms" ? maskPhone(verifyRes.destination) : maskEmail(verifyRes.destination);
