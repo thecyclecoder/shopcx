@@ -23,6 +23,29 @@ interface LaneRow {
   since: string;
 }
 
+/**
+ * Pull the human-readable failure reason out of a job's log_tail. A `claude -p` run stores its
+ * result JSON (`{is_error, api_error_status, result}`) — surface the 529 / Max-limit / API message
+ * so the owner can tell a transient overload from a real bug. A tsc failure stores raw compiler
+ * output — show its tail. Never throws; returns null when there's nothing useful.
+ */
+function failureDetail(logTail: string | null): string | null {
+  if (!logTail) return null;
+  try {
+    const j = JSON.parse(logTail);
+    if (j && typeof j === "object") {
+      const parts: string[] = [];
+      if (j.api_error_status) parts.push(`API ${j.api_error_status}`);
+      if (typeof j.result === "string" && j.result.trim()) parts.push(j.result.trim());
+      else if (typeof j.subtype === "string" && j.is_error) parts.push(j.subtype);
+      if (parts.length) return parts.join(" — ").slice(0, 500);
+    }
+  } catch {
+    /* not JSON (e.g. tsc output) — fall through to the tail */
+  }
+  return logTail.slice(-500).trim() || null;
+}
+
 export async function GET() {
   const supabase = await createClient();
   const {
@@ -75,5 +98,27 @@ export async function GET() {
   const queue = jobs.filter((j) => j.status === "queued" || j.status === "queued_resume");
   const paused = jobs.filter((j) => j.status === "needs_input" || j.status === "needs_approval");
 
-  return NextResponse.json({ worker, queue, paused });
+  // Failed builds (actionable) — surface a failure so the owner doesn't have to dig into a spec
+  // card to learn a build died. Only show a spec whose *latest* build attempt is `failed`: a later
+  // successful/in-flight build (merged/completed/building/queued) supersedes the old failure, so a
+  // since-rebuilt spec (e.g. control-tower) is NOT shown as failed.
+  const { data: buildHist } = await admin
+    .from("agent_jobs")
+    .select("id, spec_slug, kind, status, error, log_tail, updated_at, created_at")
+    .eq("workspace_id", workspaceId)
+    .in("kind", ["build", "plan"])
+    .order("created_at", { ascending: false })
+    .limit(500);
+  type BuildJob = { id: string; spec_slug: string; kind: string; status: string; error: string | null; log_tail: string | null; updated_at: string };
+  const latestBySlug = new Map<string, BuildJob>();
+  for (const j of (buildHist ?? []) as BuildJob[]) {
+    if (!latestBySlug.has(j.spec_slug)) latestBySlug.set(j.spec_slug, j);
+  }
+  const failed = [...latestBySlug.values()]
+    .filter((j) => j.status === "failed")
+    .map((j) => ({ id: j.id, spec_slug: j.spec_slug, kind: j.kind, error: j.error ?? null, detail: failureDetail(j.log_tail), updated_at: j.updated_at }))
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+    .slice(0, 20);
+
+  return NextResponse.json({ worker, queue, paused, failed });
 }
