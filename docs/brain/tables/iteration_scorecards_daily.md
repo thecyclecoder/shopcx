@@ -105,6 +105,12 @@ Indexes: `(meta_ad_account_id, snapshot_date)`, `(workspace_id, level, snapshot_
   any unresolved ref** before writing and falls back to per-row upsert on a batch error,
   so one bad ref can't drop its neighbors, and the run's reported `rows` is the count
   that actually persisted (never `records.length` when the write failed).
+- **The upsert is also NOT-NULL-resilient** (scorecards-notnull-guard). A second pre-write
+  pass skips any row missing a required key (`workspace_id`/`meta_ad_account_id`/`level`/
+  `object_id`/`snapshot_date`) — logged with a reason, never force-inserted — and coalesces
+  any **non-finite** value (`NaN`/`±Infinity`, which `JSON.stringify` turns into `null`) in a
+  NOT-NULL metric column back to its column default. This closes the `23502 null value` gap the
+  FK pass didn't cover.
 
 ---
 
