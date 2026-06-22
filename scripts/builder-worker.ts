@@ -117,6 +117,10 @@ const PR_RESOLVE_TIMEOUT_MS = 20 * 60 * 1000;
 // auto-queues the build for an allow-listed mechanical class, or no-op-resolves a transient, or
 // surfaces needs-human. It NEVER edits product code / opens a PR / applies a migration. A few lanes
 // so N errors at once drain a few at a time without a pileup; re-claimable (a restart re-runs it).
+const MAX_STOREFRONT_OPTIMIZER = Number(process.env.AGENT_TODO_MAX_STOREFRONT_OPTIMIZER || 1);
+// A storefront-optimizer campaign cycle: read-only diagnose on Max → propose a typed campaign / a
+// missing-capability spec. Generous — it may generate a Nano-Banana hero on the worker side post-approval.
+const STOREFRONT_OPTIMIZER_TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_REPAIR = Number(process.env.AGENT_TODO_MAX_REPAIR || 2);
 // One repair pass: read-only investigation (the signature + sample + the implicated code) + a
 // verdict. Minutes — same ballpark as a migration-fix / ticket-improve turn, not the seed ceiling.
@@ -172,7 +176,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -184,17 +188,21 @@ interface PendingAction {
   // src/lib/migration-fix.ts `applyMigrationFix` on approval.
   fix_kind?: "price_reconcile" | "variant_backfill" | "appstle_cancel";
   payload?: unknown;
-  // set when type==='repair_build' (repair-agent): the fix spec slug the repair agent authored to
-  // main + surfaced for one-tap owner Build. The build is queued on approval, NOT auto (unless the
-  // verdict is on REPAIR_AUTOBUILD_KINDS — that path queues directly without surfacing).
+  // set when type==='repair_build' (repair-agent) OR type==='storefront_build' (storefront-optimizer):
+  // the fix/feature spec slug the agent authored to main + surfaced for one-tap owner Build. The build
+  // is queued on approval, NOT auto.
   spec_slug?: string;
+  // set when type==='storefront_campaign' (storefront-optimizer): the typed OptimizerProposal the box
+  // session emitted; the worker stands up the M1 experiment from it on approval (or immediately when the
+  // gate is auto_run). Carries hypothesis + lever + reversible variant patch.
+  campaign_plan?: unknown;
 }
 interface Job {
   id: string;
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -621,7 +629,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -3787,6 +3795,335 @@ async function runRepairJob(job: Job) {
   }
 }
 
+// ── Box-hosted Storefront Optimizer agent (storefront-optimizer-agent) ───────
+// A kind='storefront-optimizer' job is enqueued by the scheduling cron ([[storefront-optimizer]]
+// → enqueueDueCampaigns) — one per DUE (product × lander-type × audience), deduped to ≤1 active
+// campaign per surface. Like migration-fix/repair it runs a TOP-LEVEL `claude -p` on Max (no
+// ANTHROPIC_API_KEY, keeps read-only DB secrets) that DIAGNOSES read-only and PROPOSES a typed plan:
+//   • a reversible-lever campaign (copy/hero/chapter patch) → the worker stands up the M1 experiment
+//     vs holdout (immediately if the policy auto-runs reversible levers, else surfaced for one-tap
+//     owner Approve);
+//   • a missing capability (a new component / a video hero / an offer or structural change — all
+//     beyond a reversible content patch) → the worker authors a scoped spec to main + surfaces a
+//     Build card (the repair-agent surface-don't-auto-build pattern), NEVER faking the lever.
+// Phase 4 (decide → learn → report) is already wired in the M1 refresh (commitLearning → M2
+// updatePosterior); the experiment row IS the campaign record M5 grades. spec_slug = the surface key
+// `${product_id}:${lander_type}:${audience}`; instructions = JSON {workspace_id, product_id,
+// lander_type, audience, lever_key, lever_reason}. No PR — it mutates the experiment tables, not the
+// repo (except the missing-capability spec, committed to main like repair). See
+// docs/brain/specs/storefront-optimizer-agent.md.
+async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: STOREFRONT_OPTIMIZER_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+interface OptimizerSurfaceLite { workspace_id: string; product_id: string; lander_type: string; audience: string; lever_key?: string; lever_reason?: string }
+
+function storefrontOptimizerPrompt(brief: string, surface: OptimizerSurfaceLite): string {
+  return [
+    `You are the box's Storefront Optimizer agent on Max (read-only — web search on, no API key). Your boss is the Growth director; your objective is predicted-LTV-per-visitor + a rising average campaign grade. cwd is the repo root.`,
+    `Run ONE campaign cycle for the surface below: read the state in the BRIEF, form ONE atomic, CRO-grounded hypothesis on ONE lever, and emit a typed plan. You DIAGNOSE + PROPOSE only — the worker stands up the experiment / authors the spec on the gate's verdict. NEVER mutate the DB yourself.`,
+    ``,
+    `SURFACE: product=${surface.product_id} · lander_type=${surface.lander_type} · audience=${surface.audience}`,
+    ``,
+    brief,
+    ``,
+    `CRO PRINCIPLES (ground the hypothesis in these): benefit/pain over features · hero dominant · pricing clarity is the #2 lever · message-match (ad → lander) · one clear CTA · no friction. Honor the brand voice + supplement-compliance HARD RAILS: NO disease claims, NO fabricated stats, NO unverifiable superlatives.`,
+    ``,
+    `Pick the lever: prefer the NEXT-BEST lever from the M2 map (or another ranked candidate if the funnel signal points elsewhere). ONE atomic lever per campaign — never bundle two changes. Surface your reasoning: cite BOTH the funnel signal AND the lever posterior the hypothesis came from.`,
+    ``,
+    `Classify the lever:`,
+    `  • REVERSIBLE (copy / hero / chapter add-remove-reorder) → propose a "campaign". The variant is a reversible content patch, OR a generated hero (the worker generates it from your prompt). This is the ONLY auto-run-eligible class.`,
+    `  • OFFER (pricing / discount / renewal-offer change) or STRUCTURAL (a NEW component, a new chapter TYPE, a video hero, a comparison-table widget — anything a reversible content patch can't express) → do NOT fake it as a content patch. Emit "needs_build": author a scoped single-phase spec (Owner: [[../functions/growth]] + a parent) so the worker commits it to main and surfaces a Build card for the owner. These are ALWAYS approval-gated.`,
+    ``,
+    `Variant patch shape (reversible content — applyVariantPatch in src/lib/storefront/experiments.ts): {headline?, dek?, publication?, sponsorLabel?, heroCaption?, heroImageUrl?, chapterHeading?, chapterParagraphs?:string[], chapterOrder?:number[], reasonsOrder?:number[]}. For a generated hero use kind:"hero" + hero_prompt (the worker calls Nano-Banana + uploads, then sets heroImageUrl).`,
+    ``,
+    `If the BRIEF says CONSERVATIVE (M3 uncalibrated): make a SMALLER bet — one modest, high-confidence change; the worker reserves a bigger holdout automatically.`,
+    `If the activation GATE is idle/refused_scope: emit "idle" (do not propose). If there's no worthwhile lever to test: "idle". If a genuine product decision the brief doesn't cover blocks you: "needs_input" with ONE plain question.`,
+    ``,
+    `Final message = ONLY one JSON object:`,
+    `  {"status":"propose","hypothesis":"<one testable sentence>","reasoning":"<cites the funnel signal + the lever posterior>","lever_key":"<one of the ranked candidate lever_keys>","lever_class":"reversible","lander_type":"${surface.lander_type}","audience":"${surface.audience}","holdout_pct":0.1,"variant":{"label":"<short>","kind":"content","patch":{...}}}`,
+    `  {"status":"propose",...,"variant":{"label":"<short>","kind":"hero","hero_prompt":"<photoreal hero brief; composites the product pouch>"}}`,
+    `  {"status":"needs_build","hypothesis":"<what you'd test if it existed>","spec":{"slug":"<stable kebab slug>","title":"...","owner":"[[../functions/growth]]","parent":"<a Growth mandate or goal milestone>","intent":"<one paragraph>","problem":"<concrete, grounded in the funnel + lever>","target":"src/lib/<the file/area>"}}`,
+    `  {"status":"idle","reason":"<why nothing worthwhile to test now>"}`,
+    `  {"status":"needs_input","questions":[{"id":"q1","q":"<ONE plain product question>"}]}`,
+  ].join("\n");
+}
+
+// Author the missing-capability spec to main (Phase 5 build-or-request). Idempotent on a stable slug:
+// if it already exists, leave it for the in-flight build rather than clobbering. Returns {slug, note}.
+async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite): Promise<{ slug: string; note: string } | null> {
+  const s = (raw || {}) as Record<string, unknown>;
+  const rawSlug = String(s.slug || "");
+  const title = String(s.title || "");
+  if (!rawSlug || !title) return null;
+  const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
+  if (!slug) return null;
+  const path = `docs/brain/specs/${slug}.md`;
+  const md = [
+    `# ${title} ⏳`,
+    ``,
+    `**Owner:** ${String(s.owner || "[[../functions/growth]]")} · **Parent:** ${String(s.parent || "extends [[../specs/storefront-optimizer-agent]]")} · **Optimizer-surface:** \`${surface.product_id}:${surface.lander_type}:${surface.audience}\``,
+    ``,
+    String(s.intent || "Add the storefront capability the optimizer needs to test this lever.").trim(),
+    ``,
+    `## Problem (from a Storefront Optimizer hypothesis on \`${surface.lander_type}\`)`,
+    String(s.problem || "(see the optimizer's reasoning below)").trim(),
+    typeof s.target === "string" && s.target ? `\n**Likely target:** \`${s.target}\`` : ``,
+    ``,
+    `## Phase 1 — build the lever ⏳`,
+    `Scope from the problem above; land the new component/lever + register it in [[../specs/storefront-lever-importance-memory|M2]]'s \`storefront_levers\`; add its brain page; gate on \`npx tsc --noEmit\`.`,
+    ``,
+    `## Verification`,
+    `- Once shipped, the new lever appears in \`storefront_levers\` and the optimizer can pick it via \`nextLeverToTest\` for \`${surface.lander_type}\` → expect a campaign stands up on it.`,
+    ``,
+    `> Authored by the box Storefront Optimizer (build-or-request) for surface \`${surface.product_id}:${surface.lander_type}:${surface.audience}\`. Commission the build from the Roadmap board (owner = growth).`,
+    ``,
+  ].join("\n");
+  try {
+    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+    if (existing.ok) return { slug, note: `spec already tracked: ${path} (commission on Roadmap)` };
+    const put = await putFileMain(path, md, `spec: ${slug} (from storefront-optimizer build-or-request)`);
+    return put.ok ? { slug, note: `spec authored: ${path} (owner=growth) — commission on Roadmap` } : null;
+  } catch (e) {
+    console.warn(`[storefront-optimizer] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+async function runStorefrontOptimizerJob(job: Job) {
+  const tag = `[sf-opt:${job.id.slice(0, 8)}]`;
+  let instr: OptimizerSurfaceLite = { workspace_id: job.workspace_id, product_id: "", lander_type: "", audience: "all" };
+  try {
+    if (job.instructions) instr = { ...instr, ...JSON.parse(job.instructions) };
+  } catch {
+    // Fall back to parsing the surface key out of spec_slug (`product:lander:audience`).
+    const parts = (job.spec_slug || "").split(":");
+    if (parts.length === 3) instr = { workspace_id: job.workspace_id, product_id: parts[0], lander_type: parts[1], audience: parts[2] };
+  }
+  const surface: OptimizerSurfaceLite = {
+    workspace_id: instr.workspace_id || job.workspace_id,
+    product_id: instr.product_id,
+    lander_type: instr.lander_type,
+    audience: instr.audience || "all",
+    lever_key: instr.lever_key,
+    lever_reason: instr.lever_reason,
+  };
+  if (!surface.product_id || !surface.lander_type) {
+    await update(job.id, { status: "failed", error: "storefront-optimizer job missing product_id/lander_type" });
+    return;
+  }
+
+  const opt = await import("../src/lib/storefront/optimizer-agent");
+  const policyLib = await import("../src/lib/storefront/optimizer-policy");
+
+  // ── Approval resume: the owner approved/declined a campaign or a missing-capability Build card. ──
+  const isApprovalResume = (job.pending_actions || []).some((a) => a.status === "approved" || a.status === "declined");
+  if (isApprovalResume) {
+    const actions = (job.pending_actions || []).map((a) => ({ ...a }));
+    const results: string[] = [];
+    for (const act of actions) {
+      if (act.type === "storefront_campaign") {
+        if (act.status === "declined") { act.result = "declined by owner"; results.push("campaign → declined"); continue; }
+        if (act.status !== "approved") continue;
+        try {
+          const plan = act.campaign_plan as Record<string, unknown> | undefined;
+          if (!plan) { act.status = "failed"; act.result = "no campaign_plan on action"; results.push("campaign → failed (no plan)"); continue; }
+          const r = await materializeOptimizerCampaign(opt, surface, plan, job.created_by, false);
+          act.status = r.ok ? "done" : "failed";
+          act.result = r.detail;
+          results.push(`campaign → ${act.status}: ${r.detail}`);
+        } catch (e) {
+          act.status = "failed"; act.result = e instanceof Error ? e.message : String(e);
+          results.push(`campaign → failed: ${act.result}`);
+        }
+      } else if (act.type === "storefront_build") {
+        if (act.status === "declined") { act.result = "dismissed by owner"; results.push("build → dismissed"); continue; }
+        if (act.status !== "approved" || !act.spec_slug) continue;
+        const dupe = await hasActiveBuildForSlug(act.spec_slug);
+        if (dupe.active) {
+          act.status = "done"; act.result = `build already live for ${act.spec_slug} (${dupe.reason}) — not re-queued`;
+        } else {
+          const { error } = await db.from("agent_jobs").insert({
+            workspace_id: job.workspace_id,
+            spec_slug: act.spec_slug,
+            kind: "build",
+            status: "queued",
+            created_by: job.created_by,
+            instructions: `Build from storefront-optimizer missing-capability spec ${act.spec_slug}. Follow the spec exactly; tsc-clean; open a PR.`,
+          });
+          act.status = error ? "failed" : "done";
+          act.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${act.spec_slug}`;
+        }
+        results.push(`build → ${act.status}: ${act.result}`);
+      }
+    }
+    await update(job.id, { status: "completed", pending_actions: actions, error: null, log_tail: (results.join("; ") || "no actions").slice(-2000) });
+    console.log(`${tag} resume applied: ${results.join("; ")}`);
+    return;
+  }
+
+  // ── Fresh diagnosis. Dedup first: ≤1 active campaign per surface. ──
+  const admin = (await import("../src/lib/supabase/admin")).createAdminClient();
+  if (await opt.hasActiveCampaignForSurface(admin, { workspace_id: surface.workspace_id, product_id: surface.product_id, lander_type: surface.lander_type as never, audience: surface.audience })) {
+    await update(job.id, { status: "completed", error: null, log_tail: `a campaign is already active on ${opt.surfaceKey(surface)} — skipped (deduped)`.slice(-2000) });
+    console.log(`${tag} deduped — active campaign already on ${opt.surfaceKey(surface)}`);
+    return;
+  }
+
+  try {
+    const brief = await opt.loadOptimizerBrief({ surface: { workspace_id: surface.workspace_id, product_id: surface.product_id, lander_type: surface.lander_type as never, audience: surface.audience } });
+    // Gate: idle / refused_scope → don't propose at all.
+    if (!brief.gate.canPropose) {
+      await update(job.id, { status: "completed", error: null, log_tail: `not proposing — ${brief.gate.disposition}: ${brief.gate.reason}`.slice(-2000) });
+      console.log(`${tag} ${brief.gate.disposition} — not proposing`);
+      return;
+    }
+
+    const { session, resultText, isError, raw } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (parsed?.status === "idle") {
+      await update(job.id, { status: "completed", error: null, log_tail: `idle: ${String(parsed.reason || "no worthwhile lever to test")}`.slice(-2000) });
+      return;
+    }
+
+    if (parsed?.status === "needs_input") {
+      const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      await update(job.id, { status: "needs_input", questions, log_tail: "awaiting a product decision".slice(-2000) });
+      console.log(`${tag} needs_input — asked ${questions.length} question(s)`);
+      return;
+    }
+
+    if (parsed?.status === "needs_build") {
+      // Phase 5 — build-or-request. Author the scoped spec to main + surface a Build card (no auto-build).
+      const authored = await authorOptimizerSpec(parsed.spec, surface);
+      if (!authored) {
+        await update(job.id, { status: "needs_attention", error: "no valid capability spec proposed", log_tail: String(parsed.hypothesis || "missing-capability, no spec").slice(-2000) });
+        return;
+      }
+      const action: PendingAction = {
+        id: `so${job.id.slice(0, 6)}`,
+        type: "storefront_build",
+        summary: `New storefront lever → build [[${authored.slug}]]`,
+        preview: String(parsed.hypothesis || "").slice(0, 400),
+        status: "pending",
+        spec_slug: authored.slug,
+      };
+      await update(job.id, { status: "needs_approval", pending_actions: [action], log_tail: `needs_build → ${authored.note}; surfaced for owner Build.\n\n${String(parsed.hypothesis || "")}`.slice(-2000) });
+      console.log(`${tag} needs_build → authored ${authored.slug}, surfaced for owner Build`);
+      return;
+    }
+
+    if (parsed?.status === "propose") {
+      // Validate the proposed lever is a known candidate + the class is reversible (the only campaign-able class).
+      const leverKey = String(parsed.lever_key || "");
+      const leverClass = String(parsed.lever_class || "reversible");
+      const known = brief.candidates.some((c) => c.lever_key === leverKey);
+      if (!leverKey || !known) {
+        await update(job.id, { status: "needs_attention", error: `proposed unknown lever_key '${leverKey}'`, log_tail: `lever not in the ranked candidates — not standing up`.slice(-2000) });
+        return;
+      }
+      if (leverClass !== "reversible") {
+        await update(job.id, { status: "needs_attention", error: `proposed a ${leverClass} lever as a campaign`, log_tail: `offer/structural levers must be routed via needs_build, not a content campaign`.slice(-2000) });
+        return;
+      }
+
+      // Re-gate on the actual (reversible) lever class.
+      const gate = policyLib.evaluateProposalGate(brief.policy, { productId: surface.product_id, leverClass: "reversible" });
+      const planForStore: Record<string, unknown> = { ...parsed };
+      const hypothesis = String(parsed.hypothesis || "");
+
+      if (gate.disposition === "auto_run") {
+        // Reversible + auto_run_reversible — stand up the experiment immediately (no per-campaign tap).
+        const r = await materializeOptimizerCampaign(opt, surface, planForStore, job.created_by, brief.conservative);
+        if (!r.ok) { await update(job.id, { status: "needs_attention", error: "auto-run materialize failed", log_tail: r.detail.slice(-2000) }); return; }
+        await update(job.id, { status: "completed", error: null, log_tail: `AUTO-RAN (reversible) — ${r.detail}\nhypothesis: ${hypothesis}`.slice(-2000) });
+        console.log(`${tag} auto-ran campaign — ${r.detail}`);
+        return;
+      }
+
+      // needs_approval — surface a campaign Approve card carrying the typed plan (materialized on approval).
+      const action: PendingAction = {
+        id: `so${job.id.slice(0, 6)}`,
+        type: "storefront_campaign",
+        summary: `Run campaign on ${opt.surfaceKey(surface)} — lever ${leverKey}`,
+        preview: `${hypothesis}\n\n${String(parsed.reasoning || "")}`.slice(0, 400),
+        status: "pending",
+        campaign_plan: planForStore,
+      };
+      await update(job.id, { status: "needs_approval", pending_actions: [action], log_tail: `proposed campaign (lever ${leverKey}) → awaiting owner Approve.\n\n${hypothesis}`.slice(-2000) });
+      console.log(`${tag} proposed campaign on ${opt.surfaceKey(surface)} → awaiting approval`);
+      return;
+    }
+
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "storefront-optimizer run errored", log_tail: raw.slice(-2000) });
+      return;
+    }
+    await update(job.id, { status: "needs_attention", error: "storefront-optimizer ended without a recognizable status", log_tail: raw.slice(-2000) });
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// Coerce a stored/parsed plan into an OptimizerProposal, generate the hero if the variant needs one,
+// and stand up the M1 campaign via the library. Returns the library's MaterializeResult.
+async function materializeOptimizerCampaign(
+  opt: typeof import("../src/lib/storefront/optimizer-agent"),
+  surface: OptimizerSurfaceLite,
+  plan: Record<string, unknown>,
+  createdBy: string | null,
+  conservative: boolean,
+): Promise<{ ok: boolean; detail: string }> {
+  const variant = (plan.variant || {}) as Record<string, unknown>;
+  let patch = (variant.patch || {}) as Record<string, unknown>;
+  // kind='hero' → generate the hero on the worker, then patch heroImageUrl.
+  if (String(variant.kind) === "hero") {
+    const heroPrompt = String(variant.hero_prompt || "");
+    if (!heroPrompt) return { ok: false, detail: "hero variant missing hero_prompt" };
+    const url = await opt.generateCampaignHero({ workspaceId: surface.workspace_id, productId: surface.product_id, prompt: heroPrompt, slug: `${surface.lander_type}-${String(plan.lever_key || "hero")}` });
+    if (!url) return { ok: false, detail: "hero generation failed (no isolated product image / Gemini error)" };
+    patch = { ...patch, heroImageUrl: url };
+  }
+  const proposal = {
+    hypothesis: String(plan.hypothesis || ""),
+    reasoning: String(plan.reasoning || ""),
+    lever_key: String(plan.lever_key || ""),
+    lever_class: "reversible" as const,
+    lander_type: surface.lander_type as never,
+    audience: surface.audience,
+    holdout_pct: typeof plan.holdout_pct === "number" ? (plan.holdout_pct as number) : undefined,
+    variant: { label: String(variant.label || "variant"), kind: "content" as const, patch: patch as never },
+  };
+  const r = await opt.materializeCampaign({
+    workspaceId: surface.workspace_id,
+    proposal,
+    productId: surface.product_id,
+    conservative,
+    createdBy,
+  });
+  return { ok: r.ok, detail: r.detail };
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -3799,6 +4136,7 @@ async function runJob(job: Job) {
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
   if (job.kind === "repair") return runRepairJob(job);
+  if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -4143,7 +4481,8 @@ async function main() {
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair").length;
+  const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "storefront-optimizer").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -4268,6 +4607,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed repair ${job.id.slice(0, 8)} → ${countRepair() + 1}/${MAX_REPAIR} repair lane`);
+        launch(job);
+      }
+      // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —
+      // read funnel+lever map+proxy → propose a hypothesis/variant → stand up an M1 experiment (or
+      // surface a missing-capability spec). Own concurrency-1 lane, read-only diagnose on Max.
+      while (countStorefrontOptimizer() < MAX_STOREFRONT_OPTIMIZER) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["storefront-optimizer"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed storefront-optimizer ${job.id.slice(0, 8)} → ${countStorefrontOptimizer() + 1}/${MAX_STOREFRONT_OPTIMIZER} storefront-optimizer lane`);
         launch(job);
       }
       // Fill the build/plan pool.
