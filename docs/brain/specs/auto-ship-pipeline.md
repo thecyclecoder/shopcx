@@ -9,8 +9,8 @@ Two bottlenecks are pure rubber-stamps — the owner clicks "merge" on green PRs
 - **Condition:** a `claude/*` **build** PR (box-authored) that is **mergeable (no conflicts) AND all checks green** → **squash-merge + delete branch** (mirrors the owner's manual action + the watcher pattern used all session).
 - **Guardrails:**
   - `claude/*` build/fix PRs only — never a human PR, never a non-build branch.
-  - **Serialize:** merge ONE at a time (a queue), never fan out N merges → N simultaneous Vercel deploys.
-  - **Skip while an Inngest sync is active** (a deploy kills running functions — the standing rule); defer to the next safe window.
+  - **Serialize:** merge ONE at a time (a queue), never fan out N merges → N simultaneous Vercel deploys. (This alone prevents deploy storms.)
+  - **No sync-gating** (owner directive, 2026-06-22): the old "don't deploy during an Inngest sync" concern was about monolithic long-running Shopify syncs that lost progress when a deploy killed them mid-step — those are sunset. Routine Inngest functions are **step-durable** (a deploy mid-run just retries the current step and resumes), so auto-merge does NOT defer for Inngest activity.
   - Conflicting PRs are left for [[dirty-pr-resolver-agent]] (not force-merged).
   - The post-merge [[spec-test-on-ship]] is the safety net: a bad-but-green build surfaces as a regression → the existing fix/repair flow. Auto-merge doesn't need to *judge* the code (the owner didn't either) — it needs to ship what's ready and let the spec-test catch what's wrong.
 
@@ -26,13 +26,13 @@ Two bottlenecks are pure rubber-stamps — the owner clicks "merge" on green PRs
 
 ## Verification
 - Open a clean `claude/*` build PR with green checks → it auto-squash-merges + deletes the branch within the webhook window; a CONFLICTING one is NOT merged (goes to the dirty-PR-resolver); a human PR is never touched.
-- Two ready PRs at once → they merge **serially** (not two simultaneous deploys); during an active Inngest sync, merges defer.
+- Two ready PRs at once → they merge **serially** (not two simultaneous deploys).
 - A spec reaches shipped + agent-approved + all human checks resolved + no regressions → it auto-folds (batch fold-build) with no owner click; a spec with one waiting/failed human check or a regression → NOT folded.
 - Both gates appear as green monitored loops in the Control Tower; each merge/fold is logged. Flip the kill-switch → the gate stops acting.
 - Negative: a red-check PR isn't merged; an agent-verdict-`issues` spec isn't folded.
 
 ## Phase 1 — auto-merge gate (extend the PR webhook) ⏳
-Add the ready-PR auto-merge path to the dirty-PR-resolver's webhook handler (claude/* + mergeable + green → serialized squash-merge, sync-aware), the kill-switch, Control Tower registration + logging. Brain: [[dirty-pr-resolver-agent]] · [[../libraries/control-tower]] · [[../operational-rules]].
+Add the ready-PR auto-merge path to the dirty-PR-resolver's webhook handler (claude/* + mergeable + green → serialized squash-merge), the kill-switch, Control Tower registration + logging. Brain: [[dirty-pr-resolver-agent]] · [[../libraries/control-tower]] · [[../operational-rules]].
 
 ## Phase 2 — auto-fold gate ⏳
 Periodic + reactive check for fully-verified shipped specs → `enqueue_fold`, all-green guardrail, kill-switch, Control Tower registration + logging. Brain: [[spec-test-on-ship]] · [[../libraries/spec-test-runs]] · [[../libraries/control-tower]].
