@@ -387,6 +387,51 @@ async function update(id: string, patch: Record<string, unknown>) {
   await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
 }
 
+// Re-runnable / idempotent kinds (worker-orphan-reaper + self-update): a restart loses nothing — they
+// just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
+// self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
+// branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve"]);
+
+// Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
+// (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
+// `queued_resume` forever — the new instance only claims `queued`, so they never complete and the Control
+// Tower flags them as stuck (a real, but self-inflicted, alert). On boot, before the poll loop, reap every
+// job a PREVIOUS instance owned (`claimed_at < WORKER_STARTED_AT` — the heartbeat cutoff, so nothing the
+// current instance is actively running is ever touched): re-runnable kinds → back to `queued` (re-run, no
+// work lost); work-producers → `failed` (visible in the failed-builds callout + recoverable via Create PR,
+// never blindly re-queued so we never double-push a branch). Idempotent: reaped rows leave `building`, so a
+// re-run is a no-op; a clean restart with nothing orphaned logs "0 reaped".
+async function reapOrphans() {
+  const { data, error } = await db
+    .from("agent_jobs")
+    .select("id, kind, spec_slug, status")
+    .in("status", ["building", "claimed", "queued_resume"])
+    .lt("claimed_at", WORKER_STARTED_AT);
+  if (error) {
+    console.error("[reaper] orphan query failed (skipping reap):", error.message);
+    return;
+  }
+  const orphans = (data ?? []) as Pick<Job, "id" | "kind" | "spec_slug" | "status">[];
+  if (orphans.length === 0) {
+    console.log("[reaper] 0 reaped — no orphaned in-flight jobs from a previous instance");
+    return;
+  }
+  const reset: Record<string, number> = {};
+  const failed: Record<string, number> = {};
+  for (const job of orphans) {
+    if (RERUNNABLE_KINDS.has(job.kind)) {
+      await update(job.id, { status: "queued", claimed_at: null });
+      reset[job.kind] = (reset[job.kind] ?? 0) + 1;
+    } else {
+      await update(job.id, { status: "failed", error: "orphaned by worker restart" });
+      failed[job.kind] = (failed[job.kind] ?? 0) + 1;
+    }
+  }
+  const fmt = (m: Record<string, number>) => Object.entries(m).map(([k, n]) => `${k}×${n}`).join(", ") || "none";
+  console.log(`[reaper] reaped ${orphans.length} orphan(s) from a previous instance — re-queued: ${fmt(reset)}; failed: ${fmt(failed)}`);
+}
+
 // ── Heartbeat + self-update (worker-self-update) ─────────────────────────────
 // Upsert the singleton worker_heartbeats row so the dashboard can show "worker: <sha>, healthy Ns ago"
 // (and surface a crash-loop) without SSH. Best-effort: a heartbeat write must never break the poll loop.
@@ -3053,6 +3098,14 @@ async function main() {
       });
   };
 
+  // Reap orphans left in-flight by a previous instance (worker-orphan-reaper) before the poll loop opens.
+  // Best-effort: a reaper failure must never block startup.
+  try {
+    await reapOrphans();
+  } catch (e) {
+    console.error("[reaper] reap failed (continuing):", e instanceof Error ? e.message : e);
+  }
+
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
   for (;;) {
     try {
@@ -3147,8 +3200,7 @@ async function main() {
       // idempotent, re-runnable lanes (spec-test, triage-escalations, migration-fix, dev-ask, pr-resolve)
       // do NOT: a restart just re-claims them from the queue. Otherwise a long re-test sweep (e.g. the
       // human→machine reclassification backfill) keeps a lane busy indefinitely and the box never updates.
-      const INTERRUPTIBLE = new Set(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve"]);
-      const sacrosanctActive = [...active.values()].filter((v) => !INTERRUPTIBLE.has(v.kind)).length;
+      const sacrosanctActive = [...active.values()].filter((v) => !RERUNNABLE_KINDS.has(v.kind)).length;
       await maybeSelfUpdate(sacrosanctActive); // exits (→ systemd restart) when behind origin/main + no sacrosanct lane running
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
