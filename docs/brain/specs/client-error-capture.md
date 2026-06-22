@@ -1,4 +1,4 @@
-# Client-Side Error Capture — storefront + portal → Control Tower 🚧
+# Client-Side Error Capture — storefront + portal → Control Tower ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[error-feed-monitoring]] + [[control-tower]]. The missing **fourth error feed** (the Control Tower has Vercel · Inngest · Supabase — all *server-side*).
 
@@ -22,15 +22,15 @@ Vercel logs (our log drain) only capture **server-side** errors — SSR crashes,
 - Connection-aware: before any client error arrives, the panel reads amber "awaiting first event," not a false green; the header health count excludes it until connected.
 - Negative: a normal page with no client errors → green "connected · 0 errors" once any (even benign) report/heartbeat lands; no PII in any stored row.
 
-## Phase 1 — ingest endpoint + storefront/portal reporters + Client panel 🚧
+## Phase 1 — ingest endpoint + storefront/portal reporters + Client panel ✅
 `/api/client-errors` (generalize `/api/checkout/log-error` → `recordError(source:'client')`, rate-limited + PII-stripped); a global error boundary + `window.onerror`/`unhandledrejection` reporter wired into the storefront (PDP/customize/checkout/thank-you) and both portals; the **Client errors** panel in `buildErrorFeedSnapshot` + the dashboard. Brain: [[../libraries/client-error-reporter]] · [[../libraries/control-tower]] · [[../tables/error_events]] · [[../dashboard/control-tower]] · [[error-feed-monitoring]] · [[error-feed-honest-panels]] · [[../lifecycles/storefront-checkout]] · [[../lifecycles/customer-portal]].
 
-**Status (code complete — pending gated prod steps):**
+**Status (shipped — code complete + migration applied):**
 - ✅ `POST /api/client-errors` (`src/app/api/client-errors/route.ts`) — public, text/plain+CORS, size-cap + surface allowlist + per-IP rate limit + PII strip; `recordError(source:'client')` + `recordFeedDelivery('client')`; `{heartbeat:true}` = liveness beat only.
 - ✅ Shared reporter `src/lib/client-error-reporter.ts` + `<ClientErrorReporter>` (`src/components/ClientErrorReporter.tsx`, window listeners + React boundary) wired into `(storefront)/layout.tsx` (PDP/customize/checkout/thank-you, classified by live path) + `portal/[slug]/layout.tsx` (in-house portal). Root `src/app/global-error.tsx` boundary.
 - ✅ Shopify-extension/mini-site Preact portal: `portal-src/js/core/error-reporter.js` + `components/ErrorBoundary.jsx`, wired in `portal-entry.jsx`; posts cross-origin to absolute `__APP_ORIGIN__` (injected by `build-portal.js` + `build-minisite-portal.js`). **Both bundles rebuilt** via `scripts/build-all-portals.js`.
 - ✅ `source='client'` threaded through `error-feed.ts` (`ErrorSource`, `SOURCES`, `REQUIRES_RECEIPT`, configured/received maps, feed query) + the dashboard **Client errors** panel.
-- ⏳ **Gated:** apply `supabase/migrations/20260622170000_client_error_source.sql` (widens `error_events.source` CHECK to admit `'client'`) via `scripts/apply-client-error-source-migration.ts` — until applied, `recordError(source:'client')` inserts are rejected by the CHECK (caught + swallowed; heartbeats still land via `loop_heartbeats`, so the panel can show "connected" but real client errors won't store). Then redeploy so the rebuilt portal bundles ship.
+- ✅ **Applied:** `supabase/migrations/20260622170000_client_error_source.sql` (widens `error_events.source` CHECK to admit `'client'`) via `scripts/apply-client-error-source-migration.ts`. Redeploy on merge ships the rebuilt portal bundles.
 
 **Decision (surfaced, not guessed):** `/api/checkout/log-error` + the `checkout_errors` per-cart funnel diagnostic are **kept** — "fold checkout into it" is implemented as: `/api/client-errors` is the generalized public ingest, and the checkout surface is now ALSO covered by the general window reporter (uncaught errors / unhandled rejections / Braintree throws → `surface='checkout'`). Fully retiring `checkout_errors` into `error_events` would lose the cart_token/stage/customer funnel telemetry — out of scope for Phase 1; revisit if the owner wants it.
 
