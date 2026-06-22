@@ -1,6 +1,6 @@
 # libraries/brain-roadmap
 
-The parser that turns `docs/brain/specs/*.md` (+ `goals/`, `functions/`) into the structured data behind the [[../dashboard/roadmap|Roadmap board]], the taxonomy map, and the goal/function layer. **The markdown is the source of truth** — this reads it at request time, so editing a spec (or a build flipping a phase emoji) shows up with no DB and no drift.
+The parser that turns `docs/brain/specs/*.md` (+ `goals/`, `functions/`) into the structured data behind the [[../dashboard/roadmap|Roadmap board]], the taxonomy map, and the goal/function layer. **The markdown is the source of truth** — this reads it at request time, so editing a spec (or a build flipping a phase emoji) shows up with no DB and no drift. The board/archive/detail readers read that markdown from **`main` at request time** (not the deploy-baked copy), so a phase flip lands without waiting for a redeploy — see [[#Reading specs from main (request-time)]].
 
 **File:** `src/lib/brain-roadmap.ts`
 
@@ -25,6 +25,15 @@ Per [[../project-management]], planning + tracking live in the brain, not a sepa
 - **`extractSpecSection`/`stripSpecSection`** — lift/strip a `## Heading` (the `## Verification` card, [[../specs/verification-guides]]).
 - **`phaseEmoji(Phase)`** — the inverse of the internal `statusFromText`; `⏳/🚧/✅/❌`. Used by the blocker chip + the gate error.
 
+## Reading specs from `main` (request-time)
+
+([[../specs/roadmap-reads-specs-from-git]]) The board (`getRoadmap` → `readSpecs`/`readTracks`), the archive (`getArchive`), and the detail page (`getSpec`) read their markdown from **`main` via the GitHub API at request time**, not from the deploy-baked `docs/brain/` copy. Without this, a phase emoji flipping on `main` (a build merges, the spec-drift agent stamps ✅, a fold lands) didn't reach the board until the app redeployed — minutes-to-hours of lag (observed: `error-feed-monitoring` showed "P2 planned" while `main` had P2 ✅).
+
+- **SHA-keyed in-memory cache.** Per request: one cheap `GET /repos/{repo}/git/ref/heads/main` for `main`'s commit SHA (cached for a few seconds so the several `snapshot()` calls one render makes collapse to ~1, and a deploy burst can't fan out). SHA unchanged ⇒ return the cached parse. SHA advanced ⇒ re-fetch the `docs/brain/specs` + `archive.d` + `archive.md` blobs in **one batched pass** — the Git Trees API (`recursive=1`, one call for all paths+blob SHAs) then the needed blobs in parallel via the Git Blobs API (not N naive Contents calls) — re-parse, re-cache. Net: 1 ref call/request, a full re-fetch only when `main` actually advances.
+- **`fs` fallback — never breaks the board.** Any GitHub failure (missing `GITHUB_TOKEN`, network, rate-limit, error, truncated tree, undecodable blob) falls back to the bundled `fs` copy (today's behavior) and logs **once** per outage episode. A stale-but-rendered board beats a broken one; freshness is best-effort, availability is not.
+- **`main` is authoritative when git is up:** `getSpec` for a slug absent on `main` returns null (spec removed/folded), and a spec added on `main` appears at the next request — not next deploy.
+- Auth + repo reuse the `GITHUB_TOKEN` / `AGENT_TODO_REPO` pattern of [[../inngest/brain-index-refresh]] (shares the GitHub-read auth, see [[../integrations/github-webhook]]). `parseSpec` is unchanged — only the *source* of the markdown moved. The goals/functions loaders still read `fs` (lower-priority — they lag less).
+
 ## Spec metadata lines (parsed in `parseSpec`)
 
 Under a spec's H1, one-per-concept bold metadata lines, each resolving `[[wikilinks]]` to slugs:
@@ -48,7 +57,7 @@ Under a spec's H1, one-per-concept bold metadata lines, each resolving `[[wikili
 
 ## Gotchas
 
-- **No DB, no cache** — every call re-reads disk. Cheap (a few hundred small files) and always fresh.
+- **No DB** — the markdown is the only source. The board/archive/detail readers fetch it from `main` at request time behind a SHA-keyed in-memory cache (see [[#Reading specs from main (request-time)]]); the goals/functions loaders still re-read the bundled disk copy each call (cheap, a few hundred small files). Both fall back to disk if GitHub is unavailable.
 - **`blockedBy` needs the full set** — `parseSpec` alone can't know another spec's status, so a card's `blockedBy` is only meaningful *after* `getRoadmap`/`getSpec` resolution. A raw `parseSpec(...)` (e.g. inside `deriveSpecStatus`) leaves it unresolved (all `cleared:false`); don't read `blockedBy` off that path.
 - **Vercel tracing** — any route that calls these must trace `docs/brain/**` in `next.config.ts` or it reads an empty dir in prod (e.g. `/api/roadmap/build` was added for the spec-blockers gate).
 
