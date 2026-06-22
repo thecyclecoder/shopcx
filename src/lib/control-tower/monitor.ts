@@ -209,7 +209,7 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -235,7 +235,10 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
   // EXPLICITLY so the old deploy-boundary false positive can't silently return if the read changes.
   if (!latest) {
     const window = loop.livenessWindowMs ?? 26 * 60 * 60_000;
-    if (everBeatCount === 0 && deployAgeMs != null && deployAgeMs > window) {
+    // beatsReadFailed: the per-loop beats RPC errored/timed-out, so `latest`/`everBeatCount`
+    // are absent-because-unread, NOT absent-because-never-fired. Suppress the never_fired red
+    // and stay amber — a transient read failure must not page owners on a healthy cron.
+    if (everBeatCount === 0 && !beatsReadFailed && deployAgeMs != null && deployAgeMs > window) {
       return {
         ...base,
         color: "red",
@@ -246,10 +249,15 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
         },
       };
     }
-    return { ...base, color: "amber", statusText: "no heartbeat yet — awaiting first run", violation: null };
+    return { ...base, color: "amber", statusText: beatsReadFailed ? "beats read failed — status unknown (conservative)" : "no heartbeat yet — awaiting first run", violation: null };
   }
   const stale = ageMs(latest.ran_at) > (loop.livenessWindowMs ?? 26 * 60 * 60_000);
   if (stale) {
+    // Same guard on the freshness red: if the beats read failed we can't trust that `latest`
+    // is the true newest beat, so don't page on staleness — stay amber.
+    if (beatsReadFailed) {
+      return { ...base, color: "amber", statusText: `beats read failed — last known run ${elapsed(latest.ran_at)} ago (conservative)`, violation: null };
+    }
     return { ...base, color: "red", statusText: `hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence})`, violation: { reason: "cron_freshness", detail: `Cron ${loop.id} hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence}; last beat ${latest.ran_at}).` } };
   }
   if (!latest.ok) {
@@ -585,7 +593,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
+  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly grouped read (control-tower-monitor-accuracy P1): the latest
     // HISTORY_LIMIT beats PER loop_id + the all-time beat count, for cron + agent-kind loops only.
@@ -604,6 +612,14 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
 
   // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
   const deployAgeMs = deployRefAgeMs(workerRow as WorkerRow | null);
+
+  // The control_tower_loop_beats RPC errored or returned null (e.g. a statement timeout
+  // scanning a large table) → `beats` is null, so EVERY cron lands with empty history,
+  // latest=null and everBeatCount=0. That's indistinguishable from a real never_fired, so
+  // a failed read would false-fire never_fired (and cron_freshness) reds and page owners on
+  // healthy crons. When the read failed we can't trust the absence of beats: stay conservative
+  // (amber), the same way deployAgeMs==null keeps a missing deploy-age reference from false-alarming.
+  const beatsReadFailed = beatsError != null;
 
   // Group heartbeats by loop_id (the RPC returns them ordered by loop_id, rn=newest-first, already
   // capped at HISTORY_LIMIT per loop) and capture the all-time beat count for the never-fired check.
@@ -634,7 +650,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, countByLoop.get(loop.id) ?? 0);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, countByLoop.get(loop.id) ?? 0, beatsReadFailed);
     else core = evalAgentKind(loop, latest, activeJobs);
     // Phase 2: layer the output assertion on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it).
