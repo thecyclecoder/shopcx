@@ -10,6 +10,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { discoverResellers } from "@/lib/known-resellers";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /**
  * Manual on-demand trigger fired from the dashboard "Run discovery now"
@@ -96,6 +97,11 @@ export const resellerDiscoveryWeeklyCron = inngest.createFunction(
         });
       }
     }
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("reseller-discovery-weekly", { ok: true, produced: summary });
+    });
 
     return summary;
   },

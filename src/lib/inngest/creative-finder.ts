@@ -21,6 +21,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { hasAdLibraryKey, ALL_SEEDS } from "@/lib/adlibrary";
 import { sweepSeed, type IngestResult } from "@/lib/creative-skeleton";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const SWEEP_DELAY_MS = 7000; // ~8 searches/min — under AdLibrary's 10/min cap
 
@@ -63,7 +64,14 @@ export const creativeFinderDailyCron = inngest.createFunction(
         if (i < ALL_SEEDS.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
       }
     }
-    return { workspaces: workspaceIds.length, totals };
+    const result = { workspaces: workspaceIds.length, totals };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("creative-finder-daily-cron", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );
 

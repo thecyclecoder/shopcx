@@ -12,6 +12,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { generateDailyReport } from "@/lib/daily-analysis-report";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 function yesterdayUtcDate(): string {
   const d = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -56,6 +57,13 @@ export const dailyAnalysisReportCron = inngest.createFunction(
       else failures.push({ workspace_id: workspaceId, reason: r.reason || "unknown" });
     }
 
-    return { date, workspaces: workspaces.length, generated, failures };
+    const result = { date, workspaces: workspaces.length, generated, failures };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("daily-analysis-report-cron", { ok: true, produced: result });
+    });
+
+    return result;
   }
 );

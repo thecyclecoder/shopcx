@@ -23,6 +23,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendCsatEmail } from "@/lib/email";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { createHmac } from "crypto";
 
 const CSAT_DELAY_HOURS = 48;
@@ -152,6 +153,13 @@ export const ticketCsatCron = inngest.createFunction(
       else if (result === "skipped_no_reply") skippedNoReply++;
     }
 
-    return { sent, skipped_too_old: skippedCount, skipped_no_reply: skippedNoReply, batch_size: due.length };
+    const result = { sent, skipped_too_old: skippedCount, skipped_no_reply: skippedNoReply, batch_size: due.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("ticket-csat-cron", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

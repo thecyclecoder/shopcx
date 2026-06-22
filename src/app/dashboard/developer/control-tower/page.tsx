@@ -28,7 +28,7 @@ interface OpenAlert {
 }
 interface LoopStatus {
   id: string;
-  kind: "worker" | "cron" | "agent-kind" | "inline-agent";
+  kind: "worker" | "cron" | "agent-kind" | "inline-agent" | "reactive";
   label: string;
   description: string;
   expectedCadence: string;
@@ -132,6 +132,7 @@ const DOT: Record<LoopColor, string> = {
 const KIND_LABEL: Record<string, string> = {
   worker: "Worker",
   cron: "Crons",
+  reactive: "Reactive agents",
   "agent-kind": "Agent lanes",
   "inline-agent": "Inline AI agents",
 };
@@ -443,7 +444,7 @@ export default function ControlTowerPage() {
     );
   }
 
-  const groups: LoopStatus["kind"][] = ["worker", "cron", "agent-kind", "inline-agent"];
+  const groups: LoopStatus["kind"][] = ["worker", "cron", "reactive", "agent-kind", "inline-agent"];
 
   return (
     <div className="mx-auto w-full max-w-screen-xl p-6">

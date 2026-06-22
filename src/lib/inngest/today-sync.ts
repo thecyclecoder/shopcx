@@ -5,6 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { requestReport, pollReportStatus, downloadReport, processOrderReport } from "@/lib/amazon/sync-orders";
 import { syncMetaAdSpend } from "@/lib/meta/sync-spend";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const todaySyncCron = inngest.createFunction(
   {
@@ -93,6 +94,11 @@ export const todaySyncCron = inngest.createFunction(
       return { meta: "synced", accounts: accounts?.length || 0, days: totalDays };
     });
 
-    return { today, ...amzResult, ...metaResult };
+    const result = { today, ...amzResult, ...metaResult };
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("today-sync", { ok: true, produced: result });
+    });
+    return result;
   }
 );

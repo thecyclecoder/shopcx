@@ -19,11 +19,15 @@ import {
   maybeAutoCloseGroup,
 } from "@/lib/agent-todos/execute";
 import { isCustomerFacing, isInngestExecutable } from "@/lib/agent-todos/constants";
+import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import type { AgentTodo } from "@/lib/agent-todos/types";
 
 export const agentTodoExecute = inngest.createFunction(
   { id: "agent-todo-execute", retries: 1, triggers: [{ event: "agent-todo/execute" }] },
   async ({ event, step }) => {
+    // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw). (control-tower-complete-coverage P1.)
+    let __ctOk = true;
+    try {
     const { todo_id } = event.data as { todo_id: string };
     if (!todo_id) return { ok: false, reason: "missing todo_id" };
 
@@ -85,5 +89,11 @@ export const agentTodoExecute = inngest.createFunction(
     );
 
     return { ok: true, executed: todo.action_type, ticket_closed: closed };
+    } catch (e) {
+      __ctOk = false;
+      throw e;
+    } finally {
+      await emitReactiveHeartbeat("agent-todo-execute", { ok: __ctOk });
+    }
   },
 );

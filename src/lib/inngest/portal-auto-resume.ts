@@ -9,6 +9,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 async function appstleResume(workspaceId: string, contractId: string) {
   const { healOnTouch } = await import("@/lib/appstle-pricing");
@@ -104,7 +105,14 @@ export const portalAutoResumeCron = inngest.createFunction(
       results.push(result);
     }
 
-    return { processed: results.length, results };
+    const result = { processed: results.length, results };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("portal-auto-resume-cron", { ok: true, produced: result });
+    });
+
+    return result;
   }
 );
 

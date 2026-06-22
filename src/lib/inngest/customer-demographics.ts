@@ -26,6 +26,7 @@ import {
   type SubscriptionInput,
 } from "@/lib/customer-demographics";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const HAIKU = HAIKU_MODEL;
 const ENRICHMENT_VERSION = 1;
@@ -482,7 +483,14 @@ export const enrichBatch = inngest.createFunction(
       totalRemaining += newRemaining;
     }
 
-    return { enriched: totalEnriched, remaining: totalRemaining };
+    const result = { enriched: totalEnriched, remaining: totalRemaining };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("demographics-enrich-batch", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );
 
@@ -742,6 +750,13 @@ export const demographicsSnapshotBuilder = inngest.createFunction(
       });
     }
 
-    return { workspaces: workspaces.length };
+    const result = { workspaces: workspaces.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("demographics-snapshot-builder", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

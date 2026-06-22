@@ -4,6 +4,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requestReport, pollReportStatus, downloadReport, processOrderReport } from "@/lib/amazon/sync-orders";
 import { spApiRequest } from "@/lib/amazon/auth";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── amazon/sync-orders ──
 // Triggered manually or by daily cron. Requests report → polls → processes.
@@ -227,6 +228,13 @@ export const amazonDailySyncCron = inngest.createFunction(
       });
     }
 
-    return { triggered: connections.length };
+    const result = { triggered: connections.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("amazon-daily-sync", { ok: true, produced: result });
+    });
+
+    return result;
   }
 );

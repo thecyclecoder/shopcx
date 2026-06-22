@@ -1,4 +1,4 @@
-# Proposed-Fix Ships → Auto-Re-test the Origin Spec ⏳
+# Proposed-Fix Ships → Auto-Re-test the Origin Spec ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[spec-test-agent]] + [[roadmap-build-console]]. Closes the loop on the propose-fix flow.
 
@@ -19,5 +19,10 @@ When a spec-test finds an issue, the owner clicks **Propose fix spec** → a fix
 - A fix that *doesn't* resolve the issue → A re-runs → check Y still fails → badge stays red (true signal).
 - A normal build (no `Fixes:` link) merging → no origin re-test enqueued.
 
-## Phase 1 — Fixes-link + re-test-on-merge ⏳
+## Phase 1 — Fixes-link + re-test-on-merge ✅
 Stamp `Fixes: {origin} ({check_keys})` in the propose-fix authoring brief/spec; on a build merge whose spec carries a `Fixes:` link, enqueue the origin's `spec-test` (deduped). Brain: [[../libraries/spec-test-runs]] · [[../libraries/agent-jobs]] (reconcileMergedJobs) · [[../dashboard/roadmap]] (human-queue propose-fix) · [[spec-drift-agent]] (shares the on-merge hook).
+
+**Shipped:**
+- `POST /api/roadmap/chat` `{action:"propose_fix"}` (`src/app/api/roadmap/chat/route.ts`) — the regression brief now (a) tags each failing check with its `[check {key}]` ([[../libraries/spec-test-runs]] `checkKey`) and (b) instructs the box to stamp a verbatim `**Fixes:** {origin} (check {key1}, {key2})` metadata line under the fix spec's `**Owner:** … · **Parent:** …` line.
+- `parseFixesLink(raw)` + `fetchSpecRawFromMain(slug)` exported from `src/lib/spec-drift.ts` — strict parser (requires the `(check …)` parenthetical so a stray prose "Fixes:" can't false-positive); returns `{ origin, checkKeys }` or `null`.
+- `retestOriginIfFixMerged(workspaceId, fixSlug)` in `src/lib/agent-jobs.ts`, called from `reconcileMergedJobs` inside the `pr.merged && j.kind === "build"` block (best-effort, own try/catch, independent of the spec-drift flip) — reads the merged fix spec from `main`, parses its `Fixes:` link, and re-enqueues the origin's `spec-test` via the shared `enqueueSpecTestIfDue` guard (origin's own shipped-but-not-archived gate + 20h/in-flight dedupe still apply). No link / self-reference → no-op (back-compatible).

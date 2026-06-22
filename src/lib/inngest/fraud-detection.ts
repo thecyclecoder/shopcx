@@ -5,6 +5,7 @@ import { decrypt } from "@/lib/crypto";
 import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── Nightly full scan ──
 
@@ -118,6 +119,11 @@ export const fraudNightlyScan = inngest.createFunction(
         }
       });
     }
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("fraud-nightly-scan", { ok: true });
+    });
   }
 );
 

@@ -7,6 +7,7 @@
 import { inngest } from "./client";
 import { buildSyncUrl, syncReviewPage, generateMissingSummaries } from "@/lib/klaviyo";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const syncKlaviyoReviews = inngest.createFunction(
   {
@@ -43,7 +44,14 @@ export const syncKlaviyoReviews = inngest.createFunction(
       results.push({ workspace_id: ws.id, ...result });
     }
 
-    return { workspaces_synced: results.length, results };
+    const result = { workspaces_synced: results.length, results };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("sync-klaviyo-reviews", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );
 

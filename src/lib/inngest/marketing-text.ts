@@ -36,6 +36,7 @@ import {
   disableCampaignCoupon,
   buildShortlinkUrl,
 } from "@/lib/marketing-coupons";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ─── Scheduled — build the recipient queue ─────────────────────────
 export const textCampaignScheduled = inngest.createFunction(
@@ -631,7 +632,12 @@ export const textCampaignSendTick = inngest.createFunction(
       }
     });
 
-    return { sent: sentCount, failed: failedCount, skipped: skippedCount };
+    const result = { sent: sentCount, failed: failedCount, skipped: skippedCount };
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("marketing-text-campaign-send-tick", { ok: true, produced: result });
+    });
+    return result;
   },
 );
 

@@ -10,6 +10,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { generateFeaturedReviewCards } from "@/lib/social/featured-review-cards";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const featuredReviewCardsCron = inngest.createFunction(
   {
@@ -38,6 +39,13 @@ export const featuredReviewCardsCron = inngest.createFunction(
       const r = await step.run(`gen-${ws}`, () => generateFeaturedReviewCards(ws, perRun));
       results.push({ workspace_id: ws, made: r.made, remaining: r.remaining });
     }
-    return { results };
+    const result = { results };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("featured-review-cards", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

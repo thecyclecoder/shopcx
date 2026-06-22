@@ -353,7 +353,9 @@ function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefine
 
 /** READ-ONLY: per-inline-agent window state — exact ok/err beat counts + the upstream work probe. */
 async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAgentState>> {
-  const inline = MONITORED_LOOPS.filter((l) => l.kind === "inline-agent");
+  // Reactive event-driven Inngest agents share the inline-agent evaluation model
+  // (idle = green, liveness-when-work-exists + error-rate), so they're fetched here too.
+  const inline = MONITORED_LOOPS.filter((l) => l.kind === "inline-agent" || l.kind === "reactive");
   const out = new Map<string, InlineAgentState>();
 
   await Promise.all(
@@ -555,11 +557,10 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
 
   const [{ data: workerRow }, { data: beats }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
-    // Exclude inline-agent beats here: they're high-volume (one per ticket/order/journey) and
-    // would crowd this 600-row window, starving low-frequency crons of their latest beat.
-    // Inline agents get their latest + history (and exact ok/err window counts) from
-    // fetchInlineAgentState below.
-    admin.from("loop_heartbeats").select("loop_id, ran_at, ok, produced, detail, duration_ms").neq("kind", "inline-agent").order("ran_at", { ascending: false }).limit(600),
+    // Exclude inline-agent + reactive beats here: they're high-volume (one per ticket/order/journey/
+    // event) and would crowd this 600-row window, starving low-frequency crons of their latest beat.
+    // They get their latest + history (and exact ok/err window counts) from fetchInlineAgentState below.
+    admin.from("loop_heartbeats").select("loop_id, ran_at, ok, produced, detail, duration_ms").not("kind", "in", '("inline-agent","reactive")').order("ran_at", { ascending: false }).limit(600),
     admin.from("loop_alerts").select("id, loop_id, reason, detail, opened_at, last_seen_at").eq("status", "open"),
     admin.from("agent_jobs").select("id, kind, status, created_at, claimed_at, updated_at").in("status", ["queued", "claimed", "building", "queued_resume"]),
     fetchAssertionInputs(admin),
@@ -586,9 +587,9 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const activeJobs = (jobs ?? []) as ActiveJob[];
 
   const loops: LoopStatus[] = MONITORED_LOOPS.map((loop) => {
-    // Inline agents source their history + latest from the dedicated windowed fetch
-    // (they're excluded from the main beats query above).
-    if (loop.kind === "inline-agent") {
+    // Inline + reactive agents source their history + latest from the dedicated windowed fetch
+    // (they're excluded from the main beats query above) and share the inline evaluation.
+    if (loop.kind === "inline-agent" || loop.kind === "reactive") {
       const st = inlineState.get(loop.id);
       const core = evalInlineAgent(loop, st);
       return { ...core, history: st?.history ?? [], openAlert: alertByLoop.get(loop.id) ?? null };

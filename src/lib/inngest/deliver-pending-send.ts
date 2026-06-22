@@ -7,6 +7,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTicketReply } from "@/lib/email";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const deliverPendingSends = inngest.createFunction(
   {
@@ -189,6 +190,11 @@ export const deliverPendingSends = inngest.createFunction(
       });
     }
 
-    return { delivered, cancelled, total: messages.length };
+    const result = { delivered, cancelled, total: messages.length };
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("deliver-pending-sends", { ok: true, produced: result });
+    });
+    return result;
   },
 );
