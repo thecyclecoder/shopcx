@@ -4,7 +4,7 @@
  * See docs/brain/specs/roadmap-build-console.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { deriveSpecStatus, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
+import { deriveSpecStatus, getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 
 export type JobStatus =
   | "queued"
@@ -226,6 +226,58 @@ export async function enqueueSpecTestIfDue(
   return { enqueued: true };
 }
 
+/**
+ * spec-blockers Phase 2 — auto-queue on unblock. A blocking spec `shippedSlug` just shipped (its build
+ * PR merged + phases flipped ✅). Find every live spec that named it as a `Blocked-by` prerequisite and,
+ * if that was its LAST uncleared blocker (every other blocker is now cleared too), auto-enqueue its build —
+ * the chain goes fully hands-off: merge the prerequisite and the dependent build fires itself. Shares the
+ * blockedBy resolution the board + the enqueue gate use (getRoadmap), treating `shippedSlug` as cleared
+ * explicitly so a deploy-stale disk snapshot of its status doesn't suppress the unblock.
+ *
+ * Skips a dependent that's already shipped, that opted out (`**Auto-build:** off`), or that already has a
+ * build job (dedupe — one auto-queue per spec; once a build row exists this no-ops on re-run, so it's safe
+ * to call from reconcileMergedJobs on every board load). Inserts a `kind='build'` row with created_by=null
+ * (an agent enqueue). Returns the slugs it queued.
+ */
+export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: string): Promise<string[]> {
+  const { specs } = await getRoadmap();
+  const dependents = specs.filter(
+    (s) =>
+      s.autoBuild !== false &&
+      s.status !== "shipped" &&
+      s.blockedBy.some((b) => b.slug === shippedSlug) &&
+      // last blocker cleared? every other blocker already cleared, and shippedSlug counts as cleared now.
+      s.blockedBy.every((b) => b.cleared || b.slug === shippedSlug),
+  );
+  if (!dependents.length) return [];
+
+  const admin = createAdminClient();
+  const queued: string[] = [];
+  for (const dep of dependents) {
+    // Dedupe: only auto-queue a spec with NO build job yet (any status). Once one exists — auto-queued
+    // earlier, manually built, or in-flight — skip. This is the "one auto-queue per spec" guarantee.
+    const { data: existing } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", dep.slug)
+      .eq("kind", "build")
+      .limit(1);
+    if (existing && existing.length) continue;
+
+    const { error } = await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: dep.slug,
+      kind: "build",
+      status: "queued",
+      created_by: null,
+      instructions: `Auto-queued by spec-blockers: prerequisite ${shippedSlug} shipped, clearing the last blocker.`,
+    });
+    if (!error) queued.push(dep.slug);
+  }
+  return queued;
+}
+
 /** Fetch a spec's current markdown from `main` (post-merge content), independent of the deployed bundle's
  * possibly-stale local disk. Used by reconcileMergedJobs to know whether a merge actually shipped the spec. */
 async function fetchSpecFromMain(slug: string): Promise<string | null> {
@@ -275,6 +327,9 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
               const raw = await fetchSpecFromMain(j.spec_slug);
               if (raw && deriveSpecStatus(raw) === "shipped") {
                 await enqueueSpecTestIfDue(j.workspace_id, j.spec_slug, "shipped");
+                // spec-blockers Phase 2: this spec just shipped → auto-queue any dependent whose last
+                // blocker it was (de-duped, owner-opt-out-aware; no-ops if a build row already exists).
+                await autoQueueUnblockedBy(j.workspace_id, j.spec_slug);
               }
             } catch {
               /* event missed → the daily backlog cron mops it up */

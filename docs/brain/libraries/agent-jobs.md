@@ -30,7 +30,15 @@ The **single dedupe chokepoint** shared by all three spec-test enqueue paths: th
 async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void>
 ```
 
-Self-heal: a `completed` job whose PR was merged/closed **outside** the dashboard still shows a stale "Squash & merge" button. Checks GitHub; if the PR is no longer open, flips the job to `merged` (in place + persisted). **spec-test-on-ship:** when a merged (`pr.merged`) `kind='build'` job is flipped, it fetches the spec from `main` (`fetchSpecFromMain`, independent of the possibly-stale local bundle) and, if `deriveSpecStatus` is now `shipped`, calls `enqueueSpecTestIfDue(...,'shipped')`. Called on board load ([[../dashboard/roadmap]]) and the merge path (`/api/roadmap/build`).
+Self-heal: a `completed` job whose PR was merged/closed **outside** the dashboard still shows a stale "Squash & merge" button. Checks GitHub; if the PR is no longer open, flips the job to `merged` (in place + persisted). **spec-test-on-ship:** when a merged (`pr.merged`) `kind='build'` job is flipped, it fetches the spec from `main` (`fetchSpecFromMain`, independent of the possibly-stale local bundle) and, if `deriveSpecStatus` is now `shipped`, calls `enqueueSpecTestIfDue(...,'shipped')` **then** `autoQueueUnblockedBy(...)` (spec-blockers Phase 2). Called on board load ([[../dashboard/roadmap]]) and the merge path (`/api/roadmap/build`).
+
+### `autoQueueUnblockedBy` — function  *(spec-blockers Phase 2)*
+
+```ts
+async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: string): Promise<string[]>
+```
+
+Auto-queue on unblock. `shippedSlug` just shipped (its build PR merged + phases flipped ✅); this finds every **live** spec (via `getRoadmap`) that named it in `**Blocked-by:**` and, if that was its **last** uncleared blocker (`blockedBy.every(b => b.cleared || b.slug === shippedSlug)` — `shippedSlug` is treated as cleared so a deploy-stale disk snapshot of its status can't suppress the unblock), inserts a `queued` `kind='build'` row (`created_by=null`, instructions naming the prerequisite). The chain goes hands-off: merge the prerequisite, the dependent build fires itself. **Skips** a dependent that already has ANY `build` job (dedupe — *one auto-queue per spec*, so calling this on every board load no-ops), is itself `shipped`, or opted out via `**Auto-build:** off` (`SpecCard.autoBuild === false`). Returns the slugs queued. Called from `reconcileMergedJobs`.
 
 ### Read helpers
 
@@ -40,7 +48,7 @@ Self-heal: a `completed` job whose PR was merged/closed **outside** the dashboar
 
 ## Tables written
 
-- [[../tables/agent_jobs]] (inserts `spec-test` rows via `enqueueSpecTestIfDue`; flips jobs → `merged` in `reconcileMergedJobs`)
+- [[../tables/agent_jobs]] (inserts `spec-test` rows via `enqueueSpecTestIfDue`; inserts auto-queued `build` rows via `autoQueueUnblockedBy` — [[../specs/spec-blockers]]; flips jobs → `merged` in `reconcileMergedJobs`)
 
 ## Tables read (not written)
 

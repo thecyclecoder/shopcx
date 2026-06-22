@@ -709,23 +709,35 @@ async function runPlanJob(job: Job) {
     }
 
     // Queue a build for each approved spec — the existing pipeline takes over (its own claude/* PR).
+    // Route through queueRoadmapBuild (the single enqueue chokepoint) so this agent path honours the
+    // SAME spec-blockers gate as the dashboard + Slack: a freshly-authored spec that declares an
+    // unshipped `Blocked-by` is refused here too, instead of inserting a build row that would collide.
+    // (spec-blockers Phase 2.) Owner re-check + active-job dedupe come free from the chokepoint.
+    const { queueRoadmapBuild } = await import("../src/lib/roadmap-actions");
     const queuedSlugs: string[] = [];
+    const blockedSlugs: string[] = [];
     for (const a of approved) {
       const s = a.spec!;
-      const { error } = await db.from("agent_jobs").insert({
-        workspace_id: job.workspace_id,
-        spec_slug: s.slug,
-        kind: "build",
-        status: "queued",
+      const res = await queueRoadmapBuild(job.workspace_id, job.created_by ?? "", {
+        slug: s.slug,
         instructions: `Authored by the goal planner for ${goalSlug} (${s.parent}).`,
-        created_by: job.created_by,
       });
-      if (!error) queuedSlugs.push(s.slug);
+      if (res.ok) queuedSlugs.push(s.slug);
+      else if (res.status === 409) blockedSlugs.push(s.slug);
+      else console.error(`${tag} queueRoadmapBuild failed for ${s.slug}: ${res.status} ${res.error}`);
     }
 
     const acted = actions.map((a) =>
       a.type === "spec" && a.status === "approved"
-        ? { ...a, status: "done" as const, result: queuedSlugs.includes(a.spec!.slug) ? "authored + build queued" : "authored" }
+        ? {
+            ...a,
+            status: "done" as const,
+            result: queuedSlugs.includes(a.spec!.slug)
+              ? "authored + build queued"
+              : blockedSlugs.includes(a.spec!.slug)
+                ? "authored (build blocked — prerequisite not shipped)"
+                : "authored",
+          }
         : a.type === "spec" && a.status === "declined"
           ? { ...a, status: "done" as const, result: "recorded ❌" }
           : a,
@@ -733,7 +745,7 @@ async function runPlanJob(job: Job) {
     await update(job.id, {
       status: "completed",
       pending_actions: acted,
-      log_tail: `committed ${committed} docs to main; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}`,
+      log_tail: `committed ${committed} docs to main; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}${blockedSlugs.length ? `; ${blockedSlugs.length} blocked: ${blockedSlugs.join(", ")}` : ""}`,
     });
     console.log(`${tag} ✓ authored ${approved.length} specs → queued ${queuedSlugs.length} builds`);
   } finally {
