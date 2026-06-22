@@ -9,12 +9,14 @@ Renews `subscriptions.is_internal=true` rows on schedule (post-Appstle scheduler
 ### `internal-subscription-renewal-cron`
 - **Trigger:** cron `0 9 * * *`
 - **Retries:** 1
+- **Control Tower heartbeat** carries the per-cycle outcome breakdown: `produced = { dispatched, last_cycle_outcomes, last_cycle_since }`. Because fan-out is async (today's attempts haven't run when the cron's beat is written), `last_cycle_outcomes` is the **most-recently-COMPLETED** cycle — `aggregateRenewalOutcomes` over the outcome beats since the PREVIOUS cron beat. (The Control Tower's outcome-distribution assertion aggregates the LIVE current cycle every ~15m for timely spike detection.) ([[../specs/control-tower-renewal-integrity-assertions]] P1.)
 
 
 ### `internal-subscription-renewal-attempt`
 - **Trigger:** event `internal-subscription/renewal-attempt`
 - **Retries:** 3
 - **Concurrency:** `concurrency: [{ limit: 10 }]`
+- **Outcome beats:** every terminal path emits ONE `emitRenewalOutcomeHeartbeat(outcome)` ([[../libraries/control-tower]]) — `charged` · `declined_to_dunning` · `skipped_no_payment_method` · `skipped_zero_total` · `comp_shipped` · `comp_blocked` (comp gate / not-allowlisted) · `skipped_other` (benign not_internal/status/no_customer state changes). The only uniform channel that captures SKIPS (which write no transaction row), feeding the Control Tower **outcome-distribution** assertion. Uncaught errors aren't beat — a sub that errored never advances, so it's caught by the **renewal-integrity** overdue assertion instead.
 
 
 ## Comp branch (free subs)

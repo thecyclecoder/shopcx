@@ -1,4 +1,4 @@
-# Control Tower — finish the renewal-integrity assertions (outcome distribution + stuck dunning) ⏳
+# Control Tower — finish the renewal-integrity assertions (outcome distribution + stuck dunning) 🚧
 
 **Owner:** [[../functions/retention]] · **Parent:** completes [[control-tower]] P2 renewal-integrity (the highest-value assertion, only partly built).
 
@@ -18,5 +18,14 @@ A silently-broken renewal = lost revenue + quiet churn — the exact failure the
 - Force a decline spike (e.g. a test cycle where most subs skip `no_payment_method`) → outcome-distribution alert fires; a normal cycle → green with the breakdown.
 - Leave a `dunning_cycles` row `retrying` past `next_retry_at` + grace → stuck-dunning alert; a sub within its retry schedule → not flagged.
 
-## Phase 1 — outcome counts + the two assertions ⏳
+## Phase 1 — outcome counts + the two assertions ✅ (code shipped — prod verification pending)
 Renewal cron emits the outcome breakdown; `monitor.ts` adds the outcome-distribution (spike-vs-baseline) + stuck-dunning assertions to `evalOutputAssertion`. Brain: [[../inngest/internal-subscription-renewals]] · [[../libraries/control-tower]] · [[../lifecycles/dunning]] · [[control-tower]].
+
+### What shipped
+- **Per-sub outcome beats.** `internal-subscription-renewal-attempt` emits ONE `emitRenewalOutcomeHeartbeat(outcome)` on every terminal path (`charged` · `declined_to_dunning` · `skipped_no_payment_method` · `skipped_zero_total` · `comp_shipped` · `comp_blocked` · `skipped_other`) under `loop_id = RENEWAL_OUTCOME_LOOP_ID` (`src/lib/control-tower/registry.ts`, `heartbeat.ts`). The only uniform channel that captures skips (no transaction row). Uncaught errors are NOT beat — they're caught by the existing renewal-integrity overdue assertion (a sub that errored never advances).
+- **Cron heartbeat carries the breakdown.** `internal-subscription-renewal-cron`'s `produced = { dispatched, last_cycle_outcomes, last_cycle_since }` — `aggregateRenewalOutcomes` over the beats since the previous cron beat (the most-recently-completed cycle; fan-out is async so the just-dispatched cycle isn't knowable at beat time). The tile renders it.
+- **outcome-distribution assertion** (`monitor.ts` → `evalOutputAssertion` case `renewal-outcome-distribution`, on `internal-subscription-renewal-cron` via `outputAssertions: ["renewal-integrity", "renewal-outcome-distribution"]`): fires on a systemic anomalous rate ≥50% (hard floor — bad creds declining everyone / mass no-PM) OR a spike ≥2.5× / +15pp vs the rolling 30-day baseline, gated by ≥10-sample cycle + ≥50-sample baseline. The monitor aggregates the LIVE current cycle (since the latest cron beat) every ~15m.
+- **stuck-dunning assertion** (`evalOutputAssertion` case `stuck-dunning`, on `dunning-payday-retry-cron` via `outputAssertion: "stuck-dunning"`): fires when N `dunning_cycles` are `status='retrying'` with `next_retry_at` >48h in the past. Within-schedule cycles (future/recent `next_retry_at`, or null) are not flagged.
+- Thresholds are tunable constants in `monitor.ts`.
+
+**Note on the cron `produced` breakdown:** because the renewal fan-out is async (per-sub attempts run after the cron's beat is written), the cron beat carries the *most-recently-completed* cycle's breakdown, not the cycle it just dispatched. Same-cycle timeliness comes from the monitor's live aggregation (every ~15m). The verification's "after a renewal cycle, the cron `produced` carries the breakdown" holds with this one-cycle lag; the **tile** shows the live current-cycle anomaly the moment the assertion trips.

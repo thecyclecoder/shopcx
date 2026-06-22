@@ -23,11 +23,14 @@ import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import {
   MONITORED_LOOPS,
   OWNER_FUNCTIONS,
+  RENEWAL_BAD_OUTCOMES,
   WORKER_BOX_ID,
   type LoopKind,
   type MonitoredLoop,
+  type OutputAssertionId,
   type OwnerFunction,
 } from "@/lib/control-tower/registry";
+import { aggregateRenewalOutcomes, type RenewalOutcomeCounts } from "@/lib/control-tower/heartbeat";
 import { buildCoverageAudit, type CoverageAudit } from "@/lib/control-tower/self-audit";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -486,6 +489,35 @@ interface AssertionInputs {
   latestSpecTestJobAt: string | null;
   /** active internal subs whose next_billing_date is already in the past (overdue). */
   overdueInternalSubs: number;
+  /** per-sub renewal outcome breakdown for the LIVE current cycle (since the latest renewal-cron beat). */
+  renewalCurrent: RenewalOutcomeCounts;
+  /** per-sub renewal outcome breakdown for the rolling baseline (prior cycles before the current one). */
+  renewalBaseline: RenewalOutcomeCounts;
+  /** dunning_cycles still 'retrying' more than the grace past next_retry_at (stuck). */
+  stuckDunningCycles: number;
+}
+
+// ── Outcome-distribution + stuck-dunning thresholds (control-tower-renewal-integrity-assertions, P1) ──
+/** Need at least this many per-sub outcomes in the current cycle before judging its mix (avoids 1/1=100% noise on a tiny cycle). */
+const RENEWAL_MIN_CYCLE_SAMPLE = 10;
+/** Anomalous-rate this cycle that trips the alert regardless of baseline — a systemic break (bad creds declining everyone, mass no-PM). */
+const RENEWAL_HARD_FLOOR_RATE = 0.5;
+/** Below this absolute anomalous-rate a relative spike is ignored (don't alarm on tiny noise even if it's 3× a near-zero baseline). */
+const RENEWAL_MIN_SPIKE_RATE = 0.15;
+/** Relative spike: current anomalous-rate ≥ baseline × this. */
+const RENEWAL_SPIKE_FACTOR = 2.5;
+/** Absolute spike: current anomalous-rate ≥ baseline + this (percentage points). */
+const RENEWAL_SPIKE_MARGIN = 0.15;
+/** Need at least this much baseline history before a relative spike comparison is meaningful. */
+const RENEWAL_MIN_BASELINE_SAMPLE = 50;
+/** A dunning cycle still 'retrying' more than this long past next_retry_at is stuck (generous vs the daily internal renewal cadence + weekend paydays). */
+const STUCK_DUNNING_GRACE_MS = 48 * 60 * 60_000;
+/** How far back to read renewal outcome beats for the rolling baseline. */
+const RENEWAL_BASELINE_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
+/** Sum the anomalous ("bad") outcomes in a renewal breakdown. */
+function badOutcomeCount(c: RenewalOutcomeCounts): number {
+  return RENEWAL_BAD_OUTCOMES.reduce((sum, k) => sum + c[k as keyof RenewalOutcomeCounts], 0);
 }
 
 /** Pull a numeric counter out of a loop_heartbeats.produced jsonb blob (0 if absent). */
@@ -500,14 +532,15 @@ function producedCount(produced: unknown, key: string): number {
 /**
  * The Phase 2 expected-output check for a loop. Returns a red override (statusText
  * + violation) when the loop ran but failed its assertion, else null (assertion
- * holds — leave the Phase 1 tile as-is). Pure given (loop, latest beat, inputs).
+ * holds — leave the Phase 1 tile as-is). Pure given (assertion id, loop, latest beat, inputs).
  */
 function evalOutputAssertion(
+  assertionId: OutputAssertionId,
   loop: MonitoredLoop,
   latest: LoopHistoryRow | null,
   inputs: AssertionInputs,
 ): { statusText: string; violation: { reason: string; detail: string } } | null {
-  switch (loop.outputAssertion) {
+  switch (assertionId) {
     case "escalation-idle": {
       // Idle-while-work: tickets wait but no triage job enqueued within the cadence.
       if (inputs.escalatedWaiting <= 0) return null;
@@ -552,6 +585,54 @@ function evalOutputAssertion(
         },
       };
     }
+    case "renewal-outcome-distribution": {
+      // The cron ran AND each decline individually "routed to dunning correctly", but the
+      // per-cycle outcome MIX is broken: a systemic anomalous rate (bad creds declining everyone,
+      // a mass no-payment-method skip) or a spike vs the rolling baseline. Aggregated from the
+      // per-sub outcome beats. Needs a minimum cycle sample so a quiet day can't false-fire.
+      const cur = inputs.renewalCurrent;
+      if (cur.total < RENEWAL_MIN_CYCLE_SAMPLE) return null;
+      const bad = badOutcomeCount(cur);
+      const rate = bad / cur.total;
+
+      let tripped: "systemic" | "spike" | null = null;
+      let baselineNote = "";
+      if (rate >= RENEWAL_HARD_FLOOR_RATE) {
+        tripped = "systemic";
+      } else if (inputs.renewalBaseline.total >= RENEWAL_MIN_BASELINE_SAMPLE && rate >= RENEWAL_MIN_SPIKE_RATE) {
+        const baseRate = badOutcomeCount(inputs.renewalBaseline) / inputs.renewalBaseline.total;
+        if (rate >= Math.max(baseRate * RENEWAL_SPIKE_FACTOR, baseRate + RENEWAL_SPIKE_MARGIN)) {
+          tripped = "spike";
+          baselineNote = ` (baseline ${Math.round(baseRate * 100)}%)`;
+        }
+      }
+      if (!tripped) return null;
+
+      const pct = Math.round(rate * 100);
+      const declinePct = cur.total > 0 ? Math.round((cur.declined_to_dunning / cur.total) * 100) : 0;
+      return {
+        statusText: `renewal outcome ${tripped === "systemic" ? "break" : "spike"} — ${pct}% anomalous (${cur.declined_to_dunning} declined, ${cur.skipped_no_payment_method} no-PM)`,
+        violation: {
+          reason: "renewal_outcome_distribution",
+          detail: `Renewal cycle outcome ${tripped === "systemic" ? "break" : "spike"}: ${bad}/${cur.total} outcomes anomalous (${pct}%${baselineNote}) — ${cur.declined_to_dunning} declined→dunning (${declinePct}% decline rate), ${cur.skipped_no_payment_method} skipped no-payment-method, ${cur.comp_blocked} comp-blocked. The renewal cron ran and each decline routed correctly, but the per-cycle mix signals a systemic break (e.g. bad Braintree creds, a no-payment-method spike).`,
+        },
+      };
+    }
+    case "stuck-dunning": {
+      // A dunning cycle still 'retrying' well past its next_retry_at means the retry engine ran
+      // but isn't advancing it (recovered/exhausted). A sub correctly mid-dunning (within its
+      // retry schedule, next_retry_at in the future or only recently passed) is NOT flagged.
+      if (inputs.stuckDunningCycles <= 0) return null;
+      const n = inputs.stuckDunningCycles;
+      const graceH = Math.round(STUCK_DUNNING_GRACE_MS / 3_600_000);
+      return {
+        statusText: `${n} sub${n === 1 ? "" : "s"} stuck in dunning past retry`,
+        violation: {
+          reason: "stuck_dunning",
+          detail: `${n} dunning_cycle${n === 1 ? " is" : "s are"} still 'retrying' more than ${graceH}h past next_retry_at — the retry engine isn't advancing ${n === 1 ? "it" : "them"} to recovered/exhausted on schedule.`,
+        },
+      };
+    }
     default:
       return null;
   }
@@ -561,8 +642,10 @@ function evalOutputAssertion(
 async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const startOfToday = new Date();
   startOfToday.setUTCHours(0, 0, 0, 0);
+  // A dunning cycle still 'retrying' more than the grace past next_retry_at is stuck.
+  const stuckBeforeIso = new Date(Date.now() - STUCK_DUNNING_GRACE_MS).toISOString();
 
-  const [escalated, triageJob, specTestJob, overdueSubs] = await Promise.all([
+  const [escalated, triageJob, specTestJob, overdueSubs, renewalCronBeat, stuckDunning] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -580,6 +663,25 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .eq("is_internal", true)
       .eq("status", "active")
       .lt("next_billing_date", startOfToday.toISOString()),
+    // The latest renewal-cron beat marks the start of the LIVE current cycle — outcome beats since
+    // then belong to it (vs everything older = the rolling baseline).
+    admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "internal-subscription-renewal-cron").order("ran_at", { ascending: false }).limit(1).maybeSingle(),
+    // Stuck dunning: 'retrying' with next_retry_at older than the grace. (next_retry_at < x is
+    // null-safe — null next_retry_at rows are excluded, so a cycle awaiting scheduling isn't flagged.)
+    admin
+      .from("dunning_cycles")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "retrying")
+      .lt("next_retry_at", stuckBeforeIso),
+  ]);
+
+  // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a
+  // rolling baseline (the prior cycles before it). Aggregated from the per-sub outcome beats.
+  const cycleStartIso = (renewalCronBeat.data as { ran_at: string } | null)?.ran_at ?? new Date(Date.now() - 26 * 60 * 60_000).toISOString();
+  const baselineStartIso = new Date(new Date(cycleStartIso).getTime() - RENEWAL_BASELINE_WINDOW_MS).toISOString();
+  const [renewalCurrent, renewalBaseline] = await Promise.all([
+    aggregateRenewalOutcomes(admin, cycleStartIso),
+    aggregateRenewalOutcomes(admin, baselineStartIso, cycleStartIso),
   ]);
 
   return {
@@ -587,6 +689,9 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
     latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,
     overdueInternalSubs: overdueSubs.count ?? 0,
+    renewalCurrent,
+    renewalBaseline,
+    stuckDunningCycles: stuckDunning.count ?? 0,
   };
 }
 
@@ -653,11 +758,18 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed);
     else core = evalAgentKind(loop, latest, activeJobs);
-    // Phase 2: layer the output assertion on top. Only escalates green/amber → red
-    // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it).
-    if (loop.outputAssertion && core.color !== "red") {
-      const a = evalOutputAssertion(loop, latest, assertionInputs);
-      if (a) core = { ...core, color: "red", statusText: a.statusText, violation: a.violation };
+    // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
+    // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
+    // carry several (the renewal cron: renewal-integrity + outcome-distribution) — first to fail wins.
+    const assertionIds = loop.outputAssertions ?? (loop.outputAssertion ? [loop.outputAssertion] : []);
+    if (assertionIds.length && core.color !== "red") {
+      for (const aid of assertionIds) {
+        const a = evalOutputAssertion(aid, loop, latest, assertionInputs);
+        if (a) {
+          core = { ...core, color: "red", statusText: a.statusText, violation: a.violation };
+          break;
+        }
+      }
     }
     return { ...core, owner: loop.owner, history, openAlert: alertByLoop.get(loop.id) ?? null };
   });

@@ -76,8 +76,52 @@ export const OWNER_FUNCTIONS: { id: OwnerFunction; label: string; healthLabel: s
  *                          agent_jobs actually landed (produced-but-not-persisted).
  *   - renewal-integrity  — active internal subs are overdue (next_billing_date in
  *                          the past) — the renewal cron ran but didn't advance them.
+ *   - renewal-outcome-distribution — the renewal cron RAN and every decline individually
+ *                          "routed to dunning correctly", but the per-cycle outcome mix is
+ *                          anomalous: a systemic decline/no-payment-method/comp-blocked rate
+ *                          (hard floor) or a spike vs the rolling baseline (bad Braintree
+ *                          creds declining everyone, a no-PM-skip spike). Aggregates the
+ *                          per-sub outcome beats (RENEWAL_OUTCOME_LOOP_ID). On the renewal cron.
+ *   - stuck-dunning      — a dunning_cycles row still 'retrying' more than a grace past its
+ *                          next_retry_at — the retry engine ran but isn't advancing it to
+ *                          recovered/exhausted. A sub correctly mid-dunning (within schedule)
+ *                          is NOT flagged. On the dunning payday-retry cron.
  */
-export type OutputAssertionId = "escalation-idle" | "spec-test-persisted" | "renewal-integrity";
+export type OutputAssertionId =
+  | "escalation-idle"
+  | "spec-test-persisted"
+  | "renewal-integrity"
+  | "renewal-outcome-distribution"
+  | "stuck-dunning";
+
+/**
+ * Per-sub renewal outcome taxonomy (control-tower-renewal-integrity-assertions, Phase 1). Every
+ * terminal path of `internal-subscription-renewal-attempt` emits ONE beat carrying its outcome
+ * (loop_id = RENEWAL_OUTCOME_LOOP_ID, produced.outcome) — the only uniform channel that captures
+ * SKIPS too (a no-payment-method / zero-total skip leaves no transaction row, so the DB alone is
+ * blind to it). The outcome-distribution assertion aggregates these into a per-cycle breakdown +
+ * spike-vs-baseline check; the renewal cron bakes the most-recently-completed cycle's breakdown
+ * into its heartbeat's `produced`. (Uncaught errors aren't beat here — a sub that errored never
+ * advances, so it's caught by the renewal-integrity overdue assertion instead.)
+ */
+export type RenewalOutcome =
+  | "charged"
+  | "skipped_no_payment_method"
+  | "skipped_zero_total"
+  | "declined_to_dunning"
+  | "comp_shipped"
+  | "comp_blocked"
+  | "skipped_other";
+
+/** loop_heartbeats.loop_id the per-sub renewal outcome beats are written under (kind 'reactive' so the cron/agent-kind beats RPC skips them). NOT a monitored tile — a data channel for the outcome-distribution assertion. */
+export const RENEWAL_OUTCOME_LOOP_ID = "internal-subscription-renewal-outcome";
+
+/** Outcomes that count as "anomalous" for the outcome-distribution spike/floor check (vs the benign charged / comp_shipped / zero-total / other-skip outcomes). */
+export const RENEWAL_BAD_OUTCOMES: RenewalOutcome[] = [
+  "skipped_no_payment_method",
+  "declined_to_dunning",
+  "comp_blocked",
+];
 
 /**
  * Inline-agent work-exists probe id (control-tower-agent-coverage spec, Phase 1). Each
@@ -141,6 +185,12 @@ export interface MonitoredLoop {
    * violation even if the loop is otherwise fresh/healthy on the Phase 1 checks.
    */
   outputAssertion?: OutputAssertionId;
+  /**
+   * Same as `outputAssertion` but for a loop that carries MORE THAN ONE expected-output
+   * assertion (the renewal cron: renewal-integrity AND outcome-distribution). The monitor
+   * runs each in order and flips red on the first that fails. Use this OR `outputAssertion`.
+   */
+  outputAssertions?: OutputAssertionId[];
   /**
    * inline-agent only: the read-only "is there work that should have triggered this agent
    * in the window?" probe. Liveness-when-work-exists fires only when this count > 0 AND the
@@ -229,7 +279,9 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Daily fan-out of due internal-subscription renewals.",
     expectedCadence: "daily (0 9 * * *)",
     livenessWindowMs: 26 * HOUR,
-    outputAssertion: "renewal-integrity",
+    // renewal-integrity (overdue subs never advanced) + outcome-distribution (the cron ran +
+    // each decline "routed correctly" but the per-cycle outcome mix is systemically broken / spiking).
+    outputAssertions: ["renewal-integrity", "renewal-outcome-distribution"],
   },
   {
     id: "social-scheduler-plan",
@@ -287,7 +339,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Every-30-min crons (window ~90 min) ─
   { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
   // ─ Hourly crons (window ~2h) ─
-  { id: "dunning-payday-retry-cron", kind: "cron", owner: "retention", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
+  { id: "dunning-payday-retry-cron", kind: "cron", owner: "retention", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR, outputAssertion: "stuck-dunning" },
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
   { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
   // ─ Daily crons (window ~26h) ─

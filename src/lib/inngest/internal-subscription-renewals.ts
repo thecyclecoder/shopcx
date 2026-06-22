@@ -18,7 +18,7 @@
 
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { emitCronHeartbeat, emitRenewalOutcomeHeartbeat, aggregateRenewalOutcomes } from "@/lib/control-tower/heartbeat";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
@@ -62,9 +62,27 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
       })));
     }
 
-    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1).
+    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) carrying the per-cycle
+    // outcome breakdown (control-tower-renewal-integrity-assertions, Phase 1). The attempts THIS
+    // run just dispatched haven't executed yet (fan-out is async), so same-cycle counts aren't
+    // knowable here; instead we bake in the most-recently-COMPLETED cycle's breakdown — the per-sub
+    // outcome beats since the PREVIOUS cron beat (≈ the prior daily cycle, whose attempts have long
+    // finished). The Control Tower's outcome-distribution assertion aggregates the LIVE current
+    // cycle every ~15m for timely spike detection; this is the durable on-beat record.
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("internal-subscription-renewal-cron", { ok: true, produced: { dispatched: due.length } });
+      const { data: prevBeat } = await admin
+        .from("loop_heartbeats")
+        .select("ran_at")
+        .eq("loop_id", "internal-subscription-renewal-cron")
+        .order("ran_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const sinceIso = (prevBeat?.ran_at as string | undefined) ?? new Date(Date.now() - 26 * 60 * 60_000).toISOString();
+      const last_cycle_outcomes = await aggregateRenewalOutcomes(admin, sinceIso);
+      await emitCronHeartbeat("internal-subscription-renewal-cron", {
+        ok: true,
+        produced: { dispatched: due.length, last_cycle_outcomes, last_cycle_since: sinceIso },
+      });
     });
 
     return { dispatched: due.length };
@@ -140,6 +158,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
     if (comp.isComp) {
       if ("blocked" in comp && comp.blocked) {
+        await step.run("emit-outcome-comp-blocked", () => emitRenewalOutcomeHeartbeat("comp_blocked"));
         return { skipped: true, reason: comp.blocked };
       }
       // narrow: full comp context
@@ -180,6 +199,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
             properties: { subscription_id, comp_role: c.comp_role, needs_attention: true },
           });
         });
+        await step.run("emit-outcome-comp-not-allowlisted", () => emitRenewalOutcomeHeartbeat("comp_blocked"));
         return { ok: false, failed: true, reason: "comp_not_allowlisted" };
       }
 
@@ -350,6 +370,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         });
       });
 
+      await step.run("emit-outcome-comp-shipped", () => emitRenewalOutcomeHeartbeat("comp_shipped"));
       return { ok: true, comp: true, order_id: compOrder.id, order_number: compOrder.order_number };
     }
 
@@ -431,7 +452,15 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       } as const;
     });
 
-    if (ctx.skip) return { skipped: true, reason: ctx.reason };
+    if (ctx.skip) {
+      // no_payment_method is the load-bearing skip the outcome-distribution assertion watches for
+      // a spike; the rest (not_internal / status_* / no_customer / customer_not_found) are benign
+      // between-fan-out-and-attempt state changes → skipped_other.
+      await step.run("emit-outcome-skip", () =>
+        emitRenewalOutcomeHeartbeat(ctx.reason === "no_payment_method" ? "skipped_no_payment_method" : "skipped_other"),
+      );
+      return { skipped: true, reason: ctx.reason };
+    }
 
     // ── 2. Compute charge amount ────────────────────────────────
     // Prices are DERIVED from the catalog + pricing rules (quantity break × S&S,
@@ -509,6 +538,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
     const totalCents = Math.max(0, subtotalCents - discountCents) + shippingCents + protectionCents + taxCents;
     if (totalCents <= 0) {
+      await step.run("emit-outcome-zero-total", () => emitRenewalOutcomeHeartbeat("skipped_zero_total"));
       return { skipped: true, reason: "zero_total" };
     }
 
@@ -607,6 +637,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           source: "internal_subscription_renewal",
         },
       });
+      await step.run("emit-outcome-declined", () => emitRenewalOutcomeHeartbeat("declined_to_dunning"));
       return { ok: false, failed: true, message: charge.message };
     }
 
@@ -778,6 +809,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       );
     });
 
+    await step.run("emit-outcome-charged", () => emitRenewalOutcomeHeartbeat("charged"));
     return { ok: true, order_id: newOrder.id, order_number: newOrder.order_number };
   },
 );

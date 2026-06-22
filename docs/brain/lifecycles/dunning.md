@@ -201,6 +201,7 @@ Both the legacy Appstle dunning and the internal path now send **one shared** re
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- Control Tower **stuck-dunning** assertion ([[../libraries/control-tower]], [[../specs/control-tower-renewal-integrity-assertions]] P1): the `dunning-payday-retry-cron` tile flips red when any [[../tables/dunning_cycles]] row is still `retrying` >48h past `next_retry_at` — the retry engine ran but isn't advancing it to recovered/exhausted. A sub correctly mid-dunning (within its retry schedule) is NOT flagged. Pairs with the renewal-cron outcome-distribution assertion (decline/no-PM-skip spike). (2026-06-22)
 - Internal-sub dunning shipped: internal renewal failures now enter dunning, retry on the payday schedule (renewal cron is the engine), email the magic-link recovery flow (terminal-now / soft-after-exhaust), cancel-on-exhaust + reactivate-on-recovery, and flow through `customer_events` for timeline + AI. (2026-06-09)
 - Payment-method webhook now (a) mirrors Shopify cards into customer_payment_methods (`provider='shopify'`) and (b) fires new-card-recovery for `exhausted` (dunning-cancelled) cycles, not just active/skipped — so adding a card after cancellation auto-reactivates. (2026-06-09)
 - `84eefddd` Drop Appstle payment-update email; restyle ours to look human

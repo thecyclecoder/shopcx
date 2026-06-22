@@ -12,7 +12,12 @@
  * inline writer (scripts/builder-worker.ts) against its existing admin client.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { agentLoopId, type LoopKind } from "@/lib/control-tower/registry";
+import {
+  agentLoopId,
+  RENEWAL_OUTCOME_LOOP_ID,
+  type LoopKind,
+  type RenewalOutcome,
+} from "@/lib/control-tower/registry";
 
 export interface HeartbeatInput {
   /** false ⇒ the run threw or reported a failure. Default true. */
@@ -71,4 +76,78 @@ export function emitInlineAgentHeartbeat(agentId: string, input: HeartbeatInput 
  */
 export function emitReactiveHeartbeat(functionId: string, input: HeartbeatInput = {}): Promise<void> {
   return emitLoopHeartbeat(functionId, "reactive", input);
+}
+
+/**
+ * Convenience: record ONE per-sub renewal outcome beat (control-tower-renewal-integrity-assertions,
+ * Phase 1). Called from every terminal path of `internal-subscription-renewal-attempt` so the
+ * Control Tower outcome-distribution assertion can aggregate the per-cycle mix — the only uniform
+ * channel that captures SKIPS (a no-payment-method / zero-total skip writes no transaction row).
+ * `ok:true` because these are recorded, expected per-sub outcomes (not run failures); the assertion
+ * reads `produced.outcome`, not ok. `kind:'reactive'` keeps these high-volume beats out of the
+ * cron/agent-kind `control_tower_loop_beats` RPC. Best-effort — never throws.
+ */
+export function emitRenewalOutcomeHeartbeat(outcome: RenewalOutcome): Promise<void> {
+  return emitLoopHeartbeat(RENEWAL_OUTCOME_LOOP_ID, "reactive", { ok: true, produced: { outcome } });
+}
+
+/** Per-cycle renewal outcome counts (the breakdown the outcome-distribution assertion + the cron heartbeat carry). */
+export interface RenewalOutcomeCounts {
+  total: number;
+  charged: number;
+  skipped_no_payment_method: number;
+  skipped_zero_total: number;
+  declined_to_dunning: number;
+  comp_shipped: number;
+  comp_blocked: number;
+  skipped_other: number;
+}
+
+function emptyRenewalOutcomeCounts(): RenewalOutcomeCounts {
+  return {
+    total: 0,
+    charged: 0,
+    skipped_no_payment_method: 0,
+    skipped_zero_total: 0,
+    declined_to_dunning: 0,
+    comp_shipped: 0,
+    comp_blocked: 0,
+    skipped_other: 0,
+  };
+}
+
+/**
+ * READ-ONLY: aggregate the per-sub renewal outcome beats in a time window into a count breakdown.
+ * Used by the renewal cron (bakes the just-completed cycle's breakdown into its heartbeat) AND by
+ * the Control Tower outcome-distribution assertion (live current cycle + rolling baseline). Bounded
+ * (`limit 5000`) + best-effort — a read failure returns zeros (never false-fires the assertion).
+ */
+export async function aggregateRenewalOutcomes(
+  admin: ReturnType<typeof createAdminClient>,
+  sinceIso: string,
+  untilIso?: string,
+): Promise<RenewalOutcomeCounts> {
+  const counts = emptyRenewalOutcomeCounts();
+  try {
+    let q = admin
+      .from("loop_heartbeats")
+      .select("produced")
+      .eq("loop_id", RENEWAL_OUTCOME_LOOP_ID)
+      .gte("ran_at", sinceIso)
+      .order("ran_at", { ascending: false })
+      .limit(5000);
+    if (untilIso) q = q.lt("ran_at", untilIso);
+    const { data } = await q;
+    for (const row of (data ?? []) as Array<{ produced: unknown }>) {
+      const p = row.produced;
+      const outcome = p && typeof p === "object" ? (p as Record<string, unknown>).outcome : null;
+      if (typeof outcome === "string" && outcome in counts && outcome !== "total") {
+        counts[outcome as keyof RenewalOutcomeCounts]++;
+        counts.total++;
+      }
+    }
+  } catch (e) {
+    console.warn(`[control-tower] aggregateRenewalOutcomes read failed:`, e instanceof Error ? e.message : e);
+  }
+  return counts;
 }
