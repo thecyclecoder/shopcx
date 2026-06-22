@@ -12,6 +12,8 @@ Cron: scans `ticket_messages.pending_send_at <= now()` and actually sends the me
 
 **Per-channel delivery branches:** `email` → Resend reply; `chat` → mark sent, email only if customer idle ([[../libraries/delivery-channel]]); **`portal` → mark sent + always email a threaded digest via [[../libraries/portal__thread-email]]**; other channels → mark sent only. A newer inbound since the message was queued cancels the pending send.
 
+**Control Tower heartbeat fires on every tick, including idle ones.** The `if (messages.length === 0)` early-return emits its own `emitCronHeartbeat("deliver-pending-sends", { produced: { delivered: 0 } })` before returning, so an idle cron reads green instead of tripping monitor `never_fired`. The heartbeat means "Inngest invoked me", not "there was work" ([[../specs/cron-heartbeat-on-idle-tick]]).
+
 
 ## Downstream events sent
 
