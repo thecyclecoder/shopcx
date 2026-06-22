@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { ALL_FONT_VARIABLES } from "./_lib/fonts";
+import ClientErrorReporter from "@/components/ClientErrorReporter";
 
 /**
  * Storefront layout — isolated from dashboard UI.
@@ -39,7 +40,9 @@ export default function StorefrontLayout({
     <div
       className={`${ALL_FONT_VARIABLES} storefront-root min-h-screen bg-white text-zinc-900 antialiased`}
     >
-      {children}
+      {/* Capture client-side JS errors (PDP/customize/checkout/thank-you) → /api/client-errors.
+          One mount classifies by the live path; fail-open, never blocks rendering. */}
+      <ClientErrorReporter>{children}</ClientErrorReporter>
     </div>
   );
 }

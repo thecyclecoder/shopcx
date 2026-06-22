@@ -11,7 +11,7 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `uuid` | PK · `gen_random_uuid()` |
-| `source` | `text` | `'inngest'` ｜ `'vercel'` ｜ `'supabase'` (app-layer reporter) ｜ `'supabase-logs'` (Phase 2 Management-Logs poll) · CHECK-constrained — which hidden surface |
+| `source` | `text` | `'inngest'` ｜ `'vercel'` ｜ `'supabase'` (app-layer reporter) ｜ `'supabase-logs'` (Phase 2 Management-Logs poll) ｜ `'client'` (browser JS errors on storefront + portal, via `/api/client-errors` — [[../specs/client-error-capture]]) · CHECK-constrained — which hidden surface |
 | `signature` | `text` | grouping key — a stable hash of the normalized error (uuids/hex/numbers/quoted ids stripped) so the same error recurring lands on the same row. At most **one** row per `(source, signature)` |
 | `title` | `text` | short human-readable label for the panel (function id / route + error class) |
 | `detail` | `text?` | the fuller / latest message |
@@ -46,6 +46,7 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 
 `supabase/migrations/20260622150000_error_events.sql` (this table + RLS) · apply: `scripts/apply-error-events-migration.ts`
 `supabase/migrations/20260622160000_supabase_log_poll.sql` (Phase 2: widens the `source` CHECK to admit `'supabase-logs'` + adds [[error_feed_supabase_config]]) · apply: `scripts/apply-supabase-log-poll-migration.ts`
+`supabase/migrations/20260622170000_client_error_source.sql` (client-error-capture: widens the `source` CHECK to admit `'client'`) · apply: `scripts/apply-client-error-source-migration.ts`
 
 ## Related
 

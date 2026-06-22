@@ -27,7 +27,7 @@ import { enqueueRepairJob } from "@/lib/repair-agent";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-export type ErrorSource = "inngest" | "vercel" | "supabase" | "supabase-logs";
+export type ErrorSource = "inngest" | "vercel" | "supabase" | "supabase-logs" | "client";
 
 /** Page at most once per incident per this window — a burst = one page (rate-limit). */
 const PAGE_COOLDOWN_MS = 30 * 60_000;
@@ -38,6 +38,8 @@ const SOURCE_LABEL: Record<ErrorSource, string> = {
   supabase: "Supabase error",
   // The Management Logs feed (Phase 2): DB-level errors our app never saw.
   "supabase-logs": "Supabase DB-log error",
+  // The fourth feed (client-error-capture): browser JS errors on storefront + portal.
+  client: "Client error",
 };
 
 /**
@@ -292,7 +294,7 @@ const RED_MS = 60 * 60_000; // any error in the last hour ⇒ panel red.
 const AMBER_MS = 24 * 60 * 60_000; // any in the last day ⇒ amber.
 const PANEL_INCIDENT_LIMIT = 8;
 
-const SOURCES: ErrorSource[] = ["vercel", "inngest", "supabase", "supabase-logs"];
+const SOURCES: ErrorSource[] = ["vercel", "inngest", "supabase", "supabase-logs", "client"];
 
 /**
  * Which sources need a "received a delivery" proof before they can go green.
@@ -308,6 +310,10 @@ const REQUIRES_RECEIPT: Record<ErrorSource, boolean> = {
   inngest: true,
   supabase: false,
   "supabase-logs": true,
+  // client — the storefront/portal reporters POST every error AND a per-session
+  // heartbeat to /api/client-errors (which writes a feed:client beat); a panel is
+  // "connected" only once we've actually received one, not just because no crash fired.
+  client: true,
 };
 
 /** One-line "how to wire" hint shown when a source isn't configured. */
@@ -316,6 +322,7 @@ const NOT_CONFIGURED_HINT: Record<ErrorSource, string> = {
   inngest: "Deploy the inngest-failure-capture function so failed runs are captured.",
   supabase: "reportDbError is wired in code — no setup needed.",
   "supabase-logs": "Paste a Supabase Management access token in the Control Tower (owner-only) to poll DB logs.",
+  client: "The storefront + portal reporters POST to /api/client-errors — wired in code, no setup needed.",
 };
 
 /** Compact elapsed string from an ISO timestamp to now (e.g. "3m", "2h", "1d"). */
@@ -366,7 +373,7 @@ export async function buildErrorFeedSnapshot(adminClient?: Admin): Promise<Error
     admin
       .from("loop_heartbeats")
       .select("loop_id, ran_at")
-      .in("loop_id", [feedLoopId("vercel"), feedLoopId("supabase-logs")])
+      .in("loop_id", [feedLoopId("vercel"), feedLoopId("supabase-logs"), feedLoopId("client")])
       .order("ran_at", { ascending: false })
       .limit(50),
     // Inngest liveness proxy: any recent cron beat proves Inngest is delivering (and the
@@ -395,12 +402,14 @@ export async function buildErrorFeedSnapshot(adminClient?: Admin): Promise<Error
     inngest: true, // the capture fn is registered in code with the deploy.
     supabase: true, // reportDbError needs no setup — always wired.
     "supabase-logs": supabaseLogsConfigured,
+    client: true, // the storefront/portal reporters are wired in code — always configured.
   };
   const receivedAtBy: Record<ErrorSource, string | null> = {
     vercel: feedLatest.get(feedLoopId("vercel")) ?? null,
     inngest: latestCronAt,
     supabase: null,
     "supabase-logs": feedLatest.get(feedLoopId("supabase-logs")) ?? null,
+    client: feedLatest.get(feedLoopId("client")) ?? null,
   };
 
   const panels: ErrorFeedPanel[] = SOURCES.map((source) => {

@@ -22,12 +22,22 @@ const outJs = path.join(outDir, 'subscription-portal.js');
 const outCss = path.join(outDir, 'portal.min.css');
 const scssIn = path.join(portalSrc, 'styles', 'portal.scss');
 
+// The absolute app origin client errors POST to — absolute so a branded mini-site
+// domain still reports to our app (the ingest sends permissive CORS). From the toml.
+let appOrigin = 'https://shopcx.ai';
+try {
+  const toml = fs.readFileSync(path.join(extDir, 'shopify.app.toml'), 'utf8');
+  const proxyUrl = toml.match(/\[app_proxy\][\s\S]*?url\s*=\s*"([^"]+)"/)?.[1];
+  if (proxyUrl) appOrigin = new URL(proxyUrl).origin;
+} catch {}
+
 // Build JS — endpoint is /api/portal for the minisite
 const cmd = [
   `npx esbuild ${path.join(portalSrc, 'js', 'portal-entry.jsx')}`,
   '--bundle --format=iife --platform=browser --target=es2018',
   '--jsx=automatic --jsx-import-source=preact',
   `--define:__PORTAL_ENDPOINT__='"/api/portal"'`,
+  `--define:__APP_ORIGIN__='"${appOrigin}"'`,
   `--outfile=${outJs}`,
   '--minify',
 ].join(' ');

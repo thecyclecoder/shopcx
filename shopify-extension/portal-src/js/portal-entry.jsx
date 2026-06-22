@@ -2,9 +2,16 @@
 // Only reads data-workspace from Liquid. Everything else comes from the bootstrap API.
 import { render } from 'preact';
 import App from './App.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 import { configure, requestJson } from './core/api.js';
+import { installPortalErrorReporter, reportPortalCrash } from './core/error-reporter.js';
 
 async function boot() {
+  // Capture client-side JS errors (uncaught errors / unhandled rejections) + a
+  // liveness heartbeat → /api/client-errors. Installed before anything else so a
+  // crash during bootstrap is still seen. Fail-open, never blocks the portal.
+  installPortalErrorReporter();
+
   const root = document.getElementById('subscriptions-portal-root');
   if (!root) return;
 
@@ -58,7 +65,19 @@ async function boot() {
   }
 
   root.innerHTML = '';
-  render(<App config={config} />, root);
+  try {
+    render(
+      <ErrorBoundary>
+        <App config={config} />
+      </ErrorBoundary>,
+      root,
+    );
+  } catch (e) {
+    // A synchronous crash during the initial render — report it (the boundary
+    // only catches crashes once mounted). Fail-open.
+    reportPortalCrash(e);
+    throw e;
+  }
 }
 
 if (document.readyState === 'loading') {
