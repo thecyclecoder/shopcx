@@ -52,6 +52,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the three "hidden surfaces" where failures hide — Vercel runtime errors, Inngest errored runs, Supabase errors — piped into the Control Tower so they page you + show on the dashboard instead of being found by a customer report. P1: Inngest `function.failed` handler (native) + Vercel Log Drain→webhook (I set up the drain) + an app-layer `reportDbError` (catches the swallowed-error class, no token). P2: Supabase Management Logs API (the one part needing an owner-generated Supabase access token). Extends [[control-tower]].
 
+## Active project — Subscription Overcharge Remediation ⏳
+
+**Spec:** [[subscription-overcharge-remediation]] · **Owner:** [[../functions/retention]]
+
+**Why this matters:** the capability the system should've had on Jim Leone's ticket — his grandfathered pricing dropped → Appstle billed $229.26 vs $139.84, he asked to cancel, and triage authored a (forbidden) build-order-cancellation spec instead of fixing the real issue. Detect a renewal **overcharge from dropped grandfathered pricing** → partial-refund the delta → **Appstle pricing-policy heal** (never migrate-to-internal w/o a saved PM) → reply. Plus triage grounding: check overcharge before create_return/cancel; never author a code_gap spec that contradicts a policy; always propose a customer_reply. (Jim fixed by hand: $89.42 refunded, base healed to $139.84/4.) Replaces the deleted cancel-order-direct-action spec.
+
 ## Active project — Control Tower (autonomous-loop observability) ⏳
 
 **Spec:** [[control-tower]] · **Owner:** [[../functions/platform]]
