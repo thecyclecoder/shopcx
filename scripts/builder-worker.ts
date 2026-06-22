@@ -2904,7 +2904,7 @@ function repairPrompt(brief: string): string {
     ``,
     brief,
     ``,
-    `Trace the implicated route / cron / Inngest function / library in the codebase and decide ONE verdict (cite the root cause):`,
+    `Trace the implicated code in the working tree, then decide ONE verdict (cite the root cause). The signature's SOURCE tells you WHERE to look: a server error (vercel/inngest/supabase) → a route / cron / Inngest function / library; a **\`source='client'\`** error is a BROWSER / React crash → trace the **client-side component or storefront/portal island for that error's surface + page** (e.g. surface \`storefront-pdp\` / \`storefront-customize\` / \`checkout\` / \`thank-you\` / \`portal\` — look in the storefront route's client components or shopify-extension/portal-src, NOT a server route). A real client bug is still "real-bug" (author a fix spec; owner likely \`[[../functions/growth]]\` for storefront / \`[[../functions/retention]]\` for portal).`,
     `  • "real-bug" — a genuine defect in OUR code. Author a single-phase, ~30-min-scoped fix spec. (Surfaced for owner Build — NOT auto-built, because it touches product code.)`,
     `  • "monitor-false-positive" — the Control Tower assertion mis-fired on a HEALTHY loop. Author a spec to fix the analyzer (add a grace / tighten the assertion) — monitor-only.`,
     `  • "foreign-app-noise" — a not-ours / foreign-app error leaking into a feed. Author a spec to SCOPE THE CAPTURE (filter it out) — monitor-only.`,

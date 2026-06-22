@@ -122,7 +122,7 @@ export function parseRepairSpecMeta(markdown: string): { rootCause: string | nul
 const LIVE_REPAIR_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "needs_attention"];
 
 export interface EnqueueRepairInput {
-  /** the error feed source ('inngest'|'vercel'|'supabase'|'supabase-logs') or 'loop-alert'. */
+  /** the error feed source ('inngest'|'vercel'|'supabase'|'supabase-logs'|'client') or 'loop-alert'. */
   source: string;
   /** the dedupe key — the error_events signature, or `loop:<loop_id>` for a monitor alert. */
   signature: string;
