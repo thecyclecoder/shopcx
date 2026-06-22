@@ -146,6 +146,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `meta_connected_admin_name` | `text` | ✓ |  |
 | `social_brand_proof_points` | `text` | ✓ |  |
 | `storefront_skip_customize` | `bool` | — | default: `false`. When true, pack-select navigates **straight to `/checkout`** (skipping `/customize`); checkout then shows a "Customize your order" button as the opt-in editor. A/B-toggleable without a deploy. On for Superfoods. See [[../lifecycles/storefront-checkout]] (the customize-bypass funnel). |
+| `is_test` | `bool` | — | default: `false`. **Sentinel** — true = a dedicated **spec-test sandbox tenant** ([[../specs/spec-test-deep-verification]] Phase 2). The spec-test agent's sandbox toolkit (`scripts/spec-test-sandbox.ts`, [[../libraries/spec-test-sandbox]]) refuses to fire an event / call an endpoint / write a fixture against any workspace where `is_test` is not true (`assertTestWorkspace`), so "scope to the test workspace" = `workspace_id = the is_test workspace` and "zero writes to non-test-workspace rows" = "no row with a different `workspace_id` changed". Partial index `idx_workspaces_is_test (id) WHERE is_test`. Migration `20260622120000_workspaces_is_test.sql`. |
 
 ## Foreign keys
 

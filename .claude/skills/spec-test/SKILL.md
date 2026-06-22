@@ -25,9 +25,15 @@ you are constrained to **reads** (see the hard rule).
   own **stamp**: `agent_verdict` ∈ `approved` (zero auto-checks failed) · `issues` (an auto-check
   failed) · `needs_human` (no auto-checks ran / only human checks remain). This is a CEO→role→tool
   signal ("the bot checked the automatable parts and they hold"), which the owner then confirms.
-- Any check that would **mutate prod** is auto-classified **`needs_human`** — you flag it, you do not
-  run it. Hitting that rail = surface it, not execute. This is the supervisable-autonomy north star —
+- Any check that would **mutate REAL prod data** (a real customer/order/charge/message, any external
+  API call with real effect) is auto-classified **`needs_human`** — you flag it, you do not run it.
+  Hitting that rail = surface it, not execute. This is the supervisable-autonomy north star —
   see [[../../../docs/brain/operational-rules]].
+- **The ONE bounded exception is the sandbox** (`scripts/spec-test-sandbox.ts`): it drives internal-only
+  behavioral flows against dedicated **`is_test` fixtures** — never a real customer/dollar/external API.
+  The EXTERNAL SIDE-EFFECT FIREWALL keeps it bounded: it only drives flows proven internal-only, refuses
+  any non-`is_test` workspace, and a flow that would hit an external API stays `needs_human`. You still
+  never touch real prod data, and you still never flip a spec verified/archived.
 
 ## Step 1 — classify every `## Verification` bullet
 
@@ -38,11 +44,13 @@ result}.`
 ⭐ **The founder's mandate: if a machine can test it, the machine does it.** Human testing is reserved
 for genuine visual/aesthetic judgment ("does the landing page look good," "is the chat window big
 enough") and for an irreversible prod side-effect that left no observable trace. Everything else you
-**attempt to verify non-destructively** before deferring. Four non-destructive execution modes are at
+**attempt to verify non-destructively** before deferring. Five non-destructive execution modes are at
 your disposal — read-only repo/DB/HTTP probes, **outcome probes** of already-observable prod state, a
-**non-destructive local harness** that imports and exercises pure code locally, and a **headless-browser
-check** that loads an owner-authed page and asserts the rendered DOM (with a screenshot as evidence).
-Reach for them in that order; `needs_human` is the last resort, not the default.
+**non-destructive local harness** that imports and exercises pure code locally, a **headless-browser
+check** that loads an owner-authed page and asserts the rendered DOM (with a screenshot as evidence),
+and — for a behavioral flow whose mutations are **internal-only** — a **sandbox check** that drives the
+flow on dedicated `is_test` fixtures, asserts the resulting rows/events, and cleans up. Reach for them in
+that order; `needs_human` is the last resort, not the default.
 
 For **each** bullet decide one category:
 
@@ -79,6 +87,20 @@ For **each** bullet decide one category:
     server-side (service-role admin — NO human creds), loads the page authed, asserts, and uploads a
     screenshot to the private evidence bucket. A *rendered fact* ("the stamp is present", "the textarea has
     rows≥5") is a browser check — only a *taste* judgment ("does it look good") is visual `needs_human`.
+  - **Sandbox check (internal-only behavioral bullets).** A bullet shaped *"fire event / call POST /
+    approve → assert DB rows + events"* whose every side effect is **internal** (a DB write or an Inngest
+    event) is a **SANDBOX check** (`auto`, pass/fail) — drive it on the dedicated `is_test` fixtures, assert
+    the rows/events, then clean up. Run it with `npx tsx scripts/spec-test-sandbox.ts` (Step 2). 🚨 **The
+    EXTERNAL SIDE-EFFECT FIREWALL is the core safety rule:** drive a flow ONLY if you can PROVE every side
+    effect stays internal. A flow that would call an **external API with real effect** — Amplifier
+    fulfillment, a Braintree charge/refund, an Appstle mutation, a Resend/Twilio send, a live Meta ad pause —
+    is **NOT run**; it stays `needs_human`. Prove it by reading the handler: assert up to the external edge
+    and flag the edge itself human. (Example — comp renewal: the *fail-closed* branch, comp sub + `comp_role`
+    null → failed `type='comp'` txn + `subscription.comp_renewal_failed` event, no order, no advance, is
+    fully internal → SANDBOX check; the *happy* branch's Amplifier handoff is external → that sub-assertion
+    stays `needs_human`.) The toolkit only drives flows in its internal-only registry and refuses any
+    non-`is_test` workspace. Always also assert **ZERO writes to non-test-workspace rows** (the tool reports
+    `isolation.zero_non_test_workspace_writes`).
 - **needs_human** — exactly TWO cases remain, and nothing else:
   - **(a) Visual / aesthetic judgment** — the pass condition is human taste: "looks right", "renders the
     badge nicely", "the page looks fantastic", "the chat window is big enough", "the layout reads well".
@@ -90,17 +112,21 @@ For **each** bullet decide one category:
     that real traffic hasn't already produced and that no local unit can stand in for: a **real
     SMS/email/charge actually reaching an external carrier/processor**, a real order placed against a
     live storefront, **a UI flow that can only be verified by submitting a real customer/billing
-    mutation** (the browser check is owner-authed but READ-ONLY — it never submits such a form). You never
-    perform these. (If real traffic already produced an instance → that's an *outcome probe* = `auto`, not
-    this. If the logic is a local unit → *local harness* = `auto`. If it's a rendered-DOM assertion → a
-    *browser check* = `auto`, not this.)
+    mutation** (the browser check is owner-authed but READ-ONLY — it never submits such a form), or a
+    **behavioral flow that crosses the external firewall** (the side effect would hit Amplifier/Braintree/
+    Appstle/Resend/Twilio/Meta with real effect — the sandbox refuses it). You never perform these. (If
+    real traffic already produced an instance → that's an *outcome probe* = `auto`, not this. If the logic
+    is a local unit → *local harness* = `auto`. If it's a rendered-DOM assertion → a *browser check* =
+    `auto`. If every side effect is internal-only on `is_test` fixtures → a *sandbox check* = `auto`, not
+    this.)
 - **inconclusive** — auto in principle, but you couldn't determine it without a side effect or a missing
   fixture (and no read-only outcome probe or local harness is reachable), OR the bullet is genuinely
   ambiguous and it's unclear a human easily can either (say why in the evidence).
 
 **Tie-breaker (replaces "when in doubt → needs_human"):** *When in doubt, attempt a read-only outcome
 probe first, then a non-destructive local harness, then (for a rendered-UI bullet) a headless-browser
-check; defer to `needs_human` ONLY if ALL are impossible.* A false "pass" is still worse than a deferral
+check, then (for an internal-only behavioral bullet) a sandbox check; defer to `needs_human` ONLY if ALL
+are impossible OR the flow crosses the external firewall.* A false "pass" is still worse than a deferral
 — so earn each `pass` with concrete evidence — but a lazy `needs_human` for something a machine could
 have checked is exactly what this rule exists to stop.
 
@@ -170,6 +196,20 @@ Your read-only QA toolkit, all on the box:
   customer/billing data (no such capability exists in the tool) — a bullet that can only be verified by a
   real mutation stays `needs_human`. Observing the wrong rendered state IS breakage evidence, so a
   browser-check `fail` is a legitimate `fail`.
+- **Sandbox check (internal-only behavioral flows)** — for a *"fire event / call POST / approve → assert
+  DB + events"* bullet whose every side effect is internal, drive it on the `is_test` fixtures with
+  `npx tsx scripts/spec-test-sandbox.ts`. Subcommands: `info` (the fixtures + the internal-only flow
+  registry + the forbidden external APIs), `isolation` (the non-test-workspace fingerprint),
+  `fire <flowId>` (fire an allowlisted internal-only Inngest event — e.g. `comp-renewal-failclosed` —
+  after it proves the precondition, then it asserts the rows/events + reports
+  `isolation.zero_non_test_workspace_writes`), `post <flowId> [--body '<json>'|--clear]` (call an
+  allowlisted internal POST with owner cookies scoped to the `is_test` workspace — e.g.
+  `human-queue-resolve`, `roadmap-answer`), and `cleanup` (idempotent reset). 🚨 **External firewall:** it
+  ONLY drives flows in `INTERNAL_ONLY_FLOWS` (`src/lib/spec-test-sandbox.ts`) and refuses any non-`is_test`
+  workspace (`assertTestWorkspace`); a flow that would hit Amplifier/Braintree/Appstle/Resend/Twilio/Meta
+  is not runnable here and stays `needs_human`. Cite the tool's `pass`, the per-assertion booleans, and
+  `isolation.zero_non_test_workspace_writes:true` as evidence; run `cleanup` after. Observing the wrong
+  row/event state IS breakage evidence, so a sandbox-check `fail` is a legitimate `fail`.
 - **WebSearch** when a check needs external context.
 
 Each verdict MUST carry concrete **evidence**: the query result, the HTTP status, the `file:line`, the
@@ -228,5 +268,8 @@ If you genuinely cannot proceed (spec missing, repo unreadable), your final mess
 ## Related
 `docs/brain/specs/spec-test-agent.md` · `docs/brain/specs/spec-test-deep-verification.md` (browser check) ·
 `scripts/builder-worker.ts` → `runSpecTestJob` · `scripts/spec-test-db-probe.ts` (read-only SELECT probe) ·
-`scripts/spec-test-browser-check.ts` (headless-browser render assertions + screenshot) · skills:
+`scripts/spec-test-browser-check.ts` (headless-browser render assertions + screenshot) ·
+`scripts/spec-test-sandbox.ts` (internal-only behavioral drive + assert + isolation, the external
+firewall) · `src/lib/spec-test-sandbox.ts` (fixtures + flow registry + firewall) ·
+`scripts/seed-spec-test-fixtures.ts` (the gated fixture seed) · skills:
 `probe-db`, `verify` · [[../../../docs/brain/tables/spec_test_runs]] · [[../../../docs/brain/operational-rules]]
