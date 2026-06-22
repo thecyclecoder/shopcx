@@ -13,7 +13,7 @@ A PR whose work already merged via a *sibling* PR is **unresolvable by definitio
 - A CONFLICTING `claude/*` PR whose spec already has a merged build PR → the resolver **closes it** (branch deleted, comment left), enqueues **no** further pr-resolve job; a genuinely-conflicting PR whose work is NOT merged still gets resolved normally.
 - Re-queue a build for a spec that already merged (simulate the account-switch recovery) → **no second PR** is opened (the build no-ops as already-shipped); `requeue-failed-builds` skips already-merged specs.
 - A PR that fails to resolve N times (N≤3) → stops retrying and surfaces to the owner (a repair/needs-attention signal), never an open-ended loop.
-- Negative: a normal first-time dirty PR resolves on the first pass as today; a spec with no prior merged PR builds + PRs normally.
+- ✅ Negative: a normal first-time dirty PR resolves on the first pass as today; a spec with no prior merged PR builds + PRs normally.
 
 ## Phase 1 — already-merged detection + close + PR dedup + retry cap ✅
 Resolver checks sibling-merged before resolving → close+stop; build/PR-create + `requeue-failed-builds` dedupe on a merged build PR per spec; cap pr-resolve retries with owner surfacing on exhaustion. Brain: [[dirty-pr-resolver-agent]] · [[../libraries/roadmap-actions]] · [[../libraries/agent-jobs]] · [[auto-ship-pipeline]].
