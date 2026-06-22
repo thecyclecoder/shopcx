@@ -32,6 +32,12 @@ create index if not exists loop_heartbeats_active_kind_loop_idx
   on public.loop_heartbeats (loop_id)
   where kind not in ('inline-agent', 'reactive');
 
+-- DROP before CREATE: this rewrite removes the `total_count` output column (the dropped
+-- count(*) OVER), and CREATE OR REPLACE FUNCTION cannot change a function's return type /
+-- remove an OUT parameter ("cannot change return type of existing function"). Drop the old
+-- definition first; the (int) argument signature is unchanged so this targets it exactly.
+drop function if exists public.control_tower_loop_beats(int);
+
 create or replace function public.control_tower_loop_beats(p_history_limit int default 10)
 returns table (
   loop_id text,
