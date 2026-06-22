@@ -22,7 +22,7 @@
 - Pick a goal (e.g. Storefront Optimizer) → only its specs show, with an accurate `X/Y shipped · N building` header; "All goals" restores the full board; the selection persists in the URL.
 - Source chip **🔧 Repair** → only `Repair-signature` specs; **🎯 Goal** → only goal-linked specs; **✋ Manual** → the rest; **All** → everything.
 - Goal + Source + search compose (AND) — e.g. Storefront Optimizer goal + Manual source + "hero" matches only manual hero specs under that goal.
-- A spec linked from a goal doc shows under that goal; a repair spec with no goal shows under Manual/Repair, not a goal; counts in the progress header match the visible cards.
+- ✅ A spec linked from a goal doc shows under that goal; a repair spec with no goal shows under Manual/Repair, not a goal; counts in the progress header match the visible cards.
 - Negative: a goal with no specs yet → empty board + `0/0` header (not an error); a spec in multiple goals (rare) shows under each.
 
 ## Phase 1 — goal selector + source chips + progress header ✅
