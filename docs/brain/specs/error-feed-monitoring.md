@@ -1,4 +1,4 @@
-# Error-Feed Monitoring — Vercel + Inngest + Supabase into the Control Tower ⏳
+# Error-Feed Monitoring — Vercel + Inngest + Supabase into the Control Tower ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[control-tower]]. · **Blocked-by:** [[control-tower]] (plugs into its alert store + dashboard).
 
@@ -26,8 +26,10 @@ Shipped. The `inngest/function.failed` handler ([[../inngest/inngest-failure-cap
 
 **Owner setup remaining (one-time, not a build step):** (1) generate a `VERCEL_LOG_DRAIN_SECRET` + create the Vercel Log Drain via our token pointed at `/api/webhooks/vercel-logs` (until set, the endpoint is live but returns `503`); (2) set the secret in the Vercel env. The Inngest + Supabase-app feeds need nothing.
 
-## Phase 2 — Supabase Management Logs API ⏳
-Once the owner provides a Supabase access token (stored encrypted): poll/stream Postgres/API/auth error logs into the Control Tower (DB-level errors our app never sees — constraint violations behind RLS, auth failures, slow-query/timeouts). Dashboard "Supabase errors" panel + alerting.
+## Phase 2 — Supabase Management Logs API ✅
+Shipped. The `supabase-log-poll-cron` ([[../inngest/supabase-log-poll]], registered in `src/app/api/inngest/route.ts` + the Control Tower registry, every 15 min) polls the **Supabase Management Logs API** ([[../integrations/supabase-management-logs]], `logs.all`) for DB-level errors our app never sees — Postgres `ERROR`/`FATAL`/`PANIC`, auth-service errors, edge API 5xxs — over the `(last_polled_at, now]` window (≤24h), groups them by `(source, signature)`, and records into the existing [[../tables/error_events]] store under a new `source='supabase-logs'` (its own dashboard panel "Supabase errors (DB logs)"), paging owners on a new-signature/spike (rate-limited, [[../libraries/notify-ops-alert]]). The poller (`src/lib/control-tower/supabase-log-poll.ts`, [[../libraries/control-tower]]) reads the owner's Supabase access token **stored encrypted** (AES-256-GCM, [[../libraries/crypto]]) in the new single-row [[../tables/error_feed_supabase_config]]; a **no-op until the token is pasted** via the owner-only `POST /api/developer/control-tower/supabase-token` endpoint. Migration `20260622160000_supabase_log_poll.sql` (widens the `source` CHECK + adds the config table). Brain: [[../integrations/supabase-management-logs]] · [[../inngest/supabase-log-poll]] · [[../tables/error_feed_supabase_config]] · [[../tables/error_events]] · [[../libraries/control-tower]] · [[../dashboard/control-tower]].
+
+**Owner setup remaining (one-time, not a build step):** generate a Supabase access token (personal/management) and paste it once via the Control Tower owner endpoint (`POST /api/developer/control-tower/supabase-token`). Until set, the cron is live but a no-op (the panel stays green); the Phase 1 app-layer reporter covers what our own code sees.
 
 ## Verification
 
@@ -38,5 +40,8 @@ Once the owner provides a Supabase access token (stored encrypted): poll/stream 
 - **Supabase (app-layer):** drive `refreshScorecards` into a persist error (e.g. a constraint violation on `iteration_scorecards_daily`) → `reportDbError` fires → the **Supabase errors (app-layer)** panel shows a `scorecard-upsert (iteration_scorecards_daily): …` incident + a page. (The swallowed-upsert class is now visible at the source, not silently reported as success.)
 - **Healthy state:** with no recent errors, all three panels are **green** ("No errors in the last 7 days") — no alert noise. A panel goes red only with an error in the last hour (amber within 24 h).
 
-### Phase 2 (planned ⏳ — needs an owner Supabase access token)
-- With the token stored encrypted, a **DB-level** error our app never saw (e.g. a constraint violation behind RLS, an auth failure, a slow-query/timeout) surfaces on a Supabase panel via the Management/Logs API poll — even when no app code reported it.
+### Phase 2 (shipped ✅ — needs an owner Supabase access token to exercise)
+- **Migration:** after applying `20260622160000_supabase_log_poll.sql`, `public.error_feed_supabase_config` exists (single row, service-role-only RLS) and the `error_events_source_check` constraint admits `'supabase-logs'`. `scripts/apply-supabase-log-poll-migration.ts` prints the table present + the new constraint def.
+- **Token setup:** `POST /api/developer/control-tower/supabase-token` (owner-gated) with `{ token }` stores it encrypted; `GET` returns `{ configured: true, projectRef, lastPolledAt }` (never the token); `DELETE` clears it. A non-owner gets `403`.
+- **No-op until configured:** with no token, `supabase-log-poll-cron` returns `{ status: 'no-token' }`, beats `ok:true`, and the "Supabase errors (DB logs)" panel stays green — no noise.
+- **With the token stored encrypted**, a **DB-level** error our app never saw (e.g. a constraint violation behind RLS, an auth failure, a slow-query/timeout) surfaces on the **Supabase errors (DB logs)** panel via the Management/Logs API poll — even when no app code reported it — grouped by signature and paging owners once (rate-limited), even though no Phase 1 feeder fired.

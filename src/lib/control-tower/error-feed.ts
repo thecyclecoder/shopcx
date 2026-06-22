@@ -26,7 +26,7 @@ import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-export type ErrorSource = "inngest" | "vercel" | "supabase";
+export type ErrorSource = "inngest" | "vercel" | "supabase" | "supabase-logs";
 
 /** Page at most once per incident per this window — a burst = one page (rate-limit). */
 const PAGE_COOLDOWN_MS = 30 * 60_000;
@@ -35,6 +35,8 @@ const SOURCE_LABEL: Record<ErrorSource, string> = {
   inngest: "Inngest failure",
   vercel: "Vercel error",
   supabase: "Supabase error",
+  // The Management Logs feed (Phase 2): DB-level errors our app never saw.
+  "supabase-logs": "Supabase DB-log error",
 };
 
 /**
@@ -236,7 +238,7 @@ const RED_MS = 60 * 60_000; // any error in the last hour ⇒ panel red.
 const AMBER_MS = 24 * 60 * 60_000; // any in the last day ⇒ amber.
 const PANEL_INCIDENT_LIMIT = 8;
 
-const SOURCES: ErrorSource[] = ["vercel", "inngest", "supabase"];
+const SOURCES: ErrorSource[] = ["vercel", "inngest", "supabase", "supabase-logs"];
 
 /** READ-ONLY: the per-source error panels for the Control Tower dashboard. */
 export async function buildErrorFeedSnapshot(adminClient?: Admin): Promise<ErrorFeedSnapshot> {

@@ -2,7 +2,7 @@
 
 The Control Tower module ([[../specs/control-tower]] Phase 1 + Phase 2; [[../specs/control-tower-agent-coverage]] adds the inline AI agents) — the registry, the heartbeat emit helper, and the monitor/snapshot logic (liveness + cron-freshness + stuck-jobs + inline-agent assertions + Phase 2 output assertions) that powers the [[../inngest/control-tower-monitor]] cron and the [[../dashboard/control-tower]] dashboard.
 
-**Files:** `src/lib/control-tower/registry.ts` · `src/lib/control-tower/heartbeat.ts` · `src/lib/control-tower/monitor.ts` · `src/lib/control-tower/error-feed.ts`
+**Files:** `src/lib/control-tower/registry.ts` · `src/lib/control-tower/heartbeat.ts` · `src/lib/control-tower/monitor.ts` · `src/lib/control-tower/error-feed.ts` · `src/lib/control-tower/supabase-log-poll.ts`
 
 ## `registry.ts` — the loop registry (code config)
 
@@ -12,8 +12,8 @@ The single source of truth for every loop the monitor watches. **Add a row here 
 - `type OutputAssertionId = "escalation-idle" | "spec-test-persisted" | "renewal-integrity"` — Phase 2 output assertions (see monitor.ts).
 - `type InlineWorkSignalId = "tickets-awaiting-qc" | "journeys-awaiting-delivery" | "orders-awaiting-fraud-screen" | "tickets-awaiting-decision"` — the read-only independent upstream-demand probes the inline-agent liveness-when-work-exists check evaluates.
 - `interface MonitoredLoop { id, kind, label, description, expectedCadence, livenessWindowMs?, shaGraceMs?, agentKind?, stuckThresholdMs?, outputAssertion?, inlineWorkSignal?, errorRateThreshold?, minRunsForErrorRate? }`
-- `MONITORED_LOOPS: MonitoredLoop[]` — the box worker (`box`), 7 crons (each cron's inngest fn id + a cadence-derived `livenessWindowMs`), 10 agent kinds (`agent:<kind>` + a per-kind `stuckThresholdMs`), and **4 inline AI agents** (`ai:ticket-analyzer`, `ai:journey-delivery`, `ai:fraud-detector`, and `ai:orchestrator` — the per-ticket decision agent, `inlineWorkSignal: 'tickets-awaiting-decision'`, [[../specs/control-tower-agent-coverage]] Phase 2 — each with a `livenessWindowMs`, an `inlineWorkSignal`, and `errorRateThreshold`/`minRunsForErrorRate`). Three crons also carry an `outputAssertion`: `triage-escalations-cron` → `escalation-idle`, `spec-test-cron` → `spec-test-persisted`, `internal-subscription-renewal-cron` → `renewal-integrity`.
-- `WORKER_BOX_ID = "box"` (matches `scripts/builder-worker.ts`) · `agentLoopId(kind)` → `agent:<kind>` · `INLINE_AGENT_IDS = { ticketAnalyzer, journeyDelivery, fraudDetector }` (the `ai:<agent>` loop ids, shared with the agent files).
+- `MONITORED_LOOPS: MonitoredLoop[]` — the box worker (`box`), 8 crons (each cron's inngest fn id + a cadence-derived `livenessWindowMs`, incl. `supabase-log-poll-cron`), 10 agent kinds (`agent:<kind>` + a per-kind `stuckThresholdMs`), and **4 inline AI agents** (`ai:ticket-analyzer`, `ai:journey-delivery`, `ai:fraud-detector`, and `ai:orchestrator` — the per-ticket decision agent, `inlineWorkSignal: 'tickets-awaiting-decision'`, [[../specs/control-tower-agent-coverage]] Phase 2 — each with a `livenessWindowMs`, an `inlineWorkSignal`, and `errorRateThreshold`/`minRunsForErrorRate`). Three crons also carry an `outputAssertion`: `triage-escalations-cron` → `escalation-idle`, `spec-test-cron` → `spec-test-persisted`, `internal-subscription-renewal-cron` → `renewal-integrity`.
+- `WORKER_BOX_ID = "box"` (matches `scripts/builder-worker.ts`) · `agentLoopId(kind)` → `agent:<kind>` · `INLINE_AGENT_IDS = { ticketAnalyzer, journeyDelivery, fraudDetector, orchestrator }` (the `ai:<agent>` loop ids, shared with the agent files).
 
 ## `heartbeat.ts` — end-of-run emit
 
@@ -32,15 +32,22 @@ Best-effort writes of one [[../tables/loop_heartbeats]] row (never throws).
 - **Inline-agent assertions** ([[../specs/control-tower-agent-coverage]], `evalInlineAgent` + `fetchInlineAgentState`): event-driven AI agents have no cron cadence and no `agent_jobs` queue, so silence only matters when work exists. **liveness-when-work-exists** — the loop's `inlineWorkSignal` (an independent upstream-demand count: unanalyzed closed-AI [[../tables/tickets]]; recent [[../tables/journey_sessions]]; recent [[../tables/orders]]; inbound-customer [[../tables/ticket_messages]] for `ai:orchestrator`) is > 0 AND **0 successful** beats in the window → red, `reason='idle_while_work'`. **error-rate** — `errCount/total ≥ errorRateThreshold` (default 0.5) once `total ≥ minRunsForErrorRate` (default 5) → red, `reason='error_rate'`. Inline-agent beats are fetched separately (exact counts, true-latest-regardless-of-idle) so the agents' high beat volume can't crowd the 600-row cron window.
 - **Phase 2 output assertions** (`evalOutputAssertion`, layered on top of the P1 tile — only escalates green/amber → red, a P1 red stays): `fetchAssertionInputs(admin)` adds 4 cheap read-only queries to the snapshot batch — open routine-escalated [[../tables/tickets]] (`escalated_at` set, `escalated_to` null, not closed/archived), the latest `triage-escalations` + `spec-test` [[../tables/agent_jobs]] `created_at`, and active overdue internal [[../tables/subscriptions]] (`next_billing_date` before today UTC). The three assertions: **escalation-idle** (tickets wait + no triage job within the cadence → `reason='idle_while_work'`, "idle while N tickets wait"), **spec-test-persisted** (beat reports `enqueued>0` but no spec-test job landed since → `reason='false_success'`, "reported N enqueued, persisted 0"), **renewal-integrity** (N active internal subs overdue → `reason='renewal_integrity'`). A violation flows through `runControlTowerMonitor` exactly like a P1 red (de-duped alert + page).
 
-## `error-feed.ts` — the error feed (error-feed-monitoring Phase 1)
+## `error-feed.ts` — the error feed (error-feed-monitoring Phase 1 + 2)
 
-The capture + page + snapshot layer for the three "hidden surfaces" ([[../specs/error-feed-monitoring]]) — Vercel runtime errors, Inngest failed runs, app-layer Supabase errors — into [[../tables/error_events]].
+The capture + page + snapshot layer for the "hidden surfaces" ([[../specs/error-feed-monitoring]]) — Vercel runtime errors, Inngest failed runs, app-layer Supabase errors, and (Phase 2) DB-level Supabase logs — into [[../tables/error_events]].
 
 - `recordError({ source, keyParts, title, detail?, sample?, occurrences? }, admin?)` → upserts a **grouped** [[../tables/error_events]] incident on `(source, signature)` (signature = a stable hash of the normalized `keyParts`), bumping `count`/`last_seen_at`. Pages owners ([[notify-ops-alert]]) on a **new signature or a re-firing spike**, rate-limited to one page per incident per 30 min. **Best-effort — never throws**; a `23505` race falls back to the update path.
 - `reportDbError(error, { op, table?, … }, admin?)` — the **app-layer Supabase reporter**: a no-op on a null error, else `recordError({ source: "supabase", … })`. Call it anywhere code gets a non-null Supabase `{ error }` it would otherwise swallow (the scorecard-upsert class — wired in `src/lib/meta/scorecards.ts`). See [[../operational-rules]] "don't swallow a Supabase error".
 - `signatureFor(source, keyParts)` → the grouping key (normalizes out uuids/hex/numbers/quoted strings).
-- `buildErrorFeedSnapshot(admin?)` → `ErrorFeedSnapshot { generatedAt, panels: ErrorFeedPanel[] }` — **READ-ONLY**: last 7 days of [[../tables/error_events]] per source, each panel colored by recency (red ≤1 h, amber ≤24 h, else green). Used by the dashboard API (`GET /api/developer/control-tower`, merged in as `errorFeed`).
-- Feeders: [[../inngest/inngest-failure-capture]] (`source='inngest'`), `/api/webhooks/vercel-logs` ([[../integrations/vercel-log-drain]], `source='vercel'`), `reportDbError` call sites (`source='supabase'`).
+- `buildErrorFeedSnapshot(admin?)` → `ErrorFeedSnapshot { generatedAt, panels: ErrorFeedPanel[] }` — **READ-ONLY**: last 7 days of [[../tables/error_events]] per source (4 panels: `vercel`, `inngest`, `supabase`, `supabase-logs`), each colored by recency (red ≤1 h, amber ≤24 h, else green). Used by the dashboard API (`GET /api/developer/control-tower`, merged in as `errorFeed`).
+- Feeders: [[../inngest/inngest-failure-capture]] (`source='inngest'`), `/api/webhooks/vercel-logs` ([[../integrations/vercel-log-drain]], `source='vercel'`), `reportDbError` call sites (`source='supabase'`), and the [[../inngest/supabase-log-poll]] cron (`source='supabase-logs'`).
+
+## `supabase-log-poll.ts` — Management Logs poller (error-feed-monitoring Phase 2)
+
+Pulls DB-level Supabase errors our app never sees — Postgres/auth/API — from the [[../integrations/supabase-management-logs]] `logs.all` endpoint into [[../tables/error_events]] (`source='supabase-logs'`). Driven by the [[../inngest/supabase-log-poll]] cron.
+
+- `pollSupabaseLogs(admin?)` → `{ status: 'no-token'|'ok'|'error', incidents, rows, errors }` — reads + decrypts the token, polls the `(last_polled_at, now]` window (≤24h) across 3 source queries, **groups by `(source, signature)`** client-side, `recordError`s each, advances the cursor on partial success. **No-op (no-token)** until the owner pastes the token. Best-effort — per-source failures collected in `errors`, never thrown.
+- `getSupabaseLogConfig(admin?)` → `{ token, projectRef, lastPolledAt }` or null · `isSupabaseLogPollConfigured(admin?)` → boolean · `setSupabaseAccessToken(token, { projectRef? }, admin?)` (encrypt + upsert) · `clearSupabaseAccessToken(admin?)` · `projectRefFromEnv()` (parses `NEXT_PUBLIC_SUPABASE_URL`). Config: [[../tables/error_feed_supabase_config]] (single row, service-role only). Owner endpoint: `/api/developer/control-tower/supabase-token`.
 
 ## Gotchas
 
@@ -53,4 +60,4 @@ The capture + page + snapshot layer for the three "hidden surfaces" ([[../specs/
 
 ## Related
 
-[[../specs/control-tower]] · [[../specs/control-tower-agent-coverage]] · [[../tables/loop_heartbeats]] · [[../tables/loop_alerts]] · [[../tables/worker_heartbeats]] · [[../inngest/control-tower-monitor]] · [[../dashboard/control-tower]] · [[../operational-rules]]
+[[../specs/control-tower]] · [[../specs/control-tower-agent-coverage]] · [[../specs/error-feed-monitoring]] · [[../tables/loop_heartbeats]] · [[../tables/loop_alerts]] · [[../tables/worker_heartbeats]] · [[../tables/error_events]] · [[../tables/error_feed_supabase_config]] · [[../inngest/control-tower-monitor]] · [[../inngest/supabase-log-poll]] · [[../integrations/supabase-management-logs]] · [[../dashboard/control-tower]] · [[../operational-rules]]
