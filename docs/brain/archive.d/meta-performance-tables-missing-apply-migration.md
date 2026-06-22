@@ -1,0 +1,1 @@
+- **meta-structure-upsert fails PGRST205 — meta_campaigns/adsets/ads/insights_daily tables never created in prod (skipped migration)** · verified 2026-06-22 · → [[libraries/meta__performance]]
