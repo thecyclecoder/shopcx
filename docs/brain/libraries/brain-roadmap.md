@@ -10,7 +10,7 @@ Per [[../project-management]], planning + tracking live in the brain, not a sepa
 
 ## Core types
 
-- **`SpecCard`** — one spec: `slug`, `title`, `status` (derived `Phase`), `summary`, `phases[]`, `counts`, `owner?` (function slug from `**Owner:** [[../functions/x]]`), `parent?` (mandate/goal-milestone from `**Parent:**`), and **`blockedBy[]`** (prerequisite specs — see below).
+- **`SpecCard`** — one spec: `slug`, `title`, `status` (derived `Phase`), `summary`, `phases[]`, `counts`, `owner?` (function slug from `**Owner:** [[../functions/x]]`), `parent?` (mandate/goal-milestone from `**Parent:**`), **`blockedBy[]`** (prerequisite specs — see below), and **`autoBuild?`** (`false` ⇒ opted out of spec-blockers auto-queue via `**Auto-build:** off`).
 - **`Phase`** = `"planned" | "in_progress" | "shipped" | "rejected"`.
 - `ProjectTrack`, `RoadmapData`, `FunctionMap`/`FunctionGroup`/`ParentGroup`, `FunctionCard`/`Mandate`, `GoalCard`/`Milestone`, `ArchiveEntry`.
 
@@ -40,6 +40,7 @@ Under a spec's H1, one-per-concept bold metadata lines, each resolving `[[wikili
 - **`cleared`** is `true` when the blocking spec's derived `status` is `shipped`, **or** the slug is no longer a live spec at all (archived/folded — it left `specs/` — or a dangling reference). A prerequisite already on `main` never permanently blocks.
 - Uncleared (`planned`/`in_progress`) = still blocking.
 - **`getSpecBlockers(slug)`** → the resolved `blockedBy[]` for one spec. This is what the enqueue gate ([[roadmap-actions]] `queueRoadmapBuild`) checks before inserting a build row; the [[../dashboard/roadmap|BuildButton]] renders it as the "🔒 Blocked by …" chip + disabled Build.
+- **`SpecCard.autoBuild?: boolean`** (spec-blockers Phase 2 auto-queue) — `parseSpec` reads a `**Auto-build:** off` header line (like Owner/Parent); `off`/`no`/`false`/`manual`/`disabled` ⇒ `false`, any other value or no line ⇒ default on (`undefined`). When `false` the spec is **never** auto-queued as its last blocker clears (`agent-jobs.autoQueueUnblockedBy` skips it); **manual Build is unaffected**.
 
 ## Callers
 

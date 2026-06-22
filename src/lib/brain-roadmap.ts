@@ -33,6 +33,10 @@ export interface SpecCard {
   // i.e. the prerequisite code is on `main`. The board + the enqueue gate share this one source of truth.
   // Empty when the spec declares no Blocked-by. Resolved against the full spec set in getRoadmap/getSpec.
   blockedBy: { slug: string; title: string; status: Phase; cleared: boolean }[];
+  // spec-blockers Phase 2 (auto-queue on unblock): when this spec's LAST blocker ships, its build is
+  // auto-enqueued — unless the owner opts out with a `**Auto-build:** off` header line. `false` = opted
+  // out (never auto-queued); undefined/true = default (eligible). Manual Build is unaffected either way.
+  autoBuild?: boolean;
 }
 
 export interface ProjectTrack {
@@ -198,6 +202,16 @@ function parseSpec(slug: string, raw: string): SpecCard {
     break;
   }
 
+  // **Auto-build:** off — owner opt-out from spec-blockers Phase 2 auto-queue (parsed like Owner/Parent).
+  // Default (no line) = on; only off/no/false/manual/disabled flips it false. Manual Build is unaffected.
+  let autoBuild: boolean | undefined;
+  for (const l of lines) {
+    const am = l.match(/\*\*Auto-build:\*\*\s*(.+?)\s*$/i);
+    if (!am) continue;
+    autoBuild = !/^(off|no|false|manual|disabled?)\b/i.test(am[1].trim());
+    break;
+  }
+
   return {
     slug,
     title,
@@ -208,6 +222,7 @@ function parseSpec(slug: string, raw: string): SpecCard {
     owner,
     parent,
     blockedBy: [...new Set(blockerSlugs)].map((s) => ({ slug: s, title: s, status: "planned" as Phase, cleared: false })),
+    autoBuild,
   };
 }
 
