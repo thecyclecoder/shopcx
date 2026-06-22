@@ -78,6 +78,12 @@ Internal-subscription guard: `isInternalSubscription()` short-circuits these cal
 
 Drives [[../tables/billing_forecast_events]] (sub created, cancelled, paused, frequency changed) and dunning entry via `dunning/payment-failed` event. Payloads: contract create / update / cancel / pause / resume; billing-attempt failure + success; line-item swap. Svix-signed via `webhook-id`, `webhook-timestamp`, `webhook-signature` headers, verified against `workspaces.appstle_webhook_secret_encrypted`.
 
+### Handler ack semantics (`/api/webhooks/appstle/[workspaceId]`)
+
+- **Pre-handler rejections return non-2xx** and are the *only* non-2xx responses: `400` (missing webhook headers), `401` (invalid signature), `404` (workspace has no `appstle_webhook_secret_encrypted`). Appstle should retry these.
+- **Once the signature verifies, the handler always acks 2xx** — even if processing throws. A 500 here makes Appstle retry the *same* payload, which throws again and re-runs partial side-effects; a retry can't fix a handler/data bug. The top-level `catch` logs richly (event type + contract/customer ref) and returns `{ ok: false, acked: true }`. Missed state self-heals via the periodic subscription sync + reconcile. (Before this, unguarded throws on `subscription.billing-*` events recurred ×11 in the Control Tower error feed.)
+- **`billingAttemptResponseMessage` is parsed via `parseBillingError()`** — a guarded helper. Appstle sends it as a JSON *string* on failures but it can arrive null/empty/already-parsed; a bare `JSON.parse` throws and was a 500 source. All three parse sites in the route use the helper.
+
 ## Gotchas
 
 - **`DELETE` for cancel is required.** PUT to PAUSED ≠ cancel; PUT to CANCELLED won't carry the `cancellationFeedback` that Appstle expects.

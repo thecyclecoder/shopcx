@@ -49,6 +49,24 @@ function dollarsToCents(amount: string | number | null | undefined): number {
   return Math.round(num * 100);
 }
 
+// Appstle's `billingAttemptResponseMessage` is a JSON *string* on failure events,
+// but it can also arrive null, empty, or already-parsed. A bare JSON.parse() on a
+// non-JSON value throws — and an unguarded parse here was bubbling to the route's
+// catch and 500ing billing-* webhooks (Appstle then retries → noise). Always parse
+// defensively.
+function parseBillingError(raw: unknown): { errorCode: string | null; errorMessage: string | null } {
+  if (raw == null) return { errorCode: null, errorMessage: null };
+  try {
+    const parsed = (typeof raw === "string" ? JSON.parse(raw) : raw) as Record<string, unknown> | null;
+    return {
+      errorCode: (parsed?.error_code as string) ?? null,
+      errorMessage: (parsed?.error_message as string) ?? null,
+    };
+  } catch {
+    return { errorCode: null, errorMessage: null };
+  }
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ workspaceId: string }> }
@@ -109,8 +127,21 @@ export async function POST(
 
     return NextResponse.json({ ok: true, event: eventType });
   } catch (err) {
-    console.error(`Appstle webhook error (${eventType}):`, err);
-    return NextResponse.json({ error: "Processing failed" }, { status: 500 });
+    // The signature already verified above — this is OUR processing failing on a
+    // genuine Appstle payload. Returning 500 makes Appstle RETRY the same payload,
+    // which throws again (it recurred ×11 in the error feed) and re-runs partial
+    // side-effects. A retry can't fix a handler/data bug, so ack 2xx + log richly
+    // and let the periodic subscription sync + reconcile self-heal any missed
+    // state. Non-2xx stays reserved for the genuinely-actionable rejections above
+    // (400/401/404 on bad headers / invalid signature / unconfigured workspace) —
+    // those we have NOT blanket-acked.
+    const contractRef =
+      (data?.contractId as string | undefined) ??
+      (data?.id as string | undefined) ??
+      ((data?.customer as { email?: string } | undefined)?.email) ??
+      "unknown";
+    console.error(`Appstle webhook error (${eventType}) for contract/customer ${contractRef} — acking to stop retries:`, err);
+    return NextResponse.json({ ok: false, acked: true, event: eventType, error: "Processing failed (logged)" });
   }
 }
 
@@ -565,7 +596,7 @@ async function handleBillingEvent(
         shopify_contract_id: contractId,
         attempt_count: data.attemptCount,
         status: data.status,
-        error_message: data.billingAttemptResponseMessage ? JSON.parse(data.billingAttemptResponseMessage as string)?.error_message : null,
+        error_message: parseBillingError(data.billingAttemptResponseMessage).errorMessage,
       },
     });
 
@@ -583,16 +614,8 @@ async function handleBillingEvent(
 
   // ── Dunning triggers ──
   if (eventType === "subscription.billing-failure") {
-    // Parse error from billing attempt response
-    let errorCode: string | null = null;
-    let errorMsg: string | null = null;
-    if (data.billingAttemptResponseMessage) {
-      try {
-        const parsed = JSON.parse(data.billingAttemptResponseMessage as string);
-        errorCode = parsed?.error_code || null;
-        errorMsg = parsed?.error_message || null;
-      } catch { /* ignore parse errors */ }
-    }
+    // Parse error from billing attempt response (defensive — see parseBillingError)
+    const { errorCode, errorMessage: errorMsg } = parseBillingError(data.billingAttemptResponseMessage);
 
     const billingAttemptId = data.billingAttemptId ? String(data.billingAttemptId) : null;
 
@@ -860,16 +883,9 @@ async function handleBillingEvent(
         billingIntervalCount: currentSub?.billing_interval_count,
       });
     } else if (eventType === "subscription.billing-failure") {
-      let errorMsg: string | null = null;
-      if (data.billingAttemptResponseMessage) {
-        try {
-          errorMsg = JSON.parse(data.billingAttemptResponseMessage as string)?.error_message || null;
-        } catch { /* ignore */ }
-      }
-
       await forecastFailed({
         workspaceId, contractId,
-        failureReason: errorMsg,
+        failureReason: parseBillingError(data.billingAttemptResponseMessage).errorMessage,
         billingAttemptId: data.billingAttemptId as string || null,
       });
     }
