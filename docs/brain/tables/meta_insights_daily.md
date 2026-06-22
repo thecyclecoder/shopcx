@@ -46,6 +46,7 @@ to score and act. None existed before — only the account rollup [[daily_meta_a
 - `ctr` is a **percent** (Meta's value verbatim); `roas` is derived locally, not Meta's `purchase_roas` action.
 - `meta_object_id` is NOT a uuid FK — it's the Meta id, joined to [[meta_campaigns]]/[[meta_adsets]]/[[meta_ads]] by Meta id text per `level`.
 - Reconciled against [[daily_meta_ad_spend]] on ingest: sum of `level='campaign'` spend per day should match the account rollup; drift beyond tolerance (>$1 AND >2%) is surfaced (see [[../inngest/meta-performance]]).
+- **Empty-while-spent is a guarded false-success (meta-insights-ingest-empty-fix).** `ingestMetaPerformance` throws + opens a `META_INGEST_EMPTY` Control Tower incident if it persists **0** rows here but [[daily_meta_ad_spend]] shows the account spent in the window — the original regression let a 133s run write 0 rows and still report `status='ok'`, starving `meta_attribution_daily.attributed_spend_cents` to 0. The ingest upserts now return rows **persisted** (not attempted) and throw on any swallowed `{ error }`.
 
 ---
 

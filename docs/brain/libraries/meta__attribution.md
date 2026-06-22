@@ -64,6 +64,14 @@ The sentinel variant for spend/revenue that can't be resolved to a lander varian
 - First-touch sessions are queried by `customer_id` **unbounded by window** (the first-touch click
   often predates the order's day); the windowed session scan is only for spend-allocation weights.
 - Internal customers / `is_internal` / `is_bot` sessions are excluded, same rule as the funnel.
+- **Spend is starved if insights are empty.** `attributed_spend_cents` derives entirely from
+  [[../tables/meta_insights_daily]] (`level='ad'`); if that table is empty (the
+  meta-insights-ingest-empty-fix regression), every attribution row gets `spend=0` and ROAS
+  is meaningless even though revenue/sessions are correct. The fix lives upstream in
+  [[meta__performance]] (the rows-written assertion); attribution itself is correct once fed.
+- **No swallowed writes (meta-insights-ingest-empty-fix).** The `meta_attribution_daily`
+  upsert now checks `{ error }`, reports it via `reportDbError`, and throws; `rows` is the
+  count **persisted**, not `records.length`.
 
 ---
 
