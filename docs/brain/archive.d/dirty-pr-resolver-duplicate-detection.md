@@ -1,0 +1,1 @@
+- **Dirty-PR-resolver: detect already-merged duplicates (don't loop) + prevent the duplicate PR** · verified 2026-06-22 · → [[libraries/github-pr-resolve]]
