@@ -80,7 +80,7 @@ const { count } = await admin.from("transactions")
 
 ## Gotchas
 
-- **`type`**: production data has `initial_checkout`. Other types (`subscription_renewal`, `refund`, etc.) are defined in code but not yet present at scale — the storefront checkout + internal-sub scheduler are still ramping. Probe before filtering.
+- **`type`**: guarded by `CHECK (type IN ('initial_checkout','renewal','dunning_retry','manual','comp'))` (`transactions_type_check`). It's `TEXT`+`CHECK`, not a pg enum, so widening it is a one-shot drop-then-add (`20260622170000_comp_transaction_type.sql` added `'comp'` for [[../specs/comp-subscriptions]]'s free $0 ledger rows; the original four come from `20260520160000_transactions.sql`). Production data is mostly `initial_checkout` — the storefront checkout + internal-sub scheduler are still ramping. Probe before filtering. Any NEW type value must extend this CHECK in the same migration, or every insert silently violates the constraint.
 - **`status`**: `succeeded` is what's stored on success (NOT `settled`). Failures get `failed`. `pending` for in-flight authorization.
 - **Braintree-only**. This table is for our custom-checkout flow. Shopify Payments orders DON'T write transactions rows — they only write [[orders]] + their `payment_details` JSONB.
 - **`attempted_at` is required**, `settled_at` + `refunded_at` track lifecycle. Always write `attempted_at` first.

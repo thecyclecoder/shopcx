@@ -1,18 +1,18 @@
-# Comp Transaction Type Constraint Fix ⏳
+# Comp Transaction Type Constraint Fix ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" ([[../lifecycles/subscription-billing.md]]) — fixes the shipped [[comp-subscriptions]] spec.
 
 The shipped [[comp-subscriptions]] build writes ledger rows with `type='comp'`, but `transactions.type` is a `TEXT` column guarded by an inline `CHECK (type IN ('initial_checkout','renewal','dunning_retry','manual'))` (`supabase/migrations/20260520160000_transactions.sql:41`, auto-named `transactions_type_check`). The comp migration `20260620190000_comp_subscriptions.sql` never extended that constraint, so **every** comp ledger insert violates it — and because neither insert in `internal-subscription-renewals.ts` checks the returned error, the violation is silently swallowed. The result: the fail-closed branch's `needs_attention` failed-comp row never lands (caught by spec-test QA), and the success branch's `type='comp' status='succeeded'` row has the identical latent failure (undetected, because the success path is destructive and was never run live). Both ledger writes are currently dropped on the floor. This breaks billing-integrity auditability: a comp sub that wrongly failed the allowlist gate, or a comp renewal that shipped free, leaves no transaction record. The fix extends the constraint to admit `'comp'` and makes both inserts fail loud.
 
-## Phase 1 — extend the constraint + surface insert errors ⏳
-- ⏳ New migration `supabase/migrations/<ts>_comp_transaction_type.sql`: `ALTER TABLE public.transactions DROP CONSTRAINT IF EXISTS transactions_type_check;` then `ADD CONSTRAINT transactions_type_check CHECK (type IN ('initial_checkout','renewal','dunning_retry','manual','comp'));`. It's `TEXT`+`CHECK`, not a pg enum — a clean one-shot constraint swap, no `ALTER TYPE`.
-- ⏳ Apply script `scripts/apply-comp-transaction-type-migration.ts` (follows [[../recipes/applying-migrations]] / `script-conventions`; runs the migration against the Supabase pooler).
-- ⏳ Add `if (error) throw new Error(...)` to **both** `transactions` inserts in `src/lib/inngest/internal-subscription-renewals.ts` — the fail-closed `comp-gate-failed-transaction` step (~:156) and the success `comp-transaction` step (~:239). A swallowed insert error silently defeats the fail-closed "surface it" contract; after this a DB write failure errors the step (retries/visible) instead of vanishing.
-- ⏳ `npx tsc --noEmit` gate.
+## Phase 1 — extend the constraint + surface insert errors ✅
+- ✅ New migration `supabase/migrations/20260622170000_comp_transaction_type.sql`: `ALTER TABLE public.transactions DROP CONSTRAINT IF EXISTS transactions_type_check;` then `ADD CONSTRAINT transactions_type_check CHECK (type IN ('initial_checkout','renewal','dunning_retry','manual','comp'));`. It's `TEXT`+`CHECK`, not a pg enum — a clean one-shot constraint swap, no `ALTER TYPE`. **Apply gated** (no prod creds on the box).
+- ✅ Apply script `scripts/apply-comp-transaction-type-migration.ts` (follows [[../recipes/applying-migrations]] / `script-conventions`; runs the migration against the Supabase pooler, then prints the live `transactions_type_check` def to confirm `'comp'`).
+- ✅ Added `if (error) throw new Error(...)` to **both** `transactions` inserts in `src/lib/inngest/internal-subscription-renewals.ts` — the fail-closed `comp-gate-failed-transaction` step (~:156) and the success `comp-transaction` step (~:239). A swallowed insert error silently defeats the fail-closed "surface it" contract; now a DB write failure errors the step (retries/visible) instead of vanishing.
+- ✅ `npx tsc --noEmit` gate.
 
-## Phase 2 — brain ⏳
-- ⏳ `docs/brain/tables/transactions.md`: list `comp` in the `type` allowed set (and the `type` gotcha note).
-- ⏳ Fold note into [[comp-subscriptions]] (Verification block) recording the constraint fix; cross-link [[../lifecycles/subscription-billing.md]].
+## Phase 2 — brain ✅
+- ✅ `docs/brain/tables/transactions.md`: `type` gotcha now lists the full `CHECK` set incl. `comp` + the "extend the CHECK in the same migration" rule.
+- ✅ Fold note into [[comp-subscriptions]] (Verification block) recording the constraint fix; cross-link [[../lifecycles/subscription-billing.md]].
 
 ## Safety / invariants
 - **Fail-closed must surface.** The whole point of the comp allowlist gate is that a non-allowlisted comp sub does NOT ship and **leaves a `needs_attention` ledger row + event**. A swallowed insert error breaks that silently — both comp inserts must fail loud.

@@ -153,7 +153,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         // NOT advance. Catches a $0 sub that shouldn't be free (misconfig, stale
         // flag, abuse) instead of leaking product.
         await step.run("comp-gate-failed-transaction", async () => {
-          await admin.from("transactions").insert({
+          const { error } = await admin.from("transactions").insert({
             workspace_id,
             customer_id: c.sub.customer_id,
             subscription_id,
@@ -164,6 +164,10 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
             error_message: `comp renewal blocked — customer not on comp allowlist (comp_role=${c.comp_role ?? "null"})`,
             metadata: { needs_attention: true, reason: "comp_not_allowlisted", comp_role: c.comp_role },
           });
+          // Fail loud: the fail-closed gate's whole contract is that a blocked
+          // comp sub LEAVES a needs_attention ledger row. A swallowed insert
+          // error defeats that silently — error the step so it's visible/retried.
+          if (error) throw new Error(`comp_gate_failed_transaction_insert_failed: ${error.message}`);
         });
         await step.run("comp-gate-failed-event", async () => {
           const { logCustomerEvent } = await import("@/lib/customer-events");
@@ -236,7 +240,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
       // ── Ledger row: type='comp', $0, no Braintree id ──────────
       await step.run("comp-transaction", async () => {
-        await admin.from("transactions").insert({
+        const { error } = await admin.from("transactions").insert({
           workspace_id,
           customer_id: c.sub.customer_id,
           subscription_id,
@@ -248,6 +252,10 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           settled_at: new Date().toISOString(),
           metadata: { comp: true, comp_role: c.comp_role, comp_note: c.sub.comp_note ?? null },
         });
+        // Fail loud: a comp renewal that shipped free must leave its ledger
+        // record. A swallowed insert error drops the audit trail silently —
+        // error the step so it's visible/retried.
+        if (error) throw new Error(`comp_transaction_insert_failed: ${error.message}`);
       });
 
       // ── Advance next_billing_date (drop spent one-time items) ──
