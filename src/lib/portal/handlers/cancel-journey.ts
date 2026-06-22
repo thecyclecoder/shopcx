@@ -539,7 +539,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       if (ticketId && reply) {
         await logChatMessage(admin, ticketId, "outbound", "ai", reply);
         await admin.from("tickets")
-          .update({ status: "closed" })
+          .update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null })
           .eq("id", ticketId);
       }
 
@@ -717,7 +717,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     // Close the chat ticket if one was created
     if (ticketId) {
       await admin.from("tickets")
-        .update({ status: "closed" })
+        .update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null })
         .eq("id", ticketId);
     }
 

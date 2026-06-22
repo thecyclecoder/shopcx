@@ -51,7 +51,7 @@ export async function POST(request: Request) {
       case "close": {
         const { count, error } = await admin
           .from("tickets")
-          .update({ status: "closed", resolved_at: new Date().toISOString() }, { count: "exact" })
+          .update({ status: "closed", resolved_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null }, { count: "exact" })
           .in("id", ticket_ids)
           .eq("workspace_id", workspaceId);
         if (error) errors.push(error.message);
@@ -77,8 +77,15 @@ export async function POST(request: Request) {
         if (!value || !["open", "pending", "closed"].includes(value)) {
           return NextResponse.json({ error: "Valid status required" }, { status: 400 });
         }
-        const updateData: Record<string, string> = { status: value };
-        if (value === "closed") updateData.resolved_at = new Date().toISOString();
+        const updateData: Record<string, string | null> = { status: value };
+        if (value === "closed") {
+          updateData.resolved_at = new Date().toISOString();
+          // Resolving ends escalation — clear the flags so a closed ticket
+          // can't linger on the Escalated list.
+          updateData.escalated_at = null;
+          updateData.escalated_to = null;
+          updateData.escalation_reason = null;
+        }
         const { count, error } = await admin
           .from("tickets")
           .update(updateData, { count: "exact" })

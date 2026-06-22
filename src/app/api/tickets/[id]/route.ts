@@ -225,11 +225,12 @@ export async function PATCH(
     if (body.status === "open" && existing.status === "closed") {
       updates.closed_at = null;
     }
-    // Archiving always clears escalation — an escalated ticket must never end
-    // up archived-and-still-flagged (it would vanish from active views while
-    // looking unhandled). Mirrors the merge path, which unescalates the source
-    // stub before archiving it.
-    if (body.status === "archived") {
+    // Resolving always clears escalation — escalation is an open-state concept,
+    // so a ticket that ends up closed/resolved/archived-and-still-flagged would
+    // vanish from active views while looking unhandled (it would also linger on
+    // the Escalated list). Mirrors maybeAutoCloseGroup + the merge path, which
+    // unescalate before closing/archiving. Reopening does NOT auto-re-escalate.
+    if (body.status === "closed" || body.status === "resolved" || body.status === "archived") {
       updates.escalated_to = null;
       updates.escalated_at = null;
       updates.escalation_reason = null;

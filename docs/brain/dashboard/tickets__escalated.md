@@ -6,7 +6,7 @@ Observability surface for the **whole** escalation pipeline. Under the Agent To-
 **Sidebar:** Tickets → **Escalated**.
 
 ## Behavior
-- Shows **every** ticket where `escalated_at IS NOT NULL`, sorted by `escalated_at desc` (no `escalated_to=me` filter).
+- Shows every **open** (non-terminal) ticket where `escalated_at IS NOT NULL`, sorted by `escalated_at desc` (no `escalated_to=me` filter). The query also excludes `status IN (closed, resolved, archived)` — escalation is an open-state concept, so a resolved ticket can never surface here even if a stale flag lingers. The close/resolve write paths clear the flags directly; this filter is belt-and-suspenders. See [[../specs/clear-escalation-on-resolve]].
 - **"Routed to" badge** per row, derived from the ticket's `agent_todos` group + `escalated_to`:
   - `routine` (gray) — escalated, no todo group yet.
   - `todo:pending` (amber) — group has pending todos.

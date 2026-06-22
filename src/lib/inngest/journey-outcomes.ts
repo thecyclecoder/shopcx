@@ -86,7 +86,7 @@ export const journeySessionCompleted = inngest.createFunction(
         if (ticketId) {
           await admin
             .from("tickets")
-            .update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString() })
+            .update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null })
             .eq("id", ticketId);
         }
       } else if (outcome === "saved_changed_mind") {
@@ -101,7 +101,7 @@ export const journeySessionCompleted = inngest.createFunction(
           });
           await admin
             .from("tickets")
-            .update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString() })
+            .update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null })
             .eq("id", ticketId);
         }
       } else if (outcome.startsWith("saved_pause")) {
@@ -131,7 +131,7 @@ export const journeySessionCompleted = inngest.createFunction(
           });
           await admin
             .from("tickets")
-            .update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString() })
+            .update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null })
             .eq("id", ticketId);
         }
       } else if (outcome === "saved_discount") {
@@ -171,7 +171,7 @@ export const journeySessionCompleted = inngest.createFunction(
             author_type: "system",
             visibility: "internal",
           });
-          await admin.from("tickets").update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString() }).eq("id", ticketId);
+          await admin.from("tickets").update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", ticketId);
         }
       } else if (outcome === "saved_coach" || outcome === "saved_swap") {
         // Needs human follow-up
@@ -188,7 +188,7 @@ export const journeySessionCompleted = inngest.createFunction(
       } else {
         // Generic close
         if (ticketId) {
-          await admin.from("tickets").update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString() }).eq("id", ticketId);
+          await admin.from("tickets").update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", ticketId);
         }
       }
     });

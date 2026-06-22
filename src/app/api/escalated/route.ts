@@ -36,6 +36,10 @@ export async function GET(request: Request) {
     .select("id, subject, status, channel, escalation_reason, escalated_at, escalated_to, assigned_to, customer_id")
     .eq("workspace_id", workspaceId)
     .not("escalated_at", "is", null)
+    // Belt-and-suspenders: escalation is an open-state concept, so a stale flag on
+    // a resolved ticket must never surface here. Close/resolve now clears the flags
+    // at the write paths; this guarantees the read side even if one ever lingers.
+    .not("status", "in", "(closed,resolved,archived)")
     .order("escalated_at", { ascending: false })
     .limit(500);
 

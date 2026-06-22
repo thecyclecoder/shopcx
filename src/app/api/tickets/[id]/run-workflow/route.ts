@@ -46,8 +46,8 @@ export async function POST(
   // Execute the workflow (pass subscription_id override for subscription_inquiry)
   await executeWorkflow(workspaceId, ticketId, workflow.trigger_tag, subscription_id ? { subscriptionId: subscription_id } : undefined);
 
-  // Close ticket after manual workflow application
-  await admin.from("tickets").update({ status: "closed" }).eq("id", ticketId);
+  // Close ticket after manual workflow application (clears escalation — closing ends it)
+  await admin.from("tickets").update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", ticketId);
 
   return NextResponse.json({ executed: true, workflow: workflow.name });
 }
