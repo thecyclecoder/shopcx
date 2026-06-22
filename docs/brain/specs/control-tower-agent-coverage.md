@@ -1,4 +1,4 @@
-# Control Tower — Inline AI Agent Coverage 🚧
+# Control Tower — Inline AI Agent Coverage ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[control-tower]]. The Control Tower landed monitoring **crons + box-worker agent-kinds**, but the **inline, event-driven AI agents** that run server-side per-ticket emit no heartbeat — so a QC/decision agent can silently stop and never page anyone. Flagged via the **AI ticket analyzer** (a QC agent): if it stopped scoring/escalating tickets, the dashboard would show nothing.
 
@@ -44,5 +44,12 @@ Grep: `api.anthropic.com/v1/messages | new Anthropic(`. Classification of each m
 ## Phase 1 — ticket-analyzer + journey-delivery + fraud-detector + the sweep ✅
 Heartbeat emits in `analyzeTicket`, `journey-delivery`, `fraud-detector`; their registry entries + inline-agent assertions (liveness-when-work-exists + error-rate); dashboard tiles; the AI-entry-point audit sweep. Brain: [[control-tower]] · [[../libraries/ticket-analyzer]] · [[../tables/loop_heartbeats]] · [[../dashboard/control-tower]].
 
-## Phase 2 — orchestrator coverage ⏳
-**Blocked-by:** [[subscription-overcharge-remediation]] (shares `sonnet-orchestrator-v2.ts`). Heartbeat + assertion for `ai:orchestrator` (per-ticket decision agent) — error-rate + decisions-produced-when-tickets-need-handling.
+## Phase 2 — orchestrator coverage ✅
+**Blocked-by:** [[subscription-overcharge-remediation]] (✅ shipped — unblocked). `callSonnetOrchestratorV2` now emits one `ai:orchestrator` inline-agent beat per run (try/finally wrapper around the inner `runOrchestratorDecision`): `ok:false` when the run threw OR returned a degraded/fallback decision (no API key / API error / max-rounds / parse-fail — all funnel through `fallbackWithCancelRoute`, tagged via a module `WeakSet<SonnetDecision>`), `ok:true` on a real model decision incl. a model-chosen `escalate`; `produced = {action_type, handler_name, model}`. Registry entry `ai:orchestrator` (`inlineWorkSignal: 'tickets-awaiting-decision'` — inbound customer `ticket_messages` in the 2h window — + error-rate `>50%` of `≥5` runs). The tile renders under **Inline AI agents** automatically. Brain: [[../libraries/sonnet-orchestrator-v2]] · [[../libraries/control-tower]] · [[../dashboard/control-tower]].
+
+## Verification
+- On `/dashboard/developer/control-tower` under **Inline AI agents**, expect a fourth tile **`ai:orchestrator`** (AI orchestrator — "per inbound customer message") alongside the three Phase 1 tiles — green when healthy or genuinely idle.
+- Let a normal AI ticket reply run (an inbound customer message fires `unified-ticket-handler` → `callSonnetOrchestratorV2`) → expect a fresh `loop_heartbeats` row `loop_id='ai:orchestrator'`, `kind='inline-agent'`, `ok=true`, `produced` = `{action_type, handler_name, model}`; the tile stays green and `lastProduced` shows the action_type.
+- Force the orchestrator to fail on a burst (point `ANTHROPIC_API_KEY` at a bad endpoint, or make the messages API 5xx) so ≥`minRunsForErrorRate` (5) runs land in the 2h window returning the fallback escalate → expect those beats `ok=false`, and the monitor (`/api/developer/control-tower` + the `control-tower-monitor` cron) flips the `ai:orchestrator` tile **red** with `reason='error_rate'` ("failing: N/M runs errored") + a paging `loop_alerts` row.
+- Stop the orchestrator entirely while inbound customer messages keep arriving (inbound `ticket_messages` with `direction='inbound'`, `author_type='customer'` updated within 2h, 0 successful `ai:orchestrator` beats) → expect the **liveness-when-work-exists** check: tile red, `reason='idle_while_work'`, detail "AI orchestrator silent while N item(s) awaited it — 0 successful runs in the last 120m".
+- Negative (no false positive): a **model-chosen** `escalate` decision (the orchestrator deliberately escalates a real ticket) beats `ok=true`, NOT a fallback — so a workspace that legitimately escalates does not trip error-rate; and with no inbound traffic + no runs the tile is green ("idle · …"), not red.

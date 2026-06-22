@@ -61,17 +61,23 @@ export type OutputAssertionId = "escalation-idle" | "spec-test-persisted" | "ren
  *                                 created session with no successful delivery beat = silent).
  *   - orders-awaiting-fraud-screen — orders created within the window (every new order fires
  *                                 the per-order fraud screen).
+ *   - tickets-awaiting-decision — inbound customer messages created within the window (every
+ *                                 inbound on an AI-handled ticket fires unified-ticket-handler →
+ *                                 callSonnetOrchestratorV2, so inbound traffic with 0 successful
+ *                                 decision beats = the per-ticket decision agent went silent).
  */
 export type InlineWorkSignalId =
   | "tickets-awaiting-qc"
   | "journeys-awaiting-delivery"
-  | "orders-awaiting-fraud-screen";
+  | "orders-awaiting-fraud-screen"
+  | "tickets-awaiting-decision";
 
 /** Stable inline-agent loop ids (loop_id on loop_heartbeats; matches the registry entries). */
 export const INLINE_AGENT_IDS = {
   ticketAnalyzer: "ai:ticket-analyzer",
   journeyDelivery: "ai:journey-delivery",
   fraudDetector: "ai:fraud-detector",
+  orchestrator: "ai:orchestrator",
 } as const;
 
 export interface MonitoredLoop {
@@ -240,6 +246,22 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "per new order",
     livenessWindowMs: 6 * HOUR,
     inlineWorkSignal: "orders-awaiting-fraud-screen",
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+  {
+    // The per-ticket decision agent (callSonnetOrchestratorV2) — reply/action. One beat per run,
+    // ok:false when the run threw OR returned a degraded/fallback decision (API error / parse
+    // fail / no key) — "ran but produced nothing useful", the Goodhart failure the error-rate
+    // assertion catches. A real model decision (incl. a model-chosen escalate) is ok:true.
+    // (control-tower-agent-coverage spec, Phase 2.)
+    id: INLINE_AGENT_IDS.orchestrator,
+    kind: "inline-agent",
+    label: "AI orchestrator",
+    description: "Per-ticket decision agent (callSonnetOrchestratorV2) — picks reply/action/journey/playbook/escalate.",
+    expectedCadence: "per inbound customer message",
+    livenessWindowMs: 2 * HOUR,
+    inlineWorkSignal: "tickets-awaiting-decision",
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
   },
