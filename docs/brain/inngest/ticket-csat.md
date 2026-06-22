@@ -20,7 +20,9 @@ Two passes per tick:
      3. Tags overlap `SKIP_TAGS` (`outreach`, `cls:outreach`, `spam:bot`) — cheap pre-filter, shared with [[../libraries/ticket-analyzer]] via `src/lib/ticket-tags.ts`.
    - Otherwise: stamp `csat_sent_at` first (so a Resend hiccup doesn't re-fire next tick), then send the survey email via [[../integrations/resend]].
 
-**Returns:** `{ sent, skipped_too_old, skipped_no_reply, batch_size }`.
+**Returns:** `{ sent, skipped_too_old, skipped_no_reply, batch_size }` (no `batch_size` on the idle no-due path).
+
+**Control Tower heartbeat:** every tick ends with `step.run("emit-heartbeat")` → `emitCronHeartbeat("ticket-csat-cron", …)` — on **both** the work path and the common no-due-tickets idle path (the early `return` when `find-due` is empty beats first). This honors the [[../libraries/control-tower]] heartbeat contract ('every monitored cron calls this at the END of each run') so `cron_freshness` doesn't flag a healthy idle cron as stale. The beat means "Inngest invoked me", not "there was work" — same idle-tick fix as [[marketing-text]] ([[../specs/cron-heartbeat-on-idle-tick]]).
 
 ## Downstream events sent
 

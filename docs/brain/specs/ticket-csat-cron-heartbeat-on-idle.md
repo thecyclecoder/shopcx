@@ -1,4 +1,4 @@
-# ticket-csat-cron: emit Control Tower heartbeat on idle (no-due) ticks ⏳
+# ticket-csat-cron: emit Control Tower heartbeat on idle (no-due) ticks 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower-complete-coverage]] + [[../specs/control-tower-monitor-accuracy]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/inngest/ticket-csat.ts::real-bug`
@@ -11,8 +11,10 @@ src/lib/inngest/ticket-csat.ts emits its heartbeat only in the trailing step.run
 
 **Likely target:** `src/lib/inngest/ticket-csat.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it 🚧
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Fix landed:** `ticket-csat.ts` — the `if (!due.length)` early return now emits `step.run("emit-heartbeat")` → `emitCronHeartbeat("ticket-csat-cron", { ok: true, produced: { sent: 0, … } })` before returning, so every tick (idle included) writes exactly one `loop_heartbeats` beat. Mirrors the established idle-tick fix in `marketing-text.ts`. Brain page `inngest/ticket-csat.md` updated. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:ticket-csat-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.

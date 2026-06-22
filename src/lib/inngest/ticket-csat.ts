@@ -87,7 +87,18 @@ export const ticketCsatCron = inngest.createFunction(
       return data || [];
     });
 
-    if (!due.length) return { sent: 0, skipped_too_old: skippedCount, skipped_no_reply: 0 };
+    if (!due.length) {
+      // No tickets due — the common idle path. Still emit the end-of-run
+      // heartbeat before returning so cron_freshness sees a beat every tick
+      // (heartbeat.ts contract: 'every monitored cron calls this at the END
+      // of each run'). Without this, idle ticks emitted no beat and the
+      // watchdog flagged a healthy idle cron as stale.
+      const idleResult = { sent: 0, skipped_too_old: skippedCount, skipped_no_reply: 0 };
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("ticket-csat-cron", { ok: true, produced: idleResult });
+      });
+      return idleResult;
+    }
 
     let sent = 0;
     let skippedNoReply = 0;
