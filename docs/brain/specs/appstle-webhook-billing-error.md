@@ -1,4 +1,4 @@
-# Appstle webhook 500 on subscription.billing-* events ⏳
+# Appstle webhook 500 on subscription.billing-* events ✅
 
 **Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" ([[../lifecycles/subscription-billing]]).
 
@@ -14,5 +14,12 @@ The Control Tower's Vercel error feed surfaced a **recurring `500 /api/webhooks/
 - The Control Tower Vercel panel shows the `appstle … billing` incident **stop recurring** (occurrence count stops climbing; resolves after the recency window).
 - Negative: a genuinely-malformed/unauthenticated webhook still rejects appropriately (we didn't blanket-2xx everything).
 
-## Phase 1 — fix the billing-event throw + correct ack semantics ⏳
+## Phase 1 — fix the billing-event throw + correct ack semantics ✅
 Diagnose the throw on `subscription.billing-*`, fix the handler (process correctly or ack-and-log), keep non-2xx only for retryable failures. Brain: [[../integrations/appstle]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/dunning]].
+
+**Shipped** (`src/app/api/webhooks/appstle/[workspaceId]/route.ts`):
+- **Ack semantics corrected.** The top-level `catch` no longer returns `500` — once the Svix signature verifies, any processing error is logged richly (event type + contract/customer ref) and acked `2xx` (`{ ok: false, acked: true }`). A 500 only made Appstle retry the same payload (it threw again → ×11 recurrence) and re-run partial side-effects. Non-2xx stays reserved for the genuinely-actionable pre-handler rejections (`400` bad headers, `401` invalid signature, `404` unconfigured workspace) — those are NOT blanket-acked, satisfying the negative-test requirement. Missed state self-heals via the periodic subscription sync + reconcile.
+- **Guarded the unguarded throw class.** Added `parseBillingError()` — a defensive helper for Appstle's `billingAttemptResponseMessage` (a JSON *string* on failures, but can arrive null/empty/already-parsed). Replaced all three parse sites, including the one **unguarded** `JSON.parse` in the non-success `logCustomerEvent` properties (line ~568) that bubbled to the route catch on `billing-interval-changed` / `billing-failure` payloads.
+- `npx tsc --noEmit` clean.
+
+Folded into [[../integrations/appstle]] § Webhooks → "Handler ack semantics". Ready for owner verification → archive.
