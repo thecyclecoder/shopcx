@@ -133,7 +133,7 @@ export interface ImportanceRow {
 async function getLeverByKey(admin: Admin, leverKey: string): Promise<LeverRow | null> {
   const { data } = await admin
     .from("storefront_levers")
-    .select("id, lever_key, chapter, kind, prior, lander_types, default_scope")
+    .select("id, lever_key, chapter, kind:level, prior, lander_types, default_scope")
     .eq("lever_key", leverKey)
     .maybeSingle();
   return (data as LeverRow) ?? null;
@@ -478,8 +478,8 @@ export async function nextLeverToTest(opts: {
   // Component-level levers applicable to this lander type.
   const { data: leverData } = await admin
     .from("storefront_levers")
-    .select("id, lever_key, chapter, kind, prior, lander_types, default_scope")
-    .eq("kind", "component");
+    .select("id, lever_key, chapter, kind:level, prior, lander_types, default_scope")
+    .eq("level", "component");
   const levers = ((leverData as LeverRow[]) || []).filter((l) => l.lander_types.includes(opts.landerType));
 
   // Existing posteriors for this exact cell.
@@ -632,7 +632,7 @@ export async function seedChapterPriorsFromFunnel(opts: {
       const { data } = await admin
         .from("storefront_levers")
         .update({ prior, updated_at: new Date().toISOString() })
-        .eq("kind", "chapter")
+        .eq("level", "chapter")
         .eq("lever_key", chapter)
         .select("id");
       updated += (data as unknown[] | null)?.length ?? 0;
@@ -685,7 +685,7 @@ export async function getLeverImportancePanel(admin: Admin, workspaceId: string)
     const leverIds = [...new Set(rows.map((r) => r.lever_id))];
     const { data: levers } = await admin
       .from("storefront_levers")
-      .select("id, lever_key, chapter, kind")
+      .select("id, lever_key, chapter, kind:level")
       .in("id", leverIds);
     const leverById = new Map(((levers as Array<{ id: string; lever_key: string; chapter: string; kind: "chapter" | "component" }>) || []).map((l) => [l.id, l]));
     return rows
