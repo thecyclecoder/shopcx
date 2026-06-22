@@ -28,6 +28,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { deriveSpecStatus, getRoadmap, listArchivedSlugs, phaseEmoji, type Phase } from "@/lib/brain-roadmap";
+import { markSpecCardStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken(): string | undefined {
@@ -138,6 +139,11 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
     });
   }
   return phases;
+}
+
+/** A spec's phases as the board mirror stores them — `[{ index, title, status }]` (spec-card-db-companion). */
+export function phaseStatesFromRaw(raw: string): SpecCardPhaseState[] {
+  return parsePhasesWithLines(raw).map((p) => ({ index: p.index, title: p.title, status: p.status }));
 }
 
 function cleanTitle(s: string): string {
@@ -363,7 +369,12 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
 
   await syncDriftRows(workspaceId, slug, surfaced);
 
-  return { slug, flipped, surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status: deriveSpecStatus(raw) };
+  // spec-card-db-companion: mirror the post-reconcile status + per-phase snapshot to the board instantly,
+  // so a drift flip (auto on a merge, or the cron backstop) reflects without waiting for the markdown redeploy.
+  const status = deriveSpecStatus(raw);
+  await markSpecCardStatus(workspaceId, slug, status, phaseStatesFromRaw(raw));
+
+  return { slug, flipped, surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status };
 }
 
 /** Upsert open `spec_drift` rows for the surfaced phases; resolve any open row no longer surfaced. */
