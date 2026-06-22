@@ -781,15 +781,13 @@ async function applySeverityActions(
     ? `Auto-flag: ${hasSevereIssue ? "severe issue type" : "customer threat language"} (score ${score})`
     : `Low quality score: ${score}/10 — ${(analysis.summary || "see issues").slice(0, 200)}`;
 
-  // Round-robin agent (any escalation needs an assignee)
-  const { data: members } = await admin.from("workspace_members")
-    .select("user_id, role").eq("workspace_id", workspaceId)
-    .in("role", ["owner", "admin", "agent"]);
-  const assignee = members?.[0]?.user_id || null;
-
+  // Escalate to the AI Routine (escalated_at set + escalated_to = null). The
+  // idle-triage cron picks it up next tick (solver→skeptic→quorum); its
+  // no-quorum path is what hands up to a real human. We deliberately don't
+  // round-robin to a person or pre-assign assigned_to here.
   await admin.from("tickets").update({
     status: "open",
-    escalated_to: assignee,
+    escalated_to: null,
     escalated_at: new Date().toISOString(),
     escalation_reason: escReason,
     updated_at: new Date().toISOString(),

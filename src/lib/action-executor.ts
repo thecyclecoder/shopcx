@@ -2649,22 +2649,15 @@ async function handleEscalate(
 // ── Escalation Helper ──
 
 async function escalateTicket(ctx: ActionContext, reason: string): Promise<void> {
-  // Find next available agent via round-robin
-  const { data: agents } = await ctx.admin
-    .from("workspace_members")
-    .select("user_id")
-    .eq("workspace_id", ctx.workspaceId)
-    .in("role", ["admin", "agent", "owner"])
-    .order("user_id");
-
-  const assignee = agents?.[0]?.user_id || null;
-
+  // Escalate to the AI Routine: escalated_at set + escalated_to = null (the
+  // idle-triage cron's "routine-owned" signal). We don't round-robin to a
+  // person or pre-assign assigned_to — the routine triages it next tick and its
+  // no-quorum path is what escalates up to a real human.
   await ctx.admin
     .from("tickets")
     .update({
       status: "open",
-      assigned_to: assignee,
-      escalated_to: assignee,
+      escalated_to: null,
       escalated_at: new Date().toISOString(),
       escalation_reason: reason,
     })

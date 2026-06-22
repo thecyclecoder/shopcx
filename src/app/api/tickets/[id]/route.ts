@@ -241,7 +241,16 @@ export async function PATCH(
   if ("tags" in body) updates.tags = body.tags;
   if ("csat_score" in body) updates.csat_score = body.csat_score;
   if ("auto_reply_at" in body) updates.auto_reply_at = body.auto_reply_at;
-  if ("escalated_to" in body) {
+  // Escalate to the AI Routine: escalated_at set + escalated_to = null (the
+  // idle-triage cron's "routine-owned" signal). Distinct from "not escalated"
+  // (both have escalated_to null), so it needs its own flag — a falsy
+  // escalated_to below means de-escalate and clears escalated_at.
+  if (body.escalate_to_routine) {
+    updates.escalated_to = null;
+    updates.escalated_at = new Date().toISOString();
+    updates.escalation_reason =
+      ("escalation_reason" in body ? body.escalation_reason : null) || "Escalated to AI Routine";
+  } else if ("escalated_to" in body) {
     updates.escalated_to = body.escalated_to || null;
     updates.escalated_at = body.escalated_to ? new Date().toISOString() : null;
     if ("escalation_reason" in body) updates.escalation_reason = body.escalation_reason || null;

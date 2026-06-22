@@ -36,7 +36,7 @@ const CHIP_DEFS: Array<{ key: keyof Chips; label: string; match: (r: Row, uid: s
 ];
 
 const ROUTED_BADGE: Record<string, { label: (r: Row) => string; cls: string }> = {
-  routine: { label: () => "routine", cls: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
+  routine: { label: () => "🤖 AI Routine", cls: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
   todo_pending: { label: () => "todo:pending", cls: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" },
   todo_approved: { label: () => "todo:approved", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" },
   rejected: { label: (r) => `rejected → ${r.routed_name || "?"}`, cls: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400" },

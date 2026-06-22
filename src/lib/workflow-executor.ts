@@ -380,12 +380,15 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
 async function escalate(admin: Admin, context: WorkflowContext, tag: string, assignTo: string | null, reason?: string): Promise<void> {
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
-  // Set escalation (separate from assignment)
-  if (assignTo) {
-    updates.escalated_to = assignTo;
-    updates.escalated_at = new Date().toISOString();
-    updates.escalation_reason = reason || `Workflow escalation: ${tag}`;
-  }
+  // Set escalation (separate from assignment). escalated_to = assignTo: a
+  // configured human uuid routes to that person (cron skips, human owns it);
+  // null routes to the AI Routine (escalated_at set + escalated_to null = the
+  // idle-triage cron's signal), which triages it and hands up to a human only
+  // on no-quorum. Either way escalated_at + escalation_reason are set so the
+  // ticket actually enters an escalation queue.
+  updates.escalated_to = assignTo;
+  updates.escalated_at = new Date().toISOString();
+  updates.escalation_reason = reason || `Workflow escalation: ${tag}`;
 
   // Add escalation tag
   const { data: ticket } = await admin.from("tickets").select("tags").eq("id", context.ticketId).single();

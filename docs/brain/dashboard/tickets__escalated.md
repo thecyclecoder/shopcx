@@ -8,7 +8,7 @@ Observability surface for the **whole** escalation pipeline. Under the Agent To-
 ## Behavior
 - Shows **every** ticket where `escalated_at IS NOT NULL`, sorted by `escalated_at desc` (no `escalated_to=me` filter).
 - **"Routed to" badge** per row, derived from the ticket's `agent_todos` group + `escalated_to`:
-  - `routine` (gray) — escalated, no todo group yet.
+  - `🤖 AI Routine` (gray) — escalated to the routine (`escalated_to = NULL`), no todo group yet. Every system escalation now defaults here ([[../specs/escalate-to-routine-by-default]]); a human can also pick "🤖 AI Routine" in the ticket escalate dropdown.
   - `todo:pending` (amber) — group has pending todos.
   - `todo:approved` (blue) — todos approved, awaiting execution.
   - `rejected → {first_name}` (red) — ≥1 rejected todo, `escalated_to` set to that user.

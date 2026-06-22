@@ -12,6 +12,7 @@ interface TicketRow {
   assigned_to: string | null;
   assigned_name: string | null;
   escalated_to: string | null;
+  escalated_at: string | null;
   auto_reply_at: string | null;
   last_customer_reply_at: string | null;
   customer_email: string | null;
@@ -836,8 +837,13 @@ export default function TicketsPage() {
                           {new Date(t.snoozed_until).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                         </span>
                       )}
-                      {t.escalated_to && (
-                        <svg className="h-3.5 w-3.5 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+                      {(t.escalated_to || t.escalated_at) && (
+                        <svg
+                          className="h-3.5 w-3.5 text-amber-500"
+                          fill="currentColor"
+                          viewBox="0 0 20 20"
+                        >
+                          <title>{t.escalated_to ? "Escalated" : "Escalated to AI Routine"}</title>
                           <path fillRule="evenodd" d="M3 6a3 3 0 013-3h10l-4 4 4 4H6a3 3 0 01-3-3V6z" clipRule="evenodd" />
                         </svg>
                       )}

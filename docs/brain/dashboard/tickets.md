@@ -26,6 +26,8 @@ Master ticket queue. Filters by status, channel, assignee, tags, snooze, escalat
 
 **Rendering:** `"use client"` component (client-side state + fetch).
 
+**Escalation indicator:** the amber escalate icon on a row shows whenever the ticket is escalated — `escalated_to` set (a human) **or** `escalated_at` set with `escalated_to` null (the AI Routine). The `<title>` reads "Escalated to AI Routine" for the routine case. The `escalated=true` API filter likewise keys on `escalated_at` so routine-escalated tickets surface. See [[../specs/escalate-to-routine-by-default]].
+
 ## Sub-routes
 
 - `[id]/` → [[tickets/[id]]]
