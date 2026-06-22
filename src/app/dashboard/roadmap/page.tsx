@@ -2,7 +2,7 @@ import Link from "next/link";
 import { getRoadmap, getArchive, type Phase, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
-import { getLatestSpecTestRuns, type SpecTestRun } from "@/lib/spec-test-runs";
+import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
@@ -60,7 +60,7 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-function Card({ spec, job, fold, testRun }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null }) {
+function Card({ spec, job, fold, testRun, humanResolved }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number }) {
   return (
     <div
       data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}
@@ -93,7 +93,7 @@ function Card({ spec, job, fold, testRun }: { spec: SpecCard; job: AgentJob | nu
       {spec.status === "shipped" && testRun && (
         <Link href="/dashboard/developer/spec-tests" className="mt-2 flex flex-wrap items-center gap-2 hover:opacity-80">
           <AgentTestedStamp verdict={testRun.agent_verdict} />
-          <TestChip summary={testRun.summary} />
+          <TestChip summary={testRun.summary} humanResolved={humanResolved} />
         </Link>
       )}
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
@@ -111,9 +111,9 @@ function Card({ spec, job, fold, testRun }: { spec: SpecCard; job: AgentJob | nu
 export default async function RoadmapPage() {
   const [{ specs }, archive] = await Promise.all([getRoadmap(), getArchive()]);
   const workspaceId = await getActiveWorkspaceId();
-  const [jobsBySlug, folds, testRuns] = workspaceId
-    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId)])
-    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>];
+  const [jobsBySlug, folds, testRuns, humanResolvedBySlug] = workspaceId
+    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId), getHumanResolutionCounts(workspaceId)])
+    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, {} as Record<string, number>];
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
   // Live overlay: a Planned spec with an active build job shows as In progress immediately (tapping Build
   // inserts the job, so the card jumps columns within one render), reverting to its markdown status once
@@ -169,7 +169,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} />)
                   )}
                 </div>
               </div>

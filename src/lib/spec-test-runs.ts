@@ -93,6 +93,25 @@ export async function getLatestSpecTestRuns(workspaceId: string): Promise<Record
   return map;
 }
 
+/**
+ * Per-spec count of human checks the owner has acted on (any resolution — verified/dismissed/failed).
+ * The board chip uses this to render the `👤` part as DONE vs WAITING, so you can tell at a glance
+ * whether the human testing is finished before deciding to Mark verified & archive.
+ */
+export async function getHumanResolutionCounts(workspaceId: string): Promise<Record<string, number>> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("spec_test_human_checks")
+    .select("spec_slug, resolution")
+    .eq("workspace_id", workspaceId)
+    .limit(5000);
+  const map: Record<string, number> = {};
+  for (const r of (data ?? []) as Record<string, unknown>[]) {
+    if (r.resolution) map[String(r.spec_slug)] = (map[String(r.spec_slug)] ?? 0) + 1;
+  }
+  return map;
+}
+
 /** Is a spec-test job for this spec already in flight? (dedupe for the cron + the Test-now button.) */
 export async function hasActiveSpecTestJob(workspaceId: string, specSlug: string): Promise<boolean> {
   const admin = createAdminClient();

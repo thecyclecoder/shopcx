@@ -56,16 +56,29 @@ export function AgentTestedStamp({ verdict }: { verdict: string }) {
 }
 
 /** Compact chip "✅ 8 · ✗ 1 · 👤 1 · ? 0" from a run summary. */
-export function TestChip({ summary }: { summary: Summary }) {
+export function TestChip({ summary, humanResolved }: { summary: Summary; humanResolved?: number }) {
   const pass = summary.auto_pass ?? 0;
   const fail = summary.auto_fail ?? 0;
   const human = summary.needs_human ?? 0;
   const inc = summary.inconclusive ?? 0;
+  // When the board passes the owner's resolution count, show the human checks as DONE vs WAITING — so
+  // the archive decision is obvious. Without it (e.g. a detail view), fall back to the raw count.
+  const humanWaiting = humanResolved == null ? human : Math.max(0, human - humanResolved);
   return (
     <span className="inline-flex items-center gap-1.5 text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
       <span className="text-emerald-600 dark:text-emerald-400">✅ {pass}</span>
       {fail > 0 && <span className="text-rose-600 dark:text-rose-400">✗ {fail}</span>}
-      {human > 0 && <span className="text-amber-600 dark:text-amber-400">👤 {human}</span>}
+      {human > 0 &&
+        (humanResolved != null && humanWaiting === 0 ? (
+          <span className="text-emerald-600 dark:text-emerald-400" title={`all ${human} human check${human === 1 ? "" : "s"} tested`}>👤 ✓ tested</span>
+        ) : (
+          <span
+            className="text-amber-600 dark:text-amber-400"
+            title={humanResolved != null ? `${humanWaiting} of ${human} human check${human === 1 ? "" : "s"} still need testing` : `${human} check${human === 1 ? "" : "s"} need human testing`}
+          >
+            👤 {humanWaiting}{humanResolved != null ? " to test" : ""}
+          </span>
+        ))}
       {inc > 0 && <span className="text-zinc-400">? {inc}</span>}
     </span>
   );
