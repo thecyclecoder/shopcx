@@ -6,7 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { reconcileSpecDrift, fetchSpecRawFromMain, parseFixesLink } from "@/lib/spec-drift";
-import { markSpecCardMergeShipped } from "@/lib/spec-card-state";
+import { markSpecCardMergeShipped, rollupPhaseStatus } from "@/lib/spec-card-state";
 
 export type JobStatus =
   | "queued"
@@ -480,6 +480,106 @@ export async function retestOriginIfFixMerged(workspaceId: string, fixSlug: stri
 }
 
 /**
+ * The post-merge effects of a merged `kind='build'` job — the shared body run by BOTH paths that flip a
+ * build to `merged`: the board-render reconcile ([[reconcileMergedJobs]], for a manual squash-merge) and
+ * the auto-merge webhook path ([[handleAutoMergedBuildBranch]], auto-ship-pipeline). Extracting it keeps
+ * the two identical so the chain + card-state advance the same whether a human or the auto-merge gate
+ * landed the PR (chain-and-cardstate-under-automerge Phase 1). Steps, each best-effort/idempotent:
+ *
+ *   1. reconcile spec-drift against `main` (flip phases whose code verifiably shipped) — returns the
+ *      post-flip status + per-phase snapshot;
+ *   2. mirror the merge to the board, with the status ROLLED UP from `phase_states` (Bug A — a still-⏳ H1
+ *      no longer parks a part-shipped card in Planned), tagged deploy_pending + this merge's SHA;
+ *   3. when the spec is now FULLY shipped (rollup === shipped): enqueue its spec-test + auto-queue any
+ *      dependent it just unblocked;
+ *   4. if this was a `chain_phases` "Build all" build: queue the next ⏳ phase (Bug B — the chain advances
+ *      off the merge itself, no board render required). queueNextChainedPhase no-ops when none ⏳ remain or
+ *      a build is already in flight, so a double-run (both paths) queues exactly one next phase;
+ *   5. re-test the origin spec if this build carries a `Fixes:` link.
+ *
+ * Never throws — every sub-step swallows its own error (the daily spec-drift / spec-test crons backstop).
+ */
+export async function applyMergedBuildEffects(
+  workspaceId: string,
+  slug: string,
+  opts: { chainPhases?: boolean; mergeSha?: string | null },
+): Promise<void> {
+  try {
+    const drift = await reconcileSpecDrift(workspaceId, slug);
+    // Bug A: the board status is the rollup of the (just-reconciled) phase_states, not the title-derived
+    // drift.status — markSpecCardMergeShipped also rolls up internally, but we need the rolled-up value
+    // here to gate the shipped-only effects below. Fall back to drift.status for a spec with no phases.
+    const rolled = drift.phaseStates.length ? rollupPhaseStatus(drift.phaseStates) : drift.status;
+    await markSpecCardMergeShipped(workspaceId, slug, {
+      status: drift.status,
+      mergeSha: opts.mergeSha ?? null,
+      phaseStates: drift.phaseStates,
+    });
+    if (rolled === "shipped") {
+      await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
+      await autoQueueUnblockedBy(workspaceId, slug);
+    }
+  } catch {
+    /* event missed → the daily backlog + spec-drift crons mop it up */
+  }
+  // build-all-phases-chain: advance a "Build all" chain on this phase's merge (on fresh main, atop this
+  // phase's code). Outside the shipped-check above — most phase merges leave the spec in_progress (more ⏳
+  // phases remain) and the chain advances on every phase merge, not only the final one.
+  if (opts.chainPhases) {
+    try {
+      await queueNextChainedPhase(workspaceId, slug);
+    } catch {
+      /* best-effort — the owner can re-tap Build all to resume the chain */
+    }
+  }
+  // fix-ship-retests-origin: if this merged build's spec carries a `Fixes: {origin}` link, re-test the
+  // origin so its stale "issues" badge clears once the fix is live (deduped; no link → no-op).
+  try {
+    await retestOriginIfFixMerged(workspaceId, slug);
+  } catch {
+    /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
+  }
+}
+
+/**
+ * chain-and-cardstate-under-automerge Phase 1 — the auto-merge path's post-merge hook. When the GitHub
+ * webhook's auto-merge gate (auto-ship-pipeline, [[github-pr-resolve]]) squash-merges a claude/* build PR
+ * SERVER-SIDE, advance the same post-merge state a board render would — without waiting for one. Maps the
+ * merged branch → its `kind='build'` job, flips it to `merged`, and runs [[applyMergedBuildEffects]] (rollup
+ * card-state + chain advance + spec-test/unblock). This is what makes "Build all" hands-off under auto-merge:
+ * P1 auto-merges → P2 auto-queues inside the webhook window, no click, no board load.
+ *
+ * Idempotent: a job already `merged` is skipped — and because reconcileMergedJobs only acts on `completed`
+ * jobs, flipping it here means that path never double-fires; every effect inside is itself deduped besides,
+ * so it's safe even if both paths race. Best-effort: never throws. Returns the advanced spec slug, or null
+ * (no build job for the branch / already handled).
+ */
+export async function handleAutoMergedBuildBranch(branch: string, mergeSha: string | null): Promise<string | null> {
+  if (!branch) return null;
+  try {
+    const admin = createAdminClient();
+    const { data } = await admin
+      .from("agent_jobs")
+      .select("*")
+      .eq("spec_branch", branch)
+      .eq("kind", "build")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const job = data as AgentJob | null;
+    if (!job || job.status === "merged") return null; // no build for this branch / already handled
+    await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", job.id);
+    await applyMergedBuildEffects(job.workspace_id, job.spec_slug, {
+      chainPhases: !!job.chain_phases,
+      mergeSha,
+    });
+    return job.spec_slug;
+  } catch {
+    return null; // best-effort — reconcileMergedJobs is the board-render backstop for this branch
+  }
+}
+
+/**
  * Self-heal: a `completed` job whose PR was merged/closed OUTSIDE the dashboard (e.g. merged on
  * GitHub directly) still shows a stale "Squash & merge" button. Check GitHub; if the PR is no
  * longer open, flip the job to `merged` (mutates the passed jobs in place + persists).
@@ -502,54 +602,18 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
         if (pr.merged || pr.state === "closed") {
           j.status = "merged";
           await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", j.id);
-          // spec-drift Part A (root fix): a merged build is supposed to flip the phase(s) it built ✅, but
-          // doesn't reliably — so shipped work parks in Planned/In-progress. Run the per-phase, evidence-gated
-          // reconciler against `main`: it stamps ✅ only on phases whose code is verifiably on main (a merged
-          // build now exists for this spec), leaving genuinely-pending phases. This is where the drift
-          // originates; closing it here means the cron backstop rarely has work. Returns the post-flip status.
+          // spec-drift Part A (root fix): a merged build is supposed to flip the phase(s) it built ✅ +
+          // advance the board / the chain, but the board-render reconcile is the only trigger here. Run the
+          // shared post-merge effects (drift reconcile against main → rollup card-state → spec-test/unblock →
+          // chain advance → fix re-test) — the SAME body the auto-merge webhook path runs, so a manual
+          // squash-merge lands identically to an auto-merge. Idempotent; this only fires on the
+          // completed→merged transition (a job the auto-merge path already flipped `merged` is never `completed`
+          // here, so the two never double-run for one merge).
           if (pr.merged && j.kind === "build") {
-            try {
-              const drift = await reconcileSpecDrift(j.workspace_id, j.spec_slug);
-              // spec-card-db-companion: mirror the merge to the board the moment it happens — the card flips
-              // to its post-merge status tagged `deploy_pending` with this merge's SHA, so it reads
-              // "shipped · deploying" until a deployment carrying that SHA is live (no markdown-redeploy wait,
-              // no webhook — the board clears it at read time via VERCEL_GIT_COMMIT_SHA). drift already mirrored
-              // the per-phase snapshot; this overlays the merge SHA + deploy flag.
-              await markSpecCardMergeShipped(j.workspace_id, j.spec_slug, {
-                status: drift.status,
-                mergeSha: pr.merge_commit_sha ?? null,
-              });
-              // spec-test-on-ship: if the corrected phases now read shipped, enqueue a spec-test (shared
-              // dedupe no-ops if the cron/manual flip already did) + auto-queue any unblocked dependent.
-              if (drift.status === "shipped") {
-                await enqueueSpecTestIfDue(j.workspace_id, j.spec_slug, "shipped");
-                // spec-blockers Phase 2: this spec just shipped → auto-queue any dependent whose last
-                // blocker it was (de-duped, owner-opt-out-aware; no-ops if a build row already exists).
-                await autoQueueUnblockedBy(j.workspace_id, j.spec_slug);
-              }
-            } catch {
-              /* event missed → the daily backlog + spec-drift crons mop it up */
-            }
-            // build-all-phases-chain Phase 1: if THIS merged build was part of a "Build all" chain, queue
-            // the next ⏳ phase (on fresh main, atop this phase's code). Outside the shipped-check above:
-            // most phase merges leave the spec in_progress (more ⏳ phases remain) — the chain advances on
-            // every phase merge, not only the final one. queueNextChainedPhase no-ops when no ⏳ phase is
-            // left (all ✅ = chain done) or a build is already in flight (dedupe). A failed/needs_approval
-            // phase never reaches `merged`, so the chain stops/pauses there with no explicit stop logic.
-            if (j.chain_phases) {
-              try {
-                await queueNextChainedPhase(j.workspace_id, j.spec_slug);
-              } catch {
-                /* best-effort — the owner can re-tap Build all to resume the chain */
-              }
-            }
-            // fix-ship-retests-origin: if THIS merged build's spec carries a `Fixes: {origin}` link, re-test
-            // the origin so its stale "issues" badge clears once the fix is live (deduped; no link → no-op).
-            try {
-              await retestOriginIfFixMerged(j.workspace_id, j.spec_slug);
-            } catch {
-              /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
-            }
+            await applyMergedBuildEffects(j.workspace_id, j.spec_slug, {
+              chainPhases: j.chain_phases,
+              mergeSha: pr.merge_commit_sha ?? null,
+            });
           }
           // fold-guard-live-build (Phase 1): a just-merged FOLD just archived its batch of specs (their
           // markdown moved to archive.d/). Cancel any non-terminal build/spec-test job still pointing at an

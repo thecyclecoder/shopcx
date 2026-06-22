@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
-import { findMergedSiblingBuild } from "@/lib/agent-jobs";
+import { findMergedSiblingBuild, handleAutoMergedBuildBranch } from "@/lib/agent-jobs";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -487,7 +487,7 @@ async function squashMergeAndDelete(
   prNumber: number,
   branch: string,
   headSha: string | undefined,
-): Promise<{ merged: boolean; reason?: string }> {
+): Promise<{ merged: boolean; mergeSha?: string | null; reason?: string }> {
   const body: Record<string, unknown> = { merge_method: "squash" };
   if (headSha) body.sha = headSha;
   const r = await gh("PUT", `/repos/${GH_REPO}/pulls/${prNumber}/merge`, body);
@@ -495,6 +495,9 @@ async function squashMergeAndDelete(
     const msg = (r.json as Record<string, unknown>)?.message;
     return { merged: false, reason: `merge failed (${r.status}${msg ? `: ${msg}` : ""})` };
   }
+  // The merge response carries the squash commit's SHA — the `last_merge_sha` the board's "deploying → live"
+  // chip compares against (chain-and-cardstate-under-automerge).
+  const mergeSha = (r.json as Record<string, unknown>)?.sha;
   // Delete the merged branch (mirrors the owner's "delete branch" on squash-merge). Best-effort — a 404/422
   // (already gone / protected) is fine; the merge already landed.
   try {
@@ -502,7 +505,7 @@ async function squashMergeAndDelete(
   } catch {
     /* best-effort branch cleanup */
   }
-  return { merged: true };
+  return { merged: true, mergeSha: typeof mergeSha === "string" ? mergeSha : null };
 }
 
 export interface AutoMergeResult {
@@ -577,6 +580,16 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
               result.merged = 1;
               result.mergedPr = prNumber;
               console.log(`[auto-merge] squash-merged PR #${prNumber} (${branch}) + deleted branch`);
+              // chain-and-cardstate-under-automerge Phase 1: the merge happened HERE (server-side), so advance
+              // the build's post-merge state from this path — flip its job `merged`, roll up the card status,
+              // and queue the next ⏳ phase of a "Build all" chain — without waiting for a board-render
+              // reconcile. Idempotent + best-effort (it never throws); reconcileMergedJobs is the backstop.
+              try {
+                const advanced = await handleAutoMergedBuildBranch(branch, m.mergeSha ?? null);
+                if (advanced) console.log(`[auto-merge] advanced post-merge state for ${advanced} (PR #${prNumber})`);
+              } catch (e) {
+                console.warn(`[auto-merge] post-merge advance for PR #${prNumber} failed:`, e instanceof Error ? e.message : e);
+              }
             } else {
               ok = false;
               console.warn(`[auto-merge] PR #${prNumber} (${branch}) was ready but ${m.reason}`);

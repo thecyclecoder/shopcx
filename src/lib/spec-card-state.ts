@@ -45,6 +45,22 @@ export interface SpecCardState {
 
 const PHASE_RANK: Record<Phase, number> = { rejected: -1, planned: 0, in_progress: 1, shipped: 2 };
 
+/**
+ * Roll a spec's per-phase states up to ONE board status — the same shape `deriveStatus` uses for markdown,
+ * but driven purely by the phases (never the H1 emoji). All phases ✅ → `shipped`; any ✅/🚧 but not all →
+ * `in_progress`; otherwise `planned`. `rejected` (a cut phase) is ignored — it never blocks shipped and an
+ * all-cut spec rolls up to `planned`. Used by the merge-write so a part-shipped spec whose H1 is still ⏳
+ * reads `in_progress`, not `planned` (chain-and-cardstate-under-automerge Bug A). Returns `planned` for an
+ * empty phase set — callers with no phases fall back to the markdown-derived status instead.
+ */
+export function rollupPhaseStatus(phaseStates: SpecCardPhaseState[]): Phase {
+  const relevant = phaseStates.filter((p) => p.status !== "rejected");
+  if (!relevant.length) return "planned";
+  if (relevant.every((p) => p.status === "shipped")) return "shipped";
+  if (relevant.some((p) => p.status === "shipped" || p.status === "in_progress")) return "in_progress";
+  return "planned";
+}
+
 /** Every spec_card_state row for a workspace, keyed by spec slug — the board's DB-first read. */
 export async function getSpecCardStates(workspaceId: string): Promise<Record<string, SpecCardState>> {
   const admin = createAdminClient();
@@ -138,14 +154,22 @@ export async function markSpecCardStatus(
  * Mirror a just-MERGED build: the card flips to its post-merge status instantly, tagged `deploy_pending`
  * with the merge commit SHA so the board can show "shipped · deploying" until a deployment carrying that
  * SHA is live (then deploymentState() reads it as "live" — no write needed to clear).
+ *
+ * Bug A (chain-and-cardstate-under-automerge): the status it stores is the ROLLUP of `phaseStates`, never
+ * the caller's title-derived `opts.status`. A multi-phase spec whose first phase shipped but whose H1 is
+ * still ⏳ derives `planned` from the markdown (the title wins in `deriveStatus`), which parked a
+ * part-shipped card in Planned. The phase rollup reads it correctly as `in_progress`. `opts.status` is the
+ * fallback only when no phaseStates are supplied (a spec with no parsed phases — there the markdown status
+ * is right).
  */
 export async function markSpecCardMergeShipped(
   workspaceId: string,
   slug: string,
   opts: { status: Phase; mergeSha: string | null; phaseStates?: SpecCardPhaseState[] },
 ): Promise<void> {
+  const status = opts.phaseStates && opts.phaseStates.length ? rollupPhaseStatus(opts.phaseStates) : opts.status;
   await upsertCardState(workspaceId, slug, {
-    status: opts.status,
+    status,
     phase_states: opts.phaseStates,
     last_merge_sha: opts.mergeSha,
     flags: { deploy_pending: true },
