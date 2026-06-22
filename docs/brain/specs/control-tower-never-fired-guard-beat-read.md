@@ -1,4 +1,4 @@
-# never_fired must require a TRUSTWORTHY beat read (a failed RPC ≠ 0 beats) ⏳
+# never_fired must require a TRUSTWORTHY beat read (a failed RPC ≠ 0 beats) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] (hardens [[../specs/control-tower-monitor-accuracy]]; complements [[../specs/control-tower-loop-beats-scope-feed]]) · **Repair-signature:** `loop:slack-roadmap-notify` · **Verdict:** monitor-false-positive
 
@@ -9,8 +9,10 @@ buildControlTowerSnapshot (monitor.ts:597) never inspects the control_tower_loop
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+`buildControlTowerSnapshot` (monitor.ts) now destructures the `control_tower_loop_beats` RPC `error`, derives `beatsReadOk = !beatsError`, and threads it into `evalCron`. The `never_fired` red branch now gates on `beatsReadOk && everBeatCount === 0 && deployAgeMs != null && deployAgeMs > window` — a failed/timed-out read (which also yields `everBeatCount === 0` via the empty `countByLoop` + `?? 0`) is treated as UNKNOWN, leaving the loop **amber "awaiting first run"** instead of flapping a false `never_fired`, and logs `[control-tower] control_tower_loop_beats read failed — never_fired suppressed`. tsc clean. Brain page [[../libraries/control-tower]] updated.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:slack-roadmap-notify`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
