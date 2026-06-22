@@ -139,6 +139,14 @@ const RUNNING_SHA = (() => {
 })();
 let lastSelfUpdateCheck = 0;
 
+// Control Tower migration-drift check (control-tower-migration-drift-check P1): a periodic box job
+// that diffs every migration-created table against the live public schema. Runs here (not as an
+// Inngest cron) because the deployed runtime can't read the .sql files. Gated to ~30 min + an
+// in-flight guard so it never overlaps or blocks the 5s poll loop.
+const MIGRATION_DRIFT_INTERVAL_MS = 30 * 60 * 1000;
+let lastMigrationDriftCheck = 0; // 0 ⇒ run on the first poll so there's a beat right away.
+let migrationDriftInFlight = false;
+
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
 // A planner-proposed spec branch, carried on a type:'spec' action (goal-decomposition-engine).
 interface ProposedSpec {
@@ -504,6 +512,85 @@ async function writeLoopHeartbeat(loopId: string, ok: boolean, produced: unknown
     });
   } catch (e) {
     console.error("[loop-heartbeat] write failed:", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// Control Tower: one loop_heartbeats row for a BOX-EMITTED cron (kind 'cron', not 'agent-kind') —
+// the migration-drift check. Same best-effort discipline: a heartbeat write must never break the loop.
+async function writeCronHeartbeat(loopId: string, ok: boolean, produced: unknown, durationMs: number, detail?: string) {
+  try {
+    await db.from("loop_heartbeats").insert({
+      loop_id: loopId,
+      kind: "cron",
+      ok,
+      produced: produced ?? null,
+      detail: detail ?? null,
+      duration_ms: durationMs,
+      ran_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("[loop-heartbeat] cron write failed:", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// Read the live `public` BASE TABLE names off the pooler (raw SQL — information_schema isn't exposed
+// through PostgREST). Returns null when the host has no DB password (→ the check reports 'skipped',
+// never a false "no drift"). Best-effort connect/teardown.
+async function fetchLivePublicTables(): Promise<string[] | null> {
+  let connectionString: string;
+  try {
+    const { poolerConnectionString } = await import("./_bootstrap");
+    connectionString = poolerConnectionString();
+  } catch {
+    return null; // no SUPABASE_DB_PASSWORD / SUPABASE_DB_URL on this host — skip honestly.
+  }
+  const { Client } = await import("pg");
+  const c = new Client({ connectionString });
+  await c.connect();
+  try {
+    const res = await c.query(
+      "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
+    );
+    return (res.rows as Array<{ table_name: string }>).map((r) => r.table_name);
+  } finally {
+    await c.end();
+  }
+}
+
+// The periodic migration-drift job: parse supabase/migrations/*.sql → diff the live schema → write
+// the result into the migration-drift-check loop's heartbeat. The Control Tower monitor's
+// migration-drift output assertion reads produced.missing and flips the tile red on drift; freshness
+// keeps a DEAD check visible. NEVER throws (guarded) — a check failure must not break the poll loop.
+async function runMigrationDriftJob(): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const { runMigrationDriftCheck, driftSummary, MIGRATION_DRIFT_LOOP_ID } = await import(
+      "../src/lib/control-tower/migration-drift"
+    );
+    const result = await runMigrationDriftCheck({
+      migrationsDir: resolve(REPO_DIR, "supabase/migrations"),
+      fetchLiveTables: fetchLivePublicTables,
+    });
+    const summary = driftSummary(result);
+    await writeCronHeartbeat(
+      MIGRATION_DRIFT_LOOP_ID,
+      result.status !== "skipped", // ok reflects "did the check run"; drift is an output-assertion concern.
+      {
+        status: result.status,
+        missing: result.missing,
+        allowlistedMissing: result.allowlistedMissing,
+        expectedCount: result.expectedCount,
+        liveCount: result.liveCount,
+        parsedFiles: result.parsedFiles,
+        reason: result.reason,
+      },
+      Date.now() - startedAt,
+      summary,
+    );
+    if (result.status === "drift") console.warn(`[migration-drift] ${summary}`);
+    else console.log(`[migration-drift] ${summary}`);
+  } catch (e) {
+    console.error("[migration-drift] check failed:", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -3735,6 +3822,15 @@ async function main() {
       // Heartbeat for the dashboard, then self-update if no SACROSANCT lane is running.
       const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since }));
       await writeHeartbeat(active.size, "healthy", undefined, lanes);
+
+      // Control Tower migration-drift check (control-tower-migration-drift-check P1): fire-and-forget
+      // on its ~30 min cadence, with an in-flight guard so a slow DB read never overlaps or stalls the
+      // poll loop. Detection lives on the box because the deployed runtime can't read the .sql files.
+      if (!migrationDriftInFlight && Date.now() - lastMigrationDriftCheck > MIGRATION_DRIFT_INTERVAL_MS) {
+        lastMigrationDriftCheck = Date.now();
+        migrationDriftInFlight = true;
+        void runMigrationDriftJob().finally(() => { migrationDriftInFlight = false; });
+      }
       // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
       // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
       // idempotent, re-runnable lanes (spec-test, triage-escalations, migration-fix, dev-ask, pr-resolve)
