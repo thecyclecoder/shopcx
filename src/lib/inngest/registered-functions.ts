@@ -8,6 +8,7 @@
  *
  * See docs/brain/libraries/control-tower-self-audit.md.
  */
+import { inngest } from "@/lib/inngest/client";
 import { syncCustomers, syncOrders } from "@/lib/inngest/sync-shopify";
 import { ticketCsatCron } from "@/lib/inngest/ticket-csat";
 import {
@@ -236,3 +237,21 @@ export const registeredInngestFunctions = [
   inngestFailureCapture,
   supabaseLogPollCron,
 ];
+
+/** Our Inngest app id prefix (e.g. "shopcx-"), the form Inngest prepends to function ids across apps. */
+export const APP_FUNCTION_ID_PREFIX = `${inngest.id}-`;
+
+/**
+ * Every served function's APP-PREFIXED id (e.g. "shopcx-amazon-sync-orders") — exactly the
+ * form Inngest reports in the `inngest/function.failed` event's `function_id`. Used by
+ * inngest-failure-capture to scope the Control Tower error feed to OUR app and drop
+ * sibling-app noise (inngest-capture-scope-own-app spec).
+ */
+export const servedFunctionIds: ReadonlySet<string> = new Set(
+  registeredInngestFunctions.map((fn) => fn.id(inngest.id)),
+);
+
+/** The same ids in their BARE (un-prefixed) form (e.g. "amazon-sync-orders") — tolerant fallback. */
+export const servedFunctionBareIds: ReadonlySet<string> = new Set(
+  registeredInngestFunctions.map((fn) => fn.id()),
+);

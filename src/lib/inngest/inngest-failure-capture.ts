@@ -11,9 +11,33 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { recordError } from "@/lib/control-tower/error-feed";
+import {
+  APP_FUNCTION_ID_PREFIX,
+  servedFunctionIds,
+  servedFunctionBareIds,
+} from "@/lib/inngest/registered-functions";
 
 /** This function's own id — skip capturing its OWN failures (no self-loop). */
 const SELF_ID = "inngest-failure-capture";
+
+/**
+ * Does this `function_id` belong to OUR app? The native `inngest/function.failed`
+ * event is account-wide — it fires for EVERY app on the same Inngest account, so a
+ * sibling project (e.g. `shopgrowth-amazon-sync-orders`, Prisma-based) bleeds into our
+ * Control Tower feed (inngest-capture-scope-own-app spec). We scope to ours:
+ *   - exact match against our served function ids (app-prefixed, "shopcx-…"), or
+ *   - our app-id prefix ("shopcx-") — fail-open: an unknown-but-plausibly-ours id still
+ *     records (better a rare foreign row than dropping a real one), or
+ *   - the bare (un-prefixed) form, a tolerant fallback if Inngest ever reports bare ids.
+ * A clearly-foreign id (no "shopcx-" prefix, not in our set) → not ours → ignored.
+ */
+function isOurFunction(functionId: string): boolean {
+  return (
+    servedFunctionIds.has(functionId) ||
+    functionId.startsWith(APP_FUNCTION_ID_PREFIX) ||
+    servedFunctionBareIds.has(functionId)
+  );
+}
 
 interface FailedEventData {
   error?: { name?: string; message?: string; stack?: string } | string | null;
@@ -33,8 +57,13 @@ export const inngestFailureCapture = inngest.createFunction(
     const data = (event.data ?? {}) as FailedEventData;
     const functionId = data.function_id ?? "unknown-function";
 
-    // Never capture our own failure → infinite fan-out.
-    if (functionId === SELF_ID) return { skipped: "self" };
+    // Never capture our own failure → infinite fan-out (match bare + app-prefixed form).
+    if (functionId === SELF_ID || functionId === `${APP_FUNCTION_ID_PREFIX}${SELF_ID}`)
+      return { skipped: "self" };
+
+    // Scope to OUR app — the function.failed event is account-wide and sibling apps
+    // on the same Inngest account otherwise bleed into the Control Tower feed.
+    if (!isOurFunction(functionId)) return { skipped: "foreign-app", function_id: functionId };
 
     const err = data.error;
     const errName = typeof err === "object" && err ? err.name ?? "Error" : "Error";
