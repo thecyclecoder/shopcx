@@ -53,7 +53,13 @@ export const portalAutoResumeCron = inngest.createFunction(
     });
 
     if (subs.length === 0) {
-      return { status: "no_subs_to_resume" };
+      // Control Tower: still beat on the no-work path so cron_freshness doesn't
+      // flip red during quiet hours (portal-auto-resume-heartbeat-on-empty spec).
+      const empty = { status: "no_subs_to_resume", processed: 0, results: [] };
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("portal-auto-resume-cron", { ok: true, produced: empty });
+      });
+      return empty;
     }
 
     const results: { contractId: string; outcome: string }[] = [];
