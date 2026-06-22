@@ -1,0 +1,1 @@
+- **Phase chain + card-state status break under auto-merge** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
