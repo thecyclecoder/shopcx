@@ -46,6 +46,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** formalizes the manual "queue after X merges" chaining (and prevents the parallel-build dirty-PR collisions we kept hitting). A spec declares `**Blocked-by:** [[other-spec]]`; the build enqueue chokepoint (`queueRoadmapBuild`) **refuses to queue** until every blocker has shipped; the board disables Build with a "🔒 Blocked by …" chip. P2 auto-queues the dependent build when the last blocker merges (native version of the watchers I launch by hand). Extends [[roadmap-build-console]].
 
+## Active project — Error-Feed Monitoring (Vercel · Inngest · Supabase) ⏳
+
+**Spec:** [[error-feed-monitoring]] · **Owner:** [[../functions/platform]] · **Blocked-by:** [[control-tower]]
+
+**Why this matters:** the three "hidden surfaces" where failures hide — Vercel runtime errors, Inngest errored runs, Supabase errors — piped into the Control Tower so they page you + show on the dashboard instead of being found by a customer report. P1: Inngest `function.failed` handler (native) + Vercel Log Drain→webhook (I set up the drain) + an app-layer `reportDbError` (catches the swallowed-error class, no token). P2: Supabase Management Logs API (the one part needing an owner-generated Supabase access token). Extends [[control-tower]].
+
 ## Active project — Control Tower (autonomous-loop observability) ⏳
 
 **Spec:** [[control-tower]] · **Owner:** [[../functions/platform]]
