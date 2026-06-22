@@ -483,6 +483,8 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
 interface AssertionInputs {
   /** open, routine-owned escalated tickets waiting (escalated_at set, escalated_to null). */
   escalatedWaiting: number;
+  /** the OLDEST waiting ticket's escalated_at (min over the waiting set) — how long real work has actually waited, or null. */
+  oldestEscalatedAt: string | null;
   /** most-recent triage-escalations agent_jobs.created_at (any status), or null. */
   latestTriageJobAt: string | null;
   /** most-recent spec-test agent_jobs.created_at (any status), or null. */
@@ -542,17 +544,27 @@ function evalOutputAssertion(
 ): { statusText: string; violation: { reason: string; detail: string } } | null {
   switch (assertionId) {
     case "escalation-idle": {
-      // Idle-while-work: tickets wait but no triage job enqueued within the cadence.
-      if (inputs.escalatedWaiting <= 0) return null;
+      // Idle-while-work: a ticket has actually been WAITING longer than the cadence and no triage
+      // job has been created since it escalated. Key off the oldest waiting ticket's escalated_at
+      // (real work age), NOT the last enqueued job's age — triage-escalations-cron only enqueues when
+      // escalated work exists, so latestTriageJobAt legitimately goes stale across quiet stretches and
+      // a just-now escalation hasn't waited long enough to flag (the next hourly tick will pick it up).
+      if (inputs.escalatedWaiting <= 0 || inputs.oldestEscalatedAt == null) return null;
+      // Grace ≥ the cron's hourly cadence so a ticket escalating between ticks isn't flagged before the next run.
       const windowMs = loop.livenessWindowMs ?? 2 * 60 * 60_000;
-      const enqueuedRecently = inputs.latestTriageJobAt != null && ageMs(inputs.latestTriageJobAt) <= windowMs;
-      if (enqueuedRecently) return null;
+      const waitedMs = ageMs(inputs.oldestEscalatedAt);
+      if (waitedMs <= windowMs) return null;
+      // A triage job created AT/AFTER the ticket escalated means the work was picked up — not idle.
+      const handledSinceEscalation =
+        inputs.latestTriageJobAt != null &&
+        new Date(inputs.latestTriageJobAt).getTime() >= new Date(inputs.oldestEscalatedAt).getTime();
+      if (handledSinceEscalation) return null;
       const n = inputs.escalatedWaiting;
       return {
-        statusText: `idle while ${n} ticket${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""}`,
+        statusText: `idle while ${n} ticket${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} (oldest ${elapsed(inputs.oldestEscalatedAt)})`,
         violation: {
           reason: "idle_while_work",
-          detail: `Escalation triage idle while ${n} routine-escalated ticket${n === 1 ? "" : "s"} wait — no triage-escalations job enqueued in the last ${Math.round(windowMs / 60_000)}m (last enqueue ${elapsed(inputs.latestTriageJobAt)} ago).`,
+          detail: `Escalation triage idle while ${n} routine-escalated ticket${n === 1 ? "" : "s"} wait — oldest has waited ${elapsed(inputs.oldestEscalatedAt)} (past the ${Math.round(windowMs / 60_000)}m grace) with no triage-escalations job enqueued since it escalated (last enqueue ${elapsed(inputs.latestTriageJobAt)} ago).`,
         },
       };
     }
@@ -645,7 +657,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   // A dunning cycle still 'retrying' more than the grace past next_retry_at is stuck.
   const stuckBeforeIso = new Date(Date.now() - STUCK_DUNNING_GRACE_MS).toISOString();
 
-  const [escalated, triageJob, specTestJob, overdueSubs, renewalCronBeat, stuckDunning] = await Promise.all([
+  const [escalated, oldestEscalated, triageJob, specTestJob, overdueSubs, renewalCronBeat, stuckDunning] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -653,6 +665,16 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .not("escalated_at", "is", null)
       .is("escalated_to", null)
       .not("status", "in", '("archived","closed")'),
+    // The OLDEST waiting ticket's escalated_at — how long real escalated work has actually been waiting.
+    admin
+      .from("tickets")
+      .select("escalated_at")
+      .not("escalated_at", "is", null)
+      .is("escalated_to", null)
+      .not("status", "in", '("archived","closed")')
+      .order("escalated_at", { ascending: true })
+      .limit(1)
+      .maybeSingle(),
     admin.from("agent_jobs").select("created_at").eq("kind", "triage-escalations").order("created_at", { ascending: false }).limit(1).maybeSingle(),
     admin.from("agent_jobs").select("created_at").eq("kind", "spec-test").order("created_at", { ascending: false }).limit(1).maybeSingle(),
     // Overdue = strictly before today 00:00 UTC ⇒ a full renewal window has passed
@@ -686,6 +708,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 
   return {
     escalatedWaiting: escalated.count ?? 0,
+    oldestEscalatedAt: (oldestEscalated.data as { escalated_at: string } | null)?.escalated_at ?? null,
     latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
     latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,
     overdueInternalSubs: overdueSubs.count ?? 0,

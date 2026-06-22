@@ -11,8 +11,10 @@ In src/lib/control-tower/monitor.ts the escalation-idle case (monitor.ts:544) fi
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** `evalOutputAssertion`'s `escalation-idle` case now reads the oldest waiting ticket's `escalated_at` (new `AssertionInputs.oldestEscalatedAt`, fetched as a min-ordered single-row query in `fetchAssertionInputs`). It flags only when that wait exceeds the `livenessWindowMs` grace (2h ≥ the hourly cadence) AND no `triage-escalations` job was created at/after the ticket escalated — instead of keying off the last enqueued job's age, which legitimately goes stale across quiet, work-free stretches. statusText/detail now report the oldest ticket's wait. Brain pages updated: [[../libraries/control-tower]], [[../inngest/control-tower-monitor]].
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:triage-escalations-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.

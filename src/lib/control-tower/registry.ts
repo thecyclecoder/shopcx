@@ -70,8 +70,11 @@ export const OWNER_FUNCTIONS: { id: OwnerFunction; label: string; healthLabel: s
  * flips the tile RED (opening a de-duped alert + paging) when it fails. Absent ⇒
  * the loop has only the Phase 1 checks. Implemented in monitor.ts → evalOutputAssertion.
  *
- *   - escalation-idle    — routine-escalated tickets wait but no triage-escalations
- *                          job was enqueued within the cadence (the 3h-ticket gap).
+ *   - escalation-idle    — the OLDEST routine-escalated ticket has waited past the
+ *                          cadence grace (keyed off its escalated_at, not the last
+ *                          job's age) AND no triage-escalations job was created since
+ *                          it escalated — so a healthy hourly cron isn't flagged in
+ *                          the normal gap between an escalation and the next tick.
  *   - spec-test-persisted — the latest beat reports enqueued>0 but 0 spec-test
  *                          agent_jobs actually landed (produced-but-not-persisted).
  *   - renewal-integrity  — active internal subs are overdue (next_billing_date in
