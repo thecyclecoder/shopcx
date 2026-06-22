@@ -20,7 +20,7 @@ The ±3x error bar is gone — Amazon is now product-resolvable. Coffee, Jun 7�
 - Coffee & Creamer Meta spend: **$7,179**.
 - **AcqROAS(coffee, Jun 7–20) = ($5,896 + $6,267) / $7,179 = 1.69** — and this is a CONSERVATIVE floor (see Phase 3: the account's spend also covers creamer). vs 0.82 on-site-only: the Amazon halo ~doubles measured efficiency. Profit confirmation still pends M1 COGS.
 
-## Phase 1 — Per-product non-renewal revenue resolver (Shopify+internal) ⏳
+## Phase 1 — Per-product non-renewal revenue resolver (Shopify+internal) ✅
 - Library `getShopifyInternalNonRenewalRevenue({ productIds, startDate, endDate })` mirroring the Amazon resolver's shape: walk `orders` (paginated), bucket via `bucketOrder`, sum **line-item** revenue (`line_items[].price_cents × quantity`) for non-renewal orders, matching lines by `product_variants.shopify_variant_id → product_id ∈ group`. Reuse, don't re-implement, `bucketOrder`. Reproduces the $5,896 baseline. Brain page in same PR. (Only the Amazon side — `src/lib/amazon/per-product-revenue.ts` — exists today.)
 
 ## Phase 2 — Per-product Amazon sales ingestion ✅ (delegated)
