@@ -1,4 +1,4 @@
-# Iteration Scorecard Upsert — Stop Swallowing Errors + FK-Resilient ⏳
+# Iteration Scorecard Upsert — Stop Swallowing Errors + FK-Resilient ✅
 
 **Owner:** [[../functions/cmo]] · **Parent:** CMO mandate — ad-iteration integrity ([[../libraries/meta-scorecards]] / [[../lifecycles/ad-render]]). Found by the spec-test agent as a real regression on [[storefront-iteration-engine]].
 
@@ -16,5 +16,8 @@
 - Inject a record with a non-existent `angle_id` → the row's `angle_id` is nulled (or that one row is isolated + logged) and the **other rows still persist**; the run does **not** silently report success with 0 written — on an unrecoverable error it throws with the PG message.
 - `reconcilePriorActions` + the decision engine now read non-zero scorecards for the account; the [[storefront-iteration-engine]] spec-test's "P3 per-level sanity: scorecard rows exist when attribution exists" passes.
 
-## Phase 1 — error check + FK-resilience + backfill ⏳
+## Phase 1 — error check + FK-resilience + backfill ✅
+**Shipped (PR #159, merged 2026-06-21).** `computeScorecards` (`src/lib/meta/scorecards.ts` ~L498) now captures every batch's `{ error }`, falls back to **per-row upsert** so one dangling FK can't drop the whole batch, returns the **actually-persisted** count (never the built count on failure), and throws with the PG code+message on an unrecoverable error. FK-resilience nulls any unresolved `angle_id`/`advertorial_page_id`/`parent_adset_id`/`parent_campaign_id` before upsert. The one-time backfill ran. Verified live earlier: re-running the rollup persisted 7 rows (4 variant + 3 angle) where it had silently persisted 0. Owner-verify per `## Verification`, then fold into [[../libraries/meta-scorecards]] + [[../libraries/meta-iteration-run]] + [[storefront-iteration-engine]] and delete this spec.
+
+### Original plan
 The `{ error }` check + throw + real-count return at `scorecards.ts` ~L477; null-unresolved-FK (or per-row fallback) guard; one-time rollup backfill for the live account. Brain: [[../libraries/meta-scorecards]] + [[../libraries/meta-iteration-run]] + [[storefront-iteration-engine]] (status/open-work). Fold on ship.
