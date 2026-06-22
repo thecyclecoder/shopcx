@@ -1,4 +1,4 @@
-# Ticket-analysis cron: emit Control Tower heartbeat on empty (no-tickets) runs ⏳
+# Ticket-analysis cron: emit Control Tower heartbeat on empty (no-tickets) runs ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/inngest/ticket-analysis-cron.ts::real-bug`
@@ -11,7 +11,7 @@ src/lib/inngest/ticket-analysis-cron.ts gates its only emitCronHeartbeat behind 
 
 **Likely target:** `src/lib/inngest/ticket-analysis-cron.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
