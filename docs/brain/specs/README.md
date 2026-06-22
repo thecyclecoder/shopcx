@@ -76,6 +76,12 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 - [[inngest-registered-diff-endpoint-fix]] (platform) — diffInngestRegistered hits GET /v1/apps (404); correct = /v1/apps/shopcx/functions (id-keyed). The registration-gap check is dead until fixed (the spec's own ⚠️).
 - [[control-tower-renewal-integrity-assertions]] (retention) — control-tower P2 renewal-integrity only built the overdue check; outcome-distribution (decline/no-PM spike) + stuck-dunning assertions were never implemented. Renewal breaks silently.
 
+## Active project — Client-Side Error Capture ⏳
+
+**Spec:** [[client-error-capture]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** the Control Tower's 3 error feeds (Vercel/Inngest/Supabase) are all SERVER-side. Client-side JS that breaks the UX in the browser — a PDP render crash, a broken customize interaction, a Braintree widget failing on checkout (silent lost revenue), a portal crash — is invisible to us (no error boundary / window.onerror / Sentry exists; only a narrow checkout-only logger). Fix: the missing 4th feed — global error boundary + window.onerror/unhandledrejection on storefront + portal → /api/client-errors → recordError(source:'client') → a "Client errors" Control Tower panel. Rate-limited, PII-stripped, fail-open.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
