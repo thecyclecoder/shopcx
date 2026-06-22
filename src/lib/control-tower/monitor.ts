@@ -209,7 +209,7 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadOk: boolean = true): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -220,6 +220,14 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
     lastProduced: latest?.produced ?? null,
     detail: latest?.detail ?? null,
   };
+  // The beats read (control_tower_loop_beats RPC) failed/returned null this snapshot, so latest is
+  // null and everBeatCount is 0 for EVERY cron purely because the data is missing — not because the
+  // cron is silent. Suppress the never_fired AND cron_freshness reds and stay amber (conservative),
+  // the same way deployAgeMs==null keeps a missing deploy-age reference from false-alarming. A real
+  // never_fired/stale cron still pages on the next snapshot once the read succeeds.
+  if (!beatsReadOk) {
+    return { ...base, color: "amber", statusText: "beats read unavailable — heartbeat status unknown", violation: null };
+  }
   // No beat yet: distinguish NEVER-FIRED-PAST-GRACE (red) from AWAITING-FIRST-TICK (amber).
   // A registered cron whose deploy has been live longer than its cadence+grace (livenessWindowMs)
   // but has 0 heartbeats is NOT awaiting its first tick — Inngest isn't invoking it (the exact
@@ -585,7 +593,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
+  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly grouped read (control-tower-monitor-accuracy P1): the latest
     // HISTORY_LIMIT beats PER loop_id + the all-time beat count, for cron + agent-kind loops only.
@@ -604,6 +612,13 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
 
   // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
   const deployAgeMs = deployRefAgeMs(workerRow as WorkerRow | null);
+
+  // Did the per-loop grouped beats read actually succeed? The control_tower_loop_beats RPC can 500
+  // (statement timeout) or return null under load — that leaves `beats` empty so byLoop/countByLoop
+  // are empty for EVERY cron, which would otherwise false-fire never_fired (everBeatCount=0,latest=null)
+  // and page owners on healthy loops. When the read failed, evalCron stays conservative (amber) instead
+  // of paging — the same posture as the deployAgeMs==null guard for a missing deploy-age reference.
+  const beatsReadOk = !beatsError && beats != null;
 
   // Group heartbeats by loop_id (the RPC returns them ordered by loop_id, rn=newest-first, already
   // capped at HISTORY_LIMIT per loop) and capture the all-time beat count for the never-fired check.
@@ -634,7 +649,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, countByLoop.get(loop.id) ?? 0);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, countByLoop.get(loop.id) ?? 0, beatsReadOk);
     else core = evalAgentKind(loop, latest, activeJobs);
     // Phase 2: layer the output assertion on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it).
