@@ -1,0 +1,44 @@
+/**
+ * GET /api/developer/control-tower — the Control Tower snapshot (control-tower spec, Phase 1).
+ *
+ * Owner-gated, read-only. Returns the green/amber/red status of every monitored loop
+ * (box worker liveness, cron freshness, agent-kind stuck jobs) plus per-loop last-ran /
+ * last-produced / recent history / open alerts — the data behind /dashboard/developer/control-tower.
+ * Evaluation is shared with the control-tower-monitor cron (src/lib/control-tower/monitor.ts);
+ * this endpoint never mutates (no alert open/resolve, no paging).
+ *
+ * See docs/brain/dashboard/control-tower.md.
+ */
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { buildControlTowerSnapshot } from "@/lib/control-tower/monitor";
+
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const cookieStore = await cookies();
+  const workspaceId = cookieStore.get("workspace_id")?.value;
+  if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
+
+  const admin = createAdminClient();
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+  if (!member || member.role !== "owner") {
+    return NextResponse.json({ error: "Only the workspace owner can view the Control Tower" }, { status: 403 });
+  }
+
+  const snapshot = await buildControlTowerSnapshot(admin);
+  return NextResponse.json(snapshot);
+}

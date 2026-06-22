@@ -18,6 +18,7 @@
 
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
@@ -60,6 +61,11 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
         data: { subscription_id: s.id, workspace_id: s.workspace_id },
       })));
     }
+
+    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("internal-subscription-renewal-cron", { ok: true, produced: { dispatched: due.length } });
+    });
 
     return { dispatched: due.length };
   },

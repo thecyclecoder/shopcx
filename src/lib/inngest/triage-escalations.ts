@@ -12,6 +12,7 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const triageEscalationsCron = inngest.createFunction(
   {
@@ -56,6 +57,11 @@ export const triageEscalationsCron = inngest.createFunction(
         if (!error) enqueued++;
       }
       return { workspaces: workspaceIds.length, enqueued };
+    });
+
+    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("triage-escalations-cron", { ok: true, produced: result });
     });
 
     return result;
