@@ -1,4 +1,4 @@
-# spec-drift-reconcile cron registered but never fires (+ catch the registered-not-firing class) 🚧
+# spec-drift-reconcile cron registered but never fires (+ catch the registered-not-firing class) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** restores [[spec-drift-agent]]'s backstop; extends [[control-tower]] + [[control-tower-complete-coverage]]. · **Found in use 2026-06-22:** the roadmap had stale cards (`ticket-csat-cron-heartbeat-on-idle` #219, `portal-auto-resume-heartbeat-on-empty` #218 — builds merged, phases never flipped). Root cause: **`spec-drift-reconcile` — the every-30-min drift backstop — has NEVER emitted a heartbeat** (`loop_heartbeats` has 0 beats for it), so residual drift is never auto-reconciled.
 
@@ -19,7 +19,7 @@ So a **registered cron with a valid schedule (`20,50 * * * *`) is simply not exe
 - The "registered-but-never-firing" guard: a monitored cron with 0 beats past its window surfaces a Control Tower alert (harness or a deliberately-paused cron), distinct from the registration-diff signal.
 - Negative: a healthy firing cron (e.g. `portal-action-healer`) is not flagged.
 
-## Phase 1 — get the cron firing + add the registered-not-firing guard 🚧
+## Phase 1 — get the cron firing + add the registered-not-firing guard ✅�
 Diagnose + fix `spec-drift-reconcile`'s non-execution (re-sync / cron-trigger registration in the prod Inngest env); add the zero-beats-past-window detection to the monitor for registered cron loops. Brain: [[spec-drift-agent]] · [[../inngest/spec-drift-reconcile]] · [[../libraries/control-tower]] · [[../integrations/inngest]] · [[control-tower]].
 
 **Diagnosis (code side, 2026-06-22).** The in-repo wiring is correct, confirming this is purely a prod-Inngest activation gap (not a code bug):
