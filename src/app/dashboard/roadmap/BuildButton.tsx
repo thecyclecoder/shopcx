@@ -26,6 +26,20 @@ const LABEL: Record<JobStatus, string> = {
   needs_attention: "Needs attention",
 };
 
+// Suffix the chip with the job KIND when it isn't a build, so a queued spec-test/pr-resolve/fold
+// doesn't read as a queued *build* — a spec-test waits on its own concurrency-limited lane, not a
+// build lane, so "Queued" with free build lanes looked like a stuck build. `build` = the default,
+// no suffix. (spec-test isn't in JobKind's union but arrives at runtime, hence the string keys.)
+const KIND_SUFFIX: Record<string, string> = {
+  "spec-test": " · test",
+  "pr-resolve": " · resolve",
+  fold: " · fold",
+  plan: " · plan",
+  "product-seed": " · seed",
+  "ticket-improve": " · improve",
+  "migration-fix": " · fix",
+};
+
 const CHIP: Record<JobStatus, string> = {
   queued: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
   claimed: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
