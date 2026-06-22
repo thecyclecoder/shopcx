@@ -1,4 +1,4 @@
-# Worker-orphan-reaper: prune stale worktrees + idempotent resume worktree-add ⏳
+# Worker-orphan-reaper: prune stale worktrees + idempotent resume worktree-add ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[worker-orphan-reaper]]. · **Found in use 2026-06-22:** the `auto-ship-pipeline` build **failed on resume** — `worktree add (resume) failed: fatal: 'claude/auto-ship-pipeline-mqpgwyds' is already used by worktree at '/home/builder/builds/2b9a3216-…'`. And a manual sweep found **3 stale worktrees** for terminal/merged branches (e.g. `control-tower-complete-coverage` PR #189, long-merged) that nothing had reaped. The reaper handles orphaned *jobs* but not orphaned *worktrees*.
 
@@ -17,5 +17,5 @@ Two distinct failures, one root: the box never cleans git worktrees.
 - After a build merges (branch deleted) → its worktree is reaped, not left as cruft; disk under `builds/` doesn't grow unboundedly.
 - Negative: a worktree whose job is still `building` / `needs_approval` is NEVER reaped (no killing a live build).
 
-## Phase 1 — idempotent worktree-add + worktree reaping in reapOrphans ⏳
+## Phase 1 — idempotent worktree-add + worktree reaping in reapOrphans ✅
 Add the pre-add force-remove (build + resume paths) and the terminal-job/deleted-branch worktree sweep to `reapOrphans` in `scripts/builder-worker.ts`. Brain: [[worker-orphan-reaper]] · [[../recipes/build-the-box]] (if present) · [[../operational-rules]].
