@@ -14,6 +14,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 - **"AI Investigation" — make routine-escalated tickets visible** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
 - **Per-ASIN Amazon Sales + Persistent ASIN→Product/Pack Mapping** · verified 2026-06-22 · → [[tables/daily_amazon_product_snapshots]]
+- **Appstle webhook 500 on subscription.billing-* events** · verified 2026-06-22 · → [[integrations/appstle]]
 - **Build Console: No Silent No-Op Builds + Report-Issue Enqueue Confirmation** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
 - **Clear Escalation Flags on Resolve/Close** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
 - **Comp Transaction Type Constraint Fix** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
