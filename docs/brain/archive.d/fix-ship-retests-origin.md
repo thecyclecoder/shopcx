@@ -1,0 +1,1 @@
+- **Proposed-Fix Ships → Auto-Re-test the Origin Spec** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
