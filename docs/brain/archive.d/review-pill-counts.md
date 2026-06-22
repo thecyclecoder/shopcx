@@ -1,0 +1,1 @@
+- **Review Filter Pill Counts — show the real corpus volume** · verified 2026-06-22 · → [[lifecycles/product-intelligence]]

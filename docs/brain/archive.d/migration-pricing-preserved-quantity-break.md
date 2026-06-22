@@ -1,0 +1,1 @@
+- **pricing_preserved must account for internal quantity breaks (Appstle baseline lacks them)** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
