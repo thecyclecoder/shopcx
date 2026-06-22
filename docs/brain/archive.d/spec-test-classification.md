@@ -1,0 +1,1 @@
+- **Spec-Test Classification — `fail` needs positive evidence, not "couldn't verify"** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]

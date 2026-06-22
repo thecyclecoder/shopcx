@@ -1,0 +1,1 @@
+- **Error-Feed Panels: "Not Connected" ≠ "0 Errors"** · verified 2026-06-22 · → [[libraries/control-tower]]

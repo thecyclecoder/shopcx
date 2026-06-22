@@ -1,0 +1,1 @@
+- **Spec-Test Agent (box QA over shipped-unverified specs)** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
