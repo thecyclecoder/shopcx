@@ -15,6 +15,10 @@ The **daily backlog sweep** for the box-hosted **spec-test QA agent** ([[../spec
 
 "Shipped but not archived" = `brain-roadmap` `deriveStatus` is `shipped` **AND** the spec is still in `docs/brain/specs/` with **no** `docs/brain/archive.d/{slug}.md` (`listArchivedSlugs`). It computes that candidate set in bulk (`getRoadmap` + `listArchivedSlugs`), then for each workspace that uses the build console (has any [[../tables/agent_jobs]] row) it calls `enqueueSpecTestIfDue(workspaceId, slug, 'shipped')` ([[../libraries/agent-jobs]]) per candidate — passing the already-derived `shipped` so the helper skips a redundant per-slug disk read. The helper inserts one `queued` `agent_jobs` row `kind='spec-test'` when due. The box claims each on its **concurrency-1 `spec-test` lane** (`MAX_SPEC_TEST=1`) and runs the non-destructive `## Verification` checks on Max, writing a [[../tables/spec_test_runs]] row.
 
+## Auto-fold backstop (Gate B periodic sweep)
+
+After the enqueue, an `auto-fold-verified-specs` step runs the Auto-Ship Pipeline's **auto-fold gate** ([[../specs/auto-ship-pipeline]] Phase 2) as a **daily periodic backstop**: for each build-console workspace it calls `autoFoldVerifiedSpecs(workspaceId)` ([[../libraries/spec-test-runs]]), which auto-archives every **all-green** shipped spec (latest run agent-verdict `approved` + 0 human checks waiting/failed + 0 regressions) via `enqueue_fold`. The reactive triggers (a spec-test completing in `runSpecTestJob`; a human-check resolution in the human-queue POST) drive the common case — this sweep just catches specs that became all-green while the box was down / the gate threw / the kill-switch (`workspaces.auto_fold_enabled`) was toggled back on. Kill-switched + all-green-only + idempotent (coalesces into the batch fold-build). The cron's heartbeat `produced.autoFold` carries `{workspaces, folded, foldedSlugs}`.
+
 ## Dedupe
 
 The cron does **not** dedupe itself — it delegates to the **shared `enqueueSpecTestIfDue` guard** ([[../libraries/agent-jobs]]) that the event triggers also use, so a cron tick racing a manual flip / build-merge no-ops the duplicate. The guard skips a `(workspace, slug)` that already has an **in-flight** `spec-test` job (`status` ∈ `queued|queued_resume|building|claimed`) **or** a **fresh run** (a [[../tables/spec_test_runs]] row in the last ~20h) — a sweep must never pile up or re-test the same spec twice a day. (The on-demand **Test now** button shares the same in-flight guard via `hasActiveSpecTestJob`.)
@@ -25,7 +29,9 @@ _None._ The box polls [[../tables/agent_jobs]] and claims the row; there is no H
 
 ## Tables written
 
-- [[../tables/agent_jobs]] (inserts the `spec-test` jobs)
+- [[../tables/agent_jobs]] (inserts the `spec-test` jobs; the auto-fold backstop's `enqueue_fold` inserts the batch `kind='fold'` job)
+- [[../tables/pending_folds]] (auto-fold backstop: marks all-green specs pending-fold via `enqueue_fold`)
+- `loop_heartbeats` (the `auto-fold-gate` reactive heartbeat per `autoFoldVerifiedSpecs` pass)
 
 ## Tables read (not written)
 

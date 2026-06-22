@@ -15,6 +15,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
+import { autoFoldVerifiedSpecs } from "@/lib/spec-test-runs";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const specTestCron = inngest.createFunction(
@@ -54,11 +55,28 @@ export const specTestCron = inngest.createFunction(
       return { workspaces: workspaceIds.length, candidates: slugs.length, enqueued };
     });
 
-    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1).
-    await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("spec-test-cron", { ok: true, produced: result });
+    // Auto-fold Gate B periodic sweep (auto-ship-pipeline Phase 2): the reactive triggers (spec-test
+    // completion / human-check resolution) drive the common case; this daily backstop catches specs that
+    // became all-green while the box was down / the gate threw / the kill-switch was toggled back on. The
+    // gate itself is kill-switched + all-green-only + idempotent (coalesces into the batch fold-build).
+    const autoFold = await step.run("auto-fold-verified-specs", async () => {
+      const { data: wsRows } = await admin.from("agent_jobs").select("workspace_id").limit(1000);
+      const workspaceIds = Array.from(new Set((wsRows || []).map((r) => r.workspace_id as string)));
+      let folded = 0;
+      const foldedSlugs: string[] = [];
+      for (const workspaceId of workspaceIds) {
+        const f = await autoFoldVerifiedSpecs(workspaceId, admin);
+        folded += f.folded;
+        foldedSlugs.push(...f.foldedSlugs);
+      }
+      return { workspaces: workspaceIds.length, folded, foldedSlugs };
     });
 
-    return result;
+    // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("spec-test-cron", { ok: true, produced: { ...result, autoFold } });
+    });
+
+    return { ...result, autoFold };
   },
 );

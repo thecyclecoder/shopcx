@@ -2010,6 +2010,16 @@ async function runSpecTestJob(job: Job) {
     } catch (e) {
       console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
+    // Auto-fold Gate B (auto-ship-pipeline Phase 2): an `approved` run with no waiting/failed human checks
+    // + no regressions just made this spec all-green → auto-archive it (enqueue_fold), no owner click.
+    // All-green-only + kill-switched inside the gate. Best-effort — never fail the spec-test run.
+    try {
+      const { autoFoldVerifiedSpecs } = await import("../src/lib/spec-test-runs");
+      const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
+      if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} fully-verified spec(s): ${f.foldedSlugs.join(", ")}`);
+    } catch (e) {
+      console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    }
     await update(job.id, {
       status: "completed",
       log_tail: `${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}. ${report}`.slice(-2000),
