@@ -28,8 +28,9 @@ Every ad has a scent-matched lander (advertorial / before-after) so paid traffic
 
 ### Storefront CRO
 The storefront is a conversion surface — continuously lift PDP engagement and price-step conversion across the Amazing Coffee funnel.
-- **Metric:** PDP engagement, price-step conversion, sessions→subscription rate.
-- **Specs:** **storefront-mvp** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **homepage-rebuild** ✅ (verified + archived → [[../recipes/edit-shopify-theme]]) · **checkout-customize-bypass** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **storefront-survey-chapter** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · [[../specs/storefront-iteration-engine]] ⏳ (the perpetual-CRO engine itself).
+- **Metric:** PDP engagement, price-step conversion, sessions→subscription rate; ultimately **predicted-LTV-per-visitor**.
+- **Goal:** [[../goals/storefront-optimizer]] — the autonomous **Storefront Optimizer agent**, this director's *graded employee*: form hypothesis → run a bandit campaign → learn (a hierarchical lever-importance model) → promote/kill, across all four Amazing Coffee lander types, optimizing predicted-LTV-per-visitor. **This is the "landing-page experiment harness" gap (above), finally built** — and a concrete CEO→role-agent→tool instance for [[../goals/ceo-mode]]. The Growth director sets its rails + grades each campaign 1–10.
+- **Specs:** **storefront-mvp** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **homepage-rebuild** ✅ (verified + archived → [[../recipes/edit-shopify-theme]]) · **checkout-customize-bypass** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **storefront-survey-chapter** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · [[../specs/storefront-iteration-engine]] ⏳ (the ad-side iteration engine — the optimizer's funnel partner).
 
 ## The Growth agent supervises its tools (worked example)
 
