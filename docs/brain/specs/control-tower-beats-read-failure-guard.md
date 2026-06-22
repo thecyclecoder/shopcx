@@ -1,4 +1,4 @@
-# Control Tower: a failed beats read must not false-fire never_fired ⏳
+# Control Tower: a failed beats read must not false-fire never_fired ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower-loop-beats-scope-feed]] + [[../specs/control-tower-monitor-accuracy]] + [[../specs/control-tower]] · **Repair-signature:** `loop:meta-capi-dispatch-cron` · **Verdict:** monitor-false-positive
 
@@ -9,8 +9,10 @@ Loop flipped red never_fired at 2026-06-22T12:45:12Z but the cron is healthy: pr
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** `buildControlTowerSnapshot` (monitor.ts) now captures the `control_tower_loop_beats` RPC `error` (`beatsError`) alongside `data`, and derives `beatsReadFailed = beatsError != null`. That flag is threaded into `evalCron`, which — when the read failed — treats the empty `everBeatCount`/null `latest` as UNKNOWN (not a true zero) and suppresses both the `never_fired` and `cron_freshness` reds, returning amber `"beat read unavailable — status unknown"` instead of paging. Same conservative posture as the existing `deployAgeMs==null` guard. Brain page [[../libraries/control-tower]] updated; `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:meta-capi-dispatch-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
