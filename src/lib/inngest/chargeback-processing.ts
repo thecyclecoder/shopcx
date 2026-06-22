@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
+import { emitReactiveHeartbeat, emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── chargeback/received — main processing pipeline ──
 
@@ -14,6 +15,9 @@ export const chargebackReceived = inngest.createFunction(
     triggers: [{ event: "chargeback/received" }],
   },
   async ({ event, step }) => {
+    // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw). (control-tower-complete-coverage P1.)
+    let __ctOk = true;
+    try {
     const { chargebackEventId, workspaceId } = event.data as {
       chargebackEventId: string;
       workspaceId: string;
@@ -357,6 +361,12 @@ export const chargebackReceived = inngest.createFunction(
         }
       }
     });
+    } catch (e) {
+      __ctOk = false;
+      throw e;
+    } finally {
+      await emitReactiveHeartbeat("chargeback-received", { ok: __ctOk });
+    }
   }
 );
 
@@ -554,5 +564,10 @@ export const chargebackEvidenceReminder = inngest.createFunction(
         }
       });
     }
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("chargeback-evidence-reminder", { ok: true });
+    });
   }
 );

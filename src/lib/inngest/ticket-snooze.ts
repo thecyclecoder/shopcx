@@ -1,5 +1,6 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const ticketUnsnooze = inngest.createFunction(
   {
@@ -8,7 +9,7 @@ export const ticketUnsnooze = inngest.createFunction(
     triggers: [{ cron: "*/5 * * * *" }],
   },
   async ({ step }) => {
-    return await step.run("unsnooze-tickets", async () => {
+    const result = await step.run("unsnooze-tickets", async () => {
       const admin = createAdminClient();
       const { data: snoozed } = await admin
         .from("tickets")
@@ -29,5 +30,11 @@ export const ticketUnsnooze = inngest.createFunction(
 
       return { unsnoozed: snoozed?.length || 0 };
     });
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("ticket-unsnooze", { ok: true, produced: result });
+    });
+    return result;
   }
 );

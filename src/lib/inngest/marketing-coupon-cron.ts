@@ -12,6 +12,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { disableCampaignCoupon } from "@/lib/marketing-coupons";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const marketingCouponAutoDisable = inngest.createFunction(
   {
@@ -58,6 +59,13 @@ export const marketingCouponAutoDisable = inngest.createFunction(
       });
       if (ok) disabled++;
     }
-    return { disabled, total_due: due.length };
+    const result = { disabled, total_due: due.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("marketing-coupon-auto-disable", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

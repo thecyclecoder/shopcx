@@ -15,6 +15,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { fetchOpenPortalFailures, remediatePortalTicket } from "@/lib/portal/remediation";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const portalActionHealer = inngest.createFunction(
   {
@@ -47,6 +48,11 @@ export const portalActionHealer = inngest.createFunction(
         if (a in tally) tally[a as keyof typeof tally]++;
       }
     }
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("portal-action-healer", { ok: true, produced: tally });
+    });
 
     return tally;
   },

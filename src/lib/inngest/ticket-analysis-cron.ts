@@ -10,6 +10,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { analyzeTicket } from "@/lib/ticket-analyzer";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const ticketAnalysisCron = inngest.createFunction(
   {
@@ -80,6 +81,13 @@ export const ticketAnalysisCron = inngest.createFunction(
       }
     }
 
-    return { analyzed, skipped, skip_reasons: skipReasons };
+    const result = { analyzed, skipped, skip_reasons: skipReasons };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("ticket-analysis-cron", { ok: true, produced: result });
+    });
+
+    return result;
   }
 );

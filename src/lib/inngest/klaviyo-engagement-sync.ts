@@ -30,6 +30,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const KLAVIYO_REVISION = "2025-01-15";
 
@@ -257,10 +258,17 @@ export const klaviyoEngagementSync = inngest.createFunction(
       results.push(wsResult);
     }
 
-    return {
+    const result = {
       workspaces_synced: results.length,
       results,
     };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("klaviyo-engagement-sync", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );
 

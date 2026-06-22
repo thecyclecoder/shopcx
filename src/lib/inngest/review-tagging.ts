@@ -4,6 +4,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const DEFAULT_CANCEL_REASONS = [
   "too_expensive",
@@ -208,6 +209,13 @@ export const tagCancelRelevanceCron = inngest.createFunction(
       totalTagged += result.tagged;
     }
 
-    return { tagged: totalTagged, total: reviews.length };
+    const result = { tagged: totalTagged, total: reviews.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("reviews/tag-cancel-relevance-cron", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

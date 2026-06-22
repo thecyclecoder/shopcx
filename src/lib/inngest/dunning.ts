@@ -32,6 +32,7 @@ import {
 } from "@/lib/email";
 import { sendPaymentRecoveryEmail } from "@/lib/payment-recovery-email";
 import { addTicketTag } from "@/lib/ticket-tags";
+import { emitReactiveHeartbeat, emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── dunning/payment-failed ──
 // Triggered by billing-failure webhook. Orchestrates the full dunning flow.
@@ -44,6 +45,9 @@ export const dunningPaymentFailed = inngest.createFunction(
     triggers: [{ event: "dunning/payment-failed" }],
   },
   async ({ event, step }) => {
+    // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw). (control-tower-complete-coverage P1.)
+    let __ctOk = true;
+    try {
     const {
       workspace_id,
       shopify_contract_id,
@@ -395,6 +399,12 @@ export const dunningPaymentFailed = inngest.createFunction(
     }).catch(() => {});
 
     return { status: "exhausted", cycle_id: cycle.id, cycle_number: cycle.cycle_number };
+    } catch (e) {
+      __ctOk = false;
+      throw e;
+    } finally {
+      await emitReactiveHeartbeat("dunning-payment-failed", { ok: __ctOk });
+    }
   }
 );
 
@@ -997,6 +1007,13 @@ export const dunningPaydayRetryCron = inngest.createFunction(
     }
     } // end batch loop
 
-    return { processed: results.length, results };
+    const result = { processed: results.length, results };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("dunning-payday-retry-cron", { ok: true, produced: result });
+    });
+
+    return result;
   }
 );

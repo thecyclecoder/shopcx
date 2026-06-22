@@ -12,6 +12,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { reviewWorkspace } from "@/lib/sonnet-prompt-auto-review";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const sonnetPromptAutoReviewCron = inngest.createFunction(
   {
@@ -60,7 +61,7 @@ export const sonnetPromptAutoReviewCron = inngest.createFunction(
       if (r.errors.length) errors.push(...r.errors.map((e) => `${ws.id}: ${e}`));
     }
 
-    return {
+    const result = {
       workspaces: workspaces.length,
       reviewed: totalReviewed,
       accepted: totalAccepted,
@@ -68,5 +69,12 @@ export const sonnetPromptAutoReviewCron = inngest.createFunction(
       perWorkspace,
       errors: errors.slice(0, 50),
     };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("sonnet-prompt-auto-review", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

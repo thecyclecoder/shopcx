@@ -25,6 +25,7 @@ import {
   type CapiEvent,
   type MetaSink,
 } from "@/lib/meta-capi";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const LOOKBACK_MIN = 20; // how far back to seed dispatches for new events
 const MAX_ATTEMPTS = 5; // after this, a failed dispatch → dlq
@@ -330,6 +331,11 @@ export const metaCapiDispatchCron = inngest.createFunction(
       totalFailed += result.failed;
     }
 
-    return { sinks: sinks.length, sent: totalSent, failed: totalFailed };
+    const result = { sinks: sinks.length, sent: totalSent, failed: totalFailed };
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("meta-capi-dispatch-cron", { ok: true, produced: result });
+    });
+    return result;
   },
 );

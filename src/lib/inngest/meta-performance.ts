@@ -23,6 +23,7 @@ import {
   type StageRecord,
 } from "@/lib/meta/iteration-run";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -440,6 +441,13 @@ export const metaPerformanceDailyCron = inngest.createFunction(
       });
     }
 
-    return { triggered: accounts.length };
+    const result = { triggered: accounts.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("meta-performance-daily", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

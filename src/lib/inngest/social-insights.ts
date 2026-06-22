@@ -10,6 +10,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { syncPostMetrics, syncAudienceHours } from "@/lib/social/insights";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const socialInsightsSync = inngest.createFunction(
   {
@@ -59,6 +60,13 @@ export const socialInsightsSync = inngest.createFunction(
         return n;
       });
     }
-    return { workspaces: workspaces.length, posts_synced: posts, pages_synced: pages };
+    const result = { workspaces: workspaces.length, posts_synced: posts, pages_synced: pages };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("social-insights-sync", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

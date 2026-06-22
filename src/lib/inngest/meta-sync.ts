@@ -4,6 +4,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { syncMetaAdSpend } from "@/lib/meta/sync-spend";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── meta/sync-spend ──
 export const metaSyncSpend = inngest.createFunction(
@@ -86,6 +87,13 @@ export const metaDailySyncCron = inngest.createFunction(
       });
     }
 
-    return { triggered: accounts.length };
+    const result = { triggered: accounts.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("meta-daily-sync", { ok: true, produced: result });
+    });
+
+    return result;
   }
 );

@@ -18,6 +18,7 @@ import { getSlackToken, findChannelByName, postMessage } from "@/lib/slack";
 import { getSpec } from "@/lib/brain-roadmap";
 import { buildStatusPushMessage } from "@/lib/slack-roadmap";
 import type { AgentJob } from "@/lib/agent-jobs";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const NOTIFY_STATUSES = ["needs_input", "needs_approval", "completed", "failed", "needs_attention"];
 const ROADMAP_CHANNEL = "roadmap"; // the private #roadmap channel the bot was invited to
@@ -73,6 +74,9 @@ export const slackRoadmapNotify = inngest.createFunction(
       }
     }
 
-    return { posted };
+    const result = { posted };
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await emitCronHeartbeat("slack-roadmap-notify", { ok: true, produced: result });
+    return result;
   },
 );

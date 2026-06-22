@@ -15,6 +15,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendCartRecovery } from "@/lib/cart-recovery";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const IDLE_MINUTES = 30;       // first touch: 30 min after the cart goes idle
 const FOLLOWUP_HOURS = 24;     // second touch: 24 h after the first touch
@@ -199,6 +200,13 @@ export const abandonedCartReminder = inngest.createFunction(
       if (result) sent++; else failed++;
     }
 
-    return { sent, failed, scanned: due.length };
+    const result = { sent, failed, scanned: due.length };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("abandoned-cart-reminder", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

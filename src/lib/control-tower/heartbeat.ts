@@ -62,3 +62,13 @@ export function emitAgentHeartbeat(agentKind: string, input: HeartbeatInput = {}
 export function emitInlineAgentHeartbeat(agentId: string, input: HeartbeatInput = {}): Promise<void> {
   return emitLoopHeartbeat(agentId, "inline-agent", input);
 }
+
+/**
+ * Convenience: emit a reactive event-driven Inngest agent's end-of-run beat (loop_id = the
+ * inngest function id, e.g. "unified-ticket-handler"). Call from an end-of-run try/finally so a
+ * thrown run still beats with ok:false — that's what the error-rate + liveness-when-work-exists
+ * assertions read. (control-tower-complete-coverage spec, Phase 1.)
+ */
+export function emitReactiveHeartbeat(functionId: string, input: HeartbeatInput = {}): Promise<void> {
+  return emitLoopHeartbeat(functionId, "reactive", input);
+}

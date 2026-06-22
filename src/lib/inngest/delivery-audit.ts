@@ -14,6 +14,7 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 export const deliveryNightlyAudit = inngest.createFunction(
   {
@@ -283,12 +284,19 @@ export const deliveryNightlyAudit = inngest.createFunction(
       }
     }
 
-    return {
+    const result = {
       checked: totalChecked,
       delivered: totalDelivered,
       refused: totalRefused,
       return_to_sender: totalRTS,
       failure: totalFailure,
     };
+
+    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("delivery-nightly-audit", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );
