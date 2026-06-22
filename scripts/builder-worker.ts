@@ -3112,10 +3112,17 @@ async function main() {
       // First clean tick → this sha is healthy; zero the crash-loop counter.
       if (!steady) { clearStartupCrashCounter(); steady = true; }
 
-      // Heartbeat for the dashboard, then self-update if fully idle (never mid-build).
+      // Heartbeat for the dashboard, then self-update if no SACROSANCT lane is running.
       const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since }));
       await writeHeartbeat(active.size, "healthy", undefined, lanes);
-      await maybeSelfUpdate(active.size); // exits the process (→ systemd restart) when behind origin/main
+      // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
+      // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
+      // idempotent, re-runnable lanes (spec-test, triage-escalations, migration-fix, dev-ask, pr-resolve)
+      // do NOT: a restart just re-claims them from the queue. Otherwise a long re-test sweep (e.g. the
+      // human→machine reclassification backfill) keeps a lane busy indefinitely and the box never updates.
+      const INTERRUPTIBLE = new Set(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve"]);
+      const sacrosanctActive = [...active.values()].filter((v) => !INTERRUPTIBLE.has(v.kind)).length;
+      await maybeSelfUpdate(sacrosanctActive); // exits (→ systemd restart) when behind origin/main + no sacrosanct lane running
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
     }
