@@ -1,0 +1,1 @@
+- **Control Tower — make every autonomous loop watch itself** · verified 2026-06-22 · → [[libraries/control-tower]]
