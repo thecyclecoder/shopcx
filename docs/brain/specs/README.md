@@ -58,6 +58,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the capability the system should've had on Jim Leone's ticket — his grandfathered pricing dropped → Appstle billed $229.26 vs $139.84, he asked to cancel, and triage authored a (forbidden) build-order-cancellation spec instead of fixing the real issue. Detect a renewal **overcharge from dropped grandfathered pricing** → partial-refund the delta → **Appstle pricing-policy heal** (never migrate-to-internal w/o a saved PM) → reply. Plus triage grounding: check overcharge before create_return/cancel; never author a code_gap spec that contradicts a policy; always propose a customer_reply. (Jim fixed by hand: $89.42 refunded, base healed to $139.84/4.) Replaces the deleted cancel-order-direct-action spec.
 
+## Active project — Control Tower: Complete Coverage + Department Rollups ⏳
+
+**Spec:** [[control-tower-complete-coverage]] · **Owner:** [[../functions/platform]] · **Blocked-by:** [[control-tower-agent-coverage]]
+
+**Why this matters:** audit found the Control Tower covers ~7 of ~25 crons + almost no reactive/event agents — incl. the **inbound ticket handler** (the crucial one). Hand-registering forever doesn't scale. P1: register the full cron set + key reactive agents + a **self-audit** that enumerates every `inngest.createFunction` and flags any unregistered loop (gaps surface automatically). P2: **department rollups** — tag each loop with its owner function and show CEO-mode-style "Platform/Growth/Retention/CS/CMO Health" rollup tiles instead of a flat card wall. Extends [[control-tower]].
+
 ## Active project — Control Tower: Inline AI Agent Coverage ⏳
 
 **Spec:** [[control-tower-agent-coverage]] · **Owner:** [[../functions/platform]]

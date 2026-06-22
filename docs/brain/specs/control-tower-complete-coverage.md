@@ -1,0 +1,28 @@
+# Control Tower — Complete Coverage + Department Rollups ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** extends [[control-tower]] + [[control-tower-agent-coverage]]. · **Blocked-by:** [[control-tower-agent-coverage]] (both edit `control-tower/registry.ts`).
+
+An audit (2026-06-22) found the Control Tower covers ~7 of **~25 cron functions** and almost none of the **event-driven reactive agents** — including the **inbound ticket handler**, the single most crucial agent (if it silently stops responding to customers, that's catastrophic + invisible). Hand-registering loops one at a time (as the owner keeps spotting gaps: social scheduler → blog generator → ticket handler →…) doesn't scale. Two fixes: make the Control Tower **self-audit its own coverage**, and **organize the view by department** (CEO-mode-consistent) instead of a flat wall of cards.
+
+## Part A — Complete coverage + self-audit (the robust fix)
+- **Register every loop.** Add registry entries for **all** `inngest.createFunction` crons (`abandoned-cart`, `auto-archive`, `brain-index-refresh`, `fraud-nightly-scan`, `daily-order-snapshot`, `deliver-pending-sends`, `delivery-audit`, `meta-capi-dispatch`, `sync-inventory`, `portal-action-healer`, `portal-auto-resume`, `social-insights`, `sonnet-prompt-auto-review`, `marketing-coupon`, `klaviyo-engagement-sync`, `crisis-campaign`, `creative-finder`, `featured-review-cards`, `monthly-revenue-snapshot`, the blog/content generator, … the full set) + the **reactive/event agents** that matter (the **inbound ticket handler** — crucial; `dunning`, `returns`, `journey-outcomes`, `amplifier-webhooks`, `agent-todo-execute`, `chargeback`). Each: liveness/cron-freshness + a work-exists assertion where it has one.
+- **🔑 Self-audit (so this never recurs).** A Control Tower check that **enumerates every `inngest.createFunction` id** (parsed from `src/lib/inngest/` / the serve route) **+ every registered AI entry point**, diffs against the registry, and **flags any loop that exists in code but isn't monitored** → an amber "unregistered loop: X" tile + alert. Coverage gaps surface *automatically* instead of waiting for someone to notice. Enforces the [[../operational-rules]] "register-or-it's-incomplete" rule by *detecting* violations, not trusting authors.
+- An author can mark a loop **intentionally-unmonitored** (a reason in the registry) so the self-audit doesn't nag — but silence is never the default.
+
+## Part B — Department rollups (CEO-mode view)
+Every spec already declares an **owner function** ([[../project-management]] · the [[../functions]] org chart: platform, growth, cmo, retention, cs, …). Carry that to loops: each registry entry gets an **`owner` function**. The Control Tower then:
+- **Groups loops by department** and shows a **rollup health tile per function** — **"Platform Health", "Growth Health", "Retention Health", "CS Health", "CMO Health"** — each a green/amber/red rollup of its loops (worst-of, with a "N/M healthy" count + open-alert count).
+- The dashboard leads with the **department rollups** (the CEO glance: which org function is healthy?), and each expands to its loops (the cron/agent cards). Maps cleanly onto [[../goals/ceo-mode]] — a CEO sees *org-function health*, then drills in.
+- A loop's owner = the function that owns the system it monitors (e.g. `internal-subscription-renewal-cron` → retention; `meta-*`/`social-*` → growth/cmo; `ticket-handler`/`triage` → cs; the build/spec-test/migration agents → platform).
+
+## Verification
+- **Coverage:** the registry contains an entry for every `inngest.createFunction` cron + the key reactive agents (incl. the inbound ticket handler); the dashboard shows them all. The self-audit, run against the codebase, reports **0 unregistered loops** (or lists exactly the intentionally-skipped ones with reasons).
+- **Self-audit catches a gap:** add a new dummy cron without registering it → the Control Tower flags "unregistered loop: dummy-cron" within a cycle. Register it → flag clears.
+- **Ticket handler:** the inbound ticket handler has a tile + a work-exists assertion (inbound messages exist but none handled → alert). Forcing it silent pages the owner.
+- **Department rollups:** the dashboard shows "Platform/Growth/Retention/CS/CMO Health" tiles; a red loop turns its department rollup amber/red; the count reflects healthy/total; expanding a department lists its loops.
+
+## Phase 1 — register all crons + reactive agents + self-audit ⏳
+Registry entries for the full cron set + the key reactive agents (ticket handler crucial) + the self-audit (enumerate `createFunction` ids, diff vs registry, flag unregistered). Brain: [[control-tower]] · [[../inngest]] (the cron index) · [[../operational-rules]].
+
+## Phase 2 — department rollups ⏳
+`owner` function on every registry entry; the Control Tower dashboard groups by function with a per-department rollup health tile (Platform/Growth/Retention/CS/CMO Health), CEO-glance-on-top + drill-in. Brain: [[../dashboard/control-tower]] · [[../goals/ceo-mode]] · [[../project-management]].
