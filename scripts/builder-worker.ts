@@ -42,7 +42,7 @@ const SEED_TIMEOUT_MS = 90 * 60 * 1000;
 // A ticket-improve turn is one Max `claude -p` investigation/proposal (read brain/src + web + the
 // read-only DB tools). Minutes, not the 90-min seed ceiling. See box-ticket-improve.
 const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
-const MAX_CONCURRENT = 5; // build/plan pool — real ceiling is Max rate limits, not the box
+const MAX_CONCURRENT = 8; // build/plan pool — real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; bumped 5→8, watch box logs for Max 529/overloaded before pushing further)
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
@@ -71,7 +71,7 @@ const TRIAGE_PASS_TIMEOUT_MS = 15 * 60 * 1000;
 // QA pass over ONE shipped-but-unverified spec's `## Verification` checklist — non-destructive checks
 // only (repo/tsc, gh CI, vercel deploy+logs+env, read-only DB probes, GET endpoints). It NEVER mutates
 // prod and NEVER marks a spec verified/archived; it stamps a spec_test_runs row. Serialized (one box).
-const MAX_SPEC_TEST = 1;
+const MAX_SPEC_TEST = 3; // read-only QC runs — bumped 1→3 so a backlog re-sweep (e.g. human→machine reclassification) drains in parallel instead of one-at-a-time. Browser checks (Playwright/chromium ~400MB) fit easily in 30GB.
 // One spec-test pass reads the spec + runs the box QA toolkit (tsc can be slow). Minutes, not the
 // 90-min seed ceiling — give it a build-sized ceiling so a tsc + a few probes never get cut short.
 const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
@@ -709,23 +709,35 @@ async function runPlanJob(job: Job) {
     }
 
     // Queue a build for each approved spec — the existing pipeline takes over (its own claude/* PR).
+    // Route through queueRoadmapBuild (the single enqueue chokepoint) so this agent path honours the
+    // SAME spec-blockers gate as the dashboard + Slack: a freshly-authored spec that declares an
+    // unshipped `Blocked-by` is refused here too, instead of inserting a build row that would collide.
+    // (spec-blockers Phase 2.) Owner re-check + active-job dedupe come free from the chokepoint.
+    const { queueRoadmapBuild } = await import("../src/lib/roadmap-actions");
     const queuedSlugs: string[] = [];
+    const blockedSlugs: string[] = [];
     for (const a of approved) {
       const s = a.spec!;
-      const { error } = await db.from("agent_jobs").insert({
-        workspace_id: job.workspace_id,
-        spec_slug: s.slug,
-        kind: "build",
-        status: "queued",
+      const res = await queueRoadmapBuild(job.workspace_id, job.created_by ?? "", {
+        slug: s.slug,
         instructions: `Authored by the goal planner for ${goalSlug} (${s.parent}).`,
-        created_by: job.created_by,
       });
-      if (!error) queuedSlugs.push(s.slug);
+      if (res.ok) queuedSlugs.push(s.slug);
+      else if (res.status === 409) blockedSlugs.push(s.slug);
+      else console.error(`${tag} queueRoadmapBuild failed for ${s.slug}: ${res.status} ${res.error}`);
     }
 
     const acted = actions.map((a) =>
       a.type === "spec" && a.status === "approved"
-        ? { ...a, status: "done" as const, result: queuedSlugs.includes(a.spec!.slug) ? "authored + build queued" : "authored" }
+        ? {
+            ...a,
+            status: "done" as const,
+            result: queuedSlugs.includes(a.spec!.slug)
+              ? "authored + build queued"
+              : blockedSlugs.includes(a.spec!.slug)
+                ? "authored (build blocked — prerequisite not shipped)"
+                : "authored",
+          }
         : a.type === "spec" && a.status === "declined"
           ? { ...a, status: "done" as const, result: "recorded ❌" }
           : a,
@@ -733,7 +745,7 @@ async function runPlanJob(job: Job) {
     await update(job.id, {
       status: "completed",
       pending_actions: acted,
-      log_tail: `committed ${committed} docs to main; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}`,
+      log_tail: `committed ${committed} docs to main; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}${blockedSlugs.length ? `; ${blockedSlugs.length} blocked: ${blockedSlugs.join(", ")}` : ""}`,
     });
     console.log(`${tag} ✓ authored ${approved.length} specs → queued ${queuedSlugs.length} builds`);
   } finally {
@@ -3112,10 +3124,17 @@ async function main() {
       // First clean tick → this sha is healthy; zero the crash-loop counter.
       if (!steady) { clearStartupCrashCounter(); steady = true; }
 
-      // Heartbeat for the dashboard, then self-update if fully idle (never mid-build).
+      // Heartbeat for the dashboard, then self-update if no SACROSANCT lane is running.
       const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since }));
       await writeHeartbeat(active.size, "healthy", undefined, lanes);
-      await maybeSelfUpdate(active.size); // exits the process (→ systemd restart) when behind origin/main
+      // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
+      // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
+      // idempotent, re-runnable lanes (spec-test, triage-escalations, migration-fix, dev-ask, pr-resolve)
+      // do NOT: a restart just re-claims them from the queue. Otherwise a long re-test sweep (e.g. the
+      // human→machine reclassification backfill) keeps a lane busy indefinitely and the box never updates.
+      const INTERRUPTIBLE = new Set(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve"]);
+      const sacrosanctActive = [...active.values()].filter((v) => !INTERRUPTIBLE.has(v.kind)).length;
+      await maybeSelfUpdate(sacrosanctActive); // exits (→ systemd restart) when behind origin/main + no sacrosanct lane running
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
     }

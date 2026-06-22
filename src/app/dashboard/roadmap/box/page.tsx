@@ -37,6 +37,14 @@ interface Job {
   pr_number: number | null;
   created_at: string;
 }
+interface FailedJob {
+  id: string;
+  spec_slug: string;
+  kind: string;
+  error: string | null;
+  detail: string | null;
+  updated_at: string;
+}
 
 function workerStale(w: Worker): boolean {
   if (!w.last_poll_at) return true;
@@ -110,6 +118,8 @@ export default function BoxPage() {
   const [worker, setWorker] = useState<Worker | null>(null);
   const [queue, setQueue] = useState<Job[]>([]);
   const [paused, setPaused] = useState<Job[]>([]);
+  const [failed, setFailed] = useState<FailedJob[]>([]);
+  const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -122,6 +132,7 @@ export default function BoxPage() {
           setWorker(d.worker ?? null);
           setQueue(d.queue ?? []);
           setPaused(d.paused ?? []);
+          setFailed(d.failed ?? []);
         })
         .catch(() => {})
         .finally(() => alive && setLoading(false));
@@ -132,6 +143,22 @@ export default function BoxPage() {
       clearInterval(interval);
     };
   }, []);
+
+  const retry = async (slug: string) => {
+    setRetrying((r) => ({ ...r, [slug]: true }));
+    try {
+      const res = await fetch("/api/roadmap/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug }),
+      });
+      if (res.ok) setFailed((f) => f.filter((j) => j.spec_slug !== slug)); // optimistic — it's re-queued now
+    } catch {
+      /* leave it; the next poll reflects real state */
+    } finally {
+      setRetrying((r) => ({ ...r, [slug]: false }));
+    }
+  };
 
   if (workspace.role !== "owner") {
     return (
@@ -215,6 +242,42 @@ export default function BoxPage() {
               job{queue.length === 1 ? "" : "s"} waiting in the queue
             </span>
           </div>
+
+          {/* Failed builds — surface the failure + the real reason (529 / Max / tsc) + a one-tap retry */}
+          {failed.length > 0 && (
+            <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm dark:border-red-900/40 dark:bg-red-900/20">
+              <p className="mb-2 font-medium text-red-800 dark:text-red-300">
+                {failed.length} build{failed.length === 1 ? "" : "s"} failed
+              </p>
+              <ul className="space-y-2.5">
+                {failed.map((j) => (
+                  <li key={j.id} className="flex flex-col gap-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link
+                        href={`/dashboard/roadmap/${j.spec_slug}`}
+                        className="font-medium text-red-800 underline decoration-dotted underline-offset-2 hover:text-red-900 dark:text-red-300 dark:hover:text-red-200"
+                      >
+                        {j.spec_slug}
+                      </Link>
+                      <span className="text-xs text-red-600/80 dark:text-red-400/80">{j.error ?? "failed"} · {elapsed(j.updated_at)} ago</span>
+                      <button
+                        onClick={() => retry(j.spec_slug)}
+                        disabled={retrying[j.spec_slug]}
+                        className="ml-auto inline-flex items-center rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                      >
+                        {retrying[j.spec_slug] ? "Retrying…" : "↻ Retry build"}
+                      </button>
+                    </div>
+                    {j.detail && (
+                      <pre className="max-h-28 overflow-auto whitespace-pre-wrap rounded border border-red-200 bg-white/70 px-2 py-1 text-[11px] leading-snug text-red-900/90 dark:border-red-900/40 dark:bg-black/30 dark:text-red-200/90">
+                        {j.detail}
+                      </pre>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* Paused callout */}
           {paused.length > 0 && (

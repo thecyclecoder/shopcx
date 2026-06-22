@@ -331,6 +331,18 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
               .gte("created_at", sinceIso);
             return count ?? 0;
           }
+          case "tickets-awaiting-decision": {
+            // Inbound customer messages in-window — every one fires unified-ticket-handler →
+            // callSonnetOrchestratorV2. Inbound traffic with 0 successful decision beats means
+            // the per-ticket decision agent went silent (couldn't reply or act on anyone).
+            const { count } = await admin
+              .from("ticket_messages")
+              .select("id", { count: "exact", head: true })
+              .eq("direction", "inbound")
+              .eq("author_type", "customer")
+              .gte("created_at", sinceIso);
+            return count ?? 0;
+          }
           default:
             return 0;
         }

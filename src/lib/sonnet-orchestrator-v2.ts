@@ -15,6 +15,8 @@ import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
 import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
 import { currentDateContext } from "@/lib/ai-date-context";
 import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/product-intelligence/publish";
+import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
+import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -78,17 +80,27 @@ function containsCancelIntent(message: string): boolean {
   return /\b(cancel(?:l?ed|ling|lation)?|unsubscribe|terminate\s+(?:my\s+)?subscription|end\s+(?:my\s+)?subscription|stop\s+(?:my\s+)?subscription|please\s+cancel)\b/i.test(message);
 }
 
+// Every degraded/error path (no API key, API error, parse fail, max-rounds, throw) funnels
+// through fallbackWithCancelRoute. Tag each result here so the control-tower heartbeat (Phase 2
+// of control-tower-agent-coverage) can mark the run ok:false — the orchestrator "ran but
+// produced nothing useful". A real model decision (incl. a model-chosen escalate) is NOT tagged.
+const DEGRADED_DECISIONS = new WeakSet<SonnetDecision>();
+
 function fallbackWithCancelRoute(message: string, reason: string): SonnetDecision {
+  let decision: SonnetDecision;
   if (containsCancelIntent(message)) {
-    return {
+    decision = {
       reasoning: `${reason} — cancel intent detected on inbound, routing to cancel journey instead of generic escalation`,
       action_type: "journey",
       handler_name: "cancel_subscription",
       response_message:
         "Sorry to hear you're thinking about cancelling. Let me share a couple of options before you go.",
     };
+  } else {
+    decision = { ...FALLBACK_DECISION, reasoning: reason };
   }
-  return { ...FALLBACK_DECISION, reasoning: reason };
+  DEGRADED_DECISIONS.add(decision);
+  return decision;
 }
 
 // ── Tool Definitions (Anthropic format) ──
@@ -1496,7 +1508,53 @@ async function getPaymentMethods(admin: Admin, wsId: string, custId: string): Pr
 
 // ── Main Orchestrator ──
 
+/**
+ * The per-ticket decision agent (control-tower-agent-coverage Phase 2: `ai:orchestrator`).
+ * Wraps the inner decision run in a try/finally so every run emits exactly ONE inline-agent
+ * heartbeat — ok:false when it threw OR returned a degraded/fallback decision (so the
+ * error-rate + liveness-when-work-exists assertions can see a silently-broken orchestrator),
+ * ok:true on a real model decision. The heartbeat write is best-effort and never affects the
+ * returned decision.
+ */
 export async function callSonnetOrchestratorV2(
+  workspaceId: string,
+  ticketId: string,
+  customerId: string,
+  message: string,
+  channel: string,
+  personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
+  agentContext?: { assigned: boolean; intervened: boolean } | null,
+  modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
+): Promise<SonnetDecision> {
+  const startedAt = Date.now();
+  let decision: SonnetDecision | null = null;
+  let threw: unknown = null;
+  try {
+    decision = await runOrchestratorDecision(
+      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice,
+    );
+    return decision;
+  } catch (err) {
+    threw = err;
+    throw err;
+  } finally {
+    const degraded = !!threw || (decision != null && DEGRADED_DECISIONS.has(decision));
+    void emitInlineAgentHeartbeat(INLINE_AGENT_IDS.orchestrator, {
+      ok: !degraded,
+      produced: decision
+        ? { action_type: decision.action_type, handler_name: decision.handler_name ?? null, model: modelChoice?.model ?? "sonnet" }
+        : null,
+      detail: threw
+        ? `threw: ${threw instanceof Error ? threw.message : String(threw)}`
+        : degraded
+          ? `degraded: ${(decision?.reasoning ?? "").slice(0, 160)}`
+          : `decided: ${decision?.action_type}`,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
+async function runOrchestratorDecision(
   workspaceId: string,
   ticketId: string,
   customerId: string,
