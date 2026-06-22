@@ -58,6 +58,8 @@ Reap is **by kind**:
 
 `RERUNNABLE_KINDS` is the **single shared source of truth** — the self-update `sacrosanctActive` check (lanes a restart may interrupt) reads the same constant, so "safe to re-run" can't drift between reaper and self-update. No migration (free-text `kind`, existing [[../tables/agent_jobs]] columns). This is the standing replacement for the manual `requeue-stale` ([[manage-the-build-queue]]) after a restart, and removes the stuck-jobs false-positive source the [[../dashboard/control-tower]] flagged.
 
+**Archived-spec orphan reap (fold-guard-live-build).** Right after `reapOrphans()`, `main()` also runs `reapArchivedSpecJobs()` — it calls `cancelJobsForArchivedSpecs` ([[../libraries/agent-jobs]]) to cancel every non-terminal `build`/`spec-test` job whose `spec_slug` now lives in `docs/brain/archive.d/`. A fold moves the spec markdown out from under any build still running, so that build's spec page 404s and its paused/active card is a dead link; this flips each such job `status='completed'` `error='spec archived — build auto-cancelled …'` (questions cleared). Logs `cancelled N orphaned job(s) for archived spec(s): …` (or `0 archived-spec orphans …` on a clean boot). The preventive guard (the fold path refusing a live slug via `getLiveJobForSlug`) makes this rare; this is the belt-and-suspenders for a fold that raced a build. Best-effort, idempotent. The same `cancelJobsForArchivedSpecs` also fires on the `kind='fold'` merge reconcile (board load after a fold PR merges).
+
 ## Provisioning (how it was built — to reproduce)
 
 1. **Tailscale.** `curl -fsSL https://tailscale.com/install.sh | sh` → `tailscale up` (authorize in the admin console). Put the Mac + phone on the same tailnet (`dylanralston@gmail.com`).
