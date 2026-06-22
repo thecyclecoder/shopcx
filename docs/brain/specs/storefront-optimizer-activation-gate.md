@@ -1,4 +1,4 @@
-# Storefront Optimizer — activation + product-scope gate (OFF by default) ⏳
+# Storefront Optimizer — activation + product-scope gate (OFF by default) ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** the control surface for [[../goals/storefront-optimizer]]; gates [[storefront-optimizer-agent|M4]] + [[storefront-experiment-bandit-framework|M1]]. · **Found in design 2026-06-22:** the optimizer specs say the agent "auto-runs within policy" + scope is "Amazing Coffee" — but **no policy object / on-switch / enforced scope exists**. As spec'd, once M4's cron ships it would **auto-run live experiments on customer traffic with no explicit owner enablement** — violating supervisable autonomy. The ad iteration engine got this right (`iteration_policies.policy_active` → "no active policy, zero autonomous actions"); the storefront side must mirror it.
 
@@ -9,11 +9,23 @@
 - **The switch is the owner/Growth control surface** (a dashboard toggle + per-product scope), surfaced on the storefront/optimizer view. Approval-gated levers (offers/structural) stay approval-gated regardless of the switch.
 
 ## Verification
-- Fresh install / `active=false` → the optimizer cron runs, the agent **proposes** campaigns (visible), but `select count(*) from storefront_experiments where status='running'` = 0, no `experiment_exposure` events fire, no `advertorial_pages`/PDP changes are written. Nothing reaches a customer.
-- Flip `active=true` with `product_scope=[amazing-coffee]` → it begins running experiments **only** on Amazing Coffee; an experiment on any other product is refused/never enqueued (scope-enforced, not just unscheduled).
-- A reversible lever on an in-scope product auto-runs (within the policy guardrails); an offer/structural lever still requires approval even when active.
-- Flip `active=false` → in-flight experiments stop promoting/launching new arms (graceful), no NEW running experiments; the agent reverts to propose-only.
-- Negative: with the gate OFF, there is no path by which the agent mutates live storefront content or assigns a live variant.
+- On `/dashboard/storefront/optimizer` (fresh workspace, no row) → expect the toggle reads **Off — propose-only** and `GET /api/workspaces/[id]/storefront-optimizer-policy` returns `active:false`, `product_scope:[]`. `select * from storefront_optimizer_policy where workspace_id=$ws` → 0 or 1 rows, `active=false`.
+- With `active=false` and a `running` experiment present on a product, load that product's lander as an identified visitor → expect **control content**, and `resolveExperimentsForRender`/`loadActiveExperiments` returns `exposures:[]` (no `experiment_exposure` event fires). Nothing reaches a customer.
+- On the dashboard, flip the toggle **on** → expect `PATCH` returns `active:true` with `activated_at` set and `version` bumped; `select active, activated_at, activated_by from storefront_optimizer_policy where workspace_id=$ws` confirms.
+- Add **Amazing Coffee** to scope, leave another product out → load Amazing Coffee's lander → expect its `running` experiment now serves a variant + emits an exposure; load the out-of-scope product's lander → expect **control only**, `exposures:[]` (scope enforced, not just unscheduled).
+- Run `refreshStorefrontExperiments` with the gate **closed** for a product whose bandit would promote → expect NO promotion: `storefront_experiments.status` stays non-`promoted`, the run's `decisions[].rule` = `gated_propose_only`, `counts.promoted` unchanged. A kill/auto-rollback in the same run still applies (safety reduces exposure).
+- Flip `active=false` again → expect render reverts to control-only for every product and refresh stops promoting (graceful); kill/rollback unaffected.
+- Negative: with the gate OFF (no row, `active=false`, or product out of scope) there is no code path in [[storefront-experiments]] or [[storefront-experiment-refresh]] that assigns a live variant or promotes one to live traffic — `optimizerGateOpen` returns false and both bail.
 
-## Phase 1 — the policy table + OFF-by-default gate + product scope + the toggle ⏳
-`storefront_optimizer_policy` (active=false default, product_scope, guardrails); M4 + M1 read it (propose-only when inactive / out-of-scope, enforce scope on enqueue + activation); a dashboard on/off toggle + per-product scope (the Growth control surface). Brain: [[../goals/storefront-optimizer]] · [[storefront-optimizer-agent]] · [[storefront-experiment-bandit-framework]] · [[../operational-rules]] (§ North star) · mirrors [[storefront-iteration-engine]] `iteration_policies`.
+## Phase 1 — the policy table + OFF-by-default gate + product scope + the toggle ✅
+`storefront_optimizer_policy` (active=false default, product_scope, guardrails); M1 reads it (render serves no live variant + refresh never promotes when inactive / out-of-scope); the gate helper (`optimizerGateOpen`) M4 will read on enqueue + activation; a dashboard on/off toggle + per-product scope (the Growth control surface). Brain: [[../goals/storefront-optimizer]] · [[storefront-optimizer-agent]] · [[storefront-experiment-bandit-framework]] · [[../operational-rules]] (§ North star) · mirrors [[storefront-iteration-engine]] `iteration_policies`.
+
+### What shipped
+- **Table** `storefront_optimizer_policy` (one row/workspace, `active boolean default false`, `product_scope uuid[]`, guardrails, version/audit) — migration `20260624130000_storefront_optimizer_policy.sql`, brain [[../tables/storefront_optimizer_policy]]. RLS: member SELECT, service-role write.
+- **Gate library** [[../libraries/optimizer-policy]] — `loadStorefrontOptimizerPolicy` + `optimizerGateOpen(policy, productId)` (= exists && active && product ∈ scope). null/OFF ⇒ propose-only.
+- **M1 render gate** ([[../libraries/storefront-experiments]] `loadActiveExperiments`): gate closed ⇒ zero live variants served, zero `experiment_exposure`. The negative invariant.
+- **M1 refresh gate** ([[../libraries/storefront-experiment-refresh]]): gate closed ⇒ never promotes (held `gated_propose_only`); kill/rollback still run (only reduce live exposure).
+- **Growth control surface** [[../dashboard/storefront__optimizer]] (`/dashboard/storefront/optimizer`) + `GET/PATCH /api/workspaces/[id]/storefront-optimizer-policy` — toggle, product-scope picker, guardrails.
+
+### Open question (product decision deferred, not guessed)
+- The spec says "empty `product_scope` ⇒ Amazing Coffee only to start." Implemented as **empty = nothing in scope** (most conservative; the gate can't resolve a product UUID without an explicit scope, and hardcoding a `shopify_*_id`/UUID violates conventions). The owner sets scope to Amazing Coffee on the dashboard. If a pre-seeded Amazing Coffee scope is wanted, name the product/handle and it can be seeded via a backfill.

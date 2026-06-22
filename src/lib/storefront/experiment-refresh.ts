@@ -20,6 +20,7 @@ import { isConservative } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
 import { updatePosterior } from "@/lib/storefront/lever-memory";
+import { loadStorefrontOptimizerPolicy, optimizerGateOpen } from "@/lib/storefront/optimizer-policy";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -76,6 +77,12 @@ export async function refreshStorefrontExperiments(opts: {
   const admin = createAdminClient();
   const now = opts.now ?? new Date();
   const conservative = await isConservative(opts.workspaceId);
+  // Activation gate (docs/brain/specs/storefront-optimizer-activation-gate.md): with
+  // the optimizer OFF (or a product out of scope) the refresh must NOT promote — i.e.
+  // not launch a winner to live traffic / stand up new live arms. Safety actions
+  // (kill, auto-rollback) still run; they only REDUCE live exposure. Reverting to
+  // propose-only is graceful: in-flight experiments stop promoting, none start.
+  const policy = await loadStorefrontOptimizerPolicy(admin, opts.workspaceId);
 
   // Open the run record.
   const { data: runRow } = await admin
@@ -214,11 +221,25 @@ export async function refreshStorefrontExperiments(opts: {
         updated_at: now.toISOString(),
       };
       let terminal = false;
-      if (decision.action === "promote" && decision.winnerVariantId) {
+      const gateOpen = optimizerGateOpen(policy, exp.product_id);
+      const gatedPromote = decision.action === "promote" && !!decision.winnerVariantId && !gateOpen;
+      if (decision.action === "promote" && decision.winnerVariantId && gateOpen) {
         update.status = "promoted";
         update.promoted_variant_id = decision.winnerVariantId;
         counts.promoted++;
         terminal = true;
+      } else if (decision.action === "promote" && decision.winnerVariantId && !gateOpen) {
+        // Gate OFF / out of scope ⇒ propose-only: record the would-be promotion but
+        // never launch it to live traffic. Held, not promoted.
+        update.last_decision = {
+          action: "hold",
+          rule: "gated_propose_only",
+          would: { action: "promote", winnerVariantId: decision.winnerVariantId },
+          win_prob: decision.winProb,
+          posteriors: decision.posteriors,
+          at: now.toISOString(),
+        };
+        counts.held++;
       } else if (decision.action === "kill") {
         update.status = "killed";
         update.stopped_at = now.toISOString();
@@ -232,9 +253,9 @@ export async function refreshStorefrontExperiments(opts: {
       if (terminal) await commitLearning(exp, rollups);
       decisions.push({
         experiment_id: experimentId,
-        action: decision.action,
+        action: gatedPromote ? "hold" : decision.action,
         win_prob: decision.winProb,
-        rule: decision.rule,
+        rule: gatedPromote ? "gated_propose_only" : decision.rule,
         posteriors: decision.posteriors,
       });
     }

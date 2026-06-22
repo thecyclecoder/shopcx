@@ -26,6 +26,7 @@
 import { createHash } from "crypto";
 import type { AdvertorialContent, AdvertorialVariant } from "@/lib/advertorial-pages";
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { loadStorefrontOptimizerPolicy, optimizerGateOpen } from "@/lib/storefront/optimizer-policy";
 
 export type ExperimentStatus = "draft" | "running" | "promoted" | "killed" | "rolled_back";
 export type LanderType = "pdp" | "listicle" | "beforeafter" | "advertorial";
@@ -185,7 +186,13 @@ function reorder<T>(items: T[], order: number[]): T[] {
 }
 
 /** Load the active (running|promoted) experiments + their variants for a lander.
- *  Best-effort: returns [] if the tables don't exist yet (pre-migration). */
+ *  Best-effort: returns [] if the tables don't exist yet (pre-migration).
+ *
+ *  ACTIVATION GATE (docs/brain/specs/storefront-optimizer-activation-gate.md): with
+ *  the optimizer OFF — no policy, `active=false`, or this product out of
+ *  `product_scope` — NO live variant is served (control content only, zero
+ *  exposures). This is the negative invariant: with the gate off there is no path by
+ *  which the optimizer assigns a live variant to a customer. */
 export async function loadActiveExperiments(
   admin: Admin,
   workspaceId: string,
@@ -193,6 +200,9 @@ export async function loadActiveExperiments(
   landerType: LanderType,
 ): Promise<Array<{ experiment: ExperimentRow; variants: VariantRow[] }>> {
   try {
+    const policy = await loadStorefrontOptimizerPolicy(admin, workspaceId);
+    if (!optimizerGateOpen(policy, productId)) return []; // propose-only ⇒ nothing reaches a customer
+
     const { data: experiments } = await admin
       .from("storefront_experiments")
       .select("id, workspace_id, product_id, lander_type, audience, lever, status, holdout_pct, promoted_variant_id")
