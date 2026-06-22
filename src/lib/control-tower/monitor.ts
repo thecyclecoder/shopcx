@@ -255,6 +255,22 @@ function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefine
   const total = s.okCount + s.errCount;
   const windowMin = Math.round((loop.livenessWindowMs ?? 6 * 60 * 60_000) / 60_000);
 
+  // 0. Never-run grace (first-run / deploy boundary) — an inline agent with ZERO heartbeats *ever*
+  // is awaiting its first invocation, not silently failing. These agents beat on EVERY run (incl.
+  // failures, via finally), so zero-ever-beats = the agent was never even invoked → the in-window
+  // "work" was handled by a pre-heartbeat code path (the deploy boundary) or isn't really the
+  // agent's backlog (e.g. a `pending` journey_session = awaiting the customer, not the delivery
+  // agent — the agent already created it). Amber, never red. Mirrors the cron first-run grace.
+  // (An agent that HAS run before but went silent in-window still alerts below: history non-empty.)
+  if (s.history.length === 0) {
+    return {
+      ...base,
+      color: s.work > 0 ? "amber" : "green",
+      statusText: s.work > 0 ? `awaiting first run — ${s.work} in window, none handled yet` : "idle · no runs yet",
+      violation: null,
+    };
+  }
+
   // 1. Liveness-when-work-exists — work waited but 0 successful runs in the window.
   if (s.work > 0 && s.okCount === 0) {
     return {
