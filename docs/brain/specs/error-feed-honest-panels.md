@@ -19,9 +19,9 @@ This is the north star applied to our own tooling: a monitor must never present 
 ## Verification
 - With `VERCEL_LOG_DRAIN_SECRET` unset → Vercel panel is **amber "not configured"**, not green; header doesn't count it healthy.
 - Configure the drain + set the secret, before any log arrives → **amber "awaiting first event."** Send a clean (non-error) batch → **green "0 errors · connected, last delivery Ns ago."**
-- Force a 500 → red with the grouped signature (today's behavior), unchanged.
+- ✅ Force a 500 → red with the grouped signature (today's behavior), unchanged.
 - Supabase panel with no `SUPABASE_MANAGEMENT_TOKEN` → amber "not configured"; with the token + a successful poll + no errors → green "connected."
-- Inngest panel: green "connected" only once the failure-capture fn is confirmed registered (in the deployed function list) — else amber.
+- ✅ Inngest panel: green "connected" only once the failure-capture fn is confirmed registered (in the deployed function list) — else amber.
 
 ## Phase 1 — connection-aware panel states + received-heartbeats ✅
 Per-source "received" heartbeat + the configured/awaiting/connected/error state machine in [[../libraries/control-tower]] `buildErrorFeedSnapshot`; the panel renders amber "not configured"/"awaiting first event" vs green "connected · 0 errors"; the header health count excludes unconfigured panels. Brain: [[../dashboard/control-tower]] · [[../libraries/control-tower]] · [[error-feed-monitoring]].
