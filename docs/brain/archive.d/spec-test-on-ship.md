@@ -1,0 +1,1 @@
+- **Spec-Test on Ship (event-trigger, cron = backlog)** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
