@@ -2997,6 +2997,21 @@ async function main() {
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
   console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix + ${MAX_DEV_ASK} dev-ask + ${MAX_PR_RESOLVE} pr-resolve lane, polling every ${POLL_MS}ms`);
 
+  // Deploy-time Inngest re-sync (control-tower-complete-coverage spec, Phase 2): the worker
+  // restarts right after it self-updates to a freshly-deployed SHA, so pinging the Inngest serve
+  // endpoint here makes any newly-added createFunction register with Inngest Cloud instead of
+  // silently never firing (the control-tower-monitor "awaiting first run for days" gap).
+  // Fire-and-forget, best-effort — a failed sync must never block the worker loop.
+  void (async () => {
+    try {
+      const { syncInngestRegistration } = await import("../src/lib/inngest/sync");
+      const r = await syncInngestRegistration();
+      console.log(`[inngest-sync] ${r.detail}`);
+    } catch (e) {
+      console.warn("[inngest-sync] skipped:", e instanceof Error ? e.message : e);
+    }
+  })();
+
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
   // Per-lane detail (build-box-status-view): the value carries what the lane is building + when it

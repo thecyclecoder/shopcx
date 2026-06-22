@@ -78,10 +78,23 @@ interface SpecDriftRow {
   opened_at: string;
   last_seen_at: string;
 }
+interface UnregisteredLoop {
+  id: string;
+  cadence: string;
+}
+interface InngestRegistrationDiff {
+  status: "ok" | "unverified";
+  missing: string[];
+}
+interface CoverageAudit {
+  unregistered: UnregisteredLoop[];
+  inngestRegistration: InngestRegistrationDiff;
+}
 interface Snapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
   loops: LoopStatus[];
+  selfAudit?: CoverageAudit;
   errorFeed?: ErrorFeedSnapshot;
   specDrift?: SpecDriftRow[];
 }
@@ -253,6 +266,68 @@ function ErrorPanel({ panel }: { panel: ErrorFeedPanel }) {
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+function CoverageAuditSection({ audit }: { audit: CoverageAudit }) {
+  const { unregistered, inngestRegistration } = audit;
+  const clean = unregistered.length === 0 && inngestRegistration.missing.length === 0;
+  return (
+    <div className="mt-8">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        Coverage self-audit
+      </h2>
+      <p className="mb-3 text-[11px] text-zinc-400">
+        The watchdog auditing its own coverage — every cron <code>createFunction</code> in the serve route diffed
+        against the monitored-loop registry, plus the serve route diffed against what Inngest Cloud has actually
+        registered. A cron in code with no tile is an <b>unregistered loop</b> (amber) — coverage gaps surface here
+        automatically instead of waiting for someone to notice. Empty = full coverage.
+      </p>
+
+      {clean ? (
+        <p className="rounded-lg border border-dashed border-zinc-200 px-3 py-4 text-xs text-emerald-700 dark:border-zinc-800 dark:text-emerald-300">
+          Full coverage — every cron in code has a monitored-loop tile
+          {inngestRegistration.status === "ok" ? " and Inngest has them all registered." : "."}
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {unregistered.map((u) => (
+            <div key={u.id} className={`rounded-lg border p-3.5 ${TILE.amber}`}>
+              <div className="flex items-center gap-2">
+                <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT.amber}`} />
+                <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100" title={u.id}>
+                  Unregistered loop: {u.id}
+                </h3>
+              </div>
+              <p className="mt-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-200">
+                In code but not in the registry — add a MONITORED_LOOPS entry (or mark it intentionally-unmonitored).
+              </p>
+              <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">cron: {u.cadence}</p>
+            </div>
+          ))}
+          {inngestRegistration.missing.map((id) => (
+            <div key={`inngest-${id}`} className={`rounded-lg border p-3.5 ${TILE.amber}`}>
+              <div className="flex items-center gap-2">
+                <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT.amber}`} />
+                <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100" title={id}>
+                  Not registered with Inngest: {id}
+                </h3>
+              </div>
+              <p className="mt-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-200">
+                Served in code but Inngest Cloud has no record of it — a deploy may not have re-synced the app.
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {inngestRegistration.status === "unverified" && (
+        <p className="mt-2 text-[10px] text-zinc-400">
+          In-code↔Inngest-registered diff unverified (no Inngest signing key / API unreachable) — the never-fired
+          cron check still covers the same gap from the heartbeat side.
+        </p>
       )}
     </div>
   );
@@ -444,6 +519,8 @@ export default function ControlTowerPage() {
               </div>
             </div>
           )}
+
+          {snap.selfAudit && <CoverageAuditSection audit={snap.selfAudit} />}
 
           <SpecDriftSection rows={snap.specDrift ?? []} onChange={refresh} />
 

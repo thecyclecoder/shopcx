@@ -117,6 +117,15 @@ export interface MonitoredLoop {
   minRunsForErrorRate?: number;
 }
 
+/**
+ * Cron functions that exist in code (a `createFunction` with a cron trigger in the serve
+ * route) but are DELIBERATELY not given a monitored-loop tile — so the Phase 2 self-audit
+ * (control-tower-complete-coverage) doesn't flag them as "unregistered loop: X". Silence is
+ * never the default: each MUST carry a reason. Keep this list short — the right answer for a
+ * real loop is a MONITORED_LOOPS entry, not an exemption. Keyed by the cron's inngest fn id.
+ */
+export const INTENTIONALLY_UNMONITORED_CRONS: Record<string, string> = {};
+
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
