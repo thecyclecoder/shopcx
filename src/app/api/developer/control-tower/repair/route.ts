@@ -48,23 +48,43 @@ export async function POST(request: Request) {
 
   const { data: job } = await admin
     .from("agent_jobs")
-    .select("id, kind, status, pending_actions")
+    .select("id, kind, status, spec_slug, pending_actions")
     .eq("id", jobId)
     .eq("workspace_id", workspaceId)
     .eq("kind", "repair")
     .maybeSingle();
   if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 });
-  if (job.status !== "needs_approval") {
-    return NextResponse.json({ error: `Repair job is ${job.status}, not awaiting approval` }, { status: 409 });
+  // Both proposed (needs_approval) and needs-human (needs_attention) items are dismissible; only a
+  // proposed item (which carries a repair_build action) can be Built.
+  if (job.status !== "needs_approval" && job.status !== "needs_attention") {
+    return NextResponse.json({ error: `Repair job is ${job.status}, not actionable` }, { status: 409 });
+  }
+  if (action === "build" && job.status !== "needs_approval") {
+    return NextResponse.json({ error: "No proposed fix to build on this item — Dismiss it instead." }, { status: 409 });
   }
 
   const actions = Array.isArray(job.pending_actions) ? (job.pending_actions as Array<Record<string, unknown>>) : [];
-  const next = actions.map((a) =>
-    a.type === "repair_build" ? { ...a, status: action === "build" ? "approved" : "declined" } : a,
-  );
 
-  // Flip to queued_resume so the box re-claims it on the repair lane and executes the owner's choice
-  // (queue the build / resolve the error row). The box owns the actual build enqueue + row resolve.
+  if (action === "dismiss") {
+    // Dismiss resolves DIRECTLY — resolving a row needs no prod creds, so no box round-trip. This also
+    // makes Dismiss work for needs_attention items (which have no repair_build action to decline) and
+    // clears them from getOpenRepairs immediately (status → completed).
+    const next = actions.map((a) => (a.type === "repair_build" ? { ...a, status: "declined" } : a));
+    const { error } = await admin
+      .from("agent_jobs")
+      .update({ status: "completed", pending_actions: next, error: "dismissed by owner", updated_at: new Date().toISOString() })
+      .eq("id", jobId);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    // Resolve the originating error_events row (the repair job's spec_slug IS the error signature, e.g. "vercel:…").
+    if (job.spec_slug) {
+      await admin.from("error_events").update({ status: "resolved" }).eq("signature", job.spec_slug).eq("status", "open");
+    }
+    return NextResponse.json({ ok: true, action, resolved: true });
+  }
+
+  // action === "build": approve the repair_build action + flip to queued_resume so the box re-claims it
+  // on the repair lane and enqueues the build (the build genuinely needs the box).
+  const next = actions.map((a) => (a.type === "repair_build" ? { ...a, status: "approved" } : a));
   const { error } = await admin
     .from("agent_jobs")
     .update({ status: "queued_resume", pending_actions: next, updated_at: new Date().toISOString() })
