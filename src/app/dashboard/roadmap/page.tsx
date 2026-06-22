@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getRoadmap, getArchive, type Phase, type SpecCard } from "@/lib/brain-roadmap";
+import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
@@ -8,7 +8,7 @@ import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
 import BoxChip from "./BoxChip";
-import SpecSearch from "./SpecSearch";
+import RoadmapFilters from "./RoadmapFilters";
 import { AgentTestedStamp, TestChip } from "../developer/spec-tests/SpecTestView";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
@@ -60,10 +60,13 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-function Card({ spec, job, fold, testRun, humanResolved }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number }) {
+function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: Phase; goalSlugs: string[]; source: SpecSource }) {
   return (
     <div
       data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}
+      data-status={status}
+      data-goal={goalSlugs.join(" ")}
+      data-source={source}
       className="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
     >
       <Link href={`/dashboard/roadmap/${spec.slug}`} className="group flex items-start gap-2">
@@ -109,7 +112,7 @@ function Card({ spec, job, fold, testRun, humanResolved }: { spec: SpecCard; job
 }
 
 export default async function RoadmapPage() {
-  const [{ specs }, archive] = await Promise.all([getRoadmap(), getArchive()]);
+  const [{ specs }, archive, filters] = await Promise.all([getRoadmap(), getArchive(), getRoadmapFilters()]);
   const workspaceId = await getActiveWorkspaceId();
   const [jobsBySlug, folds, testRuns, humanResolvedBySlug] = workspaceId
     ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId), getHumanResolutionCounts(workspaceId)])
@@ -146,7 +149,7 @@ export default async function RoadmapPage() {
         Status comes from the <span className="font-medium">⏳ planned · 🚧 in progress · ✅ shipped</span> phase emojis.
       </p>
 
-      <SpecSearch />
+      <RoadmapFilters goals={filters.goals} />
 
       {specs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
@@ -169,7 +172,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} />)
                   )}
                 </div>
               </div>

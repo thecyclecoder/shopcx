@@ -37,6 +37,9 @@ export interface SpecCard {
   // auto-enqueued — unless the owner opts out with a `**Auto-build:** off` header line. `false` = opted
   // out (never auto-queued); undefined/true = default (eligible). Manual Build is unaffected either way.
   autoBuild?: boolean;
+  // True when the spec body carries a **Repair-signature:** line (authored by the box Repair Agent).
+  // The "🔧 Repair" source on the roadmap board's source filter is derived from this — see getRoadmapFilters.
+  repairSignature: boolean;
 }
 
 export interface ProjectTrack {
@@ -376,6 +379,10 @@ function parseSpec(slug: string, raw: string): SpecCard {
     break;
   }
 
+  // **Repair-signature:** `…` — present only on box Repair-Agent-authored specs. Drives the board's
+  // "🔧 Repair" source chip (roadmap-goal-and-source-filters). Derived, not author-tagged.
+  const repairSignature = lines.some((l) => /\*\*Repair-signature:\*\*/i.test(l));
+
   return {
     slug,
     title,
@@ -387,6 +394,7 @@ function parseSpec(slug: string, raw: string): SpecCard {
     parent,
     blockedBy: [...new Set(blockerSlugs)].map((s) => ({ slug: s, title: s, status: "planned" as Phase, cleared: false })),
     autoBuild,
+    repairSignature,
   };
 }
 
@@ -1000,4 +1008,73 @@ export async function getGoal(slug: string): Promise<{ raw: string; card: GoalCa
   const bySlug: Record<string, SpecCard> = {};
   for (const s of specs) bySlug[s.slug] = s;
   return { raw, card, specs: bySlug };
+}
+
+// ── Roadmap board filters: goal-membership + per-spec source (roadmap-goal-and-source-filters) ──
+
+/** What created a spec, derived (no author tag): 🔧 repair · 🎯 goal · ✋ manual. */
+export type SpecSource = "repair" | "goal" | "manual";
+
+export interface RoadmapFilterData {
+  /** Dropdown options — every docs/brain/goals/*.md, by title. */
+  goals: { slug: string; title: string }[];
+  /** spec slug → goal slugs it belongs to (goal-doc wikilinks ∪ parent-match). Empty array = no goal. */
+  goalsBySpec: Record<string, string[]>;
+  /** spec slug → its derived source. */
+  sourceBySpec: Record<string, SpecSource>;
+}
+
+/** Does a spec's (cleaned) parent string reference this goal — its slug, title, or a milestone of it? */
+function parentReferencesGoal(parent: string | undefined, goal: { slug: string; title: string; milestoneNames: string[] }): boolean {
+  if (!parent) return false;
+  const p = parent.toLowerCase();
+  const slug = goal.slug.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The Parent line's [[../goals/{slug}]] wikilink survives cleanInline as a "../goals/{slug}" path token.
+  if (new RegExp(`(^|[\\s/[(])${slug}(\\b|$)`).test(p)) return true;
+  if (goal.title && p.includes(goal.title.toLowerCase())) return true;
+  // Milestone reference, e.g. **Parent:** M2 — Lever-importance model + CRO-learnings memory.
+  return goal.milestoneNames.some((n) => n.length >= 5 && p.includes(n.toLowerCase()));
+}
+
+/**
+ * Resolve goal→spec membership + per-spec source for the roadmap board's filters, once per render.
+ * Membership = the union of (a) each goal doc's [[spec-slug]] wikilinks (the reliable planner signal) and
+ * (b) specs whose **Parent:** references the goal (its slug, title, or a milestone). Source = 🔧 repair if
+ * the spec carries a **Repair-signature:** line, else 🎯 goal if it's wikilinked from a goal doc (the
+ * planner/goal-milestone signal — wikilink only, not parent-match), else ✋ manual. No schema change.
+ */
+export async function getRoadmapFilters(): Promise<RoadmapFilterData> {
+  const [{ specs }, goalSlugs] = await Promise.all([getRoadmap(), listGoalSlugs()]);
+  const goalDocs = await Promise.all(
+    goalSlugs.map(async (slug) => {
+      const raw = await fs.readFile(path.join(GOALS_DIR, `${slug}.md`), "utf8");
+      const card = parseGoal(slug, raw, specs);
+      return {
+        slug,
+        title: card.title,
+        // Every spec the goal doc wikilinks anywhere (milestones + prose) — the primary membership signal.
+        wikilinked: new Set(specWikilinks(raw)),
+        milestoneNames: card.milestones.map((m) => m.name).filter(Boolean),
+      };
+    }),
+  );
+
+  const goalsBySpec: Record<string, string[]> = {};
+  const sourceBySpec: Record<string, SpecSource> = {};
+  for (const spec of specs) {
+    const linkedGoals = goalDocs.filter((g) => g.wikilinked.has(spec.slug));
+    const memberGoals = goalDocs.filter(
+      (g) => g.wikilinked.has(spec.slug) || parentReferencesGoal(spec.parent, g),
+    );
+    goalsBySpec[spec.slug] = memberGoals.map((g) => g.slug);
+    sourceBySpec[spec.slug] = spec.repairSignature ? "repair" : linkedGoals.length ? "goal" : "manual";
+  }
+
+  return {
+    goals: goalDocs
+      .map((g) => ({ slug: g.slug, title: g.title }))
+      .sort((a, b) => a.title.localeCompare(b.title)),
+    goalsBySpec,
+    sourceBySpec,
+  };
 }
