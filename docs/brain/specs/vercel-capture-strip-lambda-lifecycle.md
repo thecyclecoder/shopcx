@@ -1,4 +1,4 @@
-# Vercel error-feed: don't mint duplicate signatures from raw Lambda START/END/REPORT lifecycle blocks ⏳
+# Vercel error-feed: don't mint duplicate signatures from raw Lambda START/END/REPORT lifecycle blocks 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/app/api/webhooks/vercel-logs/route.ts::monitor-false-positive`
@@ -11,8 +11,10 @@ src/app/api/webhooks/vercel-logs/route.ts isError() (line 71-75) captures any lo
 
 **Likely target:** `src/app/api/webhooks/vercel-logs/route.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** `vercel-logs/route.ts` adds `isBareLifecycle()` and the `isError()` re-filter now drops any 5xx whose entire message is `START`/`END`/`REPORT RequestId` scaffolding + the bare `[METHOD] path status=NNN` proxy line — so a bare lifecycle wrapper produces **no** `error_events` row / signature. A failure's actionable `console.error` (own signature + repair spec) is unaffected; a lifecycle block carrying a real message/stack ("Task timed out", uncaught exception) is not bare and is still captured. Brain: [[../integrations/vercel-log-drain]].
 
 ## Verification
 - Re-trigger the originating condition (signature `vercel:ebdf493a37c60c34`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
