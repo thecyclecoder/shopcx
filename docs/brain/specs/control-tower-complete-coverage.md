@@ -27,8 +27,13 @@ Every spec already declares an **owner function** ([[../project-management]] · 
 - **Never-fired vs awaiting-first-tick:** a registered cron deployed > (cadence + grace) ago with **0 heartbeats** → **red "registered but never run"** + a page (re-validates the `control-tower-monitor` gap); a cron deployed < one cadence ago with 0 beats → amber "awaiting first run", no page. After a deploy that adds a `createFunction`, Inngest has it registered (no manual resync needed); the in-code-vs-Inngest-registered diff reports 0 missing.
 - **Department rollups:** the dashboard shows "Platform/Growth/Retention/CS/CMO Health" tiles; a red loop turns its department rollup amber/red; the count reflects healthy/total; expanding a department lists its loops.
 
-## Phase 1 — register all crons + reactive agents + self-audit + never-fired detection ⏳
-Registry entries for the full cron set + the key reactive agents (ticket handler crucial) + the self-audit (enumerate `createFunction` ids, diff vs registry, flag unregistered) + **the never-fired detection** (`evalCron`: 0 beats past deploy-age+cadence+grace → red, not amber-forever) + **deploy-time Inngest re-sync** so new functions auto-register + an in-code-vs-Inngest-registered diff. Brain: [[control-tower]] · [[../libraries/control-tower]] (evalCron) · [[../inngest]] (the cron index + sync) · [[../operational-rules]].
+> **Split into 3 phases (was 2):** P1's original scope (register-all + self-audit + never-fired + resync) timed out the 30-min build window — too much for one build. Split so each fits + is reviewable.
 
-## Phase 2 — department rollups ⏳
+## Phase 1 — register every cron + reactive agent ⏳
+The mechanical bulk: registry entries for the **full `inngest.createFunction` cron set** + the key **reactive/event agents** (the inbound **ticket handler** crucial; dunning, returns, journey-outcomes, agent-todo-execute, chargeback) + their heartbeat emits + dashboard tiles. Each: liveness/cron-freshness + a work-exists assertion where it has one. No new detection logic — just coverage. Brain: [[control-tower]] · [[../libraries/control-tower]] · [[../inngest]] (the cron index) · [[../operational-rules]].
+
+## Phase 2 — self-audit + never-fired detection + Inngest resync ⏳
+The detection layer (smaller, focused): the **self-audit** (enumerate `createFunction` ids + AI entry points, diff vs registry, flag unregistered → amber "unregistered loop: X"); the **never-fired detection** (`evalCron`: a registered cron with 0 beats past deploy-age+cadence+grace → red "registered but never run", not amber-forever — the `control-tower-monitor` gap); **deploy-time Inngest re-sync** so new `createFunction`s auto-register + an **in-code-vs-Inngest-registered diff**. Brain: [[control-tower]] · [[../libraries/control-tower]] (evalCron) · [[../inngest]] (sync) · [[../operational-rules]].
+
+## Phase 3 — department rollups ⏳
 `owner` function on every registry entry; the Control Tower dashboard groups by function with a per-department rollup health tile (Platform/Growth/Retention/CS/CMO Health), CEO-glance-on-top + drill-in. Brain: [[../dashboard/control-tower]] · [[../goals/ceo-mode]] · [[../project-management]].
