@@ -441,9 +441,79 @@ export async function retestOriginIfFixMerged(workspaceId: string, fixSlug: stri
 }
 
 /**
+ * Post-merge handling for a just-MERGED job — the shared step run by BOTH paths that can flip a job to
+ * `merged`: the board-render reconcile (reconcileMergedJobs) AND the server-side auto-merge webhook
+ * (auto-ship-pipeline, called from github-pr-resolve's autoMergeReadyPrs). Centralising it here is what
+ * lets the chain + card-state advance with NO board render (chain-and-cardstate-under-automerge Bug B):
+ * whichever path marks the job merged runs this. Idempotent + best-effort throughout, so it's safe when
+ * both paths run (the GitHub merge fires both a check/status webhook and is later seen by the next board load).
+ *
+ * For a `build`: reconcile the spec's phase emojis against `main`, mirror the merge to the board card with a
+ * phase_states-ROLLUP status (Bug A) tagged deploy_pending + the merge SHA, enqueue a spec-test / auto-queue
+ * unblocked dependents once it reads shipped, advance a "Build all" chain (queueNextChainedPhase) when
+ * `chain_phases`, and re-test a fix's origin. For a `fold`: cancel orphaned jobs for the specs it archived.
+ */
+export async function onBuildJobMerged(job: AgentJob, mergeSha: string | null, admin: Admin): Promise<void> {
+  if (job.kind === "build") {
+    try {
+      // spec-drift Part A (root fix): stamp ✅ on the phase(s) whose code is verifiably on main (a merged
+      // build now exists for this spec), then mirror to the board. Returns the post-flip status + per-phase
+      // snapshot — markSpecCardMergeShipped rolls the snapshot up so a 1-of-N chain card reads In progress.
+      const drift = await reconcileSpecDrift(job.workspace_id, job.spec_slug);
+      await markSpecCardMergeShipped(job.workspace_id, job.spec_slug, {
+        status: drift.status,
+        mergeSha,
+        phaseStates: drift.phaseStates,
+      });
+      // spec-test-on-ship: if the corrected phases now read shipped, enqueue a spec-test (shared dedupe
+      // no-ops if the cron/manual flip already did) + auto-queue any unblocked dependent.
+      if (drift.status === "shipped") {
+        await enqueueSpecTestIfDue(job.workspace_id, job.spec_slug, "shipped");
+        await autoQueueUnblockedBy(job.workspace_id, job.spec_slug);
+      }
+    } catch {
+      /* event missed → the daily backlog + spec-drift crons mop it up */
+    }
+    // build-all-phases-chain Phase 1: if THIS merged build was part of a "Build all" chain, queue the next ⏳
+    // phase (on fresh main, atop this phase's code). Most phase merges leave the spec in_progress (more ⏳
+    // phases remain) — the chain advances on every phase merge, not only the final one. queueNextChainedPhase
+    // no-ops when no ⏳ phase is left (all ✅ = chain done) or a build is already in flight (dedupe). A
+    // failed/needs_approval phase never reaches `merged`, so the chain stops/pauses there with no stop logic.
+    if (job.chain_phases) {
+      try {
+        await queueNextChainedPhase(job.workspace_id, job.spec_slug);
+      } catch {
+        /* best-effort — the owner can re-tap Build all to resume the chain */
+      }
+    }
+    // fix-ship-retests-origin: if THIS merged build's spec carries a `Fixes: {origin}` link, re-test the
+    // origin so its stale "issues" badge clears once the fix is live (deduped; no link → no-op).
+    try {
+      await retestOriginIfFixMerged(job.workspace_id, job.spec_slug);
+    } catch {
+      /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
+    }
+  }
+  // fold-guard-live-build (Phase 1): a just-merged FOLD just archived its batch of specs (their markdown
+  // moved to archive.d/). Cancel any non-terminal build/spec-test job still pointing at an archived spec so
+  // no orphaned paused/active item with a dead spec link survives. Best-effort.
+  if (job.kind === "fold") {
+    try {
+      const c = await cancelJobsForArchivedSpecs({ workspaceId: job.workspace_id, admin });
+      if (c.cancelled) console.log(`[fold-reconcile] cancelled ${c.cancelled} orphaned job(s) for archived spec(s): ${c.slugs.join(", ")}`);
+    } catch {
+      /* best-effort — the worker reaper cancels these on next startup */
+    }
+  }
+}
+
+/**
  * Self-heal: a `completed` job whose PR was merged/closed OUTSIDE the dashboard (e.g. merged on
- * GitHub directly) still shows a stale "Squash & merge" button. Check GitHub; if the PR is no
- * longer open, flip the job to `merged` (mutates the passed jobs in place + persists).
+ * GitHub directly, or by the auto-merge webhook) still shows a stale "Squash & merge" button. Check
+ * GitHub; if the PR is no longer open, flip the job to `merged` (mutates the passed jobs in place +
+ * persists) and run the shared post-merge step. Note the auto-merge path normally beats this to it —
+ * onBuildJobMerged is idempotent, so a job it already handled is skipped here (status is `merged`, not
+ * `completed`) and the rare double-run is harmless.
  */
 export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
   const tok = ghToken();
@@ -463,67 +533,10 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
         if (pr.merged || pr.state === "closed") {
           j.status = "merged";
           await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", j.id);
-          // spec-drift Part A (root fix): a merged build is supposed to flip the phase(s) it built ✅, but
-          // doesn't reliably — so shipped work parks in Planned/In-progress. Run the per-phase, evidence-gated
-          // reconciler against `main`: it stamps ✅ only on phases whose code is verifiably on main (a merged
-          // build now exists for this spec), leaving genuinely-pending phases. This is where the drift
-          // originates; closing it here means the cron backstop rarely has work. Returns the post-flip status.
-          if (pr.merged && j.kind === "build") {
-            try {
-              const drift = await reconcileSpecDrift(j.workspace_id, j.spec_slug);
-              // spec-card-db-companion: mirror the merge to the board the moment it happens — the card flips
-              // to its post-merge status tagged `deploy_pending` with this merge's SHA, so it reads
-              // "shipped · deploying" until a deployment carrying that SHA is live (no markdown-redeploy wait,
-              // no webhook — the board clears it at read time via VERCEL_GIT_COMMIT_SHA). drift already mirrored
-              // the per-phase snapshot; this overlays the merge SHA + deploy flag.
-              await markSpecCardMergeShipped(j.workspace_id, j.spec_slug, {
-                status: drift.status,
-                mergeSha: pr.merge_commit_sha ?? null,
-              });
-              // spec-test-on-ship: if the corrected phases now read shipped, enqueue a spec-test (shared
-              // dedupe no-ops if the cron/manual flip already did) + auto-queue any unblocked dependent.
-              if (drift.status === "shipped") {
-                await enqueueSpecTestIfDue(j.workspace_id, j.spec_slug, "shipped");
-                // spec-blockers Phase 2: this spec just shipped → auto-queue any dependent whose last
-                // blocker it was (de-duped, owner-opt-out-aware; no-ops if a build row already exists).
-                await autoQueueUnblockedBy(j.workspace_id, j.spec_slug);
-              }
-            } catch {
-              /* event missed → the daily backlog + spec-drift crons mop it up */
-            }
-            // build-all-phases-chain Phase 1: if THIS merged build was part of a "Build all" chain, queue
-            // the next ⏳ phase (on fresh main, atop this phase's code). Outside the shipped-check above:
-            // most phase merges leave the spec in_progress (more ⏳ phases remain) — the chain advances on
-            // every phase merge, not only the final one. queueNextChainedPhase no-ops when no ⏳ phase is
-            // left (all ✅ = chain done) or a build is already in flight (dedupe). A failed/needs_approval
-            // phase never reaches `merged`, so the chain stops/pauses there with no explicit stop logic.
-            if (j.chain_phases) {
-              try {
-                await queueNextChainedPhase(j.workspace_id, j.spec_slug);
-              } catch {
-                /* best-effort — the owner can re-tap Build all to resume the chain */
-              }
-            }
-            // fix-ship-retests-origin: if THIS merged build's spec carries a `Fixes: {origin}` link, re-test
-            // the origin so its stale "issues" badge clears once the fix is live (deduped; no link → no-op).
-            try {
-              await retestOriginIfFixMerged(j.workspace_id, j.spec_slug);
-            } catch {
-              /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
-            }
-          }
-          // fold-guard-live-build (Phase 1): a just-merged FOLD just archived its batch of specs (their
-          // markdown moved to archive.d/). Cancel any non-terminal build/spec-test job still pointing at an
-          // archived spec so no orphaned paused/active item with a dead spec link survives — the fold-merge
-          // reconcile half of the cleanup backstop (the worker reaper covers a box restart). Best-effort.
-          if (pr.merged && j.kind === "fold") {
-            try {
-              const c = await cancelJobsForArchivedSpecs({ workspaceId: j.workspace_id, admin });
-              if (c.cancelled) console.log(`[fold-reconcile] cancelled ${c.cancelled} orphaned job(s) for archived spec(s): ${c.slugs.join(", ")}`);
-            } catch {
-              /* best-effort — the worker reaper cancels these on next startup */
-            }
-          }
+          // The shared post-merge step (reconcile phases → mirror card with rollup status → chain-advance →
+          // spec-test / unblock / origin-retest, or fold cleanup). Only when actually MERGED — a `closed`
+          // (un-merged) PR just flips the job's status, no shipped side-effects.
+          if (pr.merged) await onBuildJobMerged(j, pr.merge_commit_sha ?? null, admin);
         }
       } catch {
         /* transient — try again next load */

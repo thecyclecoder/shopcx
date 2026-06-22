@@ -45,6 +45,27 @@ export interface SpecCardState {
 
 const PHASE_RANK: Record<Phase, number> = { rejected: -1, planned: 0, in_progress: 1, shipped: 2 };
 
+/**
+ * Roll a per-phase snapshot up to a single board status (chain-and-cardstate-under-automerge Phase 1, Bug A).
+ * all shipped → shipped (a `rejected`/cut phase doesn't block, mirroring the markdown deriveStatus); any
+ * shipped/in_progress but not all → in_progress; else planned. Empty → planned.
+ *
+ * This is what a MERGE-write must store, NOT the H1-emoji-derived status: when 1 of N "Build all" phases has
+ * merged, `phase_states[0]="shipped"` but the spec's ⏳ title would derive `planned` — and since the board
+ * takes max(markdownStatus, state.status), a `planned` state can't lift the card off Planned. Rolling the
+ * phase_states up instead flips the card to In progress the moment the first phase ships.
+ */
+export function rollupPhaseStatus(phaseStates: SpecCardPhaseState[] | undefined): Phase {
+  const phases = phaseStates ?? [];
+  if (!phases.length) return "planned";
+  const planned = phases.filter((p) => p.status === "planned").length;
+  const inProgress = phases.filter((p) => p.status === "in_progress").length;
+  const shipped = phases.filter((p) => p.status === "shipped").length;
+  if (planned === 0 && inProgress === 0) return "shipped"; // every phase shipped (cut phases ignored)
+  if (shipped > 0 || inProgress > 0) return "in_progress";
+  return "planned";
+}
+
 /** Every spec_card_state row for a workspace, keyed by spec slug — the board's DB-first read. */
 export async function getSpecCardStates(workspaceId: string): Promise<Record<string, SpecCardState>> {
   const admin = createAdminClient();
@@ -144,8 +165,13 @@ export async function markSpecCardMergeShipped(
   slug: string,
   opts: { status: Phase; mergeSha: string | null; phaseStates?: SpecCardPhaseState[] },
 ): Promise<void> {
+  // Bug A (chain-and-cardstate-under-automerge): the merge-write's status is the ROLLUP of phase_states, not
+  // the caller's H1-emoji-derived `status` — so a 1-of-N-phases-merged "Build all" card flips to In progress
+  // instead of staying stale Planned. Fall back to `opts.status` only when no per-phase snapshot is supplied
+  // (nothing to roll up — e.g. a phase-less spec).
+  const status = opts.phaseStates && opts.phaseStates.length ? rollupPhaseStatus(opts.phaseStates) : opts.status;
   await upsertCardState(workspaceId, slug, {
-    status: opts.status,
+    status,
     phase_states: opts.phaseStates,
     last_merge_sha: opts.mergeSha,
     flags: { deploy_pending: true },

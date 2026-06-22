@@ -250,6 +250,7 @@ export interface ReconcileResult {
   flipped: { index: number; title: string }[]; // phases auto-flipped ✅ this run
   surfaced: { index: number; title: string }[]; // phases left for a one-tap owner flip (open drift rows)
   status: Phase; // derived spec status after any flips
+  phaseStates: SpecCardPhaseState[]; // per-phase snapshot after any flips (for the merge-write rollup)
   reason?: string; // why nothing happened (no token / not on main / no phases)
 }
 
@@ -314,7 +315,7 @@ async function hasMergedBuild(workspaceId: string, slug: string): Promise<boolea
  * for the ambiguous ones, and returns what it did. Never throws — best-effort, returns a reason on skip.
  */
 export async function reconcileSpecDrift(workspaceId: string, slug: string, opts: ReconcileOpts = {}): Promise<ReconcileResult> {
-  const empty = (reason: string): ReconcileResult => ({ slug, flipped: [], surfaced: [], status: "planned", reason });
+  const empty = (reason: string): ReconcileResult => ({ slug, flipped: [], surfaced: [], status: "planned", phaseStates: [], reason });
   if (!/^[a-z0-9-]+$/i.test(slug)) return empty("invalid slug");
   if (!ghToken()) return empty("no GitHub token");
 
@@ -324,7 +325,7 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
   let { sha } = fetched;
 
   const phases = parsePhasesWithLines(raw);
-  if (!phases.length) return { slug, flipped: [], surfaced: [], status: deriveSpecStatus(raw), reason: "no phases" };
+  if (!phases.length) return { slug, flipped: [], surfaced: [], status: deriveSpecStatus(raw), phaseStates: phaseStatesFromRaw(raw), reason: "no phases" };
 
   const mergedBuild =
     opts.mergedBuildSlugs !== undefined ? opts.mergedBuildSlugs.has(slug) : await hasMergedBuild(workspaceId, slug);
@@ -372,9 +373,10 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
   // spec-card-db-companion: mirror the post-reconcile status + per-phase snapshot to the board instantly,
   // so a drift flip (auto on a merge, or the cron backstop) reflects without waiting for the markdown redeploy.
   const status = deriveSpecStatus(raw);
-  await markSpecCardStatus(workspaceId, slug, status, phaseStatesFromRaw(raw));
+  const phaseStates = phaseStatesFromRaw(raw);
+  await markSpecCardStatus(workspaceId, slug, status, phaseStates);
 
-  return { slug, flipped, surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status };
+  return { slug, flipped, surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status, phaseStates };
 }
 
 /** Upsert open `spec_drift` rows for the surfaced phases; resolve any open row no longer surfaced. */

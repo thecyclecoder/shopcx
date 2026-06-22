@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
+import { onBuildJobMerged, type AgentJob } from "@/lib/agent-jobs";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -329,7 +330,7 @@ async function squashMergeAndDelete(
   prNumber: number,
   branch: string,
   headSha: string | undefined,
-): Promise<{ merged: boolean; reason?: string }> {
+): Promise<{ merged: boolean; reason?: string; mergeSha?: string }> {
   const body: Record<string, unknown> = { merge_method: "squash" };
   if (headSha) body.sha = headSha;
   const r = await gh("PUT", `/repos/${GH_REPO}/pulls/${prNumber}/merge`, body);
@@ -337,6 +338,9 @@ async function squashMergeAndDelete(
     const msg = (r.json as Record<string, unknown>)?.message;
     return { merged: false, reason: `merge failed (${r.status}${msg ? `: ${msg}` : ""})` };
   }
+  // The squash-merge response carries the new merge commit SHA (`sha`) — thread it through so the post-merge
+  // step can tag the spec card's last_merge_sha (the "shipped · deploying → live" signal).
+  const mergeSha = typeof (r.json as Record<string, unknown>)?.sha === "string" ? ((r.json as Record<string, unknown>).sha as string) : undefined;
   // Delete the merged branch (mirrors the owner's "delete branch" on squash-merge). Best-effort — a 404/422
   // (already gone / protected) is fine; the merge already landed.
   try {
@@ -344,7 +348,37 @@ async function squashMergeAndDelete(
   } catch {
     /* best-effort branch cleanup */
   }
-  return { merged: true };
+  return { merged: true, mergeSha };
+}
+
+/**
+ * chain-and-cardstate-under-automerge Bug B: after the auto-merge gate squash-merges a claude/* build/fold
+ * PR server-side, flip the matching agent_job → `merged` and run the SHARED post-merge step right here — so
+ * the card flips (rolled-up status) and a "Build all" chain queues its next phase WITHOUT waiting for a board
+ * render (the merge happens via webhook, where nobody loads the board). Idempotent + deduped: if the job is
+ * already `merged` (the board-render reconcile beat us, or a prior webhook), this no-ops. Best-effort — a
+ * failure here never undoes the merge; reconcileMergedJobs is the backstop on the next board load.
+ *
+ * Matches the BUILD/FOLD job carrying this PR number (a pr-resolve job can share the number — exclude it).
+ */
+async function finalizeMergedBuildJob(admin: Admin, prNumber: number, mergeSha: string | null): Promise<void> {
+  try {
+    const { data } = await admin
+      .from("agent_jobs")
+      .select("*")
+      .eq("pr_number", prNumber)
+      .in("kind", ["build", "fold"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const job = (data as AgentJob | null) ?? null;
+    if (!job || job.status === "merged") return; // no build/fold job for this PR, or already handled (dedupe)
+    await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", job.id);
+    job.status = "merged";
+    await onBuildJobMerged(job, mergeSha, admin);
+  } catch {
+    /* best-effort — the board-render reconcile (reconcileMergedJobs) is the backstop */
+  }
 }
 
 export interface AutoMergeResult {
@@ -418,6 +452,9 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
               merged = true;
               result.merged = 1;
               result.mergedPr = prNumber;
+              // Bug B: flip the job → merged + run the shared post-merge step (card rollup + chain-advance)
+              // here, since this server-side merge fires no board render. Idempotent; reconcile is the backstop.
+              await finalizeMergedBuildJob(db, prNumber, m.mergeSha ?? null);
               console.log(`[auto-merge] squash-merged PR #${prNumber} (${branch}) + deleted branch`);
             } else {
               ok = false;

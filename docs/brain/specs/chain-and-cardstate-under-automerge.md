@@ -1,4 +1,4 @@
-# Phase chain + card-state status break under auto-merge ⏳
+# Phase chain + card-state status break under auto-merge ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** fixes [[build-all-phases-chain]] + [[spec-card-db-companion]] under [[auto-ship-pipeline]] auto-merge. · **Found in use 2026-06-22:** owner hit **"Build all"** on `storefront-ltv-proxy-reconciler` (4 phases). P1 built + auto-merged (#260, `chain_phases=true`), but: (a) the card stayed in **Planned** (should be **In progress** — 1 of 4 phases shipped), and (b) **P2 never auto-queued** — the chain stalled after one phase.
 
@@ -18,5 +18,12 @@ Two bugs, related:
 - A `chain_phases` build that auto-merges queues exactly one next-phase build (no duplicate even if `reconcileMergedJobs` also runs).
 - Negative: a single-phase spec auto-merges → status `shipped`, no phantom next-phase queued; a non-chain build is unaffected.
 
-## Phase 1 — rollup status on merge + chain-continue on the auto-merge path ⏳
+## Phase 1 — rollup status on merge + chain-continue on the auto-merge path ✅
 `markSpecCardMergeShipped`/its caller derive `status` from `phase_states` rollup; the auto-merge webhook path ([[auto-ship-pipeline]]) calls both `markSpecCardMergeShipped` and `queueNextChainedPhase` (idempotent) so card-state + chain advance without a board render. Brain: [[build-all-phases-chain]] · [[spec-card-db-companion]] · [[auto-ship-pipeline]] · [[../libraries/agent-jobs]] · [[../libraries/spec-card-state]].
+
+**Landed:**
+- `rollupPhaseStatus(phaseStates)` added to `src/lib/spec-card-state.ts` — all shipped → `shipped` (cut phases ignored); any shipped/in_progress but not all → `in_progress`; else `planned`. `markSpecCardMergeShipped` now stores this rollup of the supplied `phase_states` instead of the caller's H1-derived `status` (falls back to `opts.status` only when no snapshot is passed). **Bug A fixed.**
+- `reconcileSpecDrift` (`src/lib/spec-drift.ts`) now returns `phaseStates` on `ReconcileResult` so the merge-write can roll it up.
+- Extracted the post-merge handling out of `reconcileMergedJobs` into a shared, idempotent `onBuildJobMerged(job, mergeSha, admin)` in `src/lib/agent-jobs.ts` (reconcile → card rollup-write → spec-test/unblock → `queueNextChainedPhase` for `chain_phases` → origin-retest; fold cleanup for `fold` kind). `reconcileMergedJobs` now delegates to it.
+- The auto-merge gate (`autoMergeReadyPrs` → new `finalizeMergedBuildJob` in `src/lib/github-pr-resolve.ts`) flips the matching `build`/`fold` `agent_job` → `merged` and runs `onBuildJobMerged` right after the server-side squash-merge — so the card flips + the chain advances with **no board render**. `squashMergeAndDelete` now threads the merge commit SHA through. Deduped: skips a job already `merged`. **Bug B fixed.**
+- No schema change. No new files (existing libraries extended).
