@@ -21,6 +21,7 @@ Per [[../project-management]], planning + tracking live in the brain, not a sepa
 - **`deriveStatus`/`deriveSpecStatus(raw)`** — phase-consensus status (all-`✅` ⇒ shipped even with a stale H1; explicit `❌` title wins). Used by [[../specs/spec-test-on-ship|the on-ship hook]].
 - **`getFunctionMap()`/`getFunctions()`/`getFunction()`** + `parseFunction` — the Function → Mandate/Goal → Spec taxonomy.
 - **`getGoals()`/`getGoal()`** + `parseGoal`, `specCompletion` — finite goals, milestone rollup %.
+- **`getRoadmapFilters()`** → `{ goals, goalsBySpec, sourceBySpec }` for the board's goal + source filters ([[../specs/roadmap-goal-and-source-filters]]). **Goal membership** = the union of each goal doc's `[[spec]]` wikilinks (the reliable planner signal) and any spec whose `**Parent:**` references the goal (its slug, title, or a milestone of it). **`SpecSource`** = `repair` (the spec has a `**Repair-signature:**` line — `parseSpec` derives `SpecCard.repairSignature`), else `goal` (wikilinked from a goal doc — wikilink only, not parent-match), else `manual`. No schema change — all derived from the existing markdown.
 - **`getArchive()`/`listArchivedSlugs()`** — verified/folded specs from `archive.d/` (← `archive.md` fallback).
 - **`extractSpecSection`/`stripSpecSection`** — lift/strip a `## Heading` (the `## Verification` card, [[../specs/verification-guides]]).
 - **`phaseEmoji(Phase)`** — the inverse of the internal `statusFromText`; `⏳/🚧/✅/❌`. Used by the blocker chip + the gate error.
@@ -40,6 +41,7 @@ Under a spec's H1, one-per-concept bold metadata lines, each resolving `[[wikili
 
 - `**Owner:** [[../functions/{slug}]]` → `owner` (the DRI function).
 - `**Parent:** {mandate or goal milestone}` → `parent`.
+- `**Repair-signature:** \`…\`` → `repairSignature` (boolean; box-Repair-Agent-authored specs only). Drives the board's "🔧 Repair" source chip via [[#Key exports|getRoadmapFilters]].
 - **`**Blocked-by:** [[spec-a]], [[spec-b]]`** → `blockedBy` (spec-blockers). Each `[[…]]` resolves to a spec slug (last path segment, alias/`.md` stripped, de-duped). Parsed exactly like Owner/Parent.
 
 ## `blockedBy` — build prerequisites ([[../specs/spec-blockers]])

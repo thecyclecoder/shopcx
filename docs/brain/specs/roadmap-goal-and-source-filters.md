@@ -1,4 +1,4 @@
-# Roadmap filters — focused goal-progress view + filter by source ⏳
+# Roadmap filters — focused goal-progress view + filter by source ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends the roadmap/build-console (the board at `/dashboard/roadmap`). The board now carries specs from four origins (goals, the planner, the repair agent, manual) — it needs filtering so the owner can focus on one goal's progress instead of scanning everything.
 
@@ -25,5 +25,7 @@
 - A spec linked from a goal doc shows under that goal; a repair spec with no goal shows under Manual/Repair, not a goal; counts in the progress header match the visible cards.
 - Negative: a goal with no specs yet → empty board + `0/0` header (not an error); a spec in multiple goals (rare) shows under each.
 
-## Phase 1 — goal selector + source chips + progress header ⏳
+## Phase 1 — goal selector + source chips + progress header ✅
 Derive goal-membership (goal-doc wikilinks ∪ parent match) + per-spec source in the loader; add the goal dropdown, source chips, and the goal-progress header to `/dashboard/roadmap`, composing with the search. Brain: [[../libraries/brain-roadmap]] · [[../dashboard/roadmap]] (if present) · [[../ui-conventions]].
+
+**Shipped:** `getRoadmapFilters()` in `src/lib/brain-roadmap.ts` resolves goal→spec membership (each goal doc's `[[spec]]` wikilinks ∪ a `**Parent:**` that references the goal's slug/title/milestone) + per-spec `SpecSource` (`repair` if a `**Repair-signature:**` line, else `goal` if wikilinked from a goal doc, else `manual`); `parseSpec` now derives `repairSignature`. The board (`page.tsx`) stamps each card with `data-goal` / `data-source` / `data-status` and the new client `RoadmapFilters.tsx` (replaced `SpecSearch.tsx`) renders the search box + goal dropdown + source chips + goal-progress header, ANDing all three as one DOM-visibility pass; the goal selection is sticky in the `?goal=` URL param.
