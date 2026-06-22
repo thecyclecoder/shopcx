@@ -42,7 +42,7 @@ const SEED_TIMEOUT_MS = 90 * 60 * 1000;
 // A ticket-improve turn is one Max `claude -p` investigation/proposal (read brain/src + web + the
 // read-only DB tools). Minutes, not the 90-min seed ceiling. See box-ticket-improve.
 const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
-const MAX_CONCURRENT = 5; // build/plan pool — real ceiling is Max rate limits, not the box
+const MAX_CONCURRENT = 8; // build/plan pool — real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; bumped 5→8, watch box logs for Max 529/overloaded before pushing further)
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
@@ -71,7 +71,7 @@ const TRIAGE_PASS_TIMEOUT_MS = 15 * 60 * 1000;
 // QA pass over ONE shipped-but-unverified spec's `## Verification` checklist — non-destructive checks
 // only (repo/tsc, gh CI, vercel deploy+logs+env, read-only DB probes, GET endpoints). It NEVER mutates
 // prod and NEVER marks a spec verified/archived; it stamps a spec_test_runs row. Serialized (one box).
-const MAX_SPEC_TEST = 1;
+const MAX_SPEC_TEST = 3; // read-only QC runs — bumped 1→3 so a backlog re-sweep (e.g. human→machine reclassification) drains in parallel instead of one-at-a-time. Browser checks (Playwright/chromium ~400MB) fit easily in 30GB.
 // One spec-test pass reads the spec + runs the box QA toolkit (tsc can be slow). Minutes, not the
 // 90-min seed ceiling — give it a build-sized ceiling so a tsc + a few probes never get cut short.
 const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
