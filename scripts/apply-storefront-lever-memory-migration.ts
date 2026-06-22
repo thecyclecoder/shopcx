@@ -1,9 +1,9 @@
-// apply-storefront-levers-migration — create the storefront lever-importance model +
+// apply-storefront-lever-memory-migration — create the storefront lever-importance model +
 // CRO-learnings memory tables (storefront-lever-importance-memory spec, M2):
 //   storefront_levers           — the canonical chapter→component lever taxonomy + CRO priors
 //   storefront_lever_importance — the learned posterior per (lever × product × lander_type × audience)
 // Idempotent (CREATE TABLE / INDEX / POLICY IF NOT EXISTS, ON CONFLICT DO NOTHING seed). Run against the pooler:
-//   npx tsx scripts/apply-storefront-levers-migration.ts
+//   npx tsx scripts/apply-storefront-lever-memory-migration.ts
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { pgClient } from "./_bootstrap";
