@@ -1,4 +1,4 @@
-# Repair Agent — autonomous Control Tower triage (detect → diagnose → propose fix) ⏳
+# Repair Agent — autonomous Control Tower triage (detect → diagnose → propose fix) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[control-tower]] + [[error-feed-monitoring]] + the supervisable-autonomy north star ([[../operational-rules]] § North star). Box-agent family. The standing, agent-form of the manual Control-Tower triage loop (the 2026-06-22 session).
 
@@ -34,12 +34,14 @@ Per error/alert:
 - Distinguishes transient/genuine-wait (no-op + resolve) from real bug (spec) — doesn't manufacture specs from noise.
 
 ## Verification
-- Record a new `error_events` signature (e.g. a synthetic 500) → a `repair` job enqueues for it (deduped — a second identical error doesn't double-enqueue); the box agent investigates, and within a run either commits a fix spec to main + surfaces "error → proposed fix [[slug]]" OR resolves it as transient with a logged reason.
-- A real-bug error → a fix spec appears in `docs/brain/specs/` with owner+parent, surfaced with a Build button; the build is **not** auto-queued (unless the signature is on `REPAIR_AUTOBUILD_KINDS`).
-- A foreign-app/noise error on the allow-list → its scoping fix spec auto-queues a build (the one sanctioned auto path).
-- An error the agent can't diagnose → surfaced "needs human", no spec, no loop.
-- Negative: an already-open fix spec for a signature → no duplicate `repair` job / no duplicate spec.
-- The Control Tower shows a `repair` lane tile (idle = green; a stuck repair job → red).
+- Fire a new `error_events` signature (e.g. `await recordError({source:'supabase', keyParts:['_probe-repair','x'], title:'synthetic repair test'})` from a throwaway script) → expect one `agent_jobs` row `kind='repair'`, `status='queued'`, `spec_slug` = the signature; fire the same signature again → expect **no** second repair job (deduped, `enqueueRepairJob` returns `{enqueued:false, reason:'live repair job exists…'}`).
+- On the box with the worker running, that queued repair job → expect it claimed on the `repair` lane (`MAX_REPAIR`, log `claimed repair …`) and driven to one terminal/surfaced state: `needs_approval` (a fix spec authored to main + a `repair_build` `pending_actions` entry), `completed` (transient → the `error_events` row flips `status='resolved'`, or an allow-listed verdict auto-queued a `build` job), or `needs_attention` (needs-human, no spec).
+- On `/dashboard/developer/control-tower` (owner) → expect a **Repair feed** section: a `needs_approval` repair shows **error → proposed fix [[slug]]** with a **Build** button + **Dismiss**; a `needs_attention` repair shows a **needs human** note (Dismiss only).
+- On the Repair feed, click **Build** (`POST /api/developer/control-tower/repair {jobId, action:'build'}`) → expect the repair job → `completed` and a new `agent_jobs` `kind='build'` row for the authored spec slug (the owner-gated build). Click **Dismiss** → expect the repair job `completed` + the originating `error_events` row `status='resolved'`.
+- A `foreign-app-noise` / `monitor-false-positive` verdict (on `REPAIR_AUTOBUILD_KINDS`) → expect its scoping fix spec auto-queues a `build` job WITHOUT surfacing (the one sanctioned auto path); a `real-bug` verdict → expect it surfaces for owner Build and is **not** auto-queued.
+- In `src/lib/control-tower/registry.ts` → expect an `agent:repair` agent-kind tile; on the Control Tower it's green when idle and red when a repair job is stuck > 60 min.
 
-## Phase 1 — trigger + repair lane + investigate/classify/act + surface ⏳
+## Phase 1 — trigger + repair lane + investigate/classify/act + surface ✅
 The enqueue hook in `recordError` / alert-open (new signature → `repair` job, deduped); the `repair` box kind + lane + `runRepairJob` (read-only investigate → classify → author-spec-to-main / no-op-resolve / surface-needs-human → report); the surface UI (proposed-fix + Build/Dismiss) on the Control Tower; `REPAIR_AUTOBUILD_KINDS` allow-list (default empty/foreign-noise + monitor-false-positive); register the `repair` lane in the Control Tower. Brain: [[../tables/agent_jobs]] (new `repair` kind) · [[../libraries/control-tower]] · [[error-feed-monitoring]] · [[control-tower]] · [[../recipes/build-box-setup]] (lane) · [[../operational-rules]] (North star).
+
+**Shipped as:** `src/lib/repair-agent.ts` ([[../libraries/repair-agent]]) — `enqueueRepairJob` (deduped by signature) + `REPAIR_AUTOBUILD_KINDS` (foreign-app-noise + monitor-false-positive, each with a justification) + `getOpenRepairs`. Wired into [[../libraries/control-tower]] `recordError` (new signature) + `runControlTowerMonitor` (newly-opened alert). `scripts/builder-worker.ts` `runRepairJob` on the `MAX_REPAIR` (default 2) lane (read-only investigate → classify → `authorRepairSpec` to main / resolve-transient / surface-needs-human; auto-queue only an allow-listed verdict's build, else surface `repair_build`). Surface UI: the **Repair feed** section on `/dashboard/developer/control-tower` + `getOpenRepairs` in the snapshot route + `POST /api/developer/control-tower/repair` (Build/Dismiss → `queued_resume`). `agent:repair` tile registered in `src/lib/control-tower/registry.ts`.
