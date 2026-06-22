@@ -42,7 +42,7 @@ interface LoopStatus {
   history: HistoryRow[];
   openAlert: OpenAlert | null;
 }
-type ErrorSource = "vercel" | "inngest" | "supabase" | "supabase-logs";
+type ErrorSource = "vercel" | "inngest" | "supabase" | "supabase-logs" | "client";
 interface ErrorIncident {
   id: string;
   source: ErrorSource;
@@ -305,12 +305,14 @@ const ERROR_SOURCE_LABEL: Record<ErrorSource, string> = {
   inngest: "Inngest failures",
   supabase: "Supabase errors (app-layer)",
   "supabase-logs": "Supabase errors (DB logs)",
+  client: "Client errors",
 };
 const ERROR_SOURCE_HINT: Record<ErrorSource, string> = {
   vercel: "prod runtime errors / 500s via the log drain",
   inngest: "functions that failed after exhausting retries",
   supabase: "DB errors our code reported (reportDbError)",
   "supabase-logs": "Postgres/auth/API error logs via the Management API",
+  client: "browser JS errors on the storefront + portal (PDP/customize/checkout/thank-you/portal)",
 };
 
 function ErrorPanel({ panel }: { panel: ErrorFeedPanel }) {
@@ -698,8 +700,9 @@ export default function ControlTowerPage() {
                 Errors
               </h2>
               <p className="mb-3 text-[11px] text-zinc-400">
-                The hidden surfaces — Vercel runtime errors, Inngest failed runs, app-layer Supabase errors, and
-                DB-level Supabase logs (Postgres/auth/API) via the Management API — grouped by signature. A new
+                The hidden surfaces — Vercel runtime errors, Inngest failed runs, app-layer Supabase errors,
+                DB-level Supabase logs (Postgres/auth/API) via the Management API, and client-side JS errors on the
+                storefront + portal (the fourth feed our server logs can&apos;t see) — grouped by signature. A new
                 signature or a re-firing spike pages the owners (rate-limited: a burst of the same error = one
                 page). Green = configured + receiving + 0 errors; amber = not configured / awaiting first event
                 (we&apos;re not yet watching) — never a misleading green &ldquo;0 errors&rdquo; while disconnected.

@@ -12,6 +12,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
+import ClientErrorReporter from "@/components/ClientErrorReporter";
 
 /**
  * Portal metadata — inherits the storefront favicon (so a branded domain never
@@ -90,7 +91,8 @@ export default async function PortalLayout({
         color: "#18181b",
       } as React.CSSProperties}
     >
-      {children}
+      {/* Capture client-side JS errors in the in-house portal → /api/client-errors (surface 'portal'). */}
+      <ClientErrorReporter>{children}</ClientErrorReporter>
     </div>
   );
 }

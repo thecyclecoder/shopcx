@@ -26,6 +26,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **pricing_preserved must account for internal quantity breaks (Appstle baseline lacks them)** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
 - **Portal OTP send-failure returns structured non-5xx, not a 502** · verified 2026-06-22 · → [[lifecycles/customer-portal]]
 - **Review Filter Pill Counts — show the real corpus volume** · verified 2026-06-22 · → [[lifecycles/product-intelligence]]
+- **Spec-Test JSON Robustness (no silent "no parseable JSON" runs)** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
+- **Spec-Test on Ship (event-trigger, cron = backlog)** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
 - **Worker Orphan-Reaper — reset in-flight jobs left by a dead worker** · verified 2026-06-22 · → [[recipes/build-box-setup]]
 - **Workflow actions own final ticket status — orchestrator must not reopen** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
 - **Base Price Never Above MSRP (invariant + cap)** · verified 2026-06-21 · → [[lifecycles/subscription-billing]]
