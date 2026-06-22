@@ -15,6 +15,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { winProbabilityVsControl } from "@/lib/storefront/bandit";
 
 const FUNNEL_STEPS = [
   "pdp_view",
@@ -512,6 +513,10 @@ export async function GET(
     phone: surveyPhone,
   };
 
+  // Running storefront experiments + their per-arm win-probability vs control
+  // (Phase 4 surfacing). Best-effort — empty if the tables aren't present yet.
+  const runningExperiments = await buildRunningExperiments(admin, workspaceId);
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
@@ -520,6 +525,7 @@ export async function GET(
     popupFunnel,
     surveyFunnel,
     funnel,
+    runningExperiments,
     packBreakdown,
     topProducts,
     deviceBreakdown,
@@ -541,6 +547,84 @@ export async function GET(
 
 function todayCentral(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+}
+
+interface ExperimentArm {
+  variant_id: string;
+  label: string;
+  is_control: boolean;
+  sessions: number;
+  conversions: number;
+  sub_attach: number;
+  revenue_cents: number;
+  win_prob: number | null;
+}
+export interface RunningExperiment {
+  experiment_id: string;
+  product_id: string;
+  lever: string;
+  lander_type: string;
+  status: string;
+  holdout_pct: number;
+  arms: ExperimentArm[];
+}
+
+/** Active experiments + each non-control arm's posterior win-probability vs control. */
+async function buildRunningExperiments(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+): Promise<RunningExperiment[]> {
+  try {
+    const { data: experiments } = await admin
+      .from("storefront_experiments")
+      .select("id, product_id, lever, lander_type, status, holdout_pct, promoted_variant_id")
+      .eq("workspace_id", workspaceId)
+      .in("status", ["running", "promoted"]);
+    if (!experiments?.length) return [];
+
+    const { data: variants } = await admin
+      .from("storefront_experiment_variants")
+      .select("id, experiment_id, label, is_control, sessions, conversions, sub_attach, revenue_cents, alpha, beta")
+      .in("experiment_id", experiments.map((e) => e.id));
+
+    const byExperiment = new Map<string, typeof variants>();
+    for (const v of variants || []) {
+      const arr = byExperiment.get(v.experiment_id) || [];
+      arr.push(v);
+      byExperiment.set(v.experiment_id, arr);
+    }
+
+    const out: RunningExperiment[] = [];
+    for (const e of experiments) {
+      const vs = byExperiment.get(e.id) || [];
+      const control = vs.find((v) => v.is_control);
+      const arms: ExperimentArm[] = vs.map((v) => ({
+        variant_id: v.id,
+        label: v.label,
+        is_control: v.is_control,
+        sessions: v.sessions ?? 0,
+        conversions: v.conversions ?? 0,
+        sub_attach: v.sub_attach ?? 0,
+        revenue_cents: v.revenue_cents ?? 0,
+        win_prob:
+          v.is_control || !control
+            ? null
+            : Math.round(winProbabilityVsControl(v, control, 2000) * 1000) / 1000,
+      }));
+      out.push({
+        experiment_id: e.id,
+        product_id: e.product_id,
+        lever: e.lever,
+        lander_type: e.lander_type,
+        status: e.status,
+        holdout_pct: e.holdout_pct,
+        arms,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 function defaultStart(): string {

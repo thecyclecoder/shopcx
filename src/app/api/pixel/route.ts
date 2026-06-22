@@ -52,7 +52,16 @@ const ALLOWED_EVENT_TYPES = new Set([
   "checkout_view",
   "checkout_step_completed",
   "order_placed",
+  // Storefront experiment framework — sticky-assigned arm exposure.
+  // Carries { experiment_id, variant_id, is_holdout } in meta. Dropped for
+  // is_internal/is_bot sessions below (experiment attribution must stay clean).
+  "experiment_exposure",
 ]);
+
+// Event types that must be suppressed for internal/bot traffic at WRITE time (not
+// just filtered at query time): experiment exposures, since the bandit's posteriors
+// roll up directly off these rows and internal/bot noise would skew assignment.
+const SKIP_FOR_INTERNAL_BOT = new Set(["experiment_exposure"]);
 
 const MAX_BATCH = 50;
 
@@ -375,11 +384,18 @@ async function persistEvents({
     }
   }
 
+  // Internal/bot traffic is excluded from experiment exposure rollups at WRITE
+  // time so the bandit never learns off team/crawler noise (other event types are
+  // still written and filtered at query time, as before).
+  const sessionIsInternalOrBot =
+    isInternal || isBot || !!existingSession?.is_internal || !!existingSession?.is_bot;
+
   // Filter + shape events for insert. Skip disallowed types silently
   // rather than reject the whole batch — clients can over-fire and
   // we shouldn't punish them with a 4xx that breaks page rendering.
   const rows = events
     .filter((e) => e.event_id && ALLOWED_EVENT_TYPES.has(e.event_type))
+    .filter((e) => !(sessionIsInternalOrBot && SKIP_FOR_INTERNAL_BOT.has(e.event_type)))
     .map((e) => ({
       id: e.event_id,
       workspace_id: workspaceId,

@@ -1,9 +1,12 @@
 import { notFound } from "next/navigation";
+import { cookies } from "next/headers";
 import type { Metadata } from "next";
 
 import { getPageData, listPublishedProducts } from "../../../_lib/page-data";
 import { StorefrontPage } from "../../../_lib/render-page";
 import { loadAdvertorialContent, type AdvertorialVariant } from "@/lib/advertorial-pages";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { resolveExperimentsForRender, type ExperimentExposureMeta } from "@/lib/storefront/experiments";
 
 /**
  * The single storefront route.
@@ -14,12 +17,18 @@ import { loadAdvertorialContent, type AdvertorialVariant } from "@/lib/advertori
  *      — middleware rewrites to /store/{workspace}/{slug} internally
  *        so both hit this same SSG'd HTML.
  *
- * Crucially, this route does NOT read headers() or cookies(), so
+ * Crucially, the param-less PDP does NOT read headers() or cookies(), so
  * Next.js can statically generate every (workspace, slug) pair via
  * generateStaticParams and serve from Vercel's edge CDN with sub-100ms
  * TTFB. Robots/indexing differs between the two hosts: middleware sets
  * X-Robots-Tag: noindex on shopcx.ai requests so the preview URL
  * doesn't compete with the customer-facing canonical.
+ *
+ * Ad-matched landers (`?variant=…&angle=…`) ALREADY render dynamically
+ * (they read searchParams), so — and ONLY in that branch — we also read
+ * the `sid` cookie to sticky-assign storefront experiments. The cookie()
+ * call is gated behind `variant`, so it never executes for the param-less
+ * PDP and the static prerender is preserved.
  */
 export const revalidate = 3600;
 export const dynamicParams = true;
@@ -93,7 +102,33 @@ export default async function StorefrontProductPage({
 
   const variant: AdvertorialVariant | null =
     sp.variant === "advertorial" || sp.variant === "beforeafter" || sp.variant === "reasons" ? sp.variant : null;
-  const advertorial = variant ? await loadAdvertorialContent(data, variant, sp.angle ?? null) : null;
+  let advertorial = variant ? await loadAdvertorialContent(data, variant, sp.angle ?? null) : null;
+
+  // Storefront experiments (Phase 2). Only on the already-dynamic lander branch:
+  // sticky-assign the visitor (by their `sid` anonymous_id) to an active
+  // experiment's arm, patch the lander content, and hand the resulting exposures
+  // to the client pixel to emit. Best-effort — never blocks the render.
+  let experimentExposures: ExperimentExposureMeta[] = [];
+  if (variant && advertorial) {
+    try {
+      const identityKey = (await cookies()).get("sid")?.value ?? null;
+      const resolved = await resolveExperimentsForRender({
+        admin: createAdminClient(),
+        workspaceId: data.workspace.id,
+        productId: data.product.id,
+        renderVariant: variant,
+        identityKey,
+        content: advertorial,
+        // Conservative until M3's LTV-proxy reconciler calibrates (the goal's
+        // "run conservatively until the slow loop calibrates" rule).
+        conservative: true,
+      });
+      advertorial = resolved.content;
+      experimentExposures = resolved.exposures;
+    } catch {
+      /* experiment substrate is best-effort — fall back to control content */
+    }
+  }
 
   const canonical = data.workspace.storefront_domain
     ? `https://${data.workspace.storefront_domain}/${slug}`
@@ -105,6 +140,7 @@ export default async function StorefrontProductPage({
       canonicalPath={canonical}
       reviewSlug={slug}
       advertorial={advertorial}
+      experimentExposures={experimentExposures}
     />
   );
 }

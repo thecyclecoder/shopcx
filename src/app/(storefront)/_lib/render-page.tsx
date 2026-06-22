@@ -42,6 +42,7 @@ import { BeforeAfterHero } from "../_sections/BeforeAfterHero";
 import { WeightLossTestimonialWall } from "../_sections/WeightLossTestimonialWall";
 import { StickyJumpNav } from "../_components/StickyJumpNav";
 import type { AdvertorialContent } from "@/lib/advertorial-pages";
+import type { ExperimentExposureMeta } from "@/lib/storefront/experiments";
 
 // PriceTable is mid-page but interactive on first scroll — load its
 // JS with the page but in a separate chunk so it doesn't inflate the
@@ -85,6 +86,7 @@ export function StorefrontPage({
   canonicalPath,
   reviewSlug,
   advertorial = null,
+  experimentExposures = [],
 }: {
   data: PageData;
   canonicalPath: string;
@@ -93,6 +95,9 @@ export function StorefrontPage({
    *  instead of the standard PDP. The custom top swaps; everything below the
    *  custom top (ingredients, pricing, reviews, checkout) is reused unchanged. */
   advertorial?: AdvertorialContent | null;
+  /** Storefront-experiment exposures resolved server-side (sticky assignment) for
+   *  the client pixel to emit as `experiment_exposure` events. */
+  experimentExposures?: ExperimentExposureMeta[];
 }) {
   // Per-workspace theming via CSS custom properties. The font allowlist
   // is pre-registered in next/font so the browser picks the right file;
@@ -151,6 +156,7 @@ export function StorefrontPage({
         productHandle={data.product.handle}
         metaPixelId={data.workspace.meta_pixel_id}
         skipCustomize={data.workspace.storefront_skip_customize}
+        experimentExposures={experimentExposures}
       />
       {/* Phase 2 instrumentation — observes [data-section] nodes for
           chapter_view/dwell, tracks scroll_depth + cta_click. No UI. */}
