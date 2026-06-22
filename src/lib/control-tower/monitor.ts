@@ -212,7 +212,7 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -253,6 +253,31 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
         violation: {
           reason: "never_fired",
           detail: `Cron ${loop.id} is registered in code but has never emitted a heartbeat — ${fmtDur(deployAgeMs)} after deploy, past its ${fmtDur(window)} cadence+grace (expected ${loop.expectedCadence}). Inngest is not invoking it — a deploy may not have re-synced the app.`,
+        },
+      };
+    }
+    // REGISTERED-BUT-NOT-FIRING (spec-drift-reconcile-not-firing P1) — the deploy-independent
+    // backstop the deploy-anchored never_fired above misses. The box self-updates to origin/main and
+    // restarts on every ship, so deployRefAgeMs (deployAgeMs) keeps RESETTING under a long-dead cron:
+    // with frequent deploys its current-deploy clock rarely exceeds the window, so a cron registered
+    // for weeks that has NEVER fired once (the real spec-drift-reconcile failure) slips past never_fired
+    // forever. The watchdog's own continuous run-span is a deploy-SURVIVING lower bound on how long this
+    // registered cron has had to fire: if control-tower-monitor has itself been beating for longer than
+    // this cron's full window and the cron still has 0 beats EVER, Inngest is not invoking it — distinct
+    // from never-registered (the self-audit's Inngest-registration diff): this fn IS in the registered
+    // set, the schedule just isn't active. A correctly-registered cron fires within its first cadence
+    // (≤ window) and beats before this trips, so a genuinely-just-added cron isn't false-flagged; a
+    // registered cron that produces nothing for a whole window past a provably-alive watchdog IS the
+    // problem we want to page. (monitorUptimeMs is conservative — beat retention can only shorten it,
+    // never inflate it — so it never over-fires; null = unknown ⇒ stay amber.)
+    if (everBeatCount === 0 && monitorUptimeMs != null && monitorUptimeMs > window) {
+      return {
+        ...base,
+        color: "red",
+        statusText: `registered but not firing — 0 beats in ${fmtDur(monitorUptimeMs)} of watchdog uptime`,
+        violation: {
+          reason: "registered_not_firing",
+          detail: `Cron ${loop.id} is registered with Inngest but has NEVER emitted a heartbeat — the Control Tower watchdog has been continuously running for ${fmtDur(monitorUptimeMs)}, well past this cron's ${fmtDur(window)} cadence+grace (expected ${loop.expectedCadence}), yet 0 beats. Inngest is not invoking it (its cron schedule isn't active in the prod env) — distinct from never-registered: the function IS in the registered set. Re-sync the app (PUT /api/inngest / dashboard "sync new app version") to activate the schedule.`,
         },
       };
     }
@@ -760,7 +785,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
+  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly read (control-tower-loop-beats-rpc-perf P1): a lateral join takes
     // the distinct cron + agent-kind loop_ids and, per loop, reads only its latest HISTORY_LIMIT
@@ -776,10 +801,22 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     fetchAssertionInputs(admin),
     fetchInlineAgentState(admin),
     buildCoverageAudit(),
+    // Deploy-SURVIVING watchdog-uptime reference for the registered-but-not-firing cron check
+    // (evalCron): the OLDEST control-tower-monitor beat = how long the watchdog itself has been
+    // continuously running. Unlike deployRefAgeMs it doesn't reset on the box's self-update/restart,
+    // so a long-dead registered cron can't keep hiding behind a freshly-reset deploy clock. Uses the
+    // (loop_id, ran_at) index (single oldest row). Beat retention can only shorten this span, never
+    // inflate it ⇒ conservative (never a false registered_not_firing).
+    admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "control-tower-monitor").order("ran_at", { ascending: true }).limit(1).maybeSingle(),
   ]);
 
   // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
   const deployAgeMs = deployRefAgeMs(workerRow as WorkerRow | null);
+  // How long the watchdog itself has been observably alive (oldest monitor beat → now), or null if it
+  // has never beat (bootstrapping / pruned). Feeds the deploy-independent registered_not_firing guard.
+  const monitorUptimeMs = (oldestMonitorBeat as { ran_at: string } | null)?.ran_at
+    ? ageMs((oldestMonitorBeat as { ran_at: string }).ran_at)
+    : null;
 
   // A failed/timed-out control_tower_loop_beats RPC (statement timeout scanning the feed) returns
   // beats=null → empty byLoop → every cron looks like 0 beats ever (absent) + no latest. That is
@@ -817,7 +854,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs);
     else core = evalAgentKind(loop, latest, activeJobs);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
