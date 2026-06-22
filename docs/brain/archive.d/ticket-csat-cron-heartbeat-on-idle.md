@@ -1,0 +1,1 @@
+- **ticket-csat-cron: emit Control Tower heartbeat on idle (no-due) ticks** · verified 2026-06-22 · → [[inngest/ticket-csat]]

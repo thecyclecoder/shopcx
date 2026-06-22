@@ -1,0 +1,1 @@
+- **portal-auto-resume-cron: emit Control Tower heartbeat on the no-work path** · verified 2026-06-22 · → [[inngest/portal-auto-resume]]
