@@ -58,6 +58,24 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the capability the system should've had on Jim Leone's ticket — his grandfathered pricing dropped → Appstle billed $229.26 vs $139.84, he asked to cancel, and triage authored a (forbidden) build-order-cancellation spec instead of fixing the real issue. Detect a renewal **overcharge from dropped grandfathered pricing** → partial-refund the delta → **Appstle pricing-policy heal** (never migrate-to-internal w/o a saved PM) → reply. Plus triage grounding: check overcharge before create_return/cancel; never author a code_gap spec that contradicts a policy; always propose a customer_reply. (Jim fixed by hand: $89.42 refunded, base healed to $139.84/4.) Replaces the deleted cancel-order-direct-action spec.
 
+## Active project — Iteration Ingest: Async Reports (deferred) ⏳
+
+**Spec:** [[iteration-ingest-async-reports]] · **Owner:** [[../functions/growth]]
+
+**Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
+
+## Active project — Spec-Drift Agent ⏳
+
+**Spec:** [[spec-drift-agent]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** builds merge without their phase emoji flipping ✅, so shipped work parks in Planned/In-progress (caught by hand twice). Two parts: (A) root fix — the build **stamps the phase it built ✅ on merge** (verified vs code-on-main, reusing the spec-file writeback); (B) a **per-phase reconciler** that flips a phase ✅ only with merged-build + code-on-main evidence and **never touches a genuinely-pending phase** (so multi-phase specs like pdp-refinement-pass P3 fan-out stay correctly in-progress). Ambiguous cases surface on the Control Tower for a one-tap flip. Event-on-merge + self-audit backstop.
+
+## Active project — Dirty-PR Resolver Agent ⏳
+
+**Spec:** [[dirty-pr-resolver-agent]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** parallel/failed-then-rebuilt builds keep producing dirty (CONFLICTING) `claude/*` PRs (hand-resolved a dozen this week). Event-driven (a GitHub webhook on push-to-main — what *makes* PRs conflict — NOT a cron): detect newly-dirty `claude/*` PRs → a `pr-resolve` box agent merges origin/main, resolves additively, tsc-gates, pushes — or, when two builds diverged heavily / tsc can't pass, rebuilds-on-main or surfaces for a human (never force-merges). Complements [[spec-blockers]] (which prevents collisions). Box-agent family.
+
 ## Active project — Control Tower: Complete Coverage + Department Rollups ⏳
 
 **Spec:** [[control-tower-complete-coverage]] · **Owner:** [[../functions/platform]] · **Blocked-by:** [[control-tower-agent-coverage]]

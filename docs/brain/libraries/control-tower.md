@@ -2,7 +2,7 @@
 
 The Control Tower module ([[../specs/control-tower]] Phase 1 + Phase 2; [[../specs/control-tower-agent-coverage]] adds the inline AI agents) — the registry, the heartbeat emit helper, and the monitor/snapshot logic (liveness + cron-freshness + stuck-jobs + inline-agent assertions + Phase 2 output assertions) that powers the [[../inngest/control-tower-monitor]] cron and the [[../dashboard/control-tower]] dashboard.
 
-**Files:** `src/lib/control-tower/registry.ts` · `src/lib/control-tower/heartbeat.ts` · `src/lib/control-tower/monitor.ts`
+**Files:** `src/lib/control-tower/registry.ts` · `src/lib/control-tower/heartbeat.ts` · `src/lib/control-tower/monitor.ts` · `src/lib/control-tower/error-feed.ts`
 
 ## `registry.ts` — the loop registry (code config)
 
@@ -32,6 +32,16 @@ Best-effort writes of one [[../tables/loop_heartbeats]] row (never throws).
 - **Inline-agent assertions** ([[../specs/control-tower-agent-coverage]], `evalInlineAgent` + `fetchInlineAgentState`): event-driven AI agents have no cron cadence and no `agent_jobs` queue, so silence only matters when work exists. **liveness-when-work-exists** — the loop's `inlineWorkSignal` (an independent upstream-demand count: unanalyzed closed-AI [[../tables/tickets]]; recent [[../tables/journey_sessions]]; recent [[../tables/orders]]) is > 0 AND **0 successful** beats in the window → red, `reason='idle_while_work'`. **error-rate** — `errCount/total ≥ errorRateThreshold` (default 0.5) once `total ≥ minRunsForErrorRate` (default 5) → red, `reason='error_rate'`. Inline-agent beats are fetched separately (exact counts, true-latest-regardless-of-idle) so the agents' high beat volume can't crowd the 600-row cron window.
 - **Phase 2 output assertions** (`evalOutputAssertion`, layered on top of the P1 tile — only escalates green/amber → red, a P1 red stays): `fetchAssertionInputs(admin)` adds 4 cheap read-only queries to the snapshot batch — open routine-escalated [[../tables/tickets]] (`escalated_at` set, `escalated_to` null, not closed/archived), the latest `triage-escalations` + `spec-test` [[../tables/agent_jobs]] `created_at`, and active overdue internal [[../tables/subscriptions]] (`next_billing_date` before today UTC). The three assertions: **escalation-idle** (tickets wait + no triage job within the cadence → `reason='idle_while_work'`, "idle while N tickets wait"), **spec-test-persisted** (beat reports `enqueued>0` but no spec-test job landed since → `reason='false_success'`, "reported N enqueued, persisted 0"), **renewal-integrity** (N active internal subs overdue → `reason='renewal_integrity'`). A violation flows through `runControlTowerMonitor` exactly like a P1 red (de-duped alert + page).
 
+## `error-feed.ts` — the error feed (error-feed-monitoring Phase 1)
+
+The capture + page + snapshot layer for the three "hidden surfaces" ([[../specs/error-feed-monitoring]]) — Vercel runtime errors, Inngest failed runs, app-layer Supabase errors — into [[../tables/error_events]].
+
+- `recordError({ source, keyParts, title, detail?, sample?, occurrences? }, admin?)` → upserts a **grouped** [[../tables/error_events]] incident on `(source, signature)` (signature = a stable hash of the normalized `keyParts`), bumping `count`/`last_seen_at`. Pages owners ([[notify-ops-alert]]) on a **new signature or a re-firing spike**, rate-limited to one page per incident per 30 min. **Best-effort — never throws**; a `23505` race falls back to the update path.
+- `reportDbError(error, { op, table?, … }, admin?)` — the **app-layer Supabase reporter**: a no-op on a null error, else `recordError({ source: "supabase", … })`. Call it anywhere code gets a non-null Supabase `{ error }` it would otherwise swallow (the scorecard-upsert class — wired in `src/lib/meta/scorecards.ts`). See [[../operational-rules]] "don't swallow a Supabase error".
+- `signatureFor(source, keyParts)` → the grouping key (normalizes out uuids/hex/numbers/quoted strings).
+- `buildErrorFeedSnapshot(admin?)` → `ErrorFeedSnapshot { generatedAt, panels: ErrorFeedPanel[] }` — **READ-ONLY**: last 7 days of [[../tables/error_events]] per source, each panel colored by recency (red ≤1 h, amber ≤24 h, else green). Used by the dashboard API (`GET /api/developer/control-tower`, merged in as `errorFeed`).
+- Feeders: [[../inngest/inngest-failure-capture]] (`source='inngest'`), `/api/webhooks/vercel-logs` ([[../integrations/vercel-log-drain]], `source='vercel'`), `reportDbError` call sites (`source='supabase'`).
+
 ## Gotchas
 
 - **SHA-behind needs `VERCEL_GIT_COMMIT_SHA`** (the deployed commit) as the origin/main proxy; unset locally ⇒ the check is skipped (no false positive). It only fires red after `shaGraceMs` (default 30m) so an in-progress deploy / self-update never pages.
@@ -39,7 +49,7 @@ Best-effort writes of one [[../tables/loop_heartbeats]] row (never throws).
 
 ## Callers
 
-[[../inngest/control-tower-monitor]] (`runControlTowerMonitor`) · `src/app/api/developer/control-tower/route.ts` (`buildControlTowerSnapshot`) · the 7 monitored crons + `scripts/builder-worker.ts` (heartbeat emits) · the 3 inline AI agents [[../libraries/ticket-analyzer]] · [[../libraries/journey-delivery]] · [[../libraries/fraud-detector]] (`emitInlineAgentHeartbeat`).
+[[../inngest/control-tower-monitor]] (`runControlTowerMonitor`) · `src/app/api/developer/control-tower/route.ts` (`buildControlTowerSnapshot` + `buildErrorFeedSnapshot`) · the 7 monitored crons + `scripts/builder-worker.ts` (heartbeat emits) · the 3 inline AI agents [[../libraries/ticket-analyzer]] · [[../libraries/journey-delivery]] · [[../libraries/fraud-detector]] (`emitInlineAgentHeartbeat`) · error feed: [[../inngest/inngest-failure-capture]], `/api/webhooks/vercel-logs`, `src/lib/meta/scorecards.ts` (`reportDbError`).
 
 ## Related
 
