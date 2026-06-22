@@ -87,8 +87,13 @@ export const ticketCsatCron = inngest.createFunction(
       return data || [];
     });
 
-    if (!due.length) return { sent: 0, skipped_too_old: skippedCount, skipped_no_reply: 0 };
-
+    // No early-return on an idle tick (due.length === 0): the for-loop
+    // below is a no-op when empty, so falling through lets the
+    // unconditional emit-heartbeat step at the end fire on every tick.
+    // The early-return here previously skipped the heartbeat on idle
+    // ticks (the normal post-deploy state), tripping Control Tower's
+    // never_fired monitor (loop:ticket-csat-cron). See
+    // specs/ticket-csat-cron-heartbeat-on-idle-tick.md.
     let sent = 0;
     let skippedNoReply = 0;
     for (const t of due) {

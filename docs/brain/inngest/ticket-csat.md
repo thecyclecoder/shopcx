@@ -22,6 +22,8 @@ Two passes per tick:
 
 **Returns:** `{ sent, skipped_too_old, skipped_no_reply, batch_size }`.
 
+**Control Tower heartbeat:** the final `emit-heartbeat` step calls `emitCronHeartbeat("ticket-csat-cron", …)` **unconditionally on every tick** — including idle ticks where `find-due` returns nothing. There is deliberately no early-return on `due.length === 0`; the per-ticket loop is a harmless no-op when empty, so control always falls through to the beat. The heartbeat asserts "Inngest invoked me" independent of whether there was work, so a healthy-but-idle loop reads green (`produced:{sent:0}`) instead of tripping the monitor's `never_fired` ([[../specs/ticket-csat-cron-heartbeat-on-idle-tick]]).
+
 ## Downstream events sent
 
 _None._
