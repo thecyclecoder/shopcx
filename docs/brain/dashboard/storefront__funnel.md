@@ -14,6 +14,8 @@ _TODO: page purpose._
 
 **"What the agent believes matters" panel:** surfaces the learned lever-importance posteriors ([[../tables/storefront_lever_importance]]) per `(lever × product × lander × audience)` — current `importance`, the delta vs `prior` (what testing taught it), scope (general/product), `n_tests`, and last-tested age. Returned as `leverImportance` via [[../libraries/storefront-lever-memory]] `getLeverImportancePanel`. The supervisable surface for the M2 lever-importance memory (storefront-lever-importance-memory Phase 4).
 
+**Predicted-LTV-per-visitor panel:** surfaces the M3 reward the bandit optimizes ([[../tables/storefront_ltv_metrics]]) per `(product × lander × audience)` — visitors, sub-attach, est-sub-LTV, predicted LTV/visitor, and the **week-over-week** delta (current snapshot vs the newest snapshot ≥7 days older). Returned as `predictedLtv` from the funnel API route (`buildPredictedLtv`). Shows an **"uncalibrated — betting conservatively"** badge until M3's slow loop reconciles once. The supervisable surface for the M3 LTV-proxy reconciler (storefront-ltv-proxy-reconciler Phase 4).
+
 ## Sub-routes
 
 _None._

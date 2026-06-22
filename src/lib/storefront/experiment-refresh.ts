@@ -16,7 +16,7 @@
  * invoked (north-star supervisability). Driven by [[../inngest/storefront-experiments]].
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { isConservative } from "@/lib/storefront/calibration";
+import { isProxyCalibrated } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
 import { updatePosterior } from "@/lib/storefront/lever-memory";
@@ -75,7 +75,9 @@ export async function refreshStorefrontExperiments(opts: {
 }): Promise<RefreshResult> {
   const admin = createAdminClient();
   const now = opts.now ?? new Date();
-  const conservative = await isConservative(opts.workspaceId);
+  // Bet size + promote thresholds gate on the single calibration gate (Phase 4): run
+  // conservatively until M3's slow loop has truth-checked the predicted-LTV proxy once.
+  const conservative = !(await isProxyCalibrated({ workspaceId: opts.workspaceId }));
 
   // Open the run record.
   const { data: runRow } = await admin

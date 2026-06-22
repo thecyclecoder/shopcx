@@ -1,4 +1,4 @@
-# Predicted-LTV-per-visitor metric + 4-month actual-LTV reconciler 🚧
+# Predicted-LTV-per-visitor metric + 4-month actual-LTV reconciler ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** M3 — Predicted-LTV metric + 4-month reconciler
 
@@ -22,10 +22,10 @@ The objective function for the [[../goals/storefront-optimizer]] and its truth-c
 - **Recalibrate:** fit corrected proxy weights from the proxy-vs-actual error (e.g. discount-heavy cohorts that over-predicted get their est-sub-LTV down-weighted), bump `weights_version`, and emit the corrected lever-importance signal to the [[storefront-lever-importance-memory|M2 memory]] (cross-link, no hard dependency — M2 reads the signal if present).
 - Flip `calibrated=true` once the first reconciliation lands; before that the metric reports `uncalibrated` so M1 runs conservatively.
 
-## Phase 4 — surfacing + the conservative-until-calibrated flag ⏳
-- ⏳ planned
+## Phase 4 — surfacing + the conservative-until-calibrated flag ✅
+- ✅ shipped — `isProxyCalibrated({ workspaceId, productId? })` added to `src/lib/storefront/calibration.ts` ([[../libraries/storefront-calibration]]) as the single positively-named gate (`=== !isConservative`); the M1 bandit ([[../libraries/storefront-experiment-refresh]] `refreshStorefrontExperiments`) now derives its `conservative` flag from it. Funnel dashboard gains a **Predicted-LTV-per-visitor** panel (`buildPredictedLtv` in the storefront-funnel API route → `predictedLtv`, week-over-week with an uncalibrated badge); ROAS dashboard gains a **Predicted sub-LTV** card (`buildStorefrontSubLtv` → `storefrontSubLtv`, the renewal-derived est-sub-LTV it lacked). No migration in this phase (reads the Phase-2 [[../tables/storefront_ltv_metrics]] + Phase-3 [[../tables/storefront_ltv_calibration]]).
 - Surface predicted-LTV-per-visitor per `(product × lander-type × audience)` week-over-week on the [[../dashboard/storefront__funnel|funnel dashboard]] (and feed the [[../dashboard/analytics__roas|ROAS dashboard]] the same est-sub-LTV it currently lacks).
-- Export a single `isProxyCalibrated(product)` the M1 bandit + M4 agent read to gate bet size / promote thresholds.
+- Export a single `isProxyCalibrated(product)` the M1 bandit + M4 agent read to gate bet size / promote thresholds. (Signature is product-grained per the spec; calibration currently resolves at the workspace grain — `productId` echoed, tightenable when the reconciler gains per-product calibration rows.)
 
 ## Safety / invariants
 - **Proxy is a bounded reward, never the objective.** The reconciler is the supervisor that catches the proxy lying ([[../operational-rules]] § North star); a large persistent proxy-vs-actual error escalates to the [[../functions/growth|Growth director]], it is not silently absorbed.
@@ -46,7 +46,9 @@ The objective function for the [[../goals/storefront-optimizer]] and its truth-c
 - **Phase 2** — Apply the migration (`npx tsx scripts/apply-storefront-ltv-metrics-migration.ts`) → expect `✓ public.storefront_ltv_metrics has N columns`; confirm the columns + the snapshot-key unique index `storefront_ltv_metrics_snapshot_key` in Supabase. (Phase 3 adds `storefront_ltv_reconciliations`.)
 - **Phase 2** — Run the fast loop for Amazing Coffee: `await refreshLtvMetrics({ workspaceId })` (or fire `storefront/experiments-refresh` for the workspace and let it cascade) → `select product_id, lander_type, audience, visitors, sub_attach_rate, est_sub_ltv_cents, predicted_ltv_per_visitor_cents, weights_version, calibrated from storefront_ltv_metrics order by snapshot_date desc;` → expect one row per `(product × lander-type × audience)` with active experiments, a positive `predicted_ltv_per_visitor_cents` where the cohort has conversions, `weights_version=1`, and `calibrated=false` on first run. Re-run the same day → row count stable, same snapshot row overwritten (idempotent).
 - **Phase 2** — Confirm the daily wiring: a `storefront/experiments-refresh` run fires `storefront/ltv-metrics-refresh` AFTER its attribution step (Inngest dashboard shows the child run), so the metric reads the fresh rollup.
-- **Phase 4** (deferred) — Confirm the M1 bandit reads `predicted_ltv_per_visitor` as its reward (not CVR) — its significance test references the metric row id. (Phase 2 publishes the metric; M1 already decides on the per-variant LTV proxy `reward_sum`, not raw CVR.)
+- **Phase 4** — `import { isProxyCalibrated } from "@/lib/storefront/calibration"`. Call `isProxyCalibrated({ workspaceId })` before any reconciliation → expect `false` (uncalibrated → conservative); after the slow loop writes a `storefront_ltv_calibration` row with non-null `calibrated_at` → expect `true`. It must equal `!(await isConservative(workspaceId))`. `npx tsc --noEmit` clean.
+- **Phase 4** — `GET /api/workspaces/{id}/storefront-funnel` for Amazing Coffee with metric rows present → expect a `predictedLtv` array, one entry per `(product × lander × audience)` cohort, each with `predicted_ltv_per_visitor_cents`, `snapshot_date`, and `wow_delta_pct` (null when no prior-week snapshot, else signed % vs the newest snapshot ≥7 days older), `calibrated`, `weights_version`.
+- **Phase 4** — On `/dashboard/storefront/funnel` → expect a **Predicted LTV per visitor** panel showing each cohort's predicted LTV/visitor with a "vs last wk" column, and an **"uncalibrated — betting conservatively"** badge while `calibrated=false`.
+- **Phase 4** — `GET /api/workspaces/{id}/analytics/roas` → expect a `storefrontSubLtv` object (`blended_est_sub_ltv_cents`, `weights_version`, `calibrated`, `by_product[]`); on `/dashboard/analytics/roas` a **Predicted sub-LTV** card renders when `blended_est_sub_ltv_cents > 0`, subtitled `Renewal-derived · v{n} · {calibrated|uncalibrated}`.
 - Backdate a test cohort ≥ 4 months and run the reconciler → expect a `storefront_ltv_reconciliations` row with `proxy_ltv_cents`, `actual_ltv_cents`, `error_pct`, and a bumped `weights_version`; `calibrated` flips to true and subsequent metric rows carry the new weights version.
-- On `/dashboard/storefront/funnel` → expect predicted-LTV-per-visitor shown week-over-week per `(product × lander-type × audience)`.
 - Induce a large proxy-vs-actual error on a reconciled cohort → expect a Growth-director escalation logged, not a silent absorb.

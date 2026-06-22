@@ -522,6 +522,10 @@ export async function GET(
   // (empty if the lever-memory tables aren't present yet).
   const leverImportance = await getLeverImportancePanel(admin, workspaceId);
 
+  // Predicted-LTV-per-visitor week-over-week per (product × lander × audience) — the M3
+  // reward the bandit optimizes. Best-effort (empty if storefront_ltv_metrics is absent).
+  const predictedLtv = await buildPredictedLtv(admin, workspaceId);
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
@@ -532,6 +536,7 @@ export async function GET(
     funnel,
     runningExperiments,
     leverImportance,
+    predictedLtv,
     packBreakdown,
     topProducts,
     deviceBreakdown,
@@ -628,6 +633,105 @@ async function buildRunningExperiments(
       });
     }
     return out;
+  } catch {
+    return [];
+  }
+}
+
+export interface PredictedLtvCohort {
+  product_id: string;
+  product_title: string;
+  lander_type: string;
+  audience: string;
+  snapshot_date: string;
+  visitors: number;
+  sub_attach_rate: number;
+  est_sub_ltv_cents: number;
+  predicted_ltv_per_visitor_cents: number;
+  /** Most recent snapshot at least ~7 days before `snapshot_date`, for the WoW delta. */
+  prior_snapshot_date: string | null;
+  prior_predicted_ltv_per_visitor_cents: number | null;
+  /** Signed % change vs the prior-week snapshot (null when no prior snapshot exists). */
+  wow_delta_pct: number | null;
+  weights_version: number;
+  calibrated: boolean;
+  flags: Record<string, unknown>;
+}
+
+/**
+ * Predicted-LTV-per-visitor per cohort, current snapshot vs the prior-week snapshot.
+ * Reads the [[storefront_ltv_metrics]] rows the M3 fast loop persists daily; for each
+ * `(product × lander × audience)` cohort it takes the latest snapshot as "current" and the
+ * newest snapshot ≥7 days older as the week-over-week baseline. Best-effort — returns [] if
+ * the table is absent (M3 not yet shipped in this environment).
+ */
+async function buildPredictedLtv(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+): Promise<PredictedLtvCohort[]> {
+  try {
+    // ~5 weeks of snapshots so a cohort that didn't snapshot exactly 7 days ago still has a
+    // sensible prior baseline.
+    const sinceIso = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const { data: rows } = await admin
+      .from("storefront_ltv_metrics")
+      .select("product_id, lander_type, audience, snapshot_date, visitors, sub_attach_rate, est_sub_ltv_cents, predicted_ltv_per_visitor_cents, weights_version, calibrated, flags")
+      .eq("workspace_id", workspaceId)
+      .gte("snapshot_date", sinceIso)
+      .order("snapshot_date", { ascending: false });
+    if (!rows?.length) return [];
+
+    type Row = {
+      product_id: string; lander_type: string; audience: string; snapshot_date: string;
+      visitors: number; sub_attach_rate: number; est_sub_ltv_cents: number;
+      predicted_ltv_per_visitor_cents: number; weights_version: number; calibrated: boolean;
+      flags: Record<string, unknown> | null;
+    };
+    // Group by cohort, snapshots already newest-first.
+    const byCohort = new Map<string, Row[]>();
+    for (const r of rows as Row[]) {
+      const k = `${r.product_id}|${r.lander_type}|${r.audience}`;
+      const arr = byCohort.get(k) ?? [];
+      arr.push(r);
+      byCohort.set(k, arr);
+    }
+
+    // Resolve product titles for the cohorts in view.
+    const productIds = [...new Set((rows as Row[]).map((r) => r.product_id))];
+    const { data: productRows } = productIds.length
+      ? await admin.from("products").select("id, title").in("id", productIds)
+      : { data: [] as { id: string; title: string }[] };
+    const titleById = new Map((productRows || []).map((p) => [p.id, p.title]));
+
+    const out: PredictedLtvCohort[] = [];
+    for (const snapshots of byCohort.values()) {
+      const current = snapshots[0];
+      // Prior-week baseline = newest snapshot at least 7 days before current.
+      const currentMs = new Date(current.snapshot_date).getTime();
+      const prior = snapshots.find((s) => currentMs - new Date(s.snapshot_date).getTime() >= 7 * 24 * 60 * 60 * 1000) ?? null;
+      const cur = current.predicted_ltv_per_visitor_cents;
+      const priorVal = prior?.predicted_ltv_per_visitor_cents ?? null;
+      const wow = priorVal && priorVal > 0 ? Math.round(((cur - priorVal) / priorVal) * 1000) / 10 : null;
+      out.push({
+        product_id: current.product_id,
+        product_title: titleById.get(current.product_id) || "(unknown)",
+        lander_type: current.lander_type,
+        audience: current.audience,
+        snapshot_date: current.snapshot_date,
+        visitors: current.visitors,
+        sub_attach_rate: current.sub_attach_rate,
+        est_sub_ltv_cents: current.est_sub_ltv_cents,
+        predicted_ltv_per_visitor_cents: cur,
+        prior_snapshot_date: prior?.snapshot_date ?? null,
+        prior_predicted_ltv_per_visitor_cents: priorVal,
+        wow_delta_pct: wow,
+        weights_version: current.weights_version,
+        calibrated: current.calibrated,
+        flags: current.flags ?? {},
+      });
+    }
+    // Highest-value cohorts first.
+    return out.sort((a, b) => b.predicted_ltv_per_visitor_cents - a.predicted_ltv_per_visitor_cents);
   } catch {
     return [];
   }
