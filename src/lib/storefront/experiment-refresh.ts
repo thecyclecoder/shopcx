@@ -19,6 +19,28 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isConservative } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
+import { updatePosterior } from "@/lib/storefront/lever-memory";
+
+/**
+ * Commit a completed experiment's outcome to the lever-importance memory (M2). Best-effort:
+ * a memory-update failure never breaks the bandit refresh. Idempotent per experiment, so a
+ * promoted experiment re-evaluated each daily run only commits its learning once.
+ */
+async function commitLeverLearning(
+  experimentId: string,
+  rollups: VariantRollupResult[],
+  now: Date,
+): Promise<void> {
+  try {
+    await updatePosterior({
+      experimentId,
+      now,
+      rollups: rollups.map((r) => ({ is_control: r.is_control, sessions: r.sessions, ltv_proxy_cents: r.ltv_proxy_cents })),
+    });
+  } catch (err) {
+    console.warn(`[storefront-experiments] lever-memory commit failed experiment=${experimentId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -169,6 +191,8 @@ export async function refreshStorefrontExperiments(opts: {
         counts.rolled_back++;
         escalations.push({ experiment_id: experimentId, reason });
         decisions.push({ experiment_id: experimentId, action: "rolled_back", win_prob: null, rule: reason, posteriors: snapshot });
+        // Commit the learning to memory — a loss is recorded as much as a win (M2).
+        await commitLeverLearning(experimentId, rollups, now);
         // Surface, don't bury — escalate to Growth (durable record + structured log).
         console.warn(
           `[storefront-experiments] ESCALATION rollback experiment=${experimentId} lever=${exp.lever} reason=${reason} ` +
@@ -203,6 +227,10 @@ export async function refreshStorefrontExperiments(opts: {
         rule: decision.rule,
         posteriors: decision.posteriors,
       });
+      // Commit the learning to memory on a terminal outcome (promote/kill) — M2.
+      if (decision.action === "promote" || decision.action === "kill") {
+        await commitLeverLearning(experimentId, rollups, now);
+      }
     }
 
     const finishedAt = new Date();

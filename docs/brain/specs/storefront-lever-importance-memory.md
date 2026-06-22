@@ -1,26 +1,26 @@
-# Lever-importance model + CRO-learnings memory ⏳
+# Lever-importance model + CRO-learnings memory ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** M2 — Lever-importance model + CRO-learnings memory
 **Blocked-by:** [[storefront-experiment-bandit-framework]]
 
 The persistent **brain** of the [[../goals/storefront-optimizer]] agent — the memory that turns one-off experiments into a compounding system. Today no lever-importance / CRO-memory store exists; the design lives only in the goal doc (§ "The lever-importance model"). This spec builds it: a hierarchical, **learned** chapter→component lever-importance map seeded with CRO **priors** and updated to a **posterior** by each [[storefront-experiment-bandit-framework|M1 experiment]] outcome — a **two-level bandit** (*which lever to test* × *which variant wins*). A headline variant with ~0% LTV-proxy delta demotes "headline" for that `(product × lander-type × audience)`; the agent then spends its next tests on the **high-posterior** levers instead of guessing. Importance scores **decay / get re-probed** so a written-off lever can resurrect (a bolder hero may make the headline matter again), and learnings are tagged **product-specific vs general** for cross-product transfer. Every campaign commits a learning here — **win or loss**. Serves the success metric by directing scarce test budget at the levers that actually move predicted-LTV-per-visitor.
 
-## Phase 1 — the hierarchical lever taxonomy + priors ⏳
-- ⏳ planned
+## Phase 1 — the hierarchical lever taxonomy + priors ✅
+- ✅ shipped — `storefront_levers` table (self-FK chapter→component, `lever_key`, `chapter`, `level`, `prior`, `lander_types`, `default_scope`) seeded in `20260624120000_storefront_lever_memory.sql` with the hero(0.95)/pricing_table(0.85)/cta(0.70)/social_proof(0.65)/… hierarchy (hero #1, pricing #2, matching the funnel dwell+CTA ranking). Brain page [[../tables/storefront_levers]].
 - New table `storefront_levers` — the canonical hierarchy: **chapter** level (hero, pricing-table, social-proof, ingredients, FAQ, …) and **component** level decomposing a chapter (hero = `image · headline · benefit_chips · review_snippet · trust_badges`). Columns: `parent_lever_id` (self-FK for chapter→component), `lever_key`, `chapter`, `lander_type` applicability.
 - Seed each lever with a CRO **prior** importance (hero dominant, pricing-clarity #2 — the goal's § CRO principles), and seed the chapter-level priors from the **real funnel data we already have**: per-chapter dwell + CTA-click share from [[../tables/storefront_events]] (`chapter_dwell`/`cta_click`, surfaced on [[../dashboard/storefront__funnel]]). Migration + [[write-brain-page]] `tables/storefront_levers.md`.
 
-## Phase 2 — the learned posterior store ⏳
-- ⏳ planned
+## Phase 2 — the learned posterior store ✅
+- ✅ shipped — `storefront_lever_importance` table (unique `(lever_id, product_id, lander_type, audience)`, `importance`/`prior`/`n_tests`/`last_tested_at`/`evidence` jsonb/`scope`) + `src/lib/storefront/lever-memory.ts` `updatePosterior(experiment)` (append-evidence + recompute-from-prior → idempotent per experiment id; reward = M3 LTV-proxy delta vs control). Wired into [[../libraries/storefront-experiment-refresh]] — commits on every terminal outcome (promote/kill/rolled_back), win or loss. Brain pages [[../tables/storefront_lever_importance]] + [[../libraries/lever-memory]].
 - New table `storefront_lever_importance` — one posterior row per `(lever_id, product_id, lander_type, audience)`: `importance` (current posterior), `prior`, `n_tests`, `last_tested_at`, `evidence` (jsonb of contributing experiment ids + their proxy deltas), `scope` ∈ `product_specific｜general`.
 - `src/lib/storefront/lever-memory.ts` — `updatePosterior(experiment)` consumes a completed M1 experiment ([[storefront-experiment-bandit-framework]] outcome + the M3 predicted-LTV-proxy delta as the reward) and Bayesian-updates the tested lever's importance: a meaningful proxy lift raises it, a ~0 delta demotes it. Idempotent per experiment (keyed by experiment id in `evidence`).
 
-## Phase 3 — decay / re-probe (explore on levers) ⏳
-- ⏳ planned
+## Phase 3 — decay / re-probe (explore on levers) ✅
+- ✅ shipped — [[../inngest/storefront-lever-memory]] daily pass (`30 12 * * *`, mirrors + offsets M1) `decayLeverImportance` drifts each posterior toward prior with a 30-day half-life; `nextLeverToTest({product, lander_type, audience})` is the UCB explore/exploit selector (high decayed posterior = exploit; never-tested/stale = explore) — the which-lever half of the two-level bandit.
 - A scheduled pass (Inngest, mirror the M1 refresh cadence) **decays** importance toward the prior as `last_tested_at` ages, so a written-off lever's posterior drifts back up enough to be **re-probed** later. Expose `nextLeverToTest({product, lander_type, audience})` — the explore/exploit selector that returns the highest-value lever to test next (high posterior = exploit; decayed/never-tested = explore), the *which-lever* half of the two-level bandit the M4 agent calls.
 
-## Phase 4 — cross-product transfer + M3 recalibration intake ⏳
-- ⏳ planned
+## Phase 4 — cross-product transfer + M3 recalibration intake ✅
+- ✅ shipped — learnings tagged `product_specific｜general` (seeded from the lever's `default_scope`); `seedFor`/`nextLeverToTest` seed a brand-new `(product × lander × audience)` from the average of `general` learnings on other products (cross-product transfer), else cold prior. `applyReconcilerSignals` intakes the M3 reconciler's `storefront_lever_recalibration` signal if present (soft dependency — no-op until M3 ships). Lever-importance panel added to [[../dashboard/storefront__funnel]] (`leverImportance`).
 - Tag each learning `product_specific` vs `general`; when a new `(product × lander-type × audience)` has no posterior yet, **seed from the `general` learnings** (cross-product transfer) rather than cold priors.
 - Subscribe to the [[storefront-ltv-proxy-reconciler|M3 reconciler]]'s recalibration signal: when the slow loop finds a lever class systematically over/under-predicted (e.g. discount-heavy offers churn), adjust that lever's importance posterior accordingly (cross-link to M3 Phase 3; read the signal if present, no hard dependency).
 - Surface the importance map on [[../dashboard/storefront__funnel]] (a "what the agent believes matters" panel).

@@ -16,6 +16,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { winProbabilityVsControl } from "@/lib/storefront/bandit";
+import { decayedImportance } from "@/lib/storefront/lever-memory";
 
 const FUNNEL_STEPS = [
   "pdp_view",
@@ -517,6 +518,9 @@ export async function GET(
   // (Phase 4 surfacing). Best-effort — empty if the tables aren't present yet.
   const runningExperiments = await buildRunningExperiments(admin, workspaceId);
 
+  // Lever-importance map — "what the agent believes matters" (M2). Best-effort.
+  const leverImportance = await buildLeverImportance(admin, workspaceId, productScope);
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
@@ -526,6 +530,7 @@ export async function GET(
     surveyFunnel,
     funnel,
     runningExperiments,
+    leverImportance,
     packBreakdown,
     topProducts,
     deviceBreakdown,
@@ -622,6 +627,71 @@ async function buildRunningExperiments(
       });
     }
     return out;
+  } catch {
+    return [];
+  }
+}
+
+export interface LeverImportanceEntry {
+  lever_key: string;
+  chapter: string;
+  level: "chapter" | "component";
+  label: string;
+  product_id: string;
+  lander_type: string;
+  audience: string;
+  importance: number;
+  prior: number;
+  n_tests: number;
+  last_tested_at: string | null;
+  scope: "product_specific" | "general";
+}
+
+/** The agent's current lever-importance beliefs (decayed for display), highest first.
+ *  Best-effort — empty if the M2 tables aren't present yet. */
+async function buildLeverImportance(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  productScope: string | null,
+): Promise<LeverImportanceEntry[]> {
+  try {
+    let q = admin
+      .from("storefront_lever_importance")
+      .select("lever_id, product_id, lander_type, audience, importance, prior, n_tests, last_tested_at, scope")
+      .eq("workspace_id", workspaceId);
+    if (productScope) q = q.eq("product_id", productScope);
+    const { data: rows } = await q;
+    if (!rows?.length) return [];
+
+    const leverIds = [...new Set(rows.map((r) => r.lever_id as string))];
+    const { data: levers } = await admin
+      .from("storefront_levers")
+      .select("id, lever_key, chapter, level, label")
+      .in("id", leverIds);
+    const leverById = new Map((levers || []).map((l) => [l.id as string, l]));
+
+    const now = new Date();
+    const out: LeverImportanceEntry[] = rows.map((r) => {
+      const lev = leverById.get(r.lever_id as string);
+      return {
+        lever_key: (lev?.lever_key as string) || "(unknown)",
+        chapter: (lev?.chapter as string) || "",
+        level: ((lev?.level as "chapter" | "component") || "component"),
+        label: (lev?.label as string) || "(unknown)",
+        product_id: r.product_id as string,
+        lander_type: r.lander_type as string,
+        audience: r.audience as string,
+        importance: Math.round(decayedImportance(
+          { importance: r.importance as number, prior: r.prior as number, last_tested_at: (r.last_tested_at as string | null) ?? null },
+          now,
+        ) * 1000) / 1000,
+        prior: Math.round((r.prior as number) * 1000) / 1000,
+        n_tests: (r.n_tests as number) ?? 0,
+        last_tested_at: (r.last_tested_at as string | null) ?? null,
+        scope: (r.scope as "product_specific" | "general") ?? "product_specific",
+      };
+    });
+    return out.sort((a, b) => b.importance - a.importance);
   } catch {
     return [];
   }

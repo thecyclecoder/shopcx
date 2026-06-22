@@ -88,6 +88,20 @@ interface FunnelData {
       win_prob: number | null;
     }>;
   }>;
+  leverImportance?: Array<{
+    lever_key: string;
+    chapter: string;
+    level: "chapter" | "component";
+    label: string;
+    product_id: string;
+    lander_type: string;
+    audience: string;
+    importance: number;
+    prior: number;
+    n_tests: number;
+    last_tested_at: string | null;
+    scope: "product_specific" | "general";
+  }>;
   recentEvents: Array<{
     id: string;
     event_type: string;
@@ -243,6 +257,10 @@ export default function StorefrontFunnelPage() {
 
           {data.runningExperiments && data.runningExperiments.length > 0 && (
             <RunningExperimentsPanel rows={data.runningExperiments} />
+          )}
+
+          {data.leverImportance && data.leverImportance.length > 0 && (
+            <LeverImportancePanel rows={data.leverImportance} />
           )}
 
           <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -762,6 +780,73 @@ function ChapterPerformancePanel({ rows }: { rows: NonNullable<FunnelData["chapt
                 <td className="py-2 pr-2 text-right tabular-nums font-semibold">
                   <span className={r.view_to_cta_pct >= 15 ? "text-emerald-600" : r.view_to_cta_pct > 0 ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400"}>
                     {r.view_to_cta_pct.toFixed(1)}%
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function LeverImportancePanel({ rows }: { rows: NonNullable<FunnelData["leverImportance"]> }) {
+  const fmtLever = (s: string) => s.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+  const fmtAge = (iso: string | null) => {
+    if (!iso) return "never";
+    const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+    return days <= 0 ? "today" : `${days}d ago`;
+  };
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+          Lever importance — what the agent believes matters
+        </h2>
+        <span className="text-[11px] text-zinc-400">
+          Learned posterior per (lever × product × lander × audience), decayed toward its prior with age.
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[640px] text-sm">
+          <thead>
+            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+              <th className="py-2 pr-2">Lever</th>
+              <th className="py-2 pr-2">Chapter</th>
+              <th className="py-2 pr-2">Lander · audience</th>
+              <th className="py-2 pr-2 text-right">Importance</th>
+              <th className="py-2 pr-2 text-right">Prior</th>
+              <th className="py-2 pr-2 text-right">Tests</th>
+              <th className="py-2 pr-2 text-right">Last tested</th>
+              <th className="py-2 pr-2">Scope</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={`${r.lever_key}-${r.product_id}-${r.lander_type}-${r.audience}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">
+                  {fmtLever(r.lever_key)}
+                  {r.level === "chapter" && <span className="ml-1 text-[10px] uppercase text-zinc-400">chapter</span>}
+                </td>
+                <td className="py-2 pr-2 text-zinc-500">{fmtLever(r.chapter)}</td>
+                <td className="py-2 pr-2 text-zinc-500">{r.lander_type} · {r.audience}</td>
+                <td className="py-2 pr-2 text-right tabular-nums font-semibold">
+                  <div className="flex items-center justify-end gap-2">
+                    <div className="hidden h-1.5 w-16 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800 sm:block">
+                      <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${Math.round(r.importance * 100)}%` }} />
+                    </div>
+                    <span className={r.importance > r.prior ? "text-emerald-600" : r.importance < r.prior ? "text-zinc-400" : "text-zinc-900 dark:text-zinc-100"}>
+                      {r.importance.toFixed(2)}
+                    </span>
+                  </div>
+                </td>
+                <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{r.prior.toFixed(2)}</td>
+                <td className="py-2 pr-2 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{r.n_tests}</td>
+                <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{fmtAge(r.last_tested_at)}</td>
+                <td className="py-2 pr-2">
+                  <span className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold ${r.scope === "general" ? "bg-sky-100 text-sky-800" : "bg-zinc-100 text-zinc-600"}`}>
+                    {r.scope === "general" ? "general" : "product"}
                   </span>
                 </td>
               </tr>
