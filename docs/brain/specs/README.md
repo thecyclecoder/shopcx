@@ -64,6 +64,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Fix Ships → Re-test Origin ⏳
+
+**Spec:** [[fix-ship-retests-origin]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** propose-fix → fix ships → but the origin spec's card keeps showing stale "Agent-tested · issues" because nothing re-tests it (observed: comp-subscriptions stayed red after comp-transaction-type-constraint shipped the fix). Fix: stamp a machine-readable `Fixes: {origin} ({check_keys})` in the proposed-fix spec; on the fix build's merge, auto-enqueue the origin's spec-test → the previously-failing check re-runs and the badge clears (or stays red, honestly, if the fix didn't resolve it).
+
 ## Active project — Error-Feed Honest Panels ⏳
 
 **Spec:** [[error-feed-honest-panels]] · **Owner:** [[../functions/platform]]
