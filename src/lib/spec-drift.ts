@@ -254,7 +254,7 @@ interface ReconcileOpts {
   rawFromMain?: string;
 }
 
-async function fetchSpecRawFromMain(slug: string): Promise<{ raw: string; sha: string } | null> {
+export async function fetchSpecRawFromMain(slug: string): Promise<{ raw: string; sha: string } | null> {
   try {
     const res = await gh("GET", `/repos/${REPO}/contents/docs/brain/specs/${slug}.md?ref=main`);
     if (!res.ok) return null;
@@ -263,6 +263,29 @@ async function fetchSpecRawFromMain(slug: string): Promise<{ raw: string; sha: s
   } catch {
     return null;
   }
+}
+
+/**
+ * fix-ship-retests-origin: parse a fix spec's machine-readable `Fixes:` metadata line, stamped by the
+ * propose-fix flow (POST /api/roadmap/chat {action:"propose_fix"}). The line links a fix spec back to the
+ * ORIGIN spec it resolves + the spec-test `check_key`(s) it targets, e.g.
+ *
+ *   **Fixes:** comp-subscriptions (check 3f9a1c2b7e0d5a64, 9b2e…)
+ *
+ * Strict by design: requires the `(check …)` parenthetical so a stray "Fixes:" in prose can't false-positive
+ * into an unwanted origin re-test (the "deduped + bounded, back-compatible" guardrail). First match wins;
+ * returns null when there's no link. `checkKeys` are the 16-hex [[checkKey]] hashes (traceability — the
+ * re-test re-runs the whole origin spec-test, so the enqueue itself only needs `origin`).
+ */
+export function parseFixesLink(raw: string): { origin: string; checkKeys: string[] } | null {
+  const m = raw.match(/^[ \t>*-]*(?:\*\*)?Fixes:?(?:\*\*)?[ \t]+([a-z0-9][a-z0-9-]*)[ \t]*\(\s*checks?\b([^)]*)\)/im);
+  if (!m) return null;
+  const origin = m[1];
+  const checkKeys = (m[2] || "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => /^[0-9a-f]{16}$/.test(s));
+  return { origin, checkKeys };
 }
 
 /** Has a build PR for this spec actually merged? (the strong "work shipped" evidence). */

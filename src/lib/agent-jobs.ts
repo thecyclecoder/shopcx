@@ -5,7 +5,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
-import { reconcileSpecDrift } from "@/lib/spec-drift";
+import { reconcileSpecDrift, fetchSpecRawFromMain, parseFixesLink } from "@/lib/spec-drift";
 
 export type JobStatus =
   | "queued"
@@ -280,6 +280,29 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
 }
 
 /**
+ * fix-ship-retests-origin: a just-merged build whose spec carries a machine-readable `Fixes: {origin}`
+ * link (stamped by the propose-fix flow) should auto-re-test the ORIGIN spec — the fix is now live, so the
+ * origin's previously-failing spec-test check can flip ✅ and its stale "Agent-tested · issues" badge clears
+ * with no manual re-queue. Reads the merged fix spec's markdown from `main`, parses its `Fixes:` link, and
+ * enqueues the origin's spec-test through the shared `enqueueSpecTestIfDue` guard (deduped; the origin's own
+ * shipped-but-not-archived gate still applies — derived from disk, no `knownStatus`).
+ *
+ * Re-test ONLY — never marks the origin verified/archived (the owner's gate); it just refreshes the QC
+ * signal. A spec with no `Fixes:` link no-ops (back-compatible). A still-failing re-test keeps the red badge
+ * correctly — the loop surfaces truth, it doesn't paper over it. Returns the origin slug iff a re-test was
+ * actually enqueued (null otherwise). Best-effort: never throws on a missed fetch — the daily spec-test
+ * backlog cron re-tests shipped specs anyway.
+ */
+export async function retestOriginIfFixMerged(workspaceId: string, fixSlug: string): Promise<string | null> {
+  const fetched = await fetchSpecRawFromMain(fixSlug);
+  if (!fetched) return null;
+  const link = parseFixesLink(fetched.raw);
+  if (!link || !link.origin || link.origin === fixSlug) return null; // no link / self-reference → no-op
+  const res = await enqueueSpecTestIfDue(workspaceId, link.origin);
+  return res.enqueued ? link.origin : null;
+}
+
+/**
  * Self-heal: a `completed` job whose PR was merged/closed OUTSIDE the dashboard (e.g. merged on
  * GitHub directly) still shows a stale "Squash & merge" button. Check GitHub; if the PR is no
  * longer open, flip the job to `merged` (mutates the passed jobs in place + persists).
@@ -320,6 +343,13 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
               }
             } catch {
               /* event missed → the daily backlog + spec-drift crons mop it up */
+            }
+            // fix-ship-retests-origin: if THIS merged build's spec carries a `Fixes: {origin}` link, re-test
+            // the origin so its stale "issues" badge clears once the fix is live (deduped; no link → no-op).
+            try {
+              await retestOriginIfFixMerged(j.workspace_id, j.spec_slug);
+            } catch {
+              /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
             }
           }
         }

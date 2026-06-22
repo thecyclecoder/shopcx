@@ -29,6 +29,8 @@ The spec's column then follows from `deriveStatus` over the corrected phases —
 - **`resolveSpecDrift(workspaceId, slug, phaseIndex?)`** — resolve open rows after an owner flip/dismiss (one phase, or all for the slug).
 - **`flipPhaseToShipped(raw, phaseIndex)`** → new markdown — the shared, surgical phase-emoji writer (leading emoji only; flips the H1 ✅ too once every phase is ✅). Used by the auto-flip **and** the one-tap `POST /api/roadmap/spec-drift`, so manual + auto flip identically.
 - **`parsePhasesWithLines(raw)`** / **`extractCodePaths(body)`** — line-tracked phase parse (mirrors [[brain-roadmap]] `parseSpec` ordering — heading `## Phase` shape primary, `## Phases` bullet shape fallback) + the path/migration extractor.
+- **`fetchSpecRawFromMain(slug)`** → `{ raw, sha } | null` — fetch a spec's markdown from `main` via the GitHub Contents API (the same fetch the reconciler uses; now exported for [[agent-jobs]] `retestOriginIfFixMerged`).
+- **`parseFixesLink(raw)`** → `{ origin, checkKeys } | null` *(fix-ship-retests-origin)* — parse a fix spec's machine-readable `**Fixes:** {origin} (check {key}…)` metadata line (stamped by the propose-fix flow). **Strict**: requires the `(check …)` parenthetical so a stray prose "Fixes:" can't false-positive into an unwanted origin re-test; `checkKeys` are the 16-hex [[spec-test-runs]] `checkKey` hashes. First match wins; null when absent.
 
 ## Two triggers
 
