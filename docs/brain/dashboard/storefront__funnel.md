@@ -12,6 +12,8 @@ _TODO: page purpose._
 
 **Running experiments panel:** surfaces active [[../tables/storefront_experiments]] (status `running`/`promoted`) with each arm's sessions / CVR / sub-attach and posterior **win-probability vs control** — computed in the funnel API route via [[../libraries/storefront-bandit]] `winProbabilityVsControl` and returned as `runningExperiments`. The supervisable surface for the bandit (storefront-experiment-bandit-framework Phase 4).
 
+**"What the agent believes matters" panel:** surfaces the learned lever-importance posteriors ([[../tables/storefront_lever_importance]]) per `(lever × product × lander × audience)` — current `importance`, the delta vs `prior` (what testing taught it), scope (general/product), `n_tests`, and last-tested age. Returned as `leverImportance` via [[../libraries/storefront-lever-memory]] `getLeverImportancePanel`. The supervisable surface for the M2 lever-importance memory (storefront-lever-importance-memory Phase 4).
+
 ## Sub-routes
 
 _None._
