@@ -80,6 +80,15 @@ interface SpecDriftRow {
   opened_at: string;
   last_seen_at: string;
 }
+interface RepairSurfaceItem {
+  jobId: string;
+  signature: string;
+  title: string;
+  diagnosis: string;
+  specSlug: string | null;
+  state: "proposed" | "needs-human";
+  createdAt: string;
+}
 interface UnregisteredLoop {
   id: string;
   cadence: string;
@@ -110,6 +119,7 @@ interface Snapshot {
   selfAudit?: CoverageAudit;
   errorFeed?: ErrorFeedSnapshot;
   specDrift?: SpecDriftRow[];
+  repairs?: RepairSurfaceItem[];
 }
 
 function elapsed(iso: string | null | undefined): string {
@@ -498,6 +508,93 @@ function SpecDriftSection({ rows, onChange }: { rows: SpecDriftRow[]; onChange: 
   );
 }
 
+function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; onChange: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const act = async (item: RepairSurfaceItem, action: "build" | "dismiss") => {
+    setBusy(`${item.jobId}:${action}`);
+    try {
+      const res = await fetch("/api/developer/control-tower/repair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: item.jobId, action }),
+      });
+      if (res.ok) onChange();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-8">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Repair feed</h2>
+      <p className="mb-3 text-[11px] text-zinc-400">
+        The Repair Agent triages each new error/alert read-only and proposes a fix — <b>error → proposed fix</b>.
+        It <i>surfaces</i> the fix spec for one-tap <b>Build</b> (it never auto-builds product code); <b>Dismiss</b>
+        clears it and resolves the error. <b>Needs human</b> items couldn&apos;t be confidently diagnosed — no spec,
+        no loop. Empty = nothing waiting on you.
+      </p>
+      {items.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-zinc-200 px-3 py-4 text-xs text-emerald-700 dark:border-zinc-800 dark:text-emerald-300">
+          No repair items waiting — every triaged error was auto-resolved, auto-queued, or already actioned.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {items.map((item) => (
+            <li
+              key={item.jobId}
+              className={`rounded-lg border p-3 text-[12px] ${
+                item.state === "needs-human"
+                  ? "border-rose-200 bg-rose-50 dark:border-rose-900/40 dark:bg-rose-900/15"
+                  : "border-amber-200 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-900/15"
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-100">{item.title}</span>
+                  <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
+                    {item.state === "needs-human" ? "needs human" : "proposed fix"}
+                  </span>
+                  {item.specSlug && (
+                    <Link
+                      href={`/dashboard/roadmap/${item.specSlug}`}
+                      className="ml-1.5 font-mono text-[11px] text-zinc-600 hover:underline dark:text-zinc-300"
+                    >
+                      [[{item.specSlug}]]
+                    </Link>
+                  )}
+                  {item.diagnosis && <p className="mt-1 whitespace-pre-wrap text-zinc-600 dark:text-zinc-300">{item.diagnosis}</p>}
+                  <p className="mt-0.5 text-[10px] text-zinc-400">
+                    <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  {item.state === "proposed" && item.specSlug && (
+                    <button
+                      onClick={() => act(item, "build")}
+                      disabled={busy !== null}
+                      className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      {busy === `${item.jobId}:build` ? "Queuing…" : "Build"}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => act(item, "dismiss")}
+                    disabled={busy !== null}
+                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
+                  </button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function ControlTowerPage() {
   const workspace = useWorkspace();
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -616,6 +713,8 @@ export default function ControlTowerPage() {
           )}
 
           {snap.selfAudit && <CoverageAuditSection audit={snap.selfAudit} />}
+
+          <RepairFeedSection items={snap.repairs ?? []} onChange={refresh} />
 
           <SpecDriftSection rows={snap.specDrift ?? []} onChange={refresh} />
 

@@ -406,6 +406,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:migration-fix", kind: "agent-kind", owner: "retention", agentKind: "migration-fix", label: "Agent — migration fix", description: "Event-fired billing repair diagnosis.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:dev-ask", kind: "agent-kind", owner: "platform", agentKind: "dev-ask", label: "Agent — dev ask", description: "Read-only developer message-center turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
   { id: "agent:pr-resolve", kind: "agent-kind", owner: "platform", agentKind: "pr-resolve", label: "Agent — PR resolve", description: "Webhook-fired dirty-PR resolver: merge main + resolve conflicts, tsc-gate, push (or rebuild/surface).", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
+  { id: "agent:repair", kind: "agent-kind", owner: "platform", agentKind: "repair", label: "Agent — repair", description: "Event-fired Control Tower triage: diagnose a new error_events signature / loop_alert read-only → author a fix spec + surface for owner Build (or no-op-resolve transient / surface needs-human). The repairer is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
 
   // ── Inline event-driven AI agents (loop_heartbeats, loop_id = `ai:<agent>`) ──
   // Server-side AI agents that run per-ticket / per-order / per-journey, not on a queue or

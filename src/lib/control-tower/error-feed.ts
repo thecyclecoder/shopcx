@@ -23,6 +23,7 @@
 import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
+import { enqueueRepairJob } from "@/lib/repair-agent";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -121,6 +122,9 @@ export async function recordError(
         return { opened: false, paged: false };
       }
       await pageOwners(admin, input, signature, occurrences);
+      // Repair Agent trigger: a NEW signature is the moment to enqueue a diagnose→propose-fix job
+      // (event-driven, deduped by signature). Best-effort — never let it break the error path.
+      await enqueueRepairJob(admin, { source: input.source, signature, title: input.title, errorEventId: null });
       return { opened: true, paged: true };
     }
 

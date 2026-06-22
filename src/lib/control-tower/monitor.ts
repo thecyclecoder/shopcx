@@ -763,6 +763,19 @@ export async function runControlTowerMonitor(): Promise<MonitorResult> {
         if (!error) {
           opened++;
           await pageOwners(admin, loop);
+          // Repair Agent trigger: a newly-opened loop_alert is the second place the Control Tower
+          // records a NEW problem — enqueue a diagnose→propose-fix job for it (deduped by the
+          // `loop:<id>` signature). Best-effort — never let it break the monitor's act loop.
+          try {
+            const { enqueueRepairJob } = await import("@/lib/repair-agent");
+            await enqueueRepairJob(admin, {
+              source: "loop-alert",
+              signature: `loop:${loop.id}`,
+              title: `${loop.label}: ${loop.violation.detail}`,
+            });
+          } catch (e) {
+            console.warn(`[control-tower] repair enqueue failed for ${loop.id}:`, e instanceof Error ? e.message : e);
+          }
         } else if (error.code !== "23505") {
           console.warn(`[control-tower] alert insert failed for ${loop.id}:`, error.message);
         }

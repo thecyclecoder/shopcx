@@ -1,0 +1,201 @@
+/**
+ * repair-agent — the queue plumbing + autonomy policy behind the **Repair Agent box agent**
+ * ([[docs/brain/specs/repair-agent.md]]). "escalation-triage, but for the Control Tower."
+ *
+ * North star (supervisable autonomy): the Control Tower MONITOR detects problems (a new
+ * error_events signature via recordError, a new loop_alert via the monitor). The repair agent is
+ * the objective-owner loop ABOVE that proxy: it DIAGNOSES the root cause read-only and PROPOSES the
+ * fix; the owner approves the build. The agent optimizes the bounded proxy "clear the error" — so
+ * auto-spawning code builds from a noisy/flapping feed (many PRs + merge churn + cost) is the exact
+ * Goodhart failure this module's policy guards against. The diagnosis + fix-spec is the high-value
+ * low-risk half; *building* (writes code / opens PRs / applies migrations) stays OWNER-GATED.
+ *
+ * Two entry points (event-driven — there is NO repair cron; the error appearing IS the trigger):
+ *   - `enqueueRepairJob` — called the moment the Control Tower records a NEW problem: inline in
+ *     `recordError` (new error_events signature) and in `runControlTowerMonitor` (a newly-opened
+ *     loop_alert). Deduped EXACTLY like error_events groups — one `repair` job per distinct
+ *     signature; skipped if an active/surfaced repair job for that signature already exists (don't
+ *     re-diagnose / re-spec the same thing).
+ *   - the box worker's `runRepairJob` (scripts/builder-worker.ts) consumes the queue.
+ */
+import type { createAdminClient } from "@/lib/supabase/admin";
+
+type Admin = ReturnType<typeof createAdminClient>;
+
+/** The verdict the box reaches per error/alert (it cites the root cause for each). */
+export type RepairVerdict =
+  | "real-bug" // a genuine defect in our code → author a fix spec, SURFACE for owner Build.
+  | "monitor-false-positive" // the monitor mis-flagged a healthy loop → mechanical analyzer fix.
+  | "foreign-app-noise" // a foreign-app / not-ours error leaking into a feed → scope the capture.
+  | "transient" // a genuine wait / transient blip → no-op + resolve the error row, never spec noise.
+  | "needs-human"; // can't confidently diagnose → surface "needs human", no spec, no loop.
+
+/**
+ * surface-don't-auto-build (+ a NARROW mechanical allow-list).
+ *
+ * DEFAULT: the agent authors the fix spec and SURFACES it for one-tap owner Build — it does NOT
+ * auto-queue the build. Only *known-safe, mechanical, self-evident* verdict classes may auto-queue
+ * their build — and each entry MUST carry its justification (silence/auto is never the default).
+ * Anything touching product code (`real-bug`) stays surface-and-approve, off this list.
+ *
+ *   - foreign-app-noise      → the fix is "scope the capture" (filter a not-ours error out of the
+ *                              feed) — monitor-only, never product code.
+ *   - monitor-false-positive → the fix is "add a grace / tighten the assertion" — monitor-only.
+ */
+export const REPAIR_AUTOBUILD_KINDS: Partial<Record<RepairVerdict, string>> = {
+  "foreign-app-noise": "scope the capture — mechanical, monitor-only, never touches product code",
+  "monitor-false-positive": "add a grace / tighten the assertion — mechanical, monitor-only",
+};
+
+/** Is this verdict on the sanctioned auto-queue allow-list (so its build may auto-queue)? */
+export function isRepairAutobuildKind(verdict: string): boolean {
+  return Object.prototype.hasOwnProperty.call(REPAIR_AUTOBUILD_KINDS, verdict);
+}
+
+/**
+ * Statuses that mean a repair item for a signature is still "live" — either being worked
+ * (active) or surfaced and awaiting the owner's Build/Dismiss (needs_approval is in the active
+ * set; needs_attention is the surfaced needs-human terminal-but-uncleared state). A signature with
+ * a job in any of these is NOT re-enqueued — that's the "don't re-diagnose the same thing / no
+ * loop on an undiagnosable error" guard. A genuinely re-firing brand-new signature still enqueues
+ * (recordError only calls us on a NEW signature, so a transient-resolved row that bumps its count
+ * never re-triggers).
+ */
+const LIVE_REPAIR_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "needs_attention"];
+
+export interface EnqueueRepairInput {
+  /** the error feed source ('inngest'|'vercel'|'supabase'|'supabase-logs') or 'loop-alert'. */
+  source: string;
+  /** the dedupe key — the error_events signature, or `loop:<loop_id>` for a monitor alert. */
+  signature: string;
+  /** short human-readable label for the surfaced item. */
+  title: string;
+  /** the originating error_events row (so the box loads the full sample read-only). */
+  errorEventId?: string | null;
+  /** the originating loop_alerts row (for a monitor-opened alert). */
+  loopAlertId?: string | null;
+}
+
+/**
+ * Resolve the workspace the repair job lands under. Errors are GLOBAL infra (not workspace-scoped),
+ * and the box build queue is effectively single-tenant — so a repair job rides the SAME workspace
+ * the build queue uses (the latest agent_jobs row's workspace), falling back to the first workspace.
+ * Returns null only if there is no workspace at all (then the caller no-ops).
+ */
+async function resolveRepairWorkspace(admin: Admin): Promise<string | null> {
+  const { data: latestJob } = await admin
+    .from("agent_jobs")
+    .select("workspace_id")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const fromJob = (latestJob as { workspace_id?: string } | null)?.workspace_id;
+  if (fromJob) return fromJob;
+  const { data: ws } = await admin.from("workspaces").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
+  return (ws as { id?: string } | null)?.id ?? null;
+}
+
+/**
+ * Enqueue a `repair` agent job for a NEW Control Tower problem. Best-effort + idempotent: no-op if a
+ * repair job for this signature is already live (active or surfaced). `spec_slug` = the signature
+ * (the global dedupe key, exactly like error_events groups); `instructions` = the JSON brief the box
+ * loads from. Never throws — an enqueue that can crash the error path it rides is worse than the gap.
+ */
+export async function enqueueRepairJob(admin: Admin, input: EnqueueRepairInput): Promise<{ enqueued: boolean; reason?: string }> {
+  try {
+    // Dedupe GLOBALLY by signature (errors are global infra) — skip if any live repair job exists.
+    const { data: existing } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("kind", "repair")
+      .eq("spec_slug", input.signature)
+      .in("status", LIVE_REPAIR_STATUSES)
+      .limit(1)
+      .maybeSingle();
+    if (existing) return { enqueued: false, reason: "live repair job exists for this signature" };
+
+    const workspaceId = await resolveRepairWorkspace(admin);
+    if (!workspaceId) return { enqueued: false, reason: "no workspace to attach the repair job to" };
+
+    const { error } = await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: input.signature,
+      kind: "repair",
+      status: "queued",
+      instructions: JSON.stringify({
+        source: input.source,
+        signature: input.signature,
+        title: input.title.slice(0, 300),
+        error_event_id: input.errorEventId ?? null,
+        loop_alert_id: input.loopAlertId ?? null,
+      }),
+    });
+    if (error) {
+      console.warn(`[repair-agent] enqueue failed for ${input.signature}:`, error.message);
+      return { enqueued: false, reason: error.message };
+    }
+    return { enqueued: true };
+  } catch (err) {
+    console.warn("[repair-agent] enqueueRepairJob threw:", err instanceof Error ? err.message : err);
+    return { enqueued: false, reason: "threw" };
+  }
+}
+
+// ── Dashboard surface (read-only) ────────────────────────────────────────────
+// The Control Tower's "Repair feed" tile: error X → proposed fix [[spec Y]] · [Build] [Dismiss]
+// (mirrors escalation-triage — proposes, owner finalizes). A repair job surfaces while it waits on
+// the owner: `needs_approval` (a proposed fix spec, with a Build button) or `needs_attention` (a
+// needs-human verdict, no spec — Dismiss only).
+
+export interface RepairSurfaceItem {
+  jobId: string;
+  /** the error_events signature / loop:<id> this repair addresses. */
+  signature: string;
+  /** short label of the originating error/alert. */
+  title: string;
+  /** the box's plain-text verdict + root-cause diagnosis. */
+  diagnosis: string;
+  /** the authored fix spec slug (set for a proposed-fix item; null for needs-human). */
+  specSlug: string | null;
+  /** 'proposed' = a fix spec is authored + awaiting Build; 'needs-human' = no spec, Dismiss only. */
+  state: "proposed" | "needs-human";
+  createdAt: string;
+}
+
+/**
+ * READ-ONLY: the open repair items awaiting the owner on the Control Tower. Surfaced repair jobs are
+ * those in `needs_approval` (a proposed fix spec) or `needs_attention` (a needs-human verdict). The
+ * auto-queued (allow-listed) and transient-resolved jobs complete silently and never appear here.
+ */
+export async function getOpenRepairs(admin: Admin, workspaceId: string): Promise<RepairSurfaceItem[]> {
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("id, spec_slug, status, instructions, pending_actions, log_tail, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "repair")
+    .in("status", ["needs_approval", "needs_attention"])
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  return ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
+    let title = String(row.spec_slug || "");
+    try {
+      const instr = row.instructions ? JSON.parse(String(row.instructions)) : {};
+      if (instr.title) title = String(instr.title);
+    } catch {
+      /* instructions not JSON — fall back to the slug */
+    }
+    const actions = Array.isArray(row.pending_actions) ? (row.pending_actions as Array<Record<string, unknown>>) : [];
+    const buildAction = actions.find((a) => a.type === "repair_build" && a.status === "pending");
+    const specSlug = buildAction ? String(buildAction.spec_slug || "") || null : null;
+    return {
+      jobId: String(row.id),
+      signature: String(row.spec_slug || ""),
+      title,
+      diagnosis: typeof row.log_tail === "string" ? row.log_tail : "",
+      specSlug,
+      state: row.status === "needs_approval" && specSlug ? "proposed" : "needs-human",
+      createdAt: String(row.created_at || ""),
+    };
+  });
+}

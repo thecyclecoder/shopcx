@@ -103,6 +103,18 @@ const MAX_PR_RESOLVE = Number(process.env.AGENT_TODO_MAX_PR_RESOLVE || 1);
 // One resolve pass: git merge + LLM conflict resolution + ≤2 tsc attempts. Build-sized ceiling so a
 // big merge + a couple tsc runs never gets cut short.
 const PR_RESOLVE_TIMEOUT_MS = 20 * 60 * 1000;
+// Repair jobs (repair-agent) run in their OWN concurrency-limited lane: event-fired the moment the
+// Control Tower records a NEW problem (a new error_events signature via recordError, a newly-opened
+// loop_alert via the monitor). A top-level `claude -p` on Max (web search on, no API key, KEEPS the
+// read-only DB/crypto secrets) INVESTIGATES the signature + the implicated route/cron/fn read-only,
+// classifies it, and either authors a fix spec to main + surfaces it for owner Build (default), or
+// auto-queues the build for an allow-listed mechanical class, or no-op-resolves a transient, or
+// surfaces needs-human. It NEVER edits product code / opens a PR / applies a migration. A few lanes
+// so N errors at once drain a few at a time without a pileup; re-claimable (a restart re-runs it).
+const MAX_REPAIR = Number(process.env.AGENT_TODO_MAX_REPAIR || 2);
+// One repair pass: read-only investigation (the signature + sample + the implicated code) + a
+// verdict. Minutes — same ballpark as a migration-fix / ticket-improve turn, not the seed ceiling.
+const REPAIR_TIMEOUT_MS = 15 * 60 * 1000;
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -140,7 +152,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -152,13 +164,17 @@ interface PendingAction {
   // src/lib/migration-fix.ts `applyMigrationFix` on approval.
   fix_kind?: "price_reconcile" | "variant_backfill" | "appstle_cancel";
   payload?: unknown;
+  // set when type==='repair_build' (repair-agent): the fix spec slug the repair agent authored to
+  // main + surfaced for one-tap owner Build. The build is queued on approval, NOT auto (unless the
+  // verdict is on REPAIR_AUTOBUILD_KINDS — that path queues directly without surfacing).
+  spec_slug?: string;
 }
 interface Job {
   id: string;
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair";
   status: JobStatus;
   claude_session_id: string | null;
   instructions: string | null;
@@ -391,7 +407,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -2790,6 +2806,303 @@ async function runPrResolveJob(job: Job) {
   }
 }
 
+// ── Repair Agent (repair-agent) ──────────────────────────────────────────────
+// A kind='repair' job is ONE event-fired Control Tower triage: the moment the Control Tower records
+// a NEW problem (a new error_events signature via recordError, or a newly-opened loop_alert via the
+// monitor) it enqueues a repair job (deduped by signature). The box INVESTIGATES read-only (the
+// signature + sample + the implicated route/cron/fn, traced in the working tree), CLASSIFIES it, and
+// ACTS: real bug / false-positive / noise → author a fix spec to main; transient → no-op + resolve
+// the error row; can't diagnose → surface needs-human. Autonomy is surface-don't-auto-build: the
+// DEFAULT authors the spec + SURFACES it for one-tap owner Build (it does NOT auto-queue the build);
+// only a narrow mechanical allow-list (REPAIR_AUTOBUILD_KINDS) auto-queues. It NEVER edits product
+// code / opens a PR / applies a migration — the build does that, owner-gated. (repair-agent Phase 1.)
+async function runRepairClaude(prompt: string, sessionId: string | null, cwd: string) {
+  // KEEP the env (read-only DB/crypto creds so the box can load + trace the error) — only strip the
+  // API key so ALL LLM is Max-billed (never the Anthropic API). Web search stays on (investigation).
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: REPAIR_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+// Load the read-only brief: the originating error_events signature + sample (or the loop_alert), so
+// the box knows exactly what to trace. Best-effort — degrades to the instructions if a row is gone.
+async function loadRepairBrief(instr: { source?: string; signature?: string; title?: string; error_event_id?: string | null; loop_alert_id?: string | null }): Promise<string> {
+  const lines: string[] = [`SIGNATURE: ${instr.signature}  ·  SOURCE: ${instr.source}`, `TITLE: ${instr.title}`, ``];
+  try {
+    if (instr.source === "loop-alert") {
+      const loopId = String(instr.signature || "").replace(/^loop:/, "");
+      const { data: alert } = await db
+        .from("loop_alerts")
+        .select("loop_id, kind, reason, detail, opened_at, status")
+        .eq("loop_id", loopId)
+        .order("opened_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (alert) {
+        lines.push(`LOOP ALERT — loop_id=${alert.loop_id} kind=${alert.kind} status=${alert.status}`);
+        lines.push(`  reason: ${alert.reason}`);
+        lines.push(`  detail: ${alert.detail}`);
+        lines.push(`  opened_at: ${alert.opened_at}`);
+        lines.push(``, `This is a Control Tower loop tile that went RED. Find the loop in src/lib/control-tower/registry.ts (id=${loopId}) and trace its implementation (its cron / agent / reactive fn). Decide: a REAL bug in the loop, a MONITOR false-positive (the loop is actually healthy but the assertion mis-fired), foreign-app noise, or a genuine transient.`);
+      }
+    } else {
+      // An error_events incident — load by id if we have it, else by signature.
+      let q = db.from("error_events").select("id, source, signature, title, detail, sample, count, status, first_seen_at, last_seen_at");
+      q = instr.error_event_id ? q.eq("id", instr.error_event_id) : q.eq("signature", instr.signature || "");
+      const { data: ev } = await q.order("last_seen_at", { ascending: false }).limit(1).maybeSingle();
+      if (ev) {
+        lines.push(`ERROR EVENT ${ev.id} — source=${ev.source} status=${ev.status} count=${ev.count}`);
+        lines.push(`  title: ${ev.title}`);
+        lines.push(`  detail: ${ev.detail ?? "—"}`);
+        lines.push(`  first_seen: ${ev.first_seen_at}  ·  last_seen: ${ev.last_seen_at}`);
+        lines.push(`  sample: ${JSON.stringify(ev.sample)?.slice(0, 2000) || "null"}`);
+      } else {
+        lines.push(`(error_events row not found — diagnose from the title/signature above)`);
+      }
+    }
+  } catch (e) {
+    lines.push(`(brief load degraded: ${e instanceof Error ? e.message : String(e)})`);
+  }
+  return lines.join("\n");
+}
+
+function repairPrompt(brief: string): string {
+  return [
+    `You are the box's Repair Agent on Max (web search on, no API key). You KEEP read access to prod, but you NEVER mutate and NEVER edit product code: you INVESTIGATE the error read-only, trace its ROOT CAUSE in the working tree (cwd is the repo root — read docs/brain/ first, then src/), classify it, and either propose a FIX SPEC (a doc) or no-op-resolve a transient. The actual code build is owner-gated and happens later — not now.`,
+    `This is "escalation-triage, but for the Control Tower." A new problem was just recorded. Diagnose it.`,
+    ``,
+    brief,
+    ``,
+    `Trace the implicated route / cron / Inngest function / library in the codebase and decide ONE verdict (cite the root cause):`,
+    `  • "real-bug" — a genuine defect in OUR code. Author a single-phase, ~30-min-scoped fix spec. (Surfaced for owner Build — NOT auto-built, because it touches product code.)`,
+    `  • "monitor-false-positive" — the Control Tower assertion mis-fired on a HEALTHY loop. Author a spec to fix the analyzer (add a grace / tighten the assertion) — monitor-only.`,
+    `  • "foreign-app-noise" — a not-ours / foreign-app error leaking into a feed. Author a spec to SCOPE THE CAPTURE (filter it out) — monitor-only.`,
+    `  • "transient" — a genuine wait / one-off blip with no code fix (a deploy-boundary race, a momentary upstream timeout that already recovered). NO spec — resolve the error and log why.`,
+    `  • "needs-human" — you CANNOT confidently diagnose it (ambiguous, needs context only a human has). NO spec, no guess, no loop — surface it for a human with a plain one-line note.`,
+    ``,
+    `For any spec verdict, propose owner + parent (no orphan specs). Default owner "[[../functions/platform]]" and parent "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]" unless a more specific function clearly owns the implicated system. The spec must be a SINGLE phase scoped to a ~30-min build.`,
+    ``,
+    `Final message = ONLY one JSON object:`,
+    `  {"status":"real-bug"|"monitor-false-positive"|"foreign-app-noise","diagnosis":"<plain text: the root cause + what the fix does>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"...","intent":"<one paragraph>","problem":"<concrete, grounded in the signature + the code you traced>","target":"src/lib/<the file/fn to fix>"}}`,
+    `  {"status":"transient","reason":"<why this is a genuine wait/transient with no code fix>"}`,
+    `  {"status":"needs-human","diagnosis":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
+  ].join("\n");
+}
+
+function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; target?: string }, signature: string, verdict: string): string {
+  return [
+    `# ${spec.title} ⏳`,
+    ``,
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"} · **Repair-signature:** \`${signature}\` · **Verdict:** ${verdict}`,
+    ``,
+    spec.intent.trim(),
+    ``,
+    `## Problem (from Control Tower signature \`${signature}\`)`,
+    spec.problem.trim(),
+    spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
+    ``,
+    `## Phase 1 — close it ⏳`,
+    `Scope from the problem above; land the fix + its brain page; gate on \`npx tsc --noEmit\`.`,
+    ``,
+    `## Verification`,
+    `- Re-trigger the originating condition (signature \`${signature}\`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.`,
+    ``,
+    `> Authored by the box Repair Agent from Control Tower signature \`${signature}\` (verdict: ${verdict}). Commission the build from the Control Tower / Roadmap board.`,
+    ``,
+  ].join("\n");
+}
+
+interface RepairSpecProposal { slug: string; title: string; owner?: string; parent?: string; intent?: string; problem?: string; target?: string }
+
+// Author the fix spec to main. Idempotent: if a spec with this slug already exists, leave it (the
+// recurring failure converges on one spec). Returns the sanitized slug on success, or null on failure.
+async function authorRepairSpec(raw: unknown, signature: string, verdict: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+  const s = (raw || {}) as RepairSpecProposal;
+  const rawSlug = String(s.slug || "");
+  const title = String(s.title || "");
+  if (!rawSlug || !title) return null;
+  const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
+  if (!slug) return null;
+  const path = `docs/brain/specs/${slug}.md`;
+  try {
+    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+    if (existing.ok) return { slug, alreadyExists: true };
+    const put = await putFileMain(
+      path,
+      repairSpecMarkdown(
+        {
+          slug,
+          title,
+          owner: String(s.owner || "[[../functions/platform]]"),
+          parent: String(s.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"),
+          intent: String(s.intent || "Close the issue behind this Control Tower signature."),
+          problem: String(s.problem || "(see the repair diagnosis above)"),
+          target: typeof s.target === "string" ? s.target : undefined,
+        },
+        signature,
+        verdict,
+      ),
+      `spec: ${slug} (from Control Tower signature ${signature} via repair-agent ${verdict})`,
+    );
+    return put.ok ? { slug, alreadyExists: false } : null;
+  } catch (e) {
+    console.warn(`[repair] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+// Resolve the originating error_events row (transient no-op / owner Dismiss) so the panel clears.
+async function resolveRepairErrorRow(instr: { source?: string; signature?: string; error_event_id?: string | null }): Promise<void> {
+  if (instr.source === "loop-alert") return; // loop_alerts auto-resolve on recovery in the monitor.
+  try {
+    const patch = { status: "resolved", updated_at: new Date().toISOString() } as Record<string, unknown>;
+    if (instr.error_event_id) await db.from("error_events").update(patch).eq("id", instr.error_event_id);
+    else if (instr.signature) await db.from("error_events").update(patch).eq("signature", instr.signature);
+  } catch (e) {
+    console.warn(`[repair] resolve error row failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function runRepairJob(job: Job) {
+  const tag = `[repair:${job.id.slice(0, 8)}]`;
+  let instr: { source?: string; signature?: string; title?: string; error_event_id?: string | null; loop_alert_id?: string | null } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fall back to spec_slug as the signature */
+  }
+  const signature = instr.signature || job.spec_slug;
+  instr.signature = signature;
+
+  // ── Owner action resume — the surfaced repair_build was approved (Build) or declined (Dismiss). ──
+  const buildAction = (job.pending_actions || []).find((a) => a.type === "repair_build");
+  if (buildAction && (buildAction.status === "approved" || buildAction.status === "declined")) {
+    if (buildAction.status === "approved" && buildAction.spec_slug) {
+      // Queue the actual feature build for the authored fix spec (owner-gated — this is the gate).
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: buildAction.spec_slug,
+        kind: "build",
+        status: "queued",
+        created_by: job.created_by,
+        instructions: `Build from Control Tower repair signature ${signature}. Follow the spec exactly; tsc-clean; open a PR.`,
+      });
+      buildAction.status = error ? "failed" : "done";
+      buildAction.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${buildAction.spec_slug}`;
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
+      console.log(`${tag} owner Build → ${buildAction.result}`);
+    } else {
+      // Dismiss — clear the surfaced item; resolve the originating error row.
+      await resolveRepairErrorRow(instr);
+      buildAction.result = "dismissed by owner";
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Dismiss → resolved signature ${signature}`.slice(-2000) });
+      console.log(`${tag} owner Dismiss → resolved`);
+    }
+    return;
+  }
+
+  // ── Fresh diagnosis — investigate read-only on Max → classify → act. ──
+  console.log(`${tag} diagnosing signature ${signature}`);
+  try {
+    const brief = await loadRepairBrief(instr);
+    const { session, resultText, isError, raw } = await runRepairClaude(repairPrompt(brief), null, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = String(parsed?.status || "");
+    console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
+
+    if (verdict === "transient") {
+      const reason = String(parsed?.reason || "transient / genuine wait — no code fix");
+      await resolveRepairErrorRow(instr);
+      await update(job.id, { status: "completed", error: null, log_tail: `transient → resolved: ${reason}`.slice(-2000) });
+      console.log(`${tag} transient → resolved the error row, no spec`);
+      return;
+    }
+
+    if (verdict === "needs-human") {
+      const diagnosis = String(parsed?.diagnosis || "needs a human — couldn't confidently diagnose");
+      // Surface for a human (no spec, no loop): needs_attention is read by the Control Tower repair feed.
+      await update(job.id, { status: "needs_attention", error: "needs-human", log_tail: diagnosis.slice(-2000) });
+      console.log(`${tag} needs-human → surfaced, no spec`);
+      return;
+    }
+
+    if (verdict === "real-bug" || verdict === "monitor-false-positive" || verdict === "foreign-app-noise") {
+      const diagnosis = String(parsed?.diagnosis || "");
+      const authored = await authorRepairSpec(parsed?.spec, signature, verdict);
+      if (!authored) {
+        // Verdict reached but no valid spec landed → surface for a human rather than silently dropping it.
+        await update(job.id, { status: "needs_attention", error: "no valid fix spec proposed", log_tail: diagnosis.slice(-2000) || "no valid fix spec" });
+        console.log(`${tag} ${verdict} but no valid spec → surfaced needs-human`);
+        return;
+      }
+
+      // Narrow auto-queue allow-list (the ONE sanctioned auto path): a known-safe, mechanical,
+      // monitor-only class auto-queues its build. Anything touching product code (real-bug) is
+      // surfaced for one-tap owner Build instead (surface-don't-auto-build — the North star guard).
+      const { isRepairAutobuildKind, REPAIR_AUTOBUILD_KINDS } = await import("../src/lib/repair-agent");
+      if (isRepairAutobuildKind(verdict)) {
+        const reason = REPAIR_AUTOBUILD_KINDS[verdict as keyof typeof REPAIR_AUTOBUILD_KINDS];
+        const { error } = await db.from("agent_jobs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: authored.slug,
+          kind: "build",
+          status: "queued",
+          instructions: `Auto-queued by repair-agent (${verdict} — ${reason}). Build from Control Tower signature ${signature}. Follow the spec exactly; tsc-clean; open a PR.`,
+        });
+        await update(job.id, {
+          status: "completed",
+          error: null,
+          log_tail: `${verdict} (allow-listed: ${reason}) → authored ${authored.slug}${authored.alreadyExists ? " (existing)" : ""} + ${error ? `auto-queue FAILED: ${error.message}` : "auto-queued build"}\n\n${diagnosis}`.slice(-2000),
+        });
+        console.log(`${tag} ${verdict} → authored ${authored.slug} + ${error ? "auto-queue failed" : "auto-queued build"}`);
+        return;
+      }
+
+      // DEFAULT (real-bug, or any non-allow-listed verdict): surface the proposed fix for owner Build.
+      const action: PendingAction = {
+        id: `rp${job.id.slice(0, 6)}`,
+        type: "repair_build",
+        summary: `Fix ${signature} → build [[${authored.slug}]]`,
+        preview: diagnosis.slice(0, 400),
+        status: "pending",
+        spec_slug: authored.slug,
+      };
+      await update(job.id, {
+        status: "needs_approval",
+        pending_actions: [action],
+        log_tail: `${verdict} → authored fix spec ${authored.slug}${authored.alreadyExists ? " (existing)" : ""}; surfaced for owner Build.\n\n${diagnosis}`.slice(-2000),
+      });
+      console.log(`${tag} ${verdict} → authored ${authored.slug}, surfaced for owner Build`);
+      return;
+    }
+
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "repair run errored", log_tail: raw.slice(-2000) });
+      return;
+    }
+    // No recognizable verdict — surface rather than assume resolved.
+    await update(job.id, { status: "needs_attention", error: "repair ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -2801,6 +3114,7 @@ async function runJob(job: Job) {
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
+  if (job.kind === "repair") return runRepairJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -3040,7 +3354,7 @@ async function main() {
   ensureGitIdentity();
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
-  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix + ${MAX_DEV_ASK} dev-ask + ${MAX_PR_RESOLVE} pr-resolve lane, polling every ${POLL_MS}ms`);
+  console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix + ${MAX_DEV_ASK} dev-ask + ${MAX_PR_RESOLVE} pr-resolve + ${MAX_REPAIR} repair lane, polling every ${POLL_MS}ms`);
 
   // Deploy-time Inngest re-sync (control-tower-complete-coverage spec, Phase 2): the worker
   // restarts right after it self-updates to a freshly-deployed SHA, so pinging the Inngest serve
@@ -3072,7 +3386,8 @@ async function main() {
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve").length;
+  const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
     const startedAt = Date.now();
@@ -3179,6 +3494,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed pr-resolve ${job.id.slice(0, 8)} → ${countPrResolve() + 1}/${MAX_PR_RESOLVE} pr-resolve lane`);
+        launch(job);
+      }
+      // Fill the repair lane (repair-agent): event-fired Control Tower triage, read-only diagnose → propose-fix.
+      while (countRepair() < MAX_REPAIR) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["repair"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed repair ${job.id.slice(0, 8)} → ${countRepair() + 1}/${MAX_REPAIR} repair lane`);
         launch(job);
       }
       // Fill the build/plan pool.
