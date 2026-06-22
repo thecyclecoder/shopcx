@@ -3,6 +3,7 @@
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/monitor.ts::monitor-false-positive`
 **Repair-signature:** `loop:triage-escalations-cron`
+**Repair-signature:** `loop:migration-drift-check`
 
 Stop the escalation-idle output assertion from mis-firing on a healthy triage-escalations-cron during the normal gap between a ticket escalating and the next hourly cron tick. Re-base the idle judgment on how long the oldest routine-escalated ticket has actually been waiting (its escalated_at), with a grace at least as long as the cron's hourly cadence, instead of on the staleness of the last enqueued job (which legitimately goes stale during quiet, work-free stretches).
 
