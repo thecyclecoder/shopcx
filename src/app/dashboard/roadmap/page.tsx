@@ -8,6 +8,7 @@ import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
 import BoxChip from "./BoxChip";
+import SpecSearch from "./SpecSearch";
 import { AgentTestedStamp, TestChip } from "../developer/spec-tests/SpecTestView";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
@@ -61,7 +62,10 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
 
 function Card({ spec, job, fold, testRun }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null }) {
   return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div
+      data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}
+      className="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+    >
       <Link href={`/dashboard/roadmap/${spec.slug}`} className="group flex items-start gap-2">
         <span className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${DOT[spec.status]}`} />
         <h3 className="text-sm font-medium leading-snug text-zinc-900 group-hover:text-indigo-600 dark:text-zinc-100 dark:group-hover:text-indigo-400">
@@ -105,7 +109,7 @@ function Card({ spec, job, fold, testRun }: { spec: SpecCard; job: AgentJob | nu
 }
 
 export default async function RoadmapPage() {
-  const [{ specs, tracks }, archive] = await Promise.all([getRoadmap(), getArchive()]);
+  const [{ specs }, archive] = await Promise.all([getRoadmap(), getArchive()]);
   const workspaceId = await getActiveWorkspaceId();
   const [jobsBySlug, folds, testRuns] = workspaceId
     ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId)])
@@ -142,20 +146,7 @@ export default async function RoadmapPage() {
         Status comes from the <span className="font-medium">⏳ planned · 🚧 in progress · ✅ shipped</span> phase emojis.
       </p>
 
-      {tracks.length > 0 && (
-        <div className="mb-5 flex flex-wrap gap-2">
-          {tracks.map((t, i) => (
-            <span
-              key={i}
-              title={t.why}
-              className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${DOT[t.status]}`} />
-              {t.title}
-            </span>
-          ))}
-        </div>
-      )}
+      <SpecSearch />
 
       {specs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
@@ -174,7 +165,7 @@ export default async function RoadmapPage() {
                 </div>
                 <div className="space-y-3">
                   {items.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-zinc-200 py-6 text-center text-xs text-zinc-400 dark:border-zinc-800">
+                    <div data-empty-placeholder className="rounded-lg border border-dashed border-zinc-200 py-6 text-center text-xs text-zinc-400 dark:border-zinc-800">
                       Nothing here
                     </div>
                   ) : (
@@ -188,7 +179,7 @@ export default async function RoadmapPage() {
       )}
 
       {archive.length > 0 && (
-        <details className="mt-6 rounded-lg border border-zinc-200 bg-white/60 dark:border-zinc-800 dark:bg-zinc-900/40">
+        <details id="roadmap-archive" className="mt-6 rounded-lg border border-zinc-200 bg-white/60 dark:border-zinc-800 dark:bg-zinc-900/40">
           <summary className="cursor-pointer select-none px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-zinc-500 marker:text-zinc-400 dark:text-zinc-400">
             Archived — verified &amp; retired
             <span className="ml-2 tabular-nums text-zinc-400">{archive.length}</span>
@@ -200,7 +191,7 @@ export default async function RoadmapPage() {
             </p>
             <ul className="space-y-1.5">
               {archive.map((e, i) => (
-                <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <li key={i} data-spec-search={`${e.title} ${e.link} ${e.label}`.toLowerCase()} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                   <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
                   <Link href={`/dashboard/brain/${e.link}`} className="font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400">
                     {e.title}
