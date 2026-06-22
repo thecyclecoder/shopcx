@@ -64,6 +64,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Build Recover: Create PR ⏳
+
+**Spec:** [[build-recover-pr-create]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** when a build succeeds + pushes its branch but `gh pr create` fails (transient), the job goes needs_attention and the card only offers Rebuild — which discards a completed build (hit live with control-tower P1 / #185). Fix: worker retries pr-create first; the card offers **Create PR** (open the PR for the pushed branch → job completed) for the recoverable case, Rebuild stays secondary.
+
 ## Active project — Fix Ships → Re-test Origin ⏳
 
 **Spec:** [[fix-ship-retests-origin]] · **Owner:** [[../functions/platform]]
