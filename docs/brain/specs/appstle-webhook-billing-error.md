@@ -12,7 +12,7 @@ The Control Tower's Vercel error feed surfaced a **recurring `500 /api/webhooks/
 ## Verification
 - Replay a `subscription.billing-success` payload (shape from the captured incident) → the handler returns 2xx and the intended update lands (or is explicitly + correctly a no-op); no throw.
 - The Control Tower Vercel panel shows the `appstle … billing` incident **stop recurring** (occurrence count stops climbing; resolves after the recency window).
-- Negative: a genuinely-malformed/unauthenticated webhook still rejects appropriately (we didn't blanket-2xx everything).
+- ✅ Negative: a genuinely-malformed/unauthenticated webhook still rejects appropriately (we didn't blanket-2xx everything).
 
 ## Phase 1 — fix the billing-event throw + correct ack semantics ✅
 Diagnose the throw on `subscription.billing-*`, fix the handler (process correctly or ack-and-log), keep non-2xx only for retryable failures. Brain: [[../integrations/appstle]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/dunning]].
