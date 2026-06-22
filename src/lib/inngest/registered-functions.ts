@@ -54,6 +54,7 @@ import { monthlyRevenueSnapshot } from "@/lib/inngest/monthly-revenue-snapshot";
 import { metaSyncSpend, metaDailySyncCron } from "@/lib/inngest/meta-sync";
 import { metaSyncPerformance, metaPerformanceDailyCron, metaAttributionRefresh, metaScorecardsRefresh, metaDecisionEngine, metaIterationRun, metaExecuteRecommendation } from "@/lib/inngest/meta-performance";
 import { storefrontExperimentsRefresh, storefrontExperimentsRefreshCron } from "@/lib/inngest/storefront-experiments";
+import { storefrontLtvMetricsRefresh } from "@/lib/inngest/storefront-ltv-metrics";
 import { storefrontLeverDecay, storefrontLeverDecayCron } from "@/lib/inngest/storefront-lever-decay";
 import { todaySyncCron } from "@/lib/inngest/today-sync";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
@@ -158,6 +159,7 @@ export const registeredInngestFunctions = [
   portalAutoResumeCron,
   storefrontExperimentsRefresh,
   storefrontExperimentsRefreshCron,
+  storefrontLtvMetricsRefresh,
   storefrontLeverDecay,
   storefrontLeverDecayCron,
   amazonSyncOrders,

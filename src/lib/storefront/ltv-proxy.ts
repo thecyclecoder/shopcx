@@ -44,6 +44,13 @@ export const PLACEHOLDER_MARGIN_FRACTION = 0.6;
  *  bandit — should then lean conservative). */
 export const MIN_SUBS_FOR_ESTIMATE = 5;
 
+/** The proxy-weights version a metric row is computed under BEFORE the slow loop has
+ *  recalibrated once. Every `storefront_ltv_metrics` row stamps the version it used so a
+ *  recalibration is auditable and a past decision reproducible. Phase 3's reconciler
+ *  bumps this off the proxy-vs-actual error and writes the new version to the
+ *  `storefront_ltv_calibration` signal; until then it is the initial version. */
+export const INITIAL_WEIGHTS_VERSION = 1;
+
 /** Fully-refunded order statuses — excluded from realized revenue (mirrors
  *  [[customer-stats]] + [[storefront-experiment-attribution]]). */
 const REFUNDED = new Set(["refunded", "REFUNDED", "partially_refunded", "PARTIALLY_REFUNDED"]);
