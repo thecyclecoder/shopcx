@@ -52,7 +52,10 @@ create table if not exists public.storefront_optimizer_policy (
 
   -- ── authorship / legibility (agent-writable later, human for now) ────────────
   created_by text not null default 'human' check (created_by in ('agent', 'human')),
-  updated_by uuid references auth.users(id) on delete set null, -- who last edited the policy
+  -- who last edited the policy (an auth.users id). Plain uuid, NOT a FK to auth.users:
+  -- the pooler apply role lacks REFERENCES on the auth schema, and the shipped sibling
+  -- storefront tables likewise carry no FK to auth.users.
+  updated_by uuid,
   rationale text,                                       -- why this policy is set as it is (Growth legibility)
 
   created_at timestamptz not null default now(),

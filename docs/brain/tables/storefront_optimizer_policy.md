@@ -37,7 +37,7 @@ directly-editable surface, not a supersede-on-activate policy history.
 | `auto_rollback_windows` | `int` | — | default `2` · consecutive regressing windows before auto-rollback |
 | `auto_rollback_refund_spike_delta` | `numeric` | — | default `0.10` · refund-rate spike over control that rolls back (fraction) |
 | `created_by` | `text` | — | `agent` \| `human` (CHECK, default `human`) — lets the Growth director self-author later |
-| `updated_by` | `uuid` | ✓ | → `auth.users`.id · who last edited the policy |
+| `updated_by` | `uuid` | ✓ | an `auth.users`.id (plain uuid, **no FK** — the pooler apply role lacks REFERENCES on the `auth` schema) · who last edited the policy |
 | `rationale` | `text` | ✓ | why this policy is set as it is (Growth legibility) |
 | `created_at` | `timestamptz` | — | default `now()` |
 | `updated_at` | `timestamptz` | — | default `now()` |
