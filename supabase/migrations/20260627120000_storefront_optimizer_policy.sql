@@ -72,14 +72,8 @@ drop policy if exists storefront_optimizer_policy_service on public.storefront_o
 create policy storefront_optimizer_policy_service on public.storefront_optimizer_policy
   for all to service_role using (true) with check (true);
 
--- ── SEED — the Superfoods workspace: ON, scoped to Amazing Coffee, propose-and-approve ──
--- The optimizer is ON in propose-and-approve mode, scoped to Amazing Coffee, the
--- moment M4 ships: it proposes; the owner taps Build to approve each test. Resolved
--- from the product row so we don't hardcode a workspace id; idempotent.
-insert into public.storefront_optimizer_policy
-  (workspace_id, active, product_scope, auto_run_reversible, created_by, rationale)
-select p.workspace_id, true, array[p.id], false, 'human',
-       'Seed: optimizer ON in propose-and-approve mode, scoped to Amazing Coffee — proposes campaigns, owner taps Build to run each test.'
-from public.products p
-where p.id = 'ea433e56-0aa4-4b46-9107-feb11f77f533'  -- Amazing Coffee
-on conflict (workspace_id) do nothing;
+-- SEED is applied by scripts/apply-storefront-optimizer-policy-migration.ts as a
+-- separate, guarded step (so the critical table DDL is never coupled to the data
+-- seed): the Superfoods workspace → active=true, product_scope=[amazing-coffee],
+-- auto_run_reversible=false (ON in propose-and-approve mode, scoped to Amazing
+-- Coffee). Idempotent (on conflict (workspace_id) do nothing).
