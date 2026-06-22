@@ -3,6 +3,7 @@
 **Owner:** [[../functions/growth]] · **Parent:** fixes a deploy gap in [[../specs/storefront-iteration-engine]]; root cause behind [[../specs/meta-insights-ingest-empty-fix]]; surfaced via [[../specs/error-feed-monitoring]] + [[../specs/control-tower]] · **Verdict:** real-bug
 **Repair-root-cause:** `supabase/migrations/20260618140000_meta_performance_tables.sql (apply to prod via its apply-script + notify pgrst, reload schema; verifies writers in src/lib/meta/performance.ts then succeed, then re-fire meta/sync-performance for account d6d619a5)::real-bug`
 **Repair-signature:** `supabase:a83daae8cafbcf4c`
+**Repair-signature:** `inngest:d2d9c97c049e2b0b`
 
 Apply the one skipped migration so the Meta performance ingest can persist campaign/adset/ad structure and daily insights, unblocking the iteration engine's ad/adset/campaign-grain scorecards and non-degenerate ROAS.
 
