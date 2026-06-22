@@ -13,7 +13,7 @@ When a ticket is **escalated to the routine** (`escalated_at` set + `escalated_t
 - Open a routine-escalated ticket (`escalated_at` set, `escalated_to=null`) → the header shows **"🔍 Escalated → AI Investigation"**; with an in-flight triage job it reads "· triage in progress". Same badge on the list + Escalated view.
 - After the triage job runs → the ticket thread has an internal **`[AI Investigation]`** note describing what it did (proposed todos / no-quorum / mis-escalation). The note is internal-only (not customer-visible).
 - A human escalating the ticket to a person (or assigning themselves) → the badge changes from "AI Investigation" to that person; the ticket leaves the routine's queue.
-- Negative: a non-escalated ticket shows no AI-Investigation badge; the internal note is never customer-facing.
+- ✅ Negative: a non-escalated ticket shows no AI-Investigation badge; the internal note is never customer-facing.
 
 ## Phase 1 — badge + triage internal notes ✅
 The "AI Investigation" badge on ticket header/list/escalated view for `escalated_to IS NULL` + `escalated_at` (with "triage in progress" when a job is live); the `[AI Investigation]` start + outcome internal notes in `runEscalationTriageJob`. Brain: [[../dashboard/tickets]] · [[box-escalation-triage]] · [[escalate-to-routine-by-default]]. **Queue after [[escalate-to-routine-by-default]] merges** (shared ticket-UI files). Fold on ship.
