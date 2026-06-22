@@ -1,0 +1,1 @@
+- **Worker Orphan-Reaper — reset in-flight jobs left by a dead worker** · verified 2026-06-22 · → [[recipes/build-box-setup]]

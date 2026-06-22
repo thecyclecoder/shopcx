@@ -1,0 +1,1 @@
+- **Workflow actions own final ticket status — orchestrator must not reopen** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]

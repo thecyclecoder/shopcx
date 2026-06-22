@@ -47,6 +47,17 @@ RestartSec=5
 
 **Bootstrapping:** self-update ships in `builder-worker.ts` itself, so the **one last manual redeploy** (the command above) activates it; every redeploy after that is automatic.
 
+## Startup orphan-reaper (worker-orphan-reaper, shipped 2026-06)
+
+A restart — self-update (`git reset --hard origin/main` + `exit(0)`), deploy, or crash — abandons any job the old instance had **in flight** (`building`/`claimed`/`queued_resume`). The new worker only claims `queued`, so those rows sit in `building` **forever**, never completing and tripping the Control Tower's "N jobs stuck in building past 60m" alert (observed live: 7 spec-test jobs piled up across several deploys in one session). So **`reapOrphans()` runs in `main()` before the poll loop** — best-effort (wrapped so a reaper failure never blocks startup), idempotent (a clean boot with nothing orphaned is a no-op), and **cutoff-gated**: it only touches jobs `claimed_at < WORKER_STARTED_AT` (the heartbeat `started_at`), so nothing the *current* instance owns is ever mid-build-killed.
+
+Reap is **by kind**:
+- **Re-runnable / idempotent kinds** — `RERUNNABLE_KINDS` = `spec-test`, `triage-escalations`, `migration-fix`, `dev-ask`, `pr-resolve` → **reset to `queued`** (clear `claimed_at`) so they simply re-run. No work lost.
+- **Work-producing kinds** — `build`, `plan`, `fold`, `product-seed`, `spec-chat`, `ticket-improve` → **mark `failed`** with `error="orphaned by worker restart"` (NOT re-queued — a restart may have left a half-pushed branch, and a blind re-run could double-push). The failed-builds callout on [[../dashboard/roadmap]] then surfaces it; if a branch *was* pushed, [[build-recover-pr-create]]'s **Create PR** recovers the completed work — no rebuild.
+- Logs the reap counts by kind (`[reaper] reaped N orphan(s) … re-queued: …; failed: …`, or `0 reaped — no orphaned in-flight jobs from a previous instance` on a clean boot) so a restart's cleanup is visible, not silent.
+
+`RERUNNABLE_KINDS` is the **single shared source of truth** — the self-update `sacrosanctActive` check (lanes a restart may interrupt) reads the same constant, so "safe to re-run" can't drift between reaper and self-update. No migration (free-text `kind`, existing [[../tables/agent_jobs]] columns). This is the standing replacement for the manual `requeue-stale` ([[manage-the-build-queue]]) after a restart, and removes the stuck-jobs false-positive source the [[../dashboard/control-tower]] flagged.
+
 ## Provisioning (how it was built — to reproduce)
 
 1. **Tailscale.** `curl -fsSL https://tailscale.com/install.sh | sh` → `tailscale up` (authorize in the admin console). Put the Mac + phone on the same tailnet (`dylanralston@gmail.com`).
