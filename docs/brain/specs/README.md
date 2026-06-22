@@ -128,6 +128,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[fold-guard-live-build]] (platform) — a spec (control-tower-escalation-idle-grace) was folded+archived while a needs_input build was live → orphaned build showed as "paused" on the box with a 404 link. Guard: the fold path refuses/defers folding a spec with a non-terminal job; archiving a spec cancels its orphaned jobs; the box callout tolerates a missing spec. Matters more once auto-fold runs.
 
+## Active project — dirty-PR-resolver duplicate detection ⏳
+
+[[dirty-pr-resolver-duplicate-detection]] (platform) — storefront-lever-importance-memory built twice (account-switch recovery): #252 merged, #249 left a duplicate that's permanently CONFLICTING (work already on main), so the resolver spawned 9 unresolvable pr-resolve jobs in a loop (burning Max tokens). Fix: resolver closes a PR whose spec already merged via a sibling (instead of looping); dedupe build/PR-create + requeue on a merged build PR per spec; cap pr-resolve retries with owner surfacing.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
