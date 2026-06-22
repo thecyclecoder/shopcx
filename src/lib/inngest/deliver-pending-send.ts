@@ -32,7 +32,17 @@ export const deliverPendingSends = inngest.createFunction(
       return data || [];
     });
 
-    if (messages.length === 0) return { delivered: 0 };
+    if (messages.length === 0) {
+      // Idle tick: still beat so Control Tower reads green. The heartbeat
+      // means "Inngest invoked me", independent of whether there was work
+      // (cron-heartbeat-on-idle-tick spec). Without this, a healthy-but-idle
+      // cron never writes a beat and trips monitor.ts never_fired.
+      const result = { delivered: 0 };
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("deliver-pending-sends", { ok: true, produced: result });
+      });
+      return result;
+    }
 
     let delivered = 0;
     let cancelled = 0;

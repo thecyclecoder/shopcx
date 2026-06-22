@@ -16,6 +16,8 @@ SMS campaign send pipeline. textCampaignScheduled (create recipients + reserve s
 - **Retries:** 3
 - **Concurrency:** `concurrency: [{ limit: 80 }]`
 
+**Control Tower heartbeat fires on every tick, including idle ones.** The `if (due.length === 0)` early-return emits its own `emitCronHeartbeat("marketing-text-campaign-send-tick", { produced: { sent: 0 } })` before returning, so a healthy-but-idle cron reads green (`produced:{sent:0}`) instead of tripping monitor `never_fired`. The heartbeat means "Inngest invoked me", not "there was work" ([[../specs/cron-heartbeat-on-idle-tick]]).
+
 ## Per-recipient shortlink format (REQUIRED) — `superfd.co/{LINKCODE}/{CUSTOMERCODE}`
 
 The `{shortlink}` token in `message_body` expands **per recipient** to two segments, NOT one:

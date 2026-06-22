@@ -406,7 +406,17 @@ export const textCampaignSendTick = inngest.createFunction(
       });
     }
 
-    if (due.length === 0) return { sent: 0 };
+    if (due.length === 0) {
+      // Idle tick: still beat so Control Tower reads green. The heartbeat
+      // means "Inngest invoked me", independent of whether there was work
+      // (cron-heartbeat-on-idle-tick spec). Without this, a healthy-but-idle
+      // cron never writes a beat and trips monitor.ts never_fired.
+      const result = { sent: 0 };
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("marketing-text-campaign-send-tick", { ok: true, produced: result });
+      });
+      return result;
+    }
 
     // 12-hour rate-limit enforcement moved INTO the per-recipient
     // `claim-${id}` step below. The previous design built an
