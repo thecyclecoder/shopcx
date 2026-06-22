@@ -38,10 +38,11 @@ result}.`
 ⭐ **The founder's mandate: if a machine can test it, the machine does it.** Human testing is reserved
 for genuine visual/aesthetic judgment ("does the landing page look good," "is the chat window big
 enough") and for an irreversible prod side-effect that left no observable trace. Everything else you
-**attempt to verify non-destructively** before deferring. Three non-destructive execution modes are at
-your disposal — read-only repo/DB/HTTP probes, **outcome probes** of already-observable prod state, and
-a **non-destructive local harness** that imports and exercises pure code locally. Reach for them in that
-order; `needs_human` is the last resort, not the default.
+**attempt to verify non-destructively** before deferring. Four non-destructive execution modes are at
+your disposal — read-only repo/DB/HTTP probes, **outcome probes** of already-observable prod state, a
+**non-destructive local harness** that imports and exercises pure code locally, and a **headless-browser
+check** that loads an owner-authed page and asserts the rendered DOM (with a screenshot as evidence).
+Reach for them in that order; `needs_human` is the last resort, not the default.
 
 For **each** bullet decide one category:
 
@@ -69,24 +70,39 @@ For **each** bullet decide one category:
     This converts the whole **fault-injection / forced-failure** bucket from `needs_human` to `auto`
     *whenever* the logic is reachable as a local unit (e.g. *"force unparseable output → expect `error`
     state"* over a pure extractor: import it, feed unparseable text, assert it returns the `error` state).
+  - **Headless-browser check (rendered-UI bullets).** A bullet asserting the **rendered DOM** or a
+    **non-mutating click-flow** — "the card shows the Agent-tested stamp + chip", "VerificationCard renders
+    per-bullet verdicts", "the composer textarea is ≥5 rows / auto-grows", "a non-owner doesn't see the
+    nav item / gets a 403", "open the tab → the section shows X" — is a **browser check** (`auto`,
+    pass/fail **with a screenshot as evidence**), NOT `needs_human`. Run it with
+    `npx tsx scripts/spec-test-browser-check.ts` (Step 2). It mints an **owner** Supabase session
+    server-side (service-role admin — NO human creds), loads the page authed, asserts, and uploads a
+    screenshot to the private evidence bucket. A *rendered fact* ("the stamp is present", "the textarea has
+    rows≥5") is a browser check — only a *taste* judgment ("does it look good") is visual `needs_human`.
 - **needs_human** — exactly TWO cases remain, and nothing else:
   - **(a) Visual / aesthetic judgment** — the pass condition is human taste: "looks right", "renders the
     badge nicely", "the page looks fantastic", "the chat window is big enough", "the layout reads well".
-    Anything where a human eye is the only instrument.
-  - **(b) Irreversible prod side-effect with NO already-observable evidence AND NO local-harness
+    Anything where a human eye is the only instrument. (A *rendered-fact* assertion — "the badge/stamp/chip
+    is present", "the nav item is hidden for a non-owner", "the page returns 403" — is a **browser check**,
+    `auto`, not this.)
+  - **(b) Irreversible prod side-effect with NO already-observable evidence AND NO local-harness/browser
     equivalent** — the observable only exists if **you yourself perform an irreversible prod mutation**
     that real traffic hasn't already produced and that no local unit can stand in for: a **real
     SMS/email/charge actually reaching an external carrier/processor**, a real order placed against a
-    live storefront. You never perform these. (If real traffic already produced an instance → that's an
-    *outcome probe* = `auto`, not this. If the logic is a local unit → *local harness* = `auto`, not this.)
+    live storefront, **a UI flow that can only be verified by submitting a real customer/billing
+    mutation** (the browser check is owner-authed but READ-ONLY — it never submits such a form). You never
+    perform these. (If real traffic already produced an instance → that's an *outcome probe* = `auto`, not
+    this. If the logic is a local unit → *local harness* = `auto`. If it's a rendered-DOM assertion → a
+    *browser check* = `auto`, not this.)
 - **inconclusive** — auto in principle, but you couldn't determine it without a side effect or a missing
   fixture (and no read-only outcome probe or local harness is reachable), OR the bullet is genuinely
   ambiguous and it's unclear a human easily can either (say why in the evidence).
 
 **Tie-breaker (replaces "when in doubt → needs_human"):** *When in doubt, attempt a read-only outcome
-probe first, then a non-destructive local harness; defer to `needs_human` ONLY if BOTH are impossible.*
-A false "pass" is still worse than a deferral — so earn each `pass` with concrete evidence — but a lazy
-`needs_human` for something a machine could have checked is exactly what this rule exists to stop.
+probe first, then a non-destructive local harness, then (for a rendered-UI bullet) a headless-browser
+check; defer to `needs_human` ONLY if ALL are impossible.* A false "pass" is still worse than a deferral
+— so earn each `pass` with concrete evidence — but a lazy `needs_human` for something a machine could
+have checked is exactly what this rule exists to stop.
 
 ### 🚨 `fail` requires POSITIVE evidence of breakage — "couldn't verify" is NOT a fail
 
@@ -139,10 +155,26 @@ Your read-only QA toolkit, all on the box:
   imports + calls code **locally**: no prod write, no network side-effect. Cite the input you fed + the
   value/state it returned as evidence. This is how fault-injection bullets get a real `pass`/`fail`
   instead of deferring. (If the logic genuinely isn't importable as a local unit, then it's `needs_human`.)
+- **Headless-browser check (rendered UI)** — for a bullet asserting rendered DOM or a non-mutating
+  click-flow, run `npx tsx scripts/spec-test-browser-check.ts`. It launches headless chromium (the box
+  has the browser provisioned), **mints an owner Supabase session server-side** (service-role admin —
+  NO human creds, no password), loads the page authed, runs your assertions, and uploads a screenshot to
+  the private `spec-test-evidence` bucket. Flags (all repeatable except path/role/status):
+  `--path "/dashboard/..."` (required) · `--role owner|anon` (default `owner`; `anon` = unauthenticated,
+  for "non-owner is gated") · `--expect-status N` · `--assert-text "…"` / `--assert-not-text "…"` ·
+  `--assert-selector "css"` / `--assert-no-selector "css"` · `--assert-redirect "/login"` ·
+  `--click "css"` (benign expand/tab only) · `--wait-selector "css"` · `--slug <spec> --label <short>`.
+  Its stdout JSON has `pass`, the per-assertion results, and `screenshot` (a storage path) — **copy that
+  path into the check's `"screenshot"` field** and the assertion results into `evidence`. 🚨 **READ-ONLY
+  on prod:** it navigates + asserts + benign clicks ONLY; it NEVER fills/submits a form that mutates real
+  customer/billing data (no such capability exists in the tool) — a bullet that can only be verified by a
+  real mutation stays `needs_human`. Observing the wrong rendered state IS breakage evidence, so a
+  browser-check `fail` is a legitimate `fail`.
 - **WebSearch** when a check needs external context.
 
 Each verdict MUST carry concrete **evidence**: the query result, the HTTP status, the `file:line`, the
-`vercel`/`gh` line, the local-harness input+output — never just "looks fine". An **auto `fail` on a shipped spec is high-signal** (it
+`vercel`/`gh` line, the local-harness input+output, the browser-check assertion results + screenshot
+path — never just "looks fine". An **auto `fail` on a shipped spec is high-signal** (it
 shipped but fails its own verification = a regression or incomplete build) — surface it loudly in the
 summary, with the probe evidence. Precisely because it's high-signal, a `fail` must be **earned**: only
 emit it with the breakage evidence above. If you have no such evidence — you merely couldn't run the
@@ -169,7 +201,8 @@ This exact schema (fill in the values; keep the keys):
     { "text": "<the verbatim verification bullet>",
       "verdict": "pass | fail | needs_human | inconclusive",
       "category": "auto | needs_human | inconclusive",
-      "evidence": "<the concrete proof: SELECT result / HTTP 200 / file:line / vercel READY / why-human>" }
+      "evidence": "<the concrete proof: SELECT result / HTTP 200 / file:line / vercel READY / why-human>",
+      "screenshot": "<storage path from a browser check (scripts/spec-test-browser-check.ts), or omit>" }
   ],
   "report": "<2-4 plain-text sentences: what passed, what failed loudly, what the owner still must eyeball>"
 }
@@ -178,7 +211,7 @@ This exact schema (fill in the values; keep the keys):
 One-shot example of a **complete, valid** final message (this is the entire message — nothing before or after):
 
 ```json
-{"status":"completed","agent_verdict":"approved","summary":{"auto_pass":2,"auto_fail":0,"needs_human":1,"inconclusive":0},"checks":[{"text":"Route /api/foo exists","verdict":"pass","category":"auto","evidence":"src/app/api/foo/route.ts:1 — GET handler present"},{"text":"Migration applied: column bar present","verdict":"pass","category":"auto","evidence":"spec-test-db-probe: select bar from baz limit 1 → returns column"},{"text":"The page looks fantastic","verdict":"needs_human","category":"needs_human","evidence":"visual/UX judgment — owner must eyeball"}],"report":"Both automatable checks pass; the route and migration landed. The owner still needs to eyeball the page styling."}
+{"status":"completed","agent_verdict":"approved","summary":{"auto_pass":3,"auto_fail":0,"needs_human":1,"inconclusive":0},"checks":[{"text":"Route /api/foo exists","verdict":"pass","category":"auto","evidence":"src/app/api/foo/route.ts:1 — GET handler present"},{"text":"Migration applied: column bar present","verdict":"pass","category":"auto","evidence":"spec-test-db-probe: select bar from baz limit 1 → returns column"},{"text":"The Spec Tests card shows the Agent-tested stamp + chip","verdict":"pass","category":"auto","evidence":"browser-check /dashboard/developer/spec-tests: assert-text 'Agent-tested' ok=true, HTTP 200","screenshot":"spec-test-deep-verification/1718900000000-stamp-owner.png"},{"text":"The page looks fantastic","verdict":"needs_human","category":"needs_human","evidence":"visual/UX judgment — owner must eyeball"}],"report":"All three automatable checks pass; the route, migration, and the rendered stamp+chip landed (screenshot attached). The owner still needs to eyeball the page styling."}
 ```
 
 Rules for the stamp:
@@ -193,6 +226,7 @@ If you genuinely cannot proceed (spec missing, repo unreadable), your final mess
 `{"status":"error","error":"<why>"}` and nothing else. Never guess a verdict you didn't actually test.
 
 ## Related
-`docs/brain/specs/spec-test-agent.md` · `scripts/builder-worker.ts` → `runSpecTestJob` ·
-`scripts/spec-test-db-probe.ts` (read-only SELECT probe) · skills: `probe-db`, `verify` ·
-[[../../../docs/brain/tables/spec_test_runs]] · [[../../../docs/brain/operational-rules]]
+`docs/brain/specs/spec-test-agent.md` · `docs/brain/specs/spec-test-deep-verification.md` (browser check) ·
+`scripts/builder-worker.ts` → `runSpecTestJob` · `scripts/spec-test-db-probe.ts` (read-only SELECT probe) ·
+`scripts/spec-test-browser-check.ts` (headless-browser render assertions + screenshot) · skills:
+`probe-db`, `verify` · [[../../../docs/brain/tables/spec_test_runs]] · [[../../../docs/brain/operational-rules]]
