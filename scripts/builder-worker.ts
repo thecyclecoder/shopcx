@@ -153,7 +153,9 @@ const MIGRATION_DRIFT_INTERVAL_MS = 30 * 60 * 1000;
 let lastMigrationDriftCheck = 0; // 0 ⇒ run on the first poll so there's a beat right away.
 let migrationDriftInFlight = false;
 
-type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "completed" | "failed" | "needs_attention";
+// `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
+// wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
+type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "blocked_on_usage" | "completed" | "failed" | "needs_attention";
 // A planner-proposed spec branch, carried on a type:'spec' action (goal-decomposition-engine).
 interface ProposedSpec {
   slug: string;
@@ -195,6 +197,9 @@ interface Job {
   kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair";
   status: JobStatus;
   claude_session_id: string | null;
+  // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
+  // cross-account `claude --resume` always fails "No conversation found" (box-multi-account-failover P1).
+  claude_session_config_dir: string | null;
   instructions: string | null;
   created_by: string | null;
   answers: { id: string; answer: string }[];
@@ -252,7 +257,147 @@ function ensureGitIdentity() {
 // these in its own env (from the systemd EnvironmentFile) to execute APPROVED actions.
 const SECRET_RE = /SERVICE_ROLE|PASSWORD|SECRET|_TOKEN|PRIVATE|BRAINTREE|TWILIO|RESEND|AVALARA|EASYPOST|KLAVIYO|META_|ANTHROPIC|OPENAI|SUPABASE_DB/i;
 
-async function runClaude(prompt: string, sessionId: string | null, cwd: string) {
+// ── Multi-account round-robin + usage-cap failover (box-multi-account-failover Phase 1) ──────────
+// The box runs `claude` on Max (no API key). A single Max account hits a 5-hour usage wall; with ONE
+// account a burst of builds caps it and EVERYTHING fails until the reset (the 2026-06-22 "12 builds
+// failed at once"). So the box keeps a POOL of CLAUDE_CONFIG_DIRs — each an isolated, once-logged-in
+// Max account — and:
+//  • round-robins NEW sessions across healthy accounts (load splits ~50/50 → ~2× sustained throughput,
+//    each account hits its wall ~2× slower) — the main, proactive win;
+//  • on a usage-cap failure (distinct from a 529/overloaded transient, which the existing retry owns)
+//    PULLS that account from rotation until its estimated reset, concentrating work on the healthy one(s);
+//  • PINS every resume to the account that CREATED its session — a cross-account `claude --resume` is a
+//    guaranteed "No conversation found" (learned + proven 2026-06-22); a build whose owning account is
+//    capped starts FRESH on a healthy account instead (idempotent — it re-reads the spec);
+//  • when ALL accounts are capped, parks the job `blocked_on_usage` (auto-resumes at the soonest reset),
+//    never a hard fail / manual rebuild.
+// State is in-memory: capped-state re-derives from live failures after a restart, and `blocked_on_usage`
+// rows persist in the DB (re-queued by requeueBlockedOnUsage once an account frees up). The chosen config
+// dir is persisted per-job (claude_session_config_dir) so a later resume knows which account to pin to.
+const ACCOUNT_POOL: string[] = (
+  process.env.CLAUDE_CONFIG_DIRS || "/home/builder/.claude,/home/builder/.claude-personal"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+// Max's wall resets ~5h after first use; the CLI doesn't hand us the exact reset, so a capped account
+// rejoins rotation after this conservative cooldown (the spec's "reset-time estimate").
+const USAGE_CAP_COOLDOWN_MS = 5 * 60 * 60 * 1000;
+
+interface AccountState {
+  configDir: string;
+  inFlight: number;       // builds currently running on this account — least-loaded wins the round-robin
+  lastAssignedAt: number; // tie-break: least-recently-used
+  cappedUntil: number;    // 0 = healthy; else epoch-ms until which it's pulled from rotation
+}
+const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0 }));
+const accountByDir = new Map(accounts.map((a) => [a.configDir, a]));
+
+function healthyAccounts(now: number): AccountState[] {
+  return accounts.filter((a) => a.cappedUntil <= now);
+}
+function allAccountsCapped(now: number): boolean {
+  return accounts.length > 0 && healthyAccounts(now).length === 0;
+}
+function soonestReset(now: number): number {
+  const capped = accounts.filter((a) => a.cappedUntil > now);
+  return capped.length ? Math.min(...capped.map((a) => a.cappedUntil)) : now;
+}
+// Least-recently-used / round-robin: among HEALTHY accounts pick the one with the fewest in-flight
+// builds, tie-broken by least-recently-assigned. NEW sessions only (never reassigns a pinned resume).
+function pickNewSessionAccount(now: number): AccountState | null {
+  const healthy = healthyAccounts(now);
+  if (!healthy.length) return null;
+  healthy.sort((a, b) => a.inFlight - b.inFlight || a.lastAssignedAt - b.lastAssignedAt);
+  return healthy[0];
+}
+function markAccountCapped(dir: string, now: number) {
+  const a = accountByDir.get(dir);
+  if (a) a.cappedUntil = now + USAGE_CAP_COOLDOWN_MS;
+}
+// Distinguish a Max usage-WALL (pull the account from rotation) from a transient 529/overloaded (which
+// the existing retry owns — NOT a cap, NOT an account switch). Conservative: a 529/overloaded mention
+// short-circuits to "not a cap" so a transient is never mistaken for the wall.
+function isUsageCapError(text: string): boolean {
+  const t = (text || "").toLowerCase();
+  if (/\b529\b|overloaded/.test(t)) return false; // transient — existing retry path
+  return /usage limit reached|usage limit|limit reached|limit will reset|out of usage|quota (?:exceeded|reached)|reached your usage limit|5-? ?hour limit/.test(t);
+}
+
+// The account decision for a job at dispatch time. `run` → use this config dir (and this session, which
+// is null when starting fresh); `blocked` → every account is capped, park `blocked_on_usage`.
+type AccountDecision =
+  | { kind: "run"; configDir: string; sessionId: string | null; startedFresh: boolean }
+  | { kind: "blocked"; resetAt: number };
+
+// Resolve which account a build/plan job runs under. NEW session → round-robin/LRU. RESUME → PIN to the
+// session's owning account (stored claude_session_config_dir); if that account is capped, either start
+// fresh on a healthy account (canStartFresh — builds are idempotent) or, when the job can't tolerate a
+// fresh start (a plan resume authoring approved specs), wait (blocked_on_usage).
+function resolveAccountForJob(
+  job: Pick<Job, "claude_session_id" | "claude_session_config_dir">,
+  isResume: boolean,
+  canStartFresh: boolean,
+): AccountDecision {
+  const now = Date.now();
+  if (isResume && job.claude_session_id) {
+    const owner = job.claude_session_config_dir ? accountByDir.get(job.claude_session_config_dir) : undefined;
+    if (owner && owner.cappedUntil <= now) {
+      return { kind: "run", configDir: owner.configDir, sessionId: job.claude_session_id, startedFresh: false }; // healthy owner → PIN
+    }
+    // Owning account capped (or unknown — a legacy session recorded before pinning). A cross-account
+    // `--resume` is a guaranteed "No conversation found", so never try it.
+    if (!canStartFresh) {
+      // The job can't be restarted from scratch — wait for the owning account (or, if it's gone from the
+      // pool, the soonest reset). Parked, auto-resumes.
+      const resetAt = owner ? owner.cappedUntil : soonestReset(now);
+      return { kind: "blocked", resetAt: resetAt > now ? resetAt : now + USAGE_CAP_COOLDOWN_MS };
+    }
+    const fresh = pickNewSessionAccount(now);
+    if (!fresh) return { kind: "blocked", resetAt: soonestReset(now) };
+    return { kind: "run", configDir: fresh.configDir, sessionId: null, startedFresh: true };
+  }
+  // NEW session — round-robin / LRU across healthy accounts.
+  const acct = pickNewSessionAccount(now);
+  if (!acct) return { kind: "blocked", resetAt: soonestReset(now) };
+  return { kind: "run", configDir: acct.configDir, sessionId: null, startedFresh: false };
+}
+
+// Re-queue jobs parked `blocked_on_usage` once ANY account is healthy again. A job that had a session
+// goes back to `queued_resume` (resolveAccountForJob re-pins / starts fresh on claim); a fresh job →
+// `queued`. Best-effort — a sweep failure must never break the poll loop.
+async function requeueBlockedOnUsage() {
+  const now = Date.now();
+  if (allAccountsCapped(now)) return; // nothing healthy yet — leave them parked until a reset
+  const { data, error } = await db
+    .from("agent_jobs")
+    .select("id, claude_session_id")
+    .eq("status", "blocked_on_usage")
+    .limit(100);
+  if (error || !data?.length) return;
+  for (const r of data as { id: string; claude_session_id: string | null }[]) {
+    await update(r.id, { status: r.claude_session_id ? "queued_resume" : "queued", error: null });
+  }
+  console.log(`[multi-account] re-queued ${data.length} blocked_on_usage job(s) — a healthy account is available`);
+}
+
+// Shared usage-cap handler for the build/plan pool (box-multi-account-failover Phase 1): pull the
+// account from rotation, then either re-dispatch on a healthy account (back to queued_resume if a session
+// exists so the branch/PR is reused, else queued) or park blocked_on_usage when ALL accounts are capped.
+// Returns true once it has set the job's status — the caller should then return.
+async function handlePoolUsageCap(jobId: string, tag: string, configDir: string, hadSession: boolean, logTail: string): Promise<boolean> {
+  markAccountCapped(configDir, Date.now());
+  if (allAccountsCapped(Date.now())) {
+    await update(jobId, { status: "blocked_on_usage", error: "Max usage wall hit on all accounts — auto-resumes at reset", log_tail: logTail });
+    console.warn(`${tag} usage cap on ${configDir} → all accounts capped → blocked_on_usage`);
+  } else {
+    await update(jobId, { status: hadSession ? "queued_resume" : "queued", error: null, log_tail: logTail });
+    console.warn(`${tag} usage cap on ${configDir} → re-dispatching on a healthy account`);
+  }
+  return true;
+}
+
+async function runClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -261,6 +406,11 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string) 
     if (SECRET_RE.test(k)) continue;
     env[k] = v;
   }
+  // Multi-account: point the `claude` CLI at the chosen account's isolated credentials/config dir. An
+  // ALIAS can't reach a spawned process (no shell), so the worker must set CLAUDE_CONFIG_DIR in the env
+  // object itself. Unset → the CLI's default (~/.claude = pool[0]) — back-compat for callers not yet
+  // wired into the pool (box-multi-account-failover Phase 1).
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
   const base = sessionId ? ["--resume", sessionId] : [];
   // stream-json (not json): the build must emit output continuously while it works so the hang
   // detector can tell "actively building" from "stuck". Plain json buffers the whole run and prints
@@ -495,7 +645,7 @@ const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations"
 const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Jobs whose worktree is sacrosanct — a live or paused build the owner may still resume. Anything else
 // (completed/failed/needs_attention, i.e. terminal) or a job that no longer exists ⇒ the tree is cruft.
-const ACTIVE_JOB_STATUSES = new Set<JobStatus>(["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"]);
+const ACTIVE_JOB_STATUSES = new Set<JobStatus>(["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"]);
 
 // Parse `git worktree list --porcelain` → [{ path, branch }]. branch is the short name (refs/heads/
 // stripped) or null when detached. Tolerates odd/empty git output by returning what it parsed.
@@ -903,6 +1053,26 @@ async function runPlanJob(job: Job) {
   const wt = join(BUILDS_DIR, job.id);
   console.log(`${tag} ${isResume ? "resuming (authoring approved specs)" : "planning"} (job ${job.id})`);
 
+  // Multi-account (box-multi-account-failover Phase 1): plan shares the build/plan pool, so round-robin a
+  // NEW plan across healthy accounts and PIN a resume to its session's owning account. A plan RESUME
+  // authoring approved specs is NOT idempotent (a fresh session would re-propose, not author), so it can't
+  // start fresh — if its owning account is capped it WAITS (blocked_on_usage) for that account.
+  const decision = resolveAccountForJob(job, isResume, /* canStartFresh */ false);
+  if (decision.kind === "blocked") {
+    await update(job.id, {
+      status: "blocked_on_usage",
+      error: `Max account capped — plan auto-resumes after ~${new Date(decision.resetAt).toISOString()}`,
+      log_tail: `parked blocked_on_usage; account reset ~${new Date(decision.resetAt).toISOString()}`,
+    });
+    console.warn(`${tag} owning account capped → blocked_on_usage (reset ~${new Date(decision.resetAt).toISOString()})`);
+    return;
+  }
+  const configDir = decision.configDir;
+  const sessionId = decision.sessionId;
+  const chosenAccount = accountByDir.get(configDir)!;
+  chosenAccount.inFlight++;
+  chosenAccount.lastAssignedAt = Date.now();
+
   sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]);
@@ -924,8 +1094,12 @@ async function runPlanJob(job: Job) {
         `SELF-SEQUENCING (goal-decomposition-encodes-blockers): every proposed branch MUST declare its prerequisites as \`blocked_by\`: a (possibly empty) list of the slugs it depends on — each slug MUST reference another proposed spec in THIS tree or an already-existing spec under docs/brain/specs/. The graph MUST be acyclic (no spec blocks itself, directly or transitively). Foundation specs that nothing precedes have \`blocked_by: []\`; a spec that needs a framework/memory/metric built first lists those slugs. Do NOT over-serialize independent branches — only list a real build-order dependency. The approved tree becomes self-sequencing: only unblocked specs build immediately, dependents auto-queue as their blockers ship.`,
         `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","summary":"<title>","preview":"<intent>\\n\\nGap: <brain citation>","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…","blocked_by":["<sibling-or-existing-slug>"]}}]} | {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id":"q1","q":"…"}]}.`,
       ].join("\n");
-      const { session, resultText, isError } = await runClaude(prompt, null, wt);
-      if (session) await update(job.id, { claude_session_id: session });
+      const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt, configDir);
+      if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
+      if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
+        await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
+        return;
+      }
       const parsed = parseStatus(resultText);
       console.log(`${tag} planner finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
@@ -1012,8 +1186,12 @@ async function runPlanJob(job: Job) {
       `Final message = ONLY {"status":"completed","summary":"authored N specs: …"} (or {"status":"needs_input","questions":[…]} only if a spec is genuinely under-specified).`,
     ].join("\n");
 
-    const { session, resultText, isError } = await runClaude(prompt, job.claude_session_id, wt);
-    if (session) await update(job.id, { claude_session_id: session });
+    const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt, configDir);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
+    if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
+      await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
+      return;
+    }
     const parsed = parseStatus(resultText);
     console.log(`${tag} authoring finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
@@ -1083,6 +1261,7 @@ async function runPlanJob(job: Job) {
     });
     console.log(`${tag} ✓ authored ${approved.length} specs → queued ${queuedSlugs.length} builds`);
   } finally {
+    chosenAccount.inFlight--; // release the account's round-robin load slot
     sh("git", ["worktree", "remove", "--force", wt]);
   }
 }
@@ -3654,6 +3833,32 @@ async function runJob(job: Job) {
     }
   }
 
+  // Multi-account (box-multi-account-failover Phase 1): pick the Max account this run uses. A NEW build
+  // round-robins across healthy accounts; a RESUME pins to its session's owning account, or starts FRESH
+  // on a healthy account if that one is capped (a build is idempotent — it re-reads the spec). If EVERY
+  // account is capped, park `blocked_on_usage` (auto-resumes at reset) instead of building.
+  const decision = resolveAccountForJob(job, isResume, /* canStartFresh */ true);
+  if (decision.kind === "blocked") {
+    await update(job.id, {
+      status: "blocked_on_usage",
+      error: `all ${ACCOUNT_POOL.length} Max account(s) at the usage wall — auto-resumes after ~${new Date(decision.resetAt).toISOString()}`,
+      log_tail: `parked blocked_on_usage; soonest account reset ~${new Date(decision.resetAt).toISOString()}`,
+    });
+    console.warn(`${tag} all accounts capped → blocked_on_usage (reset ~${new Date(decision.resetAt).toISOString()})`);
+    return;
+  }
+  const configDir = decision.configDir;
+  let sessionId = decision.sessionId; // the claude session to --resume; null on a fresh / started-fresh run
+  if (decision.startedFresh) {
+    // Owning account capped → sacrifice the session context (branch WIP persists) and start fresh on a
+    // healthy account. Clear the stored session + dir so this becomes a new session under `configDir`.
+    await update(job.id, { claude_session_id: null, claude_session_config_dir: null });
+    console.warn(`${tag} resume's owning account capped → starting fresh on ${configDir}`);
+  }
+  const chosenAccount = accountByDir.get(configDir)!;
+  chosenAccount.inFlight++;
+  chosenAccount.lastAssignedAt = Date.now();
+
   // Set up the worktree (its own dir + branch).
   sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
@@ -3697,7 +3902,9 @@ async function runJob(job: Job) {
       resumeBits.push(`Already-applied gated actions — treat as SETTLED, do NOT re-request them: ${settledActions.map((a) => a.cmd).join("; ")}`);
     }
 
-    const prompt = isResume
+    // `isResume && sessionId`: a started-fresh run (owning account was capped → sessionId cleared) has no
+    // prior session to "continue", so it uses the FRESH prompt and re-reads the spec from the branch WIP.
+    const prompt = isResume && sessionId
       ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
       : [
           `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
@@ -3706,9 +3913,22 @@ async function runJob(job: Job) {
           `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}. If you make NO file edits (nothing to build / already implemented), still return {"status":"completed","summary":"…","no_changes_reason":"why nothing changed"} — never claim done with no changes and no reason.`,
         ].join("\n");
 
-    const { session, resultText, isError, raw } = await runClaude(prompt, job.claude_session_id, wt);
+    const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt, configDir);
     const logTail = raw.slice(-2000);
-    if (session) await update(job.id, { claude_session_id: session });
+    // Persist the session AND its owning account so a later resume can pin to it (never cross-account).
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
+
+    // Usage-cap failover (box-multi-account-failover Phase 1): a Max usage-WALL failure (NOT a transient
+    // 529/overloaded — that's the existing retry) pulls this account from rotation. If a healthy account
+    // remains, re-dispatch (resolveAccountForJob picks it / starts fresh next claim); else park
+    // blocked_on_usage. Never a hard fail — the account rejoins after its reset.
+    // A session pinned to the now-capped account can't resume there; passing `session` as hadSession keeps
+    // it as queued_resume so the branch/PR is reused, and resolveAccountForJob starts fresh on a healthy
+    // account at re-claim.
+    if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
+      await handlePoolUsageCap(job.id, tag, configDir, !!session, logTail);
+      return;
+    }
 
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -3864,6 +4084,7 @@ async function runJob(job: Job) {
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
   } finally {
+    chosenAccount.inFlight--; // release the account's round-robin load slot
     // Always tear down the worktree — the branch is pushed, so a resume recreates one.
     sh("git", ["worktree", "remove", "--force", wt]);
   }
@@ -3961,6 +4182,14 @@ async function main() {
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
   for (;;) {
     try {
+      // Multi-account (box-multi-account-failover Phase 1): revive any job parked `blocked_on_usage` once
+      // an account has reset — flip it back to queued/queued_resume so the lanes below re-claim it. No
+      // manual re-queue / rebuild. Best-effort.
+      try {
+        await requeueBlockedOnUsage();
+      } catch (e) {
+        console.error("[multi-account] blocked_on_usage requeue failed (continuing):", e instanceof Error ? e.message : e);
+      }
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
       while (countFold() < MAX_FOLD) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold"] });

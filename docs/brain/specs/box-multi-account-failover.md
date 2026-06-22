@@ -30,8 +30,19 @@
 - The Control Tower shows per-account load + surfaces an all-capped state; a cap/failover event is logged.
 - Negative: with one healthy account, builds run normally on it (no spurious switching / no false cap).
 
-## Phase 1 — round-robin assignment + usage-cap rotation + session pinning in the worker ⏳
+## Phase 1 — round-robin assignment + usage-cap rotation + session pinning in the worker ✅
 Account pool + least-recently-used/round-robin `CLAUDE_CONFIG_DIR` selection **for new sessions only**; **persist the session's owning config dir** (`claude_session_config_dir`) and **pin every resume to it** (never cross-account `--resume`); usage-cap detection (vs 529-transient) pulls an account from rotation; a resume whose account is capped starts fresh (clear session + stored dir); `blocked_on_usage` auto-resuming state when all capped. Brain: [[../recipes/build-the-box]] (if present) · [[../operational-rules]] · [[control-tower]].
+
+**Shipped (worker — `scripts/builder-worker.ts`):**
+- **Account pool** `ACCOUNT_POOL` from env `CLAUDE_CONFIG_DIRS` (comma-separated; default `/home/builder/.claude,/home/builder/.claude-personal`), each an isolated once-logged-in Max account. In-memory `AccountState[]` tracks per-account `inFlight` / `lastAssignedAt` / `cappedUntil`.
+- **Round-robin / LRU** `pickNewSessionAccount()` — fewest in-flight, tie-broken by least-recently-used; used for NEW sessions only.
+- **`runClaude(prompt, sessionId, cwd, configDir?)`** sets `CLAUDE_CONFIG_DIR` in the spawned env (an alias can't reach a spawned process). Unset → the CLI default (`~/.claude` = pool[0]) for callers not yet wired (dev-ask / pr-resolve — see boundary below).
+- **`resolveAccountForJob(job, isResume, canStartFresh)`** — NEW → round-robin; RESUME → **pin** to the session's owning `claude_session_config_dir`. If the owner is capped: a **build** (`canStartFresh=true`) starts fresh on a healthy account (clears `claude_session_id` + stored dir, reuses the branch WIP); a **plan resume** (`canStartFresh=false`, authoring approved specs is not idempotent) **waits** (`blocked_on_usage`). All capped → `blocked_on_usage`.
+- **Persist owning account:** every `claude_session_id` write also writes `claude_session_config_dir = configDir` (new column).
+- **Usage-cap vs transient:** `isUsageCapError()` matches Max usage-wall phrasing and **short-circuits to false on `529`/`overloaded`** (the existing retry owns transients). On a cap: `handlePoolUsageCap()` pulls the account from rotation (`USAGE_CAP_COOLDOWN_MS` = 5h estimate) and re-dispatches on a healthy account (`queued_resume`/`queued`) or parks `blocked_on_usage` — never a hard fail.
+- **`blocked_on_usage`** is a new (free-text) `agent_jobs.status`; `requeueBlockedOnUsage()` runs each poll tick and flips parked rows back to `queued`/`queued_resume` once any account is healthy. Added to `JobStatus` + `ACTIVE_JOB_STATUSES`.
+- **Migration:** `supabase/migrations/20260622210000_agent_jobs_session_config_dir.sql` adds `agent_jobs.claude_session_config_dir text` (apply-script `scripts/apply-agent-jobs-session-config-dir-migration.ts`).
+- **Phase-1 boundary:** the round-robin/failover is wired into the **build + plan pool** (the source of the 12-build pileup). The concurrency-1 `dev-ask` / `pr-resolve` lanes still call `runClaude` without a `configDir` (default account `~/.claude`) — wiring those (and Control Tower surfacing + the `~/.claude-personal` login) is **Phase 2**.
 
 ## Phase 2 — second-account setup + Control Tower surfacing ⏳
 Document/perform the `~/.claude-personal` login + `claude2` alias on the box; surface active-account + all-capped + failover events to the Control Tower box-health. Brain: [[../libraries/control-tower]] · [[../recipes/build-the-box]].
