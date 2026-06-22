@@ -2947,6 +2947,33 @@ async function runPrResolveJob(job: Job) {
     return;
   }
 
+  // dirty-pr-resolver-duplicate-detection (Phase 1): if this PR's work already merged via a SIBLING build,
+  // it is unresolvable by definition (its diff is already on main → merging main just re-conflicts). Close
+  // it + delete the branch with a clear comment instead of burning a Max resolve pass on it.
+  try {
+    const { findAlreadyMergedDuplicate, closeDuplicatePr } = await import("../src/lib/github-pr-resolve");
+    const dup = await findAlreadyMergedDuplicate(db, branch);
+    if (dup) {
+      const sib = dup.mergedPr ? `#${dup.mergedPr}` : (dup.mergedBranch ?? "a sibling build");
+      const closed = await closeDuplicatePr(
+        prNumber,
+        branch,
+        `Closing as a duplicate: this spec (\`${dup.specSlug}\`) already shipped via ${sib}, so this PR's changes are already on \`main\`. There is nothing left to merge — rebasing would only re-conflict. Auto-closed by the dirty-PR resolver (dirty-pr-resolver-duplicate-detection).`,
+      );
+      await update(job.id, {
+        status: "completed",
+        pr_url: prUrl,
+        pr_number: prNumber,
+        error: `closed-as-duplicate: ${dup.specSlug} already merged via ${sib}`,
+        log_tail: `PR #${prNumber} is a duplicate of already-merged work (${dup.specSlug} via ${sib}) — ${closed ? "closed it + deleted the branch" : "close failed (left for the next event / human)"}; did NOT resolve.`,
+      });
+      console.log(`${tag} PR #${prNumber} duplicate of merged ${dup.specSlug} (${sib}) — ${closed ? "closed" : "close failed"}, no resolve`);
+      return;
+    }
+  } catch (e) {
+    console.error(`${tag} duplicate-check failed (continuing to resolve):`, e instanceof Error ? e.message : e);
+  }
+
   const wt = join(BUILDS_DIR, job.id);
   sh("git", ["fetch", "origin"]);
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
@@ -3586,6 +3613,34 @@ async function runJob(job: Job) {
   const tag = `[${slug}]`;
   const wt = join(BUILDS_DIR, job.id); // isolated worktree — parallel builds never collide
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
+
+  // dirty-pr-resolver-duplicate-detection (Phase 1): build-claim dedup. A fresh build whose work already
+  // shipped via a SIBLING build (same spec + same phase scope, already merged) must NOT open a competing PR
+  // — that is exactly the duplicate the account-switch requeue created. No-op it as already-shipped instead
+  // of building. Resumes are exempt (their branch/PR already exists; the merged sibling can't be them).
+  if (!isResume) {
+    try {
+      const { findMergedSiblingBuild } = await import("../src/lib/agent-jobs");
+      const sibling = await findMergedSiblingBuild(job.workspace_id, slug, {
+        excludeJobId: job.id,
+        instructions: job.instructions ?? null,
+      });
+      if (sibling) {
+        const sib = sibling.pr_number ? `#${sibling.pr_number}` : (sibling.spec_branch ?? "a sibling build");
+        await update(job.id, {
+          status: "completed",
+          pr_url: sibling.pr_number ? `https://github.com/${REPO}/pull/${sibling.pr_number}` : null,
+          pr_number: sibling.pr_number ?? null,
+          error: `already-shipped: ${slug} already merged via ${sib}`,
+          log_tail: `Skipped build — ${slug} already shipped via ${sib} (same phase scope). No duplicate PR opened.`,
+        });
+        console.log(`${tag} already shipped via ${sib} — no-op (no duplicate PR)`);
+        return;
+      }
+    } catch (e) {
+      console.error(`${tag} merged-sibling dedup check failed (continuing to build):`, e instanceof Error ? e.message : e);
+    }
+  }
 
   // Set up the worktree (its own dir + branch).
   sh("git", ["fetch", "origin"]);

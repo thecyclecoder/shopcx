@@ -9,6 +9,7 @@
  * shipped/superseded, and one-off kinds like pr-resolve/spec-chat). De-dupes against any in-flight job.
  */
 import { loadEnv, createAdminClient } from "./_bootstrap";
+import { findMergedSiblingBuild } from "../src/lib/agent-jobs";
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const REQUEUE_KINDS = new Set(["build", "spec-test", "fold"]);
@@ -19,7 +20,7 @@ const ACTIVE = ["queued", "claimed", "building", "queued_resume", "needs_input",
   const a = createAdminClient();
   const { data: failed } = await a
     .from("agent_jobs")
-    .select("id, kind, spec_slug, updated_at")
+    .select("id, kind, spec_slug, instructions, updated_at")
     .eq("workspace_id", WS)
     .eq("status", "failed")
     .order("updated_at", { ascending: false })
@@ -29,6 +30,22 @@ const ACTIVE = ["queued", "claimed", "building", "queued_resume", "needs_input",
   const skipped: string[] = [];
   for (const j of (failed ?? []) as Array<Record<string, string>>) {
     if (!REQUEUE_KINDS.has(j.kind)) { skipped.push(`${j.spec_slug}(${j.kind}: one-off)`); continue; }
+    // dirty-pr-resolver-duplicate-detection (Phase 1): skip a failed BUILD whose work already shipped via a
+    // SIBLING build (same spec + same phase scope, already merged) — re-queueing it just re-ships the same
+    // work and opens a duplicate PR (the exact account-switch-recovery bug). Phase-scope safe (instructions
+    // match), so a multi-phase chain's other phases still re-queue normally.
+    if (j.kind === "build") {
+      const sibling = await findMergedSiblingBuild(WS, j.spec_slug, {
+        excludeJobId: j.id,
+        instructions: j.instructions ?? null,
+        admin: a,
+      });
+      if (sibling) {
+        const sib = sibling.pr_number ? `#${sibling.pr_number}` : (sibling.spec_branch ?? "a sibling build");
+        skipped.push(`${j.spec_slug}(build: already merged via ${sib})`);
+        continue;
+      }
+    }
     // skip if a fresh job for the same spec+kind is already in flight (a retry already happened)
     const { data: live } = await a
       .from("agent_jobs")
