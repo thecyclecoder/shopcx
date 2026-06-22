@@ -108,6 +108,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[spec-drift-reconcile-not-firing]] (platform) — the every-30min drift backstop has NEVER fired (0 heartbeats), so roadmap cards drift (ticket-csat #219, portal-auto-resume #218 sat stale). Not a code bug (manual sweep works) nor a registration gap (it's in Inngest's registered set) — a registered cron with a valid schedule simply isn't executing, and the Control Tower only checks served-but-not-registered, not registered-but-never-firing. Fix the firing + add the zero-beats-past-window guard.
 
+## Active project — Build-all-phases chain ⏳
+
+[[build-all-phases-chain]] (platform) — kill the phase-by-phase babysitting on milestone builds. Part A: a "Build all" action chains phases automatically — build P1 → auto-merge → queue P2 → … until all ✅ (stops on a phase fail / needs_approval; composes with auto-ship-pipeline auto-merge). Each phase stays a bounded, isolated, resumable build (vs a risky 1hr atomic build). Part B: replace the hard 30-min BUILD_TIMEOUT wall with output-idle hang detection (~10min idle kill) + a 60-min hard cap — "fail only if hung."
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
