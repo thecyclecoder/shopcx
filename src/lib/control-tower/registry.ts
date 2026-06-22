@@ -161,6 +161,14 @@ export type InlineWorkSignalId =
   | "orders-awaiting-fraud-screen"
   | "tickets-awaiting-decision";
 
+/**
+ * loop_heartbeats.loop_id the Auto-Ship Pipeline's auto-merge gate beats under (auto-ship-pipeline spec,
+ * Phase 1 / Gate A). The gate runs INSIDE the GitHub webhook (not an Inngest fn / box lane), squash-merging
+ * ready claude/* build PRs — it beats once per webhook pass (kind 'reactive', end-of-run try/finally:
+ * ok:true on a clean pass / idle, ok:false on a failed merge attempt). Idle = green (event-driven, no cadence).
+ */
+export const AUTO_MERGE_GATE_LOOP_ID = "auto-merge-gate";
+
 /** Stable inline-agent loop ids (loop_id on loop_heartbeats; matches the registry entries). */
 export const INLINE_AGENT_IDS = {
   ticketAnalyzer: "ai:ticket-analyzer",
@@ -474,6 +482,25 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Chargeback received",
     description: "Handles an inbound chargeback — cancels subs, assembles evidence, notifies.",
     expectedCadence: "per chargeback event",
+    livenessWindowMs: 24 * HOUR,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+
+  // ── Auto-Ship Pipeline — auto-merge gate (loop_heartbeats, loop_id = AUTO_MERGE_GATE_LOOP_ID) ──
+  // Gate A (auto-ship-pipeline spec, Phase 1): the GitHub webhook squash-merges ready (mergeable +
+  // all-checks-green) claude/* build PRs — the READY mirror of the dirty-PR resolver's CONFLICTING half.
+  // Runs in the webhook route (not an Inngest fn / box lane), so it's a `reactive` loop: idle = green,
+  // beats once per pass (ok:false on a failed merge attempt, feeding the error-rate assertion). No
+  // work-exists signal (no clean upstream-demand probe) — error-rate only.
+  {
+    id: AUTO_MERGE_GATE_LOOP_ID,
+    kind: "reactive",
+    owner: "platform",
+    label: "Auto-merge gate",
+    description:
+      "Squash-merges ready (mergeable + all-checks-green) claude/* build PRs from the GitHub webhook — serialized (one per pass), sync-aware, owner kill-switch (workspaces.auto_merge_enabled). The dirty-PR resolver's READY mirror.",
+    expectedCadence: "per GitHub push/PR/check webhook",
     livenessWindowMs: 24 * HOUR,
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
