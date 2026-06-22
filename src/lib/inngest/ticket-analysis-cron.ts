@@ -47,7 +47,18 @@ export const ticketAnalysisCron = inngest.createFunction(
     });
 
     if (!tickets.length) {
-      return { analyzed: 0, skipped: 0 };
+      // No tickets need analysis — the common idle path on a */30 cadence.
+      // Still emit the end-of-run heartbeat before returning so cron_freshness
+      // sees a beat every tick (heartbeat.ts contract: 'every monitored cron
+      // calls this at the END of each run'). Without this, idle ticks emitted
+      // no beat and control-tower-monitor false-flagged a healthy quiet cron
+      // as dead (signature loop:ticket-analysis-cron). Mirrors the empty-path
+      // heartbeat in ticket-csat.ts, deliver-pending-send.ts, abandoned-cart.ts.
+      const idleResult = { analyzed: 0, skipped: 0 };
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("ticket-analysis-cron", { ok: true, produced: idleResult });
+      });
+      return idleResult;
     }
 
     let analyzed = 0;
