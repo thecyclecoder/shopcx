@@ -19,7 +19,7 @@
  */
 import { NextResponse } from "next/server";
 import crypto from "crypto";
-import { recordError } from "@/lib/control-tower/error-feed";
+import { recordError, recordFeedDelivery } from "@/lib/control-tower/error-feed";
 
 export const dynamic = "force-dynamic";
 
@@ -102,6 +102,11 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
+
+  // Liveness: a verified delivery (even a clean batch with zero errors) proves the drain
+  // is wired + live, so the Control Tower panel can show green "connected" instead of a
+  // misleading green "0 errors" while disconnected. Best-effort — never blocks the 200.
+  await recordFeedDelivery("vercel");
 
   // Defensive re-filter, then group the batch so a burst of the same error → ONE incident.
   const groups = new Map<string, { path: string; status: number; message: string; count: number; sample: VercelLog }>();

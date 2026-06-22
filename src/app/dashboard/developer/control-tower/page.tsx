@@ -51,12 +51,18 @@ interface ErrorIncident {
   first_seen_at: string;
   last_seen_at: string;
 }
+type PanelConnectionState = "not-configured" | "awaiting" | "connected" | "errors";
 interface ErrorFeedPanel {
   source: ErrorSource;
   color: LoopColor;
   incidents: ErrorIncident[];
   activeSignatures: number;
   totalOccurrences: number;
+  configured: boolean;
+  lastReceivedAt: string | null;
+  connectionState: PanelConnectionState;
+  statusText: string;
+  hint: string | null;
 }
 interface ErrorFeedSnapshot {
   generatedAt: string;
@@ -216,7 +222,18 @@ function ErrorPanel({ panel }: { panel: ErrorFeedPanel }) {
       </div>
 
       {panel.incidents.length === 0 ? (
-        <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">No errors in the last 7 days.</p>
+        <div className="mt-2">
+          <p
+            className={`text-xs font-medium ${
+              panel.color === "green"
+                ? "text-emerald-700 dark:text-emerald-300"
+                : "text-amber-700 dark:text-amber-300"
+            }`}
+          >
+            {panel.statusText}
+          </p>
+          {panel.hint && <p className="mt-1 text-[10px] text-zinc-400">{panel.hint}</p>}
+        </div>
       ) : (
         <ul className="mt-2 space-y-1.5">
           {panel.incidents.map((inc) => (
@@ -417,7 +434,8 @@ export default function ControlTowerPage() {
                 The hidden surfaces — Vercel runtime errors, Inngest failed runs, app-layer Supabase errors, and
                 DB-level Supabase logs (Postgres/auth/API) via the Management API — grouped by signature. A new
                 signature or a re-firing spike pages the owners (rate-limited: a burst of the same error = one
-                page). Green = no errors in the last 7 days.
+                page). Green = configured + receiving + 0 errors; amber = not configured / awaiting first event
+                (we&apos;re not yet watching) — never a misleading green &ldquo;0 errors&rdquo; while disconnected.
               </p>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {snap.errorFeed.panels.map((p) => (

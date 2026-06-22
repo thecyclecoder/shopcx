@@ -46,5 +46,11 @@ export async function GET() {
     buildErrorFeedSnapshot(admin),
     getOpenSpecDrift(workspaceId),
   ]);
-  return NextResponse.json({ ...snapshot, errorFeed, specDrift });
+
+  // Fold the error panels into the header health count so an unconfigured panel (amber
+  // "not configured") is NEVER counted as healthy — the self-honest count of the spec.
+  const counts = { ...snapshot.counts };
+  for (const p of errorFeed.panels) counts[p.color]++;
+
+  return NextResponse.json({ ...snapshot, counts, errorFeed, specDrift });
 }

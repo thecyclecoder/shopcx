@@ -24,7 +24,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt, decrypt } from "@/lib/crypto";
-import { recordError, signatureFor } from "@/lib/control-tower/error-feed";
+import { recordError, recordFeedDelivery, signatureFor } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -294,6 +294,9 @@ export async function pollSupabaseLogs(adminClient?: Admin): Promise<PollResult>
       .from("error_feed_supabase_config")
       .update({ last_polled_at: endIso, updated_at: endIso })
       .eq("id", CONFIG_ID);
+    // Liveness: a successful poll (even one that found zero errors) proves the feed is
+    // wired + live, so the panel can show green "connected" not a misleading "0 errors".
+    await recordFeedDelivery("supabase-logs", admin);
   }
 
   return { status: allFailed ? "error" : "ok", incidents, rows: totalRows, errors };
