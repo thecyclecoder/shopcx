@@ -13,6 +13,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getRoadmap } from "@/lib/brain-roadmap";
 
 export const dynamic = "force-dynamic";
 
@@ -94,9 +95,27 @@ export async function GET() {
     created_at: string;
   }[];
 
+  // fold-guard-live-build (Phase 1) — defense in depth: a build/spec-test job whose spec page no longer
+  // exists (the spec was folded → archived/deleted) must never render as a dead link. Compute the set of
+  // LIVE (non-archived) spec slugs; the page routes a job with `spec_missing` to a safe target instead of
+  // the would-be-404 /dashboard/roadmap/{slug}. Best-effort — a roadmap-read failure just leaves it false.
+  let liveSpecSlugs = new Set<string>();
+  try {
+    const { specs } = await getRoadmap();
+    liveSpecSlugs = new Set(specs.map((s) => s.slug));
+  } catch {
+    /* roadmap read failed — leave spec_missing false (no worse than today) */
+  }
+  // Only build-kind slugs are supposed to resolve to a spec page; non-build kinds already route elsewhere
+  // (approvalHref), so a missing spec only matters for them.
+  const specMissing = (kind: string, slug: string): boolean =>
+    (kind === "build" || kind === "spec-test") && !liveSpecSlugs.has(slug);
+
   // Waiting = not yet in a lane; paused = needs owner action.
   const queue = jobs.filter((j) => j.status === "queued" || j.status === "queued_resume");
-  const paused = jobs.filter((j) => j.status === "needs_input" || j.status === "needs_approval");
+  const paused = jobs
+    .filter((j) => j.status === "needs_input" || j.status === "needs_approval")
+    .map((j) => ({ ...j, spec_missing: specMissing(j.kind, j.spec_slug) }));
 
   // Failed builds (actionable) — surface a failure so the owner doesn't have to dig into a spec
   // card to learn a build died. Only show a spec whose *latest* build attempt is `failed`: a later
@@ -116,7 +135,7 @@ export async function GET() {
   }
   const failed = [...latestBySlug.values()]
     .filter((j) => j.status === "failed")
-    .map((j) => ({ id: j.id, spec_slug: j.spec_slug, kind: j.kind, error: j.error ?? null, detail: failureDetail(j.log_tail), updated_at: j.updated_at }))
+    .map((j) => ({ id: j.id, spec_slug: j.spec_slug, kind: j.kind, error: j.error ?? null, detail: failureDetail(j.log_tail), updated_at: j.updated_at, spec_missing: specMissing(j.kind, j.spec_slug) }))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
     .slice(0, 20);
 

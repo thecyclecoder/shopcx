@@ -109,6 +109,70 @@ export function isActive(status: JobStatus): boolean {
   return ACTIVE_STATUSES.includes(status);
 }
 
+type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * fold-guard-live-build (Phase 1): the most recent NON-TERMINAL build/spec-test job for a spec, or null.
+ *
+ * The fold path refuses to archive a spec while one of these is alive — folding it would orphan the
+ * running build (the spec markdown moves to archive.d/, so the paused build's spec page 404s the instant
+ * the fold merges). Only `build`/`spec-test` kinds are a "live build of THIS spec": a fold job carries
+ * `spec_slug='fold-batch'` (never the spec's slug) and a plan job keys on a goal slug, so neither matches.
+ * Terminal jobs (completed/merged/failed/needs_attention) never block a fold.
+ */
+export async function getLiveJobForSlug(workspaceId: string, slug: string, adminClient?: Admin): Promise<AgentJob | null> {
+  const admin = adminClient || createAdminClient();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .in("kind", ["build", "spec-test"])
+    .in("status", ACTIVE_STATUSES)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data as AgentJob | null) ?? null;
+}
+
+/**
+ * fold-guard-live-build (Phase 1) — cleanup backstop. When a spec has been archived (folded into the
+ * brain → moved to docs/brain/archive.d/) any still-non-terminal build/spec-test job for that slug is an
+ * ORPHAN: it lingers as a paused/active item whose spec page 404s and answering it is meaningless. Cancel
+ * each (status → `completed` with a clear "spec archived" reason, questions/pending_actions cleared) so no
+ * dead-link paused/active item survives. The preventive guard (getLiveJobForSlug, refused at the fold
+ * path) makes this rare; this is the belt-and-suspenders that catches a race the gate missed.
+ *
+ * Global by default (archive.d/ is global); pass `workspaceId` to scope it (e.g. a board-load reconcile).
+ * Idempotent — terminal jobs are never touched. Best-effort: a single failed update doesn't abort the rest.
+ */
+export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; admin?: Admin }): Promise<{ cancelled: number; slugs: string[] }> {
+  const admin = opts?.admin || createAdminClient();
+  const archived = await listArchivedSlugs();
+  if (!archived.length) return { cancelled: 0, slugs: [] };
+
+  let query = admin
+    .from("agent_jobs")
+    .select("id, spec_slug")
+    .in("kind", ["build", "spec-test"])
+    .in("status", ACTIVE_STATUSES)
+    .in("spec_slug", archived);
+  if (opts?.workspaceId) query = query.eq("workspace_id", opts.workspaceId);
+  const { data, error } = await query;
+  if (error || !data?.length) return { cancelled: 0, slugs: [] };
+
+  const reason = "spec archived — build auto-cancelled (the spec was folded into the brain; its spec page no longer exists)";
+  const slugs: string[] = [];
+  for (const j of data as { id: string; spec_slug: string }[]) {
+    const { error: upErr } = await admin
+      .from("agent_jobs")
+      .update({ status: "completed", error: reason, questions: [], pending_actions: [], updated_at: new Date().toISOString() })
+      .eq("id", j.id);
+    if (!upErr) slugs.push(j.spec_slug);
+  }
+  return { cancelled: slugs.length, slugs };
+}
+
 /** Latest plan job for a goal (newest wins) — drives the goal page's Plan/Re-plan control. */
 export async function getLatestPlanJob(workspaceId: string, goalSlug: string): Promise<AgentJob | null> {
   const admin = createAdminClient();
@@ -446,6 +510,18 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
               await retestOriginIfFixMerged(j.workspace_id, j.spec_slug);
             } catch {
               /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
+            }
+          }
+          // fold-guard-live-build (Phase 1): a just-merged FOLD just archived its batch of specs (their
+          // markdown moved to archive.d/). Cancel any non-terminal build/spec-test job still pointing at an
+          // archived spec so no orphaned paused/active item with a dead spec link survives — the fold-merge
+          // reconcile half of the cleanup backstop (the worker reaper covers a box restart). Best-effort.
+          if (pr.merged && j.kind === "fold") {
+            try {
+              const c = await cancelJobsForArchivedSpecs({ workspaceId: j.workspace_id, admin });
+              if (c.cancelled) console.log(`[fold-reconcile] cancelled ${c.cancelled} orphaned job(s) for archived spec(s): ${c.slugs.join(", ")}`);
+            } catch {
+              /* best-effort — the worker reaper cancels these on next startup */
             }
           }
         }
