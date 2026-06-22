@@ -116,6 +116,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[roadmap-goal-and-source-filters]] (platform) — the board carries specs from goals/planner/repair/manual; add a goal selector (focused goal-progress view: pick a goal → only its specs + an X/Y-shipped header) + source chips (🎯 Goal / 🔧 Repair / ✋ Manual, derived from goal-doc wikilinks + Repair-signature) composing with the existing search. Client-side via data-goal/data-source attributes; no schema change.
 
+## Active project — Spec-card DB companion ⏳
+
+[[spec-card-db-companion]] (platform) — SUPERSEDES the disabled [[roadmap-reads-specs-from-git]]. Move live PM state into a spec_card_state DB table the board reads instantly (no deploy lag, no GitHub quota): merge/drift/owner/build events write status+flags the moment they happen. Markdown stays canonical for content (brain rule holds); DB is the live board mirror + transient flags. "shipped · deploying" flag via VERCEL_GIT_COMMIT_SHA vs the card's merge SHA (no webhook). Retires the git-reads machinery.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
