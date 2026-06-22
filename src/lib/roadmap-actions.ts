@@ -11,6 +11,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { ACTIVE_STATUSES, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
+import { getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
 
 export type ActionResult<T> =
   | ({ ok: true } & T)
@@ -82,6 +83,18 @@ export async function queueRoadmapBuild(
   }
 
   const instructions = typeof opts.instructions === "string" && opts.instructions.trim() ? opts.instructions : null;
+
+  // Build gate (spec-blockers): refuse to enqueue a build for a spec whose prerequisites haven't shipped.
+  // This is the single enqueue chokepoint — BuildButton, the Slack `/build`, and the planner all route
+  // here — so a blocked spec can't be queued by ANY path. Verify/fold (handled above) is exempt; it retires
+  // an already-shipped spec, not a build. A blocker is uncleared until its blocking spec ships (or is
+  // archived/folded), so this never permanently blocks. No job row is inserted when blocked.
+  const blockers = await getSpecBlockers(slug);
+  const uncleared = blockers.filter((b) => !b.cleared);
+  if (uncleared.length) {
+    const list = uncleared.map((b) => `${b.slug} (${phaseEmoji(b.status)})`).join(", ");
+    return { ok: false, status: 409, error: `Blocked by: ${list}` };
+  }
 
   // One active build per spec — but only for a plain Build tap (no new instructions).
   const { data: existing } = await admin

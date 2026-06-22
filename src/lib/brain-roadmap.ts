@@ -28,6 +28,11 @@ export interface SpecCard {
   counts: Record<Phase, number>;
   owner?: string; // function slug (DRI) from the **Owner:** [[../functions/x]] line
   parent?: string; // mandate or goal milestone from **Parent:**
+  // Prerequisite specs from the **Blocked-by:** [[a]], [[b]] header line (spec-blockers). A blocker is
+  // `cleared` when its own derived status is `shipped` OR it's archived/folded (no longer a live spec) —
+  // i.e. the prerequisite code is on `main`. The board + the enqueue gate share this one source of truth.
+  // Empty when the spec declares no Blocked-by. Resolved against the full spec set in getRoadmap/getSpec.
+  blockedBy: { slug: string; title: string; status: Phase; cleared: boolean }[];
 }
 
 export interface ProjectTrack {
@@ -62,6 +67,11 @@ function statusFromText(s: string): Phase | null {
 
 function stripEmoji(s: string): string {
   return s.replace(/[⏳🚧✅❌]/g, "").trim();
+}
+
+/** The phase's status emoji — the inverse of statusFromText. Used by the blocker chip + the gate error. */
+export function phaseEmoji(p: Phase): string {
+  return p === "shipped" ? SHIPPED : p === "in_progress" ? IN_PROGRESS : p === "rejected" ? REJECTED : PLANNED;
 }
 
 /** Strip bold markers + collapse [[wikilink|alias]] / [[wikilink]] to plain text for display. */
@@ -175,6 +185,19 @@ function parseSpec(slug: string, raw: string): SpecCard {
     if (owner && parent) break;
   }
 
+  // **Blocked-by:** [[spec-a]], [[spec-b]] — prerequisite specs (spec-blockers). Parsed like Owner/Parent;
+  // each [[…]] resolves to a spec slug. Status/cleared are filled in by resolveBlockedBy against the full
+  // spec set (parseSpec alone can't know another spec's status), so here we just capture the raw slugs.
+  const blockerSlugs: string[] = [];
+  for (const l of lines) {
+    const bm = l.match(/\*\*Blocked-by:\*\*\s*(.+?)\s*$/i);
+    if (!bm) continue;
+    for (const wl of bm[1].matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
+      blockerSlugs.push(wl[1].trim().replace(/^.*\//, "").replace(/\.md$/, ""));
+    }
+    break;
+  }
+
   return {
     slug,
     title,
@@ -184,7 +207,27 @@ function parseSpec(slug: string, raw: string): SpecCard {
     counts,
     owner,
     parent,
+    blockedBy: [...new Set(blockerSlugs)].map((s) => ({ slug: s, title: s, status: "planned" as Phase, cleared: false })),
   };
+}
+
+/**
+ * Resolve a card's raw Blocked-by slugs against the live spec set (spec-blockers). A blocker is `cleared`
+ * when its blocking spec's derived status is `shipped`, OR the slug is no longer a live spec at all
+ * (archived/folded — it's left specs/ — or a dangling reference): a prerequisite already on `main` never
+ * permanently blocks. Returns a fresh blockedBy array (title + status filled from the resolved spec).
+ */
+function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCard["blockedBy"] {
+  return card.blockedBy.map((b) => {
+    const target = bySlug.get(b.slug);
+    if (target) {
+      return { slug: b.slug, title: target.title, status: target.status, cleared: target.status === "shipped" };
+    }
+    // Not a live spec → archived/folded (the prereq shipped + was retired into the brain) or a dangling
+    // slug. Either way treat it as cleared so a Blocked-by pointing at an already-shipped/archived spec
+    // never permanently blocks.
+    return { slug: b.slug, title: b.slug, status: "shipped" as Phase, cleared: true };
+  });
 }
 
 function parseTracks(raw: string): ProjectTrack[] {
@@ -223,6 +266,10 @@ async function readSpecs(): Promise<SpecCard[]> {
       .filter((f) => f.endsWith(".md") && f !== "README.md")
       .map(async (f) => parseSpec(f.replace(/\.md$/, ""), await fs.readFile(path.join(SPECS_DIR, f), "utf8"))),
   );
+  // Resolve every spec's Blocked-by slugs against the live set, so the board + the enqueue gate share one
+  // source of truth for cleared/uncleared (spec-blockers). A blocker not in this map = archived/folded ⇒ cleared.
+  const bySlug = new Map(cards.map((c) => [c.slug, c]));
+  for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug);
   // newest-feeling first: in-progress, then planned, then shipped; stable by title
   const rank: Record<Phase, number> = { in_progress: 0, planned: 1, shipped: 2, rejected: 4 };
   return cards.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
@@ -446,12 +493,28 @@ export function deriveSpecStatus(raw: string): Phase {
 
 export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
+  let raw: string;
   try {
-    const raw = await fs.readFile(path.join(SPECS_DIR, `${slug}.md`), "utf8");
-    return { raw, card: parseSpec(slug, raw) };
+    raw = await fs.readFile(path.join(SPECS_DIR, `${slug}.md`), "utf8");
   } catch {
     return null;
   }
+  const card = parseSpec(slug, raw);
+  // Resolve Blocked-by against the live spec set so the detail page's BuildButton sees the same
+  // cleared/uncleared state as the board (spec-blockers).
+  const specs = await readSpecs();
+  card.blockedBy = resolveBlockedBy(card, new Map(specs.map((c) => [c.slug, c])));
+  return { raw, card };
+}
+
+/**
+ * Resolved Blocked-by entries for one spec (spec-blockers) — the source of truth the enqueue gate
+ * (queueRoadmapBuild) checks before inserting a build row. Empty if the spec has no Blocked-by or
+ * doesn't exist. A blocker with `cleared:false` must ship before the spec can be built.
+ */
+export async function getSpecBlockers(slug: string): Promise<SpecCard["blockedBy"]> {
+  const { specs } = await getRoadmap();
+  return specs.find((s) => s.slug === slug)?.blockedBy ?? [];
 }
 
 // ══════════════════════════════════════════════════════════════════════════
