@@ -1,0 +1,1 @@
+- **spec-drift-reconcile cron registered but never fires (+ catch the registered-not-firing class)** · verified 2026-06-22 · → [[libraries/control-tower]]

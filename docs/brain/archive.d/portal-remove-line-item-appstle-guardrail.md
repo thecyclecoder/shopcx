@@ -1,0 +1,1 @@
+- **Treat Appstle 'last subscription product' 400 as a handled would_remove_last_item, not a server ERR** · verified 2026-06-22 · → [[libraries/subscription-items]]

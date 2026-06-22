@@ -1,0 +1,1 @@
+- **Build-all-phases chain + hang-based build timeout** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
