@@ -98,6 +98,14 @@ After the executor returns, the post-execute status block (`unified-ticket-handl
 
 Exception: if the action failed silently (e.g. Appstle call returned `{ success: false }`), the ticket stays open — Sonnet never tells the customer something was done unless [[../tables/customer_events]] confirms it. See [[../lifecycles/ai-multi-turn]] rule "Never fake confirmations."
 
+### Escalation lifecycle — set → visible → cleared
+
+Escalation (`tickets.escalated_at` / `escalated_to` / `escalation_reason`) is an **open-state** concept with three moments:
+
+- **Set.** The `escalate` action (Phase 2f) or the agent-involved no-action path (Phase 5 #5) flags the ticket. The default route is the **routine** (`escalated_to IS NULL`, `escalated_at` set) — see [[../specs/escalate-to-routine-by-default]] — which the box triage cron ([[../inngest/triage-escalations]] / [[../specs/box-escalation-triage]]) picks up.
+- **Visible — "AI Investigation."** A routine-escalated ticket renders a **"🔍 Escalated → AI Investigation"** badge (amber) on the ticket header/list/[[../dashboard/tickets__escalated|Escalated view]], appending "· triage in progress" when a live `triage-escalations` job exists for the workspace (`GET /api/tickets/triage-status` + `useTriageInProgress()`). Triage leaves a paper trail of internal `[AI Investigation]` notes (start + outcome) so a human knows the AI is working it and can still step in — escalating to a person sets `escalated_to` and flips the badge off. Full detail in [[../dashboard/tickets]].
+- **Cleared.** Resolving ends escalation: every terminal-status write path (`maybeAutoCloseGroup`/`executeTicketClose`, manual + bulk close, workflow/journey/portal closes, the unified handler's spam/fraud closes) sets all three flags to `null` in the same update, and the Escalated view additionally filters out `closed`/`resolved`/`archived`. So no terminal-status ticket ever carries escalation flags. **Reopening does NOT auto-re-escalate** — escalation is a fresh decision.
+
 Tags applied along the way (idempotent via `src/lib/ticket-tags.ts`):
 
 - `touched` + `ft:{source}` — first outbound touch
@@ -152,7 +160,7 @@ When `workspaces.sandbox_mode = true`, every outbound message from the AI become
 
 ## Status / open work
 
-**Shipped:** All seven phases — inbound capture (Resend, Twilio, Meta, chat widget), unified pipeline (resolve → fraud short-circuit → playbook/Sonnet → execute), outbound delivery (deliver-pending-send cron), engagement tracking (email_events, SMS callbacks), auto-resolve, CSAT, archive. Sandbox mode + agent-involved escalation gaps both closed.
+**Shipped:** All seven phases — inbound capture (Resend, Twilio, Meta, chat widget), unified pipeline (resolve → fraud short-circuit → playbook/Sonnet → execute), outbound delivery (deliver-pending-send cron), engagement tracking (email_events, SMS callbacks), auto-resolve, CSAT, archive. Sandbox mode + agent-involved escalation gaps both closed. Escalation lifecycle complete: routine-escalated tickets show the "🔍 AI Investigation" badge + triage paper-trail notes, and all three escalation flags clear on every terminal-status write path (Escalated view also filters terminal statuses).
 
 **Known gaps / not yet shipped:** None identified.
 
@@ -165,4 +173,4 @@ When `workspaces.sandbox_mode = true`, every outbound message from the AI become
 
 ## Related
 
-[[ai-multi-turn]] · [[fraud-detection]] · [[customer-link-confirmation]] · [[social-comment-moderation]] · [[../inngest/unified-ticket-handler]] · [[../inngest/deliver-pending-send]] · [[../tables/tickets]] · [[../tables/ticket_messages]]
+[[ai-multi-turn]] · [[fraud-detection]] · [[customer-link-confirmation]] · [[social-comment-moderation]] · [[../inngest/unified-ticket-handler]] · [[../inngest/deliver-pending-send]] · [[../inngest/triage-escalations]] · [[../dashboard/tickets__escalated]] · [[../tables/tickets]] · [[../tables/ticket_messages]]

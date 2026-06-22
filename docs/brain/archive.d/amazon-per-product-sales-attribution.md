@@ -1,0 +1,1 @@
+- **Per-ASIN Amazon Sales + Persistent ASIN→Product/Pack Mapping** · verified 2026-06-22 · → [[tables/daily_amazon_product_snapshots]]
