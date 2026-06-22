@@ -26,6 +26,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **pricing_preserved must account for internal quantity breaks (Appstle baseline lacks them)** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
 - **Portal OTP send-failure returns structured non-5xx, not a 502** · verified 2026-06-22 · → [[lifecycles/customer-portal]]
 - **Review Filter Pill Counts — show the real corpus volume** · verified 2026-06-22 · → [[lifecycles/product-intelligence]]
+- **Worker Orphan-Reaper — reset in-flight jobs left by a dead worker** · verified 2026-06-22 · → [[recipes/build-box-setup]]
+- **Workflow actions own final ticket status — orchestrator must not reopen** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
 - **Base Price Never Above MSRP (invariant + cap)** · verified 2026-06-21 · → [[lifecycles/subscription-billing]]
 - **Box-hosted Spec Chat (long-running Max session)** · verified 2026-06-21 · → [[lifecycles/roadmap-build-console]]
 - **Box-hosted Ticket "Improve" Agent (Max session)** · verified 2026-06-20 · → [[tables/ticket_improve_chats]]
