@@ -23,14 +23,15 @@ The board parses a card's status from the spec markdown's `⏳/🚧/✅` phase e
 - **`resolveBoardStatus(markdownStatus, state?)`** → `Phase` — forward-merge of the markdown parse and the mirror (DB-first for the deploy-lag; markdown wins when it's already ahead). `rejected` (phase-level) passes through as the markdown value.
 - **`deploymentState(state?, markdownStatus, deployedSha)`** → `DeployState | null` — the `shipped · deploying` → `shipped · live` signal. `live` when the deployed `VERCEL_GIT_COMMIT_SHA` **is** the card's `last_merge_sha`, or a later deploy already carries the flipped emoji (`markdownStatus === "shipped"`); else `deploying`. `null` for a card that isn't shipped / has no row / no merge SHA.
 - **`markSpecCardStatus(workspaceId, slug, status, phaseStates?)`** — mirror a derived status + per-phase snapshot (drift reconciler, owner flips). No deploy flag.
-- **`markSpecCardMergeShipped(workspaceId, slug, { status, mergeSha, phaseStates? })`** — mirror a just-merged build: `status` + `flags.deploy_pending = true` + `last_merge_sha`.
+- **`rollupPhaseStatus(phaseStates)`** → `Phase` — roll the per-phase states up to one board status, driven purely by the phases (never the H1 emoji): all ✅ → `shipped`; any ✅/🚧 but not all → `in_progress`; else `planned`. `rejected` (cut) phases are ignored; an empty set → `planned`. Used by the merge-write (Bug A fix below).
+- **`markSpecCardMergeShipped(workspaceId, slug, { status, mergeSha, phaseStates? })`** — mirror a just-merged build: `flags.deploy_pending = true` + `last_merge_sha`, and **status = `rollupPhaseStatus(phaseStates)`** (not the caller's title-derived `status`). chain-and-cardstate-under-automerge **Bug A:** a multi-phase spec whose first phase shipped but whose H1 is still ⏳ derives `planned` from the markdown (the title wins in `deriveStatus`), which parked a part-shipped card in Planned — the phase rollup reads it as `in_progress`. `status` is the fallback only when `phaseStates` is absent/empty (a spec with no parsed phases).
 - **`markSpecCardBlocked(workspaceId, slug, blocked)`** — set/clear the `blocked` transient flag (spec-blockers).
 
 All writers are **best-effort** — `upsertCardState` swallows its own error so a mirror-write failure never breaks the underlying merge / flip / build path. `flags` is read-modify-write **merged** (a merge's `deploy_pending` doesn't clobber a `blocked`).
 
 ## Callers
 
-- **Writers:** [[agent-jobs]] `reconcileMergedJobs` (merge) · [[spec-drift]] `reconcileSpecDrift` (drift flip) · `src/app/api/roadmap/status/route.ts` + `src/app/api/roadmap/spec-drift/route.ts` (owner flips).
+- **Writers:** [[agent-jobs]] `applyMergedBuildEffects` (the shared merge-write run by both `reconcileMergedJobs` and the auto-merge path `handleAutoMergedBuildBranch`) · [[spec-drift]] `reconcileSpecDrift` (drift flip) · `src/app/api/roadmap/status/route.ts` + `src/app/api/roadmap/spec-drift/route.ts` (owner flips).
 - **Reader:** `src/app/dashboard/roadmap/page.tsx` (the board — `getSpecCardStates` + `resolveBoardStatus` + `deploymentState`).
 - `phaseStatesFromRaw(raw)` lives in [[spec-drift]] (it already parses phases with line numbers) and feeds the per-phase snapshot to the writers.
 
