@@ -14,5 +14,14 @@ The never-fired detection ([[control-tower-complete-coverage]] P2) is **false-fl
 - A cron with **0 beats ever** past deploy+window → still **red `never_fired`** (the real signal preserved — re-validates deliver-pending-sends).
 - The Supabase feed shows **no new `500 GET /rest/v1/loop_heartbeats`** after the read is bounded; the snapshot still renders every loop.
 
-## Phase 1 — ever-beats never-fired + bounded loop_heartbeats read ⏳
+## Phase 1 — ever-beats never-fired + bounded loop_heartbeats read ✅
 `evalCron` never-fired keys off all-time beat count (0 ⇒ candidate; ≥1 ⇒ not never-fired); bound/aggregate the snapshot's loop_heartbeats query (+ index). Brain: [[../libraries/control-tower]] (evalCron, fetch) · [[../tables/loop_heartbeats]] · [[control-tower]].
+
+**Shipped:**
+- New grouped read RPC `control_tower_loop_beats(p_history_limit)` — `supabase/migrations/20260622160000_control_tower_loop_beats.sql` + `scripts/apply-control-tower-loop-beats-migration.ts` (**migration applied to prod**). Returns the latest ≤`p_history_limit` beats **per loop_id** + the **all-time beat count** per loop, for `cron`/`agent-kind` kinds only (inline/reactive excluded), riding the existing `(loop_id, ran_at desc)` index. Replaces the global "last 600 beats, order by ran_at desc" window that crowded low-frequency crons out AND 500-ed on a growing table. **The `(loop_id, ran_at desc)` index already exists** (created in `20260622120000_control_tower.sql`) — no new index needed.
+- `buildControlTowerSnapshot` now calls the RPC, builds a `byLoop` history map + a `countByLoop` all-time-count map, and passes `everBeatCount` to `evalCron`.
+- `evalCron` only flags `never_fired` when `everBeatCount === 0` (AND deploy older than the window). A cron with ≥1 historical beat falls through to the freshness check — at most amber/red on staleness, never `never_fired`.
+- Cadence-aware freshness (spec's optional item) left to registry `livenessWindowMs` tuning — not in this phase.
+- `npx tsc --noEmit` clean.
+
+**Verify after deploy:** today-sync / meta-capi-dispatch (have historical beats) show green/amber by cadence (not red `never_fired`) + their open `never_fired` alerts auto-resolve; a 0-beats-ever cron past deploy+window still goes red `never_fired`; no new `500 GET /rest/v1/loop_heartbeats` in the Supabase feed.
