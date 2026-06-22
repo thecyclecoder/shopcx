@@ -88,6 +88,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 **Why this matters:** live regression — the iteration engine's Meta insights tables (meta_insights_daily/campaigns/adsets/ads) are EMPTY, scorecards exist only at variant/angle (zero ad/adset/campaign grain), and all 111 meta_attribution_daily rows have attributed_spend_cents=0 → per-variant ROAS is meaningless. The ingest reports status='ok' the whole time (silent false-success). Investigate why the ingest writes zero ad-level rows + fix population + attribution + add a rows-written output assertion so it can't silently degrade again.
 
+## Active project — Goal-decomposition self-sequencing ⏳
+
+[[goal-decomposition-encodes-blockers]] (platform) — dogfood finding from the engine's first real run (the storefront-optimizer tree): it decomposed perfectly but set NO dependencies, so the owner had to approve in manual waves. spec-blockers enforcement already exists (Blocked-by header → build-gate + auto-queue-on-unblock); the planner just needs to EMIT blocked_by. Then a goal plan is self-sequencing — approve the whole tree, builds fire in order.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
