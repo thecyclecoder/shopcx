@@ -1,0 +1,1 @@
+- **Spec-Test JSON Robustness (no silent "no parseable JSON" runs)** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
