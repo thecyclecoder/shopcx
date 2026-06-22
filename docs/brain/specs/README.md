@@ -112,6 +112,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[build-all-phases-chain]] (platform) — kill the phase-by-phase babysitting on milestone builds. Part A: a "Build all" action chains phases automatically — build P1 → auto-merge → queue P2 → … until all ✅ (stops on a phase fail / needs_approval; composes with auto-ship-pipeline auto-merge). Each phase stays a bounded, isolated, resumable build (vs a risky 1hr atomic build). Part B: replace the hard 30-min BUILD_TIMEOUT wall with output-idle hang detection (~10min idle kill) + a 60-min hard cap — "fail only if hung."
 
+## Active project — Roadmap goal + source filters ⏳
+
+[[roadmap-goal-and-source-filters]] (platform) — the board carries specs from goals/planner/repair/manual; add a goal selector (focused goal-progress view: pick a goal → only its specs + an X/Y-shipped header) + source chips (🎯 Goal / 🔧 Repair / ✋ Manual, derived from goal-doc wikilinks + Repair-signature) composing with the existing search. Client-side via data-goal/data-source attributes; no schema change.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
