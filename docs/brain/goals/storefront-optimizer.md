@@ -38,10 +38,16 @@ The Growth director **grades each campaign 1–10** (human-overridable), scoring
 
 ## Milestones (the build path)
 - **M1 — Storefront experiment + bandit framework:** variant model, assignment, exposure tracking, outcome attribution (incl. the delayed-purchase window), Thompson-sampling stats + holdout/control + auto-rollback. *(The greenfield foundation.)*
+  - [[../specs/storefront-experiment-bandit-framework]] ⏳ — the on-site experiment substrate: variant model over DB-driven landers, sticky assignment, exposure→outcome attribution across the delayed-purchase window, Thompson sampling + holdout + auto-rollback. *(foundation — builds immediately)*
 - **M2 — Lever-importance model + CRO-learnings memory:** hierarchical chapter→component, prior + learned posterior, decay/re-probe, per `(product × lander × audience)`, cross-product transfer. The agent's persistent memory.
+  - [[../specs/storefront-lever-importance-memory]] ⏳ — hierarchical chapter→component lever map, CRO priors → learned posteriors from experiment outcomes, decay/re-probe, cross-product transfer. *(blocked by M1)*
 - **M3 — Predicted-LTV metric + 4-month reconciler:** the proxy (sub-attach × est-LTV from the ROAS dashboard) + the slow actual-LTV calibration loop.
+  - [[../specs/storefront-ltv-proxy-reconciler]] ⏳ — the fast-loop predicted-LTV-per-visitor proxy (sub-attach × est-sub-LTV + one-time margin) + the slow ~4-month actual-LTV reconciler that recalibrates the proxy. *(foundation — builds immediately)*
 - **M4 — The Storefront Optimizer agent:** the campaign loop (read funnel + importance → hypothesis → variant via hero-gen/config → bandit campaign → promote/learn), incl. the missing-tool→build routing. Scope: Amazing Coffee × all 4 lander types.
+  - [[../specs/storefront-optimizer-agent]] ⏳ — the capstone employee agent (new `storefront-optimizer` agent_jobs kind): campaign loop + autonomy-within-policy + missing-tool→build-or-request. *(blocked by M1, M2, M3)*
 - **M5 — Head-of-Growth grading loop:** 1–10 grades (hypothesis vs result, initial + 4-month-revised) that train the agent; the Growth-director report contract.
+  - [[../specs/storefront-campaign-grading-loop]] ⏳ — 1–10 campaign grading (hypothesis quality scored separately from result), initial + 4-month-revised, human-overridable, mirroring the ticket grader; trains the agent. *(blocked by M4)*
 - **M6 (gated, when offer levers turn on) — dynamic pricing-rules for persist-to-renewal offers.**
+  - [[../specs/storefront-dynamic-renewal-offers]] ⏳ — make `pricing_rules` dynamic/time-boxed for persist-to-renewal offers + wire the optimizer's approval-gated offer lever (margin-floor rail, contributes-to CFO/Retention). *(blocked by M4)*
 
 Owner: [[../functions/growth]] (the boss). Reports to: [[ceo-mode]]. Mirrors: [[../specs/storefront-iteration-engine]] (ads) · [[../specs/repair-agent]] (the build-or-request pattern).
