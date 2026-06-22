@@ -19,6 +19,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isConservative } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
+import { updatePosterior } from "@/lib/storefront/lever-memory";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -39,6 +40,8 @@ interface ExperimentRowLite {
   regression_windows: number;
   lever: string;
   product_id: string;
+  lander_type: string;
+  audience: string;
 }
 
 export interface ExperimentDecisionRecord {
@@ -92,6 +95,30 @@ export async function refreshStorefrontExperiments(opts: {
   const escalations: Array<{ experiment_id: string; reason: string }> = [];
   const counts = { promoted: 0, killed: 0, rolled_back: 0, held: 0 };
 
+  // Commit the lever-importance learning (win OR loss) for a now-terminal experiment.
+  // Best-effort: a memory failure never breaks the supervisable refresh run. Idempotent
+  // (updatePosterior dedupes by experiment id), so re-processing a terminal experiment
+  // never double-counts. The reward is the predicted-LTV-proxy delta from the rollups.
+  const commitLearning = async (exp: ExperimentRowLite, rollups: VariantRollupResult[]) => {
+    try {
+      await updatePosterior({
+        workspaceId: opts.workspaceId,
+        experiment: {
+          id: exp.id,
+          product_id: exp.product_id,
+          lander_type: exp.lander_type,
+          audience: exp.audience,
+          lever: exp.lever,
+        },
+        rollups,
+        now,
+        admin,
+      });
+    } catch (e) {
+      console.warn(`[storefront-experiments] lever-memory commit failed exp=${exp.id}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   try {
     // 1. Attribution (idempotent recompute).
     const attribution = await refreshExperimentAttribution({
@@ -113,7 +140,7 @@ export async function refreshStorefrontExperiments(opts: {
     const { data: expData } = expIds.length
       ? await admin
           .from("storefront_experiments")
-          .select("id, status, promoted_variant_id, regression_windows, lever, product_id")
+          .select("id, status, promoted_variant_id, regression_windows, lever, product_id, lander_type, audience")
           .in("id", expIds)
       : { data: [] as ExperimentRowLite[] };
     const expById = new Map((expData as ExperimentRowLite[]).map((e) => [e.id, e]));
@@ -169,6 +196,8 @@ export async function refreshStorefrontExperiments(opts: {
         counts.rolled_back++;
         escalations.push({ experiment_id: experimentId, reason });
         decisions.push({ experiment_id: experimentId, action: "rolled_back", win_prob: null, rule: reason, posteriors: snapshot });
+        // Commit the learning — a rollback is a loss, recorded as much as a win.
+        await commitLearning(exp, rollups);
         // Surface, don't bury — escalate to Growth (durable record + structured log).
         console.warn(
           `[storefront-experiments] ESCALATION rollback experiment=${experimentId} lever=${exp.lever} reason=${reason} ` +
@@ -184,18 +213,23 @@ export async function refreshStorefrontExperiments(opts: {
         last_decision: { action: decision.action, rule: decision.rule, win_prob: decision.winProb, posteriors: decision.posteriors, at: now.toISOString() },
         updated_at: now.toISOString(),
       };
+      let terminal = false;
       if (decision.action === "promote" && decision.winnerVariantId) {
         update.status = "promoted";
         update.promoted_variant_id = decision.winnerVariantId;
         counts.promoted++;
+        terminal = true;
       } else if (decision.action === "kill") {
         update.status = "killed";
         update.stopped_at = now.toISOString();
         counts.killed++;
+        terminal = true;
       } else {
         counts.held++;
       }
       await admin.from("storefront_experiments").update(update).eq("id", experimentId);
+      // A completed experiment (promote = win, kill = loss) commits its learning to memory.
+      if (terminal) await commitLearning(exp, rollups);
       decisions.push({
         experiment_id: experimentId,
         action: decision.action,

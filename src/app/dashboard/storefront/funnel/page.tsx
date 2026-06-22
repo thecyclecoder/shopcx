@@ -88,6 +88,19 @@ interface FunnelData {
       win_prob: number | null;
     }>;
   }>;
+  leverImportance?: Array<{
+    lever_key: string;
+    chapter: string;
+    kind: "chapter" | "component";
+    product_id: string;
+    lander_type: string;
+    audience: string;
+    importance: number;
+    prior: number;
+    n_tests: number;
+    scope: "product_specific" | "general";
+    last_tested_at: string | null;
+  }>;
   recentEvents: Array<{
     id: string;
     event_type: string;
@@ -243,6 +256,10 @@ export default function StorefrontFunnelPage() {
 
           {data.runningExperiments && data.runningExperiments.length > 0 && (
             <RunningExperimentsPanel rows={data.runningExperiments} />
+          )}
+
+          {data.leverImportance && data.leverImportance.length > 0 && (
+            <LeverImportancePanel rows={data.leverImportance} />
           )}
 
           <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -713,6 +730,78 @@ function RunningExperimentsPanel({ rows }: { rows: NonNullable<FunnelData["runni
             </table>
           </div>
         ))}
+      </div>
+    </section>
+  );
+}
+
+function LeverImportancePanel({ rows }: { rows: NonNullable<FunnelData["leverImportance"]> }) {
+  // What the agent believes matters: the learned lever-importance posteriors. A bar
+  // shows current importance; the delta vs prior shows what testing taught it.
+  const fmtLever = (s: string) => s.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+  const fmtAgo = (iso: string | null) => {
+    if (!iso) return "never";
+    const days = Math.round((Date.now() - new Date(iso).getTime()) / 86400000);
+    return days <= 0 ? "today" : `${days}d ago`;
+  };
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+          What the agent believes matters
+        </h2>
+        <span className="text-[11px] text-zinc-400">
+          Learned lever importance per (product × lander × audience) — updated by each experiment, win or loss.
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[640px] text-sm">
+          <thead>
+            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+              <th className="py-2 pr-2">Lever</th>
+              <th className="py-2 pr-2">Lander</th>
+              <th className="py-2 pr-2">Scope</th>
+              <th className="py-2 pr-2 text-right">Importance</th>
+              <th className="py-2 pr-2 text-right">vs prior</th>
+              <th className="py-2 pr-2 text-right">Tests</th>
+              <th className="py-2 pr-2 text-right">Last tested</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const delta = Math.round((r.importance - r.prior) * 1000) / 1000;
+              return (
+                <tr key={`${r.lever_key}-${r.product_id}-${r.lander_type}-${r.audience}-${i}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">
+                    {fmtLever(r.lever_key)}
+                    <span className="ml-1 text-[10px] uppercase text-zinc-400">{r.chapter}</span>
+                  </td>
+                  <td className="py-2 pr-2 text-zinc-500">{r.lander_type}</td>
+                  <td className="py-2 pr-2">
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-zinc-500 dark:bg-zinc-800">
+                      {r.scope === "general" ? "general" : "product"}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
+                    <div className="flex items-center justify-end gap-2">
+                      <div className="hidden h-1.5 w-20 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800 sm:block">
+                        <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${Math.round(r.importance * 100)}%` }} />
+                      </div>
+                      {r.importance.toFixed(2)}
+                    </div>
+                  </td>
+                  <td className="py-2 pr-2 text-right tabular-nums font-semibold">
+                    <span className={delta > 0.01 ? "text-emerald-600" : delta < -0.01 ? "text-rose-600" : "text-zinc-400"}>
+                      {delta > 0 ? "+" : ""}{delta.toFixed(2)}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{r.n_tests}</td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{fmtAgo(r.last_tested_at)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </section>
   );

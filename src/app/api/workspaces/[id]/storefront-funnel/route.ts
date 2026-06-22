@@ -16,6 +16,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { winProbabilityVsControl } from "@/lib/storefront/bandit";
+import { getLeverImportancePanel } from "@/lib/storefront/lever-memory";
 
 const FUNNEL_STEPS = [
   "pdp_view",
@@ -517,6 +518,10 @@ export async function GET(
   // (Phase 4 surfacing). Best-effort — empty if the tables aren't present yet.
   const runningExperiments = await buildRunningExperiments(admin, workspaceId);
 
+  // "What the agent believes matters" — the M2 lever-importance posteriors. Best-effort
+  // (empty if the lever-memory tables aren't present yet).
+  const leverImportance = await getLeverImportancePanel(admin, workspaceId);
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
@@ -526,6 +531,7 @@ export async function GET(
     surveyFunnel,
     funnel,
     runningExperiments,
+    leverImportance,
     packBreakdown,
     topProducts,
     deviceBreakdown,
