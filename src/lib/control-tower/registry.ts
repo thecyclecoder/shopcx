@@ -204,6 +204,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every 15 min (*/15 * * * *)",
     livenessWindowMs: 45 * MIN,
   },
+  {
+    id: "spec-drift-reconcile",
+    kind: "cron",
+    label: "Spec-drift reconciler",
+    description: "Per-phase emoji↔code reconciler — flips shipped phases ✅, surfaces ambiguous drift.",
+    expectedCadence: "every ~30 min (20,50 * * * *)",
+    livenessWindowMs: 90 * MIN,
+  },
 
   // ── Box agent-kind lanes (loop_heartbeats, loop_id = `agent:<kind>`) ───────
   // Idle = green. Alerted only on a STUCK job past the per-kind threshold.

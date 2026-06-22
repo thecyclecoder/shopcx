@@ -105,6 +105,7 @@ import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
 import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 import { creativeFinderDailyCron, creativeFinderManualSweep } from "@/lib/inngest/creative-finder";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
+import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
 import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 
@@ -229,6 +230,7 @@ export const { GET, POST, PUT } = serve({
     creativeFinderDailyCron,
     creativeFinderManualSweep,
     controlTowerMonitor,
+    specDriftReconcileCron,
     inngestFailureCapture,
     supabaseLogPollCron,
   ],

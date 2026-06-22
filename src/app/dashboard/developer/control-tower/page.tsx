@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -62,11 +62,22 @@ interface ErrorFeedSnapshot {
   generatedAt: string;
   panels: ErrorFeedPanel[];
 }
+interface SpecDriftRow {
+  id: string;
+  spec_slug: string;
+  phase_index: number;
+  phase_title: string;
+  current_emoji: string;
+  detail: string;
+  opened_at: string;
+  last_seen_at: string;
+}
 interface Snapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
   loops: LoopStatus[];
   errorFeed?: ErrorFeedSnapshot;
+  specDrift?: SpecDriftRow[];
 }
 
 function elapsed(iso: string | null | undefined): string {
@@ -230,31 +241,106 @@ function ErrorPanel({ panel }: { panel: ErrorFeedPanel }) {
   );
 }
 
+function SpecDriftSection({ rows, onChange }: { rows: SpecDriftRow[]; onChange: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const act = async (row: SpecDriftRow, action: "flip" | "dismiss") => {
+    setBusy(`${row.id}:${action}`);
+    try {
+      const res = await fetch("/api/roadmap/spec-drift", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: row.spec_slug, phaseIndex: row.phase_index, action }),
+      });
+      if (res.ok) onChange();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-8">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Spec drift</h2>
+      <p className="mb-3 text-[11px] text-zinc-400">
+        Phases whose code is verifiably on <code>main</code> but whose emoji is still ⏳/🚧 with no merged build
+        on record — the reconciler won&apos;t auto-flip these, so confirm with one tap. <b>Mark P&shy;n ✅</b> flips
+        the phase in the spec markdown (committed to main); <b>Dismiss</b> leaves it and clears the notice. Empty =
+        no unresolved drift.
+      </p>
+      {rows.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-zinc-200 px-3 py-4 text-xs text-emerald-700 dark:border-zinc-800 dark:text-emerald-300">
+          No spec drift — every shipped phase is marked ✅.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {rows.map((row) => (
+            <li
+              key={row.id}
+              className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] dark:border-amber-900/40 dark:bg-amber-900/15"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <Link
+                    href={`/dashboard/roadmap/${row.spec_slug}`}
+                    className="font-semibold text-zinc-800 hover:underline dark:text-zinc-100"
+                  >
+                    {row.spec_slug}
+                  </Link>
+                  <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
+                    P{row.phase_index + 1} {row.current_emoji}
+                  </span>
+                  <p className="mt-1 text-zinc-600 dark:text-zinc-300">{row.detail}</p>
+                  <p className="mt-0.5 text-[10px] text-zinc-400">surfaced {elapsed(row.opened_at)} ago</p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    onClick={() => act(row, "flip")}
+                    disabled={busy !== null}
+                    className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    {busy === `${row.id}:flip` ? "Flipping…" : `Mark P${row.phase_index + 1} ✅`}
+                  </button>
+                  <button
+                    onClick={() => act(row, "dismiss")}
+                    disabled={busy !== null}
+                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    {busy === `${row.id}:dismiss` ? "…" : "Dismiss"}
+                  </button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function ControlTowerPage() {
   const workspace = useWorkspace();
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
 
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
+  const refresh = useCallback(
+    () =>
       fetch("/api/developer/control-tower")
         .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
         .then((d) => {
-          if (!alive) return;
           setSnap(d);
           setErr(false);
         })
-        .catch(() => alive && setErr(true))
-        .finally(() => alive && setLoading(false));
-    load();
-    const interval = setInterval(load, 15000);
-    return () => {
-      alive = false;
-      clearInterval(interval);
-    };
-  }, []);
+        .catch(() => setErr(true))
+        .finally(() => setLoading(false)),
+    [],
+  );
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 15000);
+    return () => clearInterval(interval);
+  }, [refresh]);
 
   if (workspace.role !== "owner") {
     return (
@@ -340,6 +426,8 @@ export default function ControlTowerPage() {
               </div>
             </div>
           )}
+
+          <SpecDriftSection rows={snap.specDrift ?? []} onChange={refresh} />
 
           <p className="mt-6 text-[11px] text-zinc-400">
             SHA comparison uses the deployed commit ({" "}
