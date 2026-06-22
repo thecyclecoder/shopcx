@@ -15,9 +15,44 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { graphFetchJson } from "@/lib/meta/graph-retry";
+import { reportDbError } from "@/lib/control-tower/error-feed";
 
 const GRAPH_BASE = "https://graph.facebook.com/v21.0";
 const actId = (id: string) => (id.startsWith("act_") ? id : `act_${id.replace(/^act_/, "")}`);
+
+type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * Upsert in ≤500-row chunks and return the count actually PERSISTED — never the
+ * count attempted. A non-null Supabase `{ error }` is the silent-write class this
+ * spec exists to kill (meta-insights-ingest-empty-fix): the old code ignored it
+ * and returned `records.length`, so a run could page through Meta for two minutes,
+ * fail every upsert, and still report success with 0 rows written. Now we surface
+ * the swallowed error to the Control Tower feed (reportDbError) at the source and
+ * throw loudly with the PG code+message so the run fails instead of lying.
+ */
+async function upsertOrThrow(
+  admin: Admin,
+  table: string,
+  rows: Record<string, unknown>[],
+  onConflict: string,
+  ctx: { op: string; label?: string; extra?: Record<string, unknown> },
+): Promise<number> {
+  let persisted = 0;
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    const { error } = await admin.from(table).upsert(chunk, { onConflict });
+    if (error) {
+      await reportDbError(error, { op: ctx.op, table, ...(ctx.extra ?? {}), persisted, total: rows.length });
+      throw new Error(
+        `${table} upsert failed${ctx.label ? ` (${ctx.label})` : ""}: ${(error as { code?: string }).code ?? "?"} ` +
+          `${error.message} — persisted ${persisted}/${rows.length} before the error`,
+      );
+    }
+    persisted += chunk.length;
+  }
+  return persisted;
+}
 
 type Level = "campaign" | "adset" | "ad";
 
@@ -78,81 +113,90 @@ export async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: num
     { fields: "id,name,status,effective_status,objective,daily_budget,lifetime_budget,created_time,updated_time", limit: "500" },
     p.accessToken,
   );
-  if (campaigns.length) {
-    await admin.from("meta_campaigns").upsert(
-      campaigns.map((c) => ({
-        workspace_id: p.workspaceId,
-        meta_ad_account_id: p.adAccountId,
-        meta_campaign_id: c.id,
-        name: c.name ?? null,
-        status: c.status ?? null,
-        effective_status: c.effective_status ?? null,
-        objective: c.objective ?? null,
-        daily_budget_cents: toCents(c.daily_budget),
-        lifetime_budget_cents: toCents(c.lifetime_budget),
-        meta_created_time: isoOrNull(c.created_time),
-        meta_updated_time: isoOrNull(c.updated_time),
-        synced_at: now,
-        updated_at: now,
-      })),
-      { onConflict: "workspace_id,meta_campaign_id" },
-    );
-  }
+  const campaignsPersisted = campaigns.length
+    ? await upsertOrThrow(
+        admin,
+        "meta_campaigns",
+        campaigns.map((c) => ({
+          workspace_id: p.workspaceId,
+          meta_ad_account_id: p.adAccountId,
+          meta_campaign_id: c.id,
+          name: c.name ?? null,
+          status: c.status ?? null,
+          effective_status: c.effective_status ?? null,
+          objective: c.objective ?? null,
+          daily_budget_cents: toCents(c.daily_budget),
+          lifetime_budget_cents: toCents(c.lifetime_budget),
+          meta_created_time: isoOrNull(c.created_time),
+          meta_updated_time: isoOrNull(c.updated_time),
+          synced_at: now,
+          updated_at: now,
+        })),
+        "workspace_id,meta_campaign_id",
+        { op: "meta-structure-upsert", label: "campaigns", extra: { account: p.adAccountId } },
+      )
+    : 0;
 
   const adsets = await graphGetAll(
     `${acct}/adsets`,
     { fields: "id,name,status,effective_status,campaign_id,optimization_goal,daily_budget,lifetime_budget,created_time,updated_time", limit: "500" },
     p.accessToken,
   );
-  if (adsets.length) {
-    await admin.from("meta_adsets").upsert(
-      adsets.map((a) => ({
-        workspace_id: p.workspaceId,
-        meta_ad_account_id: p.adAccountId,
-        meta_adset_id: a.id,
-        meta_campaign_id: a.campaign_id ?? null,
-        name: a.name ?? null,
-        status: a.status ?? null,
-        effective_status: a.effective_status ?? null,
-        optimization_goal: a.optimization_goal ?? null,
-        daily_budget_cents: toCents(a.daily_budget),
-        lifetime_budget_cents: toCents(a.lifetime_budget),
-        meta_created_time: isoOrNull(a.created_time),
-        meta_updated_time: isoOrNull(a.updated_time),
-        synced_at: now,
-        updated_at: now,
-      })),
-      { onConflict: "workspace_id,meta_adset_id" },
-    );
-  }
+  const adsetsPersisted = adsets.length
+    ? await upsertOrThrow(
+        admin,
+        "meta_adsets",
+        adsets.map((a) => ({
+          workspace_id: p.workspaceId,
+          meta_ad_account_id: p.adAccountId,
+          meta_adset_id: a.id,
+          meta_campaign_id: a.campaign_id ?? null,
+          name: a.name ?? null,
+          status: a.status ?? null,
+          effective_status: a.effective_status ?? null,
+          optimization_goal: a.optimization_goal ?? null,
+          daily_budget_cents: toCents(a.daily_budget),
+          lifetime_budget_cents: toCents(a.lifetime_budget),
+          meta_created_time: isoOrNull(a.created_time),
+          meta_updated_time: isoOrNull(a.updated_time),
+          synced_at: now,
+          updated_at: now,
+        })),
+        "workspace_id,meta_adset_id",
+        { op: "meta-structure-upsert", label: "adsets", extra: { account: p.adAccountId } },
+      )
+    : 0;
 
   const ads = await graphGetAll(
     `${acct}/ads`,
     { fields: "id,name,status,effective_status,adset_id,campaign_id,creative,created_time,updated_time", limit: "500" },
     p.accessToken,
   );
-  if (ads.length) {
-    await admin.from("meta_ads").upsert(
-      ads.map((a) => ({
-        workspace_id: p.workspaceId,
-        meta_ad_account_id: p.adAccountId,
-        meta_ad_id: a.id,
-        meta_adset_id: a.adset_id ?? null,
-        meta_campaign_id: a.campaign_id ?? null,
-        name: a.name ?? null,
-        status: a.status ?? null,
-        effective_status: a.effective_status ?? null,
-        creative_id: a.creative?.id ?? null,
-        meta_created_time: isoOrNull(a.created_time),
-        meta_updated_time: isoOrNull(a.updated_time),
-        synced_at: now,
-        updated_at: now,
-      })),
-      { onConflict: "workspace_id,meta_ad_id" },
-    );
-  }
+  const adsPersisted = ads.length
+    ? await upsertOrThrow(
+        admin,
+        "meta_ads",
+        ads.map((a) => ({
+          workspace_id: p.workspaceId,
+          meta_ad_account_id: p.adAccountId,
+          meta_ad_id: a.id,
+          meta_adset_id: a.adset_id ?? null,
+          meta_campaign_id: a.campaign_id ?? null,
+          name: a.name ?? null,
+          status: a.status ?? null,
+          effective_status: a.effective_status ?? null,
+          creative_id: a.creative?.id ?? null,
+          meta_created_time: isoOrNull(a.created_time),
+          meta_updated_time: isoOrNull(a.updated_time),
+          synced_at: now,
+          updated_at: now,
+        })),
+        "workspace_id,meta_ad_id",
+        { op: "meta-structure-upsert", label: "ads", extra: { account: p.adAccountId } },
+      )
+    : 0;
 
-  return { campaigns: campaigns.length, adsets: adsets.length, ads: ads.length };
+  return { campaigns: campaignsPersisted, adsets: adsetsPersisted, ads: adsPersisted };
 }
 
 // ── Insights ─────────────────────────────────────────────────────────────────
@@ -211,16 +255,18 @@ export async function syncMetaInsightsForLevel(
       };
     });
 
-  if (records.length) {
-    // Chunk to stay well under statement/payload limits on a 90-day backfill.
-    for (let i = 0; i < records.length; i += 500) {
-      await admin
-        .from("meta_insights_daily")
-        .upsert(records.slice(i, i + 500), { onConflict: "workspace_id,meta_object_id,level,snapshot_date" });
-    }
-  }
+  // Chunk to stay well under statement/payload limits on a 90-day backfill, and
+  // return the count actually PERSISTED — a swallowed upsert error here was the
+  // root of the empty-insights regression (rows fetched, 0 written, status 'ok').
+  const persisted = records.length
+    ? await upsertOrThrow(admin, "meta_insights_daily", records, "workspace_id,meta_object_id,level,snapshot_date", {
+        op: "meta-insights-upsert",
+        label: level,
+        extra: { account: p.adAccountId, level, since: startDate, until: endDate },
+      })
+    : 0;
 
-  return { rows: records.length };
+  return { rows: persisted };
 }
 
 /** Max span of a single insights sub-window — keeps each Graph request light. */
@@ -372,6 +418,49 @@ export async function ingestMetaPerformance(
 
   const structure = await syncMetaStructure(p);
   const insights = await syncMetaInsights(p, startDate, endDate);
+
+  // ── Output assertion — rows-written > 0 when Meta has data (the false-success
+  // class this spec exists to kill). The ingest used to report success even when
+  // it persisted 0 insight rows. We cross-check against the INDEPENDENT
+  // `daily_meta_ad_spend` account rollup (a different feed, populated by the
+  // account-level spend sync): if that rollup proves the account spent in this
+  // window but we wrote 0 ad/adset/campaign insight rows, the object-grain ingest
+  // silently produced nothing — wrong `act_` id / a dropped ads_read scope on the
+  // token / a swallowed write — so we surface it to the Control Tower and fail
+  // loud. An account that genuinely had no Meta spend → 0 rollup spend → 0 rows is
+  // correct and stays silent (the negative case the spec calls out).
+  const insightRows = insights.campaign + insights.adset + insights.ad;
+  if (insightRows === 0) {
+    const { data: rollup } = await admin
+      .from("daily_meta_ad_spend")
+      .select("spend_cents")
+      .eq("meta_ad_account_id", p.adAccountId)
+      .gte("snapshot_date", startDate)
+      .lte("snapshot_date", endDate);
+    const rollupSpendCents = (rollup || []).reduce((s, r) => s + (r.spend_cents || 0), 0);
+    if (rollupSpendCents > 0) {
+      const detail =
+        `Meta insights ingest persisted 0 ad/adset/campaign rows for account ${p.adAccountId} over ` +
+        `${startDate}..${endDate}, but daily_meta_ad_spend shows ${rollupSpendCents}¢ of account spend in that ` +
+        `window — Meta has data while meta_insights_daily is empty (false-success). Check the active ` +
+        `meta_ad_account_id / token ads_read scope / the act_ id the insights endpoint is queried with.`;
+      // Surface the swallowed false-success to the Control Tower error feed at the
+      // source (best-effort) before throwing so the run fails loudly.
+      await reportDbError(
+        { code: "META_INGEST_EMPTY", message: detail },
+        {
+          op: "meta-ingest-false-success",
+          table: "meta_insights_daily",
+          account: p.adAccountId,
+          rollup_spend_cents: rollupSpendCents,
+          window: `${startDate}..${endDate}`,
+          structure,
+        },
+      );
+      throw new Error(detail);
+    }
+  }
+
   const reconcile = await reconcileInsightsVsSpend(p, startDate, endDate);
 
   return { backfilled, startDate, endDate, structure, insights, reconcile };

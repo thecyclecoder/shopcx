@@ -63,6 +63,11 @@ Indexes: `(meta_ad_account_id, snapshot_date)`, `(workspace_id, meta_ad_id, snap
   on); the run reports their count as `meta_orders_without_ad`.
 - Variant resolution + spend allocation are v1 URL-parse / first-touch joins. Phase 2b
   hardens this by persisting `advertorial_page_id` on sessions/orders.
+- **`attributed_spend_cents = 0` on every row ⇒ insights are empty upstream.** Spend
+  derives entirely from [[meta_insights_daily]] (`level='ad'`); if that table is empty
+  the rollup writes rows (from sessions/orders) but with `spend=0`, making per-variant
+  ROAS degenerate. That was the meta-insights-ingest-empty-fix regression — the fix +
+  rows-written guard live in [[../libraries/meta__performance]], not here.
 
 ---
 
