@@ -74,7 +74,7 @@ Single source of truth for what's being built next, what's parked, and what just
 
 Born from a full Control Tower audit. Each fixes a real red/error or a monitor false-positive:
 - [[control-tower-monitor-accuracy]] (platform) — never-fired keys off "0 beats EVER" not "0 since deploy" (clears the today-sync/meta-capi/etc. false-reds) + bound the loop_heartbeats read that's 500-ing.
-- [[serve-unserved-crons]] (platform) — deliver-pending-sends + marketing-text-campaign-send-tick are coded + registered but NOT in the Inngest serve route → serve or retire.
+- [[serve-unserved-crons]] (platform) ✅ — deliver-pending-sends + marketing-text-campaign-send-tick: investigated → both **already** served (always have been) + registered + heartbeat-wired; decision = both should run, no code change. The never-fired flag was the heartbeat-primitive-didn't-exist-until-#185 false positive that [[control-tower-monitor-accuracy]] clears.
 - [[appstle-webhook-billing-error]] (retention) — recurring 500 on subscription.billing-* events; fix the throw / ack semantics.
 - [[scorecards-notnull-guard]] (growth) — 23502 NOT-NULL violation dropping scorecard rows; guard the null column.
 - [[inngest-capture-scope-own-app]] (platform) — a sibling app (shopgrowth) bleeds into our Inngest failure feed; scope capture to our served functions.
