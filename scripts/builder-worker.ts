@@ -149,6 +149,10 @@ interface ProposedSpec {
   milestone?: string;
   intent: string;
   gap?: string;
+  // Prerequisite slugs (goal-decomposition-encodes-blockers): sibling proposed specs or already-existing
+  // specs this branch depends on. Acyclic. Written as the spec's `**Blocked-by:**` header on resume
+  // authoring — but filtered to approved blockers only (a declined sibling is dropped, not left dangling).
+  blocked_by?: string[];
 }
 interface PendingAction {
   id: string;
@@ -670,7 +674,8 @@ async function runPlanJob(job: Job) {
         `Use the plan-goal skill to plan the goal docs/brain/goals/${goalSlug}.md (cwd is the repo root).`,
         ...(job.instructions ? [`Extra planning guidance: ${job.instructions}`] : []),
         `You are PROPOSING only — do NOT author specs, do NOT queue builds, do NOT run git. Read the goal + the brain, gap-analyze, and emit the proposed tree. Every proposed spec MUST carry an owner + parent (reject your own orphans).`,
-        `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","summary":"<title>","preview":"<intent>\\n\\nGap: <brain citation>","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…"}}]} | {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id":"q1","q":"…"}]}.`,
+        `SELF-SEQUENCING (goal-decomposition-encodes-blockers): every proposed branch MUST declare its prerequisites as \`blocked_by\`: a (possibly empty) list of the slugs it depends on — each slug MUST reference another proposed spec in THIS tree or an already-existing spec under docs/brain/specs/. The graph MUST be acyclic (no spec blocks itself, directly or transitively). Foundation specs that nothing precedes have \`blocked_by: []\`; a spec that needs a framework/memory/metric built first lists those slugs. Do NOT over-serialize independent branches — only list a real build-order dependency. The approved tree becomes self-sequencing: only unblocked specs build immediately, dependents auto-queue as their blockers ship.`,
+        `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","summary":"<title>","preview":"<intent>\\n\\nGap: <brain citation>","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…","blocked_by":["<sibling-or-existing-slug>"]}}]} | {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id":"q1","q":"…"}]}.`,
       ].join("\n");
       const { session, resultText, isError } = await runClaude(prompt, null, wt);
       if (session) await update(job.id, { claude_session_id: session });
@@ -704,6 +709,11 @@ async function runPlanJob(job: Job) {
               milestone: typeof sp.milestone === "string" ? sp.milestone : undefined,
               intent: String(sp.intent || a.preview || ""),
               gap: typeof sp.gap === "string" ? sp.gap : undefined,
+              // Prerequisite slugs (goal-decomposition-encodes-blockers). Keep only string slugs;
+              // a missing/malformed list → no declared blockers (the spec authors with no Blocked-by).
+              blocked_by: Array.isArray(sp.blocked_by)
+                ? (sp.blocked_by as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+                : undefined,
             },
           });
         });
@@ -729,10 +739,16 @@ async function runPlanJob(job: Job) {
       return;
     }
 
+    // Approved-blockers-only (goal-decomposition-encodes-blockers): a proposed blocker the owner DECLINED
+    // is dropped so a spec isn't permanently blocked by a branch that will never ship. Approved siblings
+    // and already-existing specs (slugs not in this proposal at all) are kept.
+    const declinedSlugs = new Set(declined.map((a) => a.spec!.slug));
     const specList = approved
       .map((a, i) => {
         const s = a.spec!;
-        return `${i + 1}. slug=${s.slug} · title="${s.title}" · owner=${s.owner} · parent="${s.parent}"${s.milestone ? ` · milestone=${s.milestone}` : ""}\n   intent: ${s.intent}${s.gap ? `\n   gap: ${s.gap}` : ""}`;
+        const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
+        const blockedLine = blockers.length ? `\n   blocked_by: ${blockers.join(", ")}` : "";
+        return `${i + 1}. slug=${s.slug} · title="${s.title}" · owner=${s.owner} · parent="${s.parent}"${s.milestone ? ` · milestone=${s.milestone}` : ""}\n   intent: ${s.intent}${s.gap ? `\n   gap: ${s.gap}` : ""}${blockedLine}`;
       })
       .join("\n");
     const declinedNote = declined.length
@@ -741,6 +757,7 @@ async function runPlanJob(job: Job) {
     const prompt = [
       `Author the owner-APPROVED specs for goal docs/brain/goals/${goalSlug}.md (cwd is the repo root). Do NOT build anything; do NOT run git. Only write files under docs/brain/specs/ and edit docs/brain/goals/${goalSlug}.md.`,
       `For EACH approved spec below, create docs/brain/specs/{slug}.md as a real, concrete build spec: an H1 "# {Title} ⏳"; directly under it the metadata line \`**Owner:** [[../functions/{owner}]] · **Parent:** {parent}\`; a one-paragraph summary tied to the goal's success metric; concrete "## Phase N — name" sections (each first bullet "- ⏳ planned") grounded in the brain (read pages to cite real table/library names + the gap); a "## Safety / invariants" section; a "## Completion criteria" section. Match the style of existing docs/brain/specs/*.md.`,
+      `BLOCKED-BY (goal-decomposition-encodes-blockers): when an approved spec below lists \`blocked_by\`, add a metadata header line immediately after the \`**Owner:** … · **Parent:** …\` line, in exactly this format: \`**Blocked-by:** [[<slug>]], [[<slug>]]\` (one [[slug]] wikilink per blocker, comma-separated). This gates the spec's build until its prerequisites ship. If a spec has no \`blocked_by\` line below, do NOT add a Blocked-by header (it is a foundation spec that builds immediately). Use ONLY the slugs listed in that spec's \`blocked_by\` — do not invent prerequisites.`,
       `Then update docs/brain/goals/${goalSlug}.md: under the matching milestone in "## Decomposition", add a wikilink to each new spec, e.g. "[[../specs/{slug}]] ⏳ — {one-line}".${declinedNote}`,
       ``,
       `Approved specs:\n${specList}`,
