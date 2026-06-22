@@ -20,6 +20,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { reconcileLtvProxy } from "@/lib/storefront/ltv-reconciler";
+import { gradeRevisedForReconciledCohorts } from "@/lib/storefront/campaign-grader";
 
 export const storefrontLtvReconcileCron = inngest.createFunction(
   { id: "storefront-ltv-reconcile-cron", retries: 1, triggers: [{ cron: "0 14 * * *" }] },
@@ -59,12 +60,16 @@ export const storefrontLtvReconcile = inngest.createFunction(
     const result = await step.run("reconcile", () =>
       reconcileLtvProxy({ workspaceId: workspace_id, lagDays: lag_days, windowDays: window_days }),
     );
+    // M5 — once cohorts reconcile, land the REVISED campaign grade for any concluded campaign whose
+    // cohort now has its actual 4-month LTV (the proxy-time call truth-checked, [[storefront-campaign-grader]]).
+    // Best-effort + idempotent (skips already-revised + unreconciled cohorts).
+    const revised = await step.run("grade-revised", () => gradeRevisedForReconciledCohorts({ workspaceId: workspace_id }));
     console.log(
       `[storefront-ltv-reconcile] ws=${workspace_id} candidates=${result.candidates} ` +
         `reconciled=${result.reconciled.length} recalibrated=${result.recalibrated} ` +
         `weights_version=${result.weights_version} calibrated=${!!result.calibrated_at} ` +
-        `escalations=${result.escalations.length}`,
+        `escalations=${result.escalations.length} revised_grades=${revised.revised}`,
     );
-    return { status: "complete", ...result };
+    return { status: "complete", ...result, revised_grades: revised.revised };
   },
 );

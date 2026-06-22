@@ -20,9 +20,13 @@ _TODO: page purpose._
 
 _None._
 
+**Campaign grades panel (M5):** the Head-of-Growth grading report ([[../libraries/storefront-campaign-grader]]) — every concluded campaign with its **initial + revised** grade, the hypothesis/result sub-scores (hypothesis quality scored **separately** from result), who graded it, and the agent's **average-grade trend** (the supervised metric). Returned as `campaignGrades`. One-click **override** records `graded_by='human'` + `overridden_by` on [[../tables/storefront_campaign_grades]]; proposed [[../tables/storefront_grader_prompts]] calibration rules can be approved inline (storefront-campaign-grading-loop Phase 4).
+
 ## API endpoints called
 
-_None detected via static fetch() scan._
+- `GET /api/workspaces/[id]/storefront-funnel` — the funnel data (includes the `campaignGrades` block).
+- `POST /api/workspaces/[id]/storefront-campaign-grades/[gradeId]` — the human grade override (owner/admin).
+- `PATCH/DELETE /api/workspaces/[id]/storefront-grader-prompts/[ruleId]` — approve/reject/delete a calibration rule.
 
 ## Permissions
 

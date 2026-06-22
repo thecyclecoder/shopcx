@@ -48,6 +48,11 @@ export const LTV_PER_SESSION_FLOOR = 50;
 export const DECAY_HALF_LIFE_DAYS = 45;
 /** Explore weight in nextLeverToTest's score (UCB-style uncertainty bonus). */
 export const EXPLORE_C = 0.35;
+/** Secondary weight the M5 campaign-grade signal adds to a lever's selection score — the
+ *  CEO → Growth → Optimizer feedback bias. A high-graded lever pattern is nudged up, a
+ *  low-graded one down, on a normalized [-1,1] scale around a neutral grade of 5.5. Kept
+ *  small: grades SUPERVISE lever choice, they never override the learned proxy posterior. */
+export const GRADE_BIAS_WEIGHT = 0.15;
 
 // ── Pure math ───────────────────────────────────────────────────────────────
 
@@ -468,6 +473,10 @@ export async function nextLeverToTest(opts: {
   productId: string;
   landerType: string;
   audience?: string;
+  /** Optional M5 campaign-grade bias: `lever_key → avg grade (1–10)`. When present, a lever's
+   *  selection score is nudged by GRADE_BIAS_WEIGHT toward high-graded patterns — the
+   *  Head-of-Growth feedback signal as a secondary weight on lever choice. Omit ⇒ no bias. */
+  gradeBias?: Record<string, number>;
   now?: Date;
   admin?: Admin;
 }): Promise<NextLeverResult> {
@@ -526,10 +535,14 @@ export async function nextLeverToTest(opts: {
       importance = seed.prior; // best current belief = the (possibly transferred) prior
     }
 
-    // UCB-style score: exploit (importance) + explore (uncertainty: untested/stale).
+    // UCB-style score: exploit (importance) + explore (uncertainty: untested/stale) + the M5
+    // campaign-grade bias (Growth supervision: favor high-graded lever patterns). The grade term
+    // is normalized to [-1,1] around a neutral grade of 5.5, then scaled by GRADE_BIAS_WEIGHT.
     const exploreBonus = EXPLORE_C * Math.sqrt(Math.log(totalTests + 2) / (nTests + 1));
     const stalenessBonus = 0.2 * Math.min(1, ageDays / DECAY_HALF_LIFE_DAYS);
-    const score = importance + exploreBonus + stalenessBonus;
+    const gradeAvg = opts.gradeBias?.[lever.lever_key];
+    const gradeBonus = typeof gradeAvg === "number" ? GRADE_BIAS_WEIGHT * Math.max(-1, Math.min(1, (gradeAvg - 5.5) / 4.5)) : 0;
+    const score = importance + exploreBonus + stalenessBonus + gradeBonus;
     const reason: LeverCandidate["reason"] =
       nTests === 0 ? "explore_never_tested" : ageDays >= DECAY_HALF_LIFE_DAYS ? "explore_decayed" : "exploit";
 

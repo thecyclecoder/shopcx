@@ -44,6 +44,7 @@ import {
   type LanderType,
 } from "@/lib/storefront/lever-memory";
 import { getCalibrationState } from "@/lib/storefront/calibration";
+import { loadLeverGradeSignal, type LeverGradeSignal } from "@/lib/storefront/campaign-grader";
 import type { VariantPatch } from "@/lib/storefront/experiments";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -125,6 +126,8 @@ export interface OptimizerBrief {
   gate: ProposalGate;
   candidates: LeverCandidate[];
   conservative: boolean;
+  /** The M5 campaign-grade training signal for this surface (per-lever avg grades + trend). */
+  gradeSignal: LeverGradeSignal;
 }
 
 // ── Dedup ─────────────────────────────────────────────────────────────────────
@@ -303,11 +306,23 @@ export async function loadOptimizerBrief(opts: {
   // lever class (offers/structural are always approval-gated).
   const gate = evaluateProposalGate(policy, { productId: s.product_id, leverClass: "reversible" });
 
+  // M5 training signal — per-lever campaign-grade history for this surface. Feeds the lever
+  // selector as a secondary weight (favor high-graded patterns) AND is surfaced in the brief so
+  // the box session biases its hypothesis toward sound, high-graded bets.
+  const gradeSignal = await loadLeverGradeSignal({
+    workspaceId: s.workspace_id,
+    productId: s.product_id,
+    landerType: s.lander_type,
+    audience: s.audience,
+    admin,
+  });
+
   const next = await nextLeverToTest({
     workspaceId: s.workspace_id,
     productId: s.product_id,
     landerType: s.lander_type,
     audience: s.audience,
+    gradeBias: gradeSignal.avgByLever,
     now: opts.now,
     admin,
   });
@@ -341,6 +356,18 @@ export async function loadOptimizerBrief(opts: {
     ``,
     `FUNNEL SIGNAL (chapter dwell+CTA share, normalized): ${chapterSignal || "(no funnel events yet)"}`,
     ``,
+    `CAMPAIGN GRADE HISTORY (M5 Head-of-Growth training signal — bias toward high-graded HYPOTHESIS patterns, not lucky wins): ${
+      gradeSignal.graded > 0
+        ? `agent avg grade=${gradeSignal.overallAvg}/10 over ${gradeSignal.graded} graded campaign(s)`
+        : "(no graded campaigns yet)"
+    }`,
+    ...(gradeSignal.graded > 0
+      ? Object.entries(gradeSignal.avgByLever)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 8)
+          .map(([lever, avg]) => `    - ${lever}: avg grade=${avg}/10 · avg hypothesis-quality=${gradeSignal.avgHypothesisByLever[lever] ?? "—"}/10 · n=${gradeSignal.countByLever[lever] ?? 0}`)
+      : []),
+    ``,
     `PREDICTED-LTV-PER-VISITOR (M3, the reward): ${
       ltv
         ? `${ltv.predicted_ltv_per_visitor_cents}¢/visitor · sub_attach=${ltv.sub_attach_rate} · visitors=${ltv.visitors} · snapshot=${ltv.snapshot_date} · calibrated=${ltv.calibrated}`
@@ -351,7 +378,7 @@ export async function loadOptimizerBrief(opts: {
     landerSummary,
   ].join("\n");
 
-  return { surface: s, text, policy, gate, candidates: next.candidates, conservative };
+  return { surface: s, text, policy, gate, candidates: next.candidates, conservative, gradeSignal };
 }
 
 // ── Hero generation (worker-side; the box session never calls the image API) ────
