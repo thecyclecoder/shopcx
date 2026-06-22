@@ -63,6 +63,9 @@ export interface LtvPerVisitorCohort {
   now?: Date;
   /** Reuse a precomputed sub-LTV estimate (one estimateSubLTV call serves many cohorts of a product). */
   subLtv?: SubLTVEstimate;
+  /** Phase-3 recalibration correction multiplied onto est_sub_ltv in the predicted sum
+   *  (from [[storefront-calibration]] getCalibrationState). Defaults to 1 (uncalibrated). */
+  subLtvFactor?: number;
   admin?: Admin;
 }
 
@@ -85,6 +88,9 @@ export interface LtvPerVisitorResult {
   /** The headline reward: predicted lifetime margin per exposed visitor, in cents. */
   predicted_ltv_per_visitor_cents: number;
   margin_fraction: number;
+  /** The Phase-3 est-sub-LTV recalibration correction applied in this row's predicted sum
+   *  (1 until M3's slow loop reconciles once). */
+  sub_ltv_factor: number;
   /** Realized subscribers sampled for the est_sub_ltv estimate. */
   est_sub_ltv_sample_size: number;
   flags: {
@@ -135,6 +141,7 @@ export async function predictedLtvPerVisitor(cohort: LtvPerVisitorCohort): Promi
   const marginFraction = cohort.marginFraction ?? PLACEHOLDER_MARGIN_FRACTION;
   const cogsMissing = cohort.marginFraction === undefined;
   const windowMs = (cohort.windowDays ?? DEFAULT_WINDOW_DAYS) * 24 * 60 * 60 * 1000;
+  const subLtvFactor = cohort.subLtvFactor ?? 1;
 
   // 1. Sub-LTV input (renewal-derived, product-level). Shared across cohorts of a product.
   const subLtv =
@@ -158,6 +165,7 @@ export async function predictedLtvPerVisitor(cohort: LtvPerVisitorCohort): Promi
     one_time_margin_cents: 0,
     predicted_ltv_per_visitor_cents: 0,
     margin_fraction: marginFraction,
+    sub_ltv_factor: subLtvFactor,
     est_sub_ltv_sample_size: subLtv.sample_size,
     flags: {
       cogs_source_missing: cogsMissing,
@@ -258,8 +266,11 @@ export async function predictedLtvPerVisitor(cohort: LtvPerVisitorCohort): Promi
   const convertingSessions = oneTimeConversions + subConversions;
   const subAttachRateValue = convertingSessions > 0 ? subConversions / convertingSessions : 0;
   const oneTimeMarginCents = oneTimeConversions > 0 ? Math.round((marginFraction * oneTimeRevenueCents) / oneTimeConversions) : 0;
+  // est_sub_ltv is the raw renewal-derived estimate; the predicted reward applies the
+  // Phase-3 recalibration correction (down-weights a proxy the slow loop found over-predicts).
+  const effectiveEstSubLtvCents = Math.round(subLtv.est_sub_ltv_cents * subLtvFactor);
   const predictedLtvPerVisitorCents = Math.round(
-    (oneTimeConversions * oneTimeMarginCents + subConversions * subLtv.est_sub_ltv_cents) / visitors,
+    (oneTimeConversions * oneTimeMarginCents + subConversions * effectiveEstSubLtvCents) / visitors,
   );
 
   return {
@@ -274,6 +285,7 @@ export async function predictedLtvPerVisitor(cohort: LtvPerVisitorCohort): Promi
     one_time_margin_cents: oneTimeMarginCents,
     predicted_ltv_per_visitor_cents: predictedLtvPerVisitorCents,
     margin_fraction: marginFraction,
+    sub_ltv_factor: subLtvFactor,
     est_sub_ltv_sample_size: subLtv.sample_size,
     flags: {
       cogs_source_missing: cogsMissing,
@@ -314,9 +326,10 @@ export async function refreshLtvMetrics(opts: {
   const now = opts.now ?? new Date();
   const snapshot = snapshotDate(now);
 
-  // Calibration signal (Phase 3 owns flipping it): the weights version to stamp + whether
-  // the proxy has been reconciled once. Uncalibrated until then → bandit runs conservatively.
-  const { calibrated, weights_version } = await getCalibrationState(opts.workspaceId);
+  // Calibration signal (Phase 3 owns flipping it): the weights version to stamp, whether
+  // the proxy has been reconciled once, and the est-sub-LTV recalibration correction.
+  // Uncalibrated (factor 1) until then → bandit runs conservatively.
+  const { calibrated, weights_version, sub_ltv_factor } = await getCalibrationState(opts.workspaceId);
 
   // Distinct active cohorts = (product × lander_type × audience) over running/promoted experiments.
   const { data: experiments } = await admin
@@ -356,6 +369,7 @@ export async function refreshLtvMetrics(opts: {
       windowDays: opts.windowDays,
       now,
       subLtv,
+      subLtvFactor: sub_ltv_factor,
       admin,
     });
     rows.push(result);
@@ -380,7 +394,9 @@ export async function refreshLtvMetrics(opts: {
           weights_version: weights_version ?? INITIAL_WEIGHTS_VERSION,
           calibrated,
           est_sub_ltv_sample_size: result.est_sub_ltv_sample_size,
-          flags: result.flags,
+          // sub_ltv_factor has no column — persisted in the flags jsonb so a recalibrated
+          // row is auditable without a Phase-2 schema change.
+          flags: { ...result.flags, sub_ltv_factor: result.sub_ltv_factor },
           updated_at: now.toISOString(),
         },
         { onConflict: "workspace_id,product_id,lander_type,audience,snapshot_date" },

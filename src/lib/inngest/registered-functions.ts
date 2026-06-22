@@ -55,6 +55,7 @@ import { metaSyncSpend, metaDailySyncCron } from "@/lib/inngest/meta-sync";
 import { metaSyncPerformance, metaPerformanceDailyCron, metaAttributionRefresh, metaScorecardsRefresh, metaDecisionEngine, metaIterationRun, metaExecuteRecommendation } from "@/lib/inngest/meta-performance";
 import { storefrontExperimentsRefresh, storefrontExperimentsRefreshCron } from "@/lib/inngest/storefront-experiments";
 import { storefrontLtvMetricsRefresh } from "@/lib/inngest/storefront-ltv-metrics";
+import { storefrontLtvReconcile, storefrontLtvReconcileCron } from "@/lib/inngest/storefront-ltv-reconcile";
 import { storefrontLeverDecay, storefrontLeverDecayCron } from "@/lib/inngest/storefront-lever-decay";
 import { todaySyncCron } from "@/lib/inngest/today-sync";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
@@ -160,6 +161,8 @@ export const registeredInngestFunctions = [
   storefrontExperimentsRefresh,
   storefrontExperimentsRefreshCron,
   storefrontLtvMetricsRefresh,
+  storefrontLtvReconcileCron,
+  storefrontLtvReconcile,
   storefrontLeverDecay,
   storefrontLeverDecayCron,
   amazonSyncOrders,
