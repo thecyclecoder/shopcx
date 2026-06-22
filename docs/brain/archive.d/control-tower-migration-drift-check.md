@@ -1,0 +1,1 @@
+- **Control Tower — migration-drift check (schema vs migrations)** · verified 2026-06-22 · → [[libraries/control-tower]]
