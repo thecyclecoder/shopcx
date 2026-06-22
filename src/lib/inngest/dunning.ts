@@ -872,7 +872,17 @@ export const dunningPaydayRetryCron = inngest.createFunction(
     });
 
     if (cycles.length === 0) {
-      return { status: "no_cycles_to_retry" };
+      // No due cycles — the common quiet-dunning path. Still emit the end-of-run
+      // heartbeat before returning so Control Tower's freshness/never-fired
+      // monitor sees a beat every hourly tick (mirrors deliver-pending-send.ts,
+      // ticket-csat.ts, abandoned-cart.ts). Without this, a healthy hourly cron
+      // that found no work writes no loop_heartbeats row and trips
+      // monitor.ts never_fired ('registered but never firing').
+      const result = { status: "no_cycles_to_retry", processed: 0, results: [] };
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("dunning-payday-retry-cron", { ok: true, produced: result });
+      });
+      return result;
     }
 
     const results: { contractId: string; outcome: string }[] = [];
