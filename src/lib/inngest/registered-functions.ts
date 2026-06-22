@@ -109,7 +109,6 @@ import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 import { triageEscalationsCron } from "@/lib/inngest/triage-escalations";
 import { specTestCron } from "@/lib/inngest/spec-test-cron";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
-import { foundervipFollowupGate } from "@/lib/inngest/foundervip-followup-gate";
 import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
 import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 import { creativeFinderDailyCron, creativeFinderManualSweep } from "@/lib/inngest/creative-finder";
@@ -227,7 +226,6 @@ export const registeredInngestFunctions = [
   triageEscalationsCron,
   specTestCron,
   portalActionHealer,
-  foundervipFollowupGate,
   slackRoadmapNotify,
   brainIndexRefresh,
   creativeFinderDailyCron,

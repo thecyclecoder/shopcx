@@ -319,7 +319,6 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
   // ─ Yearly cron (window ~370 days) ─
-  { id: "foundervip-followup-gate", kind: "cron", owner: "retention", label: "FounderVIP follow-up gate", description: "Annual FounderVIP follow-up gate (fires once a year).", expectedCadence: "yearly (0 12 15 6 *)", livenessWindowMs: 370 * DAY },
 
   // ── Reactive event-driven Inngest agents (loop_heartbeats, loop_id = inngest fn id) ──
   // Event-driven (not crons, not the box queue). Idle = green; alerted on
