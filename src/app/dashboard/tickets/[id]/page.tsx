@@ -24,6 +24,8 @@ import type { ChargebackItem } from "@/components/shared/ChargebacksList";
 import FraudCasesList from "@/components/shared/FraudCasesList";
 import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
 import { TicketAnalysisPanel } from "@/components/TicketAnalysisPanel";
+import { AiInvestigationBadge } from "@/components/ai-investigation-badge";
+import { useTriageInProgress } from "@/lib/use-triage-in-progress";
 
 // Sentinel <option> value for "escalate to the AI Routine" — escalated_at set
 // with escalated_to null. Distinct from "" (not escalated, both null).
@@ -203,6 +205,7 @@ export default function TicketDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const workspace = useWorkspace();
+  const triageInProgress = useTriageInProgress();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const [ticket, setTicket] = useState<TicketDetail | null>(null);
@@ -1031,6 +1034,11 @@ export default function TicketDetailPage() {
             </h1>
             <StatusBadge status={ticket.status} />
             <ChannelBadge channel={ticket.channel} />
+            <AiInvestigationBadge
+              escalatedAt={ticket.escalated_at}
+              escalatedTo={ticket.escalated_to}
+              triageInProgress={triageInProgress}
+            />
             {ticket.auto_reply_at && new Date(ticket.auto_reply_at) > new Date() && (
               <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-sm font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">
                 <svg className="h-3 w-3 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.828a1 1 0 101.415-1.414L11 9.586V6z" /></svg>

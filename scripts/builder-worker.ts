@@ -1497,7 +1497,7 @@ function triageRevisePrompt(critique: string, concerns: string[]): string {
 async function runEscalationTriageJob(job: Job) {
   const tag = `[triage:${job.id.slice(0, 8)}]`;
   const wsId = job.workspace_id;
-  const { selectEscalatedForTriage, loadTriageBrief, materializeTriageOutcome, recordTriageRun, handUpExhaustedTriage } = await import(
+  const { selectEscalatedForTriage, loadTriageBrief, materializeTriageOutcome, recordTriageRun, handUpExhaustedTriage, postTriageNote } = await import(
     "../src/lib/agent-todos/triage"
   );
 
@@ -1517,6 +1517,10 @@ async function runEscalationTriageJob(job: Job) {
   for (const ticketId of sel.selected) {
     const triageRunId = randomUUID();
     try {
+      // Paper trail: the routine is taking a stab at this escalated ticket. Internal-only — a human
+      // reading the thread sees the AI is on it and can still step in (escalate to a person).
+      await postTriageNote(db, ticketId, "[AI Investigation] Looking into this escalated ticket (solver → skeptic → quorum)…").catch(() => {});
+
       const brief = await loadTriageBrief(db, wsId, ticketId);
 
       // ── Solver (fresh session) ──
@@ -1528,6 +1532,7 @@ async function runEscalationTriageJob(job: Job) {
           materialized: false, outcome: "solver produced no parseable proposal",
           solverTranscript: { raw: solver.raw.slice(-2000) }, skepticTranscript: null, groupId: null,
         });
+        await postTriageNote(db, ticketId, "[AI Investigation] no quorum — left escalated for a human.").catch(() => {});
         summaries.push(`${ticketId.slice(0, 8)}: solver-empty`);
         continue;
       }
@@ -1554,6 +1559,17 @@ async function runEscalationTriageJob(job: Job) {
 
       if (finalVerdict === "agree") {
         const mat = await materializeTriageOutcome(db, { workspaceId: wsId, ticketId, proposal, triageRunId });
+        // Outcome note (internal) describing what the routine did with this escalated ticket.
+        if (mat.todoCount > 0) {
+          await postTriageNote(db, ticketId, `[AI Investigation] proposed ${mat.todoCount} todo${mat.todoCount === 1 ? "" : "s"} for approval — see the To Do queue.`).catch(() => {});
+        } else if (proposal.decision === "escalation_false_positive") {
+          // Quorum-confirmed mis-escalation → un-escalate (leave AI-Investigation); the analyzer-fix
+          // spec mat committed handles the systemic cause. Keep escalated_to null (already null).
+          await db.from("tickets").update({ escalated_at: null, updated_at: new Date().toISOString() }).eq("id", ticketId);
+          await postTriageNote(db, ticketId, `[AI Investigation] mis-escalation — un-escalated${mat.specPath ? " (filed an analyzer-fix spec)" : ""}.`).catch(() => {});
+        } else {
+          await postTriageNote(db, ticketId, `[AI Investigation] ${mat.summary}.`).catch(() => {});
+        }
         await recordTriageRun(db, {
           id: triageRunId, workspaceId: wsId, jobId: job.id, ticketId, decision: proposal.decision, verdict: "agree",
           materialized: true, outcome: mat.summary, solverTranscript, skepticTranscript, groupId: mat.groupId ?? null,
@@ -1562,6 +1578,7 @@ async function runEscalationTriageJob(job: Job) {
         console.log(`${tag} ${ticketId.slice(0, 8)} AGREE (${proposal.decision}) → ${mat.summary}`);
       } else {
         const outcome = `no quorum (solver=${proposal.decision}, skeptic=${finalVerdict})${verdict?.critique ? `: ${verdict.critique.slice(0, 300)}` : ""}`;
+        await postTriageNote(db, ticketId, "[AI Investigation] no quorum — left escalated for a human.").catch(() => {});
         await recordTriageRun(db, {
           id: triageRunId, workspaceId: wsId, jobId: job.id, ticketId, decision: proposal.decision, verdict: finalVerdict,
           materialized: false, outcome, solverTranscript, skepticTranscript, groupId: null,

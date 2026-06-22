@@ -1,4 +1,4 @@
-# "AI Investigation" — make routine-escalated tickets visible ⏳
+# "AI Investigation" — make routine-escalated tickets visible ✅
 
 **Owner:** [[../functions/cs]] · **Parent:** refines [[escalate-to-routine-by-default]] + [[box-escalation-triage]]. Found in use 2026-06-21: a ticket routed to the routine (`escalated_to=null`) gives a human agent **no visual signal** that it's escalated or that triage is working it — so they can't tell to wait/coordinate vs. step in.
 
@@ -15,5 +15,12 @@ When a ticket is **escalated to the routine** (`escalated_at` set + `escalated_t
 - A human escalating the ticket to a person (or assigning themselves) → the badge changes from "AI Investigation" to that person; the ticket leaves the routine's queue.
 - Negative: a non-escalated ticket shows no AI-Investigation badge; the internal note is never customer-facing.
 
-## Phase 1 — badge + triage internal notes ⏳
+## Phase 1 — badge + triage internal notes ✅
 The "AI Investigation" badge on ticket header/list/escalated view for `escalated_to IS NULL` + `escalated_at` (with "triage in progress" when a job is live); the `[AI Investigation]` start + outcome internal notes in `runEscalationTriageJob`. Brain: [[../dashboard/tickets]] · [[box-escalation-triage]] · [[escalate-to-routine-by-default]]. **Queue after [[escalate-to-routine-by-default]] merges** (shared ticket-UI files). Fold on ship.
+
+### What shipped
+- **Shared badge** — `src/components/ai-investigation-badge.tsx` `AiInvestigationBadge` renders **"🔍 Escalated → AI Investigation"** (amber/escalation styling) iff `escalatedAt` set + `escalatedTo` null, else nothing. `compact` drops the "Escalated → " prefix for the list/Routed-to columns. Appends **"· triage in progress"** when `triageInProgress`.
+- **Triage-in-flight signal** — `GET /api/tickets/triage-status` returns `{ in_progress }` = is there an `agent_jobs` row `kind='triage-escalations'` in an active status (`queued|claimed|building|needs_input|needs_approval|queued_resume`) for the cookie workspace. `src/lib/use-triage-in-progress.ts` `useTriageInProgress()` fetches it once on mount.
+- **Wired into all three views** — header on `/dashboard/tickets/[id]` (after the channel badge), the ticket list (`tickets/page.tsx` — routine-escalated rows show the compact badge; human-escalated keep the amber escalate icon), and `/dashboard/tickets/escalated` (the "Routed to" column renders the badge for `routed_to==='routine'` rows). Supersedes the plainer "🤖 AI Routine" wording for the `escalated_to IS NULL` state.
+- **Triage internal notes** — `postTriageNote` (`src/lib/agent-todos/triage.ts`) inserts an internal (`visibility='internal'`, `author_type='system'`) `ticket_messages` row. `runEscalationTriageJob` (`scripts/builder-worker.ts`) posts a **start** note (`[AI Investigation] Looking into this escalated ticket (solver → skeptic → quorum)…`) before the solver, and an **outcome** note: `proposed N todos for approval` (customer fix) · `mis-escalation — un-escalated` (quorum-confirmed `escalation_false_positive` — the ticket is also un-escalated, `escalated_at=null`, leaving AI-Investigation; the analyzer-fix spec handles the cause) · `no quorum — left escalated for a human` (no quorum / solver-empty) · the materialize summary for a spec/prompt-only outcome. All internal-only, never customer-visible.
+- **Human intervention** — no lock added: the badge keys on `escalated_to IS NULL`, so escalating to a person (or the no-quorum hand-up) sets `escalated_to` and the badge flips to that person automatically (existing dropdown / `handUpExhaustedTriage` path).

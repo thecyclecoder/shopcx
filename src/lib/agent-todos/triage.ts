@@ -385,8 +385,26 @@ function triageSpecMarkdown(spec: TriageSpec, ticketId: string): string {
 export interface MaterializeResult {
   summary: string;
   groupId?: string;
+  /** How many agent_todos were inserted (0 if the outcome was a spec / prompt only). */
+  todoCount: number;
   specPath?: string;
   promptId?: string;
+}
+
+/**
+ * Post an internal ([AI Investigation]) note onto a ticket's thread — the paper trail the routine
+ * leaves so a human reading the ticket sees the AI took (or is taking) a stab and can still step in.
+ * Internal-only (visibility='internal'), never customer-visible; matches the sysNote shape used by the
+ * unified ticket handler. See docs/brain/specs/ai-investigation-ticket-visibility.md.
+ */
+export async function postTriageNote(admin: Admin, ticketId: string, body: string): Promise<void> {
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticketId,
+    direction: "outbound",
+    visibility: "internal",
+    author_type: "system",
+    body,
+  });
 }
 
 /**
@@ -401,7 +419,7 @@ export async function materializeTriageOutcome(
 ): Promise<MaterializeResult> {
   const { workspaceId, ticketId, proposal } = opts;
   const parts: string[] = [];
-  const out: MaterializeResult = { summary: "" };
+  const out: MaterializeResult = { summary: "", todoCount: 0 };
 
   // 1. agent_todos group (customer_fix / no_action / analysis_gap).
   const validTodos = (proposal.todos || []).filter((t) => TRIAGE_TODO_ACTION_TYPES.includes(t.action_type));
@@ -431,6 +449,7 @@ export async function materializeTriageOutcome(
     if (error) parts.push(`agent_todos insert failed: ${error.message}`);
     else {
       out.groupId = groupId;
+      out.todoCount = rows.length;
       parts.push(`${rows.length} agent_todo(s) [${validTodos.map((t) => t.action_type).join(", ")}] (group ${groupId.slice(0, 8)})`);
     }
   }
