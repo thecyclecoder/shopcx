@@ -1,4 +1,4 @@
-# get_customer_account no-shopify-id warning over-escalates already-unsubscribed empty shells ⏳
+# get_customer_account no-shopify-id warning over-escalates already-unsubscribed empty shells ✅
 
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `3d828685-6724-463c-af3f-3e2b00e12f3f`
 
@@ -10,7 +10,7 @@ In src/lib/sonnet-orchestrator-v2.ts (~line 858) the MARKETING CONSENT context l
 **Likely target:** `src/lib/sonnet-orchestrator-v2.ts (marketing-consent context builder, ~line 849-859)`
 
 ## Phases
-- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
 - Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).
