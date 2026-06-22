@@ -12,7 +12,7 @@
  * Run: cd /home/builder/shopcx && npx tsx scripts/builder-worker.ts   (via systemd shopcx-builder)
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { resolve, join } from "path";
+import { resolve, join, basename } from "path";
 import { spawn, spawnSync } from "child_process";
 import { randomUUID } from "crypto";
 // Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
@@ -482,34 +482,123 @@ const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations"
 // work lost); work-producers → `failed` (visible in the failed-builds callout + recoverable via Create PR,
 // never blindly re-queued so we never double-push a branch). Idempotent: reaped rows leave `building`, so a
 // re-run is a no-op; a clean restart with nothing orphaned logs "0 reaped".
+// ── Worktree reaping (worker-orphan-reaper-worktree-prune) ───────────────────
+// The box never cleaned git worktrees, which caused two distinct failures: (1) a resume's
+// `git worktree add <branch>` blew up with "already used by worktree at …" when the first run's tree
+// for that branch still existed, and (2) terminal/merged builds left their worktree (and disk) behind
+// to pile up. These helpers (a) enumerate worktrees, (b) force-remove the tree holding a branch so an
+// add is idempotent, and (c) sweep stale build worktrees in reapOrphans. All run as the worker's own
+// user (correct git ownership) and tolerate a worktree whose dir is already gone.
+
+// A build/plan/pr-resolve/fold worktree is `builds/<job.id>`; job.id is a UUID. spec-chat-*/dev-ask-*
+// lanes (non-UUID basenames) are session-stable + torn down each turn — never swept here.
+const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Jobs whose worktree is sacrosanct — a live or paused build the owner may still resume. Anything else
+// (completed/failed/needs_attention, i.e. terminal) or a job that no longer exists ⇒ the tree is cruft.
+const ACTIVE_JOB_STATUSES = new Set<JobStatus>(["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"]);
+
+// Parse `git worktree list --porcelain` → [{ path, branch }]. branch is the short name (refs/heads/
+// stripped) or null when detached. Tolerates odd/empty git output by returning what it parsed.
+function listWorktrees(): { path: string; branch: string | null }[] {
+  const out = sh("git", ["worktree", "list", "--porcelain"]).out;
+  const entries: { path: string; branch: string | null }[] = [];
+  let cur: { path: string; branch: string | null } | null = null;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      cur = { path: line.slice("worktree ".length).trim(), branch: null };
+      entries.push(cur);
+    } else if (cur && line.startsWith("branch ")) {
+      cur.branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+    }
+  }
+  return entries;
+}
+
+// Force-remove a worktree dir + nuke any lingering directory. `git worktree remove --force` clears the
+// admin entry; if the dir survived (or the remove failed because the dir was already gone), the rm -rf
+// + a later `git worktree prune` reconcile the admin list. Never throws — best-effort cleanup.
+function removeWorktreeDir(path: string) {
+  sh("git", ["worktree", "remove", "--force", path]);
+  if (existsSync(path)) sh("rm", ["-rf", path]);
+}
+
+// Idempotent worktree-add precondition: if ANY worktree already holds <branch> (from a prior run that
+// crashed or paused without tearing down), force-remove it so `git worktree add -B <branch>` can't fail
+// with "already used by worktree at …". Then prune stale admin entries.
+function removeWorktreeForBranch(branch: string) {
+  for (const e of listWorktrees()) {
+    if (e.branch === branch) removeWorktreeDir(e.path);
+  }
+  sh("git", ["worktree", "prune"]);
+}
+
+// Sweep stale build worktrees: every `builds/<job.id>` worktree whose backing job is terminal — or no
+// longer exists, which is also how a merged-and-deleted branch surfaces — is cruft → force-remove it.
+// A live or paused job's worktree is NEVER touched (status in ACTIVE_JOB_STATUSES). Best-effort.
+async function reapOrphanWorktrees() {
+  const entries = listWorktrees().filter((e) => e.path.startsWith(BUILDS_DIR + "/") && JOB_ID_RE.test(basename(e.path)));
+  if (entries.length === 0) {
+    sh("git", ["worktree", "prune"]); // reconcile admin entries for already-deleted dirs
+    console.log("[reaper] 0 build worktrees on disk");
+    return;
+  }
+  const ids = entries.map((e) => basename(e.path));
+  const { data, error } = await db.from("agent_jobs").select("id, status").in("id", ids);
+  if (error) {
+    console.error("[reaper] worktree-job status query failed (skipping worktree sweep):", error.message);
+    return;
+  }
+  const byId = new Map<string, JobStatus>();
+  for (const r of (data ?? []) as { id: string; status: JobStatus }[]) byId.set(r.id, r.status);
+  let removed = 0;
+  let kept = 0;
+  for (const e of entries) {
+    const status = byId.get(basename(e.path));
+    if (status && ACTIVE_JOB_STATUSES.has(status)) { kept++; continue; } // sacrosanct — live/paused build
+    removeWorktreeDir(e.path);
+    removed++;
+    console.log(`[reaper] reaped stale worktree ${e.path} (job ${status ?? "missing"})`);
+  }
+  sh("git", ["worktree", "prune"]);
+  console.log(`[reaper] worktrees: removed ${removed} terminal/orphaned, kept ${kept} active`);
+}
+
 async function reapOrphans() {
+  // 1) Orphaned in-flight JOBS from a previous instance.
   const { data, error } = await db
     .from("agent_jobs")
     .select("id, kind, spec_slug, status")
     .in("status", ["building", "claimed", "queued_resume"])
     .lt("claimed_at", WORKER_STARTED_AT);
   if (error) {
-    console.error("[reaper] orphan query failed (skipping reap):", error.message);
-    return;
-  }
-  const orphans = (data ?? []) as Pick<Job, "id" | "kind" | "spec_slug" | "status">[];
-  if (orphans.length === 0) {
-    console.log("[reaper] 0 reaped — no orphaned in-flight jobs from a previous instance");
-    return;
-  }
-  const reset: Record<string, number> = {};
-  const failed: Record<string, number> = {};
-  for (const job of orphans) {
-    if (RERUNNABLE_KINDS.has(job.kind)) {
-      await update(job.id, { status: "queued", claimed_at: null });
-      reset[job.kind] = (reset[job.kind] ?? 0) + 1;
+    console.error("[reaper] orphan job query failed (skipping job reap):", error.message);
+  } else {
+    const orphans = (data ?? []) as Pick<Job, "id" | "kind" | "spec_slug" | "status">[];
+    if (orphans.length === 0) {
+      console.log("[reaper] 0 reaped — no orphaned in-flight jobs from a previous instance");
     } else {
-      await update(job.id, { status: "failed", error: "orphaned by worker restart" });
-      failed[job.kind] = (failed[job.kind] ?? 0) + 1;
+      const reset: Record<string, number> = {};
+      const failed: Record<string, number> = {};
+      for (const job of orphans) {
+        if (RERUNNABLE_KINDS.has(job.kind)) {
+          await update(job.id, { status: "queued", claimed_at: null });
+          reset[job.kind] = (reset[job.kind] ?? 0) + 1;
+        } else {
+          await update(job.id, { status: "failed", error: "orphaned by worker restart" });
+          failed[job.kind] = (failed[job.kind] ?? 0) + 1;
+        }
+      }
+      const fmt = (m: Record<string, number>) => Object.entries(m).map(([k, n]) => `${k}×${n}`).join(", ") || "none";
+      console.log(`[reaper] reaped ${orphans.length} orphan(s) from a previous instance — re-queued: ${fmt(reset)}; failed: ${fmt(failed)}`);
     }
   }
-  const fmt = (m: Record<string, number>) => Object.entries(m).map(([k, n]) => `${k}×${n}`).join(", ") || "none";
-  console.log(`[reaper] reaped ${orphans.length} orphan(s) from a previous instance — re-queued: ${fmt(reset)}; failed: ${fmt(failed)}`);
+  // 2) Orphaned WORKTREES — runs even when 0 orphaned jobs (a crashed teardown leaves a worktree behind
+  // with no in-flight job; merged/terminal builds leave their tree on disk). Best-effort, never blocks.
+  try {
+    await reapOrphanWorktrees();
+  } catch (e) {
+    console.error("[reaper] worktree sweep failed (continuing):", e instanceof Error ? e.message : String(e));
+  }
 }
 
 // ── Heartbeat + self-update (worker-self-update) ─────────────────────────────
@@ -3484,10 +3573,12 @@ async function runJob(job: Job) {
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
   if (!isResume) {
     branch = `claude/${slug}-${Date.now().toString(36)}`;
+    removeWorktreeForBranch(branch); // idempotent add — never collide with a prior tree holding this branch
     const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
     if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
     await update(job.id, { spec_branch: branch });
   } else {
+    removeWorktreeForBranch(branch!); // kills "already used by worktree" on resume — re-establish the tree cleanly
     let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
