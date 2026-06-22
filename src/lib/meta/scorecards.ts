@@ -496,6 +496,57 @@ export async function computeScorecards(
     if (r.parent_campaign_id != null && !knownCampaignIds.has(r.parent_campaign_id as string)) r.parent_campaign_id = null;
   }
 
+  // ── NOT-NULL guard — never let a null reach a NOT-NULL column (PG 23502) ──────
+  // The FK pass above isolates dangling refs; this pass isolates NOT-NULL holes.
+  // Two distinct ways a NOT-NULL column goes null in the upsert payload:
+  //   1. A genuinely-required key (workspace_id/meta_ad_account_id/level/object_id/
+  //      snapshot_date) is missing — the row can't satisfy the conflict target, so
+  //      it's truly invalid. SKIP it with a logged reason (never force bad data in,
+  //      never drop it silently).
+  //   2. A NOT-NULL metric column carries a non-finite number. Every metric is
+  //      typed-default 0, but a derived value can still go NaN/±Infinity (e.g. a
+  //      0/0 ratio or a bad `created_time` feeding days_live), and `JSON.stringify`
+  //      serializes NaN/Infinity to `null` — which the DB then rejects. COALESCE
+  //      those back to the column default (a non-finite metric is meaningless, so 0
+  //      is the honest value), counting how many we touched.
+  const REQUIRED_KEYS = ["workspace_id", "meta_ad_account_id", "level", "object_id", "snapshot_date"] as const;
+  // NOT-NULL numeric columns and their defaults — NOT the nullable deltas/coverage,
+  // which legitimately hold null and must be left alone.
+  const NUMERIC_DEFAULTS: Record<string, number> = {
+    window_days: windowDays,
+    spend_cents: 0, revenue_cents: 0, roas: 0, impressions: 0, clicks: 0, ctr: 0,
+    cpc_cents: 0, frequency: 0, purchases: 0, orders: 0, sessions: 0, atc: 0,
+    atc_rate: 0, cvr: 0, days_live: 0, creatives_live: 0,
+    spend_prev_cents: 0, revenue_prev_cents: 0, roas_prev: 0, ctr_prev: 0,
+    frequency_prev: 0, sessions_prev: 0, cvr_prev: 0, fatigue_score: 0,
+  };
+  const BOOL_COLS = ["ctr_declining", "frequency_rising"] as const;
+  const valid: Row[] = [];
+  let coalesced = 0;
+  const skipped: string[] = [];
+  for (const r of records) {
+    const missing = REQUIRED_KEYS.find((k) => r[k] == null || r[k] === "");
+    if (missing) {
+      skipped.push(`${r.level ?? "?"}/${r.object_id ?? "?"} (missing ${missing})`);
+      continue;
+    }
+    for (const [col, dflt] of Object.entries(NUMERIC_DEFAULTS)) {
+      const v = r[col];
+      if (typeof v !== "number" || !Number.isFinite(v)) { r[col] = dflt; coalesced += 1; }
+    }
+    for (const col of BOOL_COLS) if (typeof r[col] !== "boolean") r[col] = false;
+    valid.push(r);
+  }
+  if (skipped.length) {
+    console.warn(
+      `[scorecards] skipped ${skipped.length}/${records.length} row(s) with a null required key ` +
+        `(not persisted, not forced): ${skipped.slice(0, 20).join(", ")}${skipped.length > 20 ? " …" : ""}`,
+    );
+  }
+  if (coalesced) {
+    console.warn(`[scorecards] coalesced ${coalesced} non-finite/null NOT-NULL metric value(s) to their column default`);
+  }
+
   // ── Persist — capture every batch's { error }; NEVER report rows we didn't write ──
   // On a batch error, fall back to per-row upsert so one bad record is isolated +
   // logged instead of dropping its 499 neighbors. `persisted` is the count that
@@ -510,8 +561,8 @@ export async function computeScorecards(
     if (!firstError) firstError = { code, message };
     console.error(`[scorecards] iteration_scorecards_daily upsert failed ${ctx}: ${code ?? "?"} ${message}`);
   };
-  for (let i = 0; i < records.length; i += 500) {
-    const batch = records.slice(i, i + 500);
+  for (let i = 0; i < valid.length; i += 500) {
+    const batch = valid.slice(i, i + 500);
     const { error } = await admin
       .from("iteration_scorecards_daily")
       .upsert(batch, { onConflict: "workspace_id,level,object_id,snapshot_date" });
@@ -538,11 +589,11 @@ export async function computeScorecards(
     // (error-feed-monitoring Phase 1) — best-effort, before we throw loudly.
     await reportDbError(
       { code: code ?? undefined, message },
-      { op: "scorecard-upsert", table: "iteration_scorecards_daily", persisted, total: records.length },
+      { op: "scorecard-upsert", table: "iteration_scorecards_daily", persisted, total: valid.length },
     );
     throw new Error(
-      `iteration_scorecards_daily upsert persisted ${persisted}/${records.length} rows; ` +
-        `${records.length - persisted} failed: ${code ?? "?"} ${message}`,
+      `iteration_scorecards_daily upsert persisted ${persisted}/${valid.length} rows; ` +
+        `${valid.length - persisted} failed: ${code ?? "?"} ${message}`,
     );
   }
 

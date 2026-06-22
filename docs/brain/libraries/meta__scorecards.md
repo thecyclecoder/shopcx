@@ -69,6 +69,16 @@ Thin wrapper: defaults `snapshotDate` to today and `windowDays` to 7, delegates 
   the `persisted/total` count. The returned `rows` is the **persisted** count, never
   `records.length` — a run can no longer report scorecards written when 0 landed (the prior bug:
   swallowed `{ error }` + `rows: records.length` → reported 7, persisted 0).
+- **Persist also guards the NOT-NULL hole (PG 23502)** (scorecards-notnull-guard, follow-on to
+  the FK pass). After nulling dangling refs, a second pass runs before the upsert. (1) Any row
+  missing a **required key** (`workspace_id`/`meta_ad_account_id`/`level`/`object_id`/
+  `snapshot_date`) can't satisfy the conflict target — it's **skipped with a logged reason +
+  count**, never forced in with bad data and never silently dropped. (2) Every **NOT-NULL metric
+  column** (the typed-default-0 columns + the bool fatigue flags; *not* the nullable
+  deltas/`variant_attribution_coverage`) is **coalesced to its column default** if it carries a
+  non-finite value — a derived metric can go `NaN`/`±Infinity`, which `JSON.stringify` serializes
+  to `null` and the DB then rejects. `persisted` is measured against the **valid** (kept) count, so
+  for valid rows the dropped count is 0; skips are logged, not counted as drops.
 - **Backfill:** `scripts/backfill-iteration-scorecards.ts` replays the rollup for accounts with
   attribution but 0 scorecards (dry-run default; `--apply` to write).
 - `frequency` is the **average** of daily frequency (it can't be summed across days).
