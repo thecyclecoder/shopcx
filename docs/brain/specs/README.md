@@ -96,6 +96,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[control-tower-migration-drift-check]] (platform) — dogfood finding: migration 20260618140000_meta_performance_tables was silently skipped in prod → meta_campaigns/adsets/ads/insights_daily never existed → swallowed PGRST205 → empty ROAS data for weeks, found only by manual investigation. Add a Control Tower check that diffs migration-created tables vs the live schema + alerts on any missing (drop-aware, sunset-allowlisted). Runs on the box (has files + DB).
 
+## Active project — Auto-Ship Pipeline ⏳
+
+[[auto-ship-pipeline]] (platform) — automate the two rubber-stamp clicks the owner makes without review: (A) auto-merge ready claude/* PRs (mergeable + green → serialized squash-merge, sync-aware; conflicting ones still go to the dirty-PR-resolver) and (B) auto-fold fully-verified specs (shipped + agent-approved + 0 waiting/failed human checks + 0 regressions → enqueue_fold). Bounded proxies, owner kill-switch per gate, both registered as Control Tower loops, post-merge spec-test is the safety net.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
