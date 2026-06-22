@@ -107,6 +107,14 @@ let lastShaCheckMs = 0;
 let fellBack = false;
 const SHA_TTL_MS = 3000;
 
+// DISABLED — reading specs from GitHub per-request burned the GitHub API quota. Each SHA advance
+// re-fetches the whole brain tree (~46 blob calls); during heavy dev `main`'s SHA advances on every
+// push, so the board re-fetched constantly → 5000/hr core quota exhausted → 403s on PR fetch/merge/
+// create across the box + dashboard. Reverting to the bundled `fs` copy (accepts the phase-status
+// deploy-lag). Re-enable only with DEPLOY-triggered cache invalidation (or a much longer TTL), NOT
+// per-request SHA polling — see docs/brain/specs/roadmap-reads-specs-from-git.md.
+const GIT_BACKED_ROADMAP = false;
+
 /** Log once per outage episode (reset on the next successful snapshot) so fallback isn't per-request spam. */
 function noteFallback(reason: string): void {
   if (fellBack) return;
@@ -166,6 +174,7 @@ async function fetchBrainFiles(commitSha: string): Promise<Map<string, string> |
  * (SHA-cached); a full tree+blob re-fetch only when `main` advances.
  */
 async function snapshot(): Promise<BrainSnapshot | null> {
+  if (!GIT_BACKED_ROADMAP) return null; // disabled — burned the API quota; read from bundled fs instead
   if (!ghToken()) {
     noteFallback("GITHUB_TOKEN missing");
     return null;

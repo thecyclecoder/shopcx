@@ -1,4 +1,6 @@
-# Roadmap Reads Spec Phases from Git/Main at Request Time ✅
+# Roadmap Reads Spec Phases from Git/Main at Request Time 🚧 (shipped → DISABLED, needs redesign)
+
+> **⚠️ Shipped (PR #182) then DISABLED.** The per-request SHA-polling + full-tree re-fetch **burned the GitHub API quota**: each `main` SHA advance re-fetches ~46 brain blobs, and during heavy dev `main` advances on nearly every push → the board re-fetched constantly → **5000/hr core quota exhausted → 403s on PR fetch/merge/create** across the box + dashboard. Disabled via `GIT_BACKED_ROADMAP = false` in [[../libraries/brain-roadmap]] (reverts to the bundled `fs` read). **Re-enable only with a cheaper strategy** — deploy-triggered cache invalidation (the brain barely changes between deploys), or a long TTL (e.g. 60s+, cutting calls ~20×), or piggyback on [[../inngest/brain-index-refresh]]'s existing periodic sync — NOT per-request SHA polling. The phase-status deploy-lag is back for now (acceptable; [[spec-drift-agent]] addresses the stamping side).
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[roadmap-build-console]] + [[roadmap-status-accuracy]]. Kills the deploy-lag on phase status.
 
