@@ -23,19 +23,11 @@
  * touches ONLY the exchanges row in place (does NOT re-seed the other policies,
  * which have drifted from scripts/seed-policies-v1.ts).
  */
-import { readFileSync } from "fs";
-import { resolve } from "path";
-const envPath = resolve(__dirname, "../.env.local");
-for (const line of readFileSync(envPath, "utf8").split("\n")) {
-  const t = line.trim();
-  if (!t || t.startsWith("#")) continue;
-  const eq = t.indexOf("=");
-  if (eq < 0) continue;
-  const k = t.slice(0, eq);
-  if (!process.env[k]) process.env[k] = t.slice(eq + 1);
-}
-import { createClient } from "@supabase/supabase-js";
-const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+// `_bootstrap` loads `.env.local` when present (local dev) and is a no-op on
+// the build box (secrets come from the systemd EnvironmentFile) — never read
+// `.env.local` directly, it's ABSENT on the box.
+import { createAdminClient } from "./_bootstrap";
+const admin = createAdminClient();
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
