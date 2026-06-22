@@ -99,6 +99,7 @@ async function subSwapVariant(workspaceId: string, contractId: string, oldVarian
 - Every helper checks `isInternalSubscription()` first. Internal subs bypass Appstle.
 - Variant ids must be Shopify variant ids when crossing into Appstle — internal UUIDs won't work.
 - `subUpdateLineItemPrice` is the **restore-the-grandfathered-base** step of subscription overcharge remediation ([[subscription-overcharge]]): it heals the Appstle sub in place (`healOnTouch` first) or sets `price_override_cents` for internal subs. The `update_line_item_price` direct action ([[action-executor]]) now **routes internal subs first** (before the Appstle config/lineId fetch, which would fail with "Appstle not configured" for an internal sub).
+- `appstleRemoveLineItem` recognizes Appstle's **own last-item guardrail**: a `400` whose body matches `"must be present in a subscription"` / `"UserGeneratedError"` (Appstle refuses to remove the last recurring product). This is logged at `console.warn` (not `console.error`) and returned as `{ success: false, error: "would_remove_last_item" }` — the same friendly outcome [[portal__handlers__remove-line-item]]'s local pre-check produces. Without this, a stale-high local items snapshot would let the removal slip past the pre-check and Appstle's 400 would surface as a logged ERR + opaque 502 (Control Tower signature `vercel:0dda1c7b9495ebb1`). The handler maps `would_remove_last_item` straight to its friendly 400.
 
 ---
 

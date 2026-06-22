@@ -220,6 +220,23 @@ export async function appstleRemoveLineItem(
 
     if (!res.ok) {
       const text = await res.text();
+      // Appstle's own authoritative guardrail: it refuses to remove the last
+      // recurring product with a 400 UserGeneratedError ("Cannot remove line
+      // item. Atleast one subscription product must be present in a
+      // subscription"). Our local pre-check (remove-line-item.ts) catches this
+      // first when the items snapshot is accurate, but a stale-high snapshot
+      // lets the removal through and Appstle rejects it. This is an expected,
+      // user-generated outcome — NOT a server error — so log at warn and fold
+      // it into the friendly would_remove_last_item path instead of flooding
+      // the error feed with a 502.
+      const lower = text.toLowerCase();
+      if (
+        res.status === 400 &&
+        (lower.includes("must be present in a subscription") || lower.includes("usergeneratederror"))
+      ) {
+        console.warn("[appstleRemoveLineItem] last-item guardrail:", res.status, text.slice(0, 200));
+        return { success: false, error: "would_remove_last_item" };
+      }
       console.error("[appstleRemoveLineItem] error:", res.status, text);
       return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }

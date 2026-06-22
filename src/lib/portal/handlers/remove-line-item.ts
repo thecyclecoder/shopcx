@@ -89,6 +89,13 @@ export const removeLineItem: RouteHandler = async ({ auth, route, req }) => {
   }
 
   if (!result.success) {
+    // Appstle's live last-item guardrail (surfaced as would_remove_last_item by
+    // appstleRemoveLineItem when our local pre-check passed on a stale-high
+    // snapshot) is a benign, user-generated outcome — return the same friendly
+    // 400 the pre-check above does, not an opaque 502.
+    if (result.error === "would_remove_last_item") {
+      return jsonErr({ error: "would_remove_last_item", detail: "At least one recurring item must remain on the subscription. Cancel the subscription instead." }, 400);
+    }
     return handleAppstleError(
       Object.assign(new Error(result.error || "Remove failed"), { details: "" }),
       { route: "removeLineItem", payload },
