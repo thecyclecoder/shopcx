@@ -17,7 +17,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 | `detail` | `text?` | last note: `self-update <from>→<to>`, crash-loop reason, … |
 | `build_lanes` | `int?` | total build/plan lanes (`MAX_CONCURRENT`) — the pool ceiling ([[../specs/build-box-status-view]]) |
 | `fold_lanes` | `int?` | total fold lanes (`MAX_FOLD`, concurrency-1) |
-| `lanes` | `jsonb` | default `'[]'` — `[{ kind, job_id, spec_slug, since }]` for every in-flight lane this tick |
+| `lanes` | `jsonb` | default `'[]'` — `[{ kind, job_id, spec_slug, since, phase? }]` for every in-flight lane this tick (`phase` = `"Phase N"` for a chained/per-phase build, null otherwise — [[../specs/box-lane-show-phase]]) |
 | `started_at` | `timestamptz?` | when this worker process booted |
 | `last_poll_at` | `timestamptz?` | heartbeat — set every poll tick (~5s); a stale value ⇒ box down |
 | `updated_at` | `timestamptz` | default `now()` |

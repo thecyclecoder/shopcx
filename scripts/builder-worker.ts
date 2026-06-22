@@ -623,7 +623,19 @@ async function reapArchivedSpecJobs() {
 const WORKER_STARTED_AT = new Date().toISOString();
 // One in-flight lane, surfaced on the heartbeat so the dashboard can show what each lane is building
 // right now (build-box-status-view). job_id ties back to agent_jobs; since = when the lane started.
-interface LaneRow { kind: Job["kind"]; job_id: string; spec_slug: string; since: string }
+// phase = which phase a chained/per-phase build is on (e.g. "Phase 2"), derived from the job's
+// instructions (the phaseScopedInstructions format embeds `"Phase N — <title>"`); null for a
+// whole-spec build or a non-build lane (box-lane-show-phase).
+interface LaneRow { kind: Job["kind"]; job_id: string; spec_slug: string; since: string; phase?: string | null }
+
+// Derive the phase a build lane is on from its instructions. A per-phase/chained build's
+// instructions embed `"Phase N — <title>"` (phaseScopedInstructions); a whole-spec build (or any
+// non-build job whose instructions are JSON params) has no single phase → null. Never throws.
+function derivePhase(instructions: string | null | undefined): string | null {
+  if (!instructions) return null;
+  const m = /\bPhase\s+(\d+)\b/i.exec(instructions);
+  return m ? `Phase ${m[1]}` : null;
+}
 async function writeHeartbeat(activeBuilds: number, status: string, detail?: string, lanes: LaneRow[] = []) {
   try {
     await db.from("worker_heartbeats").upsert({
@@ -634,7 +646,7 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       detail: detail ?? null,
       build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling)
       fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane)
-      lanes, // [{ kind, job_id, spec_slug, since }] for every in-flight lane this tick
+      lanes, // [{ kind, job_id, spec_slug, since, phase }] for every in-flight lane this tick
       started_at: WORKER_STARTED_AT,
       last_poll_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -3898,7 +3910,7 @@ async function main() {
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
   // Per-lane detail (build-box-status-view): the value carries what the lane is building + when it
   // started, so each heartbeat tick can publish the full lane picture (kind/spec_slug/since).
-  interface LaneInfo { kind: Job["kind"]; spec_slug: string; since: string }
+  interface LaneInfo { kind: Job["kind"]; spec_slug: string; since: string; phase: string | null }
   const active = new Map<string, LaneInfo>();
   const countFold = () => [...active.values()].filter((v) => v.kind === "fold").length;
   const countSeed = () => [...active.values()].filter((v) => v.kind === "product-seed").length;
@@ -3912,7 +3924,7 @@ async function main() {
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
   const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair").length;
   const launch = (job: Job) => {
-    active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString() });
+    active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
     let errored = false;
     runJob(job)
@@ -4041,7 +4053,7 @@ async function main() {
       if (!steady) { clearStartupCrashCounter(); steady = true; }
 
       // Heartbeat for the dashboard, then self-update if no SACROSANCT lane is running.
-      const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since }));
+      const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since, phase: v.phase }));
       await writeHeartbeat(active.size, "healthy", undefined, lanes);
 
       // Control Tower migration-drift check (control-tower-migration-drift-check P1): fire-and-forget
