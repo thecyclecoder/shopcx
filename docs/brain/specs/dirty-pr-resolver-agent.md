@@ -1,4 +1,4 @@
-# Dirty-PR Resolver Agent (auto-clean conflicting build PRs) ⏳
+# Dirty-PR Resolver Agent (auto-clean conflicting build PRs) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[roadmap-build-console]] + [[build-approval-gates]]. Box-agent family. Complements [[spec-blockers]] (which *prevents* collisions) — this *cleans up* the ones that still happen.
 
@@ -21,10 +21,13 @@ A `claude -p` on Max (keeps git/gh; KEEPS no prod creds) that, for one dirty `cl
 - Idempotent + de-duped (one resolve per PR at a time); a PR it can't fix is flagged, not retried forever.
 
 ## Verification
-- Merge a PR to `main` that dirties an open `claude/*` PR → the webhook fires, a `pr-resolve` job is enqueued for the dirty PR; the agent merges `origin/main`, resolves the (additive) conflict, tsc passes, pushes → the PR flips `CONFLICTING → MERGEABLE`, no human touch.
-- A heavily-diverged conflict (parallel rewrites of one file) → the agent does **not** force-merge; it rebuilds the spec on main (closes + re-queues) or surfaces "needs a human merge: {why}".
-- A resolution that fails tsc → the agent never pushes it; it escalates instead.
-- Negative: a non-`claude/*` PR or a clean PR triggers nothing.
+- Configure the repo webhook (`https://shopcx.ai/api/webhooks/github`, secret = `GITHUB_WEBHOOK_SECRET`, events Pushes + Pull requests). On the GitHub **Recent Deliveries** tab, redeliver a `push` → expect a `200` with `{ok:true, checked, conflicting, enqueued}`; a delivery with a bad/absent signature → expect `401`.
+- Merge a PR to `main` that dirties an open `claude/*` PR → expect the webhook to enqueue ONE `agent_jobs` row `kind='pr-resolve'`, `spec_slug='pr-{N}'`, `pr_number=N` (verify in the DB / on the build console). The box `pr-resolve` lane then merges `origin/main`, resolves the (additive) conflict, the **worker's** tsc gate passes, it pushes → on GitHub the PR flips `CONFLICTING → MERGEABLE` and the job lands `completed` with `log_tail` "resolved + pushed", no human touch.
+- Fire the webhook twice in a row for the same dirty PR (push + synchronize) → expect only ONE active `pr-resolve` job (the second `enqueuePrResolveJob` no-ops on the `pr-{N}` dedupe).
+- A heavily-diverged conflict (parallel rewrites of one file) OR a merge that can't compile after the resolve → expect the worker to NOT push; it closes the PR + re-queues a fresh `kind='build'` row for the originating spec off a clean `main` (job `error='rebuilt-on-main: …'`), or — if no originating `build` row is found — sets the job `needs_attention` and DMs owners/admins "Control Tower: PR #N needs a human merge: {why}" via Slack (`notifyOpsAlert`).
+- Force a resolution that leaves a conflict marker / unmerged path / a tsc error → expect the worker gate (`merge-base --is-ancestor`, `git ls-files -u`, conflict-marker grep, `npx tsc --noEmit`) to reject it and escalate instead of pushing.
+- On `/dashboard/developer/control-tower`, expect an **Agent — PR resolve** tile (`agent:pr-resolve`); idle = green, a `pr-resolve` job stuck > 45 min flips it red + pages owners.
+- Negative: a `push` to a non-`main` ref, a non-`claude/*` PR, or a clean (`mergeable===true`) PR → expect `{ok, skipped}` or `enqueued:0`, nothing enqueued.
 
-## Phase 1 — webhook trigger + pr-resolve agent + escalation ⏳
-The GitHub webhook → dirty-`claude/*` detection → `pr-resolve` `agent_jobs` enqueue; the `pr-resolve` box kind + lane + `runPrResolveJob` (merge → resolve → tsc → push, or rebuild/surface); the resolve-vs-rebuild-vs-human decision. Brain: [[../tables/agent_jobs]] (new kind) · [[../recipes/build-box-setup]] (lane) · new webhook page · [[control-tower]] (register the `pr-resolve` lane + surface "needs human merge").
+## Phase 1 — webhook trigger + pr-resolve agent + escalation ✅
+Shipped. The [[../integrations/github-webhook|GitHub webhook]] (`src/app/api/webhooks/github/route.ts`) → dirty-`claude/*` detection + enqueue ([[../libraries/github-pr-resolve]] `verifyGithubWebhook` / `detectAndEnqueueDirtyPrs` / `enqueuePrResolveJob`) → `pr-resolve` `agent_jobs` row; the `pr-resolve` box kind + concurrency-1 lane (`MAX_PR_RESOLVE`) + `runPrResolveJob` in `scripts/builder-worker.ts` (worktree → `claude -p` merges `origin/main` + resolves additively → the **worker** runs the tsc gate + merge-correctness checks + pushes, or rebuilds-on-main / surfaces to the owner); the resolve-vs-rebuild-vs-human decision, capped + deduped. Brain: [[../tables/agent_jobs]] (new `pr-resolve` kind) · [[../recipes/build-box-setup]] (lane) · [[../integrations/github-webhook]] (new webhook page) · [[../libraries/github-pr-resolve]] (new library) · [[control-tower]] (registered the `agent:pr-resolve` lane; "needs human merge" surfaces via [[../libraries/notify-ops-alert]]).
