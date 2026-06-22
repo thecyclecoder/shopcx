@@ -12,6 +12,19 @@ interface DayData {
 
 interface ROASData {
   daily: DayData[];
+  storefrontSubLtv?: {
+    calibrated: boolean;
+    weights_version: number;
+    snapshot_date: string | null;
+    blended_est_sub_ltv_cents: number;
+    by_product: Array<{
+      product_id: string;
+      title: string;
+      est_sub_ltv_cents: number;
+      sub_attach_rate: number;
+      est_sub_ltv_sample_size: number;
+    }>;
+  };
   summary: {
     roas: number;
     total_revenue_cents: number;
@@ -237,6 +250,14 @@ export default function ROASDashboard() {
               sub={`AOV ${fmt(s.amazon_aov_cents)} · ${s.amazon_sub_rate}% sub · ${s.amazon_avg_churn_pct}% churn`}
               color="text-amber-600 dark:text-amber-400"
             />
+            {data?.storefrontSubLtv && data.storefrontSubLtv.blended_est_sub_ltv_cents > 0 && (
+              <StatCard
+                label="Predicted sub-LTV"
+                value={fmt(data.storefrontSubLtv.blended_est_sub_ltv_cents)}
+                sub={`Renewal-derived · v${data.storefrontSubLtv.weights_version}${data.storefrontSubLtv.calibrated ? " · calibrated" : " · uncalibrated"}`}
+                color="text-emerald-600 dark:text-emerald-400"
+              />
+            )}
             <StatCard
               label="CAC"
               value={(() => {

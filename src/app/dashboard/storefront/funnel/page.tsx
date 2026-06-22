@@ -101,6 +101,23 @@ interface FunnelData {
     scope: "product_specific" | "general";
     last_tested_at: string | null;
   }>;
+  predictedLtv?: Array<{
+    product_id: string;
+    product_title: string;
+    lander_type: string;
+    audience: string;
+    snapshot_date: string;
+    visitors: number;
+    sub_attach_rate: number;
+    est_sub_ltv_cents: number;
+    predicted_ltv_per_visitor_cents: number;
+    prior_snapshot_date: string | null;
+    prior_predicted_ltv_per_visitor_cents: number | null;
+    wow_delta_pct: number | null;
+    weights_version: number;
+    calibrated: boolean;
+    flags: Record<string, unknown>;
+  }>;
   recentEvents: Array<{
     id: string;
     event_type: string;
@@ -252,6 +269,10 @@ export default function StorefrontFunnelPage() {
 
           {data.abandonedCarts && (
             <AbandonedCartsPanel block={data.abandonedCarts} />
+          )}
+
+          {data.predictedLtv && data.predictedLtv.length > 0 && (
+            <PredictedLtvPanel rows={data.predictedLtv} />
           )}
 
           {data.runningExperiments && data.runningExperiments.length > 0 && (
@@ -678,6 +699,71 @@ function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
           </table>
         </div>
       )}
+    </section>
+  );
+}
+
+function PredictedLtvPanel({ rows }: { rows: NonNullable<FunnelData["predictedLtv"]> }) {
+  // The M3 reward the bandit optimizes: predicted lifetime MARGIN per exposed visitor per
+  // (product × lander × audience), shown week-over-week. While uncalibrated the proxy hasn't
+  // been truth-checked by the 4-month reconciler, so the bandit bets conservatively.
+  const money = (cents: number) => "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const anyUncalibrated = rows.some((r) => !r.calibrated);
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+          Predicted LTV per visitor
+        </h2>
+        <span className="text-[11px] text-zinc-400">
+          The reward the agent optimizes — predicted lifetime margin per visitor, week-over-week.
+          {anyUncalibrated && (
+            <span className="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+              uncalibrated — betting conservatively
+            </span>
+          )}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[680px] text-sm">
+          <thead>
+            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+              <th className="py-2 pr-2">Cohort</th>
+              <th className="py-2 pr-2 text-right">Visitors</th>
+              <th className="py-2 pr-2 text-right">Sub-attach</th>
+              <th className="py-2 pr-2 text-right">Est sub-LTV</th>
+              <th className="py-2 pr-2 text-right">Pred. LTV/visitor</th>
+              <th className="py-2 pr-2 text-right">vs last wk</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const wow = r.wow_delta_pct;
+              return (
+                <tr key={`${r.product_id}-${r.lander_type}-${r.audience}-${i}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">
+                    {r.product_title}
+                    <span className="ml-1 text-[10px] uppercase text-zinc-400">{r.lander_type} · {r.audience}</span>
+                  </td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{r.visitors.toLocaleString()}</td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{Math.round(r.sub_attach_rate * 1000) / 10}%</td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{money(r.est_sub_ltv_cents)}</td>
+                  <td className="py-2 pr-2 text-right font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{money(r.predicted_ltv_per_visitor_cents)}</td>
+                  <td className="py-2 pr-2 text-right tabular-nums font-semibold">
+                    {wow === null ? (
+                      <span className="text-zinc-400">—</span>
+                    ) : (
+                      <span className={wow > 0.1 ? "text-emerald-600" : wow < -0.1 ? "text-rose-600" : "text-zinc-400"}>
+                        {wow > 0 ? "+" : ""}{wow}%
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

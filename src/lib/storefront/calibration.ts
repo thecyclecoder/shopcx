@@ -5,10 +5,13 @@
  * [[../goals/storefront-optimizer]] rule): smaller bets + tighter promote thresholds
  * until M3's ~4-month reconciler has confirmed the predicted-LTV proxy at least once.
  *
- * M3 isn't built yet, so this reads its (future) calibration signal defensively and
- * DEFAULTS TO conservative=true whenever the signal is absent — the safe direction.
- * When M3 lands it publishes a `storefront_ltv_calibration` row per workspace with a
- * non-null `calibrated_at`; flip to non-conservative once that exists.
+ * This reads M3's calibration signal defensively and DEFAULTS TO conservative=true
+ * whenever the signal is absent — the safe direction. M3's slow loop publishes a
+ * `storefront_ltv_calibration` row per workspace with a non-null `calibrated_at` once it
+ * reconciles once; this flips to non-conservative the moment that exists.
+ *
+ * [[isProxyCalibrated]] is the single positively-named gate the M1 bandit + M4 agent read
+ * (Phase 4 of the spec) — `isProxyCalibrated === !isConservative`.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { INITIAL_WEIGHTS_VERSION } from "@/lib/storefront/ltv-proxy";
@@ -27,6 +30,27 @@ export async function isConservative(workspaceId: string): Promise<boolean> {
   } catch {
     return true; // M3 table absent / unreadable → stay conservative
   }
+}
+
+/**
+ * THE single calibration gate the M1 bandit + M4 agent read to decide whether the
+ * predicted-LTV proxy has been truth-checked, and therefore whether to size bets full
+ * (`true`) or run conservatively with tighter promote thresholds (`false`). It is the
+ * positive framing of [[isConservative]] — `isProxyCalibrated === !isConservative` —
+ * exported so downstream callers gate on one clearly-named function instead of negating
+ * the internal reader.
+ *
+ * The signature is product-grained (the spec's `isProxyCalibrated(product)`) because
+ * calibration is conceptually per `(product)`; today the slow loop calibrates at the
+ * WORKSPACE grain (one [[../tables/storefront_ltv_calibration]] row per workspace), so
+ * `productId` is accepted-and-echoed but resolution is workspace-wide. When the reconciler
+ * gains per-product calibration rows this can tighten without changing callers.
+ *
+ * DEFAULTS to `false` (uncalibrated → conservative) whenever the signal is absent — the
+ * safe direction, mirroring `isConservative`.
+ */
+export async function isProxyCalibrated(opts: { workspaceId: string; productId?: string }): Promise<boolean> {
+  return !(await isConservative(opts.workspaceId));
 }
 
 export interface CalibrationState {

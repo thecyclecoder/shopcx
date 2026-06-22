@@ -9,6 +9,9 @@ The conservative-mode gate for the storefront bandit, read from M3 (the LTV-prox
 ### `isConservative(workspaceId)` → `Promise<boolean>`
 Returns whether the bandit should run conservatively (smaller bets + tighter promote thresholds). Reads [[../tables/storefront_ltv_calibration]]; a non-null `calibrated_at` → no longer conservative. **Defaults to `true`** whenever the signal is absent/unreadable (no reconciliation yet) — the safe direction per the goal's "run conservatively until the slow loop calibrates once" rule.
 
+### `isProxyCalibrated({ workspaceId, productId? })` → `Promise<boolean>`
+**THE single calibration gate** the M1 bandit + M4 agent read (Phase 4) to size bets / gate promote thresholds — the positive framing of `isConservative` (`isProxyCalibrated === !isConservative`). Product-grained signature (the spec's `isProxyCalibrated(product)`); calibration is conceptually per `(product)` but the slow loop currently calibrates at the WORKSPACE grain, so `productId` is accepted-and-echoed and resolution is workspace-wide (tightenable later without changing callers). **Defaults to `false`** (uncalibrated → conservative) when the signal is absent. Read by [[storefront-experiment-refresh]] (`refreshStorefrontExperiments` derives its `conservative` flag from it).
+
 ### `getCalibrationState(workspaceId)` → `Promise<{ calibrated, weights_version, sub_ltv_factor }>`
 The signal the fast loop ([[storefront-ltv-metrics]] `refreshLtvMetrics`) reads when persisting a metric row:
 - `calibrated` — `!!calibrated_at` (true once the slow loop reconciles once).

@@ -290,9 +290,16 @@ export async function GET(
     ? (shopifyLTV * shopifyOrderCount + amazonLTV * amazonOrderCount) / totalOrderCount
     : 0;
 
+  // ── Renewal-derived predicted sub-LTV (from the M3 storefront LTV proxy) ──
+  // The ROAS LTV above is AOV×churn-derived; this surfaces the storefront optimizer's
+  // renewal-survival-derived est-sub-LTV (the metric the dashboard previously lacked).
+  // Best-effort: empty/null if storefront_ltv_metrics is absent (M3 not yet shipped here).
+  const storefrontSubLtv = await buildStorefrontSubLtv(admin, workspaceId);
+
   return NextResponse.json({
     daily,
     totals,
+    storefrontSubLtv,
     summary: {
       roas: Math.round(roas * 100) / 100,
       total_revenue_cents: totalRevenue,
@@ -323,4 +330,96 @@ export async function GET(
     start: startDate,
     end: endDate,
   });
+}
+
+export interface StorefrontSubLtv {
+  /** true once M3's slow loop has reconciled the proxy at least once. */
+  calibrated: boolean;
+  weights_version: number;
+  snapshot_date: string | null;
+  /** sub-conversion-weighted blend of per-product est-sub-LTV across the latest snapshot. */
+  blended_est_sub_ltv_cents: number;
+  by_product: Array<{
+    product_id: string;
+    title: string;
+    est_sub_ltv_cents: number;
+    sub_attach_rate: number;
+    est_sub_ltv_sample_size: number;
+  }>;
+}
+
+/**
+ * Renewal-derived predicted sub-LTV per product from the latest [[storefront_ltv_metrics]]
+ * snapshot — the est-sub-LTV the storefront optimizer (M3) computes from real subscription
+ * renewal survival, surfaced on the ROAS dashboard alongside its AOV×churn LTV. est_sub_ltv
+ * is product-level (identical across a product's cohorts), so we take it from the newest
+ * snapshot per product and blend by sub-conversions. Best-effort — returns a null/empty
+ * shape if the table is absent.
+ */
+async function buildStorefrontSubLtv(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+): Promise<StorefrontSubLtv> {
+  const fallback: StorefrontSubLtv = { calibrated: false, weights_version: 1, snapshot_date: null, blended_est_sub_ltv_cents: 0, by_product: [] };
+  try {
+    const sinceIso = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const { data: rows } = await admin
+      .from("storefront_ltv_metrics")
+      .select("product_id, snapshot_date, est_sub_ltv_cents, sub_attach_rate, sub_conversions, est_sub_ltv_sample_size, weights_version, calibrated")
+      .eq("workspace_id", workspaceId)
+      .gte("snapshot_date", sinceIso)
+      .order("snapshot_date", { ascending: false });
+    if (!rows?.length) return fallback;
+
+    type Row = {
+      product_id: string; snapshot_date: string; est_sub_ltv_cents: number; sub_attach_rate: number;
+      sub_conversions: number; est_sub_ltv_sample_size: number; weights_version: number; calibrated: boolean;
+    };
+    // Newest snapshot per product (rows already newest-first).
+    const latestByProduct = new Map<string, Row>();
+    let latestSnapshot: string | null = null;
+    for (const r of rows as Row[]) {
+      if (!latestByProduct.has(r.product_id)) latestByProduct.set(r.product_id, r);
+      if (!latestSnapshot || r.snapshot_date > latestSnapshot) latestSnapshot = r.snapshot_date;
+    }
+
+    const productIds = [...latestByProduct.keys()];
+    const { data: productRows } = productIds.length
+      ? await admin.from("products").select("id, title").in("id", productIds)
+      : { data: [] as { id: string; title: string }[] };
+    const titleById = new Map((productRows || []).map((p) => [p.id, p.title]));
+
+    const byProduct = [...latestByProduct.values()].map((r) => ({
+      product_id: r.product_id,
+      title: titleById.get(r.product_id) || "(unknown)",
+      est_sub_ltv_cents: r.est_sub_ltv_cents,
+      sub_attach_rate: r.sub_attach_rate,
+      est_sub_ltv_sample_size: r.est_sub_ltv_sample_size,
+    }));
+
+    // Blend weighted by sub-conversions; fall back to a simple mean when no conversions yet.
+    let weightSum = 0;
+    let weighted = 0;
+    for (const r of latestByProduct.values()) {
+      const w = Math.max(0, r.sub_conversions);
+      weightSum += w;
+      weighted += w * r.est_sub_ltv_cents;
+    }
+    const blended = weightSum > 0
+      ? Math.round(weighted / weightSum)
+      : byProduct.length
+        ? Math.round(byProduct.reduce((s, p) => s + p.est_sub_ltv_cents, 0) / byProduct.length)
+        : 0;
+
+    const any = [...latestByProduct.values()][0];
+    return {
+      calibrated: !!any?.calibrated,
+      weights_version: any?.weights_version ?? 1,
+      snapshot_date: latestSnapshot,
+      blended_est_sub_ltv_cents: blended,
+      by_product: byProduct.sort((a, b) => b.est_sub_ltv_cents - a.est_sub_ltv_cents),
+    };
+  } catch {
+    return fallback;
+  }
 }
