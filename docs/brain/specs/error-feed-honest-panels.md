@@ -1,4 +1,4 @@
-# Error-Feed Panels: "Not Connected" ≠ "0 Errors" ⏳
+# Error-Feed Panels: "Not Connected" ≠ "0 Errors" 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[error-feed-monitoring]] + the supervisable-autonomy north star ([[../operational-rules]] § North star). Closes a Goodhart trap in our own observability.
 
@@ -23,5 +23,7 @@ This is the north star applied to our own tooling: a monitor must never present 
 - Supabase panel with no `SUPABASE_MANAGEMENT_TOKEN` → amber "not configured"; with the token + a successful poll + no errors → green "connected."
 - Inngest panel: green "connected" only once the failure-capture fn is confirmed registered (in the deployed function list) — else amber.
 
-## Phase 1 — connection-aware panel states + received-heartbeats ⏳
+## Phase 1 — connection-aware panel states + received-heartbeats ✅
 Per-source "received" heartbeat + the configured/awaiting/connected/error state machine in [[../libraries/control-tower]] `buildErrorFeedSnapshot`; the panel renders amber "not configured"/"awaiting first event" vs green "connected · 0 errors"; the header health count excludes unconfigured panels. Brain: [[../dashboard/control-tower]] · [[../libraries/control-tower]] · [[error-feed-monitoring]].
+
+**Shipped:** `recordFeedDelivery(source)` / `feedLoopId(source)` write `feed:<source>` liveness beats to [[../tables/loop_heartbeats]] (`kind='feed'`) — emitted on each clean Vercel drain POST (`/api/webhooks/vercel-logs`) and each successful Supabase-logs poll (`pollSupabaseLogs`). `buildErrorFeedSnapshot` now returns connection-aware panels (`connectionState`/`configured`/`lastReceivedAt`/`statusText`/`hint`): **errors** → red/amber by recency (unchanged) · **not configured** (`VERCEL_LOG_DRAIN_SECRET` unset · no stored Supabase token) → amber + how-to-wire hint · **configured + 0 deliveries ever** → amber "awaiting first event" · **configured + received + clean** → green "connected · 0 errors (last delivery Ns ago)". Inngest liveness is proxied by the latest `cron` beat (failure-only feed, no clean delivery to observe); the app-layer `supabase` panel needs no receipt (`reportDbError` is wired unconditionally). `GET /api/developer/control-tower` folds the panel colors into the header health count so an unconfigured (amber) panel is never counted healthy. Dashboard renders `statusText` + `hint`. `npx tsc --noEmit` clean.
