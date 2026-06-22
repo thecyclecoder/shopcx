@@ -46,6 +46,16 @@ interface FailedJob {
   updated_at: string;
 }
 
+// Route a paused/failed job to where you actually approve/act on it. A spec page (/dashboard/roadmap/{slug})
+// only exists for build-kind jobs whose slug is a real spec — so repair (slug = error signature), plan
+// (slug = goal slug), and migration-fix (slug = fix id) all 404'd there. Send each to its real surface.
+function approvalHref(kind: string, specSlug: string): string {
+  if (kind === "repair" || kind === "triage-escalations") return "/dashboard/developer/control-tower";
+  if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
+  if (kind === "migration-fix") return "/dashboard/migrations";
+  return `/dashboard/roadmap/${specSlug}`;
+}
+
 function workerStale(w: Worker): boolean {
   if (!w.last_poll_at) return true;
   return Date.now() - new Date(w.last_poll_at).getTime() > STALE_MS;
@@ -254,7 +264,7 @@ export default function BoxPage() {
                   <li key={j.id} className="flex flex-col gap-1.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <Link
-                        href={`/dashboard/roadmap/${j.spec_slug}`}
+                        href={approvalHref(j.kind, j.spec_slug)}
                         className="font-medium text-red-800 underline decoration-dotted underline-offset-2 hover:text-red-900 dark:text-red-300 dark:hover:text-red-200"
                       >
                         {j.spec_slug}
@@ -291,8 +301,11 @@ export default function BoxPage() {
                     <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
                       {j.status === "needs_approval" ? "needs approval" : "needs input"}
                     </span>
+                    <span className="inline-flex items-center rounded-full bg-amber-200/60 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-800/40 dark:text-amber-200">
+                      {j.kind}
+                    </span>
                     <Link
-                      href={`/dashboard/roadmap/${j.spec_slug}`}
+                      href={approvalHref(j.kind, j.spec_slug)}
                       className="font-medium underline decoration-dotted underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
                     >
                       {j.spec_slug}
