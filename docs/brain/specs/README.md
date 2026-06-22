@@ -64,6 +64,16 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Control Tower triage (2026-06-22) ⏳
+
+Born from a full Control Tower audit. Each fixes a real red/error or a monitor false-positive:
+- [[control-tower-monitor-accuracy]] (platform) — never-fired keys off "0 beats EVER" not "0 since deploy" (clears the today-sync/meta-capi/etc. false-reds) + bound the loop_heartbeats read that's 500-ing.
+- [[serve-unserved-crons]] (platform) — deliver-pending-sends + marketing-text-campaign-send-tick are coded + registered but NOT in the Inngest serve route → serve or retire.
+- [[appstle-webhook-billing-error]] (retention) — recurring 500 on subscription.billing-* events; fix the throw / ack semantics.
+- [[scorecards-notnull-guard]] (growth) — 23502 NOT-NULL violation dropping scorecard rows; guard the null column.
+- [[inngest-capture-scope-own-app]] (platform) — a sibling app (shopgrowth) bleeds into our Inngest failure feed; scope capture to our served functions.
+*No-op:* 502 /api/branches (×1) — coincided with the GitHub rate-limit exhaustion, transient.
+
 ## Active project — Worker Orphan-Reaper ⏳
 
 **Spec:** [[worker-orphan-reaper]] · **Owner:** [[../functions/platform]]
