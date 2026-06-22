@@ -29,6 +29,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Proposed-Fix Ships → Auto-Re-test the Origin Spec** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
 - **Improve Queue — Mark-as-Read / Dismiss** · verified 2026-06-22 · → [[dashboard/tickets__improve]]
 - **Scope the Inngest failure-capture to our own app (filter foreign-app noise)** · verified 2026-06-22 · → [[inngest/inngest-failure-capture]]
+- **Fix the Inngest in-code-vs-registered diff — wrong REST endpoint (404)** · verified 2026-06-22 · → [[libraries/control-tower-self-audit]]
 - **Iteration Scorecard Upsert — Stop Swallowing Errors + FK-Resilient** · verified 2026-06-22 · → [[libraries/meta__scorecards]]
 - **Migration-Fix: Remove a Line Item (`remove_line` fix_kind)** · verified 2026-06-22 · → [[libraries/migration-fix]]
 - **pricing_preserved must account for internal quantity breaks (Appstle baseline lacks them)** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
