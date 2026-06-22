@@ -1,0 +1,1 @@
+- **Spec Blockers — gate a build until its prerequisites ship** · verified 2026-06-22 · → [[libraries/brain-roadmap]]

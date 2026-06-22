@@ -1,0 +1,1 @@
+- **Portal-action-failure triage must escalate, not just tag needs-human** · verified 2026-06-22 · → [[libraries/portal__remediation]]

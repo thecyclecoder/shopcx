@@ -1,0 +1,1 @@
+- **Scope the Inngest failure-capture to our own app (filter foreign-app noise)** · verified 2026-06-22 · → [[inngest/inngest-failure-capture]]

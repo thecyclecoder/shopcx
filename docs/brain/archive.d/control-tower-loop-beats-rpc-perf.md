@@ -1,0 +1,1 @@
+- **control_tower_loop_beats RPC — stop the 500 (bound the scan via lateral join)** · verified 2026-06-22 · → [[libraries/control-tower]]

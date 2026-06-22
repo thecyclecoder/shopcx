@@ -16,8 +16,9 @@ Cron that triages **open "Portal action needs help" tickets** (tag `portal-actio
 
 - **healed** — transient error cleared, action re-run, ticket closed
 - **dismissed** — UI/validation error (insufficient points, last-line-item removal), closed + tagged `auto-dismissed`
-- **retry_pending** — still transient, left open, retried next tick (max 3, then `needs-human`)
-- **escalated / skipped** — `needs-human` tagged (unrecognized error or exhausted) or human already owns it
+- **retry_pending** — still transient, left open, retried next tick (max 3, then escalated)
+- **escalated** — unrecognized error / no failure context / retries exhausted / no replay for route / non-transient on retry → `escalate()` sets `escalated_at` + `escalation_reason`, `escalated_to = null` (the AI Routine), so it enters the escalation queue ([[../libraries/portal__remediation]] · [[triage-escalations]])
+- **skipped** — already escalated (`escalated_at`/`escalated_to` set) or a human already owns it
 
 ## Tables written
 
@@ -31,7 +32,7 @@ Cron that triages **open "Portal action needs help" tickets** (tag `portal-actio
 
 ## Gotchas
 
-- **`needs-human` is terminal for the automation** — those tickets stay open but are skipped on every pass so the cron never re-hammers Appstle with a known-bad replay.
+- **Escalation is terminal for the automation** — once a ticket is escalated (`escalated_at` set), the top-of-pass hand-off guard skips it on every later pass so the cron never re-hammers Appstle with a known-bad replay. `escalated_at` (not `escalated_to`, which is null for routine escalations) is the idempotency key. A legacy `needs-human`-tagged ticket with no `escalated_at` is escalated on its next pass (backlog migration), not skipped forever.
 - Classification keys off the error **message**, not the HTTP status (the portal wraps all Appstle errors as 502). See [[../libraries/portal__remediation]].
 
 ---

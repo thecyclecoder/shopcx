@@ -1,0 +1,1 @@
+- **Cron heartbeat must fire on idle ticks (early-return skips the beat)** · verified 2026-06-22 · → [[inngest/marketing-text]]

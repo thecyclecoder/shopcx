@@ -1,0 +1,1 @@
+- **Control Tower Monitor Accuracy — never-fired uses "0 beats ever" + lighter loop_heartbeats reads** · verified 2026-06-22 · → [[libraries/control-tower]]

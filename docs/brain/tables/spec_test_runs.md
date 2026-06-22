@@ -45,4 +45,4 @@ The `spec-test` skill is contracted to emit **only** the result JSON as its fina
 
 ## Related
 
-[[../specs/spec-test-agent]] · [[agent_jobs]] · [[../inngest/spec-test-cron]] · [[../dashboard/roadmap]] · [[../recipes/build-box-setup]] · [[../project-management]] · [[../operational-rules]]
+[[../libraries/spec-test-runs]] · [[../specs/spec-test-agent]] · [[agent_jobs]] · [[../inngest/spec-test-cron]] · [[../dashboard/roadmap]] · [[../recipes/build-box-setup]] · [[../project-management]] · [[../operational-rules]]

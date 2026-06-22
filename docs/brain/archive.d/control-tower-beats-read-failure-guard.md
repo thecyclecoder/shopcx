@@ -1,0 +1,1 @@
+- **Control Tower: a failed beats read must not false-fire never_fired** · verified 2026-06-22 · → [[libraries/control-tower]]
