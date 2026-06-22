@@ -8,6 +8,12 @@ import type { Phase } from "@/lib/brain-roadmap";
 
 const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
+// build-recover-pr-create: the exact `error` the worker stamps when a build succeeds + pushes its branch
+// but `gh pr create` fails. Mirrors PR_CREATE_FAILED_ERROR in roadmap-actions.ts (client-safe copy — that
+// module is server-only). Such a needs_attention job is RECOVERABLE: the work is done + pushed, so the card
+// offers "Create PR" (re-open the PR) as primary, with Rebuild demoted to a labeled discard-and-redo.
+const PR_CREATE_FAILED_ERROR = "branch pushed but PR creation failed";
+
 // Status emoji for a Blocked-by entry (spec-blockers) — matches the brain's phaseEmoji + the board legend.
 const PHASE_EMOJI: Record<Phase, string> = { planned: "⏳", in_progress: "🚧", shipped: "✅", rejected: "❌" };
 
@@ -71,6 +77,8 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   const [issueNotice, setIssueNotice] = useState<string | null>(null);
   const [confirmVerify, setConfirmVerify] = useState(false);
   const [verifying, setVerifying] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [recoverNotice, setRecoverNotice] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -149,6 +157,33 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
       /* surfaced via no state change; user can retry */
     } finally {
       setBusy(false);
+    }
+  }
+
+  // build-recover-pr-create: re-open the PR for an already-pushed build branch (the build succeeded but
+  // `gh pr create` failed). The server re-validates branch-exists-on-origin + idempotently adopts an
+  // existing PR; on success the job flips to `completed` with the recovered PR attached.
+  async function createPr() {
+    if (!job || recovering) return;
+    setRecovering(true);
+    setRecoverNotice(null);
+    try {
+      const res = await fetch("/api/roadmap/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: job.id, recoverPr: true }),
+      });
+      const d = await res.json();
+      if (res.ok && d.job) {
+        setJob(d.job);
+        router.refresh();
+      } else {
+        setRecoverNotice(d.error ? `Couldn't open the PR: ${d.error}` : "Couldn't open the PR — please try again.");
+      }
+    } catch {
+      setRecoverNotice("Couldn't open the PR — please try again.");
+    } finally {
+      setRecovering(false);
     }
   }
 
@@ -261,6 +296,10 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
 
   const needsInput = job?.status === "needs_input";
   const needsApproval = job?.status === "needs_approval";
+  // build-recover-pr-create: a needs_attention job whose branch pushed but PR-create failed = recoverable.
+  // The server re-checks branch-exists-on-origin; this is the cheap card-side gate to offer Create PR.
+  const recoverable =
+    job?.kind === "build" && job.status === "needs_attention" && job.error === PR_CREATE_FAILED_ERROR && !!job.spec_branch;
   const canMerge = !!job?.pr_number && job.status === "completed" && !merged;
   // Verify is the owner-only "I tested it in prod" gate, offered only on shipped specs with no live build
   // and not already in a fold batch.
@@ -330,19 +369,51 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
           ))}
         </div>
       )}
-      {/* Build / Rebuild gets its own full-width row. Disabled while blocked (server gate also refuses). */}
-      {!active && specStatus !== "shipped" && (
-        <div className="mt-2">
-          <button
-            type="button"
-            onClick={build}
-            disabled={busy || blocked}
-            title={blockedTooltip}
-            className="w-full rounded-md bg-indigo-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {busy ? "…" : blocked ? "🔒 Blocked" : job ? "Rebuild" : "Build"}
-          </button>
+      {/* build-recover-pr-create: a build that finished + pushed its branch but failed to open the PR.
+          Primary = Create PR (recover the completed build); Rebuild is demoted to a labeled discard-and-redo
+          fallback (use only if the branch is bad). Shown regardless of specStatus — the work is done. */}
+      {recoverable ? (
+        <div className="mt-2 space-y-2 rounded-md border border-amber-200 bg-amber-50/70 px-2 py-2 text-left dark:border-amber-900/40 dark:bg-amber-950/20">
+          <p className="text-[11px] leading-snug text-amber-800 dark:text-amber-300">
+            This build finished and pushed its branch (<code>{job!.spec_branch}</code>), but opening the PR failed.
+            Recover it — no code is re-run.
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={createPr}
+              disabled={recovering}
+              className="flex-1 rounded-md bg-indigo-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {recovering ? "Opening PR…" : "Create PR"}
+            </button>
+            <button
+              type="button"
+              onClick={build}
+              disabled={busy || recovering}
+              title="Discards the completed, pushed build and rebuilds from scratch — only if the branch is bad."
+              className="rounded-md border border-zinc-200 px-3 py-2 text-[12px] font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300"
+            >
+              {busy ? "…" : "Rebuild (discard)"}
+            </button>
+          </div>
+          {recoverNotice && <p className="text-[11px] text-rose-600 dark:text-rose-400">{recoverNotice}</p>}
         </div>
+      ) : (
+        /* Build / Rebuild gets its own full-width row. Disabled while blocked (server gate also refuses). */
+        !active && specStatus !== "shipped" && (
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={build}
+              disabled={busy || blocked}
+              title={blockedTooltip}
+              className="w-full rounded-md bg-indigo-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {busy ? "…" : blocked ? "🔒 Blocked" : job ? "Rebuild" : "Build"}
+            </button>
+          </div>
+        )
       )}
       {/* Report issue + Mark verified & archive get their own full-width row so they
           aren't jammed in with the status chip / PR / build controls above. Report issue is

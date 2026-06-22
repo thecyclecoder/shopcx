@@ -1,4 +1,4 @@
-# Build Done but PR-Create Failed → "Create PR" (recover, don't discard) ⏳
+# Build Done but PR-Create Failed → "Create PR" (recover, don't discard) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[roadmap-build-console]] + [[build-approval-gates]].
 
@@ -15,10 +15,12 @@ When a build **succeeds and pushes its branch** but the final `gh pr create` ste
 - The recoverable detection is evidence-gated (branch must exist on origin); a `needs_attention` with no pushed branch keeps the human-attention treatment.
 
 ## Verification
-- Force a build whose `gh pr create` fails (branch pushed, no PR) → job `needs_attention`, error "branch pushed but PR creation failed" → the card shows **Create PR** (primary) + Rebuild (secondary). Click Create PR → a PR opens for the pushed branch, job → `completed` with the PR attached, card shows Built + merge. (Re-validates the #185 case.)
-- Create PR when a PR already exists for the branch → adopts it (no duplicate), job → `completed`.
-- A genuinely-stuck `needs_attention` (no pushed branch / dirty-resolver human-merge) → still shows the human-attention treatment, not a misleading Create PR.
-- The worker's pre-flag retry: a transient first `gh pr create` failure that succeeds on retry → never reaches `needs_attention` at all.
+- On a `needs_attention` build card whose `error` is `"branch pushed but PR creation failed"` and whose `spec_branch` is set (e.g. the `control-tower-complete-coverage`/#185 case), the [[../dashboard/roadmap|BuildButton]] shows a **Create PR** primary button + a demoted **"Rebuild (discard)"** secondary, with a note naming the pushed branch → expect Create PR present, Rebuild labeled discard-and-redo.
+- Click **Create PR** (`POST /api/roadmap/build { jobId, recoverPr:true }`) for a branch that exists on origin with no PR → expect a new PR opened against `main` for that branch, the job flips to `completed` with `pr_url`/`pr_number` set + `error` cleared, and the card re-buckets to **Built** with **Squash & merge**.
+- Click **Create PR** when an **open PR already exists** for the branch → expect it is **adopted** (response `adopted:true`, no duplicate PR), job → `completed` with that PR attached.
+- Trigger `createPrForJob` for a `needs_attention` job whose `spec_branch` does **not** exist on origin (deleted/never pushed) → expect `409 "Branch … not found on origin"`, job stays `needs_attention` (no false success).
+- On a genuinely-stuck `needs_attention` (no `spec_branch`, or a different `error` like the dirty-resolver `"needs a human merge"`) → expect the card shows the plain treatment, **not** a Create PR button (`recoverable` is false).
+- In `scripts/builder-worker.ts`, force a transient first `gh pr create` failure that succeeds on a later attempt → expect `ensurePr` retries with backoff and returns the PR, so the job reaches `completed` and **never** hits `needs_attention`.
 
-## Phase 1 — Create-PR recovery action + worker retry ⏳
+## Phase 1 — Create-PR recovery action + worker retry ✅
 The `gh pr create` retry-with-backoff in the worker before flagging; the recoverable-`needs_attention` detection (PR-create-failed + branch-exists); the **Create PR** card action (`POST /api/roadmap/build` → open-PR-for-branch → job `completed`); idempotent adopt-existing-PR. Brain: [[../libraries/agent-jobs]] · [[roadmap-build-console]] · [[../dashboard/roadmap]] (BuildButton) · [[../recipes/build-box-setup]].
