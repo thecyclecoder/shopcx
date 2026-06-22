@@ -22,6 +22,15 @@
 -- size, so a floor buys nothing — and a floor inside the lateral would DROP a loop whose only
 -- beats are older than the floor from the result entirely, falsely making it look never_fired.
 -- Presence (ever-beaten) stays correct because the distinct-loop_id set is computed table-wide.
+--
+-- The one table-wide step — `select distinct loop_id where kind not in (...)` — gets its own
+-- PARTIAL index so it never seq-scans the whole (inline-agent/reactive-dominated) feed: the index
+-- covers only the cron+agent-kind rows, so the planner satisfies the distinct with an index-only
+-- scan over a small index instead of a full heap scan. Without it, this distinct is the last
+-- unbounded scan and would re-introduce the statement-timeout 500 under PostgREST's tighter limit.
+create index if not exists loop_heartbeats_active_kind_loop_idx
+  on public.loop_heartbeats (loop_id)
+  where kind not in ('inline-agent', 'reactive');
 
 create or replace function public.control_tower_loop_beats(p_history_limit int default 10)
 returns table (

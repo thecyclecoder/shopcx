@@ -35,7 +35,7 @@ The Control Tower's per-run liveness log ([[../specs/control-tower]] Phase 1). E
 
 ## Migration
 
-`supabase/migrations/20260622120000_control_tower.sql` (this table + [[loop_alerts]] + RLS, incl. the `(loop_id, ran_at desc)` index) · apply: `scripts/apply-control-tower-migration.ts`. The per-loop-read RPC: `supabase/migrations/20260622160000_control_tower_loop_beats.sql` (original grouped/window body) · apply: `scripts/apply-control-tower-loop-beats-migration.ts`. Lateral-join rewrite (drops the per-row `count(*) OVER`, presence ⇒ ever-beaten): `supabase/migrations/20260622170000_control_tower_loop_beats_lateral.sql` · apply: `scripts/apply-control-tower-loop-beats-lateral-migration.ts`
+`supabase/migrations/20260622120000_control_tower.sql` (this table + [[loop_alerts]] + RLS, incl. the `(loop_id, ran_at desc)` index) · apply: `scripts/apply-control-tower-migration.ts`. The per-loop-read RPC: `supabase/migrations/20260622160000_control_tower_loop_beats.sql` (original grouped/window body) · apply: `scripts/apply-control-tower-loop-beats-migration.ts`. Lateral-join rewrite (drops the per-row `count(*) OVER`, presence ⇒ ever-beaten; adds the partial index `loop_heartbeats_active_kind_loop_idx on (loop_id) where kind not in ('inline-agent','reactive')` so the distinct-loop_id presence scan is index-only, not a seq scan of the whole feed): `supabase/migrations/20260622170000_control_tower_loop_beats_lateral.sql` · apply: `scripts/apply-control-tower-loop-beats-lateral-migration.ts`
 
 ## Related
 
