@@ -1,4 +1,4 @@
-# Dirty-PR-resolver: detect already-merged duplicates (don't loop) + prevent the duplicate PR ⏳
+# Dirty-PR-resolver: detect already-merged duplicates (don't loop) + prevent the duplicate PR ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** hardens [[dirty-pr-resolver-agent]] + the build PR-create path. · **Found in use 2026-06-22:** `storefront-lever-importance-memory` was built **twice** during the account-switch recovery — #252 merged the work, leaving #249 as a duplicate of the same spec. #249 went permanently **CONFLICTING** (its content already on main), so the dirty-PR-resolver kept trying to rebase it and **spawned 9 pr-resolve jobs** that could never succeed — burning Max tokens in a loop. Closing #249 by hand stopped it.
 
@@ -15,5 +15,13 @@ A PR whose work already merged via a *sibling* PR is **unresolvable by definitio
 - A PR that fails to resolve N times (N≤3) → stops retrying and surfaces to the owner (a repair/needs-attention signal), never an open-ended loop.
 - Negative: a normal first-time dirty PR resolves on the first pass as today; a spec with no prior merged PR builds + PRs normally.
 
-## Phase 1 — already-merged detection + close + PR dedup + retry cap ⏳
-Resolver checks sibling-merged/content-on-main before resolving → close+stop; build/PR-create + `requeue-failed-builds` dedupe on a merged build PR per spec; cap pr-resolve retries with owner surfacing on exhaustion. Brain: [[dirty-pr-resolver-agent]] · [[../libraries/roadmap-actions]] · [[../libraries/agent-jobs]] · [[auto-ship-pipeline]].
+## Phase 1 — already-merged detection + close + PR dedup + retry cap ✅
+Resolver checks sibling-merged before resolving → close+stop; build/PR-create + `requeue-failed-builds` dedupe on a merged build PR per spec; cap pr-resolve retries with owner surfacing on exhaustion. Brain: [[dirty-pr-resolver-agent]] · [[../libraries/roadmap-actions]] · [[../libraries/agent-jobs]] · [[auto-ship-pipeline]].
+
+**Shipped 2026-06-22.** `findMergedSiblingBuild` ([[../libraries/agent-jobs]]) — the shared phase-scope-safe "spec already merged?" probe (matches on `instructions` so a multi-phase chain isn't self-deduped). Wired into four sites:
+- **Resolver close+stop** — `findAlreadyMergedDuplicate` + `closeDuplicatePr` ([[../libraries/github-pr-resolve]]) in `detectAndEnqueueDirtyPrs` (webhook: close the dup PR + delete branch + comment, enqueue nothing) AND `runPrResolveJob` (box worker re-checks before any work — defense in depth). A genuinely-conflicting PR whose work is NOT merged still resolves normally.
+- **Build-claim dedup** — `runBuildJob` (scripts/builder-worker.ts) no-ops a fresh build whose work already shipped via a sibling (no duplicate PR); resumes exempt.
+- **Requeue dedup** — `scripts/requeue-failed-builds.ts` skips re-queueing a `failed` build whose spec already merged (the exact account-switch-recovery bug).
+- **Retry cap** — `enqueuePrResolveJob` counts every pr-resolve job ever enqueued for a PR; at `MAX_PR_RESOLVE_ATTEMPTS` (3) it stops and surfaces to the owner once (a `needs_attention` sentinel + `notifyOpsAlert`).
+
+*Implementation note:* the spec's "or content wholly on `main`" alternative is realized via the merged-sibling-build signal (DB-derivable in both the serverless webhook and the box worker), rather than a git diff — the latter isn't available in the serverless webhook path.

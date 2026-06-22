@@ -240,6 +240,45 @@ export async function getLatestJobsBySlug(workspaceId: string): Promise<Record<s
   return map;
 }
 
+/**
+ * dirty-pr-resolver-duplicate-detection (Phase 1) — the shared "is this spec's build already merged?"
+ * probe. A build job flips to `status='merged'` once [[reconcileMergedJobs]] sees its PR merged (the work
+ * landed on `main`). This finds a SIBLING build of the same spec that already merged — the signal that a
+ * second, still-open/conflicting build for the spec is a DUPLICATE (its diff is already on main → it can
+ * never resolve, and re-running it just re-ships the same work).
+ *
+ * Phase-scope safe: dedupes only against a merged build with the **same `instructions`** (when an
+ * `instructions` filter is given), so a multi-phase chain (phase-1 merged, phase-2 building — different
+ * `phaseScopedInstructions`) is NOT mistaken for a dup. Pass `excludeJobId`/`excludeBranch` to ignore the
+ * job/branch being checked itself. Returns the merged sibling (id + branch + pr_number) or null.
+ */
+export async function findMergedSiblingBuild(
+  workspaceId: string,
+  slug: string,
+  opts: { excludeJobId?: string; excludeBranch?: string | null; instructions?: string | null; admin?: Admin } = {},
+): Promise<{ id: string; spec_branch: string | null; pr_number: number | null } | null> {
+  const admin = opts.admin || createAdminClient();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("id, spec_branch, pr_number, instructions")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .eq("status", "merged")
+    .order("created_at", { ascending: false })
+    .limit(25);
+  const rows = (data ?? []) as { id: string; spec_branch: string | null; pr_number: number | null; instructions: string | null }[];
+  const norm = (s: string | null | undefined) => (s ?? "").trim();
+  for (const r of rows) {
+    if (opts.excludeJobId && r.id === opts.excludeJobId) continue;
+    if (opts.excludeBranch && r.spec_branch === opts.excludeBranch) continue;
+    // Only a merged build doing the SAME work (matching phase scope) counts as a duplicate.
+    if (opts.instructions !== undefined && norm(r.instructions) !== norm(opts.instructions)) continue;
+    return { id: r.id, spec_branch: r.spec_branch, pr_number: r.pr_number };
+  }
+  return null;
+}
+
 const GH_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken() {
   return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;

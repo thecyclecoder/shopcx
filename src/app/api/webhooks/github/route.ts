@@ -65,10 +65,10 @@ export async function POST(request: Request) {
   try {
     const dirty = dirtyRelevant
       ? await detectAndEnqueueDirtyPrs()
-      : { checked: 0, conflicting: 0, enqueued: 0, prs: [] };
+      : { checked: 0, conflicting: 0, enqueued: 0, closedDuplicate: 0, prs: [] };
     if (dirtyRelevant) {
       console.log(
-        `[github-webhook] ${event}: checked ${dirty.checked} claude/* PR(s), ${dirty.conflicting} conflicting, ${dirty.enqueued} pr-resolve job(s) enqueued`,
+        `[github-webhook] ${event}: checked ${dirty.checked} claude/* PR(s), ${dirty.conflicting} conflicting, ${dirty.enqueued} pr-resolve job(s) enqueued, ${dirty.closedDuplicate} closed as already-merged duplicate(s)`,
       );
     }
 

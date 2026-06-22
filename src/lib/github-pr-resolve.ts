@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
+import { findMergedSiblingBuild } from "@/lib/agent-jobs";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -33,6 +34,14 @@ const ACTIVE_JOB_STATUSES = [
   "needs_input",
   "needs_approval",
 ];
+
+/**
+ * dirty-pr-resolver-duplicate-detection (Phase 1) — backstop cap. A single PR must never spawn unbounded
+ * pr-resolve jobs: once this many pr-resolve jobs (ANY status) exist for a PR, stop enqueueing and surface
+ * it to the owner instead of looping forever. The already-merged-duplicate detector catches the known
+ * unresolvable case up front; this caps any FUTURE unresolvable case so it can't burn tokens indefinitely.
+ */
+const MAX_PR_RESOLVE_ATTEMPTS = 3;
 
 /**
  * Verify the `X-Hub-Signature-256` header GitHub sends on a webhook delivery. GitHub signs the raw
@@ -127,6 +136,68 @@ function prSpecSlug(prNumber: number): string {
 }
 
 /**
+ * dirty-pr-resolver-duplicate-detection (Phase 1): is this conflicting PR's work ALREADY MERGED via a
+ * sibling build? Maps the PR branch → its originating `kind='build'` job (spec_slug + workspace) → checks
+ * for a SIBLING build of the same spec that already merged (same phase scope). Such a PR is unresolvable
+ * by definition — its diff is already on `main`, so rebasing/merging main just re-conflicts. Returns the
+ * merged sibling (so the caller can close+stop with a clear comment) or null (resolve normally).
+ *
+ * Branch-keyed (not slug-keyed) because the webhook only knows the PR/branch; we never guess the spec from
+ * the branch name — we read the build job that created it. If no build job maps to the branch, returns
+ * null (can't prove it's a dup → let the normal resolver handle it).
+ */
+export async function findAlreadyMergedDuplicate(
+  admin: Admin,
+  branch: string,
+): Promise<{ specSlug: string; mergedBranch: string | null; mergedPr: number | null } | null> {
+  if (!branch || !branch.startsWith("claude/")) return null;
+  const { data: buildJob } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, workspace_id, instructions")
+    .eq("spec_branch", branch)
+    .eq("kind", "build")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const specSlug = buildJob?.spec_slug as string | undefined;
+  const workspaceId = buildJob?.workspace_id as string | undefined;
+  if (!specSlug || !workspaceId) return null;
+
+  const sibling = await findMergedSiblingBuild(workspaceId, specSlug, {
+    excludeBranch: branch,
+    instructions: (buildJob?.instructions as string | null) ?? null,
+    admin,
+  });
+  if (!sibling) return null;
+  return { specSlug, mergedBranch: sibling.spec_branch, mergedPr: sibling.pr_number };
+}
+
+/**
+ * Close a duplicate claude/* PR (+ delete its branch) with an explanatory comment, instead of resolving it.
+ * Used when the PR's work already merged via a sibling — there is nothing to resolve. Best-effort: a failed
+ * comment/branch-delete never blocks the close. Returns true once the PR is closed.
+ */
+export async function closeDuplicatePr(
+  prNumber: number,
+  branch: string,
+  comment: string,
+): Promise<boolean> {
+  try {
+    await gh("POST", `/repos/${GH_REPO}/issues/${prNumber}/comments`, { body: comment });
+  } catch {
+    /* best-effort comment */
+  }
+  const closed = await gh("PATCH", `/repos/${GH_REPO}/pulls/${prNumber}`, { state: "closed" });
+  if (!closed.ok) return false;
+  try {
+    await gh("DELETE", `/repos/${GH_REPO}/git/refs/heads/${branch}`);
+  } catch {
+    /* best-effort branch cleanup (404/422 = already gone / protected) */
+  }
+  return true;
+}
+
+/**
  * Enqueue ONE `pr-resolve` job for a dirty PR. Idempotent: no-op if an active pr-resolve job already
  * exists for this PR (so a burst of push + synchronize events for the same PR enqueues once).
  */
@@ -146,6 +217,19 @@ export async function enqueuePrResolveJob(
     .maybeSingle();
   if (existing) return { enqueued: false, reason: "active job exists" };
 
+  // Retry cap (dirty-pr-resolver-duplicate-detection Phase 1): count EVERY pr-resolve job ever enqueued for
+  // this PR (any status). At/over the cap, stop looping — surface to the owner once and do NOT enqueue again.
+  const { count } = await admin
+    .from("agent_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", input.workspaceId)
+    .eq("kind", "pr-resolve")
+    .eq("spec_slug", slug);
+  if ((count ?? 0) >= MAX_PR_RESOLVE_ATTEMPTS) {
+    await surfaceExhaustedPrResolve(admin, input.workspaceId, input.prNumber, count ?? 0);
+    return { enqueued: false, reason: `retry cap reached (${count} attempts) — surfaced to owner` };
+  }
+
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: input.workspaceId,
     spec_slug: slug,
@@ -163,11 +247,65 @@ export async function enqueuePrResolveJob(
   return { enqueued: true };
 }
 
+/**
+ * Surface a PR that exhausted the pr-resolve retry cap to the owner — once. Idempotent: leaves a single
+ * `needs_attention` pr-resolve sentinel row per PR (the marker that we've already escalated), so a burst of
+ * webhook events past the cap notifies the owner only the first time. Best-effort throughout.
+ */
+async function surfaceExhaustedPrResolve(
+  admin: Admin,
+  workspaceId: string,
+  prNumber: number,
+  attempts: number,
+): Promise<void> {
+  const slug = prSpecSlug(prNumber);
+  try {
+    const { data: alreadySurfaced } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "pr-resolve")
+      .eq("spec_slug", slug)
+      .eq("status", "needs_attention")
+      .limit(1)
+      .maybeSingle();
+    if (alreadySurfaced) return; // already escalated — don't re-notify
+
+    const prUrl = `https://github.com/${GH_REPO}/pull/${prNumber}`;
+    await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "pr-resolve",
+      status: "needs_attention",
+      pr_number: prNumber,
+      error: `pr-resolve retry cap reached (${attempts} attempts) — needs a human`,
+      log_tail: `PR #${prNumber} could not be auto-resolved after ${attempts} pr-resolve attempt(s); stopped retrying to avoid an unresolvable loop.`,
+    });
+    try {
+      const { notifyOpsAlert } = await import("@/lib/notify-ops-alert");
+      await notifyOpsAlert(workspaceId, {
+        title: `Dirty-PR resolver: PR #${prNumber} gave up after ${attempts} attempts`,
+        severity: "warning",
+        lines: [
+          `This PR could not be auto-resolved after ${attempts} pr-resolve attempt(s). Stopped retrying to avoid an unresolvable loop — a human should resolve or close it.`,
+          prUrl,
+        ],
+      });
+    } catch {
+      /* slack best-effort */
+    }
+  } catch (e) {
+    console.error(`[pr-resolve] surfaceExhausted PR #${prNumber} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 export interface DirtyPrResult {
   checked: number;
   conflicting: number;
   enqueued: number;
-  prs: Array<{ number: number; branch: string; mergeable: boolean | null; enqueued: boolean }>;
+  /** dirty-pr-resolver-duplicate-detection: PRs closed because their work already merged via a sibling. */
+  closedDuplicate: number;
+  prs: Array<{ number: number; branch: string; mergeable: boolean | null; enqueued: boolean; closedDuplicate?: boolean }>;
 }
 
 /**
@@ -177,7 +315,7 @@ export interface DirtyPrResult {
  */
 export async function detectAndEnqueueDirtyPrs(admin?: Admin): Promise<DirtyPrResult> {
   const db = admin || createAdminClient();
-  const result: DirtyPrResult = { checked: 0, conflicting: 0, enqueued: 0, prs: [] };
+  const result: DirtyPrResult = { checked: 0, conflicting: 0, enqueued: 0, closedDuplicate: 0, prs: [] };
   if (!ghToken()) return result;
 
   const list = await gh("GET", `/repos/${GH_REPO}/pulls?state=open&per_page=100`);
@@ -206,17 +344,37 @@ export async function detectAndEnqueueDirtyPrs(admin?: Admin): Promise<DirtyPrRe
     // mergeable === false ⇒ CONFLICTING (the only state we act on). true ⇒ clean; null ⇒ unknown/still
     // computing or already merged/closed → skip (a later event re-checks).
     let enqueued = false;
+    let closedDup = false;
     if (mergeable === false) {
       result.conflicting++;
       try {
-        const r = await enqueuePrResolveJob(db, { workspaceId, prNumber, branch });
-        enqueued = r.enqueued;
-        if (enqueued) result.enqueued++;
+        // dirty-pr-resolver-duplicate-detection (Phase 1): if this PR's work already merged via a sibling
+        // build, it is unresolvable by definition (its diff is already on main → rebasing re-conflicts).
+        // Close it + delete the branch with a clear comment instead of looping the resolver on it.
+        const dup = await findAlreadyMergedDuplicate(db, branch);
+        if (dup) {
+          const sib = dup.mergedPr ? `#${dup.mergedPr}` : (dup.mergedBranch ?? "a sibling build");
+          const closed = await closeDuplicatePr(
+            prNumber,
+            branch,
+            `Closing as a duplicate: this spec (\`${dup.specSlug}\`) already shipped via ${sib}, so this PR's changes are already on \`main\`. There is nothing left to merge — rebasing would only re-conflict. Auto-closed by the dirty-PR resolver (dirty-pr-resolver-duplicate-detection).`,
+          );
+          if (closed) {
+            closedDup = true;
+            result.closedDuplicate++;
+            console.log(`[dirty-pr] closed duplicate PR #${prNumber} (${branch}) — ${dup.specSlug} already merged via ${sib}`);
+          }
+        }
+        if (!closedDup) {
+          const r = await enqueuePrResolveJob(db, { workspaceId, prNumber, branch });
+          enqueued = r.enqueued;
+          if (enqueued) result.enqueued++;
+        }
       } catch {
         /* best-effort — next event retries */
       }
     }
-    result.prs.push({ number: prNumber, branch, mergeable, enqueued });
+    result.prs.push({ number: prNumber, branch, mergeable, enqueued, closedDuplicate: closedDup });
   }
   return result;
 }
