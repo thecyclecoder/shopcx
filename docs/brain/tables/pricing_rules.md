@@ -35,6 +35,11 @@ Storefront pricing rules — tier qty, mode (subscription vs one-time), frequenc
 **In (others → this):**
 
 - [[product_pricing_rule]].`pricing_rule_id`
+- [[pricing_rule_offers]].`pricing_rule_id`
+
+## Dynamic persist-to-renewal offers (M6)
+
+The base rule here is **static per product**. A **time-boxed, scoped persist-to-renewal offer** that overrides it at renewal lives in the child table [[pricing_rule_offers]] (status `proposed｜approved｜active｜expired`) — an owner-approved `subscribe_discount_pct` override or a fixed renewal price that the [[../libraries/pricing]] engine layers on top of this rule **only while active**. See [[../specs/storefront-dynamic-renewal-offers]] · [[../libraries/storefront-renewal-offers]].
 
 ## Common queries
 

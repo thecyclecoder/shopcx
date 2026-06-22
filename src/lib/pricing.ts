@@ -64,10 +64,12 @@ export interface PricedLine {
   sns_pct: number;
   /** Did this unit price come from a grandfathered override? */
   is_grandfathered: boolean;
+  /** Did this unit price come from an active persist-to-renewal offer (M6)? */
+  is_offer: boolean;
 }
 
 export interface DiscountPill {
-  kind: "sns" | "quantity_break" | "free_shipping" | "coupon";
+  kind: "sns" | "quantity_break" | "free_shipping" | "coupon" | "offer";
   label: string;
 }
 
@@ -117,10 +119,24 @@ interface RuleRow {
  */
 export async function resolveSubscriptionPricing(
   workspaceId: string,
-  sub: { items?: unknown; delivery_price_cents?: number | null },
+  sub: { items?: unknown; delivery_price_cents?: number | null; pricing_rule_offer_id?: string | null },
 ): Promise<SubscriptionPricing> {
   const admin = createAdminClient();
   const items = (Array.isArray(sub.items) ? sub.items : []) as PricingItem[];
+
+  // Persist-to-renewal offer (M6): a sub bound to an ACTIVE offer carries a reference, never a
+  // baked price — so a deactivated/expired offer reverts the sub to base pricing automatically,
+  // with nothing to un-bake. Resolved live, gated on the binding being present (no extra query
+  // for the ~all subs that carry no offer). The offer overrides pricing only for its product.
+  let activeOffer: import("@/lib/storefront/renewal-offers").RenewalOffer | null = null;
+  if (sub.pricing_rule_offer_id) {
+    try {
+      const { resolveActiveOffer } = await import("@/lib/storefront/renewal-offers");
+      activeOffer = await resolveActiveOffer({ admin, offerId: sub.pricing_rule_offer_id });
+    } catch (e) {
+      console.warn(`[pricing] offer resolve failed for sub offer=${sub.pricing_rule_offer_id}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   // 1. Catalog truth for every variant on the sub. Items store variant_id in
   //    EITHER shape — our internal product_variants UUID (some migrated subs) or
@@ -199,10 +215,10 @@ export async function resolveSubscriptionPricing(
 
     if (isShippingProtection(i)) {
       const amt = i.price_cents ?? 0;
-      return { ...common, kind: "protection" as const, base_cents: amt, unit_cents: amt, break_pct: 0, sns_pct: 0, is_grandfathered: false };
+      return { ...common, kind: "protection" as const, base_cents: amt, unit_cents: amt, break_pct: 0, sns_pct: 0, is_grandfathered: false, is_offer: false };
     }
     if (i.is_gift) {
-      return { ...common, kind: "gift" as const, base_cents: v?.price_cents ?? 0, unit_cents: 0, break_pct: 0, sns_pct: 0, is_grandfathered: false };
+      return { ...common, kind: "gift" as const, base_cents: v?.price_cents ?? 0, unit_cents: 0, break_pct: 0, sns_pct: 0, is_grandfathered: false, is_offer: false };
     }
 
     const hasOverride = i.price_override_cents != null;
@@ -211,10 +227,25 @@ export async function resolveSubscriptionPricing(
     const base = hasOverride ? Number(i.price_override_cents) : (v?.price_cents ?? i.price_cents ?? 0);
     const ruleId = v ? ruleIdByProduct.get(v.product_id) : undefined;
     const rule = ruleId ? ruleMap.get(ruleId) : undefined;
-    const snsPct = rule ? Number(rule.subscribe_discount_pct || 0) : fallbackSns;
     const breakPct = rule ? breakPctForQty(rule.quantity_breaks, ruleTotalQty.get(ruleId!) || quantity) : 0;
+
+    // Persist-to-renewal offer (M6): applies ONLY to this line's product, never grandfathered
+    // lines (an explicit locked price wins). A fixed renewal price overrides break + S&S; a
+    // subscribe_discount_pct override replaces the rule's S&S and still stacks the quantity break.
+    const offerApplies = !!activeOffer && !hasOverride && common.product_id != null && String(activeOffer.product_id) === String(common.product_id);
+    if (offerApplies && activeOffer) {
+      if (activeOffer.offer_type === "fixed_renewal_price" && activeOffer.renewal_price_cents != null) {
+        const unit = Math.max(0, Number(activeOffer.renewal_price_cents));
+        return { ...common, kind: "product" as const, base_cents: base, unit_cents: unit, break_pct: 0, sns_pct: 0, is_grandfathered: false, is_offer: true };
+      }
+      const offerSns = Math.max(0, Math.min(100, Number(activeOffer.subscribe_discount_pct ?? 0)));
+      const unit = Math.round(base * (1 - breakPct / 100) * (1 - offerSns / 100));
+      return { ...common, kind: "product" as const, base_cents: base, unit_cents: unit, break_pct: breakPct, sns_pct: offerSns, is_grandfathered: false, is_offer: true };
+    }
+
+    const snsPct = rule ? Number(rule.subscribe_discount_pct || 0) : fallbackSns;
     const unit = Math.round(base * (1 - breakPct / 100) * (1 - snsPct / 100));
-    return { ...common, kind: "product" as const, base_cents: base, unit_cents: unit, break_pct: breakPct, sns_pct: snsPct, is_grandfathered: hasOverride };
+    return { ...common, kind: "product" as const, base_cents: base, unit_cents: unit, break_pct: breakPct, sns_pct: snsPct, is_grandfathered: hasOverride, is_offer: false };
   });
 
   const productLines = lines.filter((l) => l.kind === "product");
@@ -235,6 +266,8 @@ export async function resolveSubscriptionPricing(
   //    rule ("8% OFF Buy 2"). Free shipping when granted. Coupons are appended by
   //    the caller from applied_discounts.
   const discounts: DiscountPill[] = [];
+  // Persist-to-renewal offer pill takes the front when an active offer priced any line (M6).
+  if (productLines.some((l) => l.is_offer)) discounts.push({ kind: "offer", label: "Renewal Offer" });
   const snsPcts = productLines.map((l) => l.sns_pct).filter((p) => p > 0);
   if (snsPcts.length) discounts.push({ kind: "sns", label: `${Math.max(...snsPcts)}% Subscribe & Save` });
   const seenBreak = new Set<string>();

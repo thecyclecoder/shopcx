@@ -46,6 +46,7 @@ Synced from Appstle. items JSONB, billing interval, next billing date. Will beco
 - `customer_id` → [[customers]].`id`
 - `shipping_rate_id` → [[shipping_rates]].`id`
 - `workspace_id` → [[workspaces]].`id`
+- `pricing_rule_offer_id` → [[pricing_rule_offers]].`id` (`ON DELETE SET NULL`) — M6 persist-to-renewal offer binding (a **reference**, never a baked price). Set at checkout for offer-arm converters; the renewal pricing engine resolves it live and applies it only while the offer is `active`. See [[../libraries/pricing]] · [[../specs/storefront-dynamic-renewal-offers]].
 
 **In (others → this):**
 

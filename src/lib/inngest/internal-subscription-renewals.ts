@@ -378,7 +378,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     const ctx = await step.run("load-context", async () => {
       const { data: sub } = await admin
         .from("subscriptions")
-        .select("id, workspace_id, customer_id, items, billing_interval, billing_interval_count, next_billing_date, status, applied_discounts, shopify_contract_id, is_internal, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, shipping_address, payment_method_id")
+        .select("id, workspace_id, customer_id, items, billing_interval, billing_interval_count, next_billing_date, status, applied_discounts, shopify_contract_id, is_internal, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, shipping_address, payment_method_id, pricing_rule_offer_id")
         .eq("id", subscription_id)
         .single();
       if (!sub?.is_internal) return { skip: true, reason: "not_internal" } as const;

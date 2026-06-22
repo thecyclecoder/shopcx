@@ -43,6 +43,9 @@ export interface OptimizerPolicy {
   auto_rollback_ltv_tolerance: number;
   auto_rollback_windows: number;
   auto_rollback_refund_spike_delta: number;
+  /** M6 hard rail — the agent may never propose a persist-to-renewal offer whose modeled
+   *  renewal margin drops below this (a breach escalates to Growth + CFO). Default 0.35. */
+  renewal_margin_floor_pct: number;
   created_by: "agent" | "human";
   rationale: string | null;
 }
@@ -86,7 +89,7 @@ export async function loadOptimizerPolicy(
     const { data } = await admin
       .from("storefront_optimizer_policy")
       .select(
-        "id, workspace_id, active, product_scope, auto_run_reversible, max_concurrent_experiments, min_sample, holdout_pct, auto_rollback_ltv_tolerance, auto_rollback_windows, auto_rollback_refund_spike_delta, created_by, rationale",
+        "id, workspace_id, active, product_scope, auto_run_reversible, max_concurrent_experiments, min_sample, holdout_pct, auto_rollback_ltv_tolerance, auto_rollback_windows, auto_rollback_refund_spike_delta, renewal_margin_floor_pct, created_by, rationale",
       )
       .eq("workspace_id", workspaceId)
       .maybeSingle();

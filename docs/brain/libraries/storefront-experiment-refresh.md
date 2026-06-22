@@ -13,6 +13,10 @@ The Phase 3→4→5 orchestrator for one storefront-experiment refresh per works
 4. **Phase 4 decision** (`decideExperiment`) for non-rolled-back experiments → promote/kill/hold; persists status + `last_decision` snapshot.
 5. Closes the run record with `decisions`/`escalations`/`counts`.
 
+## M6 — persist-to-renewal offer expiry + rollback
+At the **start** of each refresh, `expireDueOffers` ([[storefront-renewal-offers]]) auto-expires any [[../tables/pricing_rule_offers]] past its `ends_at`. On a **rollback or kill** of an offer experiment, `deactivateOffersForExperiment` flips the bound offer to `expired` — so affected subs revert to **base renewal pricing** on their next renewal (nothing baked), each with a [[../tables/pricing_rule_offer_events]] audit row. See [[../specs/storefront-dynamic-renewal-offers]].
+
 ## Gotchas
 - **Rollback restores control by status flip only** — it never edits a variant `patch`. Non-`running`/`promoted` experiments simply aren't served at render.
 - **Supervisable, not silent** — every decision + the triggering posteriors land on the run record; rollbacks escalate.
+- **Offer deactivation is best-effort** — an offer-table failure never breaks the supervisable experiment run (it's wrapped + logged).

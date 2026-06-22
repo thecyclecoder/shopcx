@@ -80,7 +80,7 @@ export async function priceSubscription(
   const pills: DiscountPill[] = [];
 
   if (sub.is_internal) {
-    const pricing = await resolveSubscriptionPricing(workspaceId, sub as { items?: unknown; delivery_price_cents?: number | null });
+    const pricing = await resolveSubscriptionPricing(workspaceId, sub as { items?: unknown; delivery_price_cents?: number | null; pricing_rule_offer_id?: string | null });
     for (const l of pricing.lines) {
       const v = { base_cents: l.base_cents, unit_cents: l.unit_cents };
       if (l.line_id) priced.set(String(l.line_id), v);

@@ -742,6 +742,24 @@ export async function POST(request: NextRequest) {
     if (sub?.id) {
       createdSubscriptionIds.push(sub.id as string);
       if (!primarySubscriptionId) primarySubscriptionId = sub.id as string;
+      // Persist-to-renewal offer binding (M6): if this sub's product converted on an active
+      // offer ARM the visitor was exposed to, bind the sub to the offer so it persists to
+      // renewal. Best-effort — never blocks the order (a reference, never a baked price).
+      try {
+        const { bindOfferOnConversion } = await import("@/lib/storefront/renewal-offers");
+        const productIds = bucket.items.map((i) => i.product_id).filter(Boolean) as string[];
+        const anonId = (cart.anonymous_id as string | null) || null;
+        if (productIds.length && anonId) {
+          await bindOfferOnConversion({
+            workspaceId: cart.workspace_id,
+            subscriptionId: sub.id as string,
+            productIds,
+            identityKeys: [anonId],
+          });
+        }
+      } catch (e) {
+        console.warn(`[checkout] renewal-offer binding failed for sub ${sub.id}:`, e instanceof Error ? e.message : e);
+      }
     }
   }
   // Patch the transaction record with the subscription it produced (if any).

@@ -45,6 +45,13 @@ import {
 } from "@/lib/storefront/lever-memory";
 import { getCalibrationState } from "@/lib/storefront/calibration";
 import type { VariantPatch } from "@/lib/storefront/experiments";
+import {
+  proposeOffer,
+  activateOffer,
+  DEFAULT_RENEWAL_MARGIN_FLOOR_PCT,
+  type OfferType,
+  type OfferPlan,
+} from "@/lib/storefront/renewal-offers";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -76,6 +83,9 @@ export const ACTIVE_EXPERIMENT_STATUSES = ["draft", "running", "promoted"] as co
 export const CONSERVATIVE_MIN_HOLDOUT = 0.2;
 /** Bucket the optimizer's generated heroes land in (re-signable, same as the lander heroes). */
 const OPTIMIZER_HERO_BUCKET = "product-media";
+/** Lever keys that are OFFER-class (M6 persist-to-renewal offers) — ALWAYS owner-approved,
+ *  routed via the offer path (proposeOptimizerOffer), never the autonomous content/coupon one. */
+export const OFFER_LEVER_KEYS = new Set<string>(["renewal_offer"]);
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -518,5 +528,175 @@ export async function materializeCampaign(opts: {
     experiment_id: experimentId,
     lever_key: p.lever_key,
     detail: `stood up experiment ${experimentId} on ${surfaceKey(surface)} — lever ${p.lever_key}, holdout ${holdout}${opts.conservative ? " (conservative)" : ""}`,
+  };
+}
+
+// ── Offer lever (M6 — persist-to-renewal, ALWAYS owner-approved) ─────────────────
+
+/** The typed offer the box session proposes (lever_class='offer'). Created `proposed` +
+ *  inactive, margin-checked, surfaced for owner approval — NEVER auto-activated. */
+export interface OptimizerOfferPlan {
+  offer_type: OfferType;
+  /** Set when offer_type='subscribe_discount_pct' — the override S&S percent at renewal. */
+  subscribe_discount_pct?: number;
+  /** Set when offer_type='fixed_renewal_price' — the fixed per-unit renewal price (cents). */
+  renewal_price_cents?: number;
+  /** Optional explicit window; defaults to now → +60d (a time-boxed run). */
+  starts_at?: string;
+  ends_at?: string;
+  /** Honest-labeling content patch shown on the offer ARM (compliance invariant). */
+  display_patch?: VariantPatch;
+  label?: string;
+}
+
+export interface ProposeOptimizerOfferResult {
+  ok: boolean;
+  blocked: boolean;
+  offer_id?: string;
+  detail: string;
+  margin_pct?: number | null;
+  floor_pct?: number;
+}
+
+/**
+ * Propose a persist-to-renewal offer (the M6 lever): create a `proposed`/inactive
+ * [[renewal-offers]] row after the margin-floor check. Returns { blocked:true } when the
+ * modeled renewal margin is below the policy floor — the worker escalates to Growth + CFO
+ * instead of surfacing it as a normal approvable proposal. NEVER activates (owner-gated).
+ */
+export async function proposeOptimizerOffer(opts: {
+  workspaceId: string;
+  surface: OptimizerSurface;
+  offer: OptimizerOfferPlan;
+  hypothesis: string;
+  reasoning: string;
+  policy: OptimizerPolicy | null;
+  createdBy?: string | null;
+  now?: Date;
+  admin?: Admin;
+}): Promise<ProposeOptimizerOfferResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const s = opts.surface;
+  const floorPct =
+    typeof opts.policy?.renewal_margin_floor_pct === "number"
+      ? opts.policy.renewal_margin_floor_pct
+      : DEFAULT_RENEWAL_MARGIN_FLOOR_PCT;
+
+  const plan: OfferPlan = {
+    product_id: s.product_id,
+    lander_type: s.lander_type,
+    audience: s.audience,
+    offer_type: opts.offer.offer_type,
+    subscribe_discount_pct: opts.offer.subscribe_discount_pct,
+    renewal_price_cents: opts.offer.renewal_price_cents,
+    starts_at: opts.offer.starts_at,
+    ends_at: opts.offer.ends_at,
+    hypothesis: opts.hypothesis,
+    rationale: opts.reasoning,
+  };
+  const r = await proposeOffer({ workspaceId: opts.workspaceId, plan, floorPct, createdBy: opts.createdBy, now: opts.now, admin });
+  return { ok: r.ok, blocked: r.blocked, offer_id: r.offer_id, detail: r.detail, margin_pct: r.margin?.model.modeled_margin_pct ?? null, floor_pct: floorPct };
+}
+
+/**
+ * On owner approval, run the approved offer as an M1 arm vs holdout: stand up the
+ * `storefront_experiments` row (lever=renewal_offer, lever_class offer, the campaign record
+ * M5 grades) + a control arm vs the offer arm (carrying the honest-labeling display patch),
+ * LINK the offer to the experiment/arm, then ACTIVATE it (persists to renewal). ≤1 active
+ * campaign per surface. Subscribers who convert on the offer arm get bound at checkout.
+ */
+export async function materializeOfferCampaign(opts: {
+  workspaceId: string;
+  surface: OptimizerSurface;
+  offerId: string;
+  leverKey: string;
+  hypothesis: string;
+  reasoning: string;
+  displayPatch?: VariantPatch;
+  label?: string;
+  holdoutPct?: number;
+  conservative: boolean;
+  createdBy?: string | null;
+  now?: Date;
+  admin?: Admin;
+}): Promise<MaterializeResult & { variant_id?: string }> {
+  const admin = opts.admin ?? createAdminClient();
+  const now = opts.now ?? new Date();
+  const s = opts.surface;
+
+  if (await hasActiveCampaignForSurface(admin, s)) {
+    return { ok: false, detail: `a campaign is already active on ${surfaceKey(s)} — not standing up a second` };
+  }
+
+  let holdout = typeof opts.holdoutPct === "number" ? opts.holdoutPct : 0.1;
+  holdout = Math.min(0.9, Math.max(0.05, holdout));
+  if (opts.conservative) holdout = Math.max(holdout, CONSERVATIVE_MIN_HOLDOUT);
+
+  const { data: expRow, error: expErr } = await admin
+    .from("storefront_experiments")
+    .insert({
+      workspace_id: opts.workspaceId,
+      product_id: s.product_id,
+      lander_type: s.lander_type,
+      audience: s.audience,
+      lever: opts.leverKey,
+      hypothesis: opts.hypothesis,
+      status: "running",
+      holdout_pct: holdout,
+      created_by: opts.createdBy ?? null,
+      started_at: now.toISOString(),
+      last_decision: {
+        action: "stood_up",
+        by: "storefront-optimizer",
+        lever_class: "offer",
+        offer_id: opts.offerId,
+        reasoning: opts.reasoning,
+        conservative: opts.conservative,
+        at: now.toISOString(),
+      },
+    })
+    .select("id")
+    .single();
+  if (expErr || !expRow) return { ok: false, detail: `offer experiment insert failed: ${expErr?.message ?? "no row"}` };
+  const experimentId = expRow.id as string;
+
+  // Control (empty patch) + the offer arm (honest-labeling display patch, may be empty).
+  const { data: variants, error: varErr } = await admin
+    .from("storefront_experiment_variants")
+    .insert([
+      { experiment_id: experimentId, workspace_id: opts.workspaceId, label: "control", is_control: true, patch: {} },
+      { experiment_id: experimentId, workspace_id: opts.workspaceId, label: opts.label || "offer", is_control: false, patch: opts.displayPatch ?? {} },
+    ])
+    .select("id, is_control");
+  if (varErr || !variants) {
+    await admin.from("storefront_experiments").delete().eq("id", experimentId);
+    return { ok: false, detail: `offer variant insert failed (experiment rolled back): ${varErr?.message ?? "no rows"}` };
+  }
+  const offerArm = (variants as Array<{ id: string; is_control: boolean }>).find((v) => !v.is_control);
+  if (!offerArm) {
+    await admin.from("storefront_experiments").delete().eq("id", experimentId);
+    return { ok: false, detail: "offer arm not found after insert (experiment rolled back)" };
+  }
+
+  // Link the offer to the experiment + arm so checkout can bind offer-arm converters.
+  await admin
+    .from("pricing_rule_offers")
+    .update({ experiment_id: experimentId, variant_id: offerArm.id, updated_at: now.toISOString() })
+    .eq("id", opts.offerId)
+    .eq("workspace_id", opts.workspaceId);
+
+  // Activate the offer (persists to renewal). Refuses a below-floor offer (defense in depth).
+  const act = await activateOffer({ workspaceId: opts.workspaceId, offerId: opts.offerId, approvedBy: opts.createdBy, now, admin });
+  if (!act.ok) {
+    await admin.from("storefront_experiments").delete().eq("id", experimentId);
+    return { ok: false, detail: `offer activation failed (experiment rolled back): ${act.detail}` };
+  }
+
+  return {
+    ok: true,
+    experiment_id: experimentId,
+    variant_id: offerArm.id,
+    lever_key: opts.leverKey,
+    detail: `stood up OFFER experiment ${experimentId} on ${surfaceKey(s)} — offer ${opts.offerId} active, holdout ${holdout}${opts.conservative ? " (conservative)" : ""}`,
   };
 }

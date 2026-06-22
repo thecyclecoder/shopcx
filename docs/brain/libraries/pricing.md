@@ -27,6 +27,14 @@ unit   = round(base × (1 − break%/100) × (1 − sns%/100))
 
 Pricing data lives in [[../tables/pricing_rules]] (linked to products via [[../tables/product_pricing_rule]]): `quantity_breaks`, `subscribe_discount_pct`, `free_shipping`. Free shipping mirrors the storefront's authoritative rule — `free_shipping && (!free_shipping_subscription_only || isSubscribing)`. Internal subs are **always** subscription-mode, so a rule with `free_shipping = true` grants it outright; `free_shipping_threshold_cents` does **not** gate the decision (it's a one-time-order / banner concept).
 
+## Persist-to-renewal offers (M6)
+
+A sub bound to a [[../tables/pricing_rule_offers]] offer carries `pricing_rule_offer_id` — a **reference, never a baked price**. When set, the engine resolves the offer live (`resolveActiveOffer`, [[storefront-renewal-offers]]) and, **only while it is `active` + within `[starts_at, ends_at)`**, overrides pricing for that offer's product lines:
+- `fixed_renewal_price` → the unit is the fixed renewal price (overrides break + S&S).
+- `subscribe_discount_pct` → replaces the rule's S&S percent (still stacks the quantity break).
+
+Grandfathered lines (`price_override_cents`) are never offer-overridden. A priced line carries `is_offer`; an active offer adds a `Renewal Offer` discount pill. Because nothing is baked, **expiry/rollback auto-reverts the sub to base renewal pricing** — see the "reversible on real renewals" invariant in [[../specs/storefront-dynamic-renewal-offers]]. The engine only queries the offer when `pricing_rule_offer_id` is set, so the ~all offerless subs pay no extra cost.
+
 ## Identifier discipline
 
 Items reference the **variant UUID** (`product_variants.id`), never the Shopify variant id. The engine resolves variants by id-shape (UUID → `id`, numeric → `shopify_variant_id`) and keys its lookup map by **both**, so legacy items that still hold a Shopify id keep working during the transition. New writes ([[internal-subscription]] mutations, [[migrate-to-internal]]) always store the UUID.

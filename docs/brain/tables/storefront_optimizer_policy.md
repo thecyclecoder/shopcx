@@ -36,6 +36,7 @@ directly-editable surface, not a supersede-on-activate policy history.
 | `auto_rollback_ltv_tolerance` | `double precision` | — | default `0.15` · LTV-proxy regression tolerance vs control (fraction) |
 | `auto_rollback_windows` | `integer` | — | default `2` · consecutive regressing windows before auto-rollback |
 | `auto_rollback_refund_spike_delta` | `double precision` | — | default `0.10` · refund-rate spike over control that rolls back (fraction) |
+| `renewal_margin_floor_pct` | `double precision` | — | default `0.35` · M6 hard rail — the agent may never **propose** a persist-to-renewal offer whose modeled renewal margin drops below this; a breach escalates to Growth + CFO ([[pricing_rule_offers]] · [[../specs/storefront-dynamic-renewal-offers]]) |
 | `created_by` | `text` | — | `agent` \| `human` (CHECK, default `human`) — lets the Growth director self-author later |
 | `updated_by` | `uuid` | ✓ | an `auth.users`.id (plain uuid, **no FK** — the pooler apply role lacks REFERENCES on the `auth` schema) · who last edited the policy |
 | `rationale` | `text` | ✓ | why this policy is set as it is (Growth legibility) |

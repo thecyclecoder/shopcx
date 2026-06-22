@@ -20,6 +20,7 @@ import { isProxyCalibrated } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
 import { updatePosterior } from "@/lib/storefront/lever-memory";
+import { expireDueOffers, deactivateOffersForExperiment } from "@/lib/storefront/renewal-offers";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -122,6 +123,16 @@ export async function refreshStorefrontExperiments(opts: {
   };
 
   try {
+    // 0. Phase 3 (M6) — auto-expire any persist-to-renewal offer past its ends_at. The engine
+    //    applies an offer only while active, so expiry reverts bound subs to base renewal pricing
+    //    on their next renewal (nothing baked). Best-effort: never breaks the supervisable run.
+    try {
+      const expired = await expireDueOffers({ workspaceId: opts.workspaceId, now });
+      if (expired.count) console.log(`[storefront-experiments] expired ${expired.count} due renewal offer(s) for ws=${opts.workspaceId}`);
+    } catch (e) {
+      console.warn(`[storefront-experiments] offer expiry failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     // 1. Attribution (idempotent recompute).
     const attribution = await refreshExperimentAttribution({
       workspaceId: opts.workspaceId,
@@ -198,6 +209,14 @@ export async function refreshStorefrontExperiments(opts: {
         counts.rolled_back++;
         escalations.push({ experiment_id: experimentId, reason });
         decisions.push({ experiment_id: experimentId, action: "rolled_back", win_prob: null, rule: reason, posteriors: snapshot });
+        // M6 — a rolled-back experiment must un-touch real renewals: deactivate any bound
+        // persist-to-renewal offer so affected subs revert to base pricing (audited). Best-effort.
+        try {
+          const d = await deactivateOffersForExperiment({ experimentId, reason: `experiment_rolled_back: ${reason}`, event: "rolled_back", now });
+          if (d.count) console.warn(`[storefront-experiments] rollback deactivated ${d.count} renewal offer(s) for experiment=${experimentId}`);
+        } catch (e) {
+          console.warn(`[storefront-experiments] offer deactivation on rollback failed exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
         // Commit the learning — a rollback is a loss, recorded as much as a win.
         await commitLearning(exp, rollups);
         // Surface, don't bury — escalate to Growth (durable record + structured log).
@@ -226,6 +245,13 @@ export async function refreshStorefrontExperiments(opts: {
         update.stopped_at = now.toISOString();
         counts.killed++;
         terminal = true;
+        // M6 — a killed offer experiment deactivates its bound offer (subs revert to base, audited).
+        try {
+          const d = await deactivateOffersForExperiment({ experimentId, reason: `experiment_killed: ${decision.rule}`, event: "killed", now });
+          if (d.count) console.warn(`[storefront-experiments] kill deactivated ${d.count} renewal offer(s) for experiment=${experimentId}`);
+        } catch (e) {
+          console.warn(`[storefront-experiments] offer deactivation on kill failed exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       } else {
         counts.held++;
       }
