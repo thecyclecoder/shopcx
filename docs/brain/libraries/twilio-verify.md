@@ -52,7 +52,7 @@ async function checkVerification(serviceSid: string, to: string, code: string,) 
 
 ## Gotchas
 
-_None documented._
+- **A failed send is not a 5xx (fixed 2026-06-22).** When `startVerificationWithFallback` returns `success:false` (bad number + no/failed email, after the SMS→email retry), the portal OTP routes return a structured **non-5xx**, not a `502`. `otp/start` returns `200 {eligible:false, suggest_magic_link:true, error:"verify_send_failed", details}` — the login client (`LoginClient.handleEmailSubmit`) reads a non-eligible body as "route to magic-login", so the customer flow is unchanged. `otp/resend` returns `422 {error:"verify_send_failed"}` (no eligible-fallback there; the user keeps the magic-link escape hatch). The old `502` was an *expected, client-handled* per-request outcome, but it tripped the `status >= 500` filter in the Vercel-errors feed ([[../tables/error_events]] via `src/app/api/webhooks/vercel-logs/route.ts`, surfaced by [[../inngest/control-tower-monitor]]) and paged the owner on a false server-error alert (Control Tower signature `vercel:202c7bc719d2363f`).
 
 ---
 

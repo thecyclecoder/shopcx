@@ -1,4 +1,4 @@
-# Portal OTP send-failure returns structured non-5xx, not a 502 ⏳
+# Portal OTP send-failure returns structured non-5xx, not a 502 ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Repair-signature:** `vercel:202c7bc719d2363f` · **Verdict:** real-bug
 
@@ -9,8 +9,10 @@ src/app/api/portal/otp/start/route.ts:102-104 and src/app/api/portal/otp/resend/
 
 **Likely target:** `src/app/api/portal/otp/start/route.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+Shipped 2026-06-22: `src/app/api/portal/otp/start/route.ts` returns `200 {eligible:false, suggest_magic_link:true, error:"verify_send_failed", details}` (the login client already routes a non-eligible body to magic-login, so the customer flow is unchanged) and `src/app/api/portal/otp/resend/route.ts` returns `422 {error:"verify_send_failed"}` instead of `502` when `startVerificationWithFallback` fails. Documented in [[../libraries/twilio-verify]] Gotchas and [[../lifecycles/customer-portal]].
 
 ## Verification
 - Re-trigger the originating condition (signature `vercel:202c7bc719d2363f`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
