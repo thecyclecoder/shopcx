@@ -22,9 +22,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import {
   MONITORED_LOOPS,
+  OWNER_FUNCTIONS,
   WORKER_BOX_ID,
   type LoopKind,
   type MonitoredLoop,
+  type OwnerFunction,
 } from "@/lib/control-tower/registry";
 import { buildCoverageAudit, type CoverageAudit } from "@/lib/control-tower/self-audit";
 
@@ -51,6 +53,8 @@ export interface OpenAlert {
 export interface LoopStatus {
   id: string;
   kind: LoopKind;
+  /** Phase 3: the org-chart function that owns this loop (drives the department rollups). */
+  owner: OwnerFunction;
   label: string;
   description: string;
   expectedCadence: string;
@@ -65,10 +69,29 @@ export interface LoopStatus {
   openAlert: OpenAlert | null;
 }
 
+/**
+ * Phase 3: a per-department rollup health tile (CEO-glance). One per org function that owns at
+ * least one loop — worst-of color across its loops, a healthy/total count + open-alert count.
+ */
+export interface DepartmentRollup {
+  owner: OwnerFunction;
+  /** Short department label ("Platform", "Growth", …). */
+  label: string;
+  /** Rollup-tile health label ("Platform Health", …). */
+  healthLabel: string;
+  color: LoopColor;
+  total: number;
+  healthy: number;
+  counts: { green: number; amber: number; red: number };
+  openAlerts: number;
+}
+
 export interface ControlTowerSnapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
   loops: LoopStatus[];
+  /** Phase 3 department rollups (CEO-glance, worst-of per org function). */
+  departments: DepartmentRollup[];
   /** Phase 2 coverage self-audit: crons in code with no tile + the in-code↔Inngest-registered diff. */
   selfAudit: CoverageAudit;
 }
@@ -125,7 +148,7 @@ function jobStuckSince(j: ActiveJob): string | null {
   return j.updated_at ?? j.created_at;
 }
 
-function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus, "history" | "openAlert"> {
+function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -186,7 +209,7 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null): Omit<LoopStatus, "history" | "openAlert"> {
+function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -230,7 +253,7 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
   return { ...base, color: "green", statusText: `ran ${elapsed(latest.ran_at)} ago`, violation: null };
 }
 
-function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[]): Omit<LoopStatus, "history" | "openAlert"> {
+function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[]): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const mine = activeJobs.filter((j) => j.kind === loop.agentKind);
   const threshold = loop.stuckThresholdMs ?? 60 * 60_000;
   const stuck = mine.filter((j) => ageMs(jobStuckSince(j)) > threshold);
@@ -284,7 +307,7 @@ interface InlineAgentState {
   history: LoopHistoryRow[];
 }
 
-function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefined): Omit<LoopStatus, "history" | "openAlert"> {
+function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefined): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const s = state ?? { work: 0, okCount: 0, errCount: 0, latest: null, history: [] };
   const base = {
     id: loop.id,
@@ -592,11 +615,11 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     if (loop.kind === "inline-agent" || loop.kind === "reactive") {
       const st = inlineState.get(loop.id);
       const core = evalInlineAgent(loop, st);
-      return { ...core, history: st?.history ?? [], openAlert: alertByLoop.get(loop.id) ?? null };
+      return { ...core, owner: loop.owner, history: st?.history ?? [], openAlert: alertByLoop.get(loop.id) ?? null };
     }
     const history = byLoop.get(loop.id) ?? [];
     const latest = history[0] ?? null;
-    let core: Omit<LoopStatus, "history" | "openAlert">;
+    let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs);
     else core = evalAgentKind(loop, latest, activeJobs);
@@ -606,7 +629,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
       const a = evalOutputAssertion(loop, latest, assertionInputs);
       if (a) core = { ...core, color: "red", statusText: a.statusText, violation: a.violation };
     }
-    return { ...core, history, openAlert: alertByLoop.get(loop.id) ?? null };
+    return { ...core, owner: loop.owner, history, openAlert: alertByLoop.get(loop.id) ?? null };
   });
 
   const counts = { green: 0, amber: 0, red: 0 };
@@ -616,7 +639,43 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   // so the header never reads "all healthy" while the watchdog itself has a blind spot.
   counts.amber += selfAudit.unregistered.length + selfAudit.inngestRegistration.missing.length;
 
-  return { generatedAt: new Date().toISOString(), counts, loops, selfAudit };
+  // Phase 3: department rollups (CEO-glance). Each org function's loops collapse to a worst-of
+  // health tile (red > amber > green) with a healthy/total count + open-alert count — the dashboard
+  // leads with these, then drills into the per-loop cards.
+  const departments = buildDepartmentRollups(loops);
+
+  return { generatedAt: new Date().toISOString(), counts, loops, departments, selfAudit };
+}
+
+/** Worst-of color across a set of loops (red dominates amber dominates green). */
+function worstColor(colors: LoopColor[]): LoopColor {
+  if (colors.includes("red")) return "red";
+  if (colors.includes("amber")) return "amber";
+  return "green";
+}
+
+/**
+ * Phase 3: collapse every loop into its owning org function → one rollup health tile per
+ * department (Platform/Growth/Retention/CS/CMO). Worst-of color, a healthy/total count, and the
+ * open-alert count — the CEO glance before the per-loop drill-in. Departments stay in
+ * OWNER_FUNCTIONS order; one with no loops is omitted.
+ */
+function buildDepartmentRollups(loops: LoopStatus[]): DepartmentRollup[] {
+  return OWNER_FUNCTIONS.map(({ id, label, healthLabel }) => {
+    const mine = loops.filter((l) => l.owner === id);
+    const counts = { green: 0, amber: 0, red: 0 };
+    for (const l of mine) counts[l.color]++;
+    return {
+      owner: id,
+      label,
+      healthLabel,
+      color: worstColor(mine.map((l) => l.color)),
+      total: mine.length,
+      healthy: counts.green,
+      counts,
+      openAlerts: mine.filter((l) => l.openAlert).length,
+    };
+  }).filter((d) => d.total > 0);
 }
 
 /** Distinct workspaces with at least one Slack-connected owner/admin to page. */
