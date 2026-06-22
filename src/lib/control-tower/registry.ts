@@ -16,9 +16,20 @@
  *                  lane is healthy/green); alerted only when a job is STUCK
  *                  (queued/building past `stuckThresholdMs`). Its heartbeats
  *                  (loop_id = `agent:<kind>`) feed last-ran / history on the tile.
+ *   - inline-agent — an event-driven, server-side AI agent that runs inline per
+ *                  ticket / order (no cron, no queue). Beats once per run
+ *                  (loop_id = `ai:<name>`, kind `inline-agent`). NO fixed cadence,
+ *                  so it's asserted two ways over a rolling window: (a) LIVENESS-
+ *                  WHEN-WORK-EXISTS — upstream work existed but 0 successful runs →
+ *                  silent-death; (b) ERROR-RATE — too many errored runs (running but
+ *                  producing nothing useful). A genuinely-idle agent (no work) is
+ *                  GREEN, never red.
  */
 
-export type LoopKind = "worker" | "cron" | "agent-kind";
+export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent";
+
+/** inline-agent only: which upstream-demand signal proves "work existed" this window. */
+export type InlineWorkSignal = "closed-ai-tickets" | "journey-sessions" | "web-orders";
 
 export interface MonitoredLoop {
   /** Heartbeat loop_id: the worker box id, a cron's inngest fn id, or `agent:<kind>`. */
@@ -39,6 +50,18 @@ export interface MonitoredLoop {
   agentKind?: string;
   /** agent-kind only: a queued/building job older than this is "stuck" → alert. */
   stuckThresholdMs?: number;
+
+  // ── inline-agent only ──
+  /** Rolling window over which liveness + error-rate are evaluated. */
+  windowMs?: number;
+  /** Which upstream-demand signal the monitor counts to decide "work existed". */
+  workSignal?: InlineWorkSignal;
+  /** Errored/total over the window above this fraction → error-rate alert. */
+  errorRateThreshold?: number;
+  /** Minimum runs in the window before the error-rate fraction is trusted. */
+  errorRateMinSample?: number;
+  /** N consecutive errored runs (newest-first) trips the alert regardless of rate. */
+  consecutiveFailureLimit?: number;
 }
 
 const MIN = 60_000;
@@ -130,9 +153,54 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:spec-test", kind: "agent-kind", agentKind: "spec-test", label: "Agent — spec test", description: "Non-destructive spec QA pass.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:migration-fix", kind: "agent-kind", agentKind: "migration-fix", label: "Agent — migration fix", description: "Event-fired billing repair diagnosis.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:dev-ask", kind: "agent-kind", agentKind: "dev-ask", label: "Agent — dev ask", description: "Read-only developer message-center turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+
+  // ── Inline event-driven AI agents (loop_heartbeats, loop_id = `ai:<name>`) ──
+  // Beat once per run; idle = green; alerted on silent-while-work-exists OR an
+  // error spike over the rolling window (control-tower-agent-coverage spec, P1).
+  {
+    id: "ai:ticket-analyzer",
+    kind: "inline-agent",
+    label: "AI — ticket analyzer (QC)",
+    description: "Per-ticket QC grader (analyzeTicket) — scores handled tickets, escalates ≤5 / severe.",
+    expectedCadence: "per closed AI ticket",
+    windowMs: 2 * HOUR,
+    workSignal: "closed-ai-tickets",
+    errorRateThreshold: 0.5,
+    errorRateMinSample: 4,
+    consecutiveFailureLimit: 5,
+  },
+  {
+    id: "ai:journey-delivery",
+    kind: "inline-agent",
+    label: "AI — journey delivery",
+    description: "Delivers journeys to tickets/portal (launchJourneyForTicket) — CTA per channel.",
+    expectedCadence: "per journey send",
+    windowMs: 2 * HOUR,
+    workSignal: "journey-sessions",
+    errorRateThreshold: 0.5,
+    errorRateMinSample: 4,
+    consecutiveFailureLimit: 5,
+  },
+  {
+    id: "ai:fraud-detector",
+    kind: "inline-agent",
+    label: "AI — fraud detector",
+    description: "Per-order fraud QC (checkOrderForFraud) — AI screen + velocity/ring/reseller signals.",
+    expectedCadence: "per web order",
+    windowMs: 2 * HOUR,
+    workSignal: "web-orders",
+    errorRateThreshold: 0.5,
+    errorRateMinSample: 4,
+    consecutiveFailureLimit: 5,
+  },
 ];
 
 /** The agent-kind heartbeat loop_id for a given agent_jobs.kind. */
 export function agentLoopId(kind: string): string {
   return `agent:${kind}`;
+}
+
+/** The inline-agent heartbeat loop_id for a given AI agent name (e.g. `ai:ticket-analyzer`). */
+export function aiAgentLoopId(name: string): string {
+  return `ai:${name}`;
 }

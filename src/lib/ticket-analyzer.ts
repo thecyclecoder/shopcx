@@ -19,6 +19,7 @@ import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { cleanEmailBody } from "@/lib/email-cleaner";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
+import { emitInlineAgentHeartbeat, type HeartbeatInput } from "@/lib/control-tower/heartbeat";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -228,6 +229,7 @@ interface AnalyzeResult {
   ok: boolean;
   reason?: string;
   analysis?: AnalysisResult;
+  analysis_id?: string;
   cost_cents?: number;
   ai_message_count?: number;
 }
@@ -339,12 +341,59 @@ async function buildPlaybookContextForGrader(
   ].filter(Boolean).join("\n");
 }
 
+// Skip reasons are the analyzer correctly *choosing* not to grade (no AI turn,
+// spam, do-not-reply, merged stub) — a successful no-op, NOT a failure. Anything
+// else with ok:false (no_api_key, grader_http_*, parse_failed) is a real error
+// that the Control Tower error-rate assertion should count. See aiAgentLoopId(
+// "ticket-analyzer") in the registry.
+const ANALYZER_SKIP_REASONS = new Set([
+  "ticket_not_found",
+  "merged_into_other",
+  "do_not_reply",
+  "skip_tag",
+  "no_messages_in_window",
+  "no_ai_messages_in_window",
+]);
+
 /**
- * Analyze a single ticket. Returns ok=false with a reason when we
- * intentionally skip (no AI messages, spam tags, etc.) — caller should
- * still mark `last_analyzed_at` so we don't re-check.
+ * Analyze a single ticket — the `ai:ticket-analyzer` inline agent (the QC grader).
+ *
+ * Wraps the analysis in a try/finally that emits ONE `loop_heartbeats` row at the
+ * end of every run so the [[Control Tower]] can see it's alive and doing its job:
+ *   - ok:true  — a real grade (produced = analysis id + score) OR an intentional
+ *                skip (no AI turn / spam / do-not-reply) — both are successful runs.
+ *   - ok:false — a real error (no_api_key, grader_http_*, parse_failed) or a throw.
+ * Best-effort: the heartbeat never changes what the caller sees.
  */
 export async function analyzeTicket(
+  ticketId: string,
+  trigger: "auto_close" | "manual_close" | "reopen_close" | "manual" = "auto_close",
+): Promise<AnalyzeResult> {
+  const startedAt = Date.now();
+  let beat: HeartbeatInput = { ok: false, detail: "analyzer threw before completing" };
+  try {
+    const result = await analyzeTicketInner(ticketId, trigger);
+    if (result.ok) {
+      beat = {
+        ok: true,
+        produced: { analysis_id: result.analysis_id ?? null, score: result.analysis?.score ?? null, ai_message_count: result.ai_message_count ?? null },
+        detail: `graded ${ticketId.slice(0, 8)} (${result.analysis?.score ?? "?"}/10)`,
+      };
+    } else if (result.reason && ANALYZER_SKIP_REASONS.has(result.reason)) {
+      beat = { ok: true, produced: { skipped: result.reason }, detail: `skip: ${result.reason}` };
+    } else {
+      beat = { ok: false, detail: `error: ${result.reason ?? "unknown"}` };
+    }
+    return result;
+  } catch (err) {
+    beat = { ok: false, detail: `exception: ${err instanceof Error ? err.message : String(err)}` };
+    throw err;
+  } finally {
+    await emitInlineAgentHeartbeat("ticket-analyzer", { ...beat, durationMs: Date.now() - startedAt });
+  }
+}
+
+async function analyzeTicketInner(
   ticketId: string,
   trigger: "auto_close" | "manual_close" | "reopen_close" | "manual" = "auto_close",
 ): Promise<AnalyzeResult> {
@@ -542,7 +591,7 @@ export async function analyzeTicket(
   // Severity actions
   await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, inserted?.id);
 
-  return { ok: true, analysis, cost_cents: costCents, ai_message_count: aiMessageCount };
+  return { ok: true, analysis, analysis_id: inserted?.id, cost_cents: costCents, ai_message_count: aiMessageCount };
 }
 
 /**

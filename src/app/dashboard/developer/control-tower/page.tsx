@@ -28,7 +28,7 @@ interface OpenAlert {
 }
 interface LoopStatus {
   id: string;
-  kind: "worker" | "cron" | "agent-kind";
+  kind: "worker" | "cron" | "agent-kind" | "inline-agent";
   label: string;
   description: string;
   expectedCadence: string;
@@ -80,6 +80,7 @@ const KIND_LABEL: Record<string, string> = {
   worker: "Worker",
   cron: "Crons",
   "agent-kind": "Agent lanes",
+  "inline-agent": "Inline AI agents",
 };
 
 function HistoryStrip({ history }: { history: HistoryRow[] }) {
@@ -182,7 +183,7 @@ export default function ControlTowerPage() {
     );
   }
 
-  const groups: LoopStatus["kind"][] = ["worker", "cron", "agent-kind"];
+  const groups: LoopStatus["kind"][] = ["worker", "cron", "agent-kind", "inline-agent"];
 
   return (
     <div className="mx-auto w-full max-w-screen-xl p-6">
@@ -193,8 +194,9 @@ export default function ControlTowerPage() {
         </Link>
       </div>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-        Every autonomous loop, watching itself — liveness, cron freshness, and stuck jobs. A red tile pages the
-        owners on Slack; a healthy or genuinely-idle loop is green. Polls every ~15s.
+        Every autonomous loop, watching itself — worker liveness, cron freshness, stuck agent jobs, and inline
+        AI-agent silence/error-rate. A red tile pages the owners on Slack; a healthy or genuinely-idle loop is green.
+        Polls every ~15s.
       </p>
 
       {loading && !snap ? (
@@ -243,7 +245,8 @@ export default function ControlTowerPage() {
             <a href={`https://github.com/${REPO}`} target="_blank" rel="noopener noreferrer" className="underline decoration-dotted">
               {REPO}
             </a>
-            ). Output assertions (false-success, idle-while-work) ship in Phase 2.
+            ). Inline AI agents assert silent-while-work-exists + error-rate over a rolling window; the
+            orchestrator's per-decision assertion ships in agent-coverage Phase 2.
           </p>
         </>
       ) : null}

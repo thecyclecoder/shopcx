@@ -12,11 +12,14 @@
  * Called by the control-tower-monitor cron (~every 15 min).
  *
  * Three checks, matching the registry's loop kinds:
- *   - LIVENESS (worker)     — last_poll_at fresh + running_sha not behind origin/main too long.
- *   - CRON FRESHNESS (cron) — a heartbeat within the loop's window.
- *   - STUCK JOBS (agent)    — no agent_jobs queued/building past the per-kind threshold.
+ *   - LIVENESS (worker)        — last_poll_at fresh + running_sha not behind origin/main too long.
+ *   - CRON FRESHNESS (cron)    — a heartbeat within the loop's window.
+ *   - STUCK JOBS (agent)       — no agent_jobs queued/building past the per-kind threshold.
+ *   - INLINE AGENT (inline)    — over a rolling window: (a) silent-while-work-exists (upstream
+ *                                demand existed but 0 successful runs) and (b) error-rate spike
+ *                                (too many errored runs / N consecutive failures).
  * Healthy / genuinely-idle loops are GREEN — assertions never false-positive on a
- * fine-but-quiet loop (no escalations to triage, no builds queued = green, not red).
+ * fine-but-quiet loop (no escalations to triage, no builds queued, no tickets to QC = green).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
@@ -209,6 +212,163 @@ function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activ
   return { ...base, color: "green", statusText: latest ? `idle · last ran ${elapsed(latest.ran_at)} ago` : "idle · never run", violation: null };
 }
 
+/** Per-inline-agent window data: recent history, the window's beats, + upstream work count. */
+interface InlineAgentData {
+  history: LoopHistoryRow[];   // last ≤10 all-time, newest-first
+  windowBeats: LoopHistoryRow[]; // beats within the loop's window, newest-first
+  workCount: number;            // upstream demand that existed in the window
+}
+
+function windowLabel(ms: number | undefined): string {
+  const h = Math.round((ms ?? 2 * 60 * 60_000) / 60_000 / 60);
+  return h <= 1 ? "1h" : `${h}h`;
+}
+
+/**
+ * Inline AI agents have no fixed cadence — they fire per ticket / order. Two
+ * assertions over the rolling window, with idle staying GREEN:
+ *   (a) liveness-when-work-exists — upstream work existed but 0 successful runs;
+ *   (b) error-rate — errored/total over threshold, or N consecutive failures.
+ */
+function evalInlineAgent(loop: MonitoredLoop, data: InlineAgentData): Omit<LoopStatus, "history" | "openAlert"> {
+  const { history, windowBeats, workCount } = data;
+  const latest = history[0] ?? null;
+  // Show the last *real* output (most recent ok beat with produced), not a skip/null.
+  const lastProduced = history.find((h) => h.ok && h.produced != null)?.produced ?? latest?.produced ?? null;
+  const base = {
+    id: loop.id,
+    kind: loop.kind,
+    label: loop.label,
+    description: loop.description,
+    expectedCadence: loop.expectedCadence,
+    lastRanAt: latest?.ran_at ?? null,
+    lastProduced,
+    detail: latest?.detail ?? null,
+  };
+
+  const total = windowBeats.length;
+  const success = windowBeats.filter((b) => b.ok).length;
+  const errored = total - success;
+  const win = windowLabel(loop.windowMs);
+
+  // (a) Liveness-when-work-exists: demand existed but nothing succeeded → silent death.
+  if (workCount > 0 && success === 0) {
+    return {
+      ...base,
+      color: "red",
+      statusText: `silent while ${workCount} awaited (0 successful runs in ${win})`,
+      violation: {
+        reason: "inline_agent_silent",
+        detail: `${loop.label} silent: ${workCount} item(s) awaited it in the last ${win} but it produced 0 successful runs${total ? ` (${errored} errored)` : " (no runs at all)"}.`,
+      },
+    };
+  }
+
+  // (b) Error-rate: too many errored runs, or a run of consecutive failures.
+  let consecutive = 0;
+  for (const b of windowBeats) {
+    if (!b.ok) consecutive++;
+    else break;
+  }
+  const minSample = loop.errorRateMinSample ?? 4;
+  const threshold = loop.errorRateThreshold ?? 0.5;
+  const consecLimit = loop.consecutiveFailureLimit ?? 5;
+  const rate = total > 0 ? errored / total : 0;
+  const rateTripped = total >= minSample && rate > threshold;
+  const consecTripped = consecutive >= consecLimit;
+  if (rateTripped || consecTripped) {
+    const why = consecTripped ? `${consecutive} consecutive failures` : `${Math.round(rate * 100)}% errored`;
+    return {
+      ...base,
+      color: "red",
+      statusText: `failing — ${errored}/${total} runs errored in ${win}`,
+      violation: {
+        reason: "inline_agent_error_rate",
+        detail: `${loop.label} failing: ${errored}/${total} runs errored in the last ${win} (${why}) — running but producing nothing useful.`,
+      },
+    };
+  }
+
+  // Genuinely-idle (no runs, no work) or healthy = green.
+  if (total === 0) {
+    return { ...base, color: "green", statusText: latest ? `idle · last ran ${elapsed(latest.ran_at)} ago` : "idle · never run", violation: null };
+  }
+  return { ...base, color: "green", statusText: `healthy · ${success}/${total} ok in ${win} · last ran ${elapsed(latest?.ran_at)} ago`, violation: null };
+}
+
+/** Count the upstream demand that existed in the window for an inline agent's work signal. */
+async function countInlineWork(admin: Admin, signal: MonitoredLoop["workSignal"], sinceIso: string): Promise<number> {
+  if (signal === "closed-ai-tickets") {
+    // Closed AI tickets updated in the window that haven't been analyzed since
+    // their last update — the exact "awaiting QC" backlog the cron drains. (Column-
+    // to-column compare isn't supported in PostgREST, so filter in JS — same as
+    // ticket-analysis-cron.)
+    const { data } = await admin
+      .from("tickets")
+      .select("id, last_analyzed_at, updated_at")
+      .eq("status", "closed")
+      .contains("tags", ["ai"])
+      .gte("updated_at", sinceIso)
+      .limit(300);
+    return (data ?? []).filter(
+      (t: { last_analyzed_at: string | null; updated_at: string | null }) =>
+        !t.last_analyzed_at || (t.updated_at != null && new Date(t.last_analyzed_at) < new Date(t.updated_at)),
+    ).length;
+  }
+  if (signal === "journey-sessions") {
+    // Journey sessions created in the window — each represents a journey that was
+    // "queued" for delivery (the row is inserted before the channel send).
+    const { count } = await admin
+      .from("journey_sessions")
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", sinceIso);
+    return count ?? 0;
+  }
+  if (signal === "web-orders") {
+    // Web-checkout orders created in the window — exactly what gets fraud-screened.
+    const { count } = await admin
+      .from("orders")
+      .select("id", { count: "exact", head: true })
+      .eq("source_name", "web")
+      .gte("created_at", sinceIso);
+    return count ?? 0;
+  }
+  return 0;
+}
+
+/** Fetch each inline agent's history + window beats + upstream work count (dedicated, high-volume safe). */
+async function fetchInlineAgentData(admin: Admin, loops: MonitoredLoop[]): Promise<Map<string, InlineAgentData>> {
+  const now = Date.now();
+  const out = new Map<string, InlineAgentData>();
+  await Promise.all(
+    loops.map(async (loop) => {
+      const sinceIso = new Date(now - (loop.windowMs ?? 2 * 60 * 60_000)).toISOString();
+      const [historyRes, windowRes, workCount] = await Promise.all([
+        admin
+          .from("loop_heartbeats")
+          .select("ran_at, ok, produced, detail, duration_ms")
+          .eq("loop_id", loop.id)
+          .order("ran_at", { ascending: false })
+          .limit(HISTORY_LIMIT),
+        admin
+          .from("loop_heartbeats")
+          .select("ran_at, ok, produced, detail, duration_ms")
+          .eq("loop_id", loop.id)
+          .gte("ran_at", sinceIso)
+          .order("ran_at", { ascending: false })
+          .limit(300),
+        countInlineWork(admin, loop.workSignal, sinceIso),
+      ]);
+      out.set(loop.id, {
+        history: (historyRes.data ?? []) as LoopHistoryRow[],
+        windowBeats: (windowRes.data ?? []) as LoopHistoryRow[],
+        workCount,
+      });
+    }),
+  );
+  return out;
+}
+
 /** READ-ONLY: evaluate every registered loop → tiles. Used by the dashboard + the monitor. */
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
@@ -235,13 +395,28 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   }
   const activeJobs = (jobs ?? []) as ActiveJob[];
 
+  // Inline agents fire per ticket/order (high volume) — fetch their beats +
+  // upstream work counts in dedicated queries so a busy agent can't starve the
+  // shared 600-beat pull above (and vice versa).
+  const inlineData = await fetchInlineAgentData(
+    admin,
+    MONITORED_LOOPS.filter((l) => l.kind === "inline-agent"),
+  );
+
   const loops: LoopStatus[] = MONITORED_LOOPS.map((loop) => {
-    const history = byLoop.get(loop.id) ?? [];
-    const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert">;
-    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest);
-    else core = evalAgentKind(loop, latest, activeJobs);
+    let history: LoopHistoryRow[];
+    if (loop.kind === "inline-agent") {
+      const data = inlineData.get(loop.id) ?? { history: [], windowBeats: [], workCount: 0 };
+      history = data.history;
+      core = evalInlineAgent(loop, data);
+    } else {
+      history = byLoop.get(loop.id) ?? [];
+      const latest = history[0] ?? null;
+      if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
+      else if (loop.kind === "cron") core = evalCron(loop, latest);
+      else core = evalAgentKind(loop, latest, activeJobs);
+    }
     return { ...core, history, openAlert: alertByLoop.get(loop.id) ?? null };
   });
 

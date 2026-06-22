@@ -41,6 +41,10 @@ Several signals (`email_domain_velocity`, `surname_velocity`, the repeat-offende
 
 - **Don't re-introduce a hand-maintained domain list.** A short inline `Set` will silently miss providers and flag real customers as a ring. Edit the vendored JSON / supplement instead.
 
+## Control Tower coverage (`ai:fraud-detector`)
+
+`checkOrderForFraud` is an **inline AI agent** in the [[control-tower]] (`ai:fraud-detector`). It delegates to `checkOrderForFraudImpl` (which now returns `{ flagged, reason? }`) inside a try/finally and emits one [[../tables/loop_heartbeats]] beat per run via `emitInlineAgentHeartbeat("fraud-detector", …)`: **ok:true** on completion (`produced = { order_id, flagged, reason }`), **ok:false** on a throw. The monitor's silent-while-work-exists check pairs this with web-checkout [[../tables/orders]] (`source_name='web'`) created in the window. The signature stays `Promise<void>` (the impl's result is internal). The SQL-only batch detectors (`runAllFraudRules`) call no model and are out of inline-agent scope. See [[control-tower]] · [[../specs/control-tower-agent-coverage]].
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

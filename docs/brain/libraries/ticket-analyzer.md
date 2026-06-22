@@ -32,6 +32,15 @@ async function analyzeTicket(ticketId: string, trigger: "auto_close" | "manual_c
 
 - `src/lib/inngest/ticket-analysis-cron.ts`
 
+## Control Tower coverage (`ai:ticket-analyzer`)
+
+`analyzeTicket` is the flagship **inline AI agent** registered in the [[control-tower]] (`ai:ticket-analyzer`, `kind:'inline-agent'`). It wraps its body (`analyzeTicketInner`) in a try/finally and emits ONE [[../tables/loop_heartbeats]] row per run via `emitInlineAgentHeartbeat("ticket-analyzer", …)`:
+
+- **ok:true** — a real grade (`produced = { analysis_id, score, ai_message_count }`) OR an intentional skip (reason in `ANALYZER_SKIP_REASONS`: `no_ai_messages_in_window`, `skip_tag`, `do_not_reply`, `merged_into_other`, `no_messages_in_window`, `ticket_not_found`). A skip is the analyzer correctly *choosing* not to grade — a successful no-op, not a failure.
+- **ok:false** — a real error (`no_api_key`, `grader_http_*`, `parse_failed`) or a thrown exception.
+
+The monitor asserts two ways over a 2h window: **silent-while-work-exists** (closed `ai` tickets awaited QC but 0 successful runs → "analyzer silent while N awaited QC") and **error-rate** (>50% of in-window runs errored, or ≥5 consecutive → "ticket analyzer failing: N/M runs errored"). A genuinely-idle analyzer (no eligible tickets) stays green. See [[control-tower]] · [[../specs/control-tower-agent-coverage]].
+
 ## Escalation routing
 
 `analyzeTicket`'s severity actions (≤5 → escalate + notify; 6 → escalate silently) now escalate to the **AI Routine**, not a human: the re-open sets `escalated_to = null` with `escalated_at` + `escalation_reason` set (it no longer round-robins to a workspace member or pre-assigns `assigned_to`). That `escalated_at`-set + `escalated_to`-null state is exactly what [[../inngest/triage-escalations]]'s cron picks up — the idle-triage routine then runs solver→skeptic→quorum and produces approval-gated todos, handing **up** to a human only on no-quorum. The orchestrator (`action-executor.ts`), workflow executor (`workflow-executor.ts`), and portal remediation (`portal/remediation.ts`) escalations default the same way. See [[../specs/escalate-to-routine-by-default]].
