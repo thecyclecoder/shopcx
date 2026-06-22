@@ -1,4 +1,4 @@
-# Control Tower Monitor Accuracy — never-fired uses "0 beats ever" + lighter loop_heartbeats reads ⏳
+# Control Tower Monitor Accuracy — never-fired uses "0 beats ever" + lighter loop_heartbeats reads ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[control-tower]] + [[control-tower-complete-coverage]]. Fixes a false-positive class + a self-inflicted error.
 
