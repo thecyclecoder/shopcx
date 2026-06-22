@@ -57,6 +57,7 @@ import { storefrontExperimentsRefresh, storefrontExperimentsRefreshCron } from "
 import { storefrontLtvMetricsRefresh } from "@/lib/inngest/storefront-ltv-metrics";
 import { storefrontLtvReconcile, storefrontLtvReconcileCron } from "@/lib/inngest/storefront-ltv-reconcile";
 import { storefrontLeverDecay, storefrontLeverDecayCron } from "@/lib/inngest/storefront-lever-decay";
+import { storefrontOptimizerCron, storefrontOptimizerSchedule } from "@/lib/inngest/storefront-optimizer";
 import { todaySyncCron } from "@/lib/inngest/today-sync";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/review-tagging";
@@ -165,6 +166,8 @@ export const registeredInngestFunctions = [
   storefrontLtvReconcile,
   storefrontLeverDecay,
   storefrontLeverDecayCron,
+  storefrontOptimizerCron,
+  storefrontOptimizerSchedule,
   amazonSyncOrders,
   amazonSyncAsins,
   amazonDailySyncCron,

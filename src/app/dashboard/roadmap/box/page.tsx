@@ -80,6 +80,9 @@ function approvalHref(kind: string, specSlug: string, specMissing?: boolean): st
   if (kind === "repair" || kind === "triage-escalations") return "/dashboard/developer/control-tower";
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
   if (kind === "migration-fix") return "/dashboard/migrations";
+  // storefront-optimizer slug is a surface key (product:lander:audience), not a spec — route to the
+  // optimizer's home surface (the funnel dashboard) rather than a dead /dashboard/roadmap/{slug}.
+  if (kind === "storefront-optimizer") return "/dashboard/storefront/funnel";
   if (specMissing) return "/dashboard/roadmap";
   return `/dashboard/roadmap/${specSlug}`;
 }
