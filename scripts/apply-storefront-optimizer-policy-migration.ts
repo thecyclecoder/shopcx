@@ -79,11 +79,23 @@ async function main() {
     }
     console.log(`✓ applied ${MIGRATION} (${stmts.length} statements)`);
 
+    const EXPECTED_COLS = 16;
     const { rows: cols } = await c.query(
       "select count(*)::int as n from information_schema.columns where table_schema='public' and table_name=$1",
       ["storefront_optimizer_policy"],
     );
     console.log(`✓ public.storefront_optimizer_policy has ${cols[0].n} columns`);
+    if (cols[0].n !== EXPECTED_COLS) {
+      // Convergence guard: a stale/partial table (the spec's ⚠️ Phase 1 BLOCKED case)
+      // must not pass. With drop-and-recreate the count is always 16; anything else
+      // means the table did not rebuild to the full shape — fail loudly, don't seed.
+      await c.end();
+      verdict(
+        `column count MISMATCH — expected ${EXPECTED_COLS}, got ${cols[0].n} ` +
+          `(stale/partial table did not converge — NOT seeding).`,
+      );
+      process.exit(1);
+    }
 
     // ── 2. SEED — guarded + parameterized, isolated from the DDL ──────────────
     // Resolve the Superfoods workspace from the Amazing Coffee product row (no
@@ -115,6 +127,11 @@ async function main() {
       "select active, product_scope, auto_run_reversible from public.storefront_optimizer_policy where workspace_id = $1",
       [prod[0].workspace_id],
     );
+    if (seed.length !== 1) {
+      await c.end();
+      verdict(`seed MISMATCH — expected exactly 1 policy row for the Superfoods workspace, got ${seed.length}.`);
+      process.exit(1);
+    }
     const r = seed[0];
     await c.end();
     verdict(

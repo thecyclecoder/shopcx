@@ -26,6 +26,16 @@
 -- the shipped storefront tables (storefront_ltv_reconciler / storefront_experiments):
 -- integer/double precision/boolean/jsonb/text/uuid, separate unique index, public.* refs.
 
+-- ── CONVERGENCE (see spec ⚠️ Phase 1 BLOCKED) ────────────────────────────────
+-- A prior partial apply left a STALE table in prod with only 10 of 16 columns and
+-- 0 rows. `create table if not exists` no-ops against it, so the 6 missing columns
+-- (auto_run_reversible, min_sample, auto_rollback_*, updated_by) are never added and
+-- the seed dies (`insert ... auto_run_reversible` → column does not exist), so the
+-- apply can NEVER converge. The table is empty + unshipped, so the spec's PREFERRED
+-- fix is drop-and-recreate: the DROP heals any partial shape and the CREATE below
+-- always rebuilds the full 16-column table. Idempotent + convergent on every re-run.
+drop table if exists public.storefront_optimizer_policy;
+
 create table if not exists public.storefront_optimizer_policy (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references public.workspaces(id) on delete cascade,
