@@ -1,0 +1,1 @@
+- **Spec-Test Deep Verification (browser + sandboxed behavioral checks)** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]

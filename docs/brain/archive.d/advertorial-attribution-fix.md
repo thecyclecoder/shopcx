@@ -1,0 +1,1 @@
+- **Advertorial Attribution Fix (stamp advertorial_page_id from the angle)** · verified 2026-06-22 · → [[lifecycles/advertorial-landers]]

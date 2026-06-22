@@ -1,0 +1,1 @@
+- **Migration: Shipping Protection (line item → internal flag)** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]

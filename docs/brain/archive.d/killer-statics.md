@@ -1,0 +1,1 @@
+- **Killer statics — cold-50+ archetypes, both formats** · verified 2026-06-22 · → [[lifecycles/ad-static]]

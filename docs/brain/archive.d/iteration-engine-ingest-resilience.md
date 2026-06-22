@@ -1,0 +1,1 @@
+- **Iteration Engine Ingest Resilience** · verified 2026-06-22 · → [[libraries/meta__performance]]

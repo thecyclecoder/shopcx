@@ -1,0 +1,1 @@
+- **Goal Decomposition Engine** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]

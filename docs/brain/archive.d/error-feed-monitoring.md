@@ -1,0 +1,1 @@
+- **Error-Feed Monitoring — Vercel + Inngest + Supabase into the Control Tower** · verified 2026-06-22 · → [[dashboard/control-tower]]

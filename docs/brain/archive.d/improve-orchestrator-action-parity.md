@@ -1,0 +1,1 @@
+- **Improve must be able to do anything to a customer the orchestrator can — via the same executor** · verified 2026-06-22 · → [[lifecycles/agent-todo-system]]

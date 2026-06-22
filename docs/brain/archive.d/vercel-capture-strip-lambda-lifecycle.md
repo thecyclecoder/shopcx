@@ -1,0 +1,1 @@
+- **Vercel error-feed: don't mint duplicate signatures from raw Lambda START/END/REPORT lifecycle blocks** · verified 2026-06-22 · → [[integrations/vercel-log-drain]]

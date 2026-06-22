@@ -1,0 +1,1 @@
+- **Suppress CSAT surveys on tickets we never actually replied to** · verified 2026-06-22 · → [[lifecycles/csat]]
