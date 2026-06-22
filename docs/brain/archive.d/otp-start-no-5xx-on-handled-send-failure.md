@@ -1,0 +1,1 @@
+- **Portal OTP send-failure returns structured non-5xx, not a 502** · verified 2026-06-22 · → [[lifecycles/customer-portal]]
