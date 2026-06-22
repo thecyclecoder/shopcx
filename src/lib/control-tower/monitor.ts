@@ -101,6 +101,16 @@ export interface ControlTowerSnapshot {
 
 const HISTORY_LIMIT = 10;
 
+/**
+ * Feeder-cadence grace for the `tickets-awaiting-qc` work probe (ticket-analyzer-workprobe-cron-grace).
+ * The ai:ticket-analyzer is fed by ticket-analysis-cron (every 30 min), which stamps last_analyzed_at
+ * even on skip. A closed AI ticket only counts as 'awaited but unserviced' once it has survived at
+ * least one FULL feeder cycle still unprocessed (last_analyzed_at null) — so a ticket closing between
+ * cron ticks (the 20:30→~21:00 gap that fired the false idle_while_work) isn't counted before any cron
+ * cycle could service it. Grace = one 30-min cadence + a buffer for the cron+analyzer run latency. A
+ * genuinely-stuck analyzer (the ticket survives a whole cycle unprocessed) still trips the alert. */
+const TICKET_ANALYSIS_FEEDER_GRACE_MS = 40 * 60_000;
+
 /** Compact elapsed string from an ISO timestamp to now (e.g. "3m", "2h", "1d"). */
 function elapsed(iso: string | null | undefined): string {
   if (!iso) return "never";
@@ -437,13 +447,20 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // Closed AI-handled tickets never analyzed (last_analyzed_at null), updated in-window —
             // exactly what the ticket-analysis cron feeds analyzeTicket. The cron stamps
             // last_analyzed_at even on skip, so a null here is a genuinely-unprocessed ticket.
+            // Feeder-cadence grace (ticket-analyzer-workprobe-cron-grace): only count a ticket once it
+            // has survived a FULL ticket-analysis-cron cycle still unprocessed — a ticket closing
+            // between the 30-min ticks hasn't been given a chance yet, so its updated_at must also be
+            // older than the grace. Eliminates the between-ticks false positive; a genuinely-stuck
+            // analyzer (ticket still null a whole cycle later) still counts and alerts.
+            const graceCutoffIso = new Date(Date.now() - TICKET_ANALYSIS_FEEDER_GRACE_MS).toISOString();
             const { count } = await admin
               .from("tickets")
               .select("id", { count: "exact", head: true })
               .eq("status", "closed")
               .contains("tags", ["ai"])
               .is("last_analyzed_at", null)
-              .gte("updated_at", sinceIso);
+              .gte("updated_at", sinceIso)
+              .lte("updated_at", graceCutoffIso);
             return count ?? 0;
           }
           case "journeys-awaiting-delivery": {

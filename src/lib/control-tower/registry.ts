@@ -144,7 +144,10 @@ export const RENEWAL_BAD_OUTCOMES: RenewalOutcome[] = [
  *
  *   - tickets-awaiting-qc       — closed AI-handled tickets never analyzed (last_analyzed_at
  *                                 null) updated within the window — what the ticket-analysis
- *                                 cron feeds analyzeTicket.
+ *                                 cron feeds analyzeTicket. Feeder-cadence grace: only counts a
+ *                                 ticket once it has survived a full ticket-analysis-cron cycle
+ *                                 (~30 min) still unprocessed, so a ticket closing between ticks
+ *                                 isn't a false idle_while_work (ticket-analyzer-workprobe-cron-grace).
  *   - journeys-awaiting-delivery — journey_sessions created within the window (each is created
  *                                 inside launchJourneyForTicket right before delivery, so a
  *                                 created session with no successful delivery beat = silent).
