@@ -1,6 +1,6 @@
 # libraries/control-tower
 
-The Control Tower module ([[../specs/control-tower]] Phase 1) — the registry, the heartbeat emit helper, and the monitor/snapshot logic that powers the [[../inngest/control-tower-monitor]] cron and the [[../dashboard/control-tower]] dashboard.
+The Control Tower module ([[../specs/control-tower]] Phase 1 + Phase 2) — the registry, the heartbeat emit helper, and the monitor/snapshot logic (liveness + cron-freshness + stuck-jobs + Phase 2 output assertions) that powers the [[../inngest/control-tower-monitor]] cron and the [[../dashboard/control-tower]] dashboard.
 
 **Files:** `src/lib/control-tower/registry.ts` · `src/lib/control-tower/heartbeat.ts` · `src/lib/control-tower/monitor.ts`
 
@@ -9,8 +9,9 @@ The Control Tower module ([[../specs/control-tower]] Phase 1) — the registry, 
 The single source of truth for every loop the monitor watches. **Add a row here when you ship a new cron / worker / agent-kind** ([[../operational-rules]] "register-or-it's-incomplete").
 
 - `type LoopKind = "worker" | "cron" | "agent-kind"`
-- `interface MonitoredLoop { id, kind, label, description, expectedCadence, livenessWindowMs?, shaGraceMs?, agentKind?, stuckThresholdMs? }`
-- `MONITORED_LOOPS: MonitoredLoop[]` — the box worker (`box`), 7 crons (each cron's inngest fn id + a cadence-derived `livenessWindowMs`), and 10 agent kinds (`agent:<kind>` + a per-kind `stuckThresholdMs`).
+- `type OutputAssertionId = "escalation-idle" | "spec-test-persisted" | "renewal-integrity"` — Phase 2 output assertions (see monitor.ts).
+- `interface MonitoredLoop { id, kind, label, description, expectedCadence, livenessWindowMs?, shaGraceMs?, agentKind?, stuckThresholdMs?, outputAssertion? }`
+- `MONITORED_LOOPS: MonitoredLoop[]` — the box worker (`box`), 7 crons (each cron's inngest fn id + a cadence-derived `livenessWindowMs`), and 10 agent kinds (`agent:<kind>` + a per-kind `stuckThresholdMs`). Three crons also carry an `outputAssertion`: `triage-escalations-cron` → `escalation-idle`, `spec-test-cron` → `spec-test-persisted`, `internal-subscription-renewal-cron` → `renewal-integrity`.
 - `WORKER_BOX_ID = "box"` (matches `scripts/builder-worker.ts`) · `agentLoopId(kind)` → `agent:<kind>`.
 
 ## `heartbeat.ts` — end-of-run emit
@@ -26,6 +27,7 @@ Best-effort writes of one [[../tables/loop_heartbeats]] row (never throws).
 - `buildControlTowerSnapshot(admin?)` → `ControlTowerSnapshot { generatedAt, counts:{green,amber,red}, loops: LoopStatus[] }`. **READ-ONLY**: one batched read of [[../tables/worker_heartbeats]], [[../tables/loop_heartbeats]] (last 600 beats, grouped per loop, ≤10 history each), open [[../tables/loop_alerts]], and active [[../tables/agent_jobs]]; evaluates each loop to a `LoopStatus { color, statusText, lastRanAt, lastProduced, detail, violation, history, openAlert }`. Used **verbatim** by the dashboard API.
 - `runControlTowerMonitor()` → `MonitorResult`. Builds the snapshot, then **acts**: opens a de-duped [[../tables/loop_alerts]] incident on each newly-red loop (paging owners via [[../libraries/notify-ops-alert]]), bumps `last_seen_at` while still red (no re-page), and resolves on recovery. Called only by the cron.
 - Evaluators: `evalWorker` (liveness + SHA-behind), `evalCron` (freshness), `evalAgentKind` (stuck jobs). Genuinely-idle/healthy → green; a freshly-shipped cron with no beat yet → amber (never a false red).
+- **Phase 2 output assertions** (`evalOutputAssertion`, layered on top of the P1 tile — only escalates green/amber → red, a P1 red stays): `fetchAssertionInputs(admin)` adds 4 cheap read-only queries to the snapshot batch — open routine-escalated [[../tables/tickets]] (`escalated_at` set, `escalated_to` null, not closed/archived), the latest `triage-escalations` + `spec-test` [[../tables/agent_jobs]] `created_at`, and active overdue internal [[../tables/subscriptions]] (`next_billing_date` before today UTC). The three assertions: **escalation-idle** (tickets wait + no triage job within the cadence → `reason='idle_while_work'`, "idle while N tickets wait"), **spec-test-persisted** (beat reports `enqueued>0` but no spec-test job landed since → `reason='false_success'`, "reported N enqueued, persisted 0"), **renewal-integrity** (N active internal subs overdue → `reason='renewal_integrity'`). A violation flows through `runControlTowerMonitor` exactly like a P1 red (de-duped alert + page).
 
 ## Gotchas
 

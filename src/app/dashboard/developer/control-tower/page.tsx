@@ -193,8 +193,9 @@ export default function ControlTowerPage() {
         </Link>
       </div>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-        Every autonomous loop, watching itself — liveness, cron freshness, and stuck jobs. A red tile pages the
-        owners on Slack; a healthy or genuinely-idle loop is green. Polls every ~15s.
+        Every autonomous loop, watching itself — liveness, cron freshness, stuck jobs, and output assertions
+        (idle-while-work + false-success). A red tile pages the owners on Slack; a healthy or genuinely-idle loop
+        is green. Polls every ~15s.
       </p>
 
       {loading && !snap ? (
@@ -243,7 +244,7 @@ export default function ControlTowerPage() {
             <a href={`https://github.com/${REPO}`} target="_blank" rel="noopener noreferrer" className="underline decoration-dotted">
               {REPO}
             </a>
-            ). Output assertions (false-success, idle-while-work) ship in Phase 2.
+            ). Output assertions: escalation idle-while-work, spec-test false-success, and internal-renewal integrity.
           </p>
         </>
       ) : null}

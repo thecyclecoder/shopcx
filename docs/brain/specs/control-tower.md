@@ -1,4 +1,4 @@
-# Control Tower — make every autonomous loop watch itself ⏳
+# Control Tower — make every autonomous loop watch itself ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** the supervisable-autonomy north star ([[../operational-rules]] § North star). The observability layer that lets us *trust* the autonomy we've built — the gap between a powerful system and a governed one.
 
@@ -37,7 +37,7 @@ This is the **objective-owner's window** from the north star: every autonomous t
 - **De-dupe:** while a violation persists, expect the open `loop_alerts` row's `last_seen_at` to bump each tick but **no repeat Slack DM** (one page per incident); the partial unique index `loop_alerts_one_open_per_loop` enforces ≤1 open row per loop.
 - **Self-monitoring:** disable/skip `control-tower-monitor` for > 45 min → its own tile goes red on the next manual snapshot load (a dead watchdog is visible too).
 
-### Phase 2 (planned ⏳) — output assertions
+### Phase 2 (shipped ✅) — output assertions
 - **Idle-while-work:** leave a routine-escalated ticket with no triage job past the cadence → alert "triage idle while 1 ticket waits". (Re-validates the exact 3h-ticket gap.)
 - **False-success:** force a run that reports produced>0 but persists 0 (the scorecard class) → alert "X reported N, persisted 0", red tile — not a silent green.
 - **Renewal integrity (the highest-value assertion — build this well):** when an internal sub is **due**, it must renew correctly or we get paged. A silently-missed renewal = lost revenue + quiet churn, invisible today.
@@ -51,5 +51,7 @@ This is the **objective-owner's window** from the north star: every autonomous t
 
 Liveness uses the existing [[../tables/worker_heartbeats]] for the box (its ~5s poll beat) and `loop_heartbeats` for crons + agent kinds. SHA-behind uses `VERCEL_GIT_COMMIT_SHA` as the origin/main proxy and only pages after a 30-min grace (no deploy-time false positives).
 
-## Phase 2 — output assertions (false-success + idle-while-work) ⏳
-The per-loop **expected-output assertions** — idle-while-work (escalation cron), false-success (produced-but-not-persisted: spec-test, iteration scorecards, renewals), renewal integrity — wired into the monitor. This is the Goodhart-catching layer; P1 catches "loop went silent", P2 catches "loop ran but silently did nothing/wrong".
+## Phase 2 — output assertions (false-success + idle-while-work) ✅
+The per-loop **expected-output assertions** wired into the monitor (`evalOutputAssertion` in `src/lib/control-tower/monitor.ts`, declared via `MonitoredLoop.outputAssertion` in the registry): **idle-while-work** on `triage-escalations-cron` (routine-escalated [[../tables/tickets]] wait + no `triage-escalations` [[../tables/agent_jobs]] within the cadence → `reason='idle_while_work'`), **false-success** on `spec-test-cron` (beat reports `enqueued>0` but no spec-test job landed → `reason='false_success'`, "reported N enqueued, persisted 0"), and **renewal integrity** on `internal-subscription-renewal-cron` (active internal [[../tables/subscriptions]] overdue past today UTC → `reason='renewal_integrity'`). Each is layered on top of the P1 tile (only escalates green/amber → red; a P1 red stays) and flows through `runControlTowerMonitor` as a de-duped, auto-resolving, owner-paging alert exactly like a P1 red. This is the Goodhart-catching layer; P1 catches "loop went silent", P2 catches "loop ran but silently did nothing/wrong".
+
+*Note:* the iteration-scorecards false-success class (`iteration_run.scorecard_rows` vs `iteration_scorecards_daily` delta) named in the spec body is **not** wired here — the scorecard refresh (`meta-scorecards-refresh`) is event-triggered and not yet a registered Control Tower loop (no heartbeat), and `refreshScorecards` already self-counts *actually-persisted* rows (the original incident's code-level fix). Wiring it needs the iteration engine to register a heartbeat loop first; the spec-test + renewal assertions cover the produced-but-not-persisted class in the meantime.

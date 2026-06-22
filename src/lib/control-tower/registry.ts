@@ -20,6 +20,23 @@
 
 export type LoopKind = "worker" | "cron" | "agent-kind";
 
+/**
+ * Phase 2 output-assertion id. Phase 1 catches "the loop went SILENT" (liveness /
+ * cron-freshness / stuck-jobs). An output assertion catches the Goodhart failure
+ * Phase 1 can't see: the loop RAN (fresh heartbeat, green on P1) but silently did
+ * nothing or the wrong thing. The monitor runs the named read-only state-check and
+ * flips the tile RED (opening a de-duped alert + paging) when it fails. Absent ⇒
+ * the loop has only the Phase 1 checks. Implemented in monitor.ts → evalOutputAssertion.
+ *
+ *   - escalation-idle    — routine-escalated tickets wait but no triage-escalations
+ *                          job was enqueued within the cadence (the 3h-ticket gap).
+ *   - spec-test-persisted — the latest beat reports enqueued>0 but 0 spec-test
+ *                          agent_jobs actually landed (produced-but-not-persisted).
+ *   - renewal-integrity  — active internal subs are overdue (next_billing_date in
+ *                          the past) — the renewal cron ran but didn't advance them.
+ */
+export type OutputAssertionId = "escalation-idle" | "spec-test-persisted" | "renewal-integrity";
+
 export interface MonitoredLoop {
   /** Heartbeat loop_id: the worker box id, a cron's inngest fn id, or `agent:<kind>`. */
   id: string;
@@ -39,6 +56,12 @@ export interface MonitoredLoop {
   agentKind?: string;
   /** agent-kind only: a queued/building job older than this is "stuck" → alert. */
   stuckThresholdMs?: number;
+  /**
+   * Phase 2: the per-loop expected-output assertion (false-success / idle-while-work).
+   * When set, the monitor runs the named state-check and flips the tile red on a
+   * violation even if the loop is otherwise fresh/healthy on the Phase 1 checks.
+   */
+  outputAssertion?: OutputAssertionId;
 }
 
 const MIN = 60_000;
@@ -68,6 +91,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Hourly enqueue of the box escalation-triage sweep.",
     expectedCadence: "hourly (30 * * * *)",
     livenessWindowMs: 2 * HOUR,
+    outputAssertion: "escalation-idle",
   },
   {
     id: "spec-test-cron",
@@ -76,6 +100,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Daily enqueue of box QA over shipped-unverified specs.",
     expectedCadence: "daily (45 10 * * *)",
     livenessWindowMs: 26 * HOUR,
+    outputAssertion: "spec-test-persisted",
   },
   {
     id: "migration-audit-retry-cron",
@@ -100,6 +125,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Daily fan-out of due internal-subscription renewals.",
     expectedCadence: "daily (0 9 * * *)",
     livenessWindowMs: 26 * HOUR,
+    outputAssertion: "renewal-integrity",
   },
   {
     id: "social-scheduler-plan",
