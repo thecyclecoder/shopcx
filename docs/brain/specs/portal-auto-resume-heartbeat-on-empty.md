@@ -1,4 +1,4 @@
-# portal-auto-resume-cron: emit Control Tower heartbeat on the no-work path ⏳
+# portal-auto-resume-cron: emit Control Tower heartbeat on the no-work path ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/inngest/portal-auto-resume.ts::real-bug`
@@ -11,8 +11,8 @@ In src/lib/inngest/portal-auto-resume.ts, portalAutoResumeCron returns early at 
 
 **Likely target:** `src/lib/inngest/portal-auto-resume.ts`
 
-## Phase 1 — close it ⏳
-Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+## Phase 1 — close it ✅
+Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`. **Fix landed (build #218 merged):** `portal-auto-resume.ts` now emits `emitCronHeartbeat("portal-auto-resume-cron", …)` on the `subs.length === 0` no-work path before returning, so every hourly run beats and the 2h freshness assertion stays green on quiet hours.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:portal-auto-resume-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
