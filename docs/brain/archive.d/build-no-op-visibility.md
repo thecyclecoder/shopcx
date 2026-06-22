@@ -1,0 +1,1 @@
+- **Build Console: No Silent No-Op Builds + Report-Issue Enqueue Confirmation** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
