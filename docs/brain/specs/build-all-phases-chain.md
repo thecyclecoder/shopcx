@@ -23,7 +23,7 @@ The hard `BUILD_TIMEOUT_MS = 30 min` kills a legit long phase mid-work. Replace 
 ## Verification
 - "Build all" on a 3-phase spec (P1–P3 all ⏳) → P1 builds → auto-merges → P2 auto-queues (on updated main) → auto-merges → P3 → spec ends all-✅, with **no owner clicks** between phases.
 - Mid-chain a phase **fails** → the chain stops at that phase (next phase NOT queued), it surfaces; retrying the failed phase resumes the chain.
-- A phase that needs_approval pauses; approving it continues the chain.
+- ✅ A phase that needs_approval pauses; approving it continues the chain.
 - A build actively emitting output at 35 min is **not** killed (past the old 30-min wall); a build silent for >10 min **is** killed as hung; nothing runs past the 60-min hard cap.
 - Single-phase / non-chained builds are unaffected (no `chain_phases` → no auto-queue).
 
