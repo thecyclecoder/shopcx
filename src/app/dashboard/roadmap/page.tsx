@@ -95,7 +95,7 @@ function Card({ spec, job, fold, testRun }: { spec: SpecCard; job: AgentJob | nu
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 space-y-2">
         <StatusControl slug={spec.slug} status={spec.status} />
-        <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} />
+        <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} blockedBy={spec.blockedBy} />
       </div>
       <div className="mt-1.5 text-[11px] text-zinc-400">
         <code>specs/{spec.slug}.md</code>

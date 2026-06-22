@@ -8,6 +8,11 @@ import type { Phase } from "@/lib/brain-roadmap";
 
 const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
+// Status emoji for a Blocked-by entry (spec-blockers) — matches the brain's phaseEmoji + the board legend.
+const PHASE_EMOJI: Record<Phase, string> = { planned: "⏳", in_progress: "🚧", shipped: "✅", rejected: "❌" };
+
+type Blocker = { slug: string; title: string; status: Phase; cleared: boolean };
+
 const LABEL: Record<JobStatus, string> = {
   queued: "Queued",
   claimed: "Starting…",
@@ -34,7 +39,7 @@ const CHIP: Record<JobStatus, string> = {
   needs_attention: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
-export default function BuildButton({ slug, initialJob, specStatus, initialFold }: { slug: string; initialJob: AgentJob | null; specStatus: Phase; initialFold?: PendingFold | null }) {
+export default function BuildButton({ slug, initialJob, specStatus, initialFold, blockedBy }: { slug: string; initialJob: AgentJob | null; specStatus: Phase; initialFold?: PendingFold | null; blockedBy?: Blocker[] }) {
   const workspace = useWorkspace();
   const router = useRouter();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
@@ -82,6 +87,13 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
 
   const active = !!job && ACTIVE.includes(job.status);
 
+  // spec-blockers: a spec with any uncleared Blocked-by prerequisite can't be built yet. The server gate
+  // (queueRoadmapBuild) is the real enforcement; this disables the button + names what must ship first.
+  const blockers = blockedBy ?? [];
+  const uncleared = blockers.filter((b) => !b.cleared);
+  const blocked = uncleared.length > 0;
+  const blockedTooltip = blocked ? `Build is blocked — ship first: ${uncleared.map((b) => b.slug).join(", ")}` : undefined;
+
   const chip = job ? (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${CHIP[job.status]}`}>
       {LABEL[job.status]}
@@ -103,7 +115,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
   }
 
   async function build() {
-    if (busy) return;
+    if (busy || blocked) return; // server gate refuses anyway; don't even fire the request
     setBusy(true);
     try {
       const res = await fetch("/api/roadmap/build", {
@@ -285,16 +297,36 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold 
           </button>
         )}
       </div>
-      {/* Build / Rebuild gets its own full-width row. */}
+      {/* spec-blockers: a "🔒 Blocked by …" chip listing each prerequisite + its status. Shown whenever a
+          prerequisite is still uncleared, on a not-yet-shipped spec. Cleared blockers render ✅. */}
+      {blocked && specStatus !== "shipped" && (
+        <div
+          className="mt-2 rounded-md border border-amber-200 bg-amber-50/70 px-2 py-1.5 text-[11px] leading-snug text-amber-800 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-300"
+          title={blockedTooltip}
+        >
+          <span className="font-medium">🔒 Blocked by</span>{" "}
+          {blockers.map((b, i) => (
+            <span key={b.slug}>
+              {i > 0 && ", "}
+              <a href={`/dashboard/roadmap/${b.slug}`} className="underline decoration-dotted hover:text-amber-900 dark:hover:text-amber-200">
+                {b.slug}
+              </a>{" "}
+              {b.cleared ? "✅" : PHASE_EMOJI[b.status]}
+            </span>
+          ))}
+        </div>
+      )}
+      {/* Build / Rebuild gets its own full-width row. Disabled while blocked (server gate also refuses). */}
       {!active && specStatus !== "shipped" && (
         <div className="mt-2">
           <button
             type="button"
             onClick={build}
-            disabled={busy}
-            className="w-full rounded-md bg-indigo-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            disabled={busy || blocked}
+            title={blockedTooltip}
+            className="w-full rounded-md bg-indigo-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {busy ? "…" : job ? "Rebuild" : "Build"}
+            {busy ? "…" : blocked ? "🔒 Blocked" : job ? "Rebuild" : "Build"}
           </button>
         </div>
       )}

@@ -121,7 +121,7 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
             )}
 
             <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
-              <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} initialFold={fold} />
+              <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} initialFold={fold} blockedBy={spec.card.blockedBy} />
               <div className="mt-3">
                 <VerificationCard
                   slug={slug}

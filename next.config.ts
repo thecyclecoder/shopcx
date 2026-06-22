@@ -30,6 +30,10 @@ const nextConfig: NextConfig = {
     // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into
     // its Opus system prompt for grounding; trace the markdown into its bundle.
     "/api/roadmap/chat": ["./docs/brain/**/*.md"],
+    // The build dispatch POST runs the spec-blockers enqueue gate (queueRoadmapBuild → getSpecBlockers →
+    // getRoadmap reads docs/brain/specs at request time). Trace the specs in or the gate sees zero blockers
+    // in prod and silently passes. See docs/brain/specs/spec-blockers.md.
+    "/api/roadmap/build": ["./docs/brain/specs/**/*.md"],
     // The Slack Roadmap Console renders the board/detail from the brain markdown (getRoadmap /
     // getSpec) inside the slash-command + Inngest-watcher bundles. Trace the specs in or they
     // render empty in prod. See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md.
