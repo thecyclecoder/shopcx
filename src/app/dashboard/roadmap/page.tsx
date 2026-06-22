@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
+import { getSpecCardStates, resolveBoardStatus, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
 import StatusControl from "./StatusControl";
 import BuildButton from "./BuildButton";
@@ -60,7 +61,25 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: Phase; goalSlugs: string[]; source: SpecSource }) {
+/** "shipped · deploying" (merged, not yet live) vs "shipped · live" (a deploy carrying the merge SHA is up). */
+function DeployChip({ state }: { state: DeployState }) {
+  const deploying = state === "deploying";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+        deploying
+          ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+          : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+      }`}
+      title={deploying ? "Merged — the deployment carrying this code isn't live yet" : "Live — a deployment carrying this merge is up"}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${deploying ? "bg-amber-500" : "bg-emerald-500"}`} />
+      {deploying ? "shipped · deploying" : "shipped · live"}
+    </span>
+  );
+}
+
+function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source, deploy }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: Phase; goalSlugs: string[]; source: SpecSource; deploy: DeployState | null }) {
   return (
     <div
       data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}
@@ -75,6 +94,11 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
           {spec.title}
         </h3>
       </Link>
+      {deploy && (
+        <div className="mt-1.5">
+          <DeployChip state={deploy} />
+        </div>
+      )}
       {spec.summary && (
         <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{spec.summary}</p>
       )}
@@ -118,13 +142,21 @@ export default async function RoadmapPage() {
     ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId), getHumanResolutionCounts(workspaceId)])
     : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, {} as Record<string, number>];
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
-  // Live overlay: a Planned spec with an active build job shows as In progress immediately (tapping Build
-  // inserts the job, so the card jumps columns within one render), reverting to its markdown status once
-  // the job is terminal. Only ever *promotes* planned→in_progress — never demotes a Shipped spec.
+  // spec-card-db-companion: the board reads the live DB mirror (instant status + the deploy flag),
+  // falling back to the markdown-parsed status when a spec has no row. Read AFTER reconcileMergedJobs so
+  // a merge it just detected is reflected this render. The deployed app exposes its own commit SHA —
+  // compared to each card's last_merge_sha to tell "shipped · deploying" (merge not yet live) from
+  // "shipped · live" (a deployment carrying that SHA is up). Zero GitHub API calls for status.
+  const cardStates = workspaceId ? await getSpecCardStates(workspaceId) : ({} as Record<string, SpecCardState>);
+  const deployedSha = process.env.VERCEL_GIT_COMMIT_SHA || "";
+  // Status the board shows = the DB mirror forward-merged with the markdown bundle (resolveBoardStatus:
+  // whichever is further along — DB-first for the deploy-lag, markdown wins when it's ahead), then the
+  // live-build overlay promotes a still-Planned card with an active job to In progress (never demotes).
   const effectiveStatus = (sp: SpecCard): Phase => {
+    const base = resolveBoardStatus(sp.status, cardStates[sp.slug]);
     const job = jobsBySlug[sp.slug];
-    if (sp.status === "planned" && job && isActive(job.status)) return "in_progress";
-    return sp.status;
+    if (base === "planned" && job && isActive(job.status)) return "in_progress";
+    return base;
   };
   const byStatus = (s: Phase) => specs.filter((sp) => effectiveStatus(sp) === s);
 
@@ -172,7 +204,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} deploy={deploymentState(cardStates[spec.slug], spec.status, deployedSha)} />)
                   )}
                 </div>
               </div>

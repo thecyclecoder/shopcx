@@ -18,7 +18,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { deriveSpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
-import { flipPhaseToShipped, resolveSpecDrift } from "@/lib/spec-drift";
+import { flipPhaseToShipped, resolveSpecDrift, phaseStatesFromRaw } from "@/lib/spec-drift";
+import { markSpecCardStatus } from "@/lib/spec-card-state";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken(): string | undefined {
@@ -104,6 +105,10 @@ export async function POST(request: Request) {
   if (!put.ok) return NextResponse.json({ error: "commit failed", status: put.status }, { status: 502 });
 
   await resolveSpecDrift(workspaceId, slug, phaseIndex);
+
+  // spec-card-db-companion: mirror the flipped status + per-phase snapshot to the board instantly (the
+  // markdown bundle won't redeploy for minutes). Best-effort — never fail the flip on the mirror write.
+  await markSpecCardStatus(workspaceId, slug, deriveSpecStatus(updated), phaseStatesFromRaw(updated));
 
   // spec-test-on-ship: if this flip leaves the spec fully shipped, enqueue a spec-test over the
   // just-committed content (local disk hasn't redeployed yet). Shared dedupe no-ops dupes.

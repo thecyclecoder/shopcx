@@ -6,6 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { reconcileSpecDrift, fetchSpecRawFromMain, parseFixesLink } from "@/lib/spec-drift";
+import { markSpecCardMergeShipped } from "@/lib/spec-card-state";
 
 export type JobStatus =
   | "queued"
@@ -394,7 +395,7 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
           cache: "no-store",
         });
         if (!res.ok) return;
-        const pr = (await res.json()) as { merged?: boolean; state?: string };
+        const pr = (await res.json()) as { merged?: boolean; state?: string; merge_commit_sha?: string };
         if (pr.merged || pr.state === "closed") {
           j.status = "merged";
           await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", j.id);
@@ -406,6 +407,15 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
           if (pr.merged && j.kind === "build") {
             try {
               const drift = await reconcileSpecDrift(j.workspace_id, j.spec_slug);
+              // spec-card-db-companion: mirror the merge to the board the moment it happens — the card flips
+              // to its post-merge status tagged `deploy_pending` with this merge's SHA, so it reads
+              // "shipped · deploying" until a deployment carrying that SHA is live (no markdown-redeploy wait,
+              // no webhook — the board clears it at read time via VERCEL_GIT_COMMIT_SHA). drift already mirrored
+              // the per-phase snapshot; this overlays the merge SHA + deploy flag.
+              await markSpecCardMergeShipped(j.workspace_id, j.spec_slug, {
+                status: drift.status,
+                mergeSha: pr.merge_commit_sha ?? null,
+              });
               // spec-test-on-ship: if the corrected phases now read shipped, enqueue a spec-test (shared
               // dedupe no-ops if the cron/manual flip already did) + auto-queue any unblocked dependent.
               if (drift.status === "shipped") {

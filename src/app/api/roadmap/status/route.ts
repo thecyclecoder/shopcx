@@ -12,6 +12,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { deriveSpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
+import { markSpecCardStatus } from "@/lib/spec-card-state";
+import { phaseStatesFromRaw } from "@/lib/spec-drift";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const EMOJI = { planned: "⏳", in_progress: "🚧", shipped: "✅", rejected: "❌" } as const;
@@ -115,6 +117,10 @@ export async function POST(request: Request) {
   if (!put.ok) {
     return NextResponse.json({ error: "commit failed", status: put.status }, { status: 502 });
   }
+  // spec-card-db-companion: mirror the new status + per-phase snapshot to the board instantly (the markdown
+  // bundle won't redeploy for minutes). Best-effort — never fail the status commit on the mirror write.
+  await markSpecCardStatus(workspaceId, slug, deriveSpecStatus(updated), phaseStatesFromRaw(updated));
+
   // spec-test-on-ship: if this flip leaves the spec's derived status `shipped`, enqueue a spec-test now
   // (over the just-committed content — local disk hasn't redeployed yet). Shared dedupe no-ops dupes.
   if (deriveSpecStatus(updated) === "shipped") {

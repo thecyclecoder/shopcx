@@ -58,169 +58,11 @@ const SPECS_DIR = path.join(process.cwd(), "docs", "brain", "specs");
 const ARCHIVE_FILE = path.join(process.cwd(), "docs", "brain", "archive.md");
 const ARCHIVE_DIR = path.join(process.cwd(), "docs", "brain", "archive.d");
 
-// ── Git-backed spec source (roadmap-reads-specs-from-git) ──────────────────
-// The bundled `docs/brain/` copy is only as fresh as the last deploy, so a phase
-// emoji flipping on `main` (a build merges, the spec-drift agent stamps ✅, a fold
-// lands) didn't reach the board until the app redeployed — minutes-to-hours of lag.
-// We instead read the spec markdown from `main` at request time via the GitHub API,
-// SHA-keyed so the common (unchanged) case is one cheap call. ANY GitHub failure
-// (missing token / network / rate-limit / error) falls back to the bundled `fs`
-// copy so the board never breaks — freshness is best-effort, availability is not.
-const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
-function ghToken(): string | undefined {
-  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
-}
-
-/** Minimal GitHub REST helper — same shape as inngest/brain-index-refresh's `gh`. */
-async function gh(apiPath: string): Promise<{ ok: boolean; status: number; json: Record<string, unknown> }> {
-  const res = await fetch(`https://api.github.com${apiPath}`, {
-    headers: {
-      Authorization: `Bearer ${ghToken()}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    cache: "no-store",
-  });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
-}
-
-/** Which `docs/brain/` paths the board/archive/detail readers need from `main`. */
-function isWantedPath(p: string): boolean {
-  if (p === "docs/brain/archive.md") return true;
-  if (p.startsWith("docs/brain/specs/") && p.endsWith(".md")) return true;
-  if (p.startsWith("docs/brain/archive.d/") && p.endsWith(".md")) return true;
-  return false;
-}
-
-interface BrainSnapshot {
-  sha: string;
-  files: Map<string, string>; // repo-relative path → decoded markdown
-}
-
-// In-memory, SHA-keyed. `snapshotCache` holds the last successful fetch; we only
-// re-fetch the tree+blobs when `main`'s SHA actually advances. A short SHA-check
-// TTL collapses the several snapshot() calls one board render makes into ~1 ref
-// call/request and floors the re-fetch rate during a deploy burst. `inflight`
-// de-dupes concurrent fetches.
-let snapshotCache: BrainSnapshot | null = null;
-let inflight: Promise<BrainSnapshot | null> | null = null;
-let lastSha: string | null = null;
-let lastShaCheckMs = 0;
-let fellBack = false;
-const SHA_TTL_MS = 3000;
-
-// DISABLED — reading specs from GitHub per-request burned the GitHub API quota. Each SHA advance
-// re-fetches the whole brain tree (~46 blob calls); during heavy dev `main`'s SHA advances on every
-// push, so the board re-fetched constantly → 5000/hr core quota exhausted → 403s on PR fetch/merge/
-// create across the box + dashboard. Reverting to the bundled `fs` copy (accepts the phase-status
-// deploy-lag). Re-enable only with DEPLOY-triggered cache invalidation (or a much longer TTL), NOT
-// per-request SHA polling — see docs/brain/specs/roadmap-reads-specs-from-git.md.
-const GIT_BACKED_ROADMAP = false;
-
-/** Log once per outage episode (reset on the next successful snapshot) so fallback isn't per-request spam. */
-function noteFallback(reason: string): void {
-  if (fellBack) return;
-  fellBack = true;
-  console.warn(`[brain-roadmap] reading specs from bundled fs fallback: ${reason}`);
-}
-
-/** `main`'s latest commit SHA via the cheap ref endpoint (cached for SHA_TTL_MS). */
-async function currentSha(): Promise<string | null> {
-  if (lastSha && Date.now() - lastShaCheckMs < SHA_TTL_MS) return lastSha;
-  const r = await gh(`/repos/${REPO}/git/ref/heads/main`);
-  if (!r.ok) return null;
-  const sha = (r.json.object as { sha?: string } | undefined)?.sha ?? null;
-  if (sha) {
-    lastSha = sha;
-    lastShaCheckMs = Date.now();
-  }
-  return sha;
-}
-
-function decodeBlob(json: Record<string, unknown>): string | null {
-  const content = json.content;
-  if (typeof content !== "string") return null;
-  const enc = json.encoding;
-  if (typeof enc === "string" && enc !== "base64") return null;
-  return Buffer.from(content.replace(/\s/g, ""), "base64").toString("utf8");
-}
-
-/**
- * Fetch every wanted `docs/brain/` markdown file at `commitSha` in ONE batched pass:
- * the Git Trees API (recursive) gives all paths+blob SHAs in a single call, then the
- * blobs we need are fetched in parallel via the Git Blobs API (not N naive Contents
- * calls). Returns null on any failure (incl. a truncated tree, or any blob that won't
- * decode) so the caller falls back to the bundled copy rather than serving a partial board.
- */
-async function fetchBrainFiles(commitSha: string): Promise<Map<string, string> | null> {
-  const tree = await gh(`/repos/${REPO}/git/trees/${commitSha}?recursive=1`);
-  if (!tree.ok) return null;
-  if (tree.json.truncated === true) return null; // too large to trust → fs fallback
-  const entries = (tree.json.tree as Array<{ path: string; type: string; sha: string }> | undefined) || [];
-  const wanted = entries.filter((e) => e.type === "blob" && isWantedPath(e.path));
-  const blobs = await Promise.all(
-    wanted.map(async (e) => {
-      const blob = await gh(`/repos/${REPO}/git/blobs/${e.sha}`);
-      if (!blob.ok) return null;
-      const content = decodeBlob(blob.json);
-      return content == null ? null : ([e.path, content] as const);
-    }),
-  );
-  if (blobs.some((b) => b === null)) return null;
-  return new Map(blobs.filter((b): b is readonly [string, string] => b !== null));
-}
-
-/**
- * The current `main` snapshot of the brain spec/archive markdown, or null when GitHub
- * is unavailable (callers then read the bundled `fs` copy). One ref call per request
- * (SHA-cached); a full tree+blob re-fetch only when `main` advances.
- */
-async function snapshot(): Promise<BrainSnapshot | null> {
-  if (!GIT_BACKED_ROADMAP) return null; // disabled — burned the API quota; read from bundled fs instead
-  if (!ghToken()) {
-    noteFallback("GITHUB_TOKEN missing");
-    return null;
-  }
-  const sha = await currentSha();
-  if (!sha) {
-    noteFallback("could not resolve main SHA");
-    return null;
-  }
-  if (snapshotCache?.sha === sha) {
-    fellBack = false;
-    return snapshotCache;
-  }
-  if (inflight) return inflight;
-  inflight = (async () => {
-    try {
-      const files = await fetchBrainFiles(sha);
-      if (!files) {
-        noteFallback("specs fetch from main failed");
-        return snapshotCache; // serve stale git if we have it; else null → fs fallback
-      }
-      snapshotCache = { sha, files };
-      fellBack = false;
-      return snapshotCache;
-    } finally {
-      inflight = null;
-    }
-  })();
-  return inflight;
-}
-
-/** specs/*.md (excluding README) from a snapshot → slug → raw markdown. */
-function specRawsFromSnapshot(snap: BrainSnapshot): Map<string, string> {
-  const prefix = "docs/brain/specs/";
-  const out = new Map<string, string>();
-  for (const [p, content] of snap.files) {
-    if (!p.startsWith(prefix)) continue;
-    const name = p.slice(prefix.length);
-    if (name.includes("/") || !name.endsWith(".md") || name === "README.md") continue;
-    out.set(name.replace(/\.md$/, ""), content);
-  }
-  return out;
-}
+// NOTE: roadmap-reads-specs-from-git (reading spec markdown from `main` per-request via the GitHub API)
+// was tried and RETIRED — per-request SHA polling burned the GitHub core quota (see spec-card-db-companion).
+// The board reads the bundled `fs` copy below; the *live* project-management state (instant status + the
+// deploy-pending flag) now comes from the spec_card_state DB mirror (src/lib/spec-card-state.ts), which the
+// board overlays on top of this markdown parse — no GitHub API calls for status.
 
 const PLANNED = "⏳";
 const IN_PROGRESS = "🚧";
@@ -454,10 +296,6 @@ function buildSpecCards(rawBySlug: Map<string, string>): SpecCard[] {
 }
 
 async function readSpecs(): Promise<SpecCard[]> {
-  // Prefer `main` at request time (kills the deploy-lag); fall back to the bundled copy on any GitHub failure.
-  const snap = await snapshot();
-  if (snap) return buildSpecCards(specRawsFromSnapshot(snap));
-
   let files: string[];
   try {
     files = await fs.readdir(SPECS_DIR);
@@ -474,11 +312,6 @@ async function readSpecs(): Promise<SpecCard[]> {
 }
 
 async function readTracks(): Promise<ProjectTrack[]> {
-  const snap = await snapshot();
-  if (snap) {
-    const raw = snap.files.get("docs/brain/specs/README.md");
-    return raw ? parseTracks(raw) : [];
-  }
   try {
     return parseTracks(await fs.readFile(path.join(SPECS_DIR, "README.md"), "utf8"));
   } catch {
@@ -630,20 +463,6 @@ function buildArchiveEntries(archiveD: { slug: string; raw: string }[], archiveM
 }
 
 export async function getArchive(): Promise<ArchiveEntry[]> {
-  // Prefer `main` at request time; fall back to the bundled copy on any GitHub failure.
-  const snap = await snapshot();
-  if (snap) {
-    const prefix = "docs/brain/archive.d/";
-    const archiveD = [...snap.files.entries()]
-      .filter(([p]) => {
-        if (!p.startsWith(prefix) || !p.endsWith(".md")) return false;
-        const name = p.slice(prefix.length);
-        return !name.includes("/") && name.toLowerCase() !== "readme.md";
-      })
-      .map(([p, raw]) => ({ slug: path.basename(p, ".md"), raw }));
-    return buildArchiveEntries(archiveD, snap.files.get("docs/brain/archive.md") ?? null);
-  }
-
   let archiveD: { slug: string; raw: string }[] = [];
   try {
     const files = (await fs.readdir(ARCHIVE_DIR)).filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md");
@@ -719,18 +538,10 @@ export function deriveSpecStatus(raw: string): Phase {
 export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
   let raw: string;
-  const snap = await snapshot();
-  if (snap) {
-    // `main` is authoritative: a spec absent here was removed/folded ⇒ doesn't exist (request-time accuracy).
-    const fromGit = snap.files.get(`docs/brain/specs/${slug}.md`);
-    if (fromGit == null) return null;
-    raw = fromGit;
-  } else {
-    try {
-      raw = await fs.readFile(path.join(SPECS_DIR, `${slug}.md`), "utf8");
-    } catch {
-      return null;
-    }
+  try {
+    raw = await fs.readFile(path.join(SPECS_DIR, `${slug}.md`), "utf8");
+  } catch {
+    return null;
   }
   const card = parseSpec(slug, raw);
   // Resolve Blocked-by against the live spec set so the detail page's BuildButton sees the same

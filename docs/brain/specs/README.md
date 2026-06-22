@@ -116,9 +116,9 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[roadmap-goal-and-source-filters]] (platform) — the board carries specs from goals/planner/repair/manual; add a goal selector (focused goal-progress view: pick a goal → only its specs + an X/Y-shipped header) + source chips (🎯 Goal / 🔧 Repair / ✋ Manual, derived from goal-doc wikilinks + Repair-signature) composing with the existing search. Client-side via data-goal/data-source attributes; no schema change.
 
-## Active project — Spec-card DB companion ⏳
+## Active project — Spec-card DB companion 🚧
 
-[[spec-card-db-companion]] (platform) — SUPERSEDES the disabled [[roadmap-reads-specs-from-git]]. Move live PM state into a spec_card_state DB table the board reads instantly (no deploy lag, no GitHub quota): merge/drift/owner/build events write status+flags the moment they happen. Markdown stays canonical for content (brain rule holds); DB is the live board mirror + transient flags. "shipped · deploying" flag via VERCEL_GIT_COMMIT_SHA vs the card's merge SHA (no webhook). Retires the git-reads machinery.
+[[spec-card-db-companion]] (platform) — SUPERSEDES + RETIRES the disabled git-reads approach (roadmap-reads-specs-from-git, now deleted). Move live PM state into a spec_card_state DB table the board reads instantly (no deploy lag, no GitHub quota): merge/drift/owner/build events write status+flags the moment they happen. Markdown stays canonical for content (brain rule holds); DB is the live board mirror + transient flags. "shipped · deploying" flag via VERCEL_GIT_COMMIT_SHA vs the card's merge SHA (no webhook). **Phase 1 shipped:** table + instant writers + DB-first board read + deploy-pending flag; the dead git-reads machinery is removed.
 
 ## Active project — Box multi-account failover ⏳
 
@@ -163,12 +163,6 @@ Born from a full Control Tower audit. Each fixes a real red/error or a monitor f
 **Spec:** [[error-feed-honest-panels]] · **Owner:** [[../functions/platform]]
 
 **Why this matters:** the Control Tower's Vercel/Inngest/Supabase panels show green "0 errors" even when the source isn't connected (forward-only + unwired) — a disconnected monitor reading "all clear" is the exact Goodhart silent-failure the Control Tower exists to catch. Fix: connection-aware states — amber "not configured" / "awaiting first event" vs green "connected · 0 errors"; header health count excludes unconfigured panels.
-
-## Active project — Roadmap Reads Specs from Git ⏳
-
-**Spec:** [[roadmap-reads-specs-from-git]] · **Owner:** [[../functions/platform]]
-
-**Why this matters:** the roadmap board reads spec phase emojis from the docs baked into the deployed build, so a phase that flips on main (build merges / spec-drift stamps ✅ / fold lands) shows stale until the next deploy — minutes-to-hours of lag (observed: error-feed-monitoring showed P2 planned while main had P2 ✅). Fix: read spec content from main at request time, SHA-keyed cache (1 commit-SHA call/request, full re-fetch only when main moves), with a baked-in fs fallback so the board never breaks. Lag drops from next-deploy to next-request.
 
 ## Active project — Spec-Drift Agent ⏳
 
