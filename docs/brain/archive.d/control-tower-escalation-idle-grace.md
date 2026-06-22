@@ -1,0 +1,1 @@
+- **Control Tower: escalation-idle assertion — grace off oldest-ticket escalated_at, not last-job age** · verified 2026-06-22 · → [[libraries/control-tower]]

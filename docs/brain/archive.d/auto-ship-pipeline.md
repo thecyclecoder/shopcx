@@ -1,0 +1,1 @@
+- **Auto-Ship Pipeline — auto-merge ready PRs + auto-fold verified specs** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]

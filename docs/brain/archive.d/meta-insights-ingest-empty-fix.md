@@ -1,0 +1,1 @@
+- **Meta insights ingest writes zero ad-level rows → degenerate ROAS** · verified 2026-06-22 · → [[libraries/meta__performance]]
