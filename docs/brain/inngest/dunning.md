@@ -29,6 +29,8 @@ Dunning orchestrator: payment-failed → card rotation → payday retries → cy
 - **Retries:** 1
 - **Concurrency:** `concurrency: [{ limit: 1 }]`
 
+**Control Tower heartbeat fires on every tick, including empty ones.** The `if (cycles.length === 0)` early-return (no `dunning_cycles` in `status='retrying'` with `next_retry_at <= now()`) emits its own `emitCronHeartbeat("dunning-payday-retry-cron", { produced: { status: "no_cycles_to_retry", processed: 0, results: [] } })` before returning, so a healthy hourly cron in a quiet dunning period reads green instead of tripping [[../libraries/control-tower]] monitor `never_fired`. The beat means "Inngest invoked me", not "there was work" — same fix as [[deliver-pending-send]], [[ticket-csat]], and [[abandoned-cart]] ([[../specs/cron-heartbeat-on-idle-tick]]).
+
 
 ## Downstream events sent
 
