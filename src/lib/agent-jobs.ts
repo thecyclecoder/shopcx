@@ -4,7 +4,8 @@
  * See docs/brain/specs/roadmap-build-console.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { deriveSpecStatus, getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
+import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
+import { reconcileSpecDrift } from "@/lib/spec-drift";
 
 export type JobStatus =
   | "queued"
@@ -278,25 +279,6 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
   return queued;
 }
 
-/** Fetch a spec's current markdown from `main` (post-merge content), independent of the deployed bundle's
- * possibly-stale local disk. Used by reconcileMergedJobs to know whether a merge actually shipped the spec. */
-async function fetchSpecFromMain(slug: string): Promise<string | null> {
-  const tok = ghToken();
-  if (!tok || !/^[a-z0-9-]+$/i.test(slug)) return null;
-  try {
-    const res = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/docs/brain/specs/${slug}.md?ref=main`, {
-      headers: { Authorization: `Bearer ${tok}`, Accept: "application/vnd.github+json" },
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { content?: string };
-    if (!json.content) return null;
-    return Buffer.from(json.content.replace(/\s/g, ""), "base64").toString("utf8");
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Self-heal: a `completed` job whose PR was merged/closed OUTSIDE the dashboard (e.g. merged on
  * GitHub directly) still shows a stale "Squash & merge" button. Check GitHub; if the PR is no
@@ -320,19 +302,24 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
         if (pr.merged || pr.state === "closed") {
           j.status = "merged";
           await admin.from("agent_jobs").update({ status: "merged", updated_at: new Date().toISOString() }).eq("id", j.id);
-          // spec-test-on-ship: a merged build PR may have flipped its spec's phases to ✅. If the spec is
-          // now shipped, enqueue a spec-test (shared dedupe no-ops if the cron/manual flip already did).
+          // spec-drift Part A (root fix): a merged build is supposed to flip the phase(s) it built ✅, but
+          // doesn't reliably — so shipped work parks in Planned/In-progress. Run the per-phase, evidence-gated
+          // reconciler against `main`: it stamps ✅ only on phases whose code is verifiably on main (a merged
+          // build now exists for this spec), leaving genuinely-pending phases. This is where the drift
+          // originates; closing it here means the cron backstop rarely has work. Returns the post-flip status.
           if (pr.merged && j.kind === "build") {
             try {
-              const raw = await fetchSpecFromMain(j.spec_slug);
-              if (raw && deriveSpecStatus(raw) === "shipped") {
+              const drift = await reconcileSpecDrift(j.workspace_id, j.spec_slug);
+              // spec-test-on-ship: if the corrected phases now read shipped, enqueue a spec-test (shared
+              // dedupe no-ops if the cron/manual flip already did) + auto-queue any unblocked dependent.
+              if (drift.status === "shipped") {
                 await enqueueSpecTestIfDue(j.workspace_id, j.spec_slug, "shipped");
                 // spec-blockers Phase 2: this spec just shipped → auto-queue any dependent whose last
                 // blocker it was (de-duped, owner-opt-out-aware; no-ops if a build row already exists).
                 await autoQueueUnblockedBy(j.workspace_id, j.spec_slug);
               }
             } catch {
-              /* event missed → the daily backlog cron mops it up */
+              /* event missed → the daily backlog + spec-drift crons mop it up */
             }
           }
         }

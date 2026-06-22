@@ -30,7 +30,7 @@ The **single dedupe chokepoint** shared by all three spec-test enqueue paths: th
 async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void>
 ```
 
-Self-heal: a `completed` job whose PR was merged/closed **outside** the dashboard still shows a stale "Squash & merge" button. Checks GitHub; if the PR is no longer open, flips the job to `merged` (in place + persisted). **spec-test-on-ship:** when a merged (`pr.merged`) `kind='build'` job is flipped, it fetches the spec from `main` (`fetchSpecFromMain`, independent of the possibly-stale local bundle) and, if `deriveSpecStatus` is now `shipped`, calls `enqueueSpecTestIfDue(...,'shipped')` **then** `autoQueueUnblockedBy(...)` (spec-blockers Phase 2). Called on board load ([[../dashboard/roadmap]]) and the merge path (`/api/roadmap/build`).
+Self-heal: a `completed` job whose PR was merged/closed **outside** the dashboard still shows a stale "Squash & merge" button. Checks GitHub; if the PR is no longer open, flips the job to `merged` (in place + persisted). **spec-drift Part A (root fix):** when a merged (`pr.merged`) `kind='build'` job is flipped, it calls `reconcileSpecDrift(workspace, slug)` ([[spec-drift]]) — the per-phase, evidence-gated reconciler that stamps ✅ on phases whose code is verifiably on `main` (a merged build now exists for the spec), leaving genuinely-pending phases. This is where drift originates; closing it on merge means the [[../inngest/spec-drift-reconcile]] cron rarely has work. If the corrected phases now derive `shipped`, it then calls `enqueueSpecTestIfDue(...,'shipped')` **then** `autoQueueUnblockedBy(...)` (spec-blockers Phase 2) — the reconciler's returned status replaces the old `fetchSpecFromMain` + `deriveSpecStatus` check. Called on board load ([[../dashboard/roadmap]]) and the merge path (`/api/roadmap/build`).
 
 ### `autoQueueUnblockedBy` — function  *(spec-blockers Phase 2)*
 
@@ -53,8 +53,8 @@ Auto-queue on unblock. `shippedSlug` just shipped (its build PR merged + phases 
 ## Tables read (not written)
 
 - [[../tables/agent_jobs]] (in-flight dedupe, latest-job/plan lookups), [[../tables/spec_test_runs]] (fresh-run dedupe), [[../tables/pending_folds]]
-- `docs/brain/specs/**` + `docs/brain/archive.d/**` via [[brain-roadmap]] (`getSpec` / `listArchivedSlugs` / `deriveSpecStatus`) — and GitHub `contents` for `fetchSpecFromMain`
+- `docs/brain/specs/**` + `docs/brain/archive.d/**` via [[brain-roadmap]] (`getSpec` / `listArchivedSlugs` / `deriveSpecStatus`) — and GitHub `contents` (via [[spec-drift]] `reconcileSpecDrift` on the merge path)
 
 ---
 
-[[../README]] · [[brain-roadmap]] · [[../tables/agent_jobs]] · [[../tables/spec_test_runs]] · [[../inngest/spec-test-cron]] · [[../specs/spec-test-agent]] · [[../specs/spec-test-on-ship]] · [[../lifecycles/roadmap-build-console]]
+[[../README]] · [[brain-roadmap]] · [[spec-drift]] · [[../tables/agent_jobs]] · [[../tables/spec_test_runs]] · [[../inngest/spec-test-cron]] · [[../specs/spec-test-agent]] · [[../specs/spec-test-on-ship]] · [[../lifecycles/roadmap-build-console]]
