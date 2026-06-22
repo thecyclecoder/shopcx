@@ -58,6 +58,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the capability the system should've had on Jim Leone's ticket — his grandfathered pricing dropped → Appstle billed $229.26 vs $139.84, he asked to cancel, and triage authored a (forbidden) build-order-cancellation spec instead of fixing the real issue. Detect a renewal **overcharge from dropped grandfathered pricing** → partial-refund the delta → **Appstle pricing-policy heal** (never migrate-to-internal w/o a saved PM) → reply. Plus triage grounding: check overcharge before create_return/cancel; never author a code_gap spec that contradicts a policy; always propose a customer_reply. (Jim fixed by hand: $89.42 refunded, base healed to $139.84/4.) Replaces the deleted cancel-order-direct-action spec.
 
+## Active project — Iteration Ingest: Async Reports (deferred) ⏳
+
+**Spec:** [[iteration-ingest-async-reports]] · **Owner:** [[../functions/growth]]
+
+**Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
+
 ## Active project — Spec-Drift Agent ⏳
 
 **Spec:** [[spec-drift-agent]] · **Owner:** [[../functions/platform]]
