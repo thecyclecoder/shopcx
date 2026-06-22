@@ -64,6 +64,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** the originally-deferred Phase 3 of [[iteration-engine-ingest-resilience]], split into its own card so the parent reads ✅ shipped. A **build-on-demand** optimization: use Meta's async insights-report path for huge first-run backfills — only if the ≤14-day chunked path ever strains. Deferred until that's observed.
 
+## Active project — Error-Feed Honest Panels ⏳
+
+**Spec:** [[error-feed-honest-panels]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** the Control Tower's Vercel/Inngest/Supabase panels show green "0 errors" even when the source isn't connected (forward-only + unwired) — a disconnected monitor reading "all clear" is the exact Goodhart silent-failure the Control Tower exists to catch. Fix: connection-aware states — amber "not configured" / "awaiting first event" vs green "connected · 0 errors"; header health count excludes unconfigured panels.
+
 ## Active project — Roadmap Reads Specs from Git ⏳
 
 **Spec:** [[roadmap-reads-specs-from-git]] · **Owner:** [[../functions/platform]]
