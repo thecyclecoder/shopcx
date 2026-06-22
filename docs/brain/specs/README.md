@@ -40,6 +40,12 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Why this matters:** closing/resolving a ticket never clears `escalated_at`, so resolved tickets linger on the Escalated list (one sat 16 days post-close — Sheryl Dickey "Wrong product delivered"). Fix: clear escalation flags on resolve/close in the status-write paths + filter the Escalated view to non-terminal statuses + a gated stale sweep (currently 0). Completes [[box-escalation-triage]].
 
+## Active project — Control Tower (autonomous-loop observability) ⏳
+
+**Spec:** [[control-tower]] · **Owner:** [[../functions/platform]]
+
+**Why this matters:** we run ~dozen autonomous loops; this week three failed **silently** (idle escalation cron, swallowed scorecard upsert reporting false success, lingering stale ticket) — caught by luck, not design (Goodhart: proxy "completed" while objective failed). Each loop emits a **heartbeat + expected-output assertion**; a `control-tower-monitor` cron pages the owner (Slack) on **silence or false-success**, with a Control Tower dashboard (green/amber/red per loop). The observability layer that lets us *trust* the autonomy. P1 liveness+alerting+dashboard, P2 output assertions (idle-while-work, produced-but-not-persisted).
+
 ## Active project — "AI Investigation" Ticket Visibility ⏳
 
 **Spec:** [[ai-investigation-ticket-visibility]] · **Owner:** [[../functions/cs]]
