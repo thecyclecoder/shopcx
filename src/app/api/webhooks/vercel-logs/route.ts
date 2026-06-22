@@ -67,11 +67,46 @@ function verifySignature(rawBody: string, signature: string | null, secret: stri
   }
 }
 
+/**
+ * A Vercel/Lambda log whose entire body is request-lifecycle scaffolding —
+ * `START`/`END`/`REPORT RequestId` blocks (+ their Duration/Memory metric lines) and
+ * the bare `[METHOD] path status=NNN` proxy summary — carries NO error body. For a 5xx
+ * it is the non-actionable platform wrapper around a failure the function already logged
+ * itself (a `console.error` with its own stable signature + repair spec). Recording it
+ * too mints a SECOND, redundant signature for one failure (Control Tower
+ * `vercel:ebdf493a37c60c34`), so we drop these before signature-grouping. A lifecycle
+ * block that ALSO carries a real message/stack (e.g. "Task timed out", an uncaught
+ * exception) is NOT bare and is still captured.
+ */
+function isBareLifecycle(message: string): boolean {
+  const lines = message
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return false;
+  return lines.every(
+    (l) =>
+      /^START RequestId:/i.test(l) ||
+      /^END RequestId:/i.test(l) ||
+      /^REPORT RequestId:/i.test(l) ||
+      // REPORT continuation / metric lines when Lambda splits them onto their own lines.
+      /^(Duration|Billed Duration|Memory Size|Max Memory Used|Init Duration|Restore Duration):/i.test(l) ||
+      // XRAY/Segment trailers Lambda sometimes appends to a REPORT block.
+      /^(XRAY TraceId|SegmentId|Sampled|Status):/i.test(l) ||
+      // The bare proxy summary line: "[POST] /api/portal?route=x status=502".
+      /^\[[A-Z]+\]\s+\S+\s+status=\d{3}$/i.test(l),
+  );
+}
+
 /** Is this log an error / 500-level entry worth surfacing? */
 function isError(log: VercelLog): boolean {
-  if (log.level === "error" || log.level === "fatal") return true;
   const status = log.statusCode ?? log.proxy?.statusCode ?? 0;
-  return status >= 500;
+  const errorish = log.level === "error" || log.level === "fatal" || status >= 500;
+  if (!errorish) return false;
+  // Drop bare Lambda lifecycle/REPORT wrappers — non-actionable platform noise around a
+  // failure the function already logged (and that already has its own signature).
+  if (isBareLifecycle((log.message ?? "").trim())) return false;
+  return true;
 }
 
 /** A stable per-error group key for the batch + the keyParts recordError groups on. */
