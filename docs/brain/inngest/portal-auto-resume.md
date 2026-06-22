@@ -10,6 +10,7 @@ Resumes paused subs at `pause_resume_at`. Used by cancel-flow pause remedies + c
 - **Trigger:** cron `15 * * * *`
 - **Retries:** 1
 - **Concurrency:** `concurrency: [{ limit: 1 }]`
+- **Control Tower heartbeat:** emits `emitCronHeartbeat("portal-auto-resume-cron", …)` at the end of *every* run — including the common no-work path (`subs.length === 0`), so the 2h `cron_freshness` assertion stays green during quiet hours. (portal-auto-resume-heartbeat-on-empty spec.)
 
 
 ### `portal-auto-resume`
