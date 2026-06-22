@@ -2840,10 +2840,18 @@ async function runRepairClaude(prompt: string, sessionId: string | null, cwd: st
 
 // Load the read-only brief: the originating error_events signature + sample (or the loop_alert), so
 // the box knows exactly what to trace. Best-effort — degrades to the instructions if a row is gone.
-async function loadRepairBrief(instr: { source?: string; signature?: string; title?: string; error_event_id?: string | null; loop_alert_id?: string | null }): Promise<string> {
+async function loadRepairBrief(instr: { source?: string; signature?: string; title?: string; error_event_id?: string | null; loop_alert_id?: string | null; members?: Array<{ source: string; signature: string; title: string }> }): Promise<string> {
   const lines: string[] = [`SIGNATURE: ${instr.signature}  ·  SOURCE: ${instr.source}`, `TITLE: ${instr.title}`, ``];
   try {
-    if (instr.source === "loop-alert") {
+    if (instr.source === "cluster") {
+      // A batched cluster job (per-cycle cap overflow): N signatures from one burst that LIKELY share
+      // ONE root cause. Investigate the cluster together and author at most ONE fix spec for the
+      // shared cause (the dedup grouping collapses siblings onto it).
+      const members = Array.isArray(instr.members) ? instr.members : [];
+      lines.push(`CLUSTER — ${members.length} signatures batched from one burst (cap overflow). They LIKELY share one root cause; find it and author ONE spec for the shared cause (NOT one per signature).`, ``);
+      for (const m of members) lines.push(`  • [${m.source}] ${m.signature} — ${m.title}`);
+      lines.push(``, `Trace the most likely SHARED implicated file/failure mode. If they genuinely differ, diagnose the dominant one and note the rest in the diagnosis.`);
+    } else if (instr.source === "loop-alert") {
       const loopId = String(instr.signature || "").replace(/^loop:/, "");
       const { data: alert } = await db
         .from("loop_alerts")
@@ -2903,11 +2911,13 @@ function repairPrompt(brief: string): string {
   ].join("\n");
 }
 
-function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; target?: string }, signature: string, verdict: string): string {
+function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; target?: string }, signature: string, verdict: string, rootCause: string): string {
   return [
     `# ${spec.title} ⏳`,
     ``,
-    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"} · **Repair-signature:** \`${signature}\` · **Verdict:** ${verdict}`,
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"} · **Verdict:** ${verdict}`,
+    `**Repair-root-cause:** \`${rootCause}\``,
+    `**Repair-signature:** \`${signature}\``,
     ``,
     spec.intent.trim(),
     ``,
@@ -2928,19 +2938,138 @@ function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; 
 
 interface RepairSpecProposal { slug: string; title: string; owner?: string; parent?: string; intent?: string; problem?: string; target?: string }
 
-// Author the fix spec to main. Idempotent: if a spec with this slug already exists, leave it (the
-// recurring failure converges on one spec). Returns the sanitized slug on success, or null on failure.
-async function authorRepairSpec(raw: unknown, signature: string, verdict: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+// Build-job statuses that mean a build for a slug is still live (mirror of src/lib/agent-jobs
+// ACTIVE_STATUSES; inlined so the worker never loads that module at startup just for the array).
+const ACTIVE_BUILD_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
+
+interface RepairLedgerEntry { jobId: string; signature: string; rootCause: string | null; authoredSlug: string | null; status: string; createdAt: string }
+
+// The dedup LEDGER (repair-agent-dedup Phase 1): recent repair jobs + the root-cause key / authored
+// spec slug each persisted onto its own `instructions` JSON. Backs root-cause grouping (sibling spec
+// for the same cause → group, don't re-author) and the already-fixed skip (this signature was already
+// addressed → resolve pending-deploy, don't re-diagnose). One small query, parsed in JS.
+async function repairLedger(windowMs: number): Promise<RepairLedgerEntry[]> {
+  const sinceIso = new Date(Date.now() - windowMs).toISOString();
+  const { data } = await db
+    .from("agent_jobs")
+    .select("id, spec_slug, instructions, status, created_at")
+    .eq("kind", "repair")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: true });
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => {
+    let rootCause: string | null = null;
+    let authoredSlug: string | null = null;
+    try {
+      const i = JSON.parse(String(r.instructions || "{}")) as { root_cause?: string; authored_slug?: string };
+      rootCause = i.root_cause ?? null;
+      authoredSlug = i.authored_slug ?? null;
+    } catch { /* not JSON — no ledger fields */ }
+    return { jobId: String(r.id), signature: String(r.spec_slug || ""), rootCause, authoredSlug, status: String(r.status || ""), createdAt: String(r.created_at || "") };
+  });
+}
+
+// Is a build for this spec slug already live (active build job OR an open claude/<slug>-* PR)? The
+// auto-build dedup guard — never enqueue a second build / open a 4th identical PR for one spec slug.
+async function hasActiveBuildForSlug(slug: string): Promise<{ active: boolean; reason?: string }> {
+  const { data: job } = await db
+    .from("agent_jobs")
+    .select("id")
+    .eq("kind", "build")
+    .eq("spec_slug", slug)
+    .in("status", ACTIVE_BUILD_STATUSES)
+    .limit(1)
+    .maybeSingle();
+  if (job) return { active: true, reason: "active build job" };
+  try {
+    const owner = REPO.split("/")[0];
+    const open = await gh("GET", `/repos/${REPO}/pulls?state=open&per_page=100`);
+    if (open.ok && Array.isArray(open.json)) {
+      const prefix = `claude/${slug}-`;
+      const hit = (open.json as Array<{ head?: { ref?: string }; number?: number }>).find(
+        (p) => typeof p.head?.ref === "string" && (p.head.ref === `claude/${slug}` || p.head.ref.startsWith(prefix)),
+      );
+      if (hit) return { active: true, reason: `open PR #${hit.number}` };
+    }
+  } catch { /* PR list degraded — fall back to the job check above */ }
+  return { active: false };
+}
+
+// Fetch + parse a repair-authored spec from main: its Repair-root-cause key, the signatures it
+// already carries, plus the raw body + blob sha (so a grouping append can edit it in place).
+async function fetchRepairSpec(slug: string): Promise<{ body: string; sha: string; rootCause: string | null; signatures: string[] } | null> {
+  const { parseRepairSpecMeta } = await import("../src/lib/repair-agent");
+  const get = await gh("GET", `/repos/${REPO}/contents/docs/brain/specs/${slug}.md?ref=main`);
+  if (!get.ok) return null;
+  const j = get.json as { content?: string; sha?: string };
+  const body = Buffer.from(String(j.content || "").replace(/\s/g, ""), "base64").toString("utf8");
+  const meta = parseRepairSpecMeta(body);
+  return { body, sha: String(j.sha || ""), rootCause: meta.rootCause, signatures: meta.signatures };
+}
+
+// Append a `Repair-signature:` line to an existing repair spec (root-cause grouping: one spec carries
+// N sibling signatures). No-op if it already carries this signature. Returns true on write.
+async function appendSignatureToSpec(slug: string, body: string, sha: string, signature: string): Promise<boolean> {
+  if (body.includes(`**Repair-signature:** \`${signature}\``)) return true; // already carried
+  const line = `**Repair-signature:** \`${signature}\``;
+  let next: string;
+  const lines = body.split("\n");
+  // insert right after the LAST existing Repair-signature line, else after the Repair-root-cause line.
+  let idx = -1;
+  for (let i = 0; i < lines.length; i++) if (lines[i].startsWith("**Repair-signature:**") || lines[i].startsWith("**Repair-root-cause:**")) idx = i;
+  if (idx >= 0) {
+    lines.splice(idx + 1, 0, line);
+    next = lines.join("\n");
+  } else {
+    next = `${body.trimEnd()}\n\n${line}\n`;
+  }
+  const put = await gh("PUT", `/repos/${REPO}/contents/docs/brain/specs/${slug}.md`, {
+    message: `spec: ${slug} — group sibling Control Tower signature ${signature} (repair-agent dedup)`,
+    content: Buffer.from(next, "utf8").toString("base64"),
+    sha,
+    branch: "main",
+  });
+  return put.ok;
+}
+
+// Author OR GROUP the fix spec on main (repair-agent-dedup Phase 1).
+//   1. Root-cause grouping — if a sibling repair spec authored in this window covers the SAME
+//      root-cause key (implicated file + failure mode), add THIS signature to it and reuse its slug
+//      (one root cause → one spec, N signatures) rather than authoring a new spec.
+//   2. Else author a new spec, stamping the Repair-root-cause key for future grouping.
+// Same-slug convergence stays idempotent (a recurring failure folds onto one spec). Returns the
+// resolved slug + whether it pre-existed + whether this was a group-onto-sibling, or null on failure.
+async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict: string): Promise<{ slug: string; alreadyExists: boolean; grouped: boolean; rootCause: string } | null> {
+  const { rootCauseKey, REPAIR_RECENT_FIX_WINDOW_MS } = await import("../src/lib/repair-agent");
   const s = (raw || {}) as RepairSpecProposal;
   const rawSlug = String(s.slug || "");
   const title = String(s.title || "");
   if (!rawSlug || !title) return null;
   const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
   if (!slug) return null;
+  const rootCause = rootCauseKey(typeof s.target === "string" ? s.target : "", verdict);
   const path = `docs/brain/specs/${slug}.md`;
   try {
-    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-    if (existing.ok) return { slug, alreadyExists: true };
+    // 1) Root-cause grouping: a sibling spec authored this cycle for the same cause → add this
+    //    signature to IT (skip authoring a near-duplicate). Skip if rootCause is unknown (`?::…`).
+    if (!rootCause.startsWith("?::")) {
+      const ledger = await repairLedger(REPAIR_RECENT_FIX_WINDOW_MS);
+      const sibling = ledger.find((e) => e.rootCause === rootCause && e.authoredSlug && e.authoredSlug !== slug && e.signature !== signature);
+      if (sibling?.authoredSlug) {
+        const spec = await fetchRepairSpec(sibling.authoredSlug);
+        if (spec) {
+          await appendSignatureToSpec(sibling.authoredSlug, spec.body, spec.sha, signature);
+          return { slug: sibling.authoredSlug, alreadyExists: true, grouped: true, rootCause };
+        }
+      }
+    }
+
+    // 2) Same-slug convergence / author-new.
+    const existing = await fetchRepairSpec(slug);
+    if (existing) {
+      // The slug already exists — ensure it carries THIS signature (a recurring failure converges).
+      await appendSignatureToSpec(slug, existing.body, existing.sha, signature);
+      return { slug, alreadyExists: true, grouped: false, rootCause };
+    }
     const put = await putFileMain(
       path,
       repairSpecMarkdown(
@@ -2955,14 +3084,29 @@ async function authorRepairSpec(raw: unknown, signature: string, verdict: string
         },
         signature,
         verdict,
+        rootCause,
       ),
       `spec: ${slug} (from Control Tower signature ${signature} via repair-agent ${verdict})`,
     );
-    return put.ok ? { slug, alreadyExists: false } : null;
+    return put.ok ? { slug, alreadyExists: false, grouped: false, rootCause } : null;
   } catch (e) {
     console.warn(`[repair] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
+}
+
+// Already-fixed skip (repair-agent-dedup Phase 1): was THIS signature already addressed by a prior
+// repair that authored a fix spec recently (whose build is in-flight or merged-but-not-yet-deployed)?
+// The 2026-06-22 stale-error trap: an error recorded BEFORE its fix deployed must not re-trigger a
+// fresh diagnosis. Returns the addressing spec slug if so (→ resolve "fixed by [[slug]], pending
+// deploy", author nothing). The enqueue dedup only blocks LIVE same-signature jobs, so a re-fire
+// after the prior repair COMPLETED slips through to here.
+async function findAlreadyAddressing(signature: string, selfJobId: string): Promise<{ slug: string } | null> {
+  const { REPAIR_RECENT_FIX_WINDOW_MS } = await import("../src/lib/repair-agent");
+  const ledger = await repairLedger(REPAIR_RECENT_FIX_WINDOW_MS);
+  const prior = ledger.find((e) => e.jobId !== selfJobId && e.signature === signature && e.authoredSlug);
+  if (prior?.authoredSlug) return { slug: prior.authoredSlug };
+  return null;
 }
 
 // Resolve the originating error_events row (transient no-op / owner Dismiss) so the panel clears.
@@ -2992,6 +3136,16 @@ async function runRepairJob(job: Job) {
   const buildAction = (job.pending_actions || []).find((a) => a.type === "repair_build");
   if (buildAction && (buildAction.status === "approved" || buildAction.status === "declined")) {
     if (buildAction.status === "approved" && buildAction.spec_slug) {
+      // Auto-build dedup: never enqueue a second build for a slug that already has one in-flight /
+      // an open PR (the 4-identical-PRs failure). If one's already live, settle this action onto it.
+      const dupe = await hasActiveBuildForSlug(buildAction.spec_slug);
+      if (dupe.active) {
+        buildAction.status = "done";
+        buildAction.result = `build already live for ${buildAction.spec_slug} (${dupe.reason}) — not re-queued`;
+        await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
+        console.log(`${tag} owner Build → dedup: ${buildAction.result}`);
+        return;
+      }
       // Queue the actual feature build for the authored fix spec (owner-gated — this is the gate).
       const { error } = await db.from("agent_jobs").insert({
         workspace_id: job.workspace_id,
@@ -3013,6 +3167,25 @@ async function runRepairJob(job: Job) {
       console.log(`${tag} owner Dismiss → resolved`);
     }
     return;
+  }
+
+  // ── Already-fixed skip (repair-agent-dedup) — don't re-diagnose a problem whose fix already
+  // shipped / is in-flight. A prior repair that authored a spec for THIS signature means it's
+  // addressed (the stale-error trap: an error recorded BEFORE its fix deployed re-firing). The
+  // enqueue dedup only blocks LIVE same-signature jobs, so a re-fire after the prior COMPLETED lands
+  // here. Resolve "fixed by [[spec]], pending deploy" + author nothing. (Skip for the cluster job.) ──
+  if (instr.source !== "cluster") {
+    const addressed = await findAlreadyAddressing(signature, job.id);
+    if (addressed) {
+      await resolveRepairErrorRow(instr);
+      await update(job.id, {
+        status: "completed",
+        error: null,
+        log_tail: `already-fixed → resolved signature ${signature}: fixed by [[${addressed.slug}]], pending deploy (no re-diagnosis)`.slice(-2000),
+      });
+      console.log(`${tag} already-fixed by ${addressed.slug} → resolved, no diagnosis`);
+      return;
+    }
   }
 
   // ── Fresh diagnosis — investigate read-only on Max → classify → act. ──
@@ -3043,13 +3216,20 @@ async function runRepairJob(job: Job) {
 
     if (verdict === "real-bug" || verdict === "monitor-false-positive" || verdict === "foreign-app-noise") {
       const diagnosis = String(parsed?.diagnosis || "");
-      const authored = await authorRepairSpec(parsed?.spec, signature, verdict);
+      // Author OR GROUP: a sibling spec for the same root cause (implicated file + failure mode) →
+      // add this signature to it, don't author a near-duplicate (one root cause → one spec).
+      const authored = await groupOrAuthorRepairSpec(parsed?.spec, signature, verdict);
       if (!authored) {
         // Verdict reached but no valid spec landed → surface for a human rather than silently dropping it.
         await update(job.id, { status: "needs_attention", error: "no valid fix spec proposed", log_tail: diagnosis.slice(-2000) || "no valid fix spec" });
         console.log(`${tag} ${verdict} but no valid spec → surfaced needs-human`);
         return;
       }
+      // Persist this signature's root-cause key + authored slug onto the job — the dedup ledger the
+      // NEXT repair reads for root-cause grouping + the already-fixed skip.
+      instr.signature = signature;
+      const ledgerInstr = JSON.stringify({ ...instr, root_cause: authored.rootCause, authored_slug: authored.slug });
+      const groupedNote = authored.grouped ? ` (grouped onto sibling for root cause ${authored.rootCause})` : authored.alreadyExists ? " (existing)" : "";
 
       // Narrow auto-queue allow-list (the ONE sanctioned auto path): a known-safe, mechanical,
       // monitor-only class auto-queues its build. Anything touching product code (real-bug) is
@@ -3057,19 +3237,29 @@ async function runRepairJob(job: Job) {
       const { isRepairAutobuildKind, REPAIR_AUTOBUILD_KINDS } = await import("../src/lib/repair-agent");
       if (isRepairAutobuildKind(verdict)) {
         const reason = REPAIR_AUTOBUILD_KINDS[verdict as keyof typeof REPAIR_AUTOBUILD_KINDS];
-        const { error } = await db.from("agent_jobs").insert({
-          workspace_id: job.workspace_id,
-          spec_slug: authored.slug,
-          kind: "build",
-          status: "queued",
-          instructions: `Auto-queued by repair-agent (${verdict} — ${reason}). Build from Control Tower signature ${signature}. Follow the spec exactly; tsc-clean; open a PR.`,
-        });
+        // Auto-build dedup: ≤1 build per slug. If a build for this slug is already live / has an open
+        // PR (a sibling job grouped onto the same spec, or a prior cycle), do NOT enqueue a second.
+        const dupe = await hasActiveBuildForSlug(authored.slug);
+        let buildResult: string;
+        if (dupe.active) {
+          buildResult = `build already live (${dupe.reason}) — not re-queued`;
+        } else {
+          const { error } = await db.from("agent_jobs").insert({
+            workspace_id: job.workspace_id,
+            spec_slug: authored.slug,
+            kind: "build",
+            status: "queued",
+            instructions: `Auto-queued by repair-agent (${verdict} — ${reason}). Build from Control Tower signature ${signature}. Follow the spec exactly; tsc-clean; open a PR.`,
+          });
+          buildResult = error ? `auto-queue FAILED: ${error.message}` : "auto-queued build";
+        }
         await update(job.id, {
           status: "completed",
           error: null,
-          log_tail: `${verdict} (allow-listed: ${reason}) → authored ${authored.slug}${authored.alreadyExists ? " (existing)" : ""} + ${error ? `auto-queue FAILED: ${error.message}` : "auto-queued build"}\n\n${diagnosis}`.slice(-2000),
+          instructions: ledgerInstr,
+          log_tail: `${verdict} (allow-listed: ${reason}) → authored ${authored.slug}${groupedNote} + ${buildResult}\n\n${diagnosis}`.slice(-2000),
         });
-        console.log(`${tag} ${verdict} → authored ${authored.slug} + ${error ? "auto-queue failed" : "auto-queued build"}`);
+        console.log(`${tag} ${verdict} → authored ${authored.slug}${groupedNote} + ${buildResult}`);
         return;
       }
 
@@ -3085,9 +3275,10 @@ async function runRepairJob(job: Job) {
       await update(job.id, {
         status: "needs_approval",
         pending_actions: [action],
-        log_tail: `${verdict} → authored fix spec ${authored.slug}${authored.alreadyExists ? " (existing)" : ""}; surfaced for owner Build.\n\n${diagnosis}`.slice(-2000),
+        instructions: ledgerInstr,
+        log_tail: `${verdict} → authored fix spec ${authored.slug}${groupedNote}; surfaced for owner Build.\n\n${diagnosis}`.slice(-2000),
       });
-      console.log(`${tag} ${verdict} → authored ${authored.slug}, surfaced for owner Build`);
+      console.log(`${tag} ${verdict} → authored ${authored.slug}${groupedNote}, surfaced for owner Build`);
       return;
     }
 
