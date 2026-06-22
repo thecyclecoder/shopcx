@@ -230,9 +230,11 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
   // NEVER-FIRED = 0 beats in ALL of history, NOT 0-since-deploy (control-tower-monitor-accuracy
   // P1). A cron with ANY historical beat is being invoked by Inngest — a longer-than-window real
   // cadence (daily today-sync, bursty meta-capi-dispatch) is at most a freshness alert below, never
-  // never_fired. everBeatCount is the all-time beat count from the per-loop grouped read; with that
-  // read `latest` is already non-null whenever everBeatCount>0, but we gate the red on the count
-  // EXPLICITLY so the old deploy-boundary false positive can't silently return if the read changes.
+  // never_fired. everBeatCount is the loop's beat count from the lateral-join read (capped at the
+  // history limit, so it's a presence flag, not a true total): >0 ⇔ the loop appeared in the
+  // distinct-loop_id set ⇔ it has beaten at least once. `latest` is already non-null whenever
+  // everBeatCount>0, but we gate the red on the count EXPLICITLY so the old deploy-boundary false
+  // positive can't silently return if the read changes.
   if (!latest) {
     // The beats read failed (RPC error/timeout) → everBeatCount=0 and latest=null are artifacts of
     // an UNKNOWN read, not a true zero. Stay amber; never false-fire never_fired off a failed read.
@@ -594,13 +596,14 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
 
   const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at").eq("id", WORKER_BOX_ID).maybeSingle(),
-    // ONE bounded, index-friendly grouped read (control-tower-monitor-accuracy P1): the latest
-    // HISTORY_LIMIT beats PER loop_id + the all-time beat count, for cron + agent-kind loops only.
-    // Replaces the old global "latest 600 beats, order by ran_at desc" window, which (a) crowded a
-    // low-frequency cron's latest beat out → false `never_fired`, and (b) had no single-column index
-    // to ride → 500-ing GET /rest/v1/loop_heartbeats as the table grew. Inline-agent/reactive beats
-    // are high-volume and excluded here — they get latest + history + ok/err counts from
-    // fetchInlineAgentState below. Rides the existing (loop_id, ran_at desc) index.
+    // ONE bounded, index-friendly read (control-tower-loop-beats-rpc-perf P1): a lateral join takes
+    // the distinct cron + agent-kind loop_ids and, per loop, reads only its latest HISTORY_LIMIT
+    // beats off the (loop_id, ran_at desc) index — ≤N index rows per loop, no global scan/sort. It
+    // returns no all-time count: PRESENCE is the ever-beaten signal (absent ⇒ 0 beats ⇒ never_fired
+    // candidate). Replaces the prior per-row `count(*) OVER`/`row_number() OVER` window, which still
+    // scanned + sorted the whole (ever-growing) beat history per call → statement-timeout 500s on
+    // POST /rest/v1/rpc/control_tower_loop_beats. Inline-agent/reactive beats are high-volume and
+    // excluded here — they get latest + history + ok/err counts from fetchInlineAgentState below.
     admin.rpc("control_tower_loop_beats", { p_history_limit: HISTORY_LIMIT }),
     admin.from("loop_alerts").select("id, loop_id, reason, detail, opened_at, last_seen_at").eq("status", "open"),
     admin.from("agent_jobs").select("id, kind, status, created_at, claimed_at, updated_at").in("status", ["queued", "claimed", "building", "queued_resume"]),
@@ -613,22 +616,22 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const deployAgeMs = deployRefAgeMs(workerRow as WorkerRow | null);
 
   // A failed/timed-out control_tower_loop_beats RPC (statement timeout scanning the feed) returns
-  // beats=null → empty byLoop/countByLoop → every cron looks like 0 beats ever + no latest. That is
+  // beats=null → empty byLoop → every cron looks like 0 beats ever (absent) + no latest. That is
   // UNKNOWN, not "never fired": suppress the never_fired + cron_freshness reds and stay conservative
   // (amber) so a transient read failure can't false-fire and page healthy crons — the same posture
   // as the deployAgeMs==null guard that keeps a missing deploy-age reference from false-alarming.
   const beatsReadFailed = beatsError != null;
 
   // Group heartbeats by loop_id (the RPC returns them ordered by loop_id, rn=newest-first, already
-  // capped at HISTORY_LIMIT per loop) and capture the all-time beat count for the never-fired check.
-  // A loop with zero beats returns NO rows → absent from both maps → countByLoop default 0.
+  // capped at HISTORY_LIMIT per loop). PRESENCE in this map is the ever-beaten signal: the lateral-
+  // join RPC no longer returns an all-time count (the costly per-row window is gone) — a loop with
+  // zero beats simply isn't in the distinct-loop_id set → absent from byLoop → never_fired candidate;
+  // present (history non-empty) ⇒ it has beaten ⇒ at most a freshness alert, never never_fired.
   const byLoop = new Map<string, LoopHistoryRow[]>();
-  const countByLoop = new Map<string, number>();
-  for (const b of (beats ?? []) as Array<LoopHistoryRow & { loop_id: string; total_count: number }>) {
+  for (const b of (beats ?? []) as Array<LoopHistoryRow & { loop_id: string }>) {
     const arr = byLoop.get(b.loop_id) ?? [];
     arr.push({ ran_at: b.ran_at, ok: b.ok, produced: b.produced, detail: b.detail, duration_ms: b.duration_ms });
     byLoop.set(b.loop_id, arr);
-    countByLoop.set(b.loop_id, Number(b.total_count));
   }
   const alertByLoop = new Map<string, OpenAlert>();
   for (const a of (openAlerts ?? []) as Array<OpenAlert & { loop_id: string }>) {
@@ -648,7 +651,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, countByLoop.get(loop.id) ?? 0, beatsReadFailed);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed);
     else core = evalAgentKind(loop, latest, activeJobs);
     // Phase 2: layer the output assertion on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it).
