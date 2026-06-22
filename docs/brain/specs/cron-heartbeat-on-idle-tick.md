@@ -16,6 +16,6 @@ Scope from the problem above; land the fix + its brain page; gate on `npx tsc --
 - On prod `loop_heartbeats`, query `select count(*), max(ran_at) from loop_heartbeats where loop_id = 'marketing-text-campaign-send-tick'` after the next idle minute → expect a fresh row with `produced = {"sent":0}` (was 0 all-time beats before this fix).
 - On prod `loop_heartbeats`, same query for `loop_id = 'deliver-pending-sends'` → expect a fresh `produced = {"delivered":0}` row each idle minute (was 1 lone beat).
 - On the Control Tower dashboard, the `marketing-text-campaign-send-tick` + `deliver-pending-sends` tiles → expect green/live, not red `never_fired`.
-- Re-trigger the originating condition (signature `loop:marketing-text-campaign-send-tick`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- ✅ Re-trigger the originating condition (signature `loop:marketing-text-campaign-send-tick`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
 
 > Authored by the box Repair Agent from Control Tower signature `loop:marketing-text-campaign-send-tick` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.
