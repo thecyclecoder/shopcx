@@ -1,4 +1,4 @@
-# Abandoned-cart cron: emit Control Tower heartbeat on empty (no-due-carts) runs ⏳
+# Abandoned-cart cron: emit Control Tower heartbeat on empty (no-due-carts) runs ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/inngest/abandoned-cart.ts::real-bug`
@@ -11,8 +11,10 @@ src/lib/inngest/abandoned-cart.ts gates its emitCronHeartbeat behind work being 
 
 **Likely target:** `src/lib/inngest/abandoned-cart.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+Shipped: `src/lib/inngest/abandoned-cart.ts` — the `if (due.length === 0)` early-return now emits `emitCronHeartbeat("abandoned-cart-reminder", { ok: true, produced: { sent: 0, scanned: 0 } })` via a `step.run("emit-heartbeat")` before returning, matching the empty-path beat in `deliver-pending-send.ts` + `ticket-csat.ts`. Brain page `inngest/abandoned-cart.md` documents the idle-tick heartbeat. tsc clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:abandoned-cart-reminder`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
