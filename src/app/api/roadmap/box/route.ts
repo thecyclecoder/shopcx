@@ -22,6 +22,9 @@ interface LaneRow {
   job_id: string;
   spec_slug: string;
   since: string;
+  // Which phase a chained/per-phase build is on (e.g. "Phase 2"); null for a whole-spec or non-build
+  // lane (box-lane-show-phase). Written by the worker's heartbeat; passed through as-is.
+  phase?: string | null;
 }
 
 /**

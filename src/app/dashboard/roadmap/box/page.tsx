@@ -16,6 +16,7 @@ interface LaneRow {
   job_id: string;
   spec_slug: string;
   since: string;
+  phase?: string | null; // "Phase N" for a chained/per-phase build, else null (box-lane-show-phase)
 }
 interface Worker {
   running_sha: string | null;
@@ -100,9 +101,10 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
       <Link
         href={`/dashboard/roadmap/${lane.spec_slug}`}
         className="truncate text-xs font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400"
-        title={lane.spec_slug}
+        title={lane.phase ? `${lane.spec_slug} · ${lane.phase}` : lane.spec_slug}
       >
         {lane.spec_slug}
+        {lane.phase && <span className="text-zinc-400 dark:text-zinc-500"> · {lane.phase}</span>}
       </Link>
     </div>
   );

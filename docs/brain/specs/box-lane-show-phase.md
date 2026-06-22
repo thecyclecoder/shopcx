@@ -1,4 +1,4 @@
-# Build box lane shows which phase it's building ⏳
+# Build box lane shows which phase it's building ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** small observability add to the build-console box view (`/dashboard/roadmap/box`). · **Requested 2026-06-22:** with "Build all" chaining phases, a lane shows only the spec slug (`storefront-ltv-proxy-reconciler`) — the owner can't tell *which phase* is building. Show it (`storefront-ltv-proxy-reconciler · Phase 2`).
 
@@ -10,9 +10,11 @@ The box lane picture comes from `worker_heartbeats.lanes` (`LaneRow = { kind, jo
 - **Box page** (`box/page.tsx`): render it next to the slug — `spec-slug · Phase N` (or just the slug when no phase). Keep it compact (the lane card is small).
 
 ## Verification
-- A lane running a chained/phase build shows `slug · Phase N` (e.g. `storefront-ltv-proxy-reconciler · Phase 2`); a whole-spec (non-phase) build shows just the slug.
-- The phase reflects the actual phase the build is on (matches the job's instructions); when the build advances to the next chained phase, the lane updates on the next heartbeat.
-- Negative: a non-build lane (spec-test/fold/plan) is unaffected; a build with unparseable instructions falls back to the slug only (no crash).
+- On `/dashboard/roadmap/box`, with a per-phase or chained build in a Build/plan lane → expect the lane card to read `slug · Phase N` (e.g. `storefront-ltv-proxy-reconciler · Phase 2`), the `· Phase N` muted after the slug. A whole-spec "Build all the spec" lane → expect just the slug, no `· Phase`.
+- On `GET /api/roadmap/box`, inspect `worker.lanes[]` while a phased build runs → expect each lane object to carry `phase: "Phase N"` matching the job's instructions; advance the chain to the next phase and re-poll (~5s) → expect the lane's `phase` to update on the next heartbeat tick.
+- Negative — on `/dashboard/roadmap/box`, a fold/spec-test/plan lane → expect no `· Phase` suffix (its instructions carry no `Phase N`); a build whose instructions don't embed `Phase N` → expect the card falls back to slug-only with no crash (`derivePhase` returns null).
 
-## Phase 1 — phase on the lane (worker → API → page) ⏳
+## Phase 1 — phase on the lane (worker → API → page) ✅
 Add `phase` to `LaneRow`, derive it in the worker's heartbeat lane-build, pass it through `/api/roadmap/box`, render `slug · Phase N` in `box/page.tsx`. Brain: [[../dashboard/roadmap]] · [[build-all-phases-chain]].
+
+Shipped: `scripts/builder-worker.ts` — `derivePhase(instructions)` regexes `Phase N` out of the job's instructions (the `phaseScopedInstructions` format embeds `"Phase N — <title>"`); `LaneInfo`/`LaneRow` carry `phase`, set at `launch()` from `job.instructions`, written on every heartbeat tick. `/api/roadmap/box` `LaneRow` declares `phase?` (the `lanes` array passes through as-is). `box/page.tsx` `LaneCell` renders ` · Phase N` (muted) after the slug when present, slug-only otherwise.
