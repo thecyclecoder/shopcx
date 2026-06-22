@@ -242,7 +242,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Delivers journeys to a ticket/portal per channel (launchJourneyForTicket).",
     expectedCadence: "per journey launch",
     livenessWindowMs: 6 * HOUR,
-    inlineWorkSignal: "journeys-awaiting-delivery",
+    // NO work-exists signal: delivery is SYNCHRONOUS — the agent creates the journey_session, so a
+    // session existing proves it already ran (there's no "awaiting delivery" backlog; `pending` =
+    // awaiting the customer, not the agent). Counting created sessions as "work awaiting" was a
+    // false-positive source. Liveness here is error-rate only: when the agent DOES run, does it
+    // succeed? (A "should-have-launched-but-didn't" gap lives in the upstream trigger, not here.)
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
   },
@@ -253,6 +257,12 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Per-order fraud QC screen (checkOrderForFraud) — rules + AI screen + ring signals.",
     expectedCadence: "per new order",
     livenessWindowMs: 6 * HOUR,
+    // Work-signal = new orders in-window. This is CORRECT (not over-broad like journey's was):
+    // orders are EXTERNAL inputs, and every one fires fraud/order.check → checkOrderForFraud → a
+    // beat. So "orders flowing but 0 successful screens" is a genuine silence signal. (There's no
+    // per-order "screened" flag to filter on — orders has only easypost_checked_at, fraud_cases
+    // exist only for flagged ones — but the all-orders count is the right liveness proxy here.)
+    // The deploy-boundary false case is handled by the never-run grace in evalInlineAgent.
     inlineWorkSignal: "orders-awaiting-fraud-screen",
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
