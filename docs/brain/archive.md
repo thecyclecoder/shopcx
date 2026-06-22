@@ -12,7 +12,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **"AI Investigation" — make routine-escalated tickets visible** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
+- **Per-ASIN Amazon Sales + Persistent ASIN→Product/Pack Mapping** · verified 2026-06-22 · → [[tables/daily_amazon_product_snapshots]]
 - **Build Console: No Silent No-Op Builds + Report-Issue Enqueue Confirmation** · verified 2026-06-22 · → [[lifecycles/roadmap-build-console]]
+- **Clear Escalation Flags on Resolve/Close** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
+- **Comp Transaction Type Constraint Fix** · verified 2026-06-22 · → [[lifecycles/subscription-billing]]
 - **Developer Message Center** · verified 2026-06-22 · → [[tables/dev_message_threads]]
 - **Improve Queue — Mark-as-Read / Dismiss** · verified 2026-06-22 · → [[dashboard/tickets__improve]]
 - **Iteration Scorecard Upsert — Stop Swallowing Errors + FK-Resilient** · verified 2026-06-22 · → [[libraries/meta__scorecards]]
