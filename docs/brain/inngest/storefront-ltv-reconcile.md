@@ -16,6 +16,7 @@ The **slow-loop** 4-month actual-LTV reconciler (Phase 3 of the storefront-ltv-p
 - **Retries:** 2 · **Concurrency:** `[{ limit: 1, key: "event.data.workspace_id" }]`
 - **Event data:** `{ workspace_id, lag_days?, window_days? }`
 - Reconciles each past cohort whose decision-time snapshot is now ≥ the ~4-month renewal lag old, records proxy-vs-actual error to [[../tables/storefront_ltv_reconciliations]], recalibrates the proxy weights ([[../tables/storefront_ltv_calibration]]), and escalates a large error to [[../functions/growth|Growth]].
+- **M5 revised grading (step `grade-revised`):** after reconcile, calls [[../libraries/storefront-campaign-grader]] `gradeRevisedForReconciledCohorts` — lands the **revised** campaign grade for any concluded campaign whose cohort now has its actual 4-month LTV. Best-effort + idempotent (skips already-revised + unreconciled cohorts). A large initial-vs-revised gap proposes a [[../tables/storefront_grader_prompts]] rule.
 
 ## Gotchas
 - **Cheap no-op most days.** Most runs find no newly-mature cohort; reconciliation is idempotent (a cohort reconciles exactly once), so a daily cadence never double-writes nor re-bumps the `weights_version`.

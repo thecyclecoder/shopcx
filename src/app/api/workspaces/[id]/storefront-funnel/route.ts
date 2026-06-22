@@ -526,6 +526,11 @@ export async function GET(
   // reward the bandit optimizes. Best-effort (empty if storefront_ltv_metrics is absent).
   const predictedLtv = await buildPredictedLtv(admin, workspaceId);
 
+  // The M5 Head-of-Growth campaign-grading report: every concluded campaign with its initial +
+  // revised grade, hypothesis/result sub-scores, and the agent's average-grade trend. Best-effort
+  // (empty if storefront_campaign_grades is absent).
+  const campaignGrades = await buildCampaignGrades(admin, workspaceId);
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: visibleSessions.length,
@@ -537,6 +542,7 @@ export async function GET(
     runningExperiments,
     leverImportance,
     predictedLtv,
+    campaignGrades,
     packBreakdown,
     topProducts,
     deviceBreakdown,
@@ -734,6 +740,150 @@ async function buildPredictedLtv(
     return out.sort((a, b) => b.predicted_ltv_per_visitor_cents - a.predicted_ltv_per_visitor_cents);
   } catch {
     return [];
+  }
+}
+
+export interface CampaignGradeRow {
+  grade_id: string;
+  experiment_id: string;
+  product_id: string;
+  product_title: string;
+  lever: string;
+  lander_type: string;
+  audience: string;
+  status: string;
+  grade_initial: number | null;
+  grade_revised: number | null;
+  hypothesis_quality: number | null;
+  result_quality: number | null;
+  grade_initial_reasoning: string | null;
+  grade_revised_reasoning: string | null;
+  graded_by: string;
+  overridden_by: string | null;
+  initial_graded_at: string | null;
+  revised_graded_at: string | null;
+}
+export interface CampaignGradesBlock {
+  graded: number;
+  /** Agent average of the latest grade (revised ?? initial) across all graded campaigns. */
+  avg_grade: number | null;
+  /** Average hypothesis_quality (the sound-bet metric we train toward). */
+  avg_hypothesis_quality: number | null;
+  /** Chronological grade trend points (oldest→newest) for the average-grade trend sparkline. */
+  trend: Array<{ at: string; grade: number }>;
+  /** Proposed calibration rules awaiting the Growth director's approval. */
+  proposed_rules: Array<{ id: string; title: string; content: string; created_at: string }>;
+  rows: CampaignGradeRow[];
+}
+
+/**
+ * The M5 campaign-grading report: every concluded M4 campaign with its initial + revised grade,
+ * the hypothesis/result sub-scores, who graded it, and the agent's average-grade trend (the
+ * supervised metric the Growth director watches). Plus the proposed calibration rules awaiting
+ * approval. Best-effort — returns an empty block if storefront_campaign_grades is absent.
+ */
+async function buildCampaignGrades(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+): Promise<CampaignGradesBlock> {
+  const empty: CampaignGradesBlock = { graded: 0, avg_grade: null, avg_hypothesis_quality: null, trend: [], proposed_rules: [], rows: [] };
+  try {
+    const { data: grades } = await admin
+      .from("storefront_campaign_grades")
+      .select("id, experiment_id, grade_initial, grade_revised, hypothesis_quality, result_quality, grade_initial_reasoning, grade_revised_reasoning, graded_by, overridden_by, initial_graded_at, revised_graded_at, created_at")
+      .eq("workspace_id", workspaceId)
+      .not("grade_initial", "is", null)
+      .order("initial_graded_at", { ascending: false })
+      .limit(200);
+    const gradeRows = (grades || []) as Array<{
+      id: string; experiment_id: string; grade_initial: number | null; grade_revised: number | null;
+      hypothesis_quality: number | null; result_quality: number | null; grade_initial_reasoning: string | null;
+      grade_revised_reasoning: string | null; graded_by: string; overridden_by: string | null;
+      initial_graded_at: string | null; revised_graded_at: string | null; created_at: string;
+    }>;
+    if (!gradeRows.length) {
+      // Still surface any proposed calibration rules even with no graded campaigns yet.
+      const { data: rules0 } = await admin
+        .from("storefront_grader_prompts")
+        .select("id, title, content, created_at")
+        .eq("workspace_id", workspaceId)
+        .eq("status", "proposed")
+        .order("created_at", { ascending: false })
+        .limit(25);
+      return { ...empty, proposed_rules: (rules0 || []) as CampaignGradesBlock["proposed_rules"] };
+    }
+
+    const expIds = gradeRows.map((g) => g.experiment_id);
+    const { data: exps } = await admin
+      .from("storefront_experiments")
+      .select("id, product_id, lever, lander_type, audience, status")
+      .in("id", expIds);
+    const expById = new Map(((exps || []) as Array<{ id: string; product_id: string; lever: string; lander_type: string; audience: string; status: string }>).map((e) => [e.id, e]));
+
+    const productIds = [...new Set(((exps || []) as Array<{ product_id: string }>).map((e) => e.product_id))];
+    const { data: productRows } = productIds.length
+      ? await admin.from("products").select("id, title").in("id", productIds)
+      : { data: [] as { id: string; title: string }[] };
+    const titleById = new Map(((productRows || []) as { id: string; title: string }[]).map((p) => [p.id, p.title]));
+
+    const rows: CampaignGradeRow[] = gradeRows.map((g) => {
+      const e = expById.get(g.experiment_id);
+      return {
+        grade_id: g.id,
+        experiment_id: g.experiment_id,
+        product_id: e?.product_id || "",
+        product_title: e ? titleById.get(e.product_id) || "(unknown)" : "(unknown)",
+        lever: e?.lever || "(unknown)",
+        lander_type: e?.lander_type || "—",
+        audience: e?.audience || "all",
+        status: e?.status || "—",
+        grade_initial: g.grade_initial,
+        grade_revised: g.grade_revised,
+        hypothesis_quality: g.hypothesis_quality,
+        result_quality: g.result_quality,
+        grade_initial_reasoning: g.grade_initial_reasoning,
+        grade_revised_reasoning: g.grade_revised_reasoning,
+        graded_by: g.graded_by,
+        overridden_by: g.overridden_by,
+        initial_graded_at: g.initial_graded_at,
+        revised_graded_at: g.revised_graded_at,
+      };
+    });
+
+    // Agent metric: average of the latest grade (revised supersedes initial) + hypothesis quality.
+    let gradeSum = 0;
+    let gradeN = 0;
+    let hypSum = 0;
+    let hypN = 0;
+    for (const g of gradeRows) {
+      const latest = g.grade_revised ?? g.grade_initial;
+      if (latest != null) { gradeSum += latest; gradeN++; }
+      if (g.hypothesis_quality != null) { hypSum += g.hypothesis_quality; hypN++; }
+    }
+    // Trend: oldest→newest by initial_graded_at (the supervised average-grade-over-time view).
+    const trend = [...gradeRows]
+      .filter((g) => g.initial_graded_at)
+      .sort((a, b) => new Date(a.initial_graded_at!).getTime() - new Date(b.initial_graded_at!).getTime())
+      .map((g) => ({ at: g.initial_graded_at!, grade: g.grade_revised ?? g.grade_initial! }));
+
+    const { data: rules } = await admin
+      .from("storefront_grader_prompts")
+      .select("id, title, content, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "proposed")
+      .order("created_at", { ascending: false })
+      .limit(25);
+
+    return {
+      graded: gradeN,
+      avg_grade: gradeN > 0 ? Math.round((gradeSum / gradeN) * 100) / 100 : null,
+      avg_hypothesis_quality: hypN > 0 ? Math.round((hypSum / hypN) * 100) / 100 : null,
+      trend,
+      proposed_rules: (rules || []) as CampaignGradesBlock["proposed_rules"],
+      rows,
+    };
+  } catch {
+    return empty;
   }
 }
 

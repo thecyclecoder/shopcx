@@ -15,7 +15,7 @@
  * the money drop-off is engaged → pack_selected.
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, Fragment } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface FunnelStepRow {
@@ -118,6 +118,33 @@ interface FunnelData {
     calibrated: boolean;
     flags: Record<string, unknown>;
   }>;
+  campaignGrades?: {
+    graded: number;
+    avg_grade: number | null;
+    avg_hypothesis_quality: number | null;
+    trend: Array<{ at: string; grade: number }>;
+    proposed_rules: Array<{ id: string; title: string; content: string; created_at: string }>;
+    rows: Array<{
+      grade_id: string;
+      experiment_id: string;
+      product_id: string;
+      product_title: string;
+      lever: string;
+      lander_type: string;
+      audience: string;
+      status: string;
+      grade_initial: number | null;
+      grade_revised: number | null;
+      hypothesis_quality: number | null;
+      result_quality: number | null;
+      grade_initial_reasoning: string | null;
+      grade_revised_reasoning: string | null;
+      graded_by: string;
+      overridden_by: string | null;
+      initial_graded_at: string | null;
+      revised_graded_at: string | null;
+    }>;
+  };
   recentEvents: Array<{
     id: string;
     event_type: string;
@@ -281,6 +308,10 @@ export default function StorefrontFunnelPage() {
 
           {data.leverImportance && data.leverImportance.length > 0 && (
             <LeverImportancePanel rows={data.leverImportance} />
+          )}
+
+          {data.campaignGrades && (data.campaignGrades.rows.length > 0 || data.campaignGrades.proposed_rules.length > 0) && (
+            <CampaignGradesPanel block={data.campaignGrades} workspaceId={workspace.id} onChange={load} />
           )}
 
           <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -889,6 +920,224 @@ function LeverImportancePanel({ rows }: { rows: NonNullable<FunnelData["leverImp
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+function CampaignGradesPanel({
+  block,
+  workspaceId,
+  onChange,
+}: {
+  block: NonNullable<FunnelData["campaignGrades"]>;
+  workspaceId: string;
+  onChange: () => void;
+}) {
+  // The M5 Head-of-Growth report: every concluded campaign with its initial + revised grade,
+  // hypothesis/result sub-scores, the agent's average-grade trend, and a one-click override.
+  // Hypothesis quality is scored SEPARATELY from result — a sound bet that lost grades high.
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editGrade, setEditGrade] = useState<number>(5);
+  const [editReason, setEditReason] = useState("");
+  const [editAxis, setEditAxis] = useState<"initial" | "revised">("initial");
+  const [proposeRule, setProposeRule] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const fmtLever = (s: string) => s.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+  const gradeTone = (g: number | null) =>
+    g === null ? "text-zinc-400" : g >= 8 ? "text-emerald-600" : g >= 6 ? "text-zinc-900 dark:text-zinc-100" : g >= 4 ? "text-amber-600" : "text-rose-600";
+
+  // Average-grade trend direction: compare the mean of the first vs the second half.
+  const trend = block.trend;
+  let trendDir: "up" | "down" | "flat" | null = null;
+  if (trend.length >= 4) {
+    const mid = Math.floor(trend.length / 2);
+    const mean = (arr: typeof trend) => arr.reduce((a, t) => a + t.grade, 0) / (arr.length || 1);
+    const first = mean(trend.slice(0, mid));
+    const second = mean(trend.slice(mid));
+    trendDir = second - first > 0.3 ? "up" : second - first < -0.3 ? "down" : "flat";
+  }
+
+  async function submitOverride(gradeId: string) {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/storefront-campaign-grades/${gradeId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grade: editGrade, reason: editReason, axis: editAxis, propose_rule: proposeRule }),
+      });
+      if (res.ok) {
+        setEditing(null);
+        setEditReason("");
+        setProposeRule(false);
+        onChange();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reviewRule(ruleId: string, status: "approved" | "rejected") {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/storefront-grader-prompts/${ruleId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (res.ok) onChange();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+          Campaign grades — Head of Growth
+        </h2>
+        <span className="text-[11px] text-zinc-400">
+          The agent&apos;s feedback signal. Hypothesis quality is graded <strong>separately</strong> from result — a sound bet that lost grades high.
+        </span>
+      </div>
+
+      <div className="mb-5 grid gap-3 sm:grid-cols-3">
+        <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Avg grade</p>
+          <p className="mt-1 flex items-baseline gap-2 text-2xl font-bold tabular-nums">
+            <span className={gradeTone(block.avg_grade)}>{block.avg_grade ?? "—"}</span>
+            {trendDir && (
+              <span className={`text-xs font-semibold ${trendDir === "up" ? "text-emerald-600" : trendDir === "down" ? "text-rose-600" : "text-zinc-400"}`}>
+                {trendDir === "up" ? "↑ trending up" : trendDir === "down" ? "↓ trending down" : "→ flat"}
+              </span>
+            )}
+          </p>
+        </div>
+        <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Avg hypothesis quality</p>
+          <p className={`mt-1 text-2xl font-bold tabular-nums ${gradeTone(block.avg_hypothesis_quality)}`}>{block.avg_hypothesis_quality ?? "—"}</p>
+        </div>
+        <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Graded campaigns</p>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">{block.graded}</p>
+        </div>
+      </div>
+
+      {block.proposed_rules.length > 0 && (
+        <div className="mb-5 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/40 dark:bg-amber-950/30">
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+            Proposed calibration rules — approve to apply
+          </p>
+          <ul className="space-y-2">
+            {block.proposed_rules.map((r) => (
+              <li key={r.id} className="flex items-start justify-between gap-3 text-xs">
+                <div>
+                  <p className="font-semibold text-zinc-900 dark:text-zinc-100">{r.title}</p>
+                  <p className="text-zinc-600 dark:text-zinc-400">{r.content}</p>
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  <button disabled={busy} onClick={() => reviewRule(r.id, "approved")} className="rounded bg-emerald-600 px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-50">Approve</button>
+                  <button disabled={busy} onClick={() => reviewRule(r.id, "rejected")} className="rounded bg-zinc-200 px-2 py-1 text-[10px] font-semibold text-zinc-700 disabled:opacity-50 dark:bg-zinc-800 dark:text-zinc-300">Reject</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {block.rows.length === 0 ? (
+        <p className="text-xs text-zinc-400">No campaigns graded yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+                <th className="py-2 pr-2">Campaign (lever)</th>
+                <th className="py-2 pr-2 text-right">Hypothesis</th>
+                <th className="py-2 pr-2 text-right">Result</th>
+                <th className="py-2 pr-2 text-right">Initial</th>
+                <th className="py-2 pr-2 text-right">Revised</th>
+                <th className="py-2 pr-2">By</th>
+                <th className="py-2 pr-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((r) => (
+                <Fragment key={r.grade_id}>
+                  <tr className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                    <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">
+                      {fmtLever(r.lever)}
+                      <span className="ml-1 text-[10px] uppercase text-zinc-400">{r.product_title} · {r.lander_type} · {r.status}</span>
+                    </td>
+                    <td className={`py-2 pr-2 text-right font-semibold tabular-nums ${gradeTone(r.hypothesis_quality)}`}>{r.hypothesis_quality ?? "—"}</td>
+                    <td className={`py-2 pr-2 text-right tabular-nums ${gradeTone(r.result_quality)}`}>{r.result_quality ?? "—"}</td>
+                    <td className={`py-2 pr-2 text-right font-semibold tabular-nums ${gradeTone(r.grade_initial)}`}>{r.grade_initial ?? "—"}</td>
+                    <td className={`py-2 pr-2 text-right font-semibold tabular-nums ${gradeTone(r.grade_revised)}`}>{r.grade_revised ?? <span className="text-zinc-300">pending</span>}</td>
+                    <td className="py-2 pr-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider ${r.graded_by === "human" ? "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300" : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800"}`}>
+                        {r.graded_by}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-2 text-right">
+                      <button
+                        onClick={() => {
+                          setEditing(editing === r.grade_id ? null : r.grade_id);
+                          setEditGrade(r.grade_revised ?? r.grade_initial ?? 5);
+                          setEditAxis(r.grade_revised != null ? "revised" : "initial");
+                          setEditReason("");
+                          setProposeRule(false);
+                        }}
+                        className="rounded border border-zinc-300 px-2 py-1 text-[10px] font-semibold text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                      >
+                        {editing === r.grade_id ? "Cancel" : "Override"}
+                      </button>
+                    </td>
+                  </tr>
+                  {editing === r.grade_id && (
+                    <tr className="border-b border-zinc-100 dark:border-zinc-800/50">
+                      <td colSpan={7} className="bg-zinc-50 px-3 py-3 dark:bg-zinc-900/60">
+                        {(r.grade_initial_reasoning || r.grade_revised_reasoning) && (
+                          <p className="mb-2 text-[11px] text-zinc-500">
+                            <span className="font-semibold">Grader reasoning:</span> {r.grade_revised_reasoning || r.grade_initial_reasoning}
+                          </p>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select value={editAxis} onChange={(e) => setEditAxis(e.target.value as "initial" | "revised")} className="rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+                            <option value="initial">Initial grade</option>
+                            <option value="revised">Revised grade</option>
+                          </select>
+                          <label className="text-xs text-zinc-500">to</label>
+                          <select value={editGrade} onChange={(e) => setEditGrade(Number(e.target.value))} className="rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+                            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => <option key={n} value={n}>{n}/10</option>)}
+                          </select>
+                          <input
+                            value={editReason}
+                            onChange={(e) => setEditReason(e.target.value)}
+                            placeholder="Why? (recorded as the override reason)"
+                            className="min-w-[240px] flex-1 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                          />
+                          <label className="flex items-center gap-1 text-[11px] text-zinc-500">
+                            <input type="checkbox" checked={proposeRule} onChange={(e) => setProposeRule(e.target.checked)} />
+                            propose calibration rule
+                          </label>
+                          <button
+                            disabled={busy || !editReason.trim()}
+                            onClick={() => submitOverride(r.grade_id)}
+                            className="rounded bg-zinc-900 px-3 py-1 text-xs font-semibold text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+                          >
+                            {busy ? "Saving…" : "Save override"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }

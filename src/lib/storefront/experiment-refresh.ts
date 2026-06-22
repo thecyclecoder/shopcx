@@ -20,6 +20,7 @@ import { isProxyCalibrated } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
 import { updatePosterior } from "@/lib/storefront/lever-memory";
+import { gradeCampaign } from "@/lib/storefront/campaign-grader";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -121,6 +122,19 @@ export async function refreshStorefrontExperiments(opts: {
     }
   };
 
+  // M5 — grade the now-concluded campaign at significance (the Head-of-Growth feedback signal,
+  // [[storefront-campaign-grader]]). Best-effort: a grader failure never breaks the supervisable
+  // refresh; idempotent per campaign (gradeCampaign upserts the initial grade in place). Fired
+  // for every terminal outcome — promote (win), kill (loss), and rollback — so a sound hypothesis
+  // that lost is graded as much as a win.
+  const gradeInitialBestEffort = async (experimentId: string) => {
+    try {
+      await gradeCampaign({ experimentId, mode: "initial", admin });
+    } catch (e) {
+      console.warn(`[storefront-experiments] campaign-grade(initial) failed exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   try {
     // 1. Attribution (idempotent recompute).
     const attribution = await refreshExperimentAttribution({
@@ -200,6 +214,8 @@ export async function refreshStorefrontExperiments(opts: {
         decisions.push({ experiment_id: experimentId, action: "rolled_back", win_prob: null, rule: reason, posteriors: snapshot });
         // Commit the learning — a rollback is a loss, recorded as much as a win.
         await commitLearning(exp, rollups);
+        // Grade the concluded campaign at significance (a rollback is a conclusion too).
+        await gradeInitialBestEffort(experimentId);
         // Surface, don't bury — escalate to Growth (durable record + structured log).
         console.warn(
           `[storefront-experiments] ESCALATION rollback experiment=${experimentId} lever=${exp.lever} reason=${reason} ` +
@@ -230,8 +246,12 @@ export async function refreshStorefrontExperiments(opts: {
         counts.held++;
       }
       await admin.from("storefront_experiments").update(update).eq("id", experimentId);
-      // A completed experiment (promote = win, kill = loss) commits its learning to memory.
-      if (terminal) await commitLearning(exp, rollups);
+      // A completed experiment (promote = win, kill = loss) commits its learning to memory
+      // and gets graded at significance (the M5 Head-of-Growth feedback signal).
+      if (terminal) {
+        await commitLearning(exp, rollups);
+        await gradeInitialBestEffort(experimentId);
+      }
       decisions.push({
         experiment_id: experimentId,
         action: decision.action,
