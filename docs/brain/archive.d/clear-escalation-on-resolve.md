@@ -1,0 +1,1 @@
+- **Clear Escalation Flags on Resolve/Close** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]

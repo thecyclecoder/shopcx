@@ -1,0 +1,1 @@
+- **"AI Investigation" — make routine-escalated tickets visible** · verified 2026-06-22 · → [[lifecycles/ticket-lifecycle]]
