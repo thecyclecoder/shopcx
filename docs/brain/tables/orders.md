@@ -131,6 +131,10 @@ const { count } = await admin.from("orders")
   .gte("created_at", since);
 ```
 
+## Indexes
+
+- `orders_workspace_id_created_at_idx (workspace_id, created_at DESC)` — backs workspace order timelines / recent-orders loaders (filter `workspace_id` + sort `created_at DESC` in one index scan, no separate Sort). Diagnosed by the [[../specs/db-index-orders]] DB Health Agent finding; applied to PROD via `CREATE INDEX CONCURRENTLY` (`scripts/apply-orders-workspace-created-at-index.ts`), recorded plain in `20260630120000_orders_workspace_created_at_index.sql` for fresh/local builds.
+
 ## Gotchas
 
 - There is no `name` column — use `order_number` (e.g. `"SC129467"`).
