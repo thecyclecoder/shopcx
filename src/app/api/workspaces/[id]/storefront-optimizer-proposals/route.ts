@@ -32,6 +32,12 @@ interface ProposalCard {
   preview: string;
   variant: { kind: string; label: string; hero_prompt?: string; patch?: unknown };
   created_at: string | null;
+  // ── optimizer-hero-preview-gate ──
+  // 'concept' = the owner is approving the idea (a hero candidate is generated on approve); 'preview' =
+  // a candidate hero is generated and awaiting image-approval (Approve goes live / Reject-with-notes regens).
+  stage?: "concept" | "preview";
+  preview_image_url?: string;
+  preview_attempts?: { url: string; notes?: string; at: string }[];
 }
 
 /** Shape of one element of agent_jobs.pending_actions (see scripts/builder-worker.ts PendingAction). */
@@ -42,6 +48,9 @@ interface PendingActionRow {
   preview?: string;
   status?: string;
   campaign_plan?: OptimizerProposal;
+  stage?: "concept" | "preview";
+  preview_image_url?: string;
+  preview_attempts?: { url: string; notes?: string; at: string }[];
 }
 
 export async function GET(
@@ -109,6 +118,9 @@ export async function GET(
           patch: plan?.variant?.patch,
         },
         created_at: job.created_at ?? null,
+        stage: act.stage,
+        preview_image_url: act.preview_image_url,
+        preview_attempts: Array.isArray(act.preview_attempts) ? act.preview_attempts : undefined,
       });
     }
   }
