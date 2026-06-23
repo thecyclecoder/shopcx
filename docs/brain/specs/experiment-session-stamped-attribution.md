@@ -17,6 +17,9 @@
 ## Phase 3 — attribute off the session stamp ⏳
 - Rewrite [[../libraries/experiment-attribution]] + [[../libraries/experiment-funnel]]: a variant's **sessions = `storefront_sessions` stamped to that arm** (excluding internal/bot); a **conversion = a storefront `orders` row whose `session_id` is stamped to that arm** (in-session, no 14-day anonymous_id guesswork). Funnel rates off the stamped sessions' events. This is reliable + literal.
 
+## Phase 3.5 — backfill past sessions (the data isn't lost) ⏳
+Assignment is a **pure deterministic function** `assignVariant(anonymous_id, experiment, variants)` (sticky hash, no stored state). So for every historical `storefront_session` that hit a running experiment's surface (matching product × lander_type × audience, within the experiment's run window), **recompute its arm from `anonymous_id`** and write the same `experiment_assignments` stamp — recovering the ~107/day untracked sessions + their conversions (e.g. SHOPCX30 = CONTROL on the listicle, verified by computing it live 2026-06-23). One-off backfill script + idempotent. (Holdout/conservative bands must use the *same* params as the live render so the recomputed arm matches what was actually served.)
+
 ## Phase 4 — Journey panel on the order detail page ⏳
 - On a storefront/`SHOPCX` order in `/dashboard/orders/[id]`: a **Journey panel** joining `orders.session_id` → the session + its `storefront_events` timeline: **source** (lander + `?variant=`, UTM/ad), **experiment + arm** (from the session stamp), and the **funnel steps** (landing → pdp_view → chapters engaged → add_to_cart → checkout → order_placed, with timestamps).
 
