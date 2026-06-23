@@ -153,10 +153,14 @@ export const RENEWAL_BAD_OUTCOMES: RenewalOutcome[] = [
  *                                 created session with no successful delivery beat = silent).
  *   - orders-awaiting-fraud-screen — orders created within the window (every new order fires
  *                                 the per-order fraud screen).
- *   - tickets-awaiting-decision — inbound customer messages created within the window (every
- *                                 inbound on an AI-handled ticket fires unified-ticket-handler →
- *                                 callSonnetOrchestratorV2, so inbound traffic with 0 successful
- *                                 decision beats = the per-ticket decision agent went silent).
+ *   - tickets-awaiting-decision — inbound customer messages created within the window that DRIVE
+ *                                 the handler (every such inbound fires ticket/inbound-message →
+ *                                 unified-ticket-handler → callSonnetOrchestratorV2, so inbound
+ *                                 traffic with 0 successful decision beats = the per-ticket decision
+ *                                 agent went silent). Excludes CSAT-reopen inserts (csat:reopened
+ *                                 tag), which reopen + route to a human and emit no
+ *                                 ticket/inbound-message event, so they never drive a beat
+ *                                 (control-tower-ticket-decision-workprobe-scope).
  */
 export type InlineWorkSignalId =
   | "tickets-awaiting-qc"
