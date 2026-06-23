@@ -71,24 +71,21 @@ interface FailedJob {
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 
-// Route a paused/failed job to where you actually approve/act on it.
-// SAFE-BY-DEFAULT (so a NEW agent kind can never 404 here, even before anyone adds a case):
-// only kinds whose `spec_slug` is a REAL spec/goal — or that have a dedicated approval surface — get a
-// deep link. EVERY other kind (repair, db_health, coverage-register, triage, AND any future agent that
-// surfaces proposals) has a signature/surface-key slug, NOT a spec, so it defaults to the Control Tower
-// (where agent feeds + their Approve buttons live) — which always loads. Previously the default was
-// `/dashboard/roadmap/{slug}`, which 404'd for every such agent until someone hand-added a case.
+// The single approval ENTRY POINT (approval-routing-engine Phase 4, CEO ruling 2026-06-23): every
+// approval — whatever raised it — is decided in the routed Agents-hub inbox, in-context (inline for a
+// simple approve/decline, an inbox-launched modal for the rich ones). The box no longer scatters a
+// paused job to a per-kind standalone surface; it links to the inbox. (This retires the old
+// approvalHref deep-links + their 404-prone `/dashboard/roadmap/{slug}` fallthrough.)
+const APPROVAL_INBOX_HREF = "/dashboard/agents?view=inbox";
+// A non-approval surface link for an INSPECTABLE job (a failed build, or a needs_input question that the
+// inbox doesn't answer): the spec/goal page when the slug is a real spec, else a surface that always
+// loads. Approvals never use this — they go to APPROVAL_INBOX_HREF.
 const SPEC_SLUG_KINDS = new Set(["build", "spec-test"]); // slug = docs/brain/specs/{slug}.md
-function approvalHref(kind: string, specSlug: string, specMissing?: boolean): string {
+function inspectHref(kind: string, specSlug: string, specMissing?: boolean): string {
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
   if (kind === "migration-fix") return "/dashboard/migrations";
-  // storefront-optimizer slug is a surface key (product:lander:audience) → the optimizer dashboard's
-  // "Proposed campaigns" section (the Approve/Decline buttons live there).
   if (kind === "storefront-optimizer") return "/dashboard/storefront/optimizer";
-  // A real-spec job: the spec page, or the board if the spec was folded/archived (never a dead link).
   if (SPEC_SLUG_KINDS.has(kind)) return specMissing ? "/dashboard/roadmap" : `/dashboard/roadmap/${specSlug}`;
-  // DEFAULT — every agent-proposal kind (signature/surface-key slug): the Control Tower, where the
-  // repair / db_health / coverage-registration / etc. feeds surface with their Approve actions.
   return "/dashboard/developer/control-tower";
 }
 
@@ -377,7 +374,7 @@ export default function BoxPage() {
                   <li key={j.id} className="flex flex-col gap-1.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <Link
-                        href={approvalHref(j.kind, j.spec_slug, j.spec_missing)}
+                        href={inspectHref(j.kind, j.spec_slug, j.spec_missing)}
                         className="font-medium text-red-800 underline decoration-dotted underline-offset-2 hover:text-red-900 dark:text-red-300 dark:hover:text-red-200"
                       >
                         {j.spec_slug}
@@ -419,12 +416,14 @@ export default function BoxPage() {
                       {j.kind}
                     </span>
                     <Link
-                      href={approvalHref(j.kind, j.spec_slug, j.spec_missing)}
+                      href={j.status === "needs_approval" ? APPROVAL_INBOX_HREF : inspectHref(j.kind, j.spec_slug, j.spec_missing)}
                       className="font-medium underline decoration-dotted underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
                     >
-                      {j.spec_slug}
+                      {j.status === "needs_approval" ? "Decide in inbox →" : j.spec_slug}
                     </Link>
-                    {j.spec_missing && <span className="text-[10px] text-amber-700/70 dark:text-amber-300/70">(spec archived)</span>}
+                    {j.spec_missing && j.status !== "needs_approval" && (
+                      <span className="text-[10px] text-amber-700/70 dark:text-amber-300/70">(spec archived)</span>
+                    )}
                   </li>
                 ))}
               </ul>

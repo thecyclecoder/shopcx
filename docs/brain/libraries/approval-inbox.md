@@ -6,7 +6,7 @@ The **routed-inbox emitter** — turns every [[../tables/agent_jobs]] `needs_app
 
 ## Why this exists
 
-Phase 1 shipped the pure router ([[approval-router]] `resolveApprover`) + the live flags ([[../tables/function_autonomy]]). This is the module that **uses** them: it resolves *who decides* for a raised approval and surfaces the request in that role's inbox, so the CEO reads **one inbox** instead of the N scattered surfaces ([[../dashboard/control-tower]] feeds, spec cards, the box `approvalHref`). Investigation inline = the decision is one read, no click-through. The scattered surfaces keep working until Phase 4 retires them — this phase **adds** the routed emission alongside them.
+Phase 1 shipped the pure router ([[approval-router]] `resolveApprover`) + the live flags ([[../tables/function_autonomy]]). This is the module that **uses** them: it resolves *who decides* for a raised approval and surfaces the request in that role's inbox, so the CEO reads **one inbox** instead of the N scattered surfaces ([[../dashboard/control-tower]] feeds, spec cards, the box `approvalHref`). Investigation inline = the decision is one read, no click-through. **Phase 4 retired the scattered entry points** (CEO ruling 2026-06-23): the inbox is now the single QUEUE + ENTRY POINT — a simple approve/decline is inline on the row, a *rich* approval opens an **inbox-launched modal** that reuses the same executors in-context (`GET /api/developer/agents/approval-detail` feeds it the live `pending_actions`); the box `approvalHref` deep-links and the [[../dashboard/control-tower]] approval feeds now point *into* the inbox (Control Tower keeps monitoring only). storefront-optimizer's hero image-preview flow remains a **documented-exception** deep-link.
 
 ## The single chokepoint — `reconcileApprovalInbox(admin)`
 
@@ -23,7 +23,9 @@ Catches **every** kind regardless of which surface raised it (repair / db_health
 
 ## Inline investigation + the decision
 
-`buildApprovalContent(job)` builds the title + the **inline body** from the still-pending `pending_actions` — each action's `summary`/`spec.title`/`spec_title`, its `preview` (the agent's diagnosis), and any `cmd` (the gated command), falling back to `log_tail`. `inlineApproveActionId(job)` returns the single action id the inbox's **Approve / Decline** buttons act on — but **only** when the job has exactly one pending action that is a plain approve/decline (not a `coverage_register` register-vs-exempt or `storefront_campaign` hero-preview multi-choice); otherwise `null`, and the row falls back to `approvalDeepLink(kind, …)` (mirrors the box page `approvalHref`: a real-spec/dedicated surface, else the Control Tower). The decision rides the **unchanged** `POST /api/roadmap/approve` path ([[roadmap-actions]] `approveRoadmapAction` → `queued_resume`) — routing changes *where* a request surfaces, never *how* an approved action runs.
+`buildApprovalContent(job)` builds the title + the **inline body** from the still-pending `pending_actions` — each action's `summary`/`spec.title`/`spec_title`, its `preview` (the agent's diagnosis), and any `cmd` (the gated command), falling back to `log_tail`. `inlineApproveActionId(job)` returns the single action id the inbox's **Approve / Decline** buttons act on — but **only** when the job has exactly one pending action that is a plain approve/decline (not a `coverage_register` register-vs-exempt or `storefront_campaign` hero-preview multi-choice); otherwise `null`.
+
+**Phase 4 — rich approvals decided in-context.** When a request isn't a single inline approve, the inbox row opens a **modal** (see [[../dashboard/agents]]) keyed on the job `kind` (carried on `metadata.kind`): control-tower kinds (`repair` → Build/Dismiss, `db_health` → Build/Dismiss, `coverage-register` → Register/Intentionally-unmonitored/Dismiss) reuse their own control-tower endpoints; multi-action roadmap kinds (`plan` branches, `build` prod-actions, `migration-fix`) decide each pending action via `POST /api/roadmap/approve`. The modal reads the **live** actions from `GET /api/developer/agents/approval-detail?jobId=` (not the notification snapshot) so a multi-action job decided one branch at a time always shows the rest. `approvalDeepLink(kind, …)` is now only the **documented-exception** fallback (storefront-optimizer hero preview / unknown kinds). The decision still rides the **unchanged** executors ([[roadmap-actions]] `approveRoadmapAction` → `queued_resume`, or the control-tower endpoints) — routing changes *where* a request surfaces, never *how* an approved action runs.
 
 ## Exports
 
@@ -45,7 +47,8 @@ Catches **every** kind regardless of which surface raised it (repair / db_health
 ## Callers
 
 - `scripts/builder-worker.ts` (poll loop) — runs `reconcileApprovalInbox(db)` ~every 20s.
-- `src/app/api/developer/agents/inbox/route.ts` — consumes the `metadata.routed_to_function` / `approve_action_id` / `deep_link` the emitter stamps.
+- `src/app/api/developer/agents/inbox/route.ts` — consumes the `metadata.routed_to_function` / `approve_action_id` / `deep_link` / `kind` the emitter stamps.
+- `src/app/api/developer/agents/approval-detail/route.ts` (Phase 4) — owner-gated GET that feeds the inbox modal the live `pending_actions` for a `jobId`.
 
 ## Related
 

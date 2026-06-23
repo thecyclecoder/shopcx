@@ -92,6 +92,7 @@ export async function GET(req: Request) {
           approveActionId,
           deepLink: typeof meta["deep_link"] === "string" ? (meta["deep_link"] as string) : (r.link as string | null) ?? null,
           routedTo,
+          kind: typeof meta["kind"] === "string" ? (meta["kind"] as string) : undefined,
         },
       ];
     }

@@ -124,8 +124,8 @@ export async function GET() {
   } catch {
     /* roadmap read failed — leave spec_missing false (no worse than today) */
   }
-  // Only build-kind slugs are supposed to resolve to a spec page; non-build kinds already route elsewhere
-  // (approvalHref), so a missing spec only matters for them.
+  // Only build-kind slugs are supposed to resolve to a spec page; non-build kinds route elsewhere
+  // (the box page's inspectHref / the routed inbox), so a missing spec only matters for them.
   const specMissing = (kind: string, slug: string): boolean =>
     (kind === "build" || kind === "spec-test") && !liveSpecSlugs.has(slug);
 

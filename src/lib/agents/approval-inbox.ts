@@ -15,9 +15,10 @@
  * (approved → queued_resume, declined, done) so the inbox never shows a stale gate.
  *
  * This milestone changes WHERE a request surfaces, not how an approved action runs — the execution
- * path is unchanged (POST /api/roadmap/approve → worker flips queued_resume). The richer scattered
- * surfaces (Control Tower feeds, spec cards, box approvalHref) keep working until Phase 4 retires
- * them; here we ADD the routed-inbox emission alongside them.
+ * path is unchanged (POST /api/roadmap/approve → worker flips queued_resume). Phase 4 retired the
+ * scattered ENTRY POINTS (box approvalHref deep-links + the Control Tower approval feeds): the inbox
+ * is now the single queue + entry point — a simple approve/decline is inline, a rich one opens an
+ * inbox-launched modal that reuses the same executors in-context (see [[../dashboard/agents]]).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
@@ -79,10 +80,9 @@ export function ownerFunctionForKind(kind: string): string | null {
 }
 
 /**
- * Where to DECIDE a richer/multi-choice action that inline Approve/Decline can't express. Mirrors
- * the box page's approvalHref (the safe-by-default router: a real-spec/dedicated surface gets a deep
- * link, every other agent-proposal kind defaults to the Control Tower, which always loads). Phase 4
- * folds these surfaces into the routed inbox and retires this fallback.
+ * The canonical decide-surface for a kind. Phase 4: the inbox decides rich approvals in-context via an
+ * inbox-launched modal, so this is now only the DOCUMENTED-EXCEPTION fallback (the storefront-optimizer
+ * hero image-preview flow / unknown kinds) — the inbox row deep-links here when no modal applies.
  */
 const SPEC_SLUG_KINDS = new Set(["build", "spec-test"]);
 export function approvalDeepLink(kind: string, specSlug: string | null, specMissing?: boolean | null): string {

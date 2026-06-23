@@ -446,10 +446,259 @@ function InboxRow({ item, onActed }: { item: InboxItem; onActed: () => void }) {
   return <li>{item.link ? <Link href={item.link}>{inner}</Link> : inner}</li>;
 }
 
+// ── Rich-approval decision in-context (approval-routing-engine Phase 4) ───────
+// CEO ruling (2026-06-23): the inbox is the single QUEUE + ENTRY POINT. A SIMPLE approve/decline is
+// decided inline on the row; a RICH approval opens a modal launched FROM the row that REUSES the
+// existing action logic in-context (no navigation to a scattered standalone card). The decision still
+// posts to the unchanged executors, so the gate is never skipped.
+//
+// Control-tower kinds carry a bespoke 2–3-way decision against their own endpoint (Build/Dismiss,
+// Register/Exempt/Dismiss). Multi-action roadmap kinds (plan branches, build prod-actions, migration-fix)
+// decide each pending action via POST /api/roadmap/approve. storefront-optimizer's hero image-preview
+// flow can't be modal-ized cheaply, so it stays a DOCUMENTED EXCEPTION: the row deep-links to the
+// optimizer surface (logged here, not a silent scatter).
+const CONTROL_TOWER_KINDS = new Set(["repair", "db_health", "coverage-register"]);
+const ROADMAP_MODAL_KINDS = new Set(["plan", "build", "spec-test", "migration-fix"]);
+function isModalKind(kind: string | undefined): boolean {
+  return Boolean(kind) && (CONTROL_TOWER_KINDS.has(kind!) || ROADMAP_MODAL_KINDS.has(kind!));
+}
+
+interface ApprovalAction {
+  id: string;
+  type: string;
+  status: string;
+  summary: string;
+  preview: string | null;
+  cmd: string | null;
+  stage: string | null;
+}
+interface ApprovalDetail {
+  jobId: string;
+  kind: string;
+  specSlug: string | null;
+  status: string;
+  actions: ApprovalAction[];
+}
+
+function ApprovalModal({ item, onClose, onActed }: { item: InboxItem; onClose: () => void; onActed: () => void }) {
+  const [detail, setDetail] = useState<ApprovalDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [rejectFor, setRejectFor] = useState<string | null>(null);
+  const [notes, setNotes] = useState("");
+
+  const fetchDetail = useCallback(
+    () =>
+      fetch(`/api/developer/agents/approval-detail?jobId=${encodeURIComponent(item.jobId ?? "")}`)
+        .then((r) => (r.ok ? (r.json() as Promise<ApprovalDetail>) : Promise.reject(r.status))),
+    [item.jobId],
+  );
+
+  useEffect(() => {
+    let alive = true;
+    fetchDetail()
+      .then((d) => alive && (setDetail(d), setLoadErr(false)))
+      .catch(() => alive && setLoadErr(true))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [fetchDetail]);
+
+  // Run one decision against its executor, then re-read the live job: if no pending action remains (the
+  // job left needs_approval), refresh the inbox + close; otherwise keep the modal open on the rest.
+  const act = async (key: string, url: string, body: Record<string, unknown>) => {
+    setBusy(key);
+    setError(null);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      onActed();
+      const fresh = await fetchDetail().catch(() => null);
+      const stillPending = fresh && fresh.status === "needs_approval" && fresh.actions.some((a) => a.status === "pending");
+      if (stillPending) {
+        setDetail(fresh);
+        setRejectFor(null);
+        setNotes("");
+      } else {
+        onClose();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const kind = detail?.kind ?? item.kind ?? "";
+  const pending = (detail?.actions ?? []).filter((a) => a.status === "pending");
+
+  // The bespoke control-tower decisions, reusing the existing control-tower endpoints in-context.
+  const ctEndpoint =
+    kind === "repair"
+      ? "/api/developer/control-tower/repair"
+      : kind === "db_health"
+        ? "/api/developer/control-tower/db-health"
+        : kind === "coverage-register"
+          ? "/api/developer/control-tower/coverage-register"
+          : null;
+
+  const btn = "rounded-md px-3 py-1 text-[12px] font-medium disabled:opacity-50";
+  const approveBtn = `${btn} bg-emerald-600 text-white hover:bg-emerald-700`;
+  const neutralBtn = `${btn} border border-zinc-300 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800`;
+  const amberBtn = `${btn} border border-amber-300 text-amber-700 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-900/30`;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:p-8"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl rounded-xl border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div className="min-w-0">
+            <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{item.title}</h3>
+            <p className="mt-0.5 text-[11px] text-zinc-400">
+              <span className="font-mono">{kind || "approval"}</span> · routed to {item.routedTo ?? "ceo"}
+            </p>
+          </div>
+          <button onClick={onClose} className="shrink-0 rounded-md px-2 py-1 text-[12px] text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+            Close
+          </button>
+        </div>
+
+        <div className="max-h-[70vh] overflow-y-auto px-4 py-3">
+          {item.body && (
+            <pre className="mb-3 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-2 font-sans text-[12px] leading-relaxed text-zinc-600 dark:bg-zinc-950/40 dark:text-zinc-300">
+              {item.body}
+            </pre>
+          )}
+
+          {loading ? (
+            <div className="py-8 text-center text-sm text-zinc-400">Loading the approval…</div>
+          ) : loadErr ? (
+            <div className="py-8 text-center text-sm text-zinc-400">Couldn&apos;t load this approval.</div>
+          ) : ctEndpoint ? (
+            // ── Control-tower proposal: a single bespoke decision against its own endpoint ──
+            <div className="flex flex-wrap items-center gap-2">
+              {kind === "coverage-register" ? (
+                <>
+                  <button disabled={busy !== null} onClick={() => act("register", ctEndpoint, { jobId: item.jobId, action: "register" })} className={approveBtn}>
+                    {busy === "register" ? "Queuing…" : "Register"}
+                  </button>
+                  <button disabled={busy !== null} onClick={() => act("exempt", ctEndpoint, { jobId: item.jobId, action: "exempt" })} className={amberBtn}>
+                    {busy === "exempt" ? "…" : "Intentionally-unmonitored"}
+                  </button>
+                  <button disabled={busy !== null} onClick={() => act("dismiss", ctEndpoint, { jobId: item.jobId, action: "dismiss" })} className={neutralBtn}>
+                    {busy === "dismiss" ? "…" : "Dismiss"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button disabled={busy !== null} onClick={() => act("build", ctEndpoint, { jobId: item.jobId, action: "build" })} className={approveBtn}>
+                    {busy === "build" ? "Queuing…" : "Build the fix"}
+                  </button>
+                  <button disabled={busy !== null} onClick={() => act("dismiss", ctEndpoint, { jobId: item.jobId, action: "dismiss" })} className={neutralBtn}>
+                    {busy === "dismiss" ? "…" : "Dismiss"}
+                  </button>
+                </>
+              )}
+            </div>
+          ) : pending.length === 0 ? (
+            <div className="py-6 text-center text-[12px] text-zinc-400">No actions still awaiting a decision.</div>
+          ) : (
+            // ── Roadmap kinds: decide each pending action via the unchanged approve endpoint ──
+            <ul className="space-y-2">
+              {pending.map((a) => {
+                const canReject = a.type === "storefront_campaign" && a.stage === "preview";
+                return (
+                  <li key={a.id} className="rounded-lg border border-zinc-200 bg-white p-2.5 dark:border-zinc-800 dark:bg-zinc-950/30">
+                    {a.summary && <div className="text-[12px] font-medium text-zinc-800 dark:text-zinc-200">{a.summary}</div>}
+                    {(a.preview || a.cmd) && (
+                      <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-zinc-100 p-1.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                        {a.preview || (a.cmd ? `$ ${a.cmd}` : "")}
+                      </pre>
+                    )}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <button
+                        disabled={busy !== null}
+                        onClick={() => act(`approve:${a.id}`, "/api/roadmap/approve", { jobId: item.jobId, actionId: a.id, decision: "approve" })}
+                        className={approveBtn}
+                      >
+                        {busy === `approve:${a.id}` ? "Approving…" : "Approve & apply"}
+                      </button>
+                      <button
+                        disabled={busy !== null}
+                        onClick={() => act(`decline:${a.id}`, "/api/roadmap/approve", { jobId: item.jobId, actionId: a.id, decision: "decline" })}
+                        className={neutralBtn}
+                      >
+                        {busy === `decline:${a.id}` ? "Declining…" : "Decline"}
+                      </button>
+                      {canReject && (
+                        <button disabled={busy !== null} onClick={() => setRejectFor(rejectFor === a.id ? null : a.id)} className={amberBtn}>
+                          Reject with notes
+                        </button>
+                      )}
+                    </div>
+                    {canReject && rejectFor === a.id && (
+                      <div className="mt-2 space-y-1.5">
+                        <textarea
+                          rows={2}
+                          value={notes}
+                          onChange={(e) => setNotes(e.target.value)}
+                          placeholder="What to change before the next candidate…"
+                          className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+                        />
+                        <button
+                          disabled={busy !== null || !notes.trim()}
+                          onClick={() => act(`reject:${a.id}`, "/api/roadmap/approve", { jobId: item.jobId, actionId: a.id, decision: "reject", notes })}
+                          className={`${btn} bg-indigo-600 text-white hover:bg-indigo-700`}
+                        >
+                          {busy === `reject:${a.id}` ? "Sending…" : "Send notes → regenerate"}
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {error && <p className="mt-2 text-[11px] text-rose-500">{error}</p>}
+          {item.deepLink && (
+            <Link href={item.deepLink} className="mt-3 inline-block text-[12px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
+              Open the full surface →
+            </Link>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }) {
   const [busy, setBusy] = useState<null | "approve" | "decline">(null);
   const [error, setError] = useState<string | null>(null);
-  const canDecideInline = Boolean(item.jobId && item.approveActionId);
+  const [modalOpen, setModalOpen] = useState(false);
+
+  // Decision routing (Phase 4): a control-tower kind always opens the modal (its decision is bespoke,
+  // 2–3-way, against its own endpoint — never a plain inline approve). Otherwise a single plain action
+  // is decided inline; a multi-action roadmap kind opens the modal; anything else (storefront hero
+  // preview, unknown kinds) falls back to the documented-exception deep-link.
+  const isControlTower = CONTROL_TOWER_KINDS.has(item.kind ?? "");
+  const canDecideInline = Boolean(item.jobId && item.approveActionId) && !isControlTower;
+  const canUseModal = Boolean(item.jobId) && !canDecideInline && isModalKind(item.kind);
 
   const decide = async (decision: "approve" | "decline") => {
     if (!item.jobId || !item.approveActionId) return;
@@ -510,8 +759,15 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
               {busy === "decline" ? "Declining…" : "Decline"}
             </button>
           </>
+        ) : canUseModal ? (
+          <button
+            onClick={() => setModalOpen(true)}
+            className="rounded-md bg-indigo-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-indigo-700"
+          >
+            Review &amp; decide
+          </button>
         ) : null}
-        {item.deepLink && (
+        {item.deepLink && !canUseModal && (
           <Link
             href={item.deepLink}
             className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
@@ -521,6 +777,7 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
         )}
         {error && <span className="text-[11px] text-rose-500">{error}</span>}
       </div>
+      {modalOpen && <ApprovalModal item={item} onClose={() => setModalOpen(false)} onActed={onActed} />}
     </li>
   );
 }

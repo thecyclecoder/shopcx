@@ -83,10 +83,17 @@ export interface InboxItem {
    * the row falls back to the `deepLink` surface so the richer decision isn't guessed at.
    */
   approveActionId?: string | null;
-  /** canonical surface to decide a richer/multi-choice action (Phase 4 folds these into the inbox). */
+  /** canonical surface to decide a richer/multi-choice action (Phase 4: a documented-exception fallback). */
   deepLink?: string | null;
   /** the org-chart function this request routed to (eyeball/audit; CEO by default). */
   routedTo?: string;
+  /**
+   * the agent_jobs.kind that raised this approval. Phase 4 uses it to pick HOW a rich approval is
+   * decided IN the inbox: control-tower kinds (repair / db_health / coverage-register) and multi-action
+   * roadmap kinds (plan / build / migration-fix) open an inbox-launched modal that reuses the existing
+   * action logic; storefront-optimizer's hero image-preview flow stays a documented-exception deep-link.
+   */
+  kind?: string;
 }
 
 export interface InboxPayload {

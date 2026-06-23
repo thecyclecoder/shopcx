@@ -9,6 +9,22 @@ import { useWorkspace } from "@/lib/workspace-context";
 // recent history. Polls GET /api/developer/control-tower every ~15s. Owner-only, read-only.
 
 const REPO = "thecyclecoder/shopcx";
+// approval-routing-engine Phase 4 (CEO ruling 2026-06-23): the Control Tower keeps its MONITORING
+// panels, but its approval FEEDS are no longer a separate entry point — every proposal is DECIDED in
+// the one routed Agents-hub inbox (in-context, reusing the same control-tower executors). These sections
+// stay as read-only "what's waiting" monitoring and link into the inbox; the decide buttons moved there.
+const APPROVAL_INBOX_HREF = "/dashboard/agents?view=inbox";
+
+function DecideInInbox() {
+  return (
+    <Link
+      href={APPROVAL_INBOX_HREF}
+      className="inline-flex items-center rounded-md border border-indigo-300 px-2.5 py-1 text-[11px] font-medium text-indigo-700 hover:bg-indigo-50 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+    >
+      Decide in inbox →
+    </Link>
+  );
+}
 
 type LoopColor = "green" | "amber" | "red";
 type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo";
@@ -463,34 +479,21 @@ function CoverageAuditSection({ audit }: { audit: CoverageAudit }) {
   );
 }
 
-function CoverageRegisterSection({ items, onChange }: { items: CoverageRegisterItem[]; onChange: () => void }) {
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const act = async (item: CoverageRegisterItem, action: "register" | "exempt" | "dismiss") => {
-    setBusy(`${item.jobId}:${action}`);
-    try {
-      const res = await fetch("/api/developer/control-tower/coverage-register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: item.jobId, action }),
-      });
-      if (res.ok) onChange();
-    } finally {
-      setBusy(null);
-    }
-  };
-
+function CoverageRegisterSection({ items }: { items: CoverageRegisterItem[] }) {
   if (items.length === 0) return null; // only show when there's a proposal waiting (the clean state lives in the audit section).
   return (
     <div className="mt-8">
-      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-        Coverage registration
-      </h2>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Coverage registration
+        </h2>
+        <DecideInInbox />
+      </div>
       <p className="mb-3 text-[11px] text-zinc-400">
         The coverage-register agent turns each unregistered loop into a proposed <code>MONITORED_LOOPS</code> entry —
-        it infers the cadence-derived window + an owner-function, then surfaces it for one-tap <b>Register</b> (lands
-        the entry → the loop becomes a monitored tile). <b>Mark intentionally-unmonitored</b> exempts it (it stops
-        re-surfacing); <b>Dismiss</b> defers. It never silently edits the registry — the build is queued only on your tap.
+        it infers the cadence-derived window + an owner-function. Monitoring only: <b>Register</b> /{" "}
+        <b>Intentionally-unmonitored</b> / <b>Dismiss</b> are decided in the routed inbox (it never silently edits
+        the registry — the build is queued only on your tap).
       </p>
       <ul className="space-y-2">
         {items.map((item) => (
@@ -498,42 +501,17 @@ function CoverageRegisterSection({ items, onChange }: { items: CoverageRegisterI
             key={item.jobId}
             className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] dark:border-amber-900/40 dark:bg-amber-900/15"
           >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0">
-                <span className="font-semibold text-zinc-800 dark:text-zinc-100">Unregistered loop: {item.loopId}</span>
-                <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
-                  proposed entry
-                </span>
-                <p className="mt-1 text-zinc-600 dark:text-zinc-300">
-                  Inferred: owner <b>{item.proposedOwner}</b> · {item.proposedCadence}
-                </p>
-                <p className="mt-0.5 text-[10px] text-zinc-400">
-                  <code>{item.cadence}</code> · build <code>{item.registerSlug}</code> · surfaced {elapsed(item.createdAt)} ago
-                </p>
-              </div>
-              <div className="flex shrink-0 flex-wrap gap-2">
-                <button
-                  onClick={() => act(item, "register")}
-                  disabled={busy !== null}
-                  className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  {busy === `${item.jobId}:register` ? "Queuing…" : "Register"}
-                </button>
-                <button
-                  onClick={() => act(item, "exempt")}
-                  disabled={busy !== null}
-                  className="rounded-md border border-amber-300 px-2.5 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-900/30"
-                >
-                  {busy === `${item.jobId}:exempt` ? "…" : "Intentionally-unmonitored"}
-                </button>
-                <button
-                  onClick={() => act(item, "dismiss")}
-                  disabled={busy !== null}
-                  className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                >
-                  {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
-                </button>
-              </div>
+            <div className="min-w-0">
+              <span className="font-semibold text-zinc-800 dark:text-zinc-100">Unregistered loop: {item.loopId}</span>
+              <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
+                proposed entry
+              </span>
+              <p className="mt-1 text-zinc-600 dark:text-zinc-300">
+                Inferred: owner <b>{item.proposedOwner}</b> · {item.proposedCadence}
+              </p>
+              <p className="mt-0.5 text-[10px] text-zinc-400">
+                <code>{item.cadence}</code> · build <code>{item.registerSlug}</code> · surfaced {elapsed(item.createdAt)} ago
+              </p>
             </div>
           </li>
         ))}
@@ -618,31 +596,18 @@ function SpecDriftSection({ rows, onChange }: { rows: SpecDriftRow[]; onChange: 
   );
 }
 
-function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; onChange: () => void }) {
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const act = async (item: RepairSurfaceItem, action: "build" | "dismiss") => {
-    setBusy(`${item.jobId}:${action}`);
-    try {
-      const res = await fetch("/api/developer/control-tower/repair", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: item.jobId, action }),
-      });
-      if (res.ok) onChange();
-    } finally {
-      setBusy(null);
-    }
-  };
-
+function RepairFeedSection({ items }: { items: RepairSurfaceItem[] }) {
   return (
     <div className="mt-8">
-      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Repair feed</h2>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Repair feed</h2>
+        {items.length > 0 && <DecideInInbox />}
+      </div>
       <p className="mb-3 text-[11px] text-zinc-400">
         The Repair Agent triages each new error/alert read-only and proposes a fix — <b>error → proposed fix</b>.
-        It <i>surfaces</i> the fix spec for one-tap <b>Build</b> (it never auto-builds product code); <b>Dismiss</b>
-        clears it and resolves the error. <b>Needs human</b> items couldn&apos;t be confidently diagnosed — no spec,
-        no loop. Empty = nothing waiting on you.
+        Monitoring only: the one-tap <b>Build</b> (it never auto-builds product code) / <b>Dismiss</b> decision is
+        made in the routed inbox. <b>Needs human</b> items couldn&apos;t be confidently diagnosed — no spec, no loop.
+        Empty = nothing waiting on you.
       </p>
       {items.length === 0 ? (
         <p className="rounded-lg border border-dashed border-zinc-200 px-3 py-4 text-xs text-emerald-700 dark:border-zinc-800 dark:text-emerald-300">
@@ -659,43 +624,23 @@ function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; on
                   : "border-amber-200 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-900/15"
               }`}
             >
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <span className="font-semibold text-zinc-800 dark:text-zinc-100">{item.title}</span>
-                  <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
-                    {item.state === "needs-human" ? "needs human" : "proposed fix"}
-                  </span>
-                  {item.specSlug && (
-                    <Link
-                      href={`/dashboard/roadmap/${item.specSlug}`}
-                      className="ml-1.5 font-mono text-[11px] text-zinc-600 hover:underline dark:text-zinc-300"
-                    >
-                      [[{item.specSlug}]]
-                    </Link>
-                  )}
-                  {item.diagnosis && <p className="mt-1 whitespace-pre-wrap text-zinc-600 dark:text-zinc-300">{item.diagnosis}</p>}
-                  <p className="mt-0.5 text-[10px] text-zinc-400">
-                    <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
-                  </p>
-                </div>
-                <div className="flex shrink-0 gap-2">
-                  {item.state === "proposed" && item.specSlug && (
-                    <button
-                      onClick={() => act(item, "build")}
-                      disabled={busy !== null}
-                      className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                    >
-                      {busy === `${item.jobId}:build` ? "Queuing…" : "Build"}
-                    </button>
-                  )}
-                  <button
-                    onClick={() => act(item, "dismiss")}
-                    disabled={busy !== null}
-                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              <div className="min-w-0">
+                <span className="font-semibold text-zinc-800 dark:text-zinc-100">{item.title}</span>
+                <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
+                  {item.state === "needs-human" ? "needs human" : "proposed fix"}
+                </span>
+                {item.specSlug && (
+                  <Link
+                    href={`/dashboard/roadmap/${item.specSlug}`}
+                    className="ml-1.5 font-mono text-[11px] text-zinc-600 hover:underline dark:text-zinc-300"
                   >
-                    {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
-                  </button>
-                </div>
+                    [[{item.specSlug}]]
+                  </Link>
+                )}
+                {item.diagnosis && <p className="mt-1 whitespace-pre-wrap text-zinc-600 dark:text-zinc-300">{item.diagnosis}</p>}
+                <p className="mt-0.5 text-[10px] text-zinc-400">
+                  <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
+                </p>
               </div>
             </li>
           ))}
@@ -717,30 +662,18 @@ function dbHumanBytes(n: number): string {
   return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
 }
 
-function DbHealthSection({ panel, onChange }: { panel: DbHealthPanel; onChange: () => void }) {
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const act = async (item: DbHealthProposalItem, action: "build" | "dismiss") => {
-    setBusy(`${item.jobId}:${action}`);
-    try {
-      const res = await fetch("/api/developer/control-tower/db-health", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: item.jobId, action }),
-      });
-      if (res.ok) onChange();
-    } finally {
-      setBusy(null);
-    }
-  };
-
+function DbHealthSection({ panel }: { panel: DbHealthPanel }) {
   return (
     <div className="mt-8">
-      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">DB Health</h2>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">DB Health</h2>
+        {panel.proposals.length > 0 && <DecideInInbox />}
+      </div>
       <p className="mb-3 text-[11px] text-zinc-400">
         The DB Health Agent watches Postgres read-only — top tables by size/growth, the slowest queries
-        (root-caused via <code>EXPLAIN</code>), missing/unused indexes, and bloat — and <b>proposes</b> fix specs
-        for one-tap <b>Build</b>. It never applies DDL or deletes on its own. Last size sweep {elapsed(panel.lastSizeSweepAt)} ago ·
+        (root-caused via <code>EXPLAIN</code>), missing/unused indexes, and bloat — and <b>proposes</b> fix specs.
+        Monitoring only: the one-tap <b>Build</b> / <b>Dismiss</b> decision is made in the routed inbox (it never
+        applies DDL or deletes on its own). Last size sweep {elapsed(panel.lastSizeSweepAt)} ago ·
         last slow-query pass {elapsed(panel.lastSlowQueryAt)} ago.
       </p>
 
@@ -794,35 +727,15 @@ function DbHealthSection({ panel, onChange }: { panel: DbHealthPanel; onChange: 
               key={item.jobId}
               className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] dark:border-amber-900/40 dark:bg-amber-900/15"
             >
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <span className="font-semibold text-zinc-800 dark:text-zinc-100">{item.title}</span>
-                  <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
-                    {item.cause}
-                  </span>
-                  {item.impact && <p className="mt-1 text-zinc-600 dark:text-zinc-300">{item.impact}</p>}
-                  <p className="mt-0.5 text-[10px] text-zinc-400">
-                    <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
-                  </p>
-                </div>
-                <div className="flex shrink-0 gap-2">
-                  {item.specSlug && (
-                    <button
-                      onClick={() => act(item, "build")}
-                      disabled={busy !== null}
-                      className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                    >
-                      {busy === `${item.jobId}:build` ? "Queuing…" : "Build"}
-                    </button>
-                  )}
-                  <button
-                    onClick={() => act(item, "dismiss")}
-                    disabled={busy !== null}
-                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                  >
-                    {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
-                  </button>
-                </div>
+              <div className="min-w-0">
+                <span className="font-semibold text-zinc-800 dark:text-zinc-100">{item.title}</span>
+                <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
+                  {item.cause}
+                </span>
+                {item.impact && <p className="mt-1 text-zinc-600 dark:text-zinc-300">{item.impact}</p>}
+                <p className="mt-0.5 text-[10px] text-zinc-400">
+                  <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
+                </p>
               </div>
             </li>
           ))}
@@ -952,11 +865,11 @@ export default function ControlTowerPage() {
 
           {snap.selfAudit && <CoverageAuditSection audit={snap.selfAudit} />}
 
-          <CoverageRegisterSection items={snap.coverageRegister ?? []} onChange={refresh} />
+          <CoverageRegisterSection items={snap.coverageRegister ?? []} />
 
-          <RepairFeedSection items={snap.repairs ?? []} onChange={refresh} />
+          <RepairFeedSection items={snap.repairs ?? []} />
 
-          {snap.dbHealth && <DbHealthSection panel={snap.dbHealth} onChange={refresh} />}
+          {snap.dbHealth && <DbHealthSection panel={snap.dbHealth} />}
 
           <SpecDriftSection rows={snap.specDrift ?? []} onChange={refresh} />
 
