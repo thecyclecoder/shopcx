@@ -1670,8 +1670,9 @@ async function runPlatformDirectorJob(job: Job) {
   if (!candidate) {
     const reason = "outside the auto-approve leash (multi-choice / non-leash / multi-action) — needs the CEO";
     await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind } });
-    await update(job.id, { status: "completed", log_tail: `escalate → ${reason}; left for CEO (escalation routing lands in Phase 3)`.slice(-2000) });
-    console.log(`${tag} escalate → outside leash, left for CEO`);
+    await lib.escalateApprovalRequestToCeo(db, t, reason); // Phase 3: route the request UP to the CEO inbox.
+    await update(job.id, { status: "completed", log_tail: `escalate → ${reason}; routed to CEO inbox`.slice(-2000) });
+    console.log(`${tag} escalate → outside leash, routed to CEO`);
     return;
   }
 
@@ -1701,8 +1702,9 @@ async function runPlatformDirectorJob(job: Job) {
     // escalate — OR no recognizable verdict (fail safe: escalate, NEVER auto-approve on an ambiguous result).
     const reason = reasoning || (isError ? "investigation errored — escalating, not approving" : "could not confirm sound + within the leash");
     await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind, verdict: verdict || "(none)" } });
-    await update(job.id, { status: "completed", log_tail: `escalate → left ${t.kind} for CEO (escalation routing lands in Phase 3): ${reason}`.slice(-2000) });
-    console.log(`${tag} escalate → ${verdict || "no verdict"}`);
+    await lib.escalateApprovalRequestToCeo(db, t, reason); // Phase 3: route the high-stakes call UP to the CEO inbox with the diagnosis.
+    await update(job.id, { status: "completed", log_tail: `escalate → routed ${t.kind} to CEO inbox: ${reason}`.slice(-2000) });
+    console.log(`${tag} escalate → ${verdict || "no verdict"} (routed to CEO)`);
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -6164,6 +6166,7 @@ async function main() {
             const { escortApprovedGoals } = await import("../src/lib/agents/platform-director");
             const r = await escortApprovedGoals(db);
             if (r.queued.length) console.log(`[platform-director] escorted goal(s) → queued ${r.queued.length} spec(s): ${r.queued.join(", ")}`);
+            if (r.escalated.length) console.log(`[platform-director] loop-guard → escalated ${r.escalated.length} stuck build(s) to CEO: ${r.escalated.join(", ")}`);
           } catch (e) {
             console.error("[platform-director] goal escort failed (continuing):", e instanceof Error ? e.message : e);
           } finally {
