@@ -27,11 +27,13 @@ _None._ Side effects are DB writes ([[../tables/loop_alerts]]) + Slack DMs.
 
 - [[../tables/loop_alerts]] (open / bump / resolve incidents)
 - [[../tables/loop_heartbeats]] (its own end-of-run beat)
+- [[../tables/control_tower_loop_registry]] (`recordLoopFirstObserved`: stamp each cron's first-observed-registered time, insert-if-absent — the per-loop `registered_not_firing` grace anchor; [[../specs/control-tower-registered-not-firing-new-cron-grace]])
 
 ## Tables read (not written)
 
 - [[../tables/worker_heartbeats]] (box liveness)
 - [[../tables/loop_heartbeats]] (cron + agent-kind freshness/history)
+- [[../tables/control_tower_loop_registry]] (per-loop first-observed age → `registered_not_firing` grace)
 - [[../tables/agent_jobs]] (stuck-job detection + Phase 2 escalation/spec-test enqueue checks)
 - [[../tables/tickets]] (Phase 2 escalation-idle: routine-escalated tickets waiting)
 - [[../tables/subscriptions]] (Phase 2 renewal-integrity: overdue active internal subs)

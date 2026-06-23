@@ -250,7 +250,7 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedAgeMs: number | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -308,14 +308,28 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
     // registered cron that produces nothing for a whole window past a provably-alive watchdog IS the
     // problem we want to page. (monitorUptimeMs is conservative — beat retention can only shorten it,
     // never inflate it — so it never over-fires; null = unknown ⇒ stay amber.)
-    if (everBeatCount === 0 && monitorUptimeMs != null && monitorUptimeMs > window) {
+    //
+    // BUT monitorUptimeMs is the WATCHDOG'S uptime, not this cron's age: a cron added AFTER the box
+    // came up (the common case — the box runs for days) inherits the watchdog's long uptime and trips
+    // the moment it's registered, BEFORE its first scheduled tick can fire (control-tower-registered-
+    // not-firing-new-cron-grace: the storefront-lever-decay-cron false positive paged 9h before any
+    // fire was possible). So anchor the grace to THIS loop too: firstObservedAgeMs = now - the per-loop
+    // first_observed_at the monitor records on first sight (control_tower_loop_registry) — a deploy-
+    // surviving lower bound on how long the monitor has KNOWN this specific cron registered. Gate on
+    // min(monitorUptimeMs, firstObservedAgeMs): a just-added cron has a small firstObservedAgeMs ⇒ min
+    // < window ⇒ stays amber through its first cadence; a long-registered dead cron has BOTH large ⇒
+    // min > window ⇒ still pages. first_observed unknown (null — never recorded yet) ⇒ stay amber too
+    // (same conservative posture as monitorUptimeMs==null) so a brand-new cron never false-fires.
+    const grantedAgeMs =
+      monitorUptimeMs != null && firstObservedAgeMs != null ? Math.min(monitorUptimeMs, firstObservedAgeMs) : null;
+    if (everBeatCount === 0 && grantedAgeMs != null && grantedAgeMs > window) {
       return {
         ...base,
         color: "red",
-        statusText: `registered but not firing — 0 beats in ${fmtDur(monitorUptimeMs)} of watchdog uptime`,
+        statusText: `registered but not firing — 0 beats in ${fmtDur(grantedAgeMs)} since first observed`,
         violation: {
           reason: "registered_not_firing",
-          detail: `Cron ${loop.id} is registered with Inngest but has NEVER emitted a heartbeat — the Control Tower watchdog has been continuously running for ${fmtDur(monitorUptimeMs)}, well past this cron's ${fmtDur(window)} cadence+grace (expected ${loop.expectedCadence}), yet 0 beats. Inngest is not invoking it (its cron schedule isn't active in the prod env) — distinct from never-registered: the function IS in the registered set. Re-sync the app (PUT /api/inngest / dashboard "sync new app version") to activate the schedule.`,
+          detail: `Cron ${loop.id} is registered with Inngest but has NEVER emitted a heartbeat — the Control Tower watchdog has known it registered for ${fmtDur(grantedAgeMs)}, well past this cron's ${fmtDur(window)} cadence+grace (expected ${loop.expectedCadence}), yet 0 beats. Inngest is not invoking it (its cron schedule isn't active in the prod env) — distinct from never-registered: the function IS in the registered set. Re-sync the app (PUT /api/inngest / dashboard "sync new app version") to activate the schedule.`,
         },
       };
     }
@@ -834,7 +848,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }] = await Promise.all([
+  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }, { data: loopRegistry }] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at, accounts").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly read (control-tower-loop-beats-rpc-perf P1): a lateral join takes
     // the distinct cron + agent-kind loop_ids and, per loop, reads only its latest HISTORY_LIMIT
@@ -857,6 +871,12 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     // (loop_id, ran_at) index (single oldest row). Beat retention can only shorten this span, never
     // inflate it ⇒ conservative (never a false registered_not_firing).
     admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "control-tower-monitor").order("ran_at", { ascending: true }).limit(1).maybeSingle(),
+    // Per-loop "first observed registered" anchor for the registered_not_firing grace (evalCron):
+    // first_observed_at is recorded once on first sight (recordLoopFirstObserved, write path below) and
+    // never updated, so now - first_observed_at is a deploy-surviving lower bound on how long the
+    // monitor has KNOWN this specific cron registered — unlike monitorUptimeMs (the watchdog's own
+    // uptime), it doesn't credit a newly-added cron with the box's pre-existing uptime. READ-ONLY here.
+    admin.from("control_tower_loop_registry").select("loop_id, first_observed_at"),
   ]);
 
   // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
@@ -866,6 +886,14 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const monitorUptimeMs = (oldestMonitorBeat as { ran_at: string } | null)?.ran_at
     ? ageMs((oldestMonitorBeat as { ran_at: string }).ran_at)
     : null;
+
+  // loop_id → how long ago the monitor first observed this loop registered (now - first_observed_at),
+  // the per-loop grace anchor for the registered_not_firing check. Absent (never recorded yet — a
+  // brand-new loop the write path hasn't stamped) ⇒ null ⇒ evalCron stays amber (conservative).
+  const firstObservedAgeByLoop = new Map<string, number>();
+  for (const r of (loopRegistry ?? []) as Array<{ loop_id: string; first_observed_at: string }>) {
+    firstObservedAgeByLoop.set(r.loop_id, ageMs(r.first_observed_at));
+  }
 
   // A failed/timed-out control_tower_loop_beats RPC (statement timeout scanning the feed) returns
   // beats=null → empty byLoop → every cron looks like 0 beats ever (absent) + no latest. That is
@@ -903,7 +931,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstObservedAgeByLoop.get(loop.id) ?? null);
     else core = evalAgentKind(loop, latest, activeJobs);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
@@ -1002,9 +1030,28 @@ export interface MonitorResult {
   resolved: number;
 }
 
+/**
+ * Stamp control_tower_loop_registry.first_observed_at the first time the monitor sees a cron loop id
+ * (insert-if-absent — ignoreDuplicates never moves an existing timestamp, so it's a stable lower bound
+ * on the loop's age that survives box self-update/restart). This is the per-loop grace anchor evalCron's
+ * registered_not_firing check reads back; recorded here in the WRITE path (runControlTowerMonitor), never
+ * in the READ-ONLY snapshot the dashboard calls. Best-effort — never let it break the monitor's act loop.
+ */
+async function recordLoopFirstObserved(admin: Admin): Promise<void> {
+  const rows = MONITORED_LOOPS.filter((l) => l.kind === "cron").map((l) => ({ loop_id: l.id, kind: l.kind }));
+  if (!rows.length) return;
+  const { error } = await admin
+    .from("control_tower_loop_registry")
+    .upsert(rows, { onConflict: "loop_id", ignoreDuplicates: true });
+  if (error) console.warn(`[control-tower] first-observed upsert failed:`, error.message);
+}
+
 /** Evaluate + act: open de-duped alerts on red loops (paging on first sight), auto-resolve on recovery. */
 export async function runControlTowerMonitor(): Promise<MonitorResult> {
   const admin = createAdminClient();
+  // Record first-observed BEFORE the snapshot so a just-added cron's grace anchor exists from its very
+  // first evaluation (firstObservedAgeMs ≈ 0 ⇒ registered_not_firing stays amber through its first cadence).
+  await recordLoopFirstObserved(admin);
   const snap = await buildControlTowerSnapshot(admin);
 
   // Self-audit findings are amber (surfaced on the dashboard + folded into counts), not a page —
