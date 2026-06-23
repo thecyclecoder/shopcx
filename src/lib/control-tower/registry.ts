@@ -279,6 +279,20 @@ export const WORKER_BOX_ID = "box";
  */
 export const MIGRATION_DRIFT_LOOP_ID = "migration-drift-check";
 
+/**
+ * loop_heartbeats.loop_id of the DB Health Agent's two BOX-EMITTED passes (docs/brain/specs/
+ * db-health-agent.md, Phase 1). Like the migration-drift check, detection runs on the box (it reads
+ * pg_stat_statements + runs EXPLAIN + reads pg_class/pg_stat_user_* via the pooler — which the
+ * deployed runtime can't do) and beats here, so a DEAD agent is itself visible (cron freshness).
+ *   - the FREQUENT (~hourly) slow-query root-cause pass.
+ *   - the DAILY size/growth/index/bloat sweep.
+ * Both are liveness tiles (green when beating) — the FINDINGS surface as deduped proposals in the DB
+ * Health panel (agent_jobs kind='db_health', needs_approval), not by reddening the tile, because a
+ * proposal is advisory (awaiting the owner), not a system failure.
+ */
+export const DB_HEALTH_SLOWQ_LOOP_ID = "db-health-slow-query";
+export const DB_HEALTH_SIZE_LOOP_ID = "db-health-size-sweep";
+
 export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ── The box build worker (worker_heartbeats) ──────────────────────────────
   {
@@ -392,6 +406,33 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every ~30 min (box job)",
     livenessWindowMs: 90 * MIN,
     outputAssertion: "migration-drift",
+  },
+  {
+    // BOX-EMITTED — the DB Health Agent's frequent slow-query root-cause pass (db-health-agent P1).
+    // Reads pg_stat_statements, EXPLAINs each top offender, classifies the cause, and proposes the
+    // matching fix (deduped, surfaced in the DB Health panel). Liveness only — a finding is an
+    // advisory proposal, not a red tile. registeredAt graces the first-run window (newcron-grace).
+    id: DB_HEALTH_SLOWQ_LOOP_ID,
+    kind: "cron",
+    owner: "platform",
+    label: "DB Health — slow-query root-cause",
+    description: "Box job: top pg_stat_statements offenders → EXPLAIN → classify cause → propose the matching fix (index/rewrite/vacuum).",
+    expectedCadence: "every ~hour (box job)",
+    livenessWindowMs: 2 * HOUR,
+    registeredAt: "2026-06-23T00:00:00Z",
+  },
+  {
+    // BOX-EMITTED — the DB Health Agent's daily size/growth/index/bloat sweep (db-health-agent P1).
+    // Snapshots per-table size into db_table_size_history (growth rate), flags unbounded growth /
+    // missing+unused indexes / bloat, and proposes the fix. Liveness only (advisory proposals).
+    id: DB_HEALTH_SIZE_LOOP_ID,
+    kind: "cron",
+    owner: "platform",
+    label: "DB Health — size / growth / index sweep",
+    description: "Box job: snapshots per-table size+stats, flags unbounded growth / missing+unused indexes / bloat, proposes the fix.",
+    expectedCadence: "daily (box job)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-06-23T00:00:00Z",
   },
 
   // ── Full Inngest cron coverage (control-tower-complete-coverage spec, Phase 1) ──
