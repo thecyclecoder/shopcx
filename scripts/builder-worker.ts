@@ -125,6 +125,7 @@ const MAX_REPAIR = Number(process.env.AGENT_TODO_MAX_REPAIR || 2);
 // One repair pass: read-only investigation (the signature + sample + the implicated code) + a
 // verdict. Minutes — same ballpark as a migration-fix / ticket-improve turn, not the seed ceiling.
 const REPAIR_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -157,6 +158,19 @@ const MIGRATION_DRIFT_INTERVAL_MS = 30 * 60 * 1000;
 let lastMigrationDriftCheck = 0; // 0 ⇒ run on the first poll so there's a beat right away.
 let migrationDriftInFlight = false;
 
+// DB Health Agent (db-health-agent P1): two box-side passes on different cadences. The FREQUENT
+// slow-query root-cause pass (~hourly) reads pg_stat_statements + EXPLAINs each top offender; the
+// DAILY size sweep snapshots per-table size/stats + flags growth/index/bloat. Both run here (not as
+// Inngest crons) because EXPLAIN + pg_stat_* need the pooler the deployed runtime can't use — same
+// rationale as migration-drift. In-flight-guarded + gated so they never overlap or stall the poll.
+const DB_HEALTH_SLOWQ_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const DB_HEALTH_SIZE_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+let lastDbHealthSlowQ = 0; // 0 ⇒ run on first poll so there's a beat right away.
+let lastDbHealthSize = 0;
+let dbHealthSlowQInFlight = false;
+let dbHealthSizeInFlight = false;
+const DB_HEALTH_MAX_PROPOSALS_PER_PASS = 5; // don't flood: surface at most the top-N findings/pass.
+
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
 type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "blocked_on_usage" | "completed" | "failed" | "needs_attention";
@@ -176,7 +190,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build" | "db_health_build";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -188,10 +202,13 @@ interface PendingAction {
   // src/lib/migration-fix.ts `applyMigrationFix` on approval.
   fix_kind?: "price_reconcile" | "variant_backfill" | "appstle_cancel";
   payload?: unknown;
-  // set when type==='repair_build' (repair-agent) OR type==='storefront_build' (storefront-optimizer):
-  // the fix/feature spec slug the agent authored to main + surfaced for one-tap owner Build. The build
-  // is queued on approval, NOT auto.
+  // set when type==='repair_build' (repair-agent) OR type==='storefront_build' (storefront-optimizer)
+  // OR type==='db_health_build' (db-health-agent): the fix/feature spec slug the agent authored to main
+  // (db_health: pre-authored at detection, committed on Build) + surfaced for one-tap owner Build. The
+  // build is queued on approval, NOT auto.
   spec_slug?: string;
+  // set when type==='db_health_build': the human-readable title of the proposed fix spec (for the panel).
+  spec_title?: string;
   // set when type==='storefront_campaign' (storefront-optimizer): the typed OptimizerProposal the box
   // session emitted; the worker stands up the M1 experiment from it on approval (or immediately when the
   // gate is auto_run). Carries hypothesis + lever + reversible variant patch.
@@ -202,7 +219,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer" | "db_health";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -689,7 +706,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer", "db_health"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -973,6 +990,331 @@ async function runMigrationDriftJob(): Promise<void> {
   } catch (e) {
     console.error("[migration-drift] check failed:", e instanceof Error ? e.message : String(e));
   }
+}
+
+// ── DB Health Agent box passes (db-health-agent P1) ───────────────────────────
+// Open a short-lived pooler connection (raw pg — pg_stat_* / EXPLAIN aren't reachable via PostgREST).
+// Returns null when the host has no DB password (→ the pass reports skipped, never a false "healthy").
+async function dbHealthPgClient(): Promise<import("pg").Client | null> {
+  let connectionString: string;
+  try {
+    const { poolerConnectionString } = await import("./_bootstrap");
+    connectionString = poolerConnectionString();
+  } catch {
+    return null; // no SUPABASE_DB_PASSWORD / SUPABASE_DB_URL on this host — skip honestly.
+  }
+  const { Client } = await import("pg");
+  const c = new Client({ connectionString });
+  await c.connect();
+  return c;
+}
+
+// EXPLAIN a safe SELECT and return the plan text, or null if it can't be planned. Plain EXPLAIN does
+// NOT execute the query (no ANALYZE) so it's safe on prod; for a normalized parameterized statement
+// (pg_stat_statements stores `$1` placeholders) plain EXPLAIN errors, so we retry with GENERIC_PLAN
+// (PG16+), which plans a parameterized query with no values. Every attempt is isolated in its own
+// try — a failed EXPLAIN must never abort the pass.
+async function explainQuery(c: import("pg").Client, query: string): Promise<string | null> {
+  const render = (rows: Array<Record<string, unknown>>): string =>
+    rows.map((r) => String(r["QUERY PLAN"] ?? Object.values(r)[0] ?? "")).join("\n");
+  try {
+    const res = await c.query(`EXPLAIN (FORMAT TEXT) ${query}`);
+    return render(res.rows as Array<Record<string, unknown>>);
+  } catch {
+    /* likely parameter placeholders — retry with a generic plan. */
+  }
+  try {
+    const res = await c.query(`EXPLAIN (GENERIC_PLAN, FORMAT TEXT) ${query}`);
+    return render(res.rows as Array<Record<string, unknown>>);
+  } catch {
+    return null; // pre-PG16 or an un-plannable statement — the finding still proposes a rewrite review.
+  }
+}
+
+// Author the proposed fix spec to main + queue the build — the owner-gate, run on a db_health Build
+// resume. The spec body was pre-authored deterministically at detection time (carried on the job's
+// instructions), so there's no LLM step. Mirrors the repair-agent owner-Build path.
+async function materializeDbHealthSpec(specSlug: string, specBody: string, signature: string): Promise<boolean> {
+  try {
+    const put = await putFileMain(
+      `docs/brain/specs/${specSlug}.md`,
+      specBody,
+      `spec: ${specSlug} (from DB Health Agent signature ${signature})`,
+    );
+    return put.ok;
+  } catch (e) {
+    console.warn(`[db-health] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+// Surface the top-N ranked findings as deduped proposals. Returns how many were newly enqueued.
+async function surfaceDbHealthFindings(findings: import("../src/lib/control-tower/db-health").DbHealthFinding[]): Promise<number> {
+  const { dedupeFindings, enqueueDbHealthProposal } = await import("../src/lib/control-tower/db-health");
+  const ranked = dedupeFindings(findings).slice(0, DB_HEALTH_MAX_PROPOSALS_PER_PASS);
+  let enqueued = 0;
+  for (const f of ranked) {
+    const r = await enqueueDbHealthProposal(db, f);
+    if (r.enqueued) enqueued++;
+  }
+  return enqueued;
+}
+
+// The FREQUENT slow-query root-cause pass: top pg_stat_statements offenders → EXPLAIN → classify →
+// propose. Writes a kind:'cron' beat (loop_id = DB_HEALTH_SLOWQ_LOOP_ID) carrying the slow-query list
+// for the panel. NEVER throws (guarded) — a pass failure must not break the poll loop. Zero DDL.
+async function runDbHealthSlowQueryJob(): Promise<void> {
+  const startedAt = Date.now();
+  const mod = await import("../src/lib/control-tower/db-health");
+  let c: import("pg").Client | null = null;
+  try {
+    c = await dbHealthPgClient();
+    if (!c) {
+      await writeCronHeartbeat(mod.DB_HEALTH_SLOWQ_LOOP_ID, false, { status: "skipped", reason: "no DB connection on this host" }, Date.now() - startedAt, "db-health slow-query skipped — no pooler");
+      return;
+    }
+    let rows: import("../src/lib/control-tower/db-health").SlowQueryRow[] = [];
+    try {
+      const res = await c.query(
+        `select queryid::text as queryid, query, calls,
+                total_exec_time, mean_exec_time, stddev_exec_time, rows
+           from pg_stat_statements
+          where query is not null
+            and query not ilike '%pg_stat_statements%'
+            and query not ilike '%db_table_size_history%'
+            and query not ilike '%loop_heartbeats%'
+          order by total_exec_time desc
+          limit 25`,
+      );
+      rows = (res.rows as Array<Record<string, unknown>>).map((r) => ({
+        queryid: String(r.queryid ?? ""),
+        query: String(r.query ?? ""),
+        calls: Number(r.calls ?? 0),
+        total_exec_time: Number(r.total_exec_time ?? 0),
+        mean_exec_time: Number(r.mean_exec_time ?? 0),
+        stddev_exec_time: Number(r.stddev_exec_time ?? 0),
+        rows: Number(r.rows ?? 0),
+      }));
+    } catch (e) {
+      // pg_stat_statements not installed / not granted — honest skip, not a false "healthy".
+      await writeCronHeartbeat(mod.DB_HEALTH_SLOWQ_LOOP_ID, false, { status: "skipped", reason: `pg_stat_statements read failed: ${e instanceof Error ? e.message : String(e)}` }, Date.now() - startedAt, "db-health slow-query skipped — no pg_stat_statements");
+      return;
+    }
+
+    const findings: import("../src/lib/control-tower/db-health").DbHealthFinding[] = [];
+    for (const row of rows) {
+      // Only EXPLAIN read-only SELECTs (plain EXPLAIN doesn't execute, but never go near a write).
+      const plan = mod.isSafeSelect(row.query) ? await explainQuery(c, row.query) : null;
+      const finding = mod.analyzeSlowQuery(row, plan);
+      if (finding) findings.push(finding);
+    }
+    const proposed = await surfaceDbHealthFindings(findings);
+    const ranked = mod.dedupeFindings(findings);
+    const slow_queries = ranked.slice(0, 10).map((f) => ({ queryid: f.signature.split(":").pop() || "", cause: f.cause, table: f.table, impact: f.impact }));
+    await writeCronHeartbeat(
+      mod.DB_HEALTH_SLOWQ_LOOP_ID,
+      true,
+      { status: "ok", scanned: rows.length, findings: findings.length, proposed, slow_queries },
+      Date.now() - startedAt,
+      `db-health slow-query — ${rows.length} scanned, ${mod.summarizeFindings(findings)}, ${proposed} proposed`,
+    );
+    console.log(`[db-health] slow-query pass — ${rows.length} scanned, ${findings.length} findings, ${proposed} proposed`);
+  } catch (e) {
+    console.error("[db-health] slow-query pass failed:", e instanceof Error ? e.message : String(e));
+  } finally {
+    if (c) await c.end().catch(() => {});
+  }
+}
+
+// The DAILY size sweep: snapshot per-table size+stats into db_table_size_history (so growth rate is
+// computable), then flag unbounded growth / missing+unused indexes / bloat and propose the fix. Beats
+// under DB_HEALTH_SIZE_LOOP_ID. NEVER throws (guarded). Zero DDL/deletes.
+async function runDbHealthSizeJob(): Promise<void> {
+  const startedAt = Date.now();
+  const mod = await import("../src/lib/control-tower/db-health");
+  let c: import("pg").Client | null = null;
+  try {
+    c = await dbHealthPgClient();
+    if (!c) {
+      await writeCronHeartbeat(mod.DB_HEALTH_SIZE_LOOP_ID, false, { status: "skipped", reason: "no DB connection on this host" }, Date.now() - startedAt, "db-health size sweep skipped — no pooler");
+      return;
+    }
+    const capturedAt = new Date().toISOString();
+    // Per-table size + live stats (pg_class + pg_stat_user_tables).
+    const tblRes = await c.query(
+      `select c.relname as table_name,
+              pg_total_relation_size(c.oid)::bigint as total_bytes,
+              pg_table_size(c.oid)::bigint as table_bytes,
+              pg_indexes_size(c.oid)::bigint as index_bytes,
+              greatest(c.reltuples, 0)::bigint as row_estimate,
+              coalesce(s.seq_scan, 0)::bigint as seq_scan,
+              coalesce(s.idx_scan, 0)::bigint as idx_scan,
+              coalesce(s.n_live_tup, 0)::bigint as n_live_tup,
+              coalesce(s.n_dead_tup, 0)::bigint as n_dead_tup,
+              s.last_vacuum, s.last_autovacuum, s.last_analyze, s.last_autoanalyze
+         from pg_class c
+         join pg_namespace n on n.oid = c.relnamespace
+         left join pg_stat_user_tables s on s.relid = c.oid
+        where n.nspname = 'public' and c.relkind = 'r'
+        order by pg_total_relation_size(c.oid) desc`,
+    );
+    const tables: import("../src/lib/control-tower/db-health").TableSizeRow[] = (tblRes.rows as Array<Record<string, unknown>>).map((r) => ({
+      table_name: String(r.table_name ?? ""),
+      total_bytes: Number(r.total_bytes ?? 0),
+      row_estimate: Number(r.row_estimate ?? 0),
+      seq_scan: Number(r.seq_scan ?? 0),
+      idx_scan: Number(r.idx_scan ?? 0),
+      n_live_tup: Number(r.n_live_tup ?? 0),
+      n_dead_tup: Number(r.n_dead_tup ?? 0),
+      last_autovacuum: r.last_autovacuum ? new Date(r.last_autovacuum as string).toISOString() : null,
+      captured_at: capturedAt,
+    }));
+
+    // Snapshot the whole batch (one shared captured_at) so the next sweep can compute a day-delta.
+    const snapshotRows = (tblRes.rows as Array<Record<string, unknown>>).map((r) => ({
+      captured_at: capturedAt,
+      table_name: String(r.table_name ?? ""),
+      total_bytes: Number(r.total_bytes ?? 0),
+      table_bytes: Number(r.table_bytes ?? 0),
+      index_bytes: Number(r.index_bytes ?? 0),
+      row_estimate: Number(r.row_estimate ?? 0),
+      seq_scan: Number(r.seq_scan ?? 0),
+      idx_scan: Number(r.idx_scan ?? 0),
+      n_live_tup: Number(r.n_live_tup ?? 0),
+      n_dead_tup: Number(r.n_dead_tup ?? 0),
+      last_vacuum: r.last_vacuum ? new Date(r.last_vacuum as string).toISOString() : null,
+      last_autovacuum: r.last_autovacuum ? new Date(r.last_autovacuum as string).toISOString() : null,
+      last_analyze: r.last_analyze ? new Date(r.last_analyze as string).toISOString() : null,
+      last_autoanalyze: r.last_autoanalyze ? new Date(r.last_autoanalyze as string).toISOString() : null,
+    }));
+    const { error: snapErr } = await db.from("db_table_size_history").insert(snapshotRows);
+    if (snapErr) console.warn(`[db-health] size snapshot insert failed: ${snapErr.message}`);
+
+    // The prior day's snapshot (latest distinct captured_at strictly before this run, ≥20h back) for
+    // the growth rate. None yet (first sweep) ⇒ no growth findings, just the snapshot — honest.
+    const priorCutoff = new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString();
+    let prior: import("../src/lib/control-tower/db-health").TableSizeRow[] = [];
+    const { data: priorBatch } = await db
+      .from("db_table_size_history")
+      .select("captured_at")
+      .lt("captured_at", priorCutoff)
+      .order("captured_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const priorCapturedAt = (priorBatch as { captured_at?: string } | null)?.captured_at;
+    if (priorCapturedAt) {
+      const { data: priorRows } = await db
+        .from("db_table_size_history")
+        .select("table_name, total_bytes, row_estimate, seq_scan, idx_scan, n_live_tup, n_dead_tup, last_autovacuum, captured_at")
+        .eq("captured_at", priorCapturedAt);
+      prior = ((priorRows ?? []) as Array<Record<string, unknown>>).map((r) => ({
+        table_name: String(r.table_name ?? ""),
+        total_bytes: Number(r.total_bytes ?? 0),
+        row_estimate: Number(r.row_estimate ?? 0),
+        seq_scan: Number(r.seq_scan ?? 0),
+        idx_scan: Number(r.idx_scan ?? 0),
+        n_live_tup: Number(r.n_live_tup ?? 0),
+        n_dead_tup: Number(r.n_dead_tup ?? 0),
+        last_autovacuum: (r.last_autovacuum as string | null) ?? null,
+      }));
+    }
+
+    // Per-index usage (pg_stat_user_indexes) for the unused-index proposal.
+    const idxRes = await c.query(
+      `select t.relname as table_name,
+              i.relname as index_name,
+              coalesce(psi.idx_scan, 0)::bigint as idx_scan,
+              pg_relation_size(i.oid)::bigint as index_bytes,
+              ix.indisunique as is_unique,
+              ix.indisprimary as is_primary
+         from pg_index ix
+         join pg_class i on i.oid = ix.indexrelid
+         join pg_class t on t.oid = ix.indrelid
+         join pg_namespace n on n.oid = t.relnamespace
+         left join pg_stat_user_indexes psi on psi.indexrelid = i.oid
+        where n.nspname = 'public' and t.relkind = 'r'`,
+    );
+    const indexes: import("../src/lib/control-tower/db-health").IndexStatRow[] = (idxRes.rows as Array<Record<string, unknown>>).map((r) => ({
+      table_name: String(r.table_name ?? ""),
+      index_name: String(r.index_name ?? ""),
+      idx_scan: Number(r.idx_scan ?? 0),
+      index_bytes: Number(r.index_bytes ?? 0),
+      is_unique: Boolean(r.is_unique),
+      is_primary: Boolean(r.is_primary),
+    }));
+
+    const findings = [
+      ...mod.analyzeGrowth(tables, prior),
+      ...mod.analyzeIndexUsage(tables, indexes),
+      ...mod.analyzeBloat(tables, Date.now()),
+    ];
+    const proposed = await surfaceDbHealthFindings(findings);
+    const top = tables.slice(0, 10).map((t) => ({ table: t.table_name, total_bytes: t.total_bytes, row_estimate: t.row_estimate }));
+    await writeCronHeartbeat(
+      mod.DB_HEALTH_SIZE_LOOP_ID,
+      true,
+      { status: "ok", tables_snapshotted: tables.length, had_prior: prior.length > 0, findings: findings.length, proposed, top },
+      Date.now() - startedAt,
+      `db-health size sweep — ${tables.length} tables, ${mod.summarizeFindings(findings)}, ${proposed} proposed`,
+    );
+    console.log(`[db-health] size sweep — ${tables.length} tables snapshotted, ${findings.length} findings, ${proposed} proposed`);
+  } catch (e) {
+    console.error("[db-health] size sweep failed:", e instanceof Error ? e.message : String(e));
+  } finally {
+    if (c) await c.end().catch(() => {});
+  }
+}
+
+// Owner Build on a surfaced db_health proposal (resume on queued_resume). Materialize the pre-authored
+// fix spec to main + queue the build — the owner-gate. (Dismiss resolves directly in the POST route.)
+async function runDbHealthJob(job: Job) {
+  const tag = `[db_health:${job.id.slice(0, 8)}]`;
+  let instr: { signature?: string; spec_slug?: string; spec_body?: string } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fall back to spec_slug as the signature */
+  }
+  const signature = instr.signature || job.spec_slug;
+  const buildAction = (job.pending_actions || []).find((a) => a.type === "db_health_build");
+  if (buildAction && (buildAction.status === "approved" || buildAction.status === "declined")) {
+    if (buildAction.status === "approved" && buildAction.spec_slug) {
+      const dupe = await hasActiveBuildForSlug(buildAction.spec_slug);
+      if (dupe.active) {
+        buildAction.status = "done";
+        buildAction.result = `build already live for ${buildAction.spec_slug} (${dupe.reason}) — not re-queued`;
+        await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
+        console.log(`${tag} owner Build → dedup: ${buildAction.result}`);
+        return;
+      }
+      const wrote = await materializeDbHealthSpec(buildAction.spec_slug, String(instr.spec_body || ""), signature);
+      if (!wrote) {
+        await update(job.id, { status: "needs_attention", error: "spec commit failed", log_tail: `owner Build → failed to author docs/brain/specs/${buildAction.spec_slug}.md`.slice(-2000) });
+        console.warn(`${tag} owner Build → spec commit failed`);
+        return;
+      }
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: buildAction.spec_slug,
+        kind: "build",
+        status: "queued",
+        created_by: job.created_by,
+        instructions: `Build from DB Health Agent signature ${signature}. Follow the spec exactly; tsc-clean; open a PR. NEVER auto-apply DDL/deletes — the migration/apply-script lands in the PR for owner review.`,
+      });
+      buildAction.status = error ? "failed" : "done";
+      buildAction.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${buildAction.spec_slug}`;
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
+      console.log(`${tag} owner Build → ${buildAction.result}`);
+    } else {
+      buildAction.result = "dismissed by owner";
+      await update(job.id, { status: "completed", error: "dismissed by owner", pending_actions: job.pending_actions, log_tail: `owner Dismiss → cleared signature ${signature}`.slice(-2000) });
+      console.log(`${tag} owner Dismiss → cleared`);
+    }
+    return;
+  }
+  // No actionable owner decision on the action — nothing to do (shouldn't normally be claimed). Park it.
+  await update(job.id, { status: "needs_approval", log_tail: `awaiting owner Build/Dismiss for ${signature}`.slice(-2000) });
+  console.log(`${tag} no owner decision yet — parked as needs_approval`);
 }
 
 // Idle self-update: ONLY when no build/fold lane is running (active === 0 — in-flight work is sacrosanct).
@@ -4219,6 +4561,7 @@ async function runJob(job: Job) {
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
   if (job.kind === "repair") return runRepairJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
+  if (job.kind === "db_health") return runDbHealthJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -4564,6 +4907,7 @@ async function main() {
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
+  const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "storefront-optimizer").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
@@ -4692,6 +5036,15 @@ async function main() {
         console.log(`claimed repair ${job.id.slice(0, 8)} → ${countRepair() + 1}/${MAX_REPAIR} repair lane`);
         launch(job);
       }
+      // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —
+      // materialize the pre-authored fix spec to main + queue its build. Concurrency-1, fast.
+      while (countDbHealth() < MAX_DB_HEALTH) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["db_health"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed db_health ${job.id.slice(0, 8)} → ${countDbHealth() + 1}/${MAX_DB_HEALTH} db_health lane`);
+        launch(job);
+      }
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —
       // read funnel+lever map+proxy → propose a hypothesis/variant → stand up an M1 experiment (or
       // surface a missing-capability spec). Own concurrency-1 lane, read-only diagnose on Max.
@@ -4724,6 +5077,21 @@ async function main() {
         lastMigrationDriftCheck = Date.now();
         migrationDriftInFlight = true;
         void runMigrationDriftJob().finally(() => { migrationDriftInFlight = false; });
+      }
+
+      // DB Health Agent (db-health-agent P1): two box-side passes, each fire-and-forget on its own
+      // cadence with an in-flight guard. The frequent slow-query root-cause pass (~hourly) + the daily
+      // size/growth/index/bloat sweep. Both read pg_stat_* / run EXPLAIN via the pooler (the deployed
+      // runtime can't), snapshot + classify read-only, and PROPOSE deduped fix specs — zero DDL.
+      if (!dbHealthSlowQInFlight && Date.now() - lastDbHealthSlowQ > DB_HEALTH_SLOWQ_INTERVAL_MS) {
+        lastDbHealthSlowQ = Date.now();
+        dbHealthSlowQInFlight = true;
+        void runDbHealthSlowQueryJob().finally(() => { dbHealthSlowQInFlight = false; });
+      }
+      if (!dbHealthSizeInFlight && Date.now() - lastDbHealthSize > DB_HEALTH_SIZE_INTERVAL_MS) {
+        lastDbHealthSize = Date.now();
+        dbHealthSizeInFlight = true;
+        void runDbHealthSizeJob().finally(() => { dbHealthSizeInFlight = false; });
       }
       // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
       // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
