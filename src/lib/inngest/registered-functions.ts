@@ -126,11 +126,13 @@ import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
 import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 import { loopHeartbeatsPrune } from "@/lib/inngest/loop-heartbeats-prune";
+import { claudeStatusPollCron } from "@/lib/inngest/claude-status-poll-cron";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
 
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
 export const registeredInngestFunctions = [
+  claudeStatusPollCron,
   ...adToolFunctions,
   syncCustomers,
   syncOrders,

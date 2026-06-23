@@ -138,6 +138,28 @@ interface DepartmentRollup {
   counts: { green: number; amber: number; red: number };
   openAlerts: number;
 }
+type ClaudeComponentStatus =
+  | "operational"
+  | "degraded_performance"
+  | "partial_outage"
+  | "major_outage"
+  | "under_maintenance"
+  | "unknown";
+interface ClaudeHealth {
+  apiStatus: ClaudeComponentStatus;
+  codeStatus: ClaudeComponentStatus;
+  externalDown: boolean;
+  localDown: boolean;
+  down: boolean;
+  consecutiveFailures: number;
+  lastFailureAt: string | null;
+  lastPolledAt: string | null;
+  pollOk: boolean | null;
+  trippedAt: string | null;
+  recoveredAt: string | null;
+  detail: string | null;
+  updatedAt: string | null;
+}
 interface Snapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
@@ -149,6 +171,7 @@ interface Snapshot {
   repairs?: RepairSurfaceItem[];
   dbHealth?: DbHealthPanel;
   coverageRegister?: CoverageRegisterItem[];
+  claudeHealth?: ClaudeHealth;
 }
 
 function elapsed(iso: string | null | undefined): string {
@@ -832,6 +855,69 @@ function DbHealthSection({ panel, onChange }: { panel: DbHealthPanel; onChange: 
   );
 }
 
+// agent-outage-resilience Phase 2: the "is Claude up?" tile — the Claude-down breaker + live component
+// status. Green = operational + breaker closed; amber = degraded / local-signal firing; red = a
+// partial/major outage or the breaker tripped. When tripped, autonomous agent jobs park
+// `blocked_on_dependency` and the repair fan-out is suppressed until Claude recovers.
+const CLAUDE_STATUS_LABEL: Record<ClaudeComponentStatus, string> = {
+  operational: "operational",
+  degraded_performance: "degraded",
+  partial_outage: "partial outage",
+  major_outage: "major outage",
+  under_maintenance: "maintenance",
+  unknown: "unknown",
+};
+function claudeComponentColor(s: ClaudeComponentStatus): LoopColor {
+  if (s === "major_outage" || s === "partial_outage") return "red";
+  if (s === "degraded_performance" || s === "unknown" || s === "under_maintenance") return "amber";
+  return "green";
+}
+function ClaudeHealthTile({ h }: { h: ClaudeHealth }) {
+  const color: LoopColor = h.down
+    ? "red"
+    : h.apiStatus === "operational" && h.codeStatus === "operational"
+      ? "green"
+      : "amber";
+  const headline = h.down ? "Claude is DOWN — breaker tripped" : color === "green" ? "Claude is up" : "Claude degraded";
+  return (
+    <div className={`rounded-lg border p-3.5 ${TILE[color]}`}>
+      <div className="flex items-center gap-2">
+        <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT[color]}`} />
+        <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{headline}</h3>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+        <span className={`rounded-full px-1.5 py-0.5 font-medium ${TILE[claudeComponentColor(h.apiStatus)]}`}>
+          Claude API: {CLAUDE_STATUS_LABEL[h.apiStatus]}
+        </span>
+        <span className={`rounded-full px-1.5 py-0.5 font-medium ${TILE[claudeComponentColor(h.codeStatus)]}`}>
+          Claude Code: {CLAUDE_STATUS_LABEL[h.codeStatus]}
+        </span>
+      </div>
+      <dl className="mt-2 space-y-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+        {h.localDown && (
+          <div className="flex gap-1.5">
+            <dt className="text-zinc-400">local signal</dt>
+            <dd className="text-rose-600 dark:text-rose-300">{h.consecutiveFailures} consecutive failures</dd>
+          </div>
+        )}
+        {h.down && h.trippedAt && (
+          <div className="flex gap-1.5">
+            <dt className="text-zinc-400">tripped</dt>
+            <dd className="text-zinc-600 dark:text-zinc-300">{elapsed(h.trippedAt)} ago — agents parked, repair fan-out suppressed</dd>
+          </div>
+        )}
+        <div className="flex gap-1.5">
+          <dt className="text-zinc-400">last poll</dt>
+          <dd className="text-zinc-600 dark:text-zinc-300">
+            {h.lastPolledAt ? `${elapsed(h.lastPolledAt)} ago` : "never"}
+            {h.pollOk === false ? " · status page unreachable" : ""}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
 export default function ControlTowerPage() {
   const workspace = useWorkspace();
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -903,6 +989,24 @@ export default function ControlTowerPage() {
             </span>
             <span className="text-xs text-zinc-400">updated {elapsed(snap.generatedAt)} ago</span>
           </div>
+
+          {/* agent-outage-resilience Phase 2: the dependency-health tile — is Claude up? */}
+          {snap.claudeHealth && (
+            <div className="mb-6">
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Dependency health
+              </h2>
+              <p className="mb-3 text-[11px] text-zinc-400">
+                The Claude-down circuit-breaker — a 1-min poll of <code>status.claude.com</code> (Claude API + Claude
+                Code) plus our own consecutive-failure counter. When it trips, autonomous agent jobs park
+                <code> blocked_on_dependency</code> and the repair fan-out is suppressed until Claude recovers
+                (park-and-drain); the customer-facing ticket path retries across the outage.
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <ClaudeHealthTile h={snap.claudeHealth} />
+              </div>
+            </div>
+          )}
 
           {/* Phase 3: department rollups (CEO glance) lead — one health tile per org function. */}
           {departments.length > 0 && (

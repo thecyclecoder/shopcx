@@ -24,6 +24,7 @@ import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import { enqueueRepairJob } from "@/lib/repair-agent";
+import { isClaudeBreakerTripped } from "@/lib/claude-health";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -96,6 +97,14 @@ export async function recordError(
     const occurrences = Math.max(1, input.occurrences ?? 1);
     const nowIso = new Date().toISOString();
 
+    // Outage-aware (agent-outage-resilience Phase 2): a flood of transient 5xx/529/timeout errors
+    // DURING a known Claude outage are symptoms downstream of the outage, not new bugs. While the
+    // breaker is tripped we still RECORD them (visibility, grouped under the outage) but tag them
+    // outage-correlated, don't page, and DON'T enqueue the repair fan-out (the repair agent needs
+    // Claude to triage — it would just 529; the comprehensive fix is Phase 1's retry/no-swallow, not
+    // N per-error proposals). A NEW signature opened during the outage is auto-resolved as transient.
+    const breakerTripped = await isClaudeBreakerTripped(admin);
+
     const { data: existing } = await admin
       .from("error_events")
       .select("id, count, last_paged_at")
@@ -112,7 +121,9 @@ export async function recordError(
         detail: input.detail ?? null,
         sample: input.sample ?? null,
         count: occurrences,
-        status: "open",
+        // Outage window → auto-resolve as transient (recorded + grouped, but not churned).
+        status: breakerTripped ? "resolved" : "open",
+        outage_correlated: breakerTripped,
         first_seen_at: nowIso,
         last_seen_at: nowIso,
         last_paged_at: nowIso,
@@ -123,6 +134,10 @@ export async function recordError(
         console.warn(`[error-feed] insert failed for ${signature}:`, error.message);
         return { opened: false, paged: false };
       }
+      if (breakerTripped) {
+        // Symptom of the outage — recorded for visibility, but no page + no repair fan-out.
+        return { opened: true, paged: false };
+      }
       await pageOwners(admin, input, signature, occurrences);
       // Repair Agent trigger: a NEW signature is the moment to enqueue a diagnose→propose-fix job
       // (event-driven, deduped by signature). Best-effort — never let it break the error path.
@@ -130,10 +145,11 @@ export async function recordError(
       return { opened: true, paged: true };
     }
 
-    // Existing incident → fold in. Re-page only if past the cooldown (burst = one page).
+    // Existing incident → fold in. Re-page only if past the cooldown (burst = one page) AND the breaker
+    // is up (an outage-window re-fire is a symptom — fold it, tag it, but never re-page).
     const e = existing as { id: string; count: number | null; last_paged_at: string | null };
     const cooledDown = !e.last_paged_at || Date.now() - new Date(e.last_paged_at).getTime() > PAGE_COOLDOWN_MS;
-    const paged = cooledDown;
+    const paged = cooledDown && !breakerTripped;
     await admin
       .from("error_events")
       .update({
@@ -141,7 +157,8 @@ export async function recordError(
         detail: input.detail ?? null,
         sample: input.sample ?? null,
         count: (e.count ?? 0) + occurrences,
-        status: "open",
+        // Don't force-resolve a pre-existing genuine incident — just tag the outage correlation.
+        ...(breakerTripped ? { outage_correlated: true } : { status: "open" }),
         last_seen_at: nowIso,
         ...(paged ? { last_paged_at: nowIso } : {}),
       })
