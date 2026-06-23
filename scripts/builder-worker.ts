@@ -5210,6 +5210,7 @@ async function main() {
   await reapArchivedSpecJobs();
 
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
+  let lastApprovalSweep = 0; // approval-routing-engine M2: throttle the routed-inbox reconcile
   for (;;) {
     try {
       // Multi-account (box-multi-account-failover Phase 1): revive any job parked `blocked_on_usage` once
@@ -5220,6 +5221,21 @@ async function main() {
         await requeueBlockedOnUsage();
       } catch (e) {
         console.error("[multi-account] blocked_on_usage requeue failed (continuing):", e instanceof Error ? e.message : e);
+      }
+
+      // Approval routing (approval-routing-engine spec, M2): the "one inbox, no orphans" sweep. Surface
+      // every open needs_approval job as a routed Approval Request in the M1 inbox (and dismiss the ones
+      // whose job has been decided). The single chokepoint — catches every kind regardless of which
+      // surface raised it. Throttled to ~20s; best-effort, never breaks the poll loop.
+      if (Date.now() - lastApprovalSweep > 20_000) {
+        lastApprovalSweep = Date.now();
+        try {
+          const { reconcileApprovalInbox } = await import("../src/lib/agents/approval-inbox");
+          const r = await reconcileApprovalInbox(db);
+          if (r.created || r.dismissed) console.log(`[approval-inbox] +${r.created} request(s), -${r.dismissed} dismissed`);
+        } catch (e) {
+          console.error("[approval-inbox] reconcile failed (continuing):", e instanceof Error ? e.message : e);
+        }
       }
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
       while (countFold() < MAX_FOLD) {

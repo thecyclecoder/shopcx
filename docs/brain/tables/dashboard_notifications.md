@@ -2,6 +2,8 @@
 
 Generic notification system — macro_suggestion, pattern_review, knowledge_gap, fraud_alert, manual_action_needed, etc. Surfaced in the bell.
 
+Also the backing store for the **Agents-hub inbox** ([[../dashboard/agents]]) — the reserved `agent_*` types (`agent_message`, `agent_approval_request`, `agent_daily_summary`) are bucketed into the three inbox tabs (the generic bell ignores them; the inbox ignores everything else). The approval-routing engine ([[../libraries/approval-inbox]], M2) emits an `agent_approval_request` per [[agent_jobs]] `needs_approval`, carrying its routing + decision affordances in `metadata` (see Gotchas).
+
 **Primary key:** `id`
 
 ## Columns
@@ -49,7 +51,8 @@ const { count } = await admin.from("dashboard_notifications")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **`agent_approval_request` metadata (M2).** The routed Approval Request carries its routing + decision affordances in `metadata`: `agent_job_id` (the gated [[agent_jobs]] row — the reconciler's idempotency key), `routed_to_function` (the resolved approver slug the inbox API filters each role on; legacy/unrouted ⇒ the CEO), `raised_by_function`, `approve_action_id` (the single pending action inline Approve/Decline acts on, or null for multi-choice → use `deep_link`), `deep_link`, `kind`, `spec_slug`. Emitted + auto-dismissed by [[../libraries/approval-inbox]] `reconcileApprovalInbox` (it sets `dismissed=true` the moment the job leaves `needs_approval`) — don't hand-edit these rows.
+- Probe before assuming — see [[../README]] § Probing technique.
 
 ---
 

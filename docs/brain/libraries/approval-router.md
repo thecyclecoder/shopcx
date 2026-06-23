@@ -37,7 +37,8 @@ The org chart is the `functions/*.md` tree, which today is **FLAT**: every direc
 ## Callers
 
 - [[../dashboard/agents|org-chart.ts]] `getOrgChart` — `loadAutonomyMap` + `isAutoApprover` derive each director's `offline ｜ live ｜ autonomous` status badge on the Agents hub.
-- *(M2 will call `resolveApproverLive` on `needs_approval` to emit the routed Approval Request into the resolved role's M1 inbox — not yet wired.)*
+- [[approval-inbox]] `reconcileApprovalInbox` / `buildApprovalNotification` (M2 Phase 2, **wired**) — calls `resolveApprover` on every `needs_approval` job to stamp `routed_to_function`, emitting the routed Approval Request into the resolved role's M1 inbox.
+- `src/app/api/developer/agents/inbox/route.ts` — `loadAutonomyMap` + `isAutoApprover` decide a director's `routesToCeo` (only an auto-approver captures approvals).
 
 ## Related
 
