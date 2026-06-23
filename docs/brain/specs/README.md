@@ -174,6 +174,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[db-health-spec-body-robust]] (platform) — db-index-orders committed an EMPTY spec → build stalled. Cause: a manual approval overwrote the job's instructions JSON (which carried spec_body). Fix: materializeDbHealthSpec never writes an empty file (re-derive from the carried finding / re-query+EXPLAIN, else needs_input); store the diagnostic on the un-clobberable pending_actions action not free-text instructions; builder rejects a 0-byte/phaseless spec.
 
+## Active project — PDP experiment wiring ⏳
+
+[[pdp-experiment-wiring]] (growth) — the PDP hero experiment is a NO-OP on the live PDP: resolution is gated behind `if (variant && advertorial)` (the advertorial branch), so the bare PDP skips it; and the patch targets AdvertorialContent.heroImageUrl while the PDP hero renders from media_by_slot['hero']. P1: ungate PDP resolution (+ honor sx_preview), apply heroImageUrl over the hero media slot, render dynamic-only-when-an-active-experiment-exists (else keep the ISR cache). P2 (owner's edge idea): assign the variant in Vercel middleware + cache-key by an sx_variant cookie — edge-cached A/B (fast + tested) for the hot PDP.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
