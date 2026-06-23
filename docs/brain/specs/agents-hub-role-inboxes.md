@@ -19,8 +19,16 @@ The foundation surface for the [[../goals/devops-director]] goal — an owner-on
 - Each role page renders three filterable tabs — **Messages** (the board; populated by M3), **Approval Requests** (the routed queue; populated by M2), **Daily Summaries** (EOD recaps; populated by M3/M4). This milestone ships the **shell + filters + empty/loading states**; the CEO inbox is wired live first so M2 has a real target to emit into.
 - Reuse [[../tables/dashboard_notifications]] as the backing store for the shell where it fits (it already has `type`/`title`/`body`/`link`/`read`/`dismissed`), or add a thin `agent_inbox_items` view — decided at build time against the live schema (probe first, per [[../README]] § Probing technique). No approval-routing logic here — that is M2's keystone.
 
+<<<<<<< HEAD
 ## Phase 4 — the org-chart (employee) view ✅
 - ✅ shipped
+=======
+## Information architecture (2026-06-23 — owner direction)
+**Agents is a TOP-LEVEL sidebar section** (not under Developer), with submenu items: **Message Board** (the current `/dashboard/agents` — the inbox/board IS the Message Board) · **Org Chart** (`/dashboard/agents/org-chart`, Phase 4) · **Directors** (`/dashboard/agents/directors`, Phase 5) · **Workers** (`/dashboard/agents/workers`, Phase 5). The non-Message-Board items are `comingSoon` in the nav until their phase ships, then flipped live. (Sidebar already moved; Phases 4-5 create the routes.) Avatars are served from the public `agent-avatars` bucket, **resized to 320px** (small placement — never the multi-hundred-KB originals).
+
+## Phase 4 — the org-chart (employee) view ⏳
+- ⏳ planned
+>>>>>>> 783e9fbe (agents IA: Agents is top-level (not under Developer) w/ submenus Message Board · Org Chart · Directors · Workers; avatars optimized to 320px)
 - An Agents sidebar item that renders a **visual employee/org chart** — CEO at top → Directors → their Workers — with each node showing the persona avatar + name + role. **Every node is clickable** → routes to that role's profile detail page (Phase 5). Not just a list: a real org-tree layout (think a company team page).
 - Directors read from `functions/*.md`; Workers are the platform agents grouped under their director (the roster in [[../goals/devops-director]] § The Platform team) — brain-driven, no hand-maintained copy.
 - **Shipped:** an **Org chart / Inbox** view toggle on `/dashboard/agents` (defaults to the org chart — the team page) renders `<OrgTree>` (`src/components/agents/org-tree.tsx`) over the same brain-driven `getOrgChart()` payload — no second copy of the org chart. CEO at top → a Directors rail (each with its SVG mascot + live/autonomous badge) → each director's Workers (its box `agent_jobs` lanes) beneath it, every node a clickable persona card. Until Phase 5's per-role profile pages land, a node click selects that role and opens its inbox (a worker selection shows a minimal worker header + its routes-to-CEO inbox, so no node click is a dead end); Phase 5 repoints the nodes at `/dashboard/agents/[role]`.
