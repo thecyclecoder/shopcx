@@ -119,6 +119,15 @@ interface CoverageAudit {
   unregistered: UnregisteredLoop[];
   inngestRegistration: InngestRegistrationDiff;
 }
+interface CoverageRegisterItem {
+  jobId: string;
+  loopId: string;
+  cadence: string;
+  proposedOwner: OwnerFunction;
+  proposedCadence: string;
+  registerSlug: string;
+  createdAt: string;
+}
 interface DepartmentRollup {
   owner: OwnerFunction;
   label: string;
@@ -139,6 +148,7 @@ interface Snapshot {
   specDrift?: SpecDriftRow[];
   repairs?: RepairSurfaceItem[];
   dbHealth?: DbHealthPanel;
+  coverageRegister?: CoverageRegisterItem[];
 }
 
 function elapsed(iso: string | null | undefined): string {
@@ -422,7 +432,7 @@ function CoverageAuditSection({ audit }: { audit: CoverageAudit }) {
                 </h3>
               </div>
               <p className="mt-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-200">
-                In code but not in the registry — add a MONITORED_LOOPS entry (or mark it intentionally-unmonitored).
+                In code but not in the registry — the coverage-register agent proposes the entry below for one-tap Build.
               </p>
               <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">cron: {u.cadence}</p>
             </div>
@@ -449,6 +459,85 @@ function CoverageAuditSection({ audit }: { audit: CoverageAudit }) {
           cron check still covers the same gap from the heartbeat side.
         </p>
       )}
+    </div>
+  );
+}
+
+function CoverageRegisterSection({ items, onChange }: { items: CoverageRegisterItem[]; onChange: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const act = async (item: CoverageRegisterItem, action: "register" | "exempt" | "dismiss") => {
+    setBusy(`${item.jobId}:${action}`);
+    try {
+      const res = await fetch("/api/developer/control-tower/coverage-register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: item.jobId, action }),
+      });
+      if (res.ok) onChange();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (items.length === 0) return null; // only show when there's a proposal waiting (the clean state lives in the audit section).
+  return (
+    <div className="mt-8">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        Coverage registration
+      </h2>
+      <p className="mb-3 text-[11px] text-zinc-400">
+        The coverage-register agent turns each unregistered loop into a proposed <code>MONITORED_LOOPS</code> entry —
+        it infers the cadence-derived window + an owner-function, then surfaces it for one-tap <b>Register</b> (lands
+        the entry → the loop becomes a monitored tile). <b>Mark intentionally-unmonitored</b> exempts it (it stops
+        re-surfacing); <b>Dismiss</b> defers. It never silently edits the registry — the build is queued only on your tap.
+      </p>
+      <ul className="space-y-2">
+        {items.map((item) => (
+          <li
+            key={item.jobId}
+            className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] dark:border-amber-900/40 dark:bg-amber-900/15"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <span className="font-semibold text-zinc-800 dark:text-zinc-100">Unregistered loop: {item.loopId}</span>
+                <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
+                  proposed entry
+                </span>
+                <p className="mt-1 text-zinc-600 dark:text-zinc-300">
+                  Inferred: owner <b>{item.proposedOwner}</b> · {item.proposedCadence}
+                </p>
+                <p className="mt-0.5 text-[10px] text-zinc-400">
+                  <code>{item.cadence}</code> · build <code>{item.registerSlug}</code> · surfaced {elapsed(item.createdAt)} ago
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <button
+                  onClick={() => act(item, "register")}
+                  disabled={busy !== null}
+                  className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {busy === `${item.jobId}:register` ? "Queuing…" : "Register"}
+                </button>
+                <button
+                  onClick={() => act(item, "exempt")}
+                  disabled={busy !== null}
+                  className="rounded-md border border-amber-300 px-2.5 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-900/30"
+                >
+                  {busy === `${item.jobId}:exempt` ? "…" : "Intentionally-unmonitored"}
+                </button>
+                <button
+                  onClick={() => act(item, "dismiss")}
+                  disabled={busy !== null}
+                  className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
+                </button>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -862,6 +951,8 @@ export default function ControlTowerPage() {
           )}
 
           {snap.selfAudit && <CoverageAuditSection audit={snap.selfAudit} />}
+
+          <CoverageRegisterSection items={snap.coverageRegister ?? []} onChange={refresh} />
 
           <RepairFeedSection items={snap.repairs ?? []} onChange={refresh} />
 
