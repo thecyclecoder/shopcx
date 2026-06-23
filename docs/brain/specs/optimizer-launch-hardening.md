@@ -1,0 +1,21 @@
+# Post-launch hardening — review findings (optimizer + infra) ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** hardens the autonomous build pipeline + [[storefront-optimizer-agent]] after the 2026-06-22 launch. · **Source:** two pre-A/B-approval review agents (2026-06-23). tsc clean, no active false-✅, customer-facing optimizer path confirmed SAFE; these are the 5 hardening findings. None block the A/B approval.
+
+## Phase 1 — optimizer approval re-gate + JobStatus enum drift ⏳ (highest value)
+- **Re-assert scope+active on approval (TOCTOU, finding #3).** `runStorefrontOptimizerJob`'s approval-resume branch (`scripts/builder-worker.ts:~4010`) calls `materializeOptimizerCampaign` with the proposal-time plan **without re-reading the policy**. The scope/active gate (`evaluateProposalGate`) only runs at *propose* time. If `product_scope` shrinks or `active` flips false between propose and approve, the campaign still materializes — violating the "every activation checks `product_id ∈ product_scope`" contract. Fix: re-load policy + re-assert `isProductInScope` + `isOptimizerActive` inside the approval-resume branch before `materializeCampaign`; refuse (surface) if no longer in scope/active.
+- **`blocked_on_usage` enum drift (finding #2).** `src/lib/agent-jobs.ts` `JobStatus` (:11) + `ACTIVE_STATUSES` (:106) omit `blocked_on_usage` (the worker's parked state). So `getLiveJobForSlug` treats a parked build as terminal → the fold-guard + auto-fold gate can fold/orphan a spec whose chained next-phase build is merely parked. Fix: add `blocked_on_usage` to the shared `JobStatus` union + `ACTIVE_STATUSES` (it IS active for fold-guard purposes).
+
+## Phase 2 — auto-merge needs a real success gate (finding #1) ⏳
+`github-pr-resolve.ts:~480` gates auto-merge on `mergeable_state==="clean"`, but the repo has **no CI workflows + no branch protection** — so GitHub reports `clean` for *any* non-conflicting `claude/*` PR. Real safety is only the build worker's pre-push `tsc --noEmit` (before the PR exists), not a verifiable PR status. A `claude/*` branch that reaches "open + mergeable" by another path (resumed build that pushed partial work, errored-post-push, manual push) auto-merges unreviewed. Fix: gate auto-merge on the **build job's own success signal** (the agent_job that owns the branch is `completed`/`merged` with a clean tsc result) before merging — not just GitHub's vacuous `clean`. (Or add a required CI status check.)
+
+## Phase 3 — plan-resume busy-loop + policy RLS ⏳
+- **Plan-resume repark/reclaim churn under partial cap (finding #4).** `requeueBlockedOnUsage` (`builder-worker.ts:~435`) un-parks **every** `blocked_on_usage` job when `!allAccountsCapped()`. A plan resume is pinned to its owning account (`canStartFresh=false`); if that account is capped but another is healthy → un-park → reclaim → re-park, every tick (DB churn + lane occupancy; **no token burn**). Fix: only un-park jobs whose *owning* account is now healthy (or null).
+- **Optimizer policy RLS over-permissive (finding #5, needs-confirm).** The `storefront_optimizer_policy` SELECT policy is reportedly `using (auth.uid() is not null)` (any authed user reads any workspace's policy) despite a workspace-member comment. Low impact (no secrets; writes via service role; scope enforced in code) but a cross-workspace info-disclosure gap. Confirm the migration line, then scope SELECT to workspace members.
+
+## Verification
+- Shrink `product_scope` (or set `active=false`) AFTER a campaign is proposed, then approve it → it is **refused** (not materialized); with scope/active unchanged, approval materializes normally.
+- A `blocked_on_usage` build counts as a live job: `getLiveJobForSlug` returns it; the fold-guard 409s on it; `cancelJobsForArchivedSpecs` cancels it.
+- An open `clean` `claude/*` PR whose owning build job is NOT completed-successfully → auto-merge does **not** merge it; a normally-built green PR still auto-merges.
+- Owner account capped + another healthy → a pinned plan-resume job is NOT repeatedly un-parked (no repark/reclaim churn); a build (start-fresh-able) still resumes.
+- A non-member authed user cannot SELECT another workspace's `storefront_optimizer_policy`.
