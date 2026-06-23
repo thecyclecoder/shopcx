@@ -1,0 +1,1 @@
+- **db-index-orders — composite (workspace_id, created_at DESC) index on orders** · verified 2026-06-23 · → [[tables/orders]]

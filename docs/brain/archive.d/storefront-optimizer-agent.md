@@ -1,0 +1,1 @@
+- **The Storefront Optimizer agent (campaign loop + build-or-request)** · verified 2026-06-23 · → [[libraries/storefront-optimizer-agent]]

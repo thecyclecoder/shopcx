@@ -1,0 +1,1 @@
+- **Storefront experiment + bandit framework** · verified 2026-06-23 · → [[libraries/storefront-bandit]]
