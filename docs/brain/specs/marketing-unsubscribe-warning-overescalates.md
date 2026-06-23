@@ -13,6 +13,6 @@ In src/lib/sonnet-orchestrator-v2.ts (~line 858) the MARKETING CONSENT context l
 - ✅ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
-- Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).
+- ✅ Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).
 
 > Authored by the box escalation-triage routine (solver+skeptic quorum) from escalated ticket `3d828685-6724-463c-af3f-3e2b00e12f3f`. Commission the build from the Roadmap board (owner = cs).
