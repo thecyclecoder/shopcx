@@ -46,6 +46,7 @@ import {
 import { getCalibrationState } from "@/lib/storefront/calibration";
 import { loadLeverGradeSignal, type LeverGradeSignal } from "@/lib/storefront/campaign-grader";
 import type { VariantPatch } from "@/lib/storefront/experiments";
+import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -641,6 +642,13 @@ export async function materializeCampaign(opts: {
     // Roll back the orphaned experiment so the surface isn't left half-stood-up.
     await admin.from("storefront_experiments").delete().eq("id", experimentId);
     return { ok: false, detail: `variant insert failed (experiment rolled back): ${varErr.message}` };
+  }
+
+  // Re-publish the active-experiment manifest to the edge + purge the PDP render so
+  // the new arm serves immediately (pdp-edge-served-experiments). PDP only — the
+  // other lander types render server-side, not via the edge manifest.
+  if (p.lander_type === "pdp") {
+    await republishExperimentManifest(admin, [opts.productId]);
   }
 
   return {

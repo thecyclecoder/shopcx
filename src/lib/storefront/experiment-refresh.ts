@@ -21,6 +21,7 @@ import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/st
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
 import { updatePosterior } from "@/lib/storefront/lever-memory";
 import { gradeCampaign } from "@/lib/storefront/campaign-grader";
+import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -216,6 +217,10 @@ export async function refreshStorefrontExperiments(opts: {
         await commitLearning(exp, rollups);
         // Grade the concluded campaign at significance (a rollback is a conclusion too).
         await gradeInitialBestEffort(experimentId);
+        // Re-publish the edge manifest + purge the PDP render so a rolled-back PDP
+        // experiment reverts every visitor to the real cached hero immediately
+        // (pdp-edge-served-experiments).
+        if (exp.lander_type === "pdp") await republishExperimentManifest(admin, [exp.product_id]);
         // Surface, don't bury — escalate to Growth (durable record + structured log).
         console.warn(
           `[storefront-experiments] ESCALATION rollback experiment=${experimentId} lever=${exp.lever} reason=${reason} ` +
@@ -251,6 +256,11 @@ export async function refreshStorefrontExperiments(opts: {
       if (terminal) {
         await commitLearning(exp, rollups);
         await gradeInitialBestEffort(experimentId);
+        // Promote/kill changed the served arm set → re-publish the edge manifest +
+        // purge the PDP render (pdp-edge-served-experiments). A promoted variant
+        // serves all non-holdout traffic from its own cached render; a kill reverts
+        // everyone to the real cached PDP.
+        if (exp.lander_type === "pdp") await republishExperimentManifest(admin, [exp.product_id]);
       }
       decisions.push({
         experiment_id: experimentId,

@@ -9,7 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   resolveExperimentsForRender,
   resolvePdpExperimentsForRender,
-  loadActiveExperiments,
+  loadEdgeAssignedPdpHero,
   parsePreviewParam,
   type ExperimentExposureMeta,
 } from "@/lib/storefront/experiments";
@@ -34,13 +34,15 @@ import {
  * (they read searchParams), so — and in that branch — we read the `sid`
  * cookie to sticky-assign storefront experiments.
  *
- * The bare PDP ALSO resolves experiments now (pdp-experiment-wiring Phase 1),
- * but stays ISR-cached on the common path: it reads the `sid` cookie — the only
- * thing that forces dynamic rendering — ONLY when an active `(product, pdp)`
- * experiment exists (a `loadActiveExperiments` check that itself touches no
- * cookies). No active PDP experiment → no cookie read → the static prerender is
- * preserved. With one active, the PDP renders dynamically per-visitor and the
- * assigned arm's hero overrides the `hero` media slot.
+ * The bare PDP resolves experiments at the EDGE now (pdp-edge-served-experiments
+ * Phase 2): the middleware sticky-assigns the variant + rewrites served arms to a
+ * variant-keyed URL (`?_sxv=<variantId>`), so each arm is a DISTINCT edge-cached
+ * render — fast AND tested, no per-request server compute. The page reads the
+ * assigned arm from `_sxv` (no `cookies()` read → stays cacheable) and overrides
+ * the `hero` media slot; control/holdout get the real cached PDP. No `_sxv` and no
+ * `?variant=` → the param-less static prerender is preserved. Exposure for the
+ * assigned arm emits client-side from the `sx_variant` cookie (the pixel),
+ * internal/bot excluded.
  */
 export const revalidate = 3600;
 export const dynamicParams = true;
@@ -150,7 +152,10 @@ export default async function StorefrontProductPage({
   // dynamically — and the route still reads no headers/cookies, so it's ISR-safe.
   // `sx_preview=<experimentId>:<variantId>` is the owner-only detail-page preview
   // (forces one arm; paired with `sx_internal=1` so it never pollutes the bandit).
-  searchParams: Promise<{ variant?: string; angle?: string; sx_preview?: string }>;
+  // `_sxv=<variantId>` is the edge-assigned PDP arm (pdp-edge-served-experiments):
+  // the middleware sticky-assigned the visitor + rewrote to this variant-keyed URL
+  // so each arm is a distinct cacheable render.
+  searchParams: Promise<{ variant?: string; angle?: string; sx_preview?: string; _sxv?: string }>;
 }) {
   const { workspace, slug } = await params;
   const sp = await searchParams;
@@ -194,11 +199,11 @@ export default async function StorefrontProductPage({
       /* experiment substrate is best-effort — fall back to control content */
     }
   } else if (!variant) {
-    // Bare PDP branch (pdp-experiment-wiring Phase 1). The PDP hero renders from
-    // `media_by_slot["hero"]`, so the assigned arm's `heroImageUrl` overrides
-    // that slot. Dynamic-only-when-testing: we read the `sid` cookie (the only
-    // dynamic API here) ONLY when an active `(product, pdp)` experiment exists,
-    // so the no-experiment common case stays ISR-cached.
+    // Bare PDP branch. Edge-served A/B (pdp-edge-served-experiments Phase 2):
+    // assignment happens at the Vercel edge (middleware), NOT inline here — so the
+    // PDP stays edge-cached per variant instead of going fully dynamic under test.
+    // The PDP hero renders from `media_by_slot["hero"]`, so we override that slot
+    // with the assigned arm's `heroImageUrl`.
     try {
       const admin = createAdminClient();
       const preview = parsePreviewParam(sp.sx_preview);
@@ -217,24 +222,18 @@ export default async function StorefrontProductPage({
         });
         if (resolved.heroImageUrl) renderData = applyPdpHeroOverride(data, resolved.heroImageUrl);
         experimentExposures = resolved.exposures;
-      } else {
-        const active = await loadActiveExperiments(admin, data.workspace.id, data.product.id, "pdp");
-        if (active.length) {
-          // An active PDP experiment exists → go dynamic (read the `sid` cookie)
-          // and sticky-assign this visitor.
-          const identityKey = (await cookies()).get("sid")?.value ?? null;
-          const resolved = await resolvePdpExperimentsForRender({
-            admin,
-            workspaceId: data.workspace.id,
-            productId: data.product.id,
-            identityKey,
-            conservative: true,
-          });
-          if (resolved.heroImageUrl) renderData = applyPdpHeroOverride(data, resolved.heroImageUrl);
-          experimentExposures = resolved.exposures;
-        }
-        // else: no active experiment → never touched cookies → ISR cache intact.
+      } else if (sp._sxv) {
+        // Edge-assigned arm: the middleware already sticky-assigned this visitor +
+        // set the `sx_variant` cookie + rewrote to `?_sxv=<variantId>`. We resolve
+        // ONLY the arm's hero (guarded to this product) — no cookie read here, so
+        // the render stays cacheable, keyed by `_sxv`. The exposure is emitted
+        // client-side from the `sx_variant` cookie (covers control/holdout too).
+        const heroUrl = await loadEdgeAssignedPdpHero(admin, data.workspace.id, data.product.id, sp._sxv);
+        if (heroUrl) renderData = applyPdpHeroOverride(data, heroUrl);
       }
+      // else: no `_sxv` (control/holdout arm, or no running experiment) → serve the
+      // cached real PDP. Any control/holdout exposure is emitted client-side from
+      // the `sx_variant` cookie when the middleware set one.
     } catch {
       /* experiment substrate is best-effort — fall back to the control PDP */
     }

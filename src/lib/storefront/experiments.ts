@@ -284,6 +284,49 @@ export async function loadExperimentById(
 }
 
 /**
+ * Resolve the hero-image override for an EDGE-ASSIGNED PDP arm
+ * (pdp-edge-served-experiments). The middleware already sticky-assigned the visitor
+ * + set the `sx_variant` cookie and rewrote to `?_sxv=<variantId>`; the page passes
+ * that variant id here. Returns the arm's `heroImageUrl`, scoped + guarded to THIS
+ * product's active PDP experiment (so a forged `_sxv` can't inject an arbitrary
+ * hero). The exposure for the arm is emitted CLIENT-SIDE from the `sx_variant`
+ * cookie (so the render stays cacheable), NOT here. Best-effort → null.
+ */
+export async function loadEdgeAssignedPdpHero(
+  admin: Admin,
+  workspaceId: string,
+  productId: string,
+  variantId: string,
+): Promise<string | null> {
+  try {
+    const { data: v } = await admin
+      .from("storefront_experiment_variants")
+      .select("id, experiment_id, is_control, patch")
+      .eq("id", variantId)
+      .maybeSingle();
+    if (!v) return null;
+    const { data: exp } = await admin
+      .from("storefront_experiments")
+      .select("id, workspace_id, product_id, lander_type, status")
+      .eq("id", (v as { experiment_id: string }).experiment_id)
+      .maybeSingle();
+    if (
+      !exp ||
+      exp.workspace_id !== workspaceId ||
+      exp.product_id !== productId ||
+      exp.lander_type !== "pdp" ||
+      !(exp.status === "running" || exp.status === "promoted")
+    ) {
+      return null;
+    }
+    const patch = (v as { patch: VariantPatch | null }).patch;
+    return patch?.heroImageUrl ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The single call the storefront lander render makes. Resolves every active
  * experiment for this (product, lander_type), sticky-assigns the visitor, patches
  * the content, and returns the `experiment_exposure` rows the client pixel emits.
