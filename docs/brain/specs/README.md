@@ -152,6 +152,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[loop-heartbeats-retention]] (platform) — loop_heartbeats grew to 21M rows/4.5GB unbounded → control_tower_loop_beats RPC times out → every Control Tower card shows "beat read unavailable — status unknown". Fix: daily batched prune to 3 days (retention cron, itself monitored) + verify the RPC uses the index / drives distinct loops from MONITORED_LOOPS not a full scan. One-time 21M backlog prune run with owner authorization.
 
+## Active project — DB Health Agent ⏳
+
+[[db-health-agent]] (platform) — new self-watching agent commissioned after the loop_heartbeats flood. Box-side: a FREQUENT (~hourly) slow-query pass (pg_stat_statements → EXPLAIN → root-cause the WHY: seq scan / missing index / disk sort / full-scan aggregate / bloat) + a daily growth/size/missing-index/bloat sweep. PROPOSES fixes (retention cron / CREATE INDEX CONCURRENTLY / query rewrite / drop unused index / vacuum) surfaced for one-tap owner Build — never auto-applies DDL/deletes (repair-agent pattern). Monitored loop + DB Health panel.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
