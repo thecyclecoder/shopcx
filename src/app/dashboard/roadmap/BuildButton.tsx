@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import { routedInboxHref } from "@/lib/agents/inbox";
 import type { AgentJob, JobStatus, PendingFold } from "@/lib/agent-jobs";
 import type { Phase } from "@/lib/brain-roadmap";
 
@@ -70,7 +71,6 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   const [showAnswers, setShowAnswers] = useState(false);
   const [answerMap, setAnswerMap] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
-  const [approvingId, setApprovingId] = useState<string | null>(null);
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState(false);
   const [showIssue, setShowIssue] = useState(false);
@@ -209,22 +209,6 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
       }
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  async function decide(actionId: string, decision: "approve" | "decline") {
-    if (!job || approvingId) return;
-    setApprovingId(actionId);
-    try {
-      const res = await fetch("/api/roadmap/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: job.id, actionId, decision }),
-      });
-      const d = await res.json();
-      if (d.job) setJob(d.job);
-    } finally {
-      setApprovingId(null);
     }
   }
 
@@ -482,25 +466,14 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
           </button>
         </div>
       )}
+      {/* approval-routing-engine Phase 4: the approval is decided in the routed inbox (the single source),
+          not on a standalone spec card. The investigation + Approve/Decline render inline there. */}
       {needsApproval && (job!.pending_actions || []).some((a) => a.status === "pending") && (
-        <div className="mt-2 space-y-2 rounded-md border border-amber-200 bg-amber-50/40 p-2 text-left dark:border-amber-900/40 dark:bg-amber-950/20">
-          <div className="text-[11px] font-medium text-amber-800 dark:text-amber-300">Needs your approval before continuing:</div>
-          {(job!.pending_actions || []).filter((a) => a.status === "pending").map((a) => (
-            <div key={a.id} className="rounded border border-amber-100 bg-white p-2 dark:border-amber-900/30 dark:bg-zinc-900">
-              <div className="text-[11px] font-medium text-zinc-800 dark:text-zinc-200">{a.summary}</div>
-              {(a.preview || a.cmd) && (
-                <pre className="mt-1 max-h-32 overflow-auto rounded bg-zinc-100 p-1.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">{a.preview || a.cmd}</pre>
-              )}
-              <div className="mt-1.5 flex gap-2">
-                <button type="button" onClick={() => decide(a.id, "approve")} disabled={approvingId !== null} className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
-                  {approvingId === a.id ? "…" : "Approve & apply"}
-                </button>
-                <button type="button" onClick={() => decide(a.id, "decline")} disabled={approvingId !== null} className="rounded-md border border-zinc-200 px-2 py-0.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300">
-                  Decline
-                </button>
-              </div>
-            </div>
-          ))}
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/40 p-2 text-left text-[11px] leading-snug dark:border-amber-900/40 dark:bg-amber-950/20">
+          <span className="font-medium text-amber-800 dark:text-amber-300">Needs your approval before continuing.</span>{" "}
+          <a href={routedInboxHref()} className="font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
+            Review &amp; approve in the Agents inbox →
+          </a>
         </div>
       )}
       {showIssue && (

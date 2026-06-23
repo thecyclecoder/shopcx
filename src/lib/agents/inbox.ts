@@ -71,6 +71,35 @@ export function tabForType(type: string): InboxTab | null {
   return INBOX_TABS.find((t) => t.notificationType === type)?.id ?? null;
 }
 
+/**
+ * Deep-link to a role's routed Approval Requests inbox on the Agents hub — the SINGLE place an
+ * approval is surfaced + (for plain approve/decline) decided (approval-routing-engine Phase 4).
+ * Every migrated surface (box page, spec cards, Control Tower feeds) points here instead of raising
+ * its own standalone approval card. Defaults to the CEO inbox — the fail-safe root every approval
+ * routes to until a director is live+autonomous. See docs/brain/dashboard/agents.md.
+ */
+export function routedInboxHref(role: string = "ceo"): string {
+  return `/dashboard/agents?view=inbox&role=${encodeURIComponent(role)}`;
+}
+
+/**
+ * One pending action the inbox can decide INLINE with a plain Approve/Decline (approval-routing-engine
+ * Phase 4 — multi-action/multi-branch inline). A job whose pending actions are ALL plain approve/decline
+ * (build gated actions, plan-proposed spec branches, repair/db-health build) surfaces every one of these
+ * so the whole decision is made in the inbox. A job with ANY multi-CHOICE action (coverage register/exempt,
+ * hero reject-with-notes) carries no `actions` and falls back to the `deepLink` canonical surface instead —
+ * the inbox never guesses a register/exempt/preview decision.
+ */
+export interface InboxApprovalAction {
+  id: string;
+  summary: string;
+  preview?: string | null;
+  cmd?: string | null;
+  /** set for a plan-proposed spec branch (type:'spec') — the DRI function + parent milestone. */
+  specOwner?: string | null;
+  specParent?: string | null;
+}
+
 export interface InboxItem {
   id: string;
   tab: InboxTab;
@@ -85,11 +114,17 @@ export interface InboxItem {
   jobId?: string;
   /**
    * the single pending action id inline Approve/Decline acts on via POST /api/roadmap/approve.
-   * null when the job is multi-action or multi-choice (coverage register/exempt, hero preview) —
-   * the row falls back to the `deepLink` surface so the richer decision isn't guessed at.
+   * Back-compat single-action pointer; `actions` (Phase 4) is the general list. null when the job is
+   * multi-choice (coverage register/exempt, hero preview) — the row falls back to `deepLink`.
    */
   approveActionId?: string | null;
-  /** canonical surface to decide a richer/multi-choice action (Phase 4 folds these into the inbox). */
+  /**
+   * every pending plain action this approval gates, each decided INLINE with its own Approve/Decline
+   * (approval-routing-engine Phase 4). Present for plain/multi-action/multi-branch jobs (build, plan,
+   * repair, db-health); absent/empty for multi-CHOICE jobs, which use `deepLink` instead.
+   */
+  actions?: InboxApprovalAction[];
+  /** canonical surface to decide a multi-CHOICE action (coverage register/exempt, hero preview). */
   deepLink?: string | null;
   /** the org-chart function this request routed to (eyeball/audit; CEO by default). */
   routedTo?: string;

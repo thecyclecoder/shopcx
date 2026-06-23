@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
+import { routedInboxHref } from "@/lib/agents/inbox";
 import type { AgentJob, JobStatus } from "@/lib/agent-jobs";
 
 const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
@@ -38,7 +39,6 @@ export default function PlanButton({ goalSlug, initialJob }: { goalSlug: string;
   const workspace = useWorkspace();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
   const [busy, setBusy] = useState(false);
-  const [approvingId, setApprovingId] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -86,22 +86,6 @@ export default function PlanButton({ goalSlug, initialJob }: { goalSlug: string;
     }
   }
 
-  async function decide(actionId: string, decision: "approve" | "decline") {
-    if (!job || approvingId) return;
-    setApprovingId(actionId);
-    try {
-      const res = await fetch("/api/roadmap/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: job.id, actionId, decision }),
-      });
-      const d = await res.json();
-      if (d.job) setJob(d.job);
-    } finally {
-      setApprovingId(null);
-    }
-  }
-
   const needsApproval = job?.status === "needs_approval";
   const pending = (job?.pending_actions || []).filter((a) => a.status === "pending");
 
@@ -125,32 +109,16 @@ export default function PlanButton({ goalSlug, initialJob }: { goalSlug: string;
         )}
       </div>
 
+      {/* approval-routing-engine Phase 4: the proposed branches are approved/declined per-branch in the
+          routed inbox (the single source) — owner + parent + intent render inline there. */}
       {needsApproval && pending.length > 0 && (
-        <div className="mt-2 space-y-2 rounded-md border border-amber-200 bg-amber-50/40 p-2 text-left dark:border-amber-900/40 dark:bg-amber-950/20">
-          <div className="text-[11px] font-medium text-amber-800 dark:text-amber-300">
-            Proposed specs — approve the branches to pursue (declined ones aren&apos;t re-proposed):
-          </div>
-          {pending.map((a) => (
-            <div key={a.id} className="rounded border border-amber-100 bg-white p-2 dark:border-amber-900/30 dark:bg-zinc-900">
-              <div className="text-[11px] font-medium text-zinc-800 dark:text-zinc-200">{a.summary}</div>
-              {a.spec && (
-                <div className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-                  owner <span className="font-medium text-violet-600 dark:text-violet-400">{a.spec.owner}</span> · ↳ {a.spec.parent}
-                </div>
-              )}
-              {(a.preview || a.cmd) && (
-                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-zinc-100 p-1.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">{a.preview || a.cmd}</pre>
-              )}
-              <div className="mt-1.5 flex gap-2">
-                <button type="button" onClick={() => decide(a.id, "approve")} disabled={approvingId !== null} className="rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
-                  {approvingId === a.id ? "…" : "Approve"}
-                </button>
-                <button type="button" onClick={() => decide(a.id, "decline")} disabled={approvingId !== null} className="rounded-md border border-zinc-200 px-2 py-0.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300">
-                  Decline
-                </button>
-              </div>
-            </div>
-          ))}
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/40 p-2 text-left text-[11px] leading-snug dark:border-amber-900/40 dark:bg-amber-950/20">
+          <span className="font-medium text-amber-800 dark:text-amber-300">
+            {pending.length} proposed branch{pending.length === 1 ? "" : "es"} await your approval.
+          </span>{" "}
+          <a href={routedInboxHref()} className="font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
+            Approve the branches in the Agents inbox →
+          </a>
         </div>
       )}
 
