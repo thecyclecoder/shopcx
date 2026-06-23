@@ -1,0 +1,1 @@
+- **Error feed: drop client-abort framework-internal stream errors from Vercel capture** · verified 2026-06-23 · → [[integrations/vercel-log-drain]]
