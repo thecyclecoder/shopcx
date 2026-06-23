@@ -39,19 +39,40 @@ export interface AdLibrarySearchParams {
   pageSize?: number;
 }
 
-/** A raw AdLibrary ad row (only the fields we read are typed; the rest pass through `raw`). */
+/**
+ * A raw AdLibrary ad row. We capture the COMPLETE payload — destination, full copy, CTA, spend,
+ * longevity, engagement, channel — not just the creative (ad-creative-scout Phase 1). The
+ * destination (`ecom_advertiser_id` = the store domain per ad) is the bridge to landing-page-scout;
+ * the copy/CTA/spend/offer fields power ad-gap analysis. The rest still passes through `raw`.
+ */
 export interface AdLibraryAd {
   ad_key: string;
   advertiser: string | null;
   title: string | null;
   body: string | null;
+  /** Secondary copy line AdLibrary returns alongside title/body. */
+  message: string | null;
+  /** "Shop Now" / "Learn More" — the ad's CTA button. */
+  call_to_action: string | null;
+  /** ecom_advertiser_id — the store DOMAIN this specific ad drives traffic to (landing-page-scout bridge). */
+  destination_domain: string | null;
+  has_store_url: boolean | null;
   preview_img_url: string | null;
   resource_urls: Array<{ type?: number; url?: string; u?: string }>;
   video_duration: number | null;
   ads_type: number | null;
+  /** Platform the ad ran on (e.g. "facebook", "instagram"). */
+  platform: string | null;
+  fb_merge_channel: string | null;
+  estimated_spend: number | null;
   all_exposure_value: number | null;
   impression: number | null;
   heat: number | null;
+  /** Engagement counts. */
+  like_count: number | null;
+  comment_count: number | null;
+  share_count: number | null;
+  view_count: number | null;
   first_seen: string | null;
   last_seen: string | null;
   days_count: number | null;
@@ -82,6 +103,32 @@ function resourceUrl(r: { url?: string; u?: string }): string | null {
   return r.url || r.u || null;
 }
 
+function pickStr(...vals: unknown[]): string | null {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+function pickBool(v: unknown): boolean | null {
+  if (typeof v === "boolean") return v;
+  if (v === "true" || v === 1) return true;
+  if (v === "false" || v === 0) return false;
+  return null;
+}
+
+/**
+ * Normalize a destination into a bare store domain (the landing-page-scout bridge): strip protocol,
+ * leading "www.", and any path/query — keep the host (incl. subdomain, e.g. shop.ryzesuperfoods.com).
+ */
+function normalizeDestination(raw: unknown): string | null {
+  const s = pickStr(raw);
+  if (!s) return null;
+  let host = s.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  host = host.split(/[/?#]/)[0].trim().toLowerCase();
+  return host || null;
+}
+
 /**
  * Classify static vs video. `video_duration` is the primary signal (0 = static,
  * >0 = video); `ads_type` (1=image, 2=video) and `resource_urls[].type` corroborate.
@@ -102,13 +149,26 @@ function normalize(row: Record<string, unknown>): NormalizedAd {
     advertiser: (row.advertiser as string) ?? (row.page_name as string) ?? null,
     title: (row.title as string) ?? null,
     body: (row.body as string) ?? null,
+    message: pickStr(row.message, row.caption, row.ad_text),
+    call_to_action: pickStr(row.call_to_action, row.cta, row.cta_text),
+    destination_domain: normalizeDestination(
+      row.ecom_advertiser_id ?? row.store_url ?? row.link_url ?? row.destination_url,
+    ),
+    has_store_url: pickBool(row.has_store_url),
     preview_img_url: (row.preview_img_url as string) ?? (row.previewImgUrl as string) ?? null,
     resource_urls: resourceUrls,
     video_duration: pickNum(row.video_duration),
     ads_type: pickNum(row.ads_type),
+    platform: pickStr(row.platform, row.publisher_platform),
+    fb_merge_channel: pickStr(row.fb_merge_channel),
+    estimated_spend: pickNum(row.estimated_spend),
     all_exposure_value: pickNum(row.all_exposure_value),
     impression: pickNum(row.impression),
     heat: pickNum(row.heat),
+    like_count: pickNum(row.like ?? row.like_count ?? row.likes),
+    comment_count: pickNum(row.comment ?? row.comment_count ?? row.comments),
+    share_count: pickNum(row.share ?? row.share_count ?? row.shares),
+    view_count: pickNum(row.view ?? row.view_count ?? row.views),
     first_seen: (row.first_seen as string) ?? null,
     last_seen: (row.last_seen as string) ?? null,
     days_count: pickNum(row.days_count),

@@ -14,6 +14,10 @@ Discovery half of the winning-static-creative finder (Phase 2). Searches [[../in
 | `NormalizedAd` / `AdLibraryAd` / `MediaType` / `Seed` | types; `NormalizedAd` adds `media_type` + best `creative_url`; `Seed = { keyword, kind, note? }` |
 | `CATEGORY_SEEDS` | curated category discovery keywords |
 
+## Full-payload capture (ad-creative-scout)
+
+`normalize()` keeps the **COMPLETE** AdLibrary row, not just the creative ([[../specs/ad-creative-scout]]): `destination_domain` (`ecom_advertiser_id` → bare host — the store domain this ad drives to, the [[../specs/landing-page-scout]] bridge), `has_store_url`, `call_to_action`, full copy (`body`/`message`), spend (`estimated_spend`/`all_exposure_value`/`impression`), engagement (`like`/`comment`/`share`/`view` → `*_count`), `platform`/`fb_merge_channel`/`ads_type`. All persisted onto [[../tables/creative_skeletons]] by [[creative-skeleton]] `ingestAd`. Field reads are defensive (multiple key aliases) since AdLibrary's row shape drifts; unknown fields still pass through `raw`.
+
 ## Seed list
 
 - **Categories** (still hardcoded here): superfood/mushroom/adaptogen coffee, energy-without-jitters, anti-inflammatory, longevity, anti-aging, weight-loss coffee, ashwagandha, greens.

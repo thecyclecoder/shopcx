@@ -24,7 +24,7 @@ _None._
 
 ## Tables written
 
-- [[../tables/creative_skeletons]] (via [[../libraries/creative-skeleton]] `ingestAd` — idempotent upsert)
+- [[../tables/creative_skeletons]] (via [[../libraries/creative-skeleton]] `ingestAd` — idempotent upsert; now stores the **complete AdLibrary payload** per ad — destination domain, copy, CTA, spend, engagement, channel — see [[../specs/ad-creative-scout]])
 - [[../tables/competitors]] (`promoteFromCategorySweep` inserts `source='category_sweep'`, `status='proposed'` candidates)
 - `ai_token_usage` (vision usage, via [[../libraries/ai-usage]])
 
@@ -41,4 +41,4 @@ _None._
 
 ---
 
-[[../README]] · [[../integrations/adlibrary]] · [[../libraries/creative-skeleton]] · [[../libraries/adlibrary]] · [[../libraries/competitors]] · [[../tables/competitors]] · [[competitor-scout]] · [[../specs/winning-static-creative-finder]] · [[../specs/competitor-scout]] · [[../../CLAUDE]]
+[[../README]] · [[../integrations/adlibrary]] · [[../libraries/creative-skeleton]] · [[../libraries/adlibrary]] · [[../libraries/ad-gap]] · [[../libraries/competitors]] · [[../tables/competitors]] · [[competitor-scout]] · [[../specs/ad-creative-scout]] · [[../specs/winning-static-creative-finder]] · [[../specs/competitor-scout]] · [[../../CLAUDE]]
