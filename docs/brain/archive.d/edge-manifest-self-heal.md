@@ -1,0 +1,1 @@
+- **Edge experiment manifest — self-heal on the refresh cron** · verified 2026-06-23 · → [[libraries/storefront-experiment-refresh]]
