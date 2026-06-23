@@ -32,6 +32,14 @@ import {
 } from "@/lib/control-tower/registry";
 import { aggregateRenewalOutcomes, type RenewalOutcomeCounts } from "@/lib/control-tower/heartbeat";
 import { buildCoverageAudit, type CoverageAudit } from "@/lib/control-tower/self-audit";
+import { SPEC_TEST_FIXTURES } from "@/lib/spec-test-sandbox";
+
+// The permanent spec-test sandbox tenant (is_test=true). Its seeded fixtures are deliberately stuck
+// (e.g. SPEC_TEST_FIXTURES.subscriptionCompId is a comp sub whose customer has no comp_role, so the
+// fail-closed comp gate intentionally never advances it). Output-assertion integrity queries scan
+// GLOBAL tables, so without this exclusion a synthetic fixture reads as a real production anomaly and
+// trips a loop tile RED. Every assertion query over a workspace-scoped table excludes this tenant.
+const SPEC_TEST_SANDBOX_WORKSPACE_ID = SPEC_TEST_FIXTURES.workspaceId;
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -784,7 +792,9 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .select("id", { count: "exact", head: true })
       .eq("is_internal", true)
       .eq("status", "active")
-      .lt("next_billing_date", startOfToday.toISOString()),
+      .lt("next_billing_date", startOfToday.toISOString())
+      // Exclude the spec-test sandbox: its seeded comp fixture is stuck overdue by design.
+      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID),
     // The latest renewal-cron beat marks the start of the LIVE current cycle — outcome beats since
     // then belong to it (vs everything older = the rolling baseline).
     admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "internal-subscription-renewal-cron").order("ran_at", { ascending: false }).limit(1).maybeSingle(),
@@ -794,7 +804,9 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .from("dunning_cycles")
       .select("id", { count: "exact", head: true })
       .eq("status", "retrying")
-      .lt("next_retry_at", stuckBeforeIso),
+      .lt("next_retry_at", stuckBeforeIso)
+      // Exclude the spec-test sandbox: a deliberately-stuck dunning fixture isn't a real anomaly.
+      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID),
   ]);
 
   // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a

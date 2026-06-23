@@ -1,4 +1,4 @@
-# Control Tower: exclude the is_test spec-test sandbox from renewal-integrity (and sibling) assertions ⏳
+# Control Tower: exclude the is_test spec-test sandbox from renewal-integrity (and sibling) assertions 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/monitor.ts::monitor-false-positive`
@@ -11,8 +11,10 @@ The internal-subscription-renewal-cron tile went RED (reason=renewal_integrity: 
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** `fetchAssertionInputs` in `src/lib/control-tower/monitor.ts` now excludes the permanent spec-test sandbox tenant (`SPEC_TEST_SANDBOX_WORKSPACE_ID` = `SPEC_TEST_FIXTURES.workspaceId`, `is_test=true`) from the workspace-scoped integrity queries via `.neq("workspace_id", …)`: the renewal-integrity overdue-subscriptions scan and the sibling stuck-dunning scan. A deliberately-stuck synthetic fixture (e.g. the comp sub whose customer has no `comp_role`) can no longer trip a real loop tile RED. Brain page [[../libraries/control-tower]] updated. (`loop_heartbeats`-sourced reads — escalation/spec-test/renewal-outcome — carry no `workspace_id` column and are unaffected.)
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:internal-subscription-renewal-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
