@@ -60,6 +60,12 @@ export const AGENT_INBOX_TYPES = INBOX_TABS.map((t) => t.notificationType);
  */
 export const APPROVAL_REQUEST_TYPE = "agent_approval_request";
 
+/**
+ * The reserved `dashboard_notifications.type` the EOD recap (M3 Phase 4) emits a Daily Summary under.
+ * Shared by the emitter (src/lib/agents/director-recap.ts) and the inbox taxonomy so it's declared once.
+ */
+export const DAILY_SUMMARY_TYPE = "agent_daily_summary";
+
 /** Map a dashboard_notifications `type` to its inbox tab (null if it isn't an agent-inbox type). */
 export function tabForType(type: string): InboxTab | null {
   return INBOX_TABS.find((t) => t.notificationType === type)?.id ?? null;

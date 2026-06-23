@@ -26,6 +26,7 @@ import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
 import { aiNightlyAnalysis } from "@/lib/inngest/ai-nightly-analysis";
 import { ticketAnalysisCron } from "@/lib/inngest/ticket-analysis-cron";
 import { dailyAnalysisReportCron } from "@/lib/inngest/daily-analysis-report-cron";
+import { directorRecapCron } from "@/lib/inngest/director-recap-cron";
 import { sonnetPromptAutoReviewCron } from "@/lib/inngest/sonnet-prompt-auto-review";
 import {
   fraudNightlyScan,
@@ -147,6 +148,7 @@ export const registeredInngestFunctions = [
   aiNightlyAnalysis,
   ticketAnalysisCron,
   dailyAnalysisReportCron,
+  directorRecapCron,
   sonnetPromptAutoReviewCron,
   fraudNightlyScan,
   fraudGenerateSummary,
