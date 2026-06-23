@@ -148,6 +148,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[optimizer-launch-hardening]] (platform) — 5 findings from the pre-A/B-approval review (tsc clean, customer path SAFE, no false-✅). P1: optimizer approval re-asserts scope/active (TOCTOU) + add blocked_on_usage to JobStatus/ACTIVE_STATUSES (fold-guard drift). P2: auto-merge gates on the build job's success not GitHub's vacuous 'clean' (no CI exists). P3: plan-resume un-park only healthy-account jobs + tighten optimizer-policy RLS. None block the A/B approval.
 
+## Active project — loop_heartbeats retention ⏳
+
+[[loop-heartbeats-retention]] (platform) — loop_heartbeats grew to 21M rows/4.5GB unbounded → control_tower_loop_beats RPC times out → every Control Tower card shows "beat read unavailable — status unknown". Fix: daily batched prune to 3 days (retention cron, itself monitored) + verify the RPC uses the index / drives distinct loops from MONITORED_LOOPS not a full scan. One-time 21M backlog prune run with owner authorization.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
