@@ -39,6 +39,23 @@ interface ProductOption {
   published: boolean;
 }
 
+/** One pending campaign proposal card (mirrors the proposals API ProposalCard). */
+interface ProposalCard {
+  jobId: string;
+  actionId: string;
+  spec_slug: string;
+  product_id: string;
+  product_name: string | null;
+  lander_type: string;
+  audience: string;
+  lever: string;
+  hypothesis: string;
+  reasoning: string;
+  preview: string;
+  variant: { kind: string; label: string; hero_prompt?: string; patch?: unknown };
+  created_at: string | null;
+}
+
 export default function StorefrontOptimizerPage() {
   const workspace = useWorkspace();
   const [policy, setPolicy] = useState<Policy | null>(null);
@@ -47,6 +64,10 @@ export default function StorefrontOptimizerPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [proposals, setProposals] = useState<ProposalCard[]>([]);
+  const [proposalsLoaded, setProposalsLoaded] = useState(false);
+  const [deciding, setDeciding] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -59,9 +80,46 @@ export default function StorefrontOptimizerPage() {
     setLoading(false);
   }, [workspace.id]);
 
+  const loadProposals = useCallback(async () => {
+    const res = await fetch(`/api/workspaces/${workspace.id}/storefront-optimizer-proposals`);
+    if (res.ok) {
+      const data = await res.json();
+      setProposals(Array.isArray(data.proposals) ? data.proposals : []);
+    }
+    setProposalsLoaded(true);
+  }, [workspace.id]);
+
   useEffect(() => {
     load();
-  }, [load]);
+    loadProposals();
+  }, [load, loadProposals]);
+
+  // The approve/decline path goes through the EXISTING /api/roadmap/approve route
+  // (approveRoadmapAction) — no new approval logic. On success we optimistically drop the card.
+  const decide = useCallback(
+    async (card: ProposalCard, decision: "approve" | "decline") => {
+      setDeciding(card.actionId);
+      setError(null);
+      const res = await fetch(`/api/roadmap/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: card.jobId, actionId: card.actionId, decision }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setProposals((prev) => prev.filter((p) => p.actionId !== card.actionId));
+        setToast(
+          decision === "approve"
+            ? "Campaign queued — the agent is standing up the experiment."
+            : "Proposal declined.",
+        );
+      } else {
+        setError(data.error || "Failed to record your decision");
+      }
+      setDeciding(null);
+    },
+    [],
+  );
 
   const patch = useCallback(
     async (changes: Partial<Policy>) => {
@@ -113,6 +171,19 @@ export default function StorefrontOptimizerPage() {
       {error && (
         <div className="mb-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-900/40 dark:bg-rose-950/30 dark:text-rose-300">
           {error}
+        </div>
+      )}
+
+      {toast && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-300">
+          <span>{toast}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className="text-xs font-medium text-emerald-600 hover:underline dark:text-emerald-400"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -190,6 +261,33 @@ export default function StorefrontOptimizerPage() {
         </div>
       </section>
 
+      {/* ── Proposed campaigns (Build/Approve cards) ──────────────────── */}
+      <section className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Proposed campaigns</h2>
+        <p className="mt-1 mb-4 text-xs text-zinc-500">
+          Each card is one hypothesis the agent formed from your funnel signal. Approving stands up the
+          experiment vs holdout; declining clears it. The agent never runs these without your tap.
+        </p>
+        {!proposalsLoaded ? (
+          <p className="text-xs text-zinc-400">Loading proposals…</p>
+        ) : proposals.length === 0 ? (
+          <p className="text-xs text-zinc-400">No proposals awaiting your approval.</p>
+        ) : (
+          <ul className="space-y-3">
+            {proposals.map((card) => (
+              <ProposalCardItem
+                key={card.actionId}
+                card={card}
+                busy={deciding === card.actionId}
+                disabled={deciding !== null}
+                onApprove={() => decide(card, "approve")}
+                onDecline={() => decide(card, "decline")}
+              />
+            ))}
+          </ul>
+        )}
+      </section>
+
       {/* ── Guardrails ────────────────────────────────────────────────── */}
       <section className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="mb-1 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Guardrails</h2>
@@ -246,6 +344,86 @@ export default function StorefrontOptimizerPage() {
         {saving ? "Saving…" : savedAt ? `Saved at ${savedAt}.` : "Changes save automatically."}
       </p>
     </div>
+  );
+}
+
+function ProposalCardItem({
+  card,
+  busy,
+  disabled,
+  onApprove,
+  onDecline,
+}: {
+  card: ProposalCard;
+  busy: boolean;
+  disabled: boolean;
+  onApprove: () => void;
+  onDecline: () => void;
+}) {
+  const isHero = card.variant.kind === "hero";
+  return (
+    <li className="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+          {card.lander_type || "lander"}
+        </span>
+        <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+          lever: {card.lever || "—"}
+        </span>
+        {card.audience && (
+          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-500 dark:bg-zinc-800">
+            {card.audience}
+          </span>
+        )}
+        {card.product_name && (
+          <span className="ml-auto text-xs text-zinc-500">{card.product_name}</span>
+        )}
+      </div>
+
+      {card.hypothesis && (
+        <p className="mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-100">{card.hypothesis}</p>
+      )}
+      {card.reasoning && (
+        <p className="mt-1 text-xs leading-relaxed text-zinc-500">{card.reasoning}</p>
+      )}
+
+      {/* Variant preview — hero prompt for kind:'hero', content patch diff otherwise. */}
+      <div className="mt-3 rounded border border-zinc-100 bg-zinc-50 p-2.5 dark:border-zinc-800 dark:bg-zinc-900/50">
+        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+          Variant{card.variant.label ? ` — ${card.variant.label}` : ""}
+        </p>
+        {isHero ? (
+          <p className="text-xs text-zinc-600 dark:text-zinc-300">
+            {card.variant.hero_prompt || "(hero — prompt pending)"}
+          </p>
+        ) : card.variant.patch ? (
+          <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-snug text-zinc-600 dark:text-zinc-300">
+            {JSON.stringify(card.variant.patch, null, 2)}
+          </pre>
+        ) : (
+          <p className="text-xs text-zinc-400">(content patch)</p>
+        )}
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onApprove}
+          className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+        >
+          {busy ? "Working…" : "Approve"}
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onDecline}
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        >
+          Decline
+        </button>
+      </div>
+    </li>
   );
 }
 
