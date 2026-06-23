@@ -1,4 +1,4 @@
-# Winning Static-Creative Finder 🚧
+# Winning Static-Creative Finder ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Static-ad optimization"
 
@@ -32,8 +32,8 @@
 - ✅ Dashboard `/dashboard/marketing/ads/winning` — **Pattern matrix** tab (slot patterns + supporting brands + test matrix) and **Browse** tab (deconstructed winners with shortlist/archive). "Run sweep now" fires the manual event. Creatives display via an authenticated proxy (no re-hosting). API: `/api/ads/creative-finder` (list + POST sweep), `/patterns`, `/[id]` (shortlist), `/media` (proxy).
 - ✅ Daily sweep cron + manual event: `src/lib/inngest/creative-finder.ts` (`creative-finder-daily-cron` `0 9 * * *` + `ads/creative-finder.sweep`), registered in `src/app/api/inngest/route.ts`. Brain: [[../inngest/creative-finder]].
 
-## Phase 6 — Video (follow-on) ⏳
-- ⏳ For `video_duration`>0: download → ffmpeg keyframes (dense in first ~3s) + transcribe audio → vision frames + transcript → same skeleton schema (literal first-2s hook = opening frame + first spoken line). Heavier pipeline (download + transcription cost) — separate phase. **v1 already routes videos to `status='video_pending'`** so they're captured and queued for this phase; nothing is lost, only deferred.
+## Phase 6 — Video (follow-on) — ✂️ split out
+- **Split to [[creative-finder-video]] (2026-06-23 board-grooming).** The video pipeline is a separable, heavier follow-on that isn't needed now — moved to its own planned card so the static finder (Phases 1-5 ✅) is fully shipped. v1 already parks videos at `status='video_pending'`; nothing is lost, only deferred. See [[creative-finder-video]].
 
 ## Safety / invariants
 - **Structure, not creative.** Reverse-engineer skeletons; store structure + an image link for analysis. Never republish or lift a competitor's asset.
