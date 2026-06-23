@@ -452,7 +452,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   // ─ Every-30-min crons (window ~90 min) ─
-  { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN },
+  { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
   // ─ Hourly crons (window ~2h) ─
   { id: "dunning-payday-retry-cron", kind: "cron", owner: "retention", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR, outputAssertion: "stuck-dunning" },
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
