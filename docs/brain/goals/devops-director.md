@@ -1,0 +1,46 @@
+# DevOps Director & the Agent Org
+
+**Outcome:** take the CEO (you) out of platform operations. Stand up the **Agent Org** — CEO → Directors → Workers — with a single **approval-routing inbox** (approvals flow *up to the first live boss, else the CEO*), a **gamified Slack-style message board**, and the first live director: the **Platform/DevOps Director**, who investigates + auto-approves the platform work you currently rubber-stamp (error fixes, db builds, migrations), **escorts approved goals through their milestones**, watches the whole system, and **reports up in human terms** — escalating only the genuinely high-stakes calls. North-star chain made real: **CEO → Director → tool** ([[../operational-rules]] § North star). The `platform` function ([[../functions/platform]]) becomes an active supervising agent; this is a real step toward [[ceo-mode]].
+
+**Why now:** unlike Growth (objective still being shaped), Platform's tools are **mature** — [[../specs/repair-agent|repair]], [[db-health-agent]], [[coverage-auto-register-agent|coverage-register]], the builder chain, the box. The director just supervises tools that already work. And the **routing inbox pays off immediately** — even before any director is automated, it consolidates every approval you currently chase across Control Tower / spec cards / the box page into **one CEO inbox**.
+
+**Success metric:** **% of platform approvals you never have to touch** (auto-handled by a live director, with audited history) trending up; **goals escorted to completion without CEO babysitting**; **mean time-to-approve** down; zero dropped/stuck approvals. You read the board + the daily recap, not the details.
+
+**Target:** decompose + sequence via the [[../specs/goal-decomposition-engine|goal decomposition engine]] (human-gated). This doc is the seed + design contract.
+
+## The keystone — approvals route UP the org chart to the first live boss, else CEO
+Every agent/tool has an owner function (its director). When it needs sign-off, the approval routes to **that director if it's live + autonomous** — else it **flows up to the CEO** (you). A per-function **`live + autonomous` flag** is the progressive-offload switch:
+- **Today** no director is automated → **everything lands in the CEO inbox** (formalizing today's reality into one place).
+- As each director comes online, its owned approvals **silently re-route to it**; with autonomy, it **auto-approves + logs an auditable decision** (supervisable autonomy — the CEO can always see what the proxy decided, and why).
+- *Example:* the [[storefront-optimizer]]'s experiment proposals route to the **CEO inbox today** (Growth not live); once Growth Director is live + autonomous, the same proposals route to **Growth**, who auto-approves → you see it in history, never in your queue.
+
+This **replaces every scattered approval surface** (Control Tower feeds, spec cards, the box `approvalHref` deep-links + their 404s) with **one inbox per role**.
+
+## The inbox (each role — CEO + every Director — gets the same shape)
+Three filterable tabs: **Messages** (the board) · **Approval Requests** (the routed queue, with the agent's *investigation + proposed fix* inline so a decision is one read) · **Daily Summaries** (EOD recaps). Owner-only sidebar for now.
+
+## The gamified `#directors` board (Messages)
+Not a log — a **team channel**. Each director is a **character** (name, personality, color, a fun **SVG mascot avatar**) posting conversationally: *"🛠️ Ada · Platform — squashed a 500 on the portal path, all green; escorting the Acquisition goal, 3/5 milestones down 💪"*. **Two-way** (you reply / @-mention / ask "why?" → it answers, wired to dev-ask/spec-chat). **Per-director XP card** (specs shipped · bugs fixed · goals escorted · streak). **EOD recap** as a standup post: *"Shipped 8 specs · advanced 1 goal · fixed 2 bugs · approved 4 migrations."* Cast: 🛠️ Ada (Platform) · 🚀 Max (Growth) · 🎨 Iris (CMO) · 💬 June (CS) · 🧲 Theo (Retention) · 👑 You (CEO). *(Names/mascots reskinnable.)*
+
+## The Platform/DevOps Director agent (the first live director)
+- **Investigate → auto-approve** its inbox (error/db builds, box migrations): reads the *cause + proposed fix*, confirms sound + low-risk, approves; **never rubber-stamps**.
+- **Escort approved goals through milestones** to completion (the chain-driving done by hand becomes its job — self-sequencing + merge + fold).
+- **Watch the platform** ([[control-tower]]) + post human-readable updates to the board.
+- **Loop-guard + CEO escalation:** tracks attempts/decisions per spec; a build that **repeatedly fails on the same error** → it *stops*, diagnoses "likely deeper issue," and **escalates to the CEO** to approve modifying the approach — never an infinite resubmit loop.
+
+## The leash (autonomy policy — the north-star guardrail)
+**Auto-approves (no CEO):** error fixes · db indexes/health · additive/reversible migrations · **milestone progression of an already-approved goal** · platform-monitoring fixes.
+**Escalates UP to CEO:** a **repeatedly-failing build** (deeper issue → modify the spec/approach) · **modifying or abandoning an approved goal** · **destructive/irreversible** actions (data-dropping migration, deleting infra) · **starting a NEW goal** (only the CEO greenlights goals). Mirrors the standing autonomy rule (autonomous for low-risk/reversible; gate high-stakes/irreversible).
+
+## Foundations we already have (don't rebuild — supervise)
+✅ [[../specs/repair-agent|repair agent]] · [[db-health-agent]] · [[coverage-auto-register-agent]] · the builder chain + auto-ship + fold · the box (multi-account failover) · [[control-tower]] · dev-ask/spec-chat (the "answer why" brain). The director **orchestrates these**, it doesn't replace them.
+
+## Decomposition
+- **M1 — Agents hub + role inboxes:** owner-only "Agents" sidebar (CEO · Directors · Workers, read from `functions/` + `goals/`); each role's inbox = Messages / Approval Requests / Daily Summaries + filters; CEO inbox live first. The reusable director persona + SVG-mascot design-system piece lands here. *(foundation — blocked_by [].)*
+- **M2 — Approval routing engine:** route every approval to the first live supervisor up the org chart, else CEO; per-function `live + autonomous` flag; autonomous-approval **history logging**; migrate the existing scattered approval surfaces (Control Tower / spec cards / box) to emit into the routed inbox. *(blocked by M1.)*
+- **M3 — Gamified `#directors` board:** the Slack-style Messages experience — personas, SVG mascots, conversational posts, two-way reply (wired to dev-ask), per-director XP card, EOD recap. *(blocked by M1.)*
+- **M4 — Platform/DevOps Director agent:** the first live director — investigate→auto-approve its routed inbox (within the leash), escort approved goals through milestones, loop-guard + CEO-escalation, post to the board + EOD recap. *(blocked by M2, M3.)*
+- **M5 — Continuous loop + grading:** the standing cadence + the CEO's grade of the director's calls (was the auto-approval right? did the escorted goal land clean?) that trains it + tightens/loosens the leash. *(blocked by M4.)*
+
+## Ownership & mirrors
+Owner: [[../functions/platform]] (the Platform/DevOps director). Parent: reports to [[ceo-mode]]. Mirrors the [[storefront-optimizer]] goal (foundation → agent → grading) and is the **template every other director inherits** (Growth, CMO, CS, Retention each get the same inbox + board + autonomy pattern).
