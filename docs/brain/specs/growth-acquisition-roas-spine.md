@@ -22,14 +22,16 @@ The ±3x error bar is gone — Amazon is now product-resolvable. Coffee, Jun 7�
 
 ## Phase 1 — Per-product non-renewal revenue resolver (Shopify+internal) ✅
 - Library `getShopifyInternalNonRenewalRevenue({ productIds, startDate, endDate })` mirroring the Amazon resolver's shape: walk `orders` (paginated), bucket via `bucketOrder`, sum **line-item** revenue (`line_items[].price_cents × quantity`) for non-renewal orders, matching lines by `product_variants.shopify_variant_id → product_id ∈ group`. Reuse, don't re-implement, `bucketOrder`. Reproduces the $5,896 baseline. Brain page in same PR. (Only the Amazon side — `src/lib/amazon/per-product-revenue.ts` — exists today.)
+- **Built with Phase 3** (the ✅ flag predated the code — an owner spec-drift flip; the resolver was missing): `src/lib/shopify-internal-revenue.ts` / [[../libraries/shopify-internal-revenue]]. Counts `new_sub`+`one_time`, line-item match via the variant→product set, Central-window→UTC, optional `metaOnlyUtm`.
 
 ## Phase 2 — Per-product Amazon sales ingestion ✅ (delegated)
 - **Shipped** as [[amazon-per-product-sales-attribution]] (#157, 2026-06-21): [[../tables/daily_amazon_product_snapshots]] (per asin/product/pack/bucket/day, backfilled Mar 23–Jun 21, conservation-checked), `pack_size` on [[../tables/amazon_asins]], and `getAmazonNonRenewalRevenue` ([[../libraries/amazon__per-product-revenue]]). This phase consumes that — **do not rebuild**.
 
-## Phase 3 — Product ↔ ad-account mapping + the metric ⏳
+## Phase 3 — Product ↔ ad-account mapping + the metric ✅
 - A persistent mapping (table or `workspaces` config) from linked-group → Meta ad account(s) (coffee → 'Amazing Coffee & Creamer' `d6d619a5`). Removes the hardcode.
 - **Multi-product account nuance:** the 'Amazing Coffee & Creamer' account covers BOTH coffee and creamer, so charging all its spend to coffee **understates** coffee AcqROAS (denominator inflated). The mapping must support either (a) splitting an account's spend across the product lines it serves, or (b) flagging 'shared account — AcqROAS is a conservative floor' on the report. Decide per account.
 - Compute `AcqROAS(product, window)` = (Phase 1 + Phase 2 non-renewal) / [[../tables/daily_meta_ad_spend]] for the mapped account(s). Surface the channel split + halo ratio (Amazon ÷ on-site) + the active assumptions.
+- **Shipped:** table [[../tables/product_ad_account_mappings]] (`(group_id, meta_ad_account_id)` unique; per-row `spend_share` resolves the split nuance — option (a) via `spend_share<1`, option (b) via `is_shared_account` + the floor flag; `credit_amazon_to_meta` + `count_all_non_renewal` carry the versioned assumptions). Metric in [[../libraries/acquisition-roas]] (`getProductAdAccountMapping`, `computeAcqROAS`) — returns `acqRoas`, `channelSplit`, `haloRatio`, per-account `accounts[]`, `assumptions`, and `flags` (shared-account floor / no mapping / zero spend). Coffee seeded by `scripts/seed-coffee-ad-account-mapping.ts` (`is_shared_account=true, spend_share=1.0` → the 1.69 floor). Migration `supabase/migrations/20260703140000_product_ad_account_mappings.sql`.
 
 ## Phase 4 — Growth report contract output ⏳
 - Emit the CEO-mode director **report contract** ([[../goals/ceo-mode]]) per product line: AcqROAS, non-renewal new-customer revenue, channel mix, week-over-week delta, guardrail flag ('on-site ROAS<1 but halo-blended ≥ target — do NOT cut'). Contribution-margin ROAS is a **declared dependency on M1 COGS** — revenue-ROAS until then.
@@ -40,7 +42,10 @@ The ±3x error bar is gone — Amazon is now product-resolvable. Coffee, Jun 7�
 - **COGS / contribution margin** (CEO-mode M1) — needed to turn revenue-AcqROAS into profit-AcqROAS.
 
 ## Verification
-- [ ] Phase 1 resolver reproduces the baseline: coffee Shopify+internal non-renewal = $5,896 for Jun 7–20 (±rounding).
-- [ ] AcqROAS(coffee, Jun 7–20) returns **1.69** (channel split shown: Shopify+internal $5,896 / Amazon $6,267 / spend $7,179), with the shared-account caveat flagged.
-- [ ] Report contract validates against the CEO-mode schema; assumptions + guardrail flags present.
-- [ ] Every new library/config has a `docs/brain/` page in the same PR.
+- [ ] Apply the migration (`npx tsx scripts/apply-product-ad-account-mappings-migration.ts`) → expect `product_ad_account_mappings table present: true`, and the table exists with the unique `(group_id, meta_ad_account_id)` index.
+- [ ] Seed the coffee mapping (`npx tsx scripts/seed-coffee-ad-account-mapping.ts`) → expect it prints the resolved account ('Amazing Coffee & Creamer') + coffee group and `✓ upserted`; re-running is idempotent (no duplicate row).
+- [ ] Call `getShopifyInternalNonRenewalRevenue({ workspaceId, productIds: <coffee group>, startDate:'2026-06-07', endDate:'2026-06-20' })` → expect `grossCents ≈ 589_600` ($5,896, ±rounding) and `orderCount ≈ 53`.
+- [ ] Call `computeAcqROAS({ workspaceId, groupId: <coffee>, startDate:'2026-06-07', endDate:'2026-06-20' })` → expect `acqRoas ≈ 1.69`, `channelSplit` = { onsiteCents ≈ $5,896, amazonCents ≈ $6,267, spendCents ≈ $7,179 }, `haloRatio ≈ 1.06`, `assumptions.sharedAccountFloor=true`, and `flags` contains the "shared account — conservative floor" caveat.
+- [ ] `computeAcqROAS` for a group with no mapping row → `acqRoas=null`, `flags` contains "no ad-account mapping".
+- [ ] (Phase 4, future) Report contract validates against the CEO-mode schema; assumptions + guardrail flags present.
+- [ ] Every new library/config has a `docs/brain/` page in the same PR (`shopify-internal-revenue`, `acquisition-roas`, `product_ad_account_mappings`).
