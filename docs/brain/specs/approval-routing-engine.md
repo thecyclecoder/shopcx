@@ -26,6 +26,14 @@ The **keystone** of the [[../goals/devops-director]] goal. Every agent/tool has 
 - ⏳ planned
 - Re-point the existing surfaces to emit into the routed inbox: the [[../dashboard/control-tower]] Repair / DB-Health / Coverage-registration feeds, the spec-card `needs_approval` cards, and the box page `approvalHref` deep-links (kill the 404-prone `/dashboard/roadmap/{slug}` fallthroughs per [[../operational-rules]]). The Control Tower keeps its **monitoring** panels; its **approval** feeds become a view onto the routed inbox (single source). Update the affected brain pages in the same PR.
 
+### Decision (2026-06-23 — CEO call on rich approvals)
+The build correctly flagged: the inbox handles **single** approve/decline inline, but `plan` (multi-branch — approve/decline each proposed spec), multi-action `build` (e.g. migration + prod-script in one job), and multi-choice actions (coverage register/exempt, storefront reject-with-notes) are richer than a single button. **Ruling:**
+- **The inbox is the single QUEUE + ENTRY POINT** — you always start there; nothing is "found" on a scattered standalone surface. That's what "single source" means here.
+- **Simple** approve/decline → **inline** in the inbox row (already shipped).
+- **Rich** approvals (multi-branch / multi-action / multi-choice) → open a **modal/drawer launched FROM the inbox row** — *reuse* the existing `PlanButton` / `BuildButton` / register-exempt / reject-with-notes component **logic** rendered in-context, NOT a navigation to the old standalone card. The logic survives; the scattered *entry point* is retired.
+- **Retire** the standalone entry points: the box `approvalHref` deep-links + their 404 fallthroughs, and the Control Tower's *separate* approval feeds (it keeps monitoring only). The goal/spec pages may still render status, but the **approval action originates in the inbox**.
+- **Do NOT** rebuild every rich action as pure-inline from scratch (gold-plating) — repurposing the existing UIs as inbox-launched modals is the bar. If a given rich action genuinely can't be modal-ized cheaply, the inbox row may deep-link to its canonical surface **as a documented exception** (logged), not a silent scatter.
+
 ## Safety / invariants
 - **Route up, never sideways or down.** An approval only ever routes to an *ancestor* function or the CEO — never to a peer or a child. The graph walk is acyclic (the `functions/*.md` org chart is a tree).
 - **Default to CEO.** Any function not `live && autonomous` (the default, all-off today) falls through to the CEO — **fail safe**: an unconfigured or partially-configured org never silently auto-approves.

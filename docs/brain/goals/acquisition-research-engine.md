@@ -42,7 +42,7 @@ A raw AdLibrary search row carries far more than our parser keeps — and crucia
 - **M4 — Acquisition Research Hub:** one surface for the competitor sets + both scouts' findings + the gap queue → route to Build/optimizer.
   - [[../specs/acquisition-research-hub]] ⏳ *(blocked_by: ad-creative-scout, landing-page-scout)*
 - **M5 — Continuous loop + grading:** standing cadence (re-scan, heavy-advertiser promotion, new-gap surfacing) + the Growth-director research grade.
-  - [[../specs/acquisition-research-loop-grading]] ⏳ *(blocked_by: acquisition-research-hub)*
+  - [[../specs/acquisition-research-loop-grading]] ✅ *(blocked_by: acquisition-research-hub)*
 
 ## Ownership & mirrors
 Owner: [[../functions/growth]] (Head of Growth role). Parent: a Growth acquisition mandate, reporting to [[ceo-mode]]. Mirrors the [[storefront-optimizer]] goal's structure (foundation → agent → hub → grading loop) and the [[../specs/repair-agent|repair agent]] detect→propose→approve pattern.

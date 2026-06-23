@@ -22,6 +22,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
+import { loadSuppressedGapTypes, isSuppressed } from "@/lib/acquisition-gap-grader";
 
 export const LANDER_SHOTS_BUCKET = "lander-shots";
 export const SIGNED_TTL_SEC = 3600; // 1 hour — comfortably longer than any analysis pass
@@ -293,6 +294,8 @@ async function fetchAsBase64(url: string): Promise<{ data: string; mediaType: st
 export interface AnalyzeResult {
   proposed: number;
   skippedExisting: number;
+  /** Gaps NOT surfaced because their gap_type was down-weighted by the gap-grade loop. */
+  skippedSuppressed: number;
   competitorSnapshots: number;
   ourSnapshots: number;
   gaps: number;
@@ -331,6 +334,7 @@ export async function analyzeLanderGaps(workspaceId: string, productId?: string 
     return {
       proposed: 0,
       skippedExisting: 0,
+      skippedSuppressed: 0,
       competitorSnapshots: competitorSnaps.length,
       ourSnapshots: ourSnaps.length,
       gaps: 0,
@@ -363,6 +367,7 @@ export async function analyzeLanderGaps(workspaceId: string, productId?: string 
     return {
       proposed: 0,
       skippedExisting: 0,
+      skippedSuppressed: 0,
       competitorSnapshots: competitorSnaps.length,
       ourSnapshots: ourSnaps.length,
       gaps: 0,
@@ -400,12 +405,22 @@ export async function analyzeLanderGaps(workspaceId: string, productId?: string 
   const result: AnalyzeResult = {
     proposed: 0,
     skippedExisting: 0,
+    skippedSuppressed: 0,
     competitorSnapshots: competitorSnaps.length,
     ourSnapshots: ourSnaps.length,
     gaps: gaps.length,
   };
 
+  // The loop's training feedback: skip gap types the Growth-director grade has down-weighted
+  // (consistently rejected / lost) so we don't endlessly re-surface them — the loop learns
+  // (docs/brain/specs/acquisition-research-loop-grading.md, Phase 1).
+  const suppressed = await loadSuppressedGapTypes({ workspaceId, admin });
+
   for (const g of gaps) {
+    if (isSuppressed(suppressed, "lander", g.gap_type)) {
+      result.skippedSuppressed++;
+      continue;
+    }
     const dedupKey = `${productId || "ws"}:${g.gap_type}`;
     const { data: existing } = await admin
       .from("lander_recommendations")
