@@ -15,14 +15,22 @@
  *
  * Activation is owner-confirmed and lands in Phase 4: until Platform's function_autonomy flag is
  * flipped `live + autonomous`, resolveApprover never routes anything here, so the enqueuer below is a
- * no-op — the machinery is built but dormant. Escalation ROUTING to the CEO inbox is Phase 3; in
- * Phase 1 a non-leash / unconfirmable request is simply left untouched (it stays needs_approval) and
- * logged as escalated, never auto-approved.
+ * no-op — the machinery is built but dormant.
  *
  * Phase 2 (escortApprovedGoals, at the bottom) adds the other half of the leash — milestone progression
  * of an ALREADY-APPROVED goal: a proactive sweep that drives the unblocked specs of the goals the
  * director owns through the EXISTING build chain (auto-queue + builder chain + auto-ship + fold), logging
  * each advance. Also dormant until live+autonomous; starting a NEW goal is never auto (Phase 3 escalation).
+ *
+ * Phase 3 (the loop-guard + CEO escalation, below escortApprovedGoals) closes the leash UP-side: an
+ * escalation actually ROUTES to the CEO inbox now (it no longer just sits untouched). Two paths reuse the
+ * SAME M2 plumbing (the routed Approval Request notification — the inbox API shows an item to a role iff
+ * `metadata.routed_to_function === role`):
+ *   - escalateApprovalRequestToCeo — re-routes an out-of-leash / destructive Approval Request the runner
+ *     declined to auto-approve to the CEO, carrying the director's written diagnosis inline.
+ *   - escortLoopGuard + escalateDiagnosisToCeo — a build that REPEATEDLY fails (≥ the loop-guard cap) is
+ *     never re-submitted; the director stops, diagnoses "likely a deeper issue," and surfaces it to the
+ *     CEO (a CEO-routed Approval Request + an `escalated` director_activity row), deduped so it pings once.
  *
  * See docs/brain/specs/platform-director-agent.md · docs/brain/libraries/platform-director.md.
  */
@@ -36,8 +44,15 @@ import {
   type AutonomyMap,
   type OrgChartGraph,
 } from "@/lib/agents/approval-router";
-import { ownerFunctionForKind, inlineApproveActionId, type ApprovalJobRow } from "@/lib/agents/approval-inbox";
+import {
+  ownerFunctionForKind,
+  inlineApproveActionId,
+  buildApprovalContent,
+  approvalDeepLink,
+  type ApprovalJobRow,
+} from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
+import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
@@ -307,6 +322,7 @@ export interface GoalEscortResult {
   pct: number;
   queued: string[]; // specs the escort kicked off (the gap the reactive auto-queue didn't cover)
   inFlight: string[]; // unblocked specs already building (auto-queue / chain / a manual build is handling it)
+  escalated: string[]; // specs whose build hit the loop-guard → escalated to the CEO, never re-submitted
 }
 
 /**
@@ -318,52 +334,90 @@ export interface GoalEscortResult {
  * is live+autonomous (dormant until Phase 4, exactly like the approval enqueuer above). Best-effort; the
  * caller logs the result. Never starts a new goal, never re-implements the build path.
  */
-export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEscortResult[]; queued: string[] }> {
+export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEscortResult[]; queued: string[]; escalated: string[] }> {
   const autonomy = await loadAutonomyMap();
-  if (!platformIsAutoApprover(autonomy)) return { goals: [], queued: [] }; // dormant until Phase 4 flips the flag
+  if (!platformIsAutoApprover(autonomy)) return { goals: [], queued: [], escalated: [] }; // dormant until Phase 4 flips the flag
 
   const workspaceId = await resolveDirectorWorkspace(admin);
-  if (!workspaceId) return { goals: [], queued: [] };
+  if (!workspaceId) return { goals: [], queued: [], escalated: [] };
 
   const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
-  const owned = goals.filter((g) => g.owner === PLATFORM && isApprovedInProgress(g));
-  if (!owned.length) return { goals: [], queued: [] };
+  const mine = goals.filter((g) => g.owner === PLATFORM);
+
+  // Starting a NEW goal is never the director's call (only the CEO greenlights goals — devops-director
+  // § leash). A zero-progress owned goal is unstarted: surface it to the CEO ONCE (deduped), never auto-start.
+  for (const goal of mine.filter((g) => g.pct === 0)) {
+    await escalateDiagnosisToCeo(admin, {
+      workspaceId,
+      specSlug: null,
+      title: `Greenlight needed: ${goal.title}`,
+      diagnosis: `The Platform goal "${goal.title}" is approved-but-unstarted (0%). Starting a new goal is a call only you can make, so I'm holding off — greenlight it and I'll escort it through its milestones.`,
+      dedupeKey: `newgoal:${goal.slug}`,
+      deepLink: `/dashboard/roadmap/goals/${goal.slug}`,
+      escalationKind: "new_goal",
+      metadata: { goal_slug: goal.slug, pct: goal.pct },
+    });
+  }
+
+  const owned = mine.filter((g) => isApprovedInProgress(g));
+  if (!owned.length) return { goals: [], queued: [], escalated: [] };
 
   const specBySlug = new Map(specs.map((s) => [s.slug, s]));
   const results: GoalEscortResult[] = [];
   const queuedAll: string[] = [];
+  const escalatedAll: string[] = [];
 
   for (const goal of owned) {
     const queued: string[] = [];
     const inFlight: string[] = [];
+    const escalated: string[] = [];
     for (const card of goalSpecs(goal, specBySlug)) {
       if (card.status === "shipped") continue; // already landed
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
       if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
 
-      // Already has a build job (any status)? → the auto-queue / chain / a manual build is handling it.
-      // Confirm it's moving (the escort's "did each land clean" check), don't stack a duplicate.
-      const { data: existing } = await admin
-        .from("agent_jobs")
-        .select("id")
-        .eq("workspace_id", workspaceId)
-        .eq("spec_slug", card.slug)
-        .eq("kind", "build")
-        .limit(1);
-      if (existing && existing.length) {
+      const state = await specBuildState(admin, workspaceId, card.slug);
+
+      // An active or already-landed build (auto-queue / chain / a manual build is handling it)? → confirm it's
+      // moving (the escort's "did each land clean" check), don't stack a duplicate. (Phase 2 idempotency.)
+      if (state.inFlight) {
         inFlight.push(card.slug);
         continue;
       }
 
-      // The gap: an unblocked, unshipped, never-queued spec of an approved goal. Kick off its build — the
-      // existing chain + auto-ship + fold + blocked_by auto-queue carry it from here (we don't rebuild them).
+      // Loop-guard — this build REPEATEDLY failed (≥ the cap) and nothing is in-flight. Stop: a deeper issue,
+      // not something a resubmit fixes. Escalate the diagnosis to the CEO (to approve modifying the approach)
+      // and NEVER re-queue — the leash forbids an infinite resubmit loop. Deduped, so it pings the CEO once.
+      if (state.failedCount >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+        const diagnosis = `Build of "${card.slug}" (escorting ${goal.title}, ${goal.pct}%) failed ${state.failedCount}× and didn't land — likely a deeper issue, not a flaky retry${state.lastError ? ` (latest error: ${state.lastError.slice(0, 400)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach and I'll carry it from there.`;
+        const r = await escalateDiagnosisToCeo(admin, {
+          workspaceId,
+          specSlug: card.slug,
+          title: `Build stuck: ${card.slug}`,
+          diagnosis,
+          dedupeKey: `loopguard:${card.slug}`,
+          deepLink: `/dashboard/roadmap/${card.slug}`,
+          escalationKind: "loop_guard",
+          metadata: { goal_slug: goal.slug, pct: goal.pct, failed_attempts: state.failedCount, last_error: state.lastError ?? undefined },
+        });
+        if (r.emitted) {
+          escalated.push(card.slug);
+          escalatedAll.push(card.slug);
+        }
+        continue;
+      }
+
+      // The gap: an unblocked, unshipped spec of an approved goal with no in-flight build — either never queued,
+      // or a prior attempt failed under the loop-guard cap (a bounded retry). Kick off its build — the existing
+      // chain + auto-ship + fold + blocked_by auto-queue carry it from here (we don't rebuild them).
+      const retry = state.failedCount > 0;
       const { error } = await admin.from("agent_jobs").insert({
         workspace_id: workspaceId,
         spec_slug: card.slug,
         kind: "build",
         status: "queued",
         created_by: null,
-        instructions: `Escorted by the Platform/DevOps Director: ${goal.title} (${goal.pct}%) — ${card.slug} is unblocked; sequencing its build toward the next milestone.`,
+        instructions: `Escorted by the Platform/DevOps Director: ${goal.title} (${goal.pct}%) — ${card.slug} is unblocked; ${retry ? `re-attempt #${state.failedCount + 1} (prior build failed) — ` : ""}sequencing its build toward the next milestone.`,
       });
       if (!error) {
         queued.push(card.slug);
@@ -371,8 +425,8 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
       }
     }
 
-    if (queued.length || inFlight.length) {
-      results.push({ goalSlug: goal.slug, goalTitle: goal.title, pct: goal.pct, queued, inFlight });
+    if (queued.length || inFlight.length || escalated.length) {
+      results.push({ goalSlug: goal.slug, goalTitle: goal.title, pct: goal.pct, queued, inFlight, escalated });
     }
     // Log an escort action only when we actually advanced the goal (queued new work) — an idle confirm-pass
     // shouldn't flood the audit log. The board post + richer EOD-recap slice land in Phase 4.
@@ -383,10 +437,183 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
         actionKind: "escorted_goal",
         specSlug: queued[0],
         reason: `Escorting ${goal.title} (${goal.pct}%): sequenced ${queued.length} unblocked spec(s) toward the next milestone — ${queued.join(", ")}.`,
-        metadata: { goal_slug: goal.slug, pct: goal.pct, queued, in_flight: inFlight, autonomous: true },
+        metadata: { goal_slug: goal.slug, pct: goal.pct, queued, in_flight: inFlight, escalated, autonomous: true },
       });
     }
   }
 
-  return { goals: results, queued: queuedAll };
+  return { goals: results, queued: queuedAll, escalated: escalatedAll };
+}
+
+// ── Phase 3 — loop-guard + CEO escalation (the high-stakes calls) ─────────────────────────────────
+// The leash is hard, so the high-stakes calls ALWAYS route UP to the CEO, never get rubber-stamped or
+// resubmitted forever:
+//   - a build that REPEATEDLY fails on the same error → STOP (a deeper issue), diagnose, escalate.
+//   - a destructive / irreversible action, an out-of-leash request, or anything the runner can't confirm
+//     sound → escalate the routed Approval Request to the CEO with the director's written diagnosis.
+//   - starting a NEW goal (a zero-progress owned goal) → only the CEO greenlights goals → escalate.
+// Every escalation reuses the EXISTING M2 inbox (a routed Approval Request notification — the inbox API
+// shows an item to a role iff `metadata.routed_to_function === role`); we never build a parallel inbox.
+
+/** Loop-guard: a build that fails to land after this many attempts → escalate to CEO, never re-submit. */
+export const PLATFORM_DIRECTOR_LOOP_GUARD_MAX = 2;
+
+/** The window the loop-guard counts recent failed build attempts over (mirrors the regression agent). */
+export const PLATFORM_DIRECTOR_RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** A build job's status means it FAILED (the loop-guard counts these). Everything else = active or landed. */
+const FAILED_BUILD_STATUSES: ReadonlySet<string> = new Set(["failed", "needs_attention"]);
+
+/** One escort spec's build state — what the escort reads to decide queue vs in-flight vs loop-guard. */
+export interface SpecBuildState {
+  /** an active (queued/building/…) or already-landed (completed/merged) build exists → leave it alone. */
+  inFlight: boolean;
+  /** failed/needs_attention build attempts within the window. */
+  failedCount: number;
+  /** the most recent failure's error text (for the diagnosis). */
+  lastError: string | null;
+  /** total build jobs seen for the spec. */
+  total: number;
+}
+
+/**
+ * Read the recent build jobs for a spec and classify them: is one active/landed (don't re-queue), how
+ * many have FAILED (the loop-guard count), and the latest failure's error. The escort uses this to pick
+ * queue (gap-fill) · retry (failed but under the cap) · in-flight (leave it) · loop-guard (escalate).
+ */
+export async function specBuildState(admin: Admin, workspaceId: string, specSlug: string): Promise<SpecBuildState> {
+  const sinceIso = new Date(Date.now() - PLATFORM_DIRECTOR_RECENT_WINDOW_MS).toISOString();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("status, error, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", specSlug)
+    .eq("kind", "build")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(20);
+  const rows = (data ?? []) as Array<{ status?: string; error?: string | null }>;
+  let inFlight = false;
+  let failedCount = 0;
+  let lastError: string | null = null;
+  for (const r of rows) {
+    const status = String(r.status ?? "");
+    if (FAILED_BUILD_STATUSES.has(status)) {
+      failedCount++;
+      if (lastError === null && r.error) lastError = String(r.error);
+    } else {
+      inFlight = true; // queued / building / needs_input / needs_approval / queued_resume / completed / merged
+    }
+  }
+  return { inFlight, failedCount, lastError, total: rows.length };
+}
+
+/**
+ * Escalate a routed Approval Request to the CEO — the director declined to auto-approve (out of leash,
+ * destructive/irreversible, or unconfirmable), so it routes UP carrying its written diagnosis INLINE.
+ * Reuses the M2 notification (it just flips `routed_to_function` to the CEO + prepends the diagnosis), so
+ * the CEO inbox shows it instead of Platform's. If the reconciler hasn't emitted the notification yet,
+ * we create a CEO-routed one (idempotent on agent_job_id — the reconciler then skips it). Best-effort.
+ */
+export async function escalateApprovalRequestToCeo(
+  admin: Admin,
+  target: DirectorTargetJob,
+  diagnosis: string,
+): Promise<{ ok: boolean; created: boolean }> {
+  const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you — outside the leash / a call only you should make:\n${diagnosis}`.slice(0, 4000);
+  const { data: notifs } = await admin
+    .from("dashboard_notifications")
+    .select("id, body, metadata")
+    .eq("type", APPROVAL_REQUEST_TYPE)
+    .eq("dismissed", false)
+    .limit(2000);
+  const existing = (notifs ?? []).find((n) => (n.metadata as Record<string, unknown> | null)?.["agent_job_id"] === target.id);
+
+  if (existing) {
+    const meta = { ...((existing.metadata as Record<string, unknown> | null) ?? {}), routed_to_function: CEO, escalated_by_director: PLATFORM, escalation_reason: diagnosis.slice(0, 2000) };
+    const body = `${note}\n\n${(existing.body as string) ?? ""}`.slice(0, 4000);
+    const { error } = await admin.from("dashboard_notifications").update({ metadata: meta, body, read: false }).eq("id", existing.id);
+    return { ok: !error, created: false };
+  }
+
+  // No routed request yet (the reconciler hasn't run) — emit a CEO-routed one ourselves so the escalation
+  // is durable. The reconciler is idempotent on agent_job_id, so it won't double-emit; and the target stays
+  // needs_approval, so the reconciler keeps (never dismisses) it until the CEO decides.
+  const content = buildApprovalContent(target as unknown as ApprovalJobRow);
+  const meta = {
+    agent_job_id: target.id,
+    kind: target.kind,
+    spec_slug: target.spec_slug ?? null,
+    raised_by_function: ownerFunctionForKind(target.kind) ?? CEO,
+    routed_to_function: CEO,
+    approve_action_id: inlineApproveActionId(target as unknown as ApprovalJobRow),
+    deep_link: approvalDeepLink(target.kind, target.spec_slug ?? null),
+    escalated_by_director: PLATFORM,
+    escalation_reason: diagnosis.slice(0, 2000),
+  };
+  const { error } = await admin.from("dashboard_notifications").insert({
+    workspace_id: target.workspace_id,
+    type: APPROVAL_REQUEST_TYPE,
+    title: content.title,
+    body: `${note}\n\n${content.body}`.slice(0, 4000),
+    link: meta.deep_link,
+    metadata: meta,
+    read: false,
+    dismissed: false,
+  });
+  return { ok: !error, created: true };
+}
+
+/**
+ * Surface a director DIAGNOSIS to the CEO inbox — a high-stakes call with NO approvable target job (a
+ * loop-guard "deeper issue," or a zero-progress owned goal only the CEO can greenlight). Emits a CEO-routed
+ * Approval Request notification (no inline approve — it deep-links the CEO to the spec/goal to decide) AND
+ * an `escalated` director_activity row. DEDUPED on `dedupeKey` via the director_activity ledger (so it pings
+ * the CEO once, even after a dismissed notification). Carries NO `agent_job_id` so the inbox reconciler —
+ * which dismisses any request whose job left needs_approval — never reaps this standalone escalation.
+ */
+export async function escalateDiagnosisToCeo(
+  admin: Admin,
+  args: { workspaceId: string; specSlug: string | null; title: string; diagnosis: string; dedupeKey: string; deepLink: string; escalationKind: string; metadata?: Record<string, unknown> },
+): Promise<{ emitted: boolean }> {
+  // Dedup via the audit ledger — one escalation per dedupeKey, ever (survives a dismissed notification).
+  const { data: prior } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("director_function", PLATFORM)
+    .eq("action_kind", "escalated")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const already = (prior ?? []).some((r) => (r.metadata as Record<string, unknown> | null)?.["dedupe_key"] === args.dedupeKey);
+  if (already) return { emitted: false };
+
+  const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
+  await admin.from("dashboard_notifications").insert({
+    workspace_id: args.workspaceId,
+    type: APPROVAL_REQUEST_TYPE,
+    title: args.title.slice(0, 200),
+    body: note,
+    link: args.deepLink,
+    metadata: {
+      routed_to_function: CEO,
+      escalated_by_director: PLATFORM,
+      escalation_kind: args.escalationKind,
+      escalation_reason: args.diagnosis.slice(0, 2000),
+      dedupe_key: args.dedupeKey,
+      spec_slug: args.specSlug ?? null,
+      deep_link: args.deepLink,
+      approve_action_id: null,
+    },
+    read: false,
+    dismissed: false,
+  });
+  await recordDirectorActivity(admin, {
+    workspaceId: args.workspaceId,
+    directorFunction: PLATFORM,
+    actionKind: "escalated",
+    specSlug: args.specSlug,
+    reason: args.diagnosis,
+    metadata: { ...(args.metadata ?? {}), escalation_kind: args.escalationKind, dedupe_key: args.dedupeKey, autonomous: true },
+  });
+  return { emitted: true };
 }
