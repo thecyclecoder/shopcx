@@ -602,6 +602,7 @@ export interface GoalCard {
   outcome: string; // **Outcome:** …
   successMetric: string; // **Success metric:** …
   target: string; // **Target:** …
+  owner?: string; // function slug (the DRI) from the goal's `Owner: [[../functions/x]]` line
   milestones: Milestone[];
   pct: number; // 0..100 rollup of milestone completion
   linkedSpecCount: number; // resolvable specs across milestones
@@ -702,6 +703,19 @@ export function parseGoal(slug: string, raw: string, specs: SpecCard[] = []): Go
     return "";
   };
 
+  // Owner (the DRI function) from the `Owner: [[../functions/x]]` line under "## Ownership & mirrors" —
+  // bold or plain, anywhere in the doc. This is the canonical goal→function link (the function doc's
+  // "Owned goals" prose list isn't reliably wikilinked); the Platform/DevOps Director escort selects the
+  // goals it owns by this (platform-director-agent Phase 2).
+  let owner: string | undefined;
+  for (const l of lines) {
+    const m = l.match(/(?:\*\*)?Owner:?(?:\*\*)?\s*\[\[([^\]|]+)/i);
+    if (m) {
+      owner = m[1].trim().replace(/^.*\//, "").replace(/\.md$/, "");
+      break;
+    }
+  }
+
   // Milestones: top-level "- " bullets under "## Decomposition", each with its trailing lines.
   const decomp = sectionLines(lines, /^##\s+Decomposition/i);
   const milestones: Milestone[] = [];
@@ -750,6 +764,7 @@ export function parseGoal(slug: string, raw: string, specs: SpecCard[] = []): Go
     outcome: meta("Outcome"),
     successMetric: meta("Success metric"),
     target: meta("Target"),
+    owner,
     milestones,
     pct,
     linkedSpecCount,
