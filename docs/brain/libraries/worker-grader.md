@@ -15,12 +15,13 @@ One **concluded `agent_jobs` row** (terminal status `completed｜failed｜needs_
 | Symbol | Signature | Notes |
 |---|---|---|
 | `gradeWorkerAction` | `({ agentJobId, admin? }) → Promise<WorkerGradeResult>` | Grade ONE concluded job against its worker's rubric. Concluded-only (`not_concluded` until terminal), rubric-gated (`not_a_gradeable_worker`), idempotent on `agent_job_id`, never clobbers a human grade. |
-| `gradeConcludedWorkerActions` | `({ workspaceId, admin?, limit? }) → Promise<{ considered, graded }>` | The batched grading pass: grade every recently-concluded, ungraded worker action in one session. A no-op while none are ungraded. Called by the Phase-2 box cadence. |
+| `gradeConcludedWorkerActions` | `({ workspaceId, admin?, limit? }) → Promise<{ considered, graded, gradedKinds }>` | The batched grading pass: grade every recently-concluded, ungraded worker action in one session; returns the distinct kinds it newly graded (so the caller coaches exactly those). A no-op while none are ungraded. |
+| `workerGradingBatchReady` | `(admin, workspaceId, now?) → Promise<{ ready, ungraded }>` | The batched-cadence gate: ready when ≥`BATCH_MIN` (5) ungraded concluded jobs OR the oldest ungraded is >`BATCH_FALLBACK_MS` (~3h). Keeps the LLM spend to one session per batch. |
 | `computeWorkerRollup` | `(admin, workspaceId, workerKind) → Promise<WorkerRollup>` | The standing score: last-`ROLLUP_WINDOW` (10) average + `priorAverage` (jobs 11–20) + `drop` (prior − current). |
 | `detectGradeDropCoaching` | `({ workspaceId, workerKind, admin? }) → Promise<CoachingTriggerResult>` | The coaching trigger: slip = avg `< COACH_LOW_ROLLUP` (≥3 grades) OR `drop > DROP_THRESHOLD`; on a slip, synthesize a learning from the low grades → `coachWorker` (Director-gated). Loop-guarded. |
 | `buildWorkerGraderSystemPrompt` | `(admin, workspaceId, workerKind) → Promise<string>` | The worker's rubric + approved [[../tables/worker_grader_prompts]] rules (worker-targeted + cross-cutting NULL). |
 
-**Constants:** `ROLLUP_WINDOW=10` · `COACH_LOW_ROLLUP=7` · `DROP_THRESHOLD=1.5`.
+**Constants:** `ROLLUP_WINDOW=10` · `COACH_LOW_ROLLUP=7` · `DROP_THRESHOLD=1.5` · `BATCH_MIN=5` · `BATCH_FALLBACK_MS=~3h`.
 
 ## How it grades
 - **Inputs:** the concluded job's row — `kind` / `spec_slug` / `status` / `error` / `log_tail` / `pr_url` / the approved `pending_action`. (Phase 1 grades from the job-row context the runtime has; the Phase-2 Max box session that reads the real PR diff is the cadence layer.)
@@ -31,8 +32,8 @@ One **concluded `agent_jobs` row** (terminal status `completed｜failed｜needs_
 `detectGradeDropCoaching` computes the rollup; on a slip it pulls the worker's recent low-graded actions, asks the LLM to distill ONE durable learning (`{errorClass, triggeringPattern, guidance, reasoning}`), and calls [[worker-instructions]] `coachWorker` with `coachedBy=PLATFORM` (the Director is the gate — a worker can't coach itself) + `sourceGradeId`. That amends the worker's instruction set ([[../tables/worker_instructions]]) and logs the director→worker message ([[../tables/worker_coaching_log]]). Loop-guard: ≥`PLATFORM_DIRECTOR_LOOP_GUARD_MAX` coaching attempts that never `stuck` → `needsEscalation` instead of re-coaching (the existing CEO-escalation rail).
 
 ## Where it's wired
-- **Phase 1 (this):** the store + grader library + the rollup/coaching trigger. Not yet on a cadence.
-- **Phase 2 (planned):** the batched box cadence (≥5 ungraded concluded jobs OR ~3h fallback → one grading session; same beat runs `detectGradeDropCoaching` per affected worker) wires into [[../inngest/platform-director-cron]] + the box runner.
+- **Phase 1 ✅:** the store + grader library + the rollup/coaching trigger.
+- **Phase 2 ✅:** the batched cadence — [[../inngest/platform-director-cron]]'s `grade-and-coach-workers` step runs `workerGradingBatchReady` (gate: ≥5 ungraded OR oldest >~3h) → `gradeConcludedWorkerActions` → `detectGradeDropCoaching` per newly-graded worker, on the same `*/15` beat as the director grade sweep, in the deployed runtime (needs the API key). Best-effort + idempotent.
 - **Phase 3 (planned):** each worker profile (`/dashboard/agents/[role]`) gets the activity feed + a last-10 rollup-grade card.
 
 ## Gotchas

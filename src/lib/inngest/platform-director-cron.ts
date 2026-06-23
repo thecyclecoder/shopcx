@@ -27,6 +27,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
+import { workerGradingBatchReady, gradeConcludedWorkerActions, detectGradeDropCoaching } from "@/lib/agents/worker-grader";
 
 export const platformDirectorCron = inngest.createFunction(
   {
@@ -88,12 +89,46 @@ export const platformDirectorCron = inngest.createFunction(
       return { considered, graded };
     });
 
+    // The WORKER grading + coaching loop (worker-grading-and-director-management Phase 2): one level
+    // DOWN the cascade — on the same beat, the Director grades each recently-CONCLUDED worker action
+    // (worker_action_grades) and coaches any worker whose rollup slipped (<7 or >1.5-pt drop →
+    // coachWorker). BATCHED: a workspace is graded only when ≥5 ungraded concluded jobs have
+    // accumulated OR the oldest is >~3h old (workerGradingBatchReady) — keeps the LLM spend to one
+    // session per batch. Runs HERE in the deployed runtime (it needs the API key), best-effort +
+    // idempotent. A no-op while no worker has concluded an ungraded action.
+    const workerGrading = await step.run("grade-and-coach-workers", async () => {
+      let considered = 0;
+      let graded = 0;
+      let coached = 0;
+      for (const workspaceId of result.workspaceIds || []) {
+        try {
+          const batch = await workerGradingBatchReady(admin, workspaceId);
+          if (!batch.ready) continue;
+          const r = await gradeConcludedWorkerActions({ workspaceId, admin });
+          considered += r.considered;
+          graded += r.graded;
+          // Coach exactly the workers this batch newly graded (a slip → a coachWorker amendment).
+          for (const workerKind of r.gradedKinds) {
+            try {
+              const c = await detectGradeDropCoaching({ workspaceId, workerKind, admin });
+              if (c.coached) coached++;
+            } catch (e) {
+              console.error(`[platform-director-cron] coach ${workerKind} ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+            }
+          }
+        } catch (e) {
+          console.error(`[platform-director-cron] worker-grade sweep failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      return { considered, graded, coached };
+    });
+
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading } });
+      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading } });
     });
 
-    return { ...result, grading };
+    return { ...result, grading, workerGrading };
   },
 );

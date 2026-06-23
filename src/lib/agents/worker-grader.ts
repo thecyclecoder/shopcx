@@ -48,6 +48,11 @@ const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "needs_attention"]
 
 /** The standing performance window — last N graded jobs per worker (the spec's locked config). */
 export const ROLLUP_WINDOW = 10;
+/** Batched grading cadence (the spec's locked config): grade when ≥ BATCH_MIN ungraded concluded jobs
+ *  have accumulated, OR a BATCH_FALLBACK_MS fallback once any are ungraded — keeps the LLM cost bounded
+ *  (one session per batch, not one per job). */
+export const BATCH_MIN = 5;
+export const BATCH_FALLBACK_MS = 3 * 60 * 60 * 1000;
 /** Coaching trigger: rollup below this, OR a drop larger than DROP_THRESHOLD vs the prior window. */
 export const COACH_LOW_ROLLUP = 7;
 export const DROP_THRESHOLD = 1.5;
@@ -297,47 +302,77 @@ export async function gradeWorkerAction(opts: { agentJobId: string; admin?: Admi
 
 // ── the batched grading sweep (the box cadence calls this — Phase 2) ─────────────────────────────────
 
+/** The concluded, ungraded worker actions for a workspace (oldest first) — the batch the cadence grades. */
+async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 1000): Promise<Array<{ id: string; created_at: string }>> {
+  const { data: gradeRows } = await admin
+    .from("worker_action_grades")
+    .select("agent_job_id")
+    .eq("workspace_id", workspaceId)
+    .limit(10000);
+  const gradedJobs = new Set<string>((gradeRows as Array<{ agent_job_id: string }> | null)?.map((r) => r.agent_job_id) ?? []);
+
+  const { data: jobs } = await admin
+    .from("agent_jobs")
+    .select("id, created_at")
+    .eq("workspace_id", workspaceId)
+    .in("kind", GRADEABLE_KINDS)
+    .in("status", Array.from(TERMINAL_JOB_STATUSES))
+    .order("created_at", { ascending: true })
+    .limit(limit);
+  return ((jobs as Array<{ id: string; created_at: string }>) || []).filter((j) => !gradedJobs.has(j.id));
+}
+
+/**
+ * Is the worker-grading batch ready to run? True when ≥ BATCH_MIN ungraded concluded jobs have
+ * accumulated, OR the oldest ungraded job is older than BATCH_FALLBACK_MS (the ~3h fallback so a small
+ * trickle still gets graded). False when nothing is ungraded. Keeps the LLM spend to one session per
+ * batch (the spec's locked cadence). Best-effort.
+ */
+export async function workerGradingBatchReady(
+  admin: Admin,
+  workspaceId: string,
+  now: number = Date.now(),
+): Promise<{ ready: boolean; ungraded: number }> {
+  try {
+    const ungraded = await ungradedConcludedJobs(admin, workspaceId);
+    if (!ungraded.length) return { ready: false, ungraded: 0 };
+    const oldestAgeMs = now - new Date(ungraded[0].created_at).getTime();
+    const ready = ungraded.length >= BATCH_MIN || oldestAgeMs >= BATCH_FALLBACK_MS;
+    return { ready, ungraded: ungraded.length };
+  } catch (e) {
+    console.warn(`[worker-grader] batch-ready check failed ws=${workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    return { ready: false, ungraded: 0 };
+  }
+}
+
 /**
  * The batched grading pass: grade every recently-CONCLUDED, ungraded worker action across the
  * rubric-backed kinds, in one session. Best-effort + idempotent (an already-graded job is skipped;
  * gradeWorkerAction upserts if re-run, and never re-writes a human grade). A no-op while no worker has
- * concluded an ungraded action. Mirror director-grader.gradeConcludedDirectorCalls.
+ * concluded an ungraded action. Returns the distinct worker kinds it newly graded so the caller can run
+ * detectGradeDropCoaching on exactly those. Mirror director-grader.gradeConcludedDirectorCalls.
  */
-export async function gradeConcludedWorkerActions(opts: { workspaceId: string; admin?: Admin; limit?: number }): Promise<{ considered: number; graded: number }> {
+export async function gradeConcludedWorkerActions(opts: { workspaceId: string; admin?: Admin; limit?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
   const admin = opts.admin ?? createAdminClient();
   let considered = 0;
   let graded = 0;
-  if (!ANTHROPIC_API_KEY) return { considered, graded };
+  const gradedKinds = new Set<string>();
+  if (!ANTHROPIC_API_KEY) return { considered, graded, gradedKinds: [] };
 
   try {
-    // Already-graded job ids → skip (don't re-spend the LLM on a settled grade).
-    const { data: gradeRows } = await admin
-      .from("worker_action_grades")
-      .select("agent_job_id")
-      .eq("workspace_id", opts.workspaceId)
-      .limit(10000);
-    const gradedJobs = new Set<string>((gradeRows as Array<{ agent_job_id: string }> | null)?.map((r) => r.agent_job_id) ?? []);
-
-    // Concluded worker actions, newest first.
-    const { data: jobs } = await admin
-      .from("agent_jobs")
-      .select("id, kind, status")
-      .eq("workspace_id", opts.workspaceId)
-      .in("kind", GRADEABLE_KINDS)
-      .in("status", Array.from(TERMINAL_JOB_STATUSES))
-      .order("created_at", { ascending: false })
-      .limit(opts.limit ?? 500);
-
-    for (const j of (jobs as Array<{ id: string }>) || []) {
-      if (gradedJobs.has(j.id)) continue;
+    const ungraded = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
+    for (const j of ungraded) {
       considered++;
       const r = await gradeWorkerAction({ agentJobId: j.id, admin });
-      if (r.ok && !r.idempotent_update) graded++;
+      if (r.ok && !r.idempotent_update) {
+        graded++;
+        if (r.worker_kind) gradedKinds.add(r.worker_kind);
+      }
     }
   } catch (e) {
     console.warn(`[worker-grader] sweep failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return { considered, graded };
+  return { considered, graded, gradedKinds: Array.from(gradedKinds) };
 }
 
 // ── the standing rollup + the coaching trigger ───────────────────────────────────────────────────────
