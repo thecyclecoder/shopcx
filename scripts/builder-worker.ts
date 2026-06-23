@@ -131,6 +131,12 @@ const MAX_REGRESSION = Number(process.env.AGENT_TODO_MAX_REGRESSION || 1);
 const REGRESSION_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
+const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
+// One Platform/DevOps Director pass (platform-director-agent P1): read-only investigation of a
+// Platform-routed Approval Request (the cause + the proposed fix + the implicated spec/migration) →
+// a verdict (auto-approve within the leash, else escalate). Minutes — same ballpark as a repair/
+// db-health turn. Re-claimable (a restart re-runs it). Stays on Max (KEEPS read-only DB creds).
+const PLATFORM_DIRECTOR_TIMEOUT_MS = 15 * 60 * 1000;
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -176,6 +182,13 @@ let dbHealthSlowQInFlight = false;
 let dbHealthSizeInFlight = false;
 const DB_HEALTH_MAX_PROPOSALS_PER_PASS = 5; // don't flood: surface at most the top-N findings/pass.
 const DB_HEALTH_TREND_WINDOW_DAYS = 21; // Phase 2: trailing size-history window for the trend projection.
+
+// Platform/DevOps Director enqueuer (platform-director-agent P1): a cheap throttled DB sweep that
+// queues a `platform-director` job per open Platform-routed Approval Request for the lane to decide.
+// A no-op while Platform isn't live+autonomous (dormant until Phase 4 flips the flag). In-flight-guarded.
+const PLATFORM_DIRECTOR_INTERVAL_MS = 60 * 1000; // ~1 min — quick to pick up a newly-routed request.
+let lastPlatformDirectorSweep = 0; // 0 ⇒ run on the first poll so a routed request is picked up right away.
+let platformDirectorSweepInFlight = false;
 
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
@@ -248,7 +261,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -735,7 +748,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -1497,6 +1510,125 @@ async function runCoverageRegisterJob(job: Job) {
   // No actionable owner decision — shouldn't normally be claimed. Park it.
   await update(job.id, { status: "needs_approval", log_tail: `awaiting owner decision for ${loopId}`.slice(-2000) });
   console.log(`${tag} no owner decision yet — parked as needs_approval`);
+}
+
+// platform-director-agent (Phase 1): the box session that drives one Platform/DevOps Director decision.
+// A top-level `claude -p` on Max (web search on, no API key, KEEPS the read-only DB/crypto creds so the
+// box can trace the implicated spec/migration/code) INVESTIGATES the routed Approval Request read-only,
+// then either AUTO-APPROVES it within the leash (mirroring the human approve path WITHOUT the owner gate,
+// logging an approval_decisions row decided_by='director', autonomous=true) or ESCALATES — never
+// rubber-stamps, never an unconfirmable approve. It NEVER edits product code / opens a PR / runs a migration.
+async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: string) {
+  // KEEP the env (read-only DB/crypto creds) — only strip the API key so all LLM is Max-billed.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: PLATFORM_DIRECTOR_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+async function runPlatformDirectorJob(job: Job) {
+  const tag = `[platform-director:${job.id.slice(0, 8)}]`;
+  let instr: { target_job_id?: string; target_kind?: string } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — no target */
+  }
+  const targetId = instr.target_job_id;
+  if (!targetId) {
+    await update(job.id, { status: "failed", error: "platform-director: no target_job_id in instructions" });
+    console.warn(`${tag} no target_job_id — failing`);
+    return;
+  }
+
+  const lib = await import("../src/lib/agents/platform-director");
+  const { ownerFunctionForKind } = await import("../src/lib/agents/approval-inbox");
+  const { resolveApprover, buildOrgChartGraph, loadAutonomyMap } = await import("../src/lib/agents/approval-router");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  // Load the target approval job.
+  const { data: target } = await db
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail")
+    .eq("id", targetId)
+    .maybeSingle();
+  if (!target) {
+    await update(job.id, { status: "completed", log_tail: `target ${targetId.slice(0, 8)} gone — nothing to decide`.slice(-2000) });
+    console.log(`${tag} target gone — no-op`);
+    return;
+  }
+  const t = target as unknown as import("../src/lib/agents/platform-director").DirectorTargetJob;
+  if (t.status !== "needs_approval") {
+    await update(job.id, { status: "completed", log_tail: `target already decided (${t.status}) — no-op`.slice(-2000) });
+    console.log(`${tag} target already decided (${t.status}) — no-op`);
+    return;
+  }
+
+  // Re-confirm routing — Platform must STILL be the live+autonomous approver for this kind. (Fail-safe:
+  // if the flag was cleared after the job was queued, do nothing — it routes to the CEO.)
+  const [chart, autonomy] = await Promise.all([buildOrgChartGraph(), loadAutonomyMap()]);
+  if (resolveApprover(ownerFunctionForKind(t.kind), chart, autonomy) !== "platform") {
+    await update(job.id, { status: "completed", log_tail: `target no longer routes to platform — no-op`.slice(-2000) });
+    console.log(`${tag} no longer routes to platform — no-op`);
+    return;
+  }
+
+  // Structural leash gate — only a single, plain inline-approve action of a leash type is auto-approvable.
+  // Anything else (multi-choice, non-leash, multi-action) is OUTSIDE the envelope → escalate, never approve.
+  const candidate = lib.directorLeashCandidate(t);
+  if (!candidate) {
+    const reason = "outside the auto-approve leash (multi-choice / non-leash / multi-action) — needs the CEO";
+    await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind } });
+    await update(job.id, { status: "completed", log_tail: `escalate → ${reason}; left for CEO (escalation routing lands in Phase 3)`.slice(-2000) });
+    console.log(`${tag} escalate → outside leash, left for CEO`);
+    return;
+  }
+
+  // Investigate read-only on Max → one JSON verdict. Never rubber-stamps: must confirm sound + in-leash.
+  console.log(`${tag} investigating ${t.kind} (${candidate.category}) for target ${targetId.slice(0, 8)}`);
+  try {
+    const brief = lib.buildDirectorBrief(t, candidate);
+    const { session, resultText, isError } = await runDirectorClaude(lib.directorInvestigationPrompt(brief), null, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
+    const verdict = String(parsed?.verdict || "");
+    const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
+
+    if (verdict === "auto-approve") {
+      const res = await lib.applyDirectorApproval(db, t, candidate.actionId, reasoning || `auto-approved (${candidate.category}) within the leash`);
+      if (!res.ok) {
+        await update(job.id, { status: "needs_attention", error: `director approve failed: ${res.error}`, log_tail: `auto-approve FAILED: ${res.error}`.slice(-2000) });
+        console.warn(`${tag} auto-approve FAILED: ${res.error}`);
+        return;
+      }
+      await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${candidate.category})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: candidate.category, autonomous: true } });
+      await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${candidate.category}) → target queued_resume.\n${reasoning}`.slice(-2000) });
+      console.log(`${tag} auto-approved ${t.kind} (${candidate.category})`);
+      return;
+    }
+
+    // escalate — OR no recognizable verdict (fail safe: escalate, NEVER auto-approve on an ambiguous result).
+    const reason = reasoning || (isError ? "investigation errored — escalating, not approving" : "could not confirm sound + within the leash");
+    await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind, verdict: verdict || "(none)" } });
+    await update(job.id, { status: "completed", log_tail: `escalate → left ${t.kind} for CEO (escalation routing lands in Phase 3): ${reason}`.slice(-2000) });
+    console.log(`${tag} escalate → ${verdict || "no verdict"}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
 }
 
 // Idle self-update: ONLY when no build/fold lane is running (active === 0 — in-flight work is sacrosanct).
@@ -5296,6 +5428,7 @@ async function runJob(job: Job) {
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
+  if (job.kind === "platform-director") return runPlatformDirectorJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -5666,7 +5799,8 @@ async function main() {
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register").length;
+  const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -5837,6 +5971,15 @@ async function main() {
         console.log(`claimed coverage-register ${job.id.slice(0, 8)} → ${countCoverageRegister() + 1}/${MAX_COVERAGE_REGISTER} coverage-register lane`);
         launch(job);
       }
+      // Fill the platform-director lane (platform-director-agent): investigate a Platform-routed Approval
+      // Request read-only on Max → auto-approve within the leash (logging the decision), else escalate.
+      while (countPlatformDirector() < MAX_PLATFORM_DIRECTOR) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["platform-director"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed platform-director ${job.id.slice(0, 8)} → ${countPlatformDirector() + 1}/${MAX_PLATFORM_DIRECTOR} platform-director lane`);
+        launch(job);
+      }
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —
       // read funnel+lever map+proxy → propose a hypothesis/variant → stand up an M1 experiment (or
       // surface a missing-capability spec). Own concurrency-1 lane, read-only diagnose on Max.
@@ -5884,6 +6027,24 @@ async function main() {
         lastDbHealthSize = Date.now();
         dbHealthSizeInFlight = true;
         void runDbHealthSizeJob().finally(() => { dbHealthSizeInFlight = false; });
+      }
+      // Platform/DevOps Director enqueuer (platform-director-agent P1): queue a `platform-director` job
+      // per open Platform-routed Approval Request for the lane above to decide. Dormant (a no-op) until
+      // Platform is flipped live+autonomous in Phase 4. Throttled + in-flight-guarded; best-effort.
+      if (!platformDirectorSweepInFlight && Date.now() - lastPlatformDirectorSweep > PLATFORM_DIRECTOR_INTERVAL_MS) {
+        lastPlatformDirectorSweep = Date.now();
+        platformDirectorSweepInFlight = true;
+        void (async () => {
+          try {
+            const { enqueuePlatformDirectorJobs } = await import("../src/lib/agents/platform-director");
+            const r = await enqueuePlatformDirectorJobs(db);
+            if (r.enqueued) console.log(`[platform-director] queued ${r.enqueued} director job(s): ${r.slugs.join(", ")}`);
+          } catch (e) {
+            console.error("[platform-director] enqueue failed (continuing):", e instanceof Error ? e.message : e);
+          } finally {
+            platformDirectorSweepInFlight = false;
+          }
+        })();
       }
       // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
       // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,

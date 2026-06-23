@@ -86,8 +86,10 @@ export interface PendingAction {
  * | 'ticket-improve' (box-ticket-improve — one turn of a ticket-bound Improve session on Max)
  * | 'migration-fix' (migration-fix-agent — fix a failed Appstle→internal migration on Max, gated)
  * | 'pr-resolve' (dirty-pr-resolver-agent — webhook-fired: merge main into a dirty claude/* PR, resolve
- *   conflicts, tsc-gate + push, or rebuild-on-main / surface to the owner). */
-export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve";
+ *   conflicts, tsc-gate + push, or rebuild-on-main / surface to the owner)
+ * | 'platform-director' (platform-director-agent — the first live director: investigate a Platform-routed
+ *   Approval Request → auto-approve within the leash, else escalate to the CEO). */
+export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director";
 
 export interface AgentJob {
   id: string;
