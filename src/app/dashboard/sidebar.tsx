@@ -272,7 +272,12 @@ export default function Sidebar({
       }
     };
     fetchCounts();
-    const interval = setInterval(fetchCounts, 10000);
+    // Poll every 30s (not 10s): this effect fires ~11 authenticated API requests per
+    // tick, each making several PostgREST round-trips that re-run the per-request RLS
+    // set_config statement (pg_stat_statements -7821780334453251234: 38,888,209 calls,
+    // 0ms mean). The sidebar is always-mounted for every user on every dashboard page,
+    // so it dominates that call volume; badge counts tolerate 30s staleness fine.
+    const interval = setInterval(fetchCounts, 30000);
     return () => clearInterval(interval);
   }, [workspace.id, pathname]);
 
