@@ -11,9 +11,9 @@
 
 ## Verification
 - With 3 running experiments and an **empty** manifest, run the refresh cron once → `storefront_experiment_manifest` in Edge Config is populated with those experiments (self-healed, no state-change needed).
-- Manually corrupt/clear the manifest key → within one refresh cycle it's rebuilt to match the live running experiments.
-- No running experiments → the cron writes an empty manifest (or no-ops), never errors.
-- Negative: Edge Config not provisioned → the cron no-ops to the blob fallback, no crash.
+- ✅ Manually corrupt/clear the manifest key → within one refresh cycle it's rebuilt to match the live running experiments.
+- ✅ No running experiments → the cron writes an empty manifest (or no-ops), never errors.
+- ✅ Negative: Edge Config not provisioned → the cron no-ops to the blob fallback, no crash.
 
 ## Phase 1 — republish the manifest on the refresh cron ✅
 Add `republishExperimentManifest(admin)` to the `storefront-experiments-refresh` per-workspace pass (gated on write-config), idempotent. Brain: [[pdp-edge-served-experiments]] · [[../libraries/storefront-experiments]] · [[../integrations/vercel]].
