@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
+import { routedInboxHref } from "@/lib/agents/inbox";
 
 interface Check { key: string; ok: boolean; detail?: string }
 interface FixAction { id: string; fix_kind: string; summary: string; preview?: string; status: string; result?: string }
@@ -166,9 +167,12 @@ function AuditCard({ a, isOwner, onChange }: { a: Audit; isOwner: boolean; onCha
   );
 }
 
-// The migration-fix box agent's diagnosis + (when it proposed a fix) the owner-gated Approve/Decline.
-// On approval the box worker executes the typed fix server-side and re-runs verifyMigration; only a
-// re-pass clears the row. See docs/brain/specs/migration-fix-agent.md.
+// The migration-fix box agent's diagnosis + (when it proposed a fix) a read-only view of the proposed
+// typed fix. The Approve/Decline ORIGINATES in the routed Agents inbox now (approval-routing-engine
+// Phase 4 — "one inbox, no orphans"), not a standalone card here: migration_fix is plain approve/decline,
+// so the inbox renders it inline and POST /api/roadmap/approve drives the SAME runMigrationFixJob resume
+// (isApprovalResume → executes the typed fix + re-runs verifyMigration) whichever surface decided it. The
+// needs_input answer flow stays (it's an answer, not an approval). See docs/brain/specs/migration-fix-agent.md.
 function FixPanel({ fix, isOwner, onChange }: { fix: FixInfo; isOwner: boolean; onChange: () => Promise<unknown> }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -208,28 +212,6 @@ function FixPanel({ fix, isOwner, onChange }: { fix: FixInfo; isOwner: boolean; 
       } else {
         setAnswers({});
         setNote("");
-        await onChange();
-      }
-    } catch {
-      setErr("Network error");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const decide = async (actionId: string, decision: "approve" | "decline") => {
-    setBusy(actionId + decision);
-    setErr(null);
-    try {
-      const res = await fetch("/api/roadmap/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: fix.jobId, actionId, decision }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        setErr(j.error || `Failed (${res.status})`);
-      } else {
         await onChange();
       }
     } catch {
@@ -285,38 +267,30 @@ function FixPanel({ fix, isOwner, onChange }: { fix: FixInfo; isOwner: boolean; 
         )
       )}
       {fix.status === "needs_approval" && fix.actions.length > 0 && (
-        <ul className="mt-2 space-y-2">
-          {fix.actions.map((act) => (
-            <li key={act.id} className="rounded-md border border-zinc-200 bg-white p-2">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="rounded bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700">{act.fix_kind}</span>
-                <span className="font-medium text-zinc-800">{act.summary}</span>
-              </div>
-              {act.preview && <p className="mt-1 whitespace-pre-wrap text-[11px] text-zinc-500">{act.preview}</p>}
-              {isOwner && act.status === "pending" && (
-                <div className="mt-2 flex gap-2">
-                  <button
-                    disabled={!!busy}
-                    onClick={() => decide(act.id, "approve")}
-                    className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                  >
-                    {busy === act.id + "approve" ? "Approving…" : "Approve & fix"}
-                  </button>
-                  <button
-                    disabled={!!busy}
-                    onClick={() => decide(act.id, "decline")}
-                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
-                  >
-                    Decline
-                  </button>
+        <div className="mt-2 space-y-2">
+          <ul className="space-y-2">
+            {fix.actions.map((act) => (
+              <li key={act.id} className="rounded-md border border-zinc-200 bg-white p-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="rounded bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700">{act.fix_kind}</span>
+                  <span className="font-medium text-zinc-800">{act.summary}</span>
                 </div>
-              )}
-              {act.status !== "pending" && <p className="mt-1 text-[11px] text-zinc-500">{act.status}{act.result ? ` — ${act.result}` : ""}</p>}
-            </li>
-          ))}
-        </ul>
+                {act.preview && <p className="mt-1 whitespace-pre-wrap text-[11px] text-zinc-500">{act.preview}</p>}
+                {act.status !== "pending" && <p className="mt-1 text-[11px] text-zinc-500">{act.status}{act.result ? ` — ${act.result}` : ""}</p>}
+              </li>
+            ))}
+          </ul>
+          {/* approval-routing-engine Phase 4 — the proposed fix is approved in the single routed Agents inbox,
+              not a standalone card here. The inbox renders this plain approve/decline inline; the executor is unchanged. */}
+          {isOwner ? (
+            <a href={routedInboxHref()} className="inline-block text-[11px] font-medium text-indigo-600 hover:text-indigo-700">
+              Review &amp; approve in the Agents inbox →
+            </a>
+          ) : (
+            <p className="text-[11px] text-zinc-400">Owner approval required.</p>
+          )}
+        </div>
       )}
-      {!isOwner && fix.status === "needs_approval" && <p className="mt-1 text-[11px] text-zinc-400">Owner approval required.</p>}
       {err && <p className="mt-1.5 text-[11px] text-rose-600">{err}</p>}
     </div>
   );
