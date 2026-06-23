@@ -16,6 +16,7 @@
  */
 import { getFunctions, getGoals } from "@/lib/brain-roadmap";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
+import { loadAutonomyMap, isAutoApprover, type AutonomyMap } from "@/lib/agents/approval-router";
 
 export interface WorkerLane {
   /** the agent_jobs kind (box lane) */
@@ -38,10 +39,15 @@ export interface DirectorNode {
   goalSlugs: string[];
   workers: WorkerLane[];
   /**
-   * M1 reality: no director is automated yet, so every director is "offline" and its
-   * approvals route up to the CEO. The per-function live/autonomous flag lands in M2.
+   * Derived from the per-function `function_autonomy` flags (approval-routing-engine M2):
+   * live && autonomous ⇒ "autonomous" (an auto-approver — approvals route HERE, then to history);
+   * live only ⇒ "live"; neither ⇒ "offline" (approvals route up to the CEO). Seeded all-off, so
+   * today every director is "offline" until the owner toggles it on from the Agents hub.
    */
   status: "offline" | "live" | "autonomous";
+  /** The raw flags behind `status` — the owner toggles these from the hub. */
+  live: boolean;
+  autonomous: boolean;
 }
 
 export interface OrgChart {
@@ -60,8 +66,14 @@ function workersForFunction(slug: string): WorkerLane[] {
   }));
 }
 
+/** live && autonomous ⇒ "autonomous"; live only ⇒ "live"; else "offline" (routes to CEO). */
+function statusFor(slug: string, autonomy: AutonomyMap): DirectorNode["status"] {
+  if (isAutoApprover(slug, autonomy)) return "autonomous";
+  return autonomy[slug]?.live ? "live" : "offline";
+}
+
 export async function getOrgChart(): Promise<OrgChart> {
-  const [functions, goals] = await Promise.all([getFunctions(), getGoals()]);
+  const [functions, goals, autonomy] = await Promise.all([getFunctions(), getGoals(), loadAutonomyMap()]);
 
   const directors: DirectorNode[] = functions.map((fn) => ({
     slug: fn.slug,
@@ -70,7 +82,9 @@ export async function getOrgChart(): Promise<OrgChart> {
     mandates: fn.mandates.map((m) => ({ name: m.name, metric: m.metric, specCount: m.specSlugs.length })),
     goalSlugs: fn.goalSlugs,
     workers: workersForFunction(fn.slug),
-    status: "offline",
+    status: statusFor(fn.slug, autonomy),
+    live: autonomy[fn.slug]?.live ?? false,
+    autonomous: autonomy[fn.slug]?.autonomous ?? false,
   }));
 
   return {
