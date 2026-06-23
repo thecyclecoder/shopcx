@@ -81,8 +81,9 @@ function approvalHref(kind: string, specSlug: string, specMissing?: boolean): st
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
   if (kind === "migration-fix") return "/dashboard/migrations";
   // storefront-optimizer slug is a surface key (product:lander:audience), not a spec — route to the
-  // optimizer's home surface (the funnel dashboard) rather than a dead /dashboard/roadmap/{slug}.
-  if (kind === "storefront-optimizer") return "/dashboard/storefront/funnel";
+  // optimizer dashboard's "Proposed campaigns" section, the surface that actually has the
+  // Approve/Decline buttons (docs/brain/specs/storefront-optimizer-proposal-cards.md Phase 2).
+  if (kind === "storefront-optimizer") return "/dashboard/storefront/optimizer";
   if (specMissing) return "/dashboard/roadmap";
   return `/dashboard/roadmap/${specSlug}`;
 }
