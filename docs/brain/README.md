@@ -9,7 +9,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 197 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 76 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 22 |
-| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 260 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 261 |
 | [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 29 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
@@ -400,11 +400,12 @@ One page per active row in [[tables/playbooks]]. See [[playbooks/README]] for th
 
 ## Libraries (`libraries/`)
 
-One page per `src/lib/*.ts` file (174 pages). Each page lists exports + signatures, callers grep'd across the codebase, and gotchas. The required-list files (orchestrator, action executor, subscription helpers, Appstle, returns, dunning, journeys, social comments, etc.) have curated descriptions and gotchas; the long tail uses each file's header comment.
+One page per `src/lib/*.ts` file (175 pages). Each page lists exports + signatures, callers grep'd across the codebase, and gotchas. The required-list files (orchestrator, action executor, subscription helpers, Appstle, returns, dunning, journeys, social comments, etc.) have curated descriptions and gotchas; the long tail uses each file's header comment.
 
 Most relevant entry points:
 
 - [[libraries/sonnet-orchestrator-v2]] — THE brain
+- [[libraries/anthropic-retry]] — Classifies a Claude failure (retryable outage vs terminal bug) so the run retries, not drops
 - [[libraries/action-executor]] — Dispatches `SonnetDecision`
 - [[libraries/subscription-items]] — Appstle line-item mutations (note 0.75 SubSave)
 - [[libraries/appstle]] · [[libraries/appstle-discount]] · [[libraries/appstle-call-log]]

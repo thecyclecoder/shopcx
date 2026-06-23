@@ -16,8 +16,10 @@
  * 11. Status (auto_resolve → closed, else → pending)
  */
 
+import { NonRetriableError } from "inngest";
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { OUTAGE_SPANNING_RETRIES, throwForAnthropicStatus, throwForAnthropicNetworkError } from "@/lib/anthropic-retry";
 import { assembleTicketContext } from "@/lib/ai-context";
 import { retrieveContext } from "@/lib/rag";
 import { matchPatterns } from "@/lib/pattern-matcher";
@@ -166,15 +168,37 @@ async function newerActivity(admin: Admin, tid: string, since: string): Promise<
 
 // ── AI ──
 
-async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max = 200, ctx?: { workspaceId?: string; ticketId?: string; purpose?: string }): Promise<string> {
+async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max = 200, ctx?: { workspaceId?: string; ticketId?: string; purpose?: string; optional?: boolean }): Promise<string> {
+  // `optional: true` marks a genuinely-optional enrichment call that may
+  // degrade gracefully (return "") on failure — every OTHER caller throws so
+  // the Inngest run retries across an outage instead of proceeding on missing
+  // data. (agent-outage-resilience Phase 1: no silent error-swallowing.)
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return "";
+  if (!key) {
+    // Missing key is a terminal config error, not a transient outage — fail
+    // fast rather than burn hours of retries.
+    if (ctx?.optional) return "";
+    throw new NonRetriableError("ANTHROPIC_API_KEY is not set");
+  }
   const mid = model === "sonnet" ? SONNET_MODEL : HAIKU_MODEL;
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-    body: JSON.stringify({ model: mid, max_tokens: max, messages: [{ role: "user", content: prompt }] }),
-  });
-  if (!r.ok) return "";
+  const where = `messages (${ctx?.purpose || "claude-helper"})`;
+  let r: Response;
+  try {
+    r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: mid, max_tokens: max, messages: [{ role: "user", content: prompt }] }),
+    });
+  } catch (e) {
+    if (ctx?.optional) return "";
+    throwForAnthropicNetworkError(e, where);
+  }
+  if (!r.ok) {
+    // Was `return ""` — a silent swallow that let callers proceed on empty
+    // data (unified-ticket-handler.ts:173). Now throw: retryable status →
+    // the run retries with backoff; terminal status → fail fast.
+    if (ctx?.optional) return "";
+    throwForAnthropicStatus(r.status, where);
+  }
   const d = await r.json();
   if (ctx?.workspaceId) {
     void logAiUsage({ workspaceId: ctx.workspaceId, model: mid, usage: d.usage, purpose: ctx.purpose || "claude-helper", ticketId: ctx.ticketId });
@@ -218,12 +242,16 @@ async function clarifyQ(msg: string, intent: string, conf: number, ch: string, p
 async function personalizeMacroText(content: string, ctx: string, msg: string, ch: string, p: { tone?: string } | null) {
   const short = ["chat", "sms", "meta_dm", "portal"].includes(ch);
   const hasLinks = content.includes("<a ");
+  // Optional enrichment: the macro `content` is already a complete, valid
+  // reply — personalization is a nice-to-have layer on top. So this is the
+  // one ticket-path call that degrades gracefully (optional: true) rather than
+  // throwing on a Claude failure; the customer still gets the macro.
   return (await claude(`Lightly personalize this response. Insert customer name and relevant details from context. Do NOT make it longer. ${p?.tone ? `Tone: ${p.tone}.` : ""} ${short ? "Very short." : ""}
 ${hasLinks ? "IMPORTANT: Preserve ALL <a href> HTML links exactly as they appear in the original. Include them in your output." : "No markdown."}
 Original: ${content}
 Customer question: "${msg}"
 ${ctx ? `Context: ${ctx.slice(0, 300)}` : ""}
-Only the personalized response, nothing else.`, "haiku", 800)) || content;
+Only the personalized response, nothing else.`, "haiku", 800, { optional: true })) || content;
 }
 
 async function kbResponse(article: string, title: string, msg: string, ch: string, p: { tone?: string } | null) {
@@ -582,7 +610,13 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
 // ══════════════════════════════════════════════════
 
 export const unifiedTicketHandler = inngest.createFunction(
-  { id: "unified-ticket-handler", retries: 1, concurrency: [{ limit: 1, key: "event.data.ticket_id" }], triggers: [{ event: "ticket/inbound-message" }] },
+  // retries: outage-spanning. A Claude/dependency failure now throws (see
+  // `claude()` + the Sonnet orchestrator), so the run retries with exponential
+  // backoff out to hours — a 1-hour Anthropic outage parks here and completes
+  // on recovery instead of failing-and-dropping after 2 attempts. Terminal
+  // logic errors throw NonRetriableError, so a real bug still fails fast.
+  // (agent-outage-resilience Phase 1.)
+  { id: "unified-ticket-handler", retries: OUTAGE_SPANNING_RETRIES, concurrency: [{ limit: 1, key: "event.data.ticket_id" }], triggers: [{ event: "ticket/inbound-message" }] },
   async ({ event, step }) => {
     const { workspace_id: wsId, ticket_id: tid, message_body: msg, channel: ch, is_new_ticket: isNew } = event.data as {
       workspace_id: string; ticket_id: string; message_body: string; channel: string; is_new_ticket: boolean;
