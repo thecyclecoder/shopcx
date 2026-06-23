@@ -1,0 +1,1 @@
+- **Register monitored loop: storefront-optimizer-cron** · verified 2026-06-23 · → [[libraries/control-tower]]
