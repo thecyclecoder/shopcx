@@ -97,6 +97,179 @@ export function composeCeoRollup(total: DirectorDayStats, activeDirectors: numbe
   return `${ceo.emoji} Company standup — ${summaryLine(total)}${tail}.`;
 }
 
+// ── The human-readable detail page (director-loop-grading spec, Phase 5) ─────────────────────────────
+//
+// The one-line standup (composeDirectorRecap) is the headline; this is the DRILL-DOWN — a readable
+// narrative of the director's day built by reading that day's director_activity rows (each row's
+// `reason` = the plain-text "why"), grouped by category: what it fixed + why, which goal it moved + how
+// far, what it escalated. A pure query over the activity log, never hand-maintained (the spec's North-star
+// invariant). Rendered on /dashboard/agents/recap/{date} via GET /api/developer/agents/recap.
+
+/** action_kind → its readable label + the category it groups under in the day narrative. */
+const ACTION_META: Record<string, { category: string; label: string }> = {
+  // goals (the live directors, M4+)
+  escorted_goal: { category: "Goals advanced", label: "Escorted a goal" },
+  advanced_milestone: { category: "Goals advanced", label: "Advanced a milestone" },
+  shipped_milestone: { category: "Goals advanced", label: "Shipped a milestone" },
+  // fixes / repairs
+  authored_fix: { category: "Fixes & repairs", label: "Authored a fix" },
+  fixed_bug: { category: "Fixes & repairs", label: "Fixed a bug" },
+  coaching_routed_to_repair: { category: "Fixes & repairs", label: "Routed coaching to repair" },
+  // approvals
+  approved_approval: { category: "Approvals", label: "Approved a request" },
+  approved_migration: { category: "Approvals", label: "Approved a migration" },
+  // watch / regression
+  detected_regression: { category: "Platform watch", label: "Detected a regression" },
+  dismissed_regression: { category: "Platform watch", label: "Dismissed a regression (no-op)" },
+  // board grooming
+  groomed_continue: { category: "Board grooming", label: "Groomed a card — continue" },
+  groomed_split: { category: "Board grooming", label: "Groomed a card — split" },
+  // coaching
+  coached_worker: { category: "Worker coaching", label: "Coached a worker" },
+  // escalations
+  escalated: { category: "Escalations", label: "Escalated to the CEO" },
+  escalated_coaching: { category: "Escalations", label: "Escalated coaching to the CEO" },
+};
+
+/** Stable render order — the headline categories first, the catch-all last. */
+const CATEGORY_ORDER = [
+  "Goals advanced",
+  "Fixes & repairs",
+  "Approvals",
+  "Platform watch",
+  "Board grooming",
+  "Worker coaching",
+  "Escalations",
+  "Activity",
+];
+
+const humanizeKind = (kind: string): string => kind.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+
+function actionMeta(kind: string): { category: string; label: string } {
+  return ACTION_META[kind] ?? { category: "Activity", label: humanizeKind(kind) };
+}
+
+/** One activity row, narrated — the action + the spec it touched + its plain-text "why". */
+export interface DayNarrativeItem {
+  actionKind: string;
+  actionLabel: string;
+  category: string;
+  specSlug: string | null;
+  reason: string;
+  createdAt: string;
+}
+
+export interface DayNarrativeGroup {
+  category: string;
+  items: DayNarrativeItem[];
+}
+
+/** One director's narrated day — persona header + grouped activity + a short count headline. */
+export interface DirectorDayNarrative {
+  functionSlug: string;
+  personaName: string;
+  personaRole: string;
+  personaEmoji: string;
+  /** "2 goals advanced · 3 fixes · 1 escalation" — a count summary of the groups below. */
+  headline: string;
+  groups: DayNarrativeGroup[];
+  total: number;
+}
+
+export interface DayNarrative {
+  date: string;
+  /** `director` = one function's day; `company` = every active director (the CEO roll-up). */
+  scope: "director" | "company";
+  directors: DirectorDayNarrative[];
+  empty: boolean;
+}
+
+type ActivityRow = {
+  director_function: string;
+  action_kind: string;
+  spec_slug: string | null;
+  reason: string | null;
+  created_at: string;
+};
+
+/** Group + order one function's activity rows, with a count headline. */
+function narrateDirector(slug: string, rows: ActivityRow[]): DirectorDayNarrative {
+  const persona = getPersona(slug);
+  const byCategory = new Map<string, DayNarrativeItem[]>();
+  for (const r of rows) {
+    const meta = actionMeta(r.action_kind);
+    const item: DayNarrativeItem = {
+      actionKind: r.action_kind,
+      actionLabel: meta.label,
+      category: meta.category,
+      specSlug: r.spec_slug,
+      reason: (r.reason ?? "").trim(),
+      createdAt: r.created_at,
+    };
+    const arr = byCategory.get(meta.category) ?? [];
+    arr.push(item);
+    byCategory.set(meta.category, arr);
+  }
+  const groups: DayNarrativeGroup[] = CATEGORY_ORDER.filter((c) => byCategory.has(c)).map((category) => ({
+    category,
+    // newest action first within a category (mirrors the activity log read order).
+    items: (byCategory.get(category) ?? []).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)),
+  }));
+  const headline = groups.map((g) => plural(g.items.length, g.category.toLowerCase())).join(" · ") || "a quiet day";
+  return {
+    functionSlug: slug,
+    personaName: persona.name,
+    personaRole: persona.role,
+    personaEmoji: persona.emoji,
+    headline,
+    groups,
+    total: rows.length,
+  };
+}
+
+/**
+ * Build the human-readable day narrative for a workspace + date (UTC) — a pure query over that day's
+ * director_activity rows. With `functionSlug` → just that director's day; without → every active
+ * director (the company roll-up). Idempotent + side-effect-free (read-only); recomputed on each view so
+ * it can never drift from the log it narrates.
+ */
+export async function buildDirectorDayNarrative(input: {
+  workspaceId: string;
+  date: string;
+  functionSlug?: string;
+}): Promise<DayNarrative> {
+  const { workspaceId, date, functionSlug } = input;
+  const scope: DayNarrative["scope"] = functionSlug ? "director" : "company";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { date, scope, directors: [], empty: true };
+
+  const admin = createAdminClient();
+  const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
+  const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+  let query = admin
+    .from("director_activity")
+    .select("director_function, action_kind, spec_slug, reason, created_at")
+    .eq("workspace_id", workspaceId)
+    .gte("created_at", dayStart)
+    .lt("created_at", dayEnd)
+    .order("created_at", { ascending: false });
+  if (functionSlug) query = query.eq("director_function", functionSlug);
+
+  const { data } = await query;
+  const rows = (data ?? []) as ActivityRow[];
+  if (!rows.length) return { date, scope, directors: [], empty: true };
+
+  // Bucket by director, preserving first-seen order (already newest-first overall).
+  const bySlug = new Map<string, ActivityRow[]>();
+  for (const r of rows) {
+    const arr = bySlug.get(r.director_function) ?? [];
+    arr.push(r);
+    bySlug.set(r.director_function, arr);
+  }
+  const directors = Array.from(bySlug.entries()).map(([slug, rs]) => narrateDirector(slug, rs));
+  return { date, scope, directors, empty: directors.length === 0 };
+}
+
 interface GenerateRecapResult {
   ok: boolean;
   reason?: string;
@@ -217,6 +390,8 @@ export async function generateDirectorRecap(workspaceId: string, date: string): 
       workspaceId,
       title: `${persona.name} · ${persona.role} — daily recap`,
       body,
+      // Deep-link to the human-readable day narrative (Phase 5) — that director's day, read from the log.
+      link: `/dashboard/agents/recap/${date}?function=${encodeURIComponent(slug)}`,
       metadata: { recap_date: date, source: "eod-recap", author_function: slug, stats },
     });
     directorsPosted++;
@@ -246,6 +421,8 @@ export async function generateDirectorRecap(workspaceId: string, date: string): 
       workspaceId,
       title: `Company standup — ${date}`,
       body,
+      // The CEO roll-up links to the cross-director day narrative (no `function` → every active director).
+      link: `/dashboard/agents/recap/${date}`,
       metadata: { recap_date: date, source: "eod-recap", scope: "ceo-rollup", stats: total },
     });
     ceoPosted = true;
@@ -259,13 +436,15 @@ type Admin = ReturnType<typeof createAdminClient>;
 /** Surface a recap in the M1 Daily Summaries tab — a reserved `agent_daily_summary` notification. */
 async function insertDailySummary(
   admin: Admin,
-  input: { workspaceId: string; title: string; body: string; metadata: Record<string, unknown> },
+  input: { workspaceId: string; title: string; body: string; link?: string; metadata: Record<string, unknown> },
 ): Promise<void> {
   await admin.from("dashboard_notifications").insert({
     workspace_id: input.workspaceId,
     type: DAILY_SUMMARY_TYPE,
     title: input.title,
     body: input.body,
+    // the row's deep-link to the human-readable day narrative (Phase 5); the inbox renders title+body as a link.
+    link: input.link ?? null,
     metadata: input.metadata,
     read: false,
     dismissed: false,
