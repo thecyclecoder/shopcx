@@ -1,4 +1,4 @@
-# Portal healer: recognize self-resolved cancels and surface Appstle error bodies ⏳
+# Portal healer: recognize self-resolved cancels and surface Appstle error bodies ✅
 
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `28593e8a-c8b7-409c-825e-e61be1db6f29`
 
@@ -10,9 +10,12 @@ Two concrete gaps. (1) src/lib/portal/remediation.ts has changedateSelfResolved(
 **Likely target:** `src/lib/portal/remediation.ts — add cancelSelfResolved(admin, workspaceId, ctx, ticket) mirroring changedateSelfResolved(): for routes 'canceljourney'/'cancel', before the disposition==='human' escalation, check whether the subscription row for ctx.payload.contractId is now status='cancelled' OR a portal.subscription.cancelled customer_event for that shopify_contract_id exists at/after ticket.created_at; if so, sysNote + 'auto-dismissed' tag + closeTicket instead of escalate. Also src/lib/appstle.ts appstleSubscriptionAction — return the response body text in the error field (e.g. `error: text || \`Appstle API error: ${res.status}\``, matching appstleSkipUpcomingOrder at line 371) so classifyPortalFailure's transient matcher ('operation is already in progress', etc.) can fire on 400s.`
 
 ## Phases
-- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — implement the fix** — `src/lib/appstle.ts` `appstleSubscriptionAction` now returns the Appstle response body in `error` (`text || \`Appstle API error: ${status}\``); `src/lib/portal/remediation.ts` adds `cancelSelfResolved()` + a `CANCEL_ROUTES` gate that runs after classification for any disposition. Brain pages [[../libraries/portal__remediation]] + [[../libraries/appstle]] updated. `npx tsc --noEmit` clean.
 
 ## Verification
-- Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).
+- On `src/lib/appstle.ts`, trigger a cancel that Appstle rejects with a 400 body (e.g. *"billing operation is already in progress"*) → `appstleSubscriptionAction` returns `{ success: false, error: "<body text>" }`, not `"Appstle API error: 400"`. Confirm by reading the `portal.error` customer_event the failed cancel writes: `properties.error` carries the Appstle message, not the bare status.
+- On the [[../inngest/portal-action-healer]] cron (or `scripts/_portal-remediate.ts`), feed a `portal-action-failed` ticket whose route is `canceljourney`/`cancel` and whose subscription is now `status='cancelled'` (or has a `portal.subscription.cancelled` customer_event at/after `ticket.created_at`) → `remediatePortalTicket` returns `{ action: "dismissed" }`, tags the ticket `auto-dismissed`, closes it, and writes an `[Auto-resolve] Self-resolved …` system note — it does NOT call `escalate()`.
+- On the same cron, feed a cancel ticket whose subscription is still active and whose error classifies as `human` → still escalates (`escalated_at` set, `escalation_reason` present) — confirms the gate only fires when the cancel actually landed.
+- Replay the originating ticket `28593e8a-c8b7-409c-825e-e61be1db6f29` through the healer (its sub is cancelled) → expect `dismissed`, not the stale 15-min-late escalation that surfaced this spec.
 
 > Authored by the box escalation-triage routine (solver+skeptic quorum) from escalated ticket `28593e8a-c8b7-409c-825e-e61be1db6f29`. Commission the build from the Roadmap board (owner = cs).

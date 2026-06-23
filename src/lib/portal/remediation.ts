@@ -26,6 +26,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { appstleUpdateNextBillingDate } from "@/lib/appstle";
 
 const PORTAL_FAIL_TAG = "portal-action-failed";
+// Route slugs the portal uses for a cancel (see src/lib/portal/handlers/index.ts).
+const CANCEL_ROUTES = new Set(["cancel", "canceljourney", "cancelJourney", "cancel_journey"]);
 const MAX_HEAL_ATTEMPTS = 3;
 const HEAL_NOTE_PREFIX = "[Auto-heal attempt";
 
@@ -256,6 +258,63 @@ async function changedateSelfResolved(
   return { resolved: false };
 }
 
+/**
+ * Did the customer already cancel this subscription themselves — without us?
+ * The real case (ticket 28593e8a): Appstle returned a transient 400 on the first
+ * confirm_cancel (a renewal had just billed), the portal made a failed ticket,
+ * the customer retried and succeeded a minute later. By the time the healer
+ * looks at the stale ticket the sub is already cancelled, so escalating it to a
+ * human is noise.
+ *
+ * Two signals, both scoped to the exact subscription:
+ *   (a) a `portal.subscription.cancelled` customer_event for this contract at or
+ *       after the ticket was created (the customer's successful retry), or
+ *   (b) the subscriptions row for this contract is now status='cancelled'
+ *       (covers a cancel that landed by any path — portal retry, webhook, or a
+ *       human — since the failure).
+ */
+async function cancelSelfResolved(
+  admin: SupabaseClient,
+  workspaceId: string,
+  ctx: FailureContext,
+  ticket: TicketRow,
+): Promise<{ resolved: boolean; reason?: string }> {
+  const contractId = String(ctx.payload?.contractId || "");
+  if (!contractId) return { resolved: false };
+  const failTime = ticket.created_at;
+
+  // (a) Customer re-did the cancel successfully after the error.
+  if (ticket.customer_id) {
+    const { data: cancelled } = await admin
+      .from("customer_events")
+      .select("created_at, properties")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", ticket.customer_id)
+      .eq("event_type", "portal.subscription.cancelled")
+      .gte("created_at", failTime)
+      .limit(20);
+    const reCancelled = (cancelled || []).find(
+      (e) => String((e.properties as Record<string, unknown>)?.shopify_contract_id || "") === contractId,
+    );
+    if (reCancelled) {
+      return { resolved: true, reason: `customer successfully cancelled the subscription herself after the error (${String(reCancelled.created_at).slice(0, 10)})` };
+    }
+  }
+
+  // (b) The subscription is now cancelled regardless of path.
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("status")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (sub?.status === "cancelled") {
+    return { resolved: true, reason: "the subscription is already cancelled — the cancel landed without us" };
+  }
+
+  return { resolved: false };
+}
+
 async function sysNote(admin: SupabaseClient, ticketId: string, body: string) {
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
@@ -343,6 +402,20 @@ export async function remediatePortalTicket(
   }
 
   const { disposition, reason } = classifyPortalFailure(ctx);
+
+  // A cancel the customer completed themselves shouldn't escalate (or retry) —
+  // check before any cancel disposition acts. Covers both a transient 400 that
+  // now classifies as `retry` (cancel has no replay, so it would otherwise
+  // escalate) and an unrecognized error that classifies as `human`.
+  if (CANCEL_ROUTES.has(ctx.route)) {
+    const sr = await cancelSelfResolved(admin, ticket.workspace_id, ctx, ticket);
+    if (sr.resolved) {
+      await sysNote(admin, ticket.id, `[Auto-resolve] Self-resolved — ${sr.reason}. Closing without escalating.`);
+      await addTag(admin, ticket, "auto-dismissed");
+      await closeTicket(admin, ticket.id);
+      return { action: "dismissed", reason: sr.reason || "self-resolved" };
+    }
+  }
 
   if (disposition === "dismiss") {
     await sysNote(admin, ticket.id, `[Auto-resolve] ${reason}\nAction: ${ctx.route} · Error: ${ctx.error}`);
