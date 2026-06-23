@@ -1,4 +1,4 @@
-# DB Health Agent — accuracy upgrade (filter foreign, slow-vs-volume, sunset allowlist) ⏳
+# DB Health Agent — accuracy upgrade (filter foreign, slow-vs-volume, sunset allowlist) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** sharpens [[db-health-agent]]. · **Found in use 2026-06-23:** the agent's first real run surfaced 5 slow-query findings — but only **1 of 5 was actionable** (an `orders` composite-index win, approved). The other 4 exposed three classification gaps: it proposed `vacuum`/`bloat` for a *foreign* query, a *sunset* table, and two *high-call-volume-not-slow* queries. The detection (ranking by total time) is good; the **fix classification** is weak. Fix the three gaps.
 
@@ -15,5 +15,7 @@
 - A real bloat case (EXPLAIN shows high dead-tuple / stale stats) → still a `vacuum` proposal (the label isn't removed, just stops being the catch-all).
 - Negative: the legit `orders` composite-index finding still surfaces under the new classifier.
 
-## Phase 1 — foreign filter + slow-vs-volume classifier + sunset allowlist ⏳
+## Phase 1 — foreign filter + slow-vs-volume classifier + sunset allowlist ✅
 In [[../libraries/db-health]]: add `isForeignQuery()` (shape-based) applied before proposing; split the cause classifier into `slow_per_call` (EXPLAIN → index/rewrite) vs `high_call_volume` (→ reduce-calls / cache / hot-predicate or GIN index) keyed off `mean_exec_time`; add a `DB_HEALTH_SUNSET_ALLOWLIST` (`klaviyo_*`, …). Re-run the slow-query pass after to re-propose under the sharper logic. Brain: [[db-health-agent]] · [[../libraries/db-health]] · [[repair-agent]] · [[control-tower-migration-drift-check]].
+
+**Shipped (2026-06-23):** in `src/lib/control-tower/db-health.ts` — `isForeignQuery(query)` (matches `wal->>` · `pgrst_` · `pg_catalog` · `information_schema` · `realtime`/`_realtime` schema · `supabase_admin`) and `isSunsetQuery(query, DB_HEALTH_SUNSET_ALLOWLIST=['klaviyo_*'])` both short-circuit `analyzeSlowQuery` to `null` before any classification; the allowlist also short-circuits `analyzeGrowth`/`analyzeIndexUsage`/`analyzeBloat` via the shared `isAllowlisted` matcher imported from [[../libraries/migration-drift|migration-drift]]. New cause `high_call_volume` + fix kind `reduce_calls` (with `slugFor`/`specTitleFor`/`buildFixSpecMarkdown` guidance covering cache / call-reduction / a hot-predicate or GIN `@>` index), classified off `SLOW_PER_CALL_MEAN_MS` (50ms): `mean ≥ 50ms` ⇒ EXPLAIN index/rewrite (unchanged orders-class path); `mean < 50ms` over the total-time floor ⇒ `high_call_volume` (never a vacuum). Re-running the slow-query pass to re-propose is a prod box action (no code change). `npx tsc --noEmit` clean.
