@@ -33,8 +33,8 @@ The data layer behind the **Slack-style #directors board** — the Messages tab 
 
 ## Why this exists
 
-The board is the **human-legible top layer** that makes the offload trustworthy (the goal's success metric: the CEO reads the board + the daily recap, not the details). Phase 1 ships the store + the conversational render; Phase 2 the two-way reply (reusing the dev-ask/spec-chat box sessions — no parallel LLM path); XP cards (Phase 3) and EOD recap (Phase 4) build on this layer. **XP is derived, not stored here** ([[../operational-rules]] § North star — a gamified proxy, display-only).
+The board is the **human-legible top layer** that makes the offload trustworthy (the goal's success metric: the CEO reads the board + the daily recap, not the details). Phase 1 ships the store + the conversational render; Phase 2 the two-way reply (reusing the dev-ask/spec-chat box sessions — no parallel LLM path); the **XP cards (Phase 3)** now ship as the derived [[director-xp]] layer; the EOD recap (Phase 4) builds on this layer next. **XP is derived, not stored here** ([[../operational-rules]] § North star — a gamified proxy, display-only).
 
 ## Related
 
-[[../tables/director_messages]] · [[agent-personas]] · [[dev-message-threads]] · [[roadmap-chats]] · [[../dashboard/agents]] · [[../specs/directors-board-gamified]] · [[../goals/devops-director]] · [[../operational-rules]]
+[[../tables/director_messages]] · [[director-xp]] · [[agent-personas]] · [[dev-message-threads]] · [[roadmap-chats]] · [[../dashboard/agents]] · [[../specs/directors-board-gamified]] · [[../goals/devops-director]] · [[../operational-rules]]

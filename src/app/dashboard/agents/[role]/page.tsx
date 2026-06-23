@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
+import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
 // `/dashboard/agents/[role]` — one page for every seat (CEO · a director slug · a
@@ -80,7 +81,7 @@ function ResponsibilityList({ items }: { items: { primary: string; secondary?: s
   );
 }
 
-function ProfileCard({ org, role }: { org: OrgChart; role: string }) {
+function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Record<string, DirectorXp> }) {
   const resolved = resolveRole(org, role);
 
   if (resolved.kind === "unknown") {
@@ -107,6 +108,7 @@ function ProfileCard({ org, role }: { org: OrgChart; role: string }) {
   let reportsTo: { name: string; role: string; href: string } | null = null;
   let inboxHref: string | null = null;
   let extra: React.ReactNode = null;
+  let xpCard: React.ReactNode = null;
 
   if (resolved.kind === "ceo") {
     personaKey = "ceo";
@@ -130,6 +132,15 @@ function ProfileCard({ org, role }: { org: OrgChart; role: string }) {
         .filter(Boolean)
         .join(" · "),
     }));
+    // Gamified XP card (directors-board-gamified, M3 Phase 3) — derived, display-only counts.
+    if (xp[d.slug]) {
+      xpCard = (
+        <div className="mt-6">
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">XP</h2>
+          <XpCard xp={xp[d.slug]} />
+        </div>
+      );
+    }
     // The director's own team — its box agent_jobs lanes, each linking to its profile.
     if (d.workers.length > 0) {
       extra = (
@@ -214,6 +225,7 @@ function ProfileCard({ org, role }: { org: OrgChart; role: string }) {
         <ResponsibilityList items={responsibilities} />
       </div>
 
+      {xpCard}
       {extra}
     </div>
   );
@@ -224,6 +236,7 @@ export default function AgentProfilePage() {
   const role = decodeURIComponent(params.role);
   const workspace = useWorkspace();
   const [org, setOrg] = useState<OrgChart | null>(null);
+  const [xp, setXp] = useState<Record<string, DirectorXp>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
 
@@ -240,10 +253,20 @@ export default function AgentProfilePage() {
     [],
   );
 
+  const loadXp = useCallback(
+    () =>
+      fetch("/api/developer/agents/xp")
+        .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+        .then((d: { xp: Record<string, DirectorXp> }) => setXp(d.xp ?? {}))
+        .catch(() => setXp({})),
+    [],
+  );
+
   useEffect(() => {
     if (workspace.role !== "owner") return;
     loadOrg();
-  }, [workspace.role, loadOrg]);
+    loadXp();
+  }, [workspace.role, loadOrg, loadXp]);
 
   if (workspace.role !== "owner") {
     return (
@@ -271,7 +294,7 @@ export default function AgentProfilePage() {
           Couldn&apos;t load the profile.
         </div>
       ) : org ? (
-        <ProfileCard org={org} role={role} />
+        <ProfileCard org={org} role={role} xp={xp} />
       ) : null}
     </div>
   );
