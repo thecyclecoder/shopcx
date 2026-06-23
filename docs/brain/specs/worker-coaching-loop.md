@@ -1,4 +1,4 @@
-# Worker coaching loop — the director teaches its workers ⏳
+# Worker coaching loop — the director teaches its workers ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (M7 — the org learns)
 **Blocked-by:** [[platform-director-agent]]
@@ -18,13 +18,23 @@ The [[platform-director-agent|DevOps Director]] doesn't just queue + grade — i
 - **Coaching that doesn't take.** If a worker keeps erring *after* N coaching attempts on the same class → **escalate to CEO** (the instruction approach isn't working — maybe a deeper redesign), per the loop-guard.
 - **The worker never edits its own instructions** — only its director coaches it; the director answers to the CEO. (CEO → Director → worker.)
 
-## Phase 1 — worker instruction store + repeated-error detection + coach + log ⏳
+## Phase 1 — worker instruction store + repeated-error detection + coach + log ✅
 `worker_instructions` (per-worker versioned guidance, loaded into the worker's prompt at runtime) + `worker_coaching_log`; the director's repeated-error detector (off grades + `director_activity`); the coach action (amend instructions, log the director→worker message, post to the board); the guidance-gap-vs-code-bug router; post-coaching grade re-check. Brain: [[../goals/devops-director]] · [[platform-director-agent]] · [[director-loop-grading]] · [[../tables/grader_prompts]] · [[regression-agent]] · [[../specs/repair-agent]].
 
+**Shipped:**
+- `supabase/migrations/20260703120000_worker_coaching.sql` → `worker_instructions` (per-worker versioned guidance; `status` active｜superseded｜reverted; `coached_by` director-gated; service-role-write-only) + `worker_coaching_log` (the director→worker message log; old→new diff, attempt count, `recheck_status`, `kind` coaching｜code-bug-route｜escalation). Tables: [[../tables/worker_instructions]] · [[../tables/worker_coaching_log]]. Apply: `npx tsx scripts/apply-worker-coaching-migration.ts`.
+- `src/lib/agents/worker-instructions.ts` ([[../libraries/worker-instructions]]) — `loadWorkerInstructions`/`formatWorkerInstructions`/`appendWorkerInstructions` (the runtime load) + `coachWorker` (director-gated amend + log) + `revertCoaching` + `getWorkerCoachingHistory` + `recordRecheck`.
+- `src/lib/agents/worker-coaching.ts` ([[../libraries/worker-coaching]]) — `detectRepeatedErrors` (off `director_activity`, recurrence = the wrongness signal), `classifyCoachingRoute` (guidance-gap vs code-bug), `runWorkerCoachingPass` (coach｜route-to-Repair｜escalate-to-CEO after N + post to board), `recheckPendingCoachings`.
+- Runtime load wired into `scripts/builder-worker.ts` `runRepairJob` + `runRegressionJob` (the LLM workers) via `appendWorkerInstructions`. The pass runs via `scripts/run-worker-coaching-pass.ts` (dry-run default).
+- Profile surface: `GET /api/developer/agents/coaching?kind=…` + the "Coaching history" section on `/dashboard/agents/[role]` (`src/components/agents/worker-coaching-history.tsx`).
+
+**Defaults (tunable in `worker-coaching.ts`):** repeated-error threshold = 3 · coaching attempts before CEO escalation = 2 · detection window = 14 days.
+
 ## Verification
-- A worker that makes the same class of mistake ≥N times → the director writes a `worker_instructions` amendment (a learning) + a `worker_coaching_log` row (director→worker, with the diff + pattern); a board post appears.
-- The worker's **next run loads the amended instructions** (the guidance is in its prompt) and the error class measurably drops; the director's post-coaching grade re-check confirms it.
-- The worker's **profile page** shows its coaching history (the director's messages to it over time).
-- A repeated error that's actually a **code bug** → routed to Repair/Regression as a fix spec, NOT an instruction tweak.
-- Coaching that fails to fix the class after N attempts → **escalates to CEO** (not infinite re-coaching).
-- Negative: a worker cannot edit its own `worker_instructions` — only its director (verify the write path is director-gated).
+- **Apply the migration:** `npx tsx scripts/apply-worker-coaching-migration.ts` → expect `✓ worker-coaching tables present: true (2/2)`. (idempotent — safe to re-run.)
+- **Detect + coach:** with a worker (e.g. `regression`) that applied the same disposition ≥3 times in `director_activity` with a signature that recurred, run `npx tsx scripts/run-worker-coaching-pass.ts` → expect a `[coached]` line in the dry-run plan; re-run with `--apply` → `select * from worker_instructions where worker_kind='regression' and status='active'` shows the new learning (with `coached_by='platform'`, `version`, `supersedes_id`), and `select kind, attempt, old_instruction, new_instruction from worker_coaching_log where worker_kind='regression' order by created_at desc limit 1` shows the director→worker message with the old→new diff. A `director_messages` board `update` ("🛠️ Ada coached 🔴 Remi: …") appears with `board_message_id` linked back on the log row.
+- **Next run loads the guidance:** trigger a `regression` (or `repair`) job → its `claude -p` prompt now contains the "## Coaching guidance" block (the active `worker_instructions` are appended via `appendWorkerInstructions` in `scripts/builder-worker.ts`). The error class measurably drops; on the next pass `recheckPendingCoachings` flips the coaching's `recheck_status` to `stuck` (or `recurred` if it didn't take).
+- **Profile page:** open `/dashboard/agents/regression` → the "Coaching history" section lists the director's messages (triggering pattern + old→new diff + attempt + the `stuck`/`recurred` chip), newest-first (via `GET /api/developer/agents/coaching?kind=regression`).
+- **Code bug ≠ coaching:** a repeated `real-bug` class → the pass emits `[routed-to-repair]`, enqueues a `repair` `agent_jobs` row (`enqueueRepairJob`), and writes a `coaching_routed_to_repair` `director_activity` row — **no** `worker_instructions` amendment.
+- **Escalate, don't loop:** a class already coached ≥2 times that still recurs → the pass emits `[escalated]`, writes an `escalated_coaching` `director_activity` row, and posts a board `update` mentioning `ceo` — no further `worker_instructions` write.
+- **Negative — worker can't self-coach:** the write path is director-gated — `coachWorker` throws without `coachedBy`, and `worker_instructions`/`worker_coaching_log` are **service-role-write-only** (RLS `*_service` policy). A worker runs read-only (no service role), so it has no path to edit its own instructions. Confirm: `select polname, roles from pg_policies where tablename='worker_instructions'` → only `authenticated` SELECT + `service_role` ALL.

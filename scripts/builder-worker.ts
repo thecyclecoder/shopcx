@@ -4336,7 +4336,10 @@ async function runRepairJob(job: Job) {
   console.log(`${tag} diagnosing signature ${signature}`);
   try {
     const brief = await loadRepairBrief(instr);
-    const { session, resultText, isError, raw } = await runRepairClaude(repairPrompt(brief), null, REPO_DIR);
+    // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
+    const { appendWorkerInstructions } = await import("../src/lib/agents/worker-instructions");
+    const repairBrief = await appendWorkerInstructions(db, job.workspace_id, "repair", repairPrompt(brief));
+    const { session, resultText, isError, raw } = await runRepairClaude(repairBrief, null, REPO_DIR);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     const verdict = String(parsed?.status || "");
@@ -4711,7 +4714,10 @@ async function runRegressionJob(job: Job) {
   // ── Fresh review — investigate read-only on Max → verdict → dismiss | author + route. ──
   console.log(`${tag} reviewing regression ${signature} (spec ${regressedSlug})`);
   try {
-    const { session, resultText, isError, raw } = await runRegressionClaude(regressionPrompt(regressionBrief(instr)), null, REPO_DIR);
+    // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
+    const { appendWorkerInstructions } = await import("../src/lib/agents/worker-instructions");
+    const coachedRegressionPrompt = await appendWorkerInstructions(db, job.workspace_id, "regression", regressionPrompt(regressionBrief(instr)));
+    const { session, resultText, isError, raw } = await runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     const verdict = String(parsed?.status || "");

@@ -7,6 +7,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
+import { WorkerCoachingHistory } from "@/components/agents/worker-coaching-history";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
 // `/dashboard/agents/[role]` — one page for every seat (CEO · a director slug · a
@@ -181,10 +182,19 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
     reportsTo = { name: dp.name, role: dp.role, href: `/dashboard/agents/${encodeURIComponent(director.slug)}` };
     responsibilities = (wp.responsibilities ?? []).map((r) => ({ primary: r }));
     extra = (
-      <p className="mt-6 text-[12px] text-zinc-400">
-        Box lane <span className="font-mono text-zinc-500 dark:text-zinc-400">{worker.kind}</span> — its requests route
-        up to the CEO inbox until {dp.name} ({dp.role}) goes live (approval-routing engine, M2).
-      </p>
+      <>
+        <p className="mt-6 text-[12px] text-zinc-400">
+          Box lane <span className="font-mono text-zinc-500 dark:text-zinc-400">{worker.kind}</span> — its requests route
+          up to the CEO inbox until {dp.name} ({dp.role}) goes live (approval-routing engine, M2).
+        </p>
+        {/* worker-coaching-loop: the director's messages to this worker over time (its coaching history). */}
+        <div className="mt-6">
+          <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            Coaching history · from {dp.name} ({dp.role})
+          </h3>
+          <WorkerCoachingHistory kind={worker.kind} />
+        </div>
+      </>
     );
   }
 
