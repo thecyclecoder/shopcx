@@ -12,6 +12,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { ACTIVE_STATUSES, getLiveJobForSlug, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
 import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
+import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
+import { resolveApproverLive, CEO } from "@/lib/agents/approval-router";
+import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 
 export type ActionResult<T> =
   | ({ ok: true } & T)
@@ -359,6 +362,34 @@ export async function approveRoadmapAction(
 
   const { data: updated, error } = await admin.from("agent_jobs").update(patch).eq("id", opts.jobId).select("*").single();
   if (error) return { ok: false, status: 500, error: error.message };
+
+  // Supervisable-autonomy ledger (approval-routing-engine Phase 3): record every TERMINAL routed
+  // decision so the CEO can always audit what was decided + why. A 'reject' is reject-with-notes —
+  // it sends a hero candidate back for regeneration, NOT a terminal approve/decline, so it isn't
+  // logged here (the request re-surfaces). Best-effort: never break the approve path on a ledger miss.
+  if (opts.decision === "approve" || opts.decision === "decline") {
+    try {
+      const raisedBy = ownerFunctionForKind(job.kind) ?? CEO;
+      const routedTo = await resolveApproverLive(ownerFunctionForKind(job.kind));
+      await recordApprovalDecision(admin, {
+        workspaceId,
+        agentJobId: job.id,
+        pendingActionId: opts.actionId,
+        raisedByFunction: raisedBy,
+        routedToFunction: routedTo,
+        // A human owner is deciding here: 'ceo' when it routed to the fail-safe root, else a human
+        // override of a director's queue. The autonomous director path (decided_by='director',
+        // autonomous=true) is recorded by that future auto-approver, not this human endpoint.
+        decidedBy: routedTo === CEO ? "ceo" : "human",
+        decision: opts.decision === "approve" ? "approved" : "declined",
+        reasoning: typeof opts.notes === "string" && opts.notes.trim() ? opts.notes.trim() : null,
+        autonomous: false,
+      });
+    } catch {
+      // ledger is best-effort; the decision already landed on the job.
+    }
+  }
+
   return { ok: true, job: updated as AgentJob };
 }
 

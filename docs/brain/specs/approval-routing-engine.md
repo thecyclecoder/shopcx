@@ -16,10 +16,11 @@ The **keystone** of the [[../goals/devops-director]] goal. Every agent/tool has 
 - The inbox API (`/api/developer/agents/inbox`) now **routes by the live flags**: a role sees only the approvals stamped to it (legacy/unrouted ⇒ CEO); a director that isn't an auto-approver captures nothing (`routesToCeo:true`). The Agents-hub Approval Requests tab renders the investigation inline with **Approve / Decline** buttons (single plain action) → `POST /api/roadmap/approve`, or a deep-link to the canonical surface for multi-choice actions (coverage register/exempt, hero preview).
 - Execution path unchanged: the approve endpoint still flips `queued_resume`; this milestone changed **where the request surfaces**, not how an approved action runs. (The richer scattered surfaces — Control Tower feeds, spec cards, box `approvalHref` — keep working in parallel; Phase 4 retires them.)
 
-## Phase 3 — autonomous-approval history (the audit log) ⏳
-- ⏳ planned
-- `approval_decisions` (columns: `id`, `agent_job_id`/`pending_action_id`, `raised_by_function`, `routed_to_function`, `decided_by` ∈ `ceo｜director｜human`, `decision` ∈ `approved｜declined｜escalated`, `reasoning`, `autonomous boolean`, `created_at`) — one row per routed decision. Brain page [[../tables/approval_decisions]]. This is the **supervisable-autonomy ledger** ([[../operational-rules]] § North star): when a future live director auto-approves, the CEO sees the decision + reasoning in **history**, never in the queue.
-- A **Decision history** view in the routed inbox + on the Agents hub: filterable by function, decision, autonomous-vs-human.
+## Phase 3 — autonomous-approval history (the audit log) ✅
+- ✅ shipped
+- `approval_decisions` (columns: `id`, `workspace_id`, `agent_job_id`/`pending_action_id`, `raised_by_function`, `routed_to_function`, `decided_by` ∈ `ceo｜director｜human`, `decision` ∈ `approved｜declined｜escalated`, `reasoning`, `autonomous boolean`, `created_at`) — one row per routed decision. Migration `20260703120000_approval_decisions.sql` + apply-script. Brain page [[../tables/approval_decisions]]. This is the **supervisable-autonomy ledger** ([[../operational-rules]] § North star): when a future live director auto-approves, the CEO sees the decision + reasoning in **history**, never in the queue.
+- New `src/lib/agents/approval-decisions.ts` ([[../libraries/approval-decisions]]) — `recordApprovalDecision(admin, input)` writes a row (best-effort; forces `autonomous=true` only for `decided_by='director'`), `listApprovalDecisions(admin, ws, role, filters)` reads the history (**CEO sees all**; a director sees decisions routed to it). [[../libraries/roadmap-actions]] `approveRoadmapAction` records every **terminal** human approve/decline (`decided_by='ceo'` when routed to root, else `'human'`; a `reject`/hero-regen is not logged); the future autonomous director records `decided_by='director', autonomous=true`.
+- A **Decision history** tab on the Agents hub (right of the three inbox tabs), backed by `GET /api/developer/agents/decisions` (owner-gated): filterable by **decision**, **autonomous-vs-human**, and (CEO only) **function**.
 
 ## Phase 4 — migrate the scattered approval surfaces ⏳
 - ⏳ planned
@@ -55,6 +56,12 @@ The **keystone** of the [[../goals/devops-director]] goal. Every agent/tool has 
 - Set Platform `live=true, autonomous=false` → raise a Platform-owned approval → expect it to **fall through to the CEO** (`routed_to_function='ceo'`; `…inbox?role=platform` → `routesToCeo:true, items:[]`).
 - Raise a multi-choice proposal (coverage-register, or storefront hero-preview) → expect its inbox row to show the inline investigation with **no** Approve/Decline buttons but a **"Decide on the full surface →"** deep-link (Control Tower / optimizer) — the register/exempt/preview decision isn't guessed at.
 
-### M3–M4 (later phases)
-- **Phase 3:** Set Platform `live=true, autonomous=true`, let a live director auto-approve → expect an `approval_decisions` row recording `routed_to_function='platform'`, `decided_by='director'`, `autonomous=true` + reasoning, visible in CEO **Decision history** (never the queue).
+### Phase 3 (shipped) — autonomous-approval history (the audit log)
+- Apply `npx tsx scripts/apply-approval-decisions-migration.ts` → expect `approval_decisions` present (uuid PK, `decided_by` ∈ ceo｜director｜human, `decision` ∈ approved｜declined｜escalated, `autonomous boolean`), RLS on, indexes `(workspace_id, created_at desc)` + `(routed_to_function, created_at desc)`.
+- With all flags off, **Approve** a CEO-routed approval in the Agents-hub inbox → expect a new `approval_decisions` row `decision='approved'`, `decided_by='ceo'`, `autonomous=false`, `agent_job_id`/`pending_action_id` set; **Decline** another → `decision='declined'`. A `reject` (optimizer hero reject-with-notes) writes **no** row.
+- On `/dashboard/agents` → **CEO → Decision history** tab: expect both rows newest-first; the **decision** dropdown filters to approved/declined/escalated; the **autonomous + human** dropdown filters to autonomous-only / human-only; the **function** dropdown (CEO only) filters by routed-to function.
+- `GET /api/developer/agents/decisions?role=ceo` → expect `items[]` with the recorded decisions; `?decision=approved&autonomy=human` narrows them. As a non-owner → **403**.
+- (Autonomous path, exercised once a live director auto-approves) — `recordApprovalDecision` with `decided_by='director', autonomous=true` → expect the row visible in CEO **Decision history** (never the queue), and `GET …decisions?role=platform` returns only Platform-routed decisions.
+
+### Phase 4 (later phase)
 - **Phase 4:** Grep the codebase / click through the old surfaces → expect Control-Tower approval feeds, spec cards, and the box `approvalHref` to deep-link into the routed inbox (no `/dashboard/roadmap/{slug}` 404 fallthrough); the old standalone cards are gone.
