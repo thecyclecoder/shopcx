@@ -1,4 +1,4 @@
-# Coverage auto-register agent — close Control Tower coverage gaps automatically ⏳
+# Coverage auto-register agent — close Control Tower coverage gaps automatically ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends the [[control-tower-complete-coverage|coverage self-audit]] + mirrors [[repair-agent]] (detect → propose fix). · **Found in use 2026-06-23:** the coverage self-audit keeps surfacing **unregistered loops** — a cron `createFunction` served in code but absent from `MONITORED_LOOPS` (currently `storefront-ltv-reconcile-cron` + `storefront-optimizer-cron`; before them, the storefront-experiments + lever-decay crons). Each time the owner (or I) hand-adds the registry entry. That's a mechanical fix the system should propose itself.
 
@@ -16,5 +16,14 @@ The self-audit already *detects* the gap (it lists each unregistered loop with i
 - Re-run the audit with a gap already proposed → **no duplicate** proposal.
 - Negative: a fn that already has a `MONITORED_LOOPS` entry → never flagged; the agent never silently edits `registry.ts` without the owner tap.
 
-## Phase 1 — detect unregistered loop → propose the MONITORED_LOOPS entry ⏳
-On a coverage self-audit gap, author + surface (deduped) the inferred `MONITORED_LOOPS` entry for one-tap Build, with an "intentionally-unmonitored" exemption path. Brain: [[control-tower-complete-coverage]] · [[../libraries/control-tower-self-audit]] · [[../libraries/control-tower]] (registry) · [[repair-agent]].
+## Phase 1 — detect unregistered loop → propose the MONITORED_LOOPS entry ✅
+On a coverage self-audit gap, author + surface (deduped) the inferred `MONITORED_LOOPS` entry for one-tap Build, with an "intentionally-unmonitored" exemption path. Brain: [[../libraries/coverage-register-agent]] · [[control-tower-complete-coverage]] · [[../libraries/control-tower-self-audit]] · [[../libraries/control-tower]] (registry) · [[repair-agent]].
+
+**Shipped:** `src/lib/coverage-register-agent.ts` — deterministic inference (`inferCadence`/`inferOwner`/`inferLoopEntry` → cadence-derived window + proposed owner + register/exempt fix-spec bodies) + `enqueueCoverageRegisterJob` (deduped: one open proposal per loop id, plus a 24h recently-built guard) + `getOpenCoverageRegistrations` (read surface). Triggered in `src/lib/control-tower/monitor.ts` `runControlTowerMonitor` (per `selfAudit.unregistered` loop, best-effort). Owner action: `src/app/api/developer/control-tower/coverage-register/route.ts` (`register`/`exempt`/`dismiss` → `queued_resume`). Box runner: `scripts/builder-worker.ts` `runCoverageRegisterJob` (materializes the chosen registry fix spec to main + queues its `build`, deduped by `hasActiveBuildForSlug`). Surfaced as the **"Coverage registration"** feed on `/dashboard/developer/control-tower`. Free-text `coverage-register` [[../tables/agent_jobs]] kind — no migration.
+
+## Verification
+- On `/dashboard/developer/control-tower`, when a cron `createFunction` is served in code without a `MONITORED_LOOPS` tile, within one control-tower-monitor cycle a **Coverage registration** card appears with the inferred owner-function + cadence label + the `register-loop-…` slug, citing the cron schedule. → expect a `coverage-register` `agent_jobs` row in `needs_approval` with `spec_slug = coverage-register:<loopId>`.
+- Click **Register** → expect the job to flip `queued_resume`, the box to commit `docs/brain/specs/register-loop-<loopId>.md` to main + queue a `build` job for it; after that build merges + deploys, `registry.ts` gains the entry, the loop becomes a real monitored tile, and the amber "Unregistered loop: <loopId>" gap clears.
+- Click **Intentionally-unmonitored** → expect a `build` for `exempt-loop-<loopId>` adding the `INTENTIONALLY_UNMONITORED_CRONS` entry; after deploy the audit no longer flags the loop (no re-surface).
+- Re-run the monitor while a proposal for the same loop is already live (or completed-with-build < 24h ago) → expect **no duplicate** `coverage-register` job for that loop id.
+- Negative: a cron that already has a `MONITORED_LOOPS` entry → never flagged, never proposed; the agent never writes to `registry.ts` without the owner tap (Register/Exempt only queues a build — a reviewable PR).

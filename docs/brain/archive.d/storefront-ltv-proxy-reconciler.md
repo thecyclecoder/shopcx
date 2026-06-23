@@ -1,1 +1,1 @@
-- **Predicted-LTV-per-visitor metric + 4-month actual-LTV reconciler** · verified 2026-06-23 · → [[libraries/storefront-ltv-proxy]]
+- **Predicted-LTV-per-visitor metric + 4-month actual-LTV reconciler** · verified 2026-06-23 · → [[goals/storefront-optimizer]]

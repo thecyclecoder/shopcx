@@ -1,1 +1,1 @@
-- **Box multi-account round-robin + failover — survive (and outrun) the Max usage wall** · verified 2026-06-23 · → [[lifecycles/roadmap-build-console]]
+- **Box multi-account round-robin + failover — survive (and outrun) the Max usage wall** · verified 2026-06-23 · → [[recipes/build-box-setup]]

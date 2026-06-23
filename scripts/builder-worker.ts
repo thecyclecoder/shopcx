@@ -126,6 +126,7 @@ const MAX_REPAIR = Number(process.env.AGENT_TODO_MAX_REPAIR || 2);
 // verdict. Minutes — same ballpark as a migration-fix / ticket-improve turn, not the seed ceiling.
 const REPAIR_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
+const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -190,7 +191,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build" | "db_health_build";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -207,8 +208,19 @@ interface PendingAction {
   // (db_health: pre-authored at detection, committed on Build) + surfaced for one-tap owner Build. The
   // build is queued on approval, NOT auto.
   spec_slug?: string;
-  // set when type==='db_health_build': the human-readable title of the proposed fix spec (for the panel).
+  // set when type==='db_health_build' OR type==='coverage_register': the human-readable title of the proposed fix spec.
   spec_title?: string;
+  // set when type==='db_health_build' (db-health-spec-body-robust): the diagnostic carried ON the action,
+  // un-clobberable by an approval that overwrites the free-text `instructions` (approve mutates the action
+  // by STATUS only). `spec_body` is the pre-rendered fix spec; `finding` is the structured DbHealthFinding
+  // the body re-renders from if `spec_body` is ever empty. The owner-Build resume reads the body from HERE
+  // first, falling back to `instructions.spec_body` for proposals enqueued before this field existed.
+  spec_body?: string;
+  finding?: import("../src/lib/control-tower/db-health").DbHealthFinding;
+  // set when type==='coverage_register' (coverage-register-agent): the owner's decision on a surfaced
+  // unregistered-loop proposal — 'register' lands the MONITORED_LOOPS entry, 'exempt' adds the
+  // INTENTIONALLY_UNMONITORED_CRONS exemption. The box materializes the matching fix spec + queues its build.
+  decision?: "register" | "exempt";
   // set when type==='storefront_campaign' (storefront-optimizer): the typed OptimizerProposal the box
   // session emitted; the worker stands up the M1 experiment from it on approval (or immediately when the
   // gate is auto_run). Carries hypothesis + lever + reversible variant patch.
@@ -231,7 +243,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer" | "db_health";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer" | "db_health" | "coverage-register";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -718,7 +730,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer", "db_health"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer", "db_health", "coverage-register"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -1043,11 +1055,44 @@ async function explainQuery(c: import("pg").Client, query: string): Promise<stri
   }
 }
 
+// Resolve the fix-spec body for an owner-Build resume, robust to a clobbered `instructions`
+// (db-health-spec-body-robust). Resolution order: the un-clobberable action-carried body → the (older)
+// instructions body → re-render from the structured `finding` carried on the action. Returns `{error}`
+// ONLY when the body is genuinely empty AND there's no finding to reconstruct from — the caller then
+// surfaces needs_input instead of ever committing an empty spec.
+async function resolveDbHealthSpecBody(
+  buildAction: PendingAction,
+  instr: { spec_body?: string },
+): Promise<{ body: string } | { error: string }> {
+  const isNonEmpty = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0;
+  if (isNonEmpty(buildAction.spec_body)) return { body: buildAction.spec_body };
+  if (isNonEmpty(instr.spec_body)) return { body: instr.spec_body };
+  // Empty/whitespace body — re-derive deterministically from the structured finding on the action.
+  if (buildAction.finding) {
+    try {
+      const { buildFixSpecMarkdown } = await import("../src/lib/control-tower/db-health");
+      const rederived = buildFixSpecMarkdown(buildAction.finding);
+      if (isNonEmpty(rederived)) return { body: rederived };
+      return { error: "re-rendered spec body from the carried finding was still empty" };
+    } catch (e) {
+      return { error: `re-derive from carried finding threw: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  return { error: "spec body empty and no carried finding to re-derive from" };
+}
+
 // Author the proposed fix spec to main + queue the build — the owner-gate, run on a db_health Build
 // resume. The spec body was pre-authored deterministically at detection time (carried on the job's
-// instructions), so there's no LLM step. Mirrors the repair-agent owner-Build path.
+// db_health_build action), so there's no LLM step. Mirrors the repair-agent owner-Build path.
 async function materializeDbHealthSpec(specSlug: string, specBody: string, signature: string): Promise<boolean> {
   try {
+    // Final backstop (db-health-spec-body-robust): NEVER putFileMain an empty/phaseless spec. The caller
+    // already resolves + re-derives a non-empty body, so this should be unreachable — but a 0-byte commit
+    // is exactly the failure this spec exists to stop, so refuse it here too.
+    if (!specBody || !specBody.trim() || !/^##\s+Phase/m.test(specBody)) {
+      console.warn(`[db-health] refusing to author empty/phaseless spec ${specSlug} (signature ${signature})`);
+      return false;
+    }
     const put = await putFileMain(
       `docs/brain/specs/${specSlug}.md`,
       specBody,
@@ -1299,7 +1344,22 @@ async function runDbHealthJob(job: Job) {
         console.log(`${tag} owner Build → dedup: ${buildAction.result}`);
         return;
       }
-      const wrote = await materializeDbHealthSpec(buildAction.spec_slug, String(instr.spec_body || ""), signature);
+      // db-health-spec-body-robust: resolve the body from the un-clobberable action (re-deriving from the
+      // carried finding if it's empty) BEFORE committing — never author a 0-byte spec.
+      const bodyResult = await resolveDbHealthSpecBody(buildAction, instr);
+      if ("error" in bodyResult) {
+        buildAction.result = `cannot author spec body: ${bodyResult.error}`;
+        await update(job.id, {
+          status: "needs_input",
+          error: `db_health: ${bodyResult.error} — refused to commit an empty spec`,
+          questions: [{ id: "spec_body", q: `The DB Health fix spec for \`${signature}\` has an empty body and can't be reconstructed (${bodyResult.error}). Re-run the DB Health pass to regenerate the proposal, or paste the fix spec body to author manually.` }],
+          pending_actions: job.pending_actions,
+          log_tail: `owner Build → empty spec body, re-derive failed: ${bodyResult.error}`.slice(-2000),
+        });
+        console.warn(`${tag} owner Build → empty spec body, re-derive failed: ${bodyResult.error}`);
+        return;
+      }
+      const wrote = await materializeDbHealthSpec(buildAction.spec_slug, bodyResult.body, signature);
       if (!wrote) {
         await update(job.id, { status: "needs_attention", error: "spec commit failed", log_tail: `owner Build → failed to author docs/brain/specs/${buildAction.spec_slug}.md`.slice(-2000) });
         console.warn(`${tag} owner Build → spec commit failed`);
@@ -1326,6 +1386,81 @@ async function runDbHealthJob(job: Job) {
   }
   // No actionable owner decision on the action — nothing to do (shouldn't normally be claimed). Park it.
   await update(job.id, { status: "needs_approval", log_tail: `awaiting owner Build/Dismiss for ${signature}`.slice(-2000) });
+  console.log(`${tag} no owner decision yet — parked as needs_approval`);
+}
+
+// coverage-register-agent (coverage-auto-register-agent spec, Phase 1): the owner's decision on a surfaced
+// unregistered-loop proposal. The proposal itself is authored deterministically by the deployed monitor
+// (src/lib/coverage-register-agent.ts enqueueCoverageRegisterJob) — both fix-spec bodies (register +
+// exempt) ride the job's instructions. This runner only materializes the CHOSEN fix spec to main + queues
+// its build on the owner's tap (Register → land the MONITORED_LOOPS entry · Intentionally-unmonitored →
+// add the INTENTIONALLY_UNMONITORED_CRONS exemption). The agent NEVER silently edits registry.ts.
+async function runCoverageRegisterJob(job: Job) {
+  const tag = `[coverage-register:${job.id.slice(0, 8)}]`;
+  let instr: {
+    signature?: string;
+    loop_id?: string;
+    register_spec_slug?: string;
+    register_spec_body?: string;
+    exempt_spec_slug?: string;
+    exempt_spec_body?: string;
+  } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fall back to spec_slug as the signature */
+  }
+  const signature = instr.signature || job.spec_slug;
+  const loopId = instr.loop_id || signature.replace("coverage-register:", "");
+
+  const action = (job.pending_actions || []).find((a) => a.type === "coverage_register");
+  if (action && (action.status === "approved" || action.status === "declined")) {
+    if (action.status === "approved") {
+      const register = action.decision !== "exempt"; // default to register
+      const specSlug = register ? instr.register_spec_slug : instr.exempt_spec_slug;
+      const specBody = register ? instr.register_spec_body : instr.exempt_spec_body;
+      const what = register ? "register entry" : "intentionally-unmonitored exemption";
+      if (!specSlug || !specBody) {
+        await update(job.id, { status: "needs_attention", error: "no fix spec body to materialize", pending_actions: job.pending_actions, log_tail: `owner ${what} → missing spec body for ${loopId}`.slice(-2000) });
+        console.warn(`${tag} owner ${what} → missing spec body`);
+        return;
+      }
+      // Auto-build dedup: never enqueue a second build / open a 4th identical PR for a slug already live.
+      const dupe = await hasActiveBuildForSlug(specSlug);
+      if (dupe.active) {
+        action.status = "done";
+        action.result = `build already live for ${specSlug} (${dupe.reason}) — not re-queued`;
+        await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner ${what} → ${action.result}`.slice(-2000) });
+        console.log(`${tag} owner ${what} → dedup: ${action.result}`);
+        return;
+      }
+      const wrote = await materializeDbHealthSpec(specSlug, specBody, signature);
+      if (!wrote) {
+        await update(job.id, { status: "needs_attention", error: "spec commit failed", pending_actions: job.pending_actions, log_tail: `owner ${what} → failed to author docs/brain/specs/${specSlug}.md`.slice(-2000) });
+        console.warn(`${tag} owner ${what} → spec commit failed`);
+        return;
+      }
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: specSlug,
+        kind: "build",
+        status: "queued",
+        created_by: job.created_by,
+        instructions: `Build from coverage-register agent (${what} for loop ${loopId}). Follow the spec exactly — a small src/lib/control-tower/registry.ts edit; tsc-clean; open a PR.`,
+      });
+      action.status = error ? "failed" : "done";
+      action.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${specSlug}`;
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner ${what} → ${action.result}`.slice(-2000) });
+      console.log(`${tag} owner ${what} → ${action.result}`);
+    } else {
+      action.result = "dismissed by owner";
+      await update(job.id, { status: "completed", error: "dismissed by owner", pending_actions: job.pending_actions, log_tail: `owner Dismiss → cleared ${loopId}`.slice(-2000) });
+      console.log(`${tag} owner Dismiss → cleared`);
+    }
+    return;
+  }
+  // No actionable owner decision — shouldn't normally be claimed. Park it.
+  await update(job.id, { status: "needs_approval", log_tail: `awaiting owner decision for ${loopId}`.slice(-2000) });
   console.log(`${tag} no owner decision yet — parked as needs_approval`);
 }
 
@@ -4668,6 +4803,7 @@ async function runJob(job: Job) {
   if (job.kind === "repair") return runRepairJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
+  if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -4747,6 +4883,28 @@ async function runJob(job: Job) {
   // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
   // Force (-sfn) so a leftover/broken link from a prior run is always replaced.
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  // db-health-spec-body-robust (Phase 1): refuse to build a 0-byte / phaseless spec — belt-and-suspenders
+  // against ANY empty spec reaching the builder (db-health or otherwise). It must FAIL loudly, never run
+  // claude on an empty file and silently merge an empty PR. Resumes are exempt: the spec was validated on
+  // the first pass and branch WIP already exists.
+  if (!isResume) {
+    const specPath = join(wt, "docs/brain/specs", `${slug}.md`);
+    let specText = "";
+    try { specText = readFileSync(specPath, "utf8"); } catch { /* missing → treated as empty below */ }
+    if (!specText.trim() || !/^##\s+Phase/m.test(specText)) {
+      const why = !specText.trim() ? "is empty / 0-byte / missing" : 'has no "## Phase" section';
+      await update(job.id, {
+        status: "failed",
+        error: `spec docs/brain/specs/${slug}.md ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
+        log_tail: `build aborted — docs/brain/specs/${slug}.md ${why}; no PR opened`,
+      });
+      console.error(`${tag} ${why} spec → failed (no silent empty merge)`);
+      chosenAccount.inFlight--; // release the round-robin slot we took above (we return before the try/finally)
+      sh("git", ["worktree", "remove", "--force", wt]);
+      return;
+    }
+  }
 
   try {
     // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.
@@ -5014,7 +5172,8 @@ async function main() {
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "storefront-optimizer").length;
+  const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -5149,6 +5308,15 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed db_health ${job.id.slice(0, 8)} → ${countDbHealth() + 1}/${MAX_DB_HEALTH} db_health lane`);
+        launch(job);
+      }
+      // Fill the coverage-register lane (coverage-register-agent): owner Register/Exempt resume on a
+      // surfaced unregistered-loop proposal — materialize the chosen registry fix spec + queue its build.
+      while (countCoverageRegister() < MAX_COVERAGE_REGISTER) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["coverage-register"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed coverage-register ${job.id.slice(0, 8)} → ${countCoverageRegister() + 1}/${MAX_COVERAGE_REGISTER} coverage-register lane`);
         launch(job);
       }
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —

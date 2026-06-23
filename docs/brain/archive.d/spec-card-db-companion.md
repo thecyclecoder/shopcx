@@ -1,1 +1,1 @@
-- **Spec-card DB companion — instant PM state + deploy-pending flag** · verified 2026-06-23 · → [[lifecycles/roadmap-build-console]]
+- **Spec-card DB companion — instant PM state + deploy-pending flag** · verified 2026-06-23 · → [[libraries/spec-card-state]]
