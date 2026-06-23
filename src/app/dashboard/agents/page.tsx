@@ -6,7 +6,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { BoardChannel } from "@/components/agents/board-channel";
-import { INBOX_TABS, type InboxTab, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
+import { INBOX_TABS, APPROVAL_REQUEST_TYPE, type InboxTab, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
 
 // Agents hub (agents-hub-role-inboxes spec) — the owner-only org-chart surface.
 // Left: CEO → Directors → Workers, read from functions/+goals/ via brain-roadmap.
@@ -247,7 +247,7 @@ function InboxShell({ role, title }: { role: string; title: string }) {
         ) : (
           <ul className="space-y-2">
             {visible.map((it) => (
-              <InboxRow key={it.id} item={it} />
+              <InboxRow key={it.id} item={it} onActed={refresh} />
             ))}
           </ul>
         )}
@@ -256,7 +256,14 @@ function InboxShell({ role, title }: { role: string; title: string }) {
   );
 }
 
-function InboxRow({ item }: { item: InboxItem }) {
+function InboxRow({ item, onActed }: { item: InboxItem; onActed: () => void }) {
+  // A routed Approval Request (M2) renders the investigation + proposed fix INLINE so the decision
+  // is one read — no click-through to a separate surface. Approve/Decline drives the unchanged
+  // execution path (POST /api/roadmap/approve → worker flips queued_resume).
+  if (item.type === APPROVAL_REQUEST_TYPE) {
+    return <ApprovalRow item={item} onActed={onActed} />;
+  }
+
   const inner = (
     <div
       className={`rounded-lg border p-3 ${
@@ -278,6 +285,85 @@ function InboxRow({ item }: { item: InboxItem }) {
     </div>
   );
   return <li>{item.link ? <Link href={item.link}>{inner}</Link> : inner}</li>;
+}
+
+function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }) {
+  const [busy, setBusy] = useState<null | "approve" | "decline">(null);
+  const [error, setError] = useState<string | null>(null);
+  const canDecideInline = Boolean(item.jobId && item.approveActionId);
+
+  const decide = async (decision: "approve" | "decline") => {
+    if (!item.jobId || !item.approveActionId) return;
+    setBusy(decision);
+    setError(null);
+    try {
+      const res = await fetch("/api/roadmap/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: item.jobId, actionId: item.approveActionId, decision }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      onActed();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed");
+      setBusy(null);
+    }
+  };
+
+  return (
+    <li
+      className={`rounded-lg border p-3 ${
+        item.read
+          ? "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+          : "border-indigo-200 bg-indigo-50/40 dark:border-indigo-900/40 dark:bg-indigo-900/10"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <span className="flex items-center gap-2 min-w-0">
+          {!item.read && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500" />}
+          <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{item.title}</span>
+        </span>
+        <span className="shrink-0 text-[10px] text-zinc-400">{elapsed(item.createdAt)}</span>
+      </div>
+      {item.body && (
+        <pre className="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-2 font-sans text-[12px] leading-relaxed text-zinc-600 dark:bg-zinc-950/40 dark:text-zinc-300">
+          {item.body}
+        </pre>
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {canDecideInline ? (
+          <>
+            <button
+              onClick={() => decide("approve")}
+              disabled={busy !== null}
+              className="rounded-md bg-emerald-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {busy === "approve" ? "Approving…" : "Approve"}
+            </button>
+            <button
+              onClick={() => decide("decline")}
+              disabled={busy !== null}
+              className="rounded-md border border-zinc-300 px-3 py-1 text-[12px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              {busy === "decline" ? "Declining…" : "Decline"}
+            </button>
+          </>
+        ) : null}
+        {item.deepLink && (
+          <Link
+            href={item.deepLink}
+            className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
+          >
+            {canDecideInline ? "Open full surface →" : "Decide on the full surface →"}
+          </Link>
+        )}
+        {error && <span className="text-[11px] text-rose-500">{error}</span>}
+      </div>
+    </li>
+  );
 }
 
 // ── Right pane header ─────────────────────────────────────────────────────────

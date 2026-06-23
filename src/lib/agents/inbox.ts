@@ -53,6 +53,13 @@ export const INBOX_TABS: InboxTabDef[] = [
 /** Every reserved type the agent inbox owns — the scope of the CEO inbox query (keeps the generic bell's notifications out). */
 export const AGENT_INBOX_TYPES = INBOX_TABS.map((t) => t.notificationType);
 
+/**
+ * The reserved `dashboard_notifications.type` the approval-routing engine (M2) emits a routed
+ * Approval Request under. Shared by the emitter (src/lib/agents/approval-inbox.ts) and the inbox
+ * API so the type string is declared once.
+ */
+export const APPROVAL_REQUEST_TYPE = "agent_approval_request";
+
 /** Map a dashboard_notifications `type` to its inbox tab (null if it isn't an agent-inbox type). */
 export function tabForType(type: string): InboxTab | null {
   return INBOX_TABS.find((t) => t.notificationType === type)?.id ?? null;
@@ -67,6 +74,19 @@ export interface InboxItem {
   link: string | null;
   read: boolean;
   createdAt: string;
+  // ── approval-routing-engine (M2) — only set on `agent_approval_request` items ──
+  /** the agent_jobs row this approval request gates (drives inline Approve/Decline). */
+  jobId?: string;
+  /**
+   * the single pending action id inline Approve/Decline acts on via POST /api/roadmap/approve.
+   * null when the job is multi-action or multi-choice (coverage register/exempt, hero preview) —
+   * the row falls back to the `deepLink` surface so the richer decision isn't guessed at.
+   */
+  approveActionId?: string | null;
+  /** canonical surface to decide a richer/multi-choice action (Phase 4 folds these into the inbox). */
+  deepLink?: string | null;
+  /** the org-chart function this request routed to (eyeball/audit; CEO by default). */
+  routedTo?: string;
 }
 
 export interface InboxPayload {
