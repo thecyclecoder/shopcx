@@ -11,13 +11,13 @@ Discovery half of the winning-static-creative finder (Phase 2). Searches [[../in
 | `fetchCreative(url)` | → `{ buffer, contentType }`. Sends the Bearer key (urls 403 without it) |
 | `classifyMedia(ad)` | `'static' \| 'video'` from `video_duration` → `ads_type` → `resource_urls[].type` |
 | `isLongRunner(ad, minDays=14)` | winner heuristic: `days_count ≥ minDays` AND `resume_advertising_flag !== false` |
-| `NormalizedAd` / `AdLibraryAd` / `MediaType` | types; `NormalizedAd` adds `media_type` + best `creative_url` |
-| `CATEGORY_SEEDS` / `COMPETITOR_SEEDS` / `ALL_SEEDS` | curated discovery seeds; `Seed = { keyword, kind, note? }` |
+| `NormalizedAd` / `AdLibraryAd` / `MediaType` / `Seed` | types; `NormalizedAd` adds `media_type` + best `creative_url`; `Seed = { keyword, kind, note? }` |
+| `CATEGORY_SEEDS` | curated category discovery keywords |
 
-## Seed list (curated + data-surfaced)
+## Seed list
 
-- **Competitors** (brand name = keyword): `everydaydose`, `ryze`, `lifeboost`, `urthlabs`/`erthlabs`, `leanjoebean`, `atlascoffeeclub`, `piquelife`, `mudwtr` (Amazing Coffee); `onnit` (Ashwavana); `bloomnu` (greens cross).
-- **Categories:** superfood/mushroom/adaptogen coffee, energy-without-jitters, anti-inflammatory, longevity, anti-aging, weight-loss coffee, ashwagandha, greens.
+- **Categories** (still hardcoded here): superfood/mushroom/adaptogen coffee, energy-without-jitters, anti-inflammatory, longevity, anti-aging, weight-loss coffee, ashwagandha, greens.
+- **Competitors are DB-driven** — they live in the [[../tables/competitors]] table, not here. `COMPETITOR_SEEDS`/`ALL_SEEDS` were removed; the sweep loads approved competitors per workspace via [[competitors]]`.loadApprovedCompetitorSeeds()` and concatenates with `CATEGORY_SEEDS`. The original 11 seeds were migrated in as `status='approved'`. See [[../specs/competitor-scout]].
 
 ## Gotchas
 
@@ -28,8 +28,9 @@ Discovery half of the winning-static-creative finder (Phase 2). Searches [[../in
 
 ## Callers
 - [[creative-skeleton]] (`sweepSeed` → `searchAds`/`fetchCreative`/`isLongRunner`).
-- [[../inngest/creative-finder]] (`hasAdLibraryKey`, `ALL_SEEDS`).
+- [[../inngest/creative-finder]] (`hasAdLibraryKey`, `CATEGORY_SEEDS`, `Seed`).
+- [[competitors]] (`Seed` type for `loadApprovedCompetitorSeeds`).
 - `src/app/api/ads/creative-finder/media` (`fetchCreative` proxy).
 
 ## Related
-[[../integrations/adlibrary]] · [[creative-skeleton]] · [[../tables/creative_skeletons]] · [[../inngest/creative-finder]] · [[../specs/winning-static-creative-finder]]
+[[../integrations/adlibrary]] · [[creative-skeleton]] · [[competitors]] · [[../tables/competitors]] · [[../tables/creative_skeletons]] · [[../inngest/creative-finder]] · [[../specs/winning-static-creative-finder]] · [[../specs/competitor-scout]]

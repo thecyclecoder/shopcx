@@ -221,21 +221,9 @@ export const CATEGORY_SEEDS: Seed[] = [
 ];
 
 /**
- * Competitor brands (curated + data-surfaced). Amazing Coffee competes with the
- * coffee/adaptogen set; Ashwavana with Onnit; superfood/greens crosses to Bloom.
+ * Competitor brands are NO LONGER hardcoded here — they live in the DB-driven `competitors` table
+ * (docs/brain/specs/competitor-scout.md). The creative-finder sweep loads APPROVED competitors per
+ * workspace via `loadApprovedCompetitorSeeds()` in `src/lib/competitors.ts` and concatenates them
+ * with CATEGORY_SEEDS above. The original 11 seeds were migrated in as status='approved' by
+ * supabase/migrations/20260623120000_competitors.sql.
  */
-export const COMPETITOR_SEEDS: Seed[] = [
-  { keyword: "everydaydose", kind: "competitor", note: "Amazing Coffee" },
-  { keyword: "ryze", kind: "competitor", note: "Amazing Coffee" },
-  { keyword: "lifeboost", kind: "competitor", note: "Amazing Coffee" },
-  { keyword: "urthlabs", kind: "competitor", note: "Amazing Coffee · anti-aging" },
-  { keyword: "erthlabs", kind: "competitor", note: "Amazing Coffee · anti-aging (alt spelling)" },
-  { keyword: "leanjoebean", kind: "competitor", note: "Amazing Coffee · weight-loss" },
-  { keyword: "atlascoffeeclub", kind: "competitor", note: "Amazing Coffee" },
-  { keyword: "piquelife", kind: "competitor", note: "Amazing Coffee" },
-  { keyword: "mudwtr", kind: "competitor", note: "Amazing Coffee" },
-  { keyword: "onnit", kind: "competitor", note: "Ashwavana" },
-  { keyword: "bloomnu", kind: "competitor", note: "superfood/greens cross" },
-];
-
-export const ALL_SEEDS: Seed[] = [...COMPETITOR_SEEDS, ...CATEGORY_SEEDS];

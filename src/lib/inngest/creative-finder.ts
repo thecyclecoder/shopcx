@@ -19,7 +19,8 @@
  */
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { hasAdLibraryKey, ALL_SEEDS } from "@/lib/adlibrary";
+import { hasAdLibraryKey, CATEGORY_SEEDS, type Seed } from "@/lib/adlibrary";
+import { loadApprovedCompetitorSeeds, promoteFromCategorySweep } from "@/lib/competitors";
 import { sweepSeed, type IngestResult } from "@/lib/creative-skeleton";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
@@ -31,6 +32,16 @@ async function adToolWorkspaceIds(): Promise<string[]> {
   // shared global credits sweeping for tenants who don't run ads.
   const { data } = await admin.from("ad_campaigns").select("workspace_id");
   return Array.from(new Set((data || []).map((r) => r.workspace_id as string)));
+}
+
+/**
+ * Per-workspace sweep seeds: the DB-driven APPROVED competitor brands (competitor-scout) +
+ * the curated CATEGORY_SEEDS. Competitor brands are NEVER hardcoded — a workspace with no
+ * approved competitors runs only its category keywords (no hardcoded fallback list).
+ */
+async function workspaceSeeds(workspaceId: string): Promise<Seed[]> {
+  const competitors = await loadApprovedCompetitorSeeds(workspaceId);
+  return [...competitors, ...CATEGORY_SEEDS];
 }
 
 function emptyTotals(): IngestResult {
@@ -61,12 +72,16 @@ export const creativeFinderDailyCron = inngest.createFunction(
 
       let totals = emptyTotals();
       for (const workspaceId of workspaceIds) {
-        for (let i = 0; i < ALL_SEEDS.length; i++) {
-          const seed = ALL_SEEDS[i];
+        const seeds = await step.run(`seeds-${workspaceId}`, () => workspaceSeeds(workspaceId));
+        for (let i = 0; i < seeds.length; i++) {
+          const seed = seeds[i];
           const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
           totals = addTotals(totals, r);
-          if (i < ALL_SEEDS.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
+          if (i < seeds.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
         }
+        // Category-sweep promotion (competitor-scout): heavy advertisers that recurred in this
+        // workspace's sweep output surface as 'proposed' competitors for owner approval.
+        await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
       }
       return { workspaces: workspaceIds.length, totals };
     })();
@@ -90,18 +105,20 @@ export const creativeFinderManualSweep = inngest.createFunction(
 
     let totals = emptyTotals();
     for (const workspaceId of workspaceIds) {
-      for (let i = 0; i < ALL_SEEDS.length; i++) {
-        const seed = ALL_SEEDS[i];
+      const seeds = await step.run(`seeds-${workspaceId}`, () => workspaceSeeds(workspaceId));
+      for (let i = 0; i < seeds.length; i++) {
+        const seed = seeds[i];
         const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
         totals = addTotals(totals, r);
-        if (i < ALL_SEEDS.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
+        if (i < seeds.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
       }
+      await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
     }
     return { workspaces: workspaceIds.length, totals };
   },
 );
 
-async function safeSweep(workspaceId: string, seed: (typeof ALL_SEEDS)[number]): Promise<IngestResult> {
+async function safeSweep(workspaceId: string, seed: Seed): Promise<IngestResult> {
   try {
     return await sweepSeed(workspaceId, seed);
   } catch (err) {
