@@ -524,13 +524,33 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // Inbound customer messages in-window — every one fires unified-ticket-handler →
             // callSonnetOrchestratorV2. Inbound traffic with 0 successful decision beats means
             // the per-ticket decision agent went silent (couldn't reply or act on anyone).
-            const { count } = await admin
-              .from("ticket_messages")
-              .select("id", { count: "exact", head: true })
-              .eq("direction", "inbound")
-              .eq("author_type", "customer")
-              .gte("created_at", sinceIso);
-            return count ?? 0;
+            //
+            // Handler-driving filter (control-tower-ticket-decision-workprobe-scope): not every
+            // inbound/customer insert fires ticket/inbound-message. The CSAT-reopen path
+            // (src/app/api/csat/[ticketId]/route.ts) inserts an inbound customer message, reopens
+            // the ticket, and routes it to a human — emitting NO ticket/inbound-message event — so
+            // the handler legitimately never beats on it. Counting those over-counts demand: a
+            // single reopen note in an otherwise-quiet window reads as work=1 with 0 beats and
+            // trips a false idle_while_work red. The CSAT-reopen path is the only inbound/customer/
+            // direction='inbound' insert that drives no handler; it tags the ticket csat:reopened,
+            // so subtract messages on csat:reopened tickets. Done as a NULL-safe subtraction (rather
+            // than a negated array filter) so tickets with NULL/empty tags always count.
+            const [allRes, reopenRes] = await Promise.all([
+              admin
+                .from("ticket_messages")
+                .select("id", { count: "exact", head: true })
+                .eq("direction", "inbound")
+                .eq("author_type", "customer")
+                .gte("created_at", sinceIso),
+              admin
+                .from("ticket_messages")
+                .select("id, tickets!inner(id)", { count: "exact", head: true })
+                .eq("direction", "inbound")
+                .eq("author_type", "customer")
+                .gte("created_at", sinceIso)
+                .contains("tickets.tags", ["csat:reopened"]),
+            ]);
+            return Math.max(0, (allRes.count ?? 0) - (reopenRes.count ?? 0));
           }
           default:
             return 0;
