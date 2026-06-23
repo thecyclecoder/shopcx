@@ -1,4 +1,4 @@
-# Daily digest — one Slack post/day to #daily-digest ⏳
+# Daily digest — one Slack post/day to #daily-digest ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** the Slack-cleanup pass (2026-06-23) — replace per-event FYI pings with **one** daily summary.
 
@@ -11,11 +11,15 @@ A single Slack message to `#daily-digest`:
 - **Platform FYIs:** count of non-critical ops warnings (the ones that no longer DM), DB-health/coverage proposals waiting in the Agents hub.
 - A link to the Agents hub for the detail. Concise — a scannable digest, not a wall.
 
-## Phase 1 — the daily-digest cron ⏳
-A new Inngest daily cron (`daily-digest-cron`, e.g. `0 13 * * *`), registered in `MONITORED_LOOPS` ([[coverage-auto-register-agent]]); aggregates the day's `director_activity` + dunning + ad-perf + ops-warning counts into one Slack post to `#daily-digest` (`C0BCQ1ZNJ1F`) via [[../libraries/slack]] `postMessage`. Gated on a Slack token; no-op if absent. Brain: [[../inngest/daily-digest-cron]] · [[../tables/director_activity]] · [[../libraries/slack]] · [[devops-director]].
+## Phase 1 — the daily-digest cron ✅
+A new Inngest daily cron (`daily-digest-cron`, `0 13 * * *`), registered in `MONITORED_LOOPS` ([[coverage-auto-register-agent]]); aggregates the last 24h of `director_activity` + `agent_jobs` (build/ship recap) + dunning + notable Meta ad-perf shifts + ops-warning counts into one Slack post to `#daily-digest` (`C0BCQ1ZNJ1F`) via [[../libraries/slack]] `postMessage`. Gated on a Slack token; no-op if absent. A quiet day still posts one brief "quiet day" digest. Brain: [[../inngest/daily-digest-cron]] · [[../tables/director_activity]] · [[../libraries/slack]] · [[devops-director]].
+
+**Shipped:** `src/lib/inngest/daily-digest-cron.ts` (registered in `registered-functions.ts` + `MONITORED_LOOPS` in `control-tower/registry.ts`, owner `platform`). Aggregation is per-section best-effort (a failed read leaves that field at zero, never fails the post). Ad-perf surfaces only material deltas (spend swing ≥25% AND ≥$50, or ROAS swing ≥0.5). Brain page: [[../inngest/daily-digest-cron]].
 
 ## Verification
-- Run the cron once → **exactly one** message lands in `#daily-digest` summarizing the day (build recap + dunning + ad-perf + ops-warning counts), with an Agents-hub link; no per-event spam.
-- A day with no activity → a brief "quiet day" digest (or skip), never an error.
-- The cron is registered in `MONITORED_LOOPS` (no unregistered-loop gap on the Control Tower).
-- Negative: critical ops alerts still go to `#alerts-critical` (not delayed into the digest); customer/fraud channels unchanged.
+- In the Inngest dev/cloud dashboard, manually invoke `daily-digest-cron` (or wait for the 13:00 UTC tick) → expect **exactly one** message in `#daily-digest` (`C0BCQ1ZNJ1F`) with a `📊 Daily digest — YYYY-MM-DD` header, the present sections (🛠 Build & ship · 💸 Money & retention · 🩺 Platform) and an "Open the Agents hub →" context link; no per-event spam.
+- On a workspace with **no Slack token** (`workspaces.slack_bot_token_encrypted` null) → expect the run completes with `posted:0`, no error, no message (gated no-op).
+- On a 24h window with zero build/dunning/ad/ops activity → expect a single message reading *"Quiet day — nothing notable to report. 🌙"* with the hub link — never an error.
+- On the [[../dashboard/control-tower|Control Tower]], confirm a **Daily digest** tile (owner Platform) exists and shows a fresh beat after the run → expect no "unregistered loop" gap and a green/amber-awaiting-first-run tile (registered in `MONITORED_LOOPS`).
+- Negative — trigger a CRITICAL ops alert (`notifyOpsAlert` severity `critical`) → expect it pages `#alerts-critical` in real time, **not** delayed into the digest; the digest's ops-warning count covers only non-critical `error_events`. Customer/fraud channels unchanged.
+- In the run output `produced` JSON → expect `{ workspaces, posted, skipped, since, dateLabel }` with `posted + skipped === workspaces`.
