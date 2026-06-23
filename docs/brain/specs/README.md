@@ -156,6 +156,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[db-health-agent]] (platform) — new self-watching agent commissioned after the loop_heartbeats flood. Box-side: a FREQUENT (~hourly) slow-query pass (pg_stat_statements → EXPLAIN → root-cause the WHY: seq scan / missing index / disk sort / full-scan aggregate / bloat) + a daily growth/size/missing-index/bloat sweep. PROPOSES fixes (retention cron / CREATE INDEX CONCURRENTLY / query rewrite / drop unused index / vacuum) surfaced for one-tap owner Build — never auto-applies DDL/deletes (repair-agent pattern). Monitored loop + DB Health panel.
 
+## Active project — Optimizer hero preview gate ⏳
+
+[[optimizer-hero-preview-gate]] (growth) — for hero-image campaigns, approve the CONCEPT → generate the candidate → owner SEES it → approve-live OR reject-with-notes → regenerate (loop), so no AI hero serves sight-unseen. Grounded: composite the real pouch from product_variants.isolated_image_url + generate at the variant's hero_width×hero_height / lander aspect. Writes an experiment-variant overlay only (canonical locked hero untouched).
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
