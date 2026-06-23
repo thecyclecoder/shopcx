@@ -18,7 +18,7 @@ import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { refreshStorefrontExperiments } from "@/lib/storefront/experiment-refresh";
 
 export const storefrontExperimentsRefreshCron = inngest.createFunction(
-  { id: "storefront-experiments-refresh-cron", retries: 1, triggers: [{ cron: "*/30 * * * *" }] },
+  { id: "storefront-experiments-refresh-cron", retries: 1, triggers: [{ cron: "*/5 * * * *" }] },
   async ({ step }) => {
     const admin = createAdminClient();
     const workspaceIds = await step.run("find-active-workspaces", async () => {
