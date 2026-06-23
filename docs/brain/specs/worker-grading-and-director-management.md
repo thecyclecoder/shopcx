@@ -1,0 +1,50 @@
+# Worker grading + director management layer ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (the org learns + self-manages) · hardens [[platform-director-agent]] + [[director-loop-grading]] + [[worker-coaching-loop]].
+
+**Found in use 2026-06-23** (operator review of the live DevOps Director): she went live + autonomous but (1) only escorted goal-linked specs (missed standalone in-flight + repair-authored fix specs), (2) ran a daily beat (too slow — fixed → `*/15` in [[../inngest/platform-director-cron]]), (3) had no per-worker grading/rollup so coaching only fired on repeated errors, (4) her profile mandates read like the *function's* charter, not what she *does autonomously*, and (5) the CEO had no way to coach her. This spec closes all of it. **CEO directive: set up to these recommendations, watch the output, tune later — so the rubrics/metrics live HERE, not in tribal memory.**
+
+## The cascade (north star)
+> **CEO** grades + coaches → **Director (Ada)** grades + coaches → **Workers (Bo, Rafa, Devi …)**
+
+Each layer judges the layer below against an explicit rubric and coaches when the grade slips. Mirrors the existing [[../tables/director_decision_grades]] (CEO grades the director) one level down.
+
+## Job-rating metrics (the locked config — tune in `worker-grader.ts`)
+- **Gradeable unit:** one **concluded `agent_jobs` row** (a build merged, an error fixed/dismissed, an index proposed, a spec verified). The job IS the worker's atomic action.
+- **Scale:** 1–10 + reasoning, `graded_by ∈ agent|human` (CEO-overridable), idempotent (one grade per job).
+- **Rollup window:** **last 10** graded jobs per worker → the standing performance score.
+- **Coaching trigger:** rollup **< 7/10** *or* a **drop > 1.5 pts** vs the prior 10-window → the director runs a coaching pass ([[../libraries/worker-coaching]] `coachWorker`); after N un-lifted attempts → escalate to CEO (existing loop-guard).
+- **Grading cadence (batched box session — needs Max to read real diffs):** run when **≥5 ungraded concluded jobs** have accumulated **OR** a **~3-hour** fallback if any are ungraded; grade the **whole batch in one session** (not one-per-session — keeps box cost bounded). Enqueued like the standing pass; the LLM grading runs on the box (reads the PR/diff/spec), not the deployed runtime.
+
+### Per-worker rubrics (what "good" = 10 means — my recommendations, calibratable via `worker_grader_prompts`)
+| Worker | kind | Graded on |
+|---|---|---|
+| Bo | `build` | spec phases satisfied · `tsc` clean · PR merged clean (no conflict markers) · no rebuild churn |
+| Rafa | `repair` | real root-cause (not symptom) · fix held (error didn't recur) · correctly dismissed noise · scoped |
+| Remi | `regression` | caught a real regression · correctly dismissed flaky ones · the authored fix spec is sound |
+| Devi | `db_health` | correct EXPLAIN diagnosis · the index/fix actually addresses the slow query · no foreign/sunset false-positives |
+| Vera | `spec-test` | caught real drift / false-✅ · no false alarms · verification matched live prod |
+| Mira | `migration-fix` | migration applied/repaired correctly · audit cleared · no data loss |
+| Pax | `pr-resolve` | conflicts resolved without lost work · clean rebase · queue left mergeable |
+| Fenn | `fold` | folded into the right brain pages · cross-links correct · archived cleanly |
+| Cole | `coverage-register` | correct registry entry / exemption · no real coverage gap missed |
+| Tao | `monitor` | accurate alerts (signal not noise) · caught real stalls |
+| Pia | `plan` | sound decomposition · correct `blocked_by` · no orphan specs |
+| Sol | `product-seed` | product correctly seeded · page built · orderable |
+| Sage / Dex | `spec-chat` / `dev-ask` | accurate, grounded answers · correct spec edits · read-only honored |
+
+## Phases
+- **P1 — grading store + grader ⏳** — migration `worker_action_grades` (mirror [[../tables/director_decision_grades]]) + `worker_grader_prompts` (CEO-calibratable rubric, mirror `director_grader_prompts`); `src/lib/agents/worker-grader.ts` (`gradeConcludedWorkerActions` batched, `computeWorkerRollup` last-10, `detectGradeDropCoaching` >1.5-drop-or-<7 → `coachWorker`). Brain: [[../tables/worker_action_grades]] · [[../libraries/worker-grader]].
+- **P2 — batched grading cadence ⏳** — box trigger: ≥5 ungraded concluded jobs OR ~3h fallback → one batched grading session; on the same beat run `detectGradeDropCoaching`. Wire into [[../inngest/platform-director-cron]] + the box runner.
+- **P3 — worker observability ⏳** — each worker profile (`/dashboard/agents/[role]`) gets the live **activity feed** (its concluded jobs, reuse the `DirectorActivity` pattern) + a **rollup-grade card** (last-10 avg + trend). 
+- **P4 — escort in-flight + authored-fix specs ⏳** — fold [[director-escort-inflight-specs]] in: the director drives any in-flight spec (≥1 ✅ phase) + 0-phase repair-authored fix specs (`error_fix` leash); new features/goals still escalate.
+- **P5 — accurate autonomous mandates ⏳** — her profile shows what she ACTUALLY does autonomously (auto-approves error/db/additive-migration/monitoring within the leash; escorts goals + in-flight + fix specs; grades + coaches workers; escalates the rest to CEO), derived from the leash — not the function charter. Update [[../functions/platform]].
+- **P6 — real-time PM companion ⏳** — when she queues/escorts/grades, write to the spec→DB project-management companion (the table that keeps the board live without re-reading the brain FS) so the board reflects her actions instantly.
+- **P7 — CEO→director coaching via UI ⏳** — a `director_coaching` mechanism (CEO writes a coaching note → joins her mandates via a coaching log, mirror [[worker-coaching-loop]] one level up); surfaced on her profile; eventually the autonomous CEO writes it.
+
+## Verification
+- A concluded `build`/`repair`/`db_health` job gets a `worker_action_grades` row (1–10 + reasoning) within one grading batch; the worker's profile shows the last-10 rollup.
+- A worker whose rollup falls <7 or drops >1.5 triggers a `coachWorker` amendment (logged in `worker_coaching_log`), visible on its profile.
+- Grading runs **batched** (one session per ≥5 jobs / ~3h), not one session per job.
+- The director's profile mandates read as her autonomous behavior; the CEO can post a coaching note that appears in her coaching history.
+- `agent-outage-resilience` P3 + repair-authored fix specs get queued by her escort (P4) without a manual queue.
