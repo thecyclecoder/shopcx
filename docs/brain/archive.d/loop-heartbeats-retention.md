@@ -1,0 +1,1 @@
+- **loop_heartbeats retention — prune so the Control Tower RPC stays fast** · verified 2026-06-23 · → [[inngest/loop-heartbeats-prune]]
