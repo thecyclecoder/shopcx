@@ -717,10 +717,16 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
   const [role, setRole] = useState("ceo");
+<<<<<<< HEAD
   // Derived per-director XP (directors-board-gamified M3 Phase 3) — display-only counts.
   const [xp, setXp] = useState<Record<string, DirectorXp>>({});
   // "org" = the visual org-tree / team page (Phase 4); "inbox" = the role nav + three-tab inbox.
   const [view, setView] = useState<"org" | "inbox">("org");
+=======
+  // "inbox" = the role nav + three-tab inbox (Message Board — the default); "org" = the visual org-tree.
+  // The org-chart now has its own route (/dashboard/agents/org-chart); this page opens on the inbox.
+  const [view, setView] = useState<"org" | "inbox">("inbox");
+>>>>>>> 3099bbc1 (agents: Message Board opens on the inbox; Org Chart gets its own /agents/org-chart route (sidebar live))
 
   // Deep-link support: a profile page (Phase 5) links back here with ?view=inbox&role=…
   // so its "Open inbox →" lands on that role's inbox. Read once on mount (client-only).

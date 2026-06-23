@@ -29,7 +29,7 @@ interface DirectorNode {
   workers: WorkerLane[];
   status: "offline" | "live" | "autonomous";
 }
-interface OrgChart {
+export interface OrgChart {
   ceo: { goals: { slug: string; title: string; pct: number }[] };
   directors: DirectorNode[];
 }
