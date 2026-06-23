@@ -303,11 +303,26 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
     // registered cron has had to fire: if control-tower-monitor has itself been beating for longer than
     // this cron's full window and the cron still has 0 beats EVER, Inngest is not invoking it — distinct
     // from never-registered (the self-audit's Inngest-registration diff): this fn IS in the registered
-    // set, the schedule just isn't active. A correctly-registered cron fires within its first cadence
-    // (≤ window) and beats before this trips, so a genuinely-just-added cron isn't false-flagged; a
-    // registered cron that produces nothing for a whole window past a provably-alive watchdog IS the
-    // problem we want to page. (monitorUptimeMs is conservative — beat retention can only shorten it,
-    // never inflate it — so it never over-fires; null = unknown ⇒ stay amber.)
+    // set, the schedule just isn't active. monitorUptimeMs alone is NOT enough to say a cron has had a
+    // window to fire, though: it's the watchdog's run-span, independent of when a given cron was ADDED,
+    // so a cron shipped after the watchdog passed its window would false-trip on day one (the
+    // control-tower-registered-not-firing-newcron-grace signal). The registeredAt grace just below adds
+    // the missing per-loop reference; a registered cron that still produces nothing a full window past
+    // BOTH a provably-alive watchdog AND its own registration IS the problem we want to page.
+    // (monitorUptimeMs is conservative — beat retention can only shorten it, never inflate it — so it
+    // never over-fires; null = unknown ⇒ stay amber.)
+    //
+    // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace): monitorUptimeMs is
+    // the watchdog's OWN run-span, independent of when THIS cron was added — so a long-cadence cron
+    // shipped AFTER the watchdog passed its window would trip the moment it deploys, hours before its
+    // first scheduled tick. registeredAt (a code constant, deploy-SURVIVING unlike deployAgeMs) gives a
+    // per-loop "how long has this cron been registered" reference: require its age past the full window
+    // too, so a just-added cron stays amber ("awaiting first run") until it's actually had a cadence to
+    // fire — graced like the deploy-anchored never_fired above. Unset (legacy crons) ⇒ no extra gate.
+    const registrationAgeMs = loop.registeredAt ? ageMs(loop.registeredAt) : null;
+    if (everBeatCount === 0 && registrationAgeMs != null && registrationAgeMs <= window) {
+      return { ...base, color: "amber", statusText: `awaiting first run — registered ${fmtDur(registrationAgeMs)} ago (within ${fmtDur(window)} cadence+grace)`, violation: null };
+    }
     if (everBeatCount === 0 && monitorUptimeMs != null && monitorUptimeMs > window) {
       return {
         ...base,
