@@ -464,6 +464,10 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // daily-digest-channel spec, Phase 1: one aggregated FYI post/day to #daily-digest (build/ship recap +
   // dunning + notable ad-perf + ops-warning counts). registeredAt graces the first-tick window (newcron-grace).
   { id: "daily-digest-cron", kind: "cron", owner: "platform", label: "Daily digest", description: "One aggregated FYI post/day to #daily-digest — build/ship recap + dunning + notable ad-perf shifts + non-critical ops-warning counts, replacing the retired per-event FYI pings.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
+  // director-loop-grading spec, Phase 1: the Platform/DevOps Director's standing cadence — a daily cron
+  // enqueueing the platform-director agent_jobs kind so escorting + watching happen on a reliable beat,
+  // not only on inbound approvals. registeredAt graces the first-tick window (newcron-grace).
+  { id: "platform-director-cron", kind: "cron", owner: "platform", label: "Platform Director cadence", description: "Daily enqueue of the Platform/DevOps Director standing pass (escort approved goals through milestones + watch the platform), in addition to the event-driven approval processing.", expectedCadence: "daily (15 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
