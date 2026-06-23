@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
+import { DirectorActivity } from "@/components/agents/director-activity";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
 import { WorkerCoachingHistory } from "@/components/agents/worker-coaching-history";
@@ -143,8 +144,8 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
       );
     }
     // The director's own team — its box agent_jobs lanes, each linking to its profile.
-    if (d.workers.length > 0) {
-      extra = (
+    const teamBlock =
+      d.workers.length > 0 ? (
         <div className="mt-6">
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
             Team · {d.workers.length} worker{d.workers.length === 1 ? "" : "s"}
@@ -168,8 +169,17 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
             })}
           </div>
         </div>
-      );
-    }
+      ) : null;
+    // Live activity feed — the director's own director_activity rows (is she alive + what she's doing).
+    extra = (
+      <>
+        {teamBlock}
+        <div className="mt-6">
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent activity</h3>
+          <DirectorActivity fn={d.slug} />
+        </div>
+      </>
+    );
   } else {
     // Worker — the most precise responsibility list (from the personas config).
     const { worker, director } = resolved;
