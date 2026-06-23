@@ -23,7 +23,7 @@ In `src/lib/control-tower/registry.ts`, add this entry to `MONITORED_LOOPS` (in 
 No other change. After merge + deploy the amber "unregistered loop: storefront-optimizer-cron" gap clears and a `storefront-optimizer-cron` cron tile appears.
 
 ## Verification
-- On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: storefront-optimizer-cron".
+- ✅ On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: storefront-optimizer-cron".
 - A `storefront-optimizer-cron` cron tile appears in the monitored loops grid (green once it has beaten, amber "awaiting first run" until then — never a false red).
 
 <!-- coverage-register: register-loop-storefront-optimizer-cron for loop storefront-optimizer-cron -->
