@@ -1,5 +1,4 @@
 import { getSlackToken, postMessage } from "@/lib/slack";
-import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * DM the workspace owners/admins about an operational problem that needs
@@ -18,23 +17,15 @@ export async function notifyOpsAlert(
     const token = await getSlackToken(workspaceId);
     if (!token) return;
 
-    const admin = createAdminClient();
-    const { data: members } = await admin
-      .from("workspace_members")
-      .select("slack_user_id")
-      .eq("workspace_id", workspaceId)
-      .in("role", ["owner", "admin"])
-      .not("slack_user_id", "is", null);
-    const userIds = (members || []).map((m) => m.slack_user_id as string).filter(Boolean);
-    if (!userIds.length) return;
+    // Slack-cleanup 2026-06-23: only CRITICAL ops alerts push to Slack (the #alerts-critical channel,
+    // a real must-act page). Warnings no longer DM everyone — they're on the Control Tower + roll into
+    // the #daily-digest. Stops the per-warning DM flood.
+    if (alert.severity !== "critical") return;
 
-    const icon = alert.severity === "critical" ? ":rotating_light:" : ":warning:";
-    const text = [`${icon} *${alert.title}*`, ...(alert.lines || [])].join("\n");
+    const ALERTS_CRITICAL_CHANNEL = "C0BCQ1UME3T"; // #alerts-critical
+    const text = [`:rotating_light: *${alert.title}*`, ...(alert.lines || [])].join("\n");
     const blocks = [{ type: "section", text: { type: "mrkdwn", text } }];
-
-    for (const uid of userIds) {
-      await postMessage(token, uid, blocks, alert.title);
-    }
+    await postMessage(token, ALERTS_CRITICAL_CHANNEL, blocks, alert.title);
   } catch (e) {
     console.warn("[notify-ops-alert] failed:", e instanceof Error ? e.message : e);
   }
