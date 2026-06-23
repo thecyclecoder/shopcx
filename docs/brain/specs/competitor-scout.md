@@ -1,4 +1,4 @@
-# Competitor Scout — DB-driven per-product competitor set 🚧
+# Competitor Scout — DB-driven per-product competitor set ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** [[../goals/acquisition-research-engine]] (M1 — the foundation)
 
@@ -11,11 +11,11 @@ The foundation of the [[../goals/acquisition-research-engine|Acquisition Researc
 ## Schema — `competitors` table
 `id · workspace_id · product_id (the product they compete with) · brand · domain · pdp_urls (text[]) · category · spend_signal · source ('llm'|'category_sweep'|'manual') · status ('proposed'|'approved'|'rejected') · evidence · created_at`. Migration `supabase/migrations/…_competitors.sql` + a Sonnet data tool (customer-referenced? no — but add to the optimizer/scout read path). Seed it by **migrating the 11 hardcoded `COMPETITOR_SEEDS`** in as `status='approved'`.
 
-## Phase 1 — competitors table + the discovery agent + migrate the hardcoded seeds 🚧
+## Phase 1 — competitors table + the discovery agent + migrate the hardcoded seeds ✅
 Migration + the discovery pass (LLM/web-search + category-sweep promotion + product-intelligence) authoring `proposed` competitors with evidence; the owner approve/reject surface; migrate `COMPETITOR_SEEDS` → DB rows and point `adlibrary.ts`'s sweep at the table (not the hardcoded list). Brain: [[../goals/acquisition-research-engine]] · [[../integrations/adlibrary]] · [[../libraries/adlibrary]] · [[ad-creative-scout]] · [[landing-page-scout]] · [[../specs/repair-agent]] (propose→approve pattern).
 
-**Built (code-complete, tsc-clean; ⏳ awaiting migration apply to prod):**
-- `supabase/migrations/20260623120000_competitors.sql` — the `competitors` table (workspace-member SELECT / service-role write RLS, `UNIQUE(workspace_id, brand)`, source/status CHECKs) + in-migration seed of the 11 `COMPETITOR_SEEDS` as `status='approved'` for every ad-tool workspace. Apply via `scripts/apply-competitors-migration.ts`. Table page: [[../tables/competitors]].
+**Built (code-complete, tsc-clean; migration applied to prod ✅):**
+- `supabase/migrations/20260623120000_competitors.sql` — the `competitors` table (workspace-member SELECT / service-role write RLS, `UNIQUE(workspace_id, brand)`, source/status CHECKs) + in-migration seed of the 11 `COMPETITOR_SEEDS` as `status='approved'` for every ad-tool workspace. Applied via `scripts/apply-competitors-migration.ts`. Table page: [[../tables/competitors]].
 - `src/lib/competitors.ts` ([[../libraries/competitors]]) — `loadApprovedCompetitorSeeds` (sweep read path), `discoverCompetitors` (LLM + web search, product-intelligence-framed, proposes `source='llm'`), `promoteFromCategorySweep` (recurring AdLibrary advertisers → `source='category_sweep'` proposals), `normalizeBrand` dedup.
 - `src/lib/inngest/competitor-scout.ts` ([[../inngest/competitor-scout]]) — `competitor-scout-discover` on event `ads/competitor-scout.discover { workspaceId, productId }`; registered in `registered-functions.ts`.
 - `src/lib/adlibrary.ts` — removed hardcoded `COMPETITOR_SEEDS`/`ALL_SEEDS` (kept `CATEGORY_SEEDS`); `src/lib/inngest/creative-finder.ts` now builds per-workspace seeds = approved competitors + categories and runs the category-sweep promotion step.
