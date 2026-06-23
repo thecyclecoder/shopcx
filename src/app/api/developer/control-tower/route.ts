@@ -17,6 +17,7 @@ import { buildControlTowerSnapshot } from "@/lib/control-tower/monitor";
 import { buildErrorFeedSnapshot } from "@/lib/control-tower/error-feed";
 import { getOpenSpecDrift } from "@/lib/spec-drift";
 import { getOpenRepairs } from "@/lib/repair-agent";
+import { getDbHealthPanel } from "@/lib/control-tower/db-health";
 
 export const dynamic = "force-dynamic";
 
@@ -42,11 +43,12 @@ export async function GET() {
     return NextResponse.json({ error: "Only the workspace owner can view the Control Tower" }, { status: 403 });
   }
 
-  const [snapshot, errorFeed, specDrift, repairs] = await Promise.all([
+  const [snapshot, errorFeed, specDrift, repairs, dbHealth] = await Promise.all([
     buildControlTowerSnapshot(admin),
     buildErrorFeedSnapshot(admin),
     getOpenSpecDrift(workspaceId),
     getOpenRepairs(admin, workspaceId),
+    getDbHealthPanel(admin, workspaceId),
   ]);
 
   // Fold the error panels into the header health count so an unconfigured panel (amber
@@ -54,5 +56,5 @@ export async function GET() {
   const counts = { ...snapshot.counts };
   for (const p of errorFeed.panels) counts[p.color]++;
 
-  return NextResponse.json({ ...snapshot, counts, errorFeed, specDrift, repairs });
+  return NextResponse.json({ ...snapshot, counts, errorFeed, specDrift, repairs, dbHealth });
 }

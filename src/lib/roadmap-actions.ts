@@ -311,11 +311,12 @@ export async function answerRoadmapBuild(
 export async function approveRoadmapAction(
   workspaceId: string,
   userId: string,
-  opts: { jobId: string; actionId: string; decision: "approve" | "decline" },
+  opts: { jobId: string; actionId: string; decision: "approve" | "decline" | "reject"; notes?: string },
 ): Promise<ActionResult<{ job: AgentJob }>> {
   const gate = await assertOwner(workspaceId, userId);
   if (!gate.ok) return gate;
-  if (typeof opts.jobId !== "string" || typeof opts.actionId !== "string" || (opts.decision !== "approve" && opts.decision !== "decline")) {
+  const DECISIONS = ["approve", "decline", "reject"] as const;
+  if (typeof opts.jobId !== "string" || typeof opts.actionId !== "string" || !DECISIONS.includes(opts.decision)) {
     return { ok: false, status: 400, error: "bad payload" };
   }
 
@@ -330,10 +331,26 @@ export async function approveRoadmapAction(
   if (!job) return { ok: false, status: 404, error: "job not found" };
   if (job.status !== "needs_approval") return { ok: false, status: 409, error: "job is not awaiting approval" };
 
+  // 'reject' is the optimizer-hero-preview-gate's reject-with-notes: it doesn't decline the campaign — it
+  // sends free-text notes back so the worker regenerates a fresh hero candidate and re-surfaces it for
+  // preview. Marked `reject_regen` (no longer pending) so the job resumes; the notes ride on the action.
+  const target = (job.pending_actions || []).find((a) => a.id === opts.actionId);
+  if (!target) return { ok: false, status: 404, error: "action not found" };
+  if (opts.decision === "reject") {
+    const notes = typeof opts.notes === "string" ? opts.notes.trim() : "";
+    if (!notes) return { ok: false, status: 400, error: "reject requires notes" };
+    if (target.type !== "storefront_campaign" || target.stage !== "preview") {
+      return { ok: false, status: 409, error: "this action has no image preview to reject" };
+    }
+  }
+
+  const newStatus: PendingAction["status"] =
+    opts.decision === "approve" ? "approved" : opts.decision === "reject" ? "reject_regen" : "declined";
   const actions: PendingAction[] = (job.pending_actions || []).map((a) =>
-    a.id === opts.actionId ? { ...a, status: opts.decision === "approve" ? "approved" : "declined" } : a,
+    a.id === opts.actionId
+      ? { ...a, status: newStatus, ...(opts.decision === "reject" ? { reject_notes: opts.notes!.trim() } : {}) }
+      : a,
   );
-  if (!actions.some((a) => a.id === opts.actionId)) return { ok: false, status: 404, error: "action not found" };
 
   // Resume only once every action has a decision; otherwise keep waiting on the rest.
   const stillPending = actions.some((a) => a.status === "pending");

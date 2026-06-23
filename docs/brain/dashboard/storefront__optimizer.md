@@ -22,6 +22,8 @@ test). See [[../specs/storefront-optimizer-activation-gate]].
 
 **Guardrails:** editable `max_concurrent_experiments`, `min_sample`, `holdout_pct`, `auto_rollback_ltv_tolerance`, `auto_rollback_windows`, `auto_rollback_refund_spike_delta` (fractions where `*_pct`/`*_tolerance`/`*_delta`).
 
+**Proposed campaigns (Build/Approve cards):** each pending `storefront-optimizer` proposal renders as a card ([[../specs/storefront-optimizer-proposal-cards]]). A **content** (copy/chapter) lever shows **Approve / Decline** and materializes on approve. A **hero** lever runs the **preview gate** ([[../specs/optimizer-hero-preview-gate]]): **Approve concept → generate preview** (the worker generates the candidate hero, doesn't go live), then the card re-appears showing the **actual generated image** with **Approve & go live / Reject with notes (free-text) / Cancel campaign**. Reject regenerates with the notes (rejected attempts shown as thumbnails); only the image-approval stands up the experiment. Approve/decline/reject all POST the existing `/api/roadmap/approve` (`reject` carries `notes`); no new approval route.
+
 ## Sub-routes
 
 _None._

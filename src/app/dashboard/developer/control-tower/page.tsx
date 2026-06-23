@@ -89,6 +89,24 @@ interface RepairSurfaceItem {
   state: "proposed" | "needs-human";
   createdAt: string;
 }
+interface DbHealthProposalItem {
+  jobId: string;
+  signature: string;
+  title: string;
+  impact: string;
+  cause: string;
+  category: string;
+  specSlug: string | null;
+  specTitle: string | null;
+  createdAt: string;
+}
+interface DbHealthPanel {
+  topTables: { table: string; totalBytes: number; rowEstimate: number }[];
+  slowQueries: { queryid: string; cause: string; table: string; impact: string }[];
+  proposals: DbHealthProposalItem[];
+  lastSizeSweepAt: string | null;
+  lastSlowQueryAt: string | null;
+}
 interface UnregisteredLoop {
   id: string;
   cadence: string;
@@ -120,6 +138,7 @@ interface Snapshot {
   errorFeed?: ErrorFeedSnapshot;
   specDrift?: SpecDriftRow[];
   repairs?: RepairSurfaceItem[];
+  dbHealth?: DbHealthPanel;
 }
 
 function elapsed(iso: string | null | undefined): string {
@@ -597,6 +616,133 @@ function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; on
   );
 }
 
+function dbHumanBytes(n: number): string {
+  if (!n || n < 1024) return `${n || 0} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
+}
+
+function DbHealthSection({ panel, onChange }: { panel: DbHealthPanel; onChange: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const act = async (item: DbHealthProposalItem, action: "build" | "dismiss") => {
+    setBusy(`${item.jobId}:${action}`);
+    try {
+      const res = await fetch("/api/developer/control-tower/db-health", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: item.jobId, action }),
+      });
+      if (res.ok) onChange();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-8">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">DB Health</h2>
+      <p className="mb-3 text-[11px] text-zinc-400">
+        The DB Health Agent watches Postgres read-only — top tables by size/growth, the slowest queries
+        (root-caused via <code>EXPLAIN</code>), missing/unused indexes, and bloat — and <b>proposes</b> fix specs
+        for one-tap <b>Build</b>. It never applies DDL or deletes on its own. Last size sweep {elapsed(panel.lastSizeSweepAt)} ago ·
+        last slow-query pass {elapsed(panel.lastSlowQueryAt)} ago.
+      </p>
+
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+          <h3 className="mb-1.5 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300">Top tables by size</h3>
+          {panel.topTables.length === 0 ? (
+            <p className="text-[11px] text-zinc-400">No snapshot yet — the daily size sweep hasn&apos;t run.</p>
+          ) : (
+            <ul className="space-y-0.5 text-[11px]">
+              {panel.topTables.slice(0, 8).map((t) => (
+                <li key={t.table} className="flex justify-between gap-2">
+                  <code className="truncate text-zinc-600 dark:text-zinc-300">{t.table}</code>
+                  <span className="shrink-0 text-zinc-400">
+                    {dbHumanBytes(t.totalBytes)} · {t.rowEstimate.toLocaleString()} rows
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+          <h3 className="mb-1.5 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300">Slowest queries (diagnosed)</h3>
+          {panel.slowQueries.length === 0 ? (
+            <p className="text-[11px] text-zinc-400">No slow queries over threshold on the last pass.</p>
+          ) : (
+            <ul className="space-y-0.5 text-[11px]">
+              {panel.slowQueries.slice(0, 8).map((q) => (
+                <li key={q.queryid} className="flex justify-between gap-2">
+                  <span className="truncate text-zinc-600 dark:text-zinc-300">
+                    <span className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{q.cause}</span>{" "}
+                    {q.table}
+                  </span>
+                  <span className="shrink-0 text-zinc-400">{q.impact}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <h3 className="mb-1.5 mt-4 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300">Proposed fixes</h3>
+      {panel.proposals.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-zinc-200 px-3 py-4 text-xs text-emerald-700 dark:border-zinc-800 dark:text-emerald-300">
+          No proposed fixes waiting — nothing over threshold, or every finding was already actioned.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {panel.proposals.map((item) => (
+            <li
+              key={item.jobId}
+              className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] dark:border-amber-900/40 dark:bg-amber-900/15"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-100">{item.title}</span>
+                  <span className="ml-1.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-300">
+                    {item.cause}
+                  </span>
+                  {item.impact && <p className="mt-1 text-zinc-600 dark:text-zinc-300">{item.impact}</p>}
+                  <p className="mt-0.5 text-[10px] text-zinc-400">
+                    <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  {item.specSlug && (
+                    <button
+                      onClick={() => act(item, "build")}
+                      disabled={busy !== null}
+                      className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      {busy === `${item.jobId}:build` ? "Queuing…" : "Build"}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => act(item, "dismiss")}
+                    disabled={busy !== null}
+                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
+                  </button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function ControlTowerPage() {
   const workspace = useWorkspace();
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -718,6 +864,8 @@ export default function ControlTowerPage() {
           {snap.selfAudit && <CoverageAuditSection audit={snap.selfAudit} />}
 
           <RepairFeedSection items={snap.repairs ?? []} onChange={refresh} />
+
+          {snap.dbHealth && <DbHealthSection panel={snap.dbHealth} onChange={refresh} />}
 
           <SpecDriftSection rows={snap.specDrift ?? []} onChange={refresh} />
 
