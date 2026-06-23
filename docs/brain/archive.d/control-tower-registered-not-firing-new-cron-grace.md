@@ -1,0 +1,1 @@
+- **Grace registered_not_firing for newly-added crons (anchor to first-observed, not watchdog uptime)** · verified 2026-06-23 · → [[libraries/control-tower]]
