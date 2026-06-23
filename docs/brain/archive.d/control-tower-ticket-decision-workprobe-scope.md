@@ -1,0 +1,1 @@
+- **Scope the tickets-awaiting-decision work probe to handler-driving messages** · verified 2026-06-23 · → [[libraries/control-tower]]
