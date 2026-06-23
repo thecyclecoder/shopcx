@@ -2171,9 +2171,38 @@ function specChatFraming(slug?: string, seedSlug?: string): string {
   ].join("\n");
 }
 
+// ── directors-board-gamified Phase 2: post a routed answer-brain reply back onto the #directors board ──
+// When a dev-ask/spec-chat turn was triggered from the board (the CEO replied "why?" under a director's
+// post), its job instructions carry a BoardReplyLink. After the turn lands, post the box's answer straight
+// back as the director's threaded `reply` so the channel reads as a two-way conversation. Best-effort —
+// a board write must never fail the underlying turn.
+type BoardReplyLink = { postId?: string; workspaceId?: string; authorFunction?: string };
+async function postBoardAnswer(
+  board: BoardReplyLink | undefined,
+  reply: string,
+  threadId: string,
+  source: "dev-ask" | "spec-chat",
+) {
+  if (!board?.postId || !board.workspaceId || !reply) return;
+  try {
+    await db.from("director_messages").insert({
+      workspace_id: board.workspaceId,
+      author: "director",
+      author_function: board.authorFunction ?? "platform",
+      body: reply,
+      kind: "reply",
+      parent_message_id: board.postId,
+      mentions: ["ceo"],
+      metadata: { thread_id: threadId, source },
+    });
+  } catch (e) {
+    console.error(`[board-answer] post-back failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runSpecChatJob(job: Job) {
   const tag = `[spec-chat:${job.id.slice(0, 8)}]`;
-  let params: { mode?: string; chat_id?: string; slug?: string; seedSlug?: string; queueBuild?: boolean } = {};
+  let params: { mode?: string; chat_id?: string; slug?: string; seedSlug?: string; queueBuild?: boolean; board?: BoardReplyLink } = {};
   try {
     params = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -2271,6 +2300,7 @@ async function runSpecChatJob(job: Job) {
         last_error: null,
         updated_at: new Date().toISOString(),
       }).eq("id", chatId!);
+      await postBoardAnswer(params.board, reply, chatId!, "spec-chat");
       await update(job.id, { status: "completed", log_tail: logTail });
       console.log(`${tag} ✓ reply appended`);
       return;
@@ -3522,7 +3552,7 @@ function renderDevTranscript(messages: DevThreadRow["messages"]): string {
 
 async function runDeveloperMessageJob(job: Job) {
   const tag = `[dev-ask:${job.id.slice(0, 8)}]`;
-  let params: { thread_id?: string; mode?: string } = {};
+  let params: { thread_id?: string; mode?: string; board?: BoardReplyLink } = {};
   try {
     params = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -3656,6 +3686,7 @@ async function runDeveloperMessageJob(job: Job) {
       pending_actions: newActions, // replace: the latest turn's cards supersede any stale pending ones
       updated_at: new Date().toISOString(),
     }).eq("id", threadId);
+    await postBoardAnswer(params.board, reply, threadId, "dev-ask");
     await update(job.id, { status: "completed", log_tail: logTail });
     console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} pending action[s])` : ""}`);
   } finally {

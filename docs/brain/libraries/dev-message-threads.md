@@ -53,8 +53,9 @@ Recent threads for the user's workspace (resume list), newest first.
 ## Callers
 
 - `src/app/api/developer/messages/route.ts` (owner-gated POST chat/retry/approve + GET load/list).
-- `scripts/builder-worker.ts` → `runDeveloperMessageJob` reads/writes the row directly via the service-role admin client (not these helpers), incl. executing approved cards.
+- `scripts/builder-worker.ts` → `runDeveloperMessageJob` reads/writes the row directly via the service-role admin client (not these helpers), incl. executing approved cards. When the turn was triggered from the **#directors board** (the job's `instructions` carry a `BoardReplyLink`), it also posts the answer back onto the board (`postBoardAnswer`).
+- `src/lib/agents/director-board.ts` → `routeBoardReply` calls `createThread`/`markThreadThinking` to spin up a board-triggered "why?" investigation ([[director-board]], directors-board-gamified Phase 2).
 
 ## Related
 
-[[../tables/dev_message_threads]] · [[../specs/developer-message-center]] · [[../recipes/dev-message-center-db]] · [[../tables/agent_jobs]] · [[roadmap-chats]]
+[[../tables/dev_message_threads]] · [[../specs/developer-message-center]] · [[../recipes/dev-message-center-db]] · [[../tables/agent_jobs]] · [[roadmap-chats]] · [[director-board]]

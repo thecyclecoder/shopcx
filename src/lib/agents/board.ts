@@ -11,6 +11,22 @@
 export type BoardAuthor = "director" | "ceo" | "system";
 export type BoardMessageKind = "update" | "reply" | "recap" | "approval-note";
 
+/** Which answer brain a CEO board reply is routed to (Phase 2): read-only investigation vs spec context. */
+export type BoardThreadKind = "dev-ask" | "spec-chat";
+
+/**
+ * The board ↔ answer-brain link stamped into a dev-ask/spec-chat agent_jobs row so the box posts its
+ * answer straight back onto the board as the director's threaded `reply` (Phase 2). Lives in the job's
+ * instructions JSON; the worker reads it after the turn completes.
+ */
+export interface BoardReplyLink {
+  /** the top-level director_messages post the answer threads under. */
+  postId: string;
+  workspaceId: string;
+  /** the director function slug the answer is attributed to (defaults to platform). */
+  authorFunction: string;
+}
+
 /** A single director_messages row, camelCased for the client. */
 export interface BoardMessage {
   id: string;
@@ -26,6 +42,8 @@ export interface BoardMessage {
   mentions: string[];
   metadata: Record<string, unknown>;
   createdAt: string;
+  /** Phase 2: a CEO `reply` whose routed answer-brain turn is still thinking (the director is investigating). */
+  awaiting?: boolean;
 }
 
 /** A top-level post with its in-thread replies nested (the rendered channel shape). */
