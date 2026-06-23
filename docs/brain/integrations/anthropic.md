@@ -38,6 +38,15 @@ Model id constants live in `src/lib/ai-models.ts`. **Don't hardcode strings else
 - SDK retries on 429 + 5xx with exponential backoff (built-in, ~3 attempts).
 - 529 (overloaded) is special-cased — see project_ticket_glitch_apr13: must surface gracefully, never silently fall through to default behavior.
 
+### Outage-spanning retry + no silent swallows ([[../libraries/anthropic-retry]])
+
+The customer-facing raw-fetch Claude calls (not the SDK) used to **swallow** a non-2xx into `""` / a grade-skip / a generic "escalate" — so a multi-hour outage failed-and-dropped in-flight work. Now (agent-outage-resilience Phase 1) every such call **throws a classified error**, and the host Inngest fn retries across the outage:
+
+- retryable (429 / 5xx / 529 / timeout / network) → `AnthropicDependencyError` (plain `Error` → Inngest retries with exponential backoff; `OUTAGE_SPANNING_RETRIES = 20` extends the curve to hours → a 1-hour outage parks-and-drains).
+- terminal (4xx other than 429, missing key) → `NonRetriableError` (fail fast — never retry a bug for hours).
+
+Touch points: `claude()` in [[../inngest/unified-ticket-handler]], `runOrchestratorDecision` in [[../libraries/sonnet-orchestrator-v2]] (throws on retryable status instead of `fallbackWithCancelRoute`), the grader fetch in [[../libraries/ticket-analyzer]] (throws instead of `grader_http_*`), and [[../inngest/ticket-analysis-cron]] (defers the ticket on a dependency error → re-graded next */30 tick). Genuinely-optional enrichment may still degrade, but only via an explicit `{ optional: true }` flag. *(Phase 2 adds the Claude-down circuit-breaker driven by a local failure counter + the `status.claude.com` poll.)*
+
 ## Token accounting
 
 Every call writes to [[../tables/ai_token_usage]]:

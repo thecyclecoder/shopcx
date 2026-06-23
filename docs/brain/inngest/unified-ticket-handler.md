@@ -8,8 +8,12 @@
 
 ### `unified-ticket-handler`
 - **Trigger:** event `ticket/inbound-message`
-- **Retries:** 1
+- **Retries:** `OUTAGE_SPANNING_RETRIES` (20) — outage-spanning. A Claude/dependency failure throws (see below), so the run retries with exponential backoff out to hours; a 1-hour Anthropic outage parks here and completes on recovery instead of failing-and-dropping. Terminal logic errors throw `NonRetriableError` → still fail fast. ([[../specs/agent-outage-resilience]] Phase 1.)
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.ticket_id" }]`
+
+## Outage resilience — no silent Claude swallows
+
+The local `claude()` helper (Haiku/Sonnet quick turns) **throws** on a failed call instead of the old `if (!r.ok) return ""` (which let callers proceed on empty data): retryable status / network → `AnthropicDependencyError` (run retries), terminal status / missing key → `NonRetriableError` (fail fast). See [[../libraries/anthropic-retry]]. The main Sonnet decision ([[../libraries/sonnet-orchestrator-v2]]) likewise throws on a retryable failure rather than degrading every ticket to "escalate". The one explicit exception is `personalizeMacroText` (`{ optional: true }`) — the macro body is already a valid reply, so it degrades gracefully.
 
 ## Sentinel messages (`message_body`)
 

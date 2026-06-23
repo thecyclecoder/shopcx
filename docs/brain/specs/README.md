@@ -170,6 +170,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 - [[coverage-auto-register-agent]] (platform) — the coverage self-audit keeps surfacing unregistered loops (storefront-ltv-reconcile-cron, storefront-optimizer-cron, …) that get hand-added; an agent should propose the MONITORED_LOOPS entry (inferred owner/cadence/window) for one-tap Build, with an intentionally-unmonitored exemption.
 - [[storefront-test-detail-page]] (growth) — a per-experiment view: both-arm preview links (owner-only, exposure-excluded) + per-arm funnel stats (sessions, engagement %, ATC, lead, conversion, sub-attach, predicted-LTV/visitor) with lift-vs-control + win-probability.
 
+## Active project — DB Health spec-body robustness ⏳
+
+[[db-health-spec-body-robust]] (platform) — db-index-orders committed an EMPTY spec → build stalled. Cause: a manual approval overwrote the job's instructions JSON (which carried spec_body). Fix: materializeDbHealthSpec never writes an empty file (re-derive from the carried finding / re-query+EXPLAIN, else needs_input); store the diagnostic on the un-clobberable pending_actions action not free-text instructions; builder rejects a 0-byte/phaseless spec.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]

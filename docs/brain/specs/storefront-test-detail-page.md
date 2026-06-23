@@ -1,4 +1,4 @@
-# Storefront test detail page — both-version previews + per-arm funnel stats ⏳
+# Storefront test detail page — both-version previews + per-arm funnel stats ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** the owner-facing view for [[storefront-optimizer-agent]] experiments; extends the optimizer/funnel dashboards. · **Requested 2026-06-23:** the owner needs a place to actually *see* each running A/B test — **preview links for both versions** (control + variant) and **per-version stats** (sessions, engagement %, add-to-cart rate, lead rate, conversion rate, predicted LTV, …) — to judge a test at a glance and decide promote/kill.
 
@@ -16,12 +16,22 @@ Per experiment, render the arms **side by side** (control vs variant(s) vs holdo
 - Engagement: `storefront_events` (chapter_view/dwell/scroll_depth/CTA per exposed session, joined on the exposure's variant_id).
 - Reuse the existing attribution rollup ([[../libraries/storefront-experiment-attribution]]) — the page reads the same numbers the bandit decides on (no divergent math).
 
-## Verification
-- Open a running experiment's detail page → both arms shown side by side; each metric (sessions, engagement %, ATC, lead, conversion, sub-attach, predicted-LTV/visitor, rev/visitor) is populated from the rollups with **lift vs control** + win-probability.
-- Click an arm's **preview link** → the lander renders with that arm's patch (control = current hero; variant = the generated hero) and **no `experiment_exposure` row is written** for the preview (owner/internal-flagged), so the bandit isn't polluted.
-- The tests index lists all experiments; clicking one opens its detail.
-- Numbers **match** what the optimizer/bandit uses (same attribution source) — the detail page and the promote/kill decision never disagree.
-- Negative: an experiment with no exposures yet shows zeroes (not an error); a non-owner can't load the preview link.
+## Phase 1 — tests index + detail page (both-arm preview + per-arm stats) ✅
+A tests index + `[experimentId]` detail page reading `storefront_experiments`/`_variants` + `storefront_events`; per-arm preview link (owner-only, exposure-excluded) + the funnel metric table with lift-vs-control + win-probability. Brain: [[storefront-optimizer-agent]] · [[storefront-experiment-bandit-framework]] · [[../libraries/storefront-experiment-attribution]] · [[../libraries/storefront-experiment-funnel]] · [[../libraries/storefront-experiments]] · [[../tables/storefront_experiments]] · [[../dashboard/storefront__optimizer]].
 
-## Phase 1 — tests index + detail page (both-arm preview + per-arm stats) ⏳
-A tests index + `[experimentId]` detail page reading `storefront_experiments`/`_variants` + `storefront_events`; per-arm preview link (owner-only, exposure-excluded) + the funnel metric table with lift-vs-control + win-probability. Brain: [[storefront-optimizer-agent]] · [[storefront-experiment-bandit-framework]] · [[../libraries/storefront-experiment-attribution]] · [[../tables/storefront_experiments]] · [[../dashboard/storefront__optimizer]].
+**Landed:**
+- Tests index `src/app/dashboard/storefront/optimizer/tests/page.tsx` + sidebar "Tests" link.
+- Detail page `src/app/dashboard/storefront/optimizer/tests/[experimentId]/page.tsx`.
+- APIs `GET /api/workspaces/[id]/storefront-experiments` (list) + `…/[experimentId]` (detail) — owner/admin only.
+- `src/lib/storefront/experiment-funnel.ts` — per-arm funnel (bandit-source outcomes + event-derived engagement/ATC/lead + win-prob).
+- `src/lib/storefront/experiments.ts` — `resolveExperimentsForRender` **preview mode** + `parsePreviewParam`/`renderVariantForLanderType`/`loadExperimentById`; lander route honors `?sx_preview=`.
+
+**Engagement % definition (engineering choice, not pinned by the spec):** an exposed session is "engaged" if it fired any `chapter_view`/`chapter_dwell`/`scroll_depth` event; engagement % = engaged ÷ exposed sessions.
+
+## Verification
+- On `/dashboard/storefront/optimizer/tests` (as owner/admin) → expect a list of all the workspace's experiments, running/active first, each showing status · lander_type · lever · product · arm count · session count; clicking a row opens its detail page.
+- On a running experiment's detail page (`/dashboard/storefront/optimizer/tests/{experimentId}`) → expect both arms side by side, and a funnel table where every metric (sessions, engagement %, ATC, lead, conversion, sub-attach, predicted-LTV/visitor, rev/visitor) is populated, non-control arms show **lift vs control** per metric, and a **win-probability vs control** row.
+- Click an arm's **"Preview this version ↗"** link → expect the live lander to render with that arm's patch (control arm = current hero; variant arm = the generated hero), and **no new `experiment_exposure` row** for that visit (the link carries `sx_internal=1`; confirm via `select count(*) from storefront_events where event_type='experiment_exposure'` before/after, or that the session's `storefront_sessions.is_internal` is true).
+- Cross-check the detail page's conversion/sub-attach/revenue/LTV against the bandit's persisted `storefront_experiment_variants` rollup columns for that experiment → expect them to match exactly (same source; the page and the promote/kill decision never disagree).
+- Negative — fresh experiment: open the detail page of an experiment with zero exposures → expect every metric to read 0 / $0.00 (and win-prob "—"), not an error.
+- Negative — non-owner: as a non-owner workspace member, `GET /api/workspaces/{id}/storefront-experiments/{experimentId}` (and the index API) → expect HTTP 403, so the tests pages and their preview links don't load.

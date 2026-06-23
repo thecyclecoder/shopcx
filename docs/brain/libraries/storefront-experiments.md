@@ -12,10 +12,12 @@ Deterministic, STICKY arm assignment. Hashes `${identityKey}:${experiment.id}` (
 ### `applyVariantPatch(content, patch)` → `AdvertorialContent`
 Applies a variant's reversible `VariantPatch` (`headline`/`dek`/`publication`/`sponsorLabel`/`heroCaption`/`heroImageUrl`/`chapterHeading`/`chapterParagraphs`/`chapterOrder[]`/`reasonsOrder[]`) over the control lander content. Empty patch → content unchanged. Copy/hero/chapter only — never an offer.
 
-### `resolveExperimentsForRender({ admin, workspaceId, productId, renderVariant, identityKey, content, conservative? })` → `{ content, exposures }`
+### `resolveExperimentsForRender({ admin, workspaceId, productId, renderVariant, identityKey, content, conservative?, preview? })` → `{ content, exposures }`
 The one call the lander render makes: loads active experiments for the `(product, lander_type)` (`landerTypeForVariant`: `reasons`→`listicle`), sticky-assigns, patches the content, and returns the `experiment_exposure` payloads the client pixel emits. Null identity → no experiments served (can't sticky-assign). Best-effort: returns the unpatched content if the tables are absent.
 
-### Also: `hashToUnit`, `landerTypeForVariant`, `loadActiveExperiments`, types `ExperimentRow`/`VariantRow`/`VariantPatch`/`ExperimentExposureMeta`.
+**Preview mode (`preview: { experimentId, variantId }`)** — the owner-only test-detail preview link (`?sx_preview=<experimentId>:<variantId>`, [[../specs/storefront-test-detail-page]]) **forces that one arm's patch** regardless of sticky assignment or identity (any status, via `loadExperimentById`), so the owner sees exactly what a shopper in that arm sees. The link also carries `sx_internal=1`, so the emitted exposure is dropped at the pixel write — the bandit is never polluted (reuses the existing internal-traffic exclusion). Returns `{ content, exposures: [] }` if the experiment isn't in the workspace / doesn't match the product / the variant is unknown.
+
+### Also: `hashToUnit`, `landerTypeForVariant`, `renderVariantForLanderType` (inverse; `pdp`→`advertorial`), `parsePreviewParam` (`"<expId>:<variantId>"`→parts), `loadActiveExperiments`, `loadExperimentById`, types `ExperimentRow`/`VariantRow`/`VariantPatch`/`ExperimentExposureMeta`.
 
 ## Gotchas
 - **No DB-persisted assignment.** Stickiness is a pure hash of identity+experiment; the bandit does DISCRETE reallocation (promote/kill/rollback), not per-request re-bucketing, so arms don't wobble.

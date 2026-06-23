@@ -6,7 +6,7 @@ import { getPageData, listPublishedProducts } from "../../../_lib/page-data";
 import { StorefrontPage } from "../../../_lib/render-page";
 import { loadAdvertorialContent, type AdvertorialVariant } from "@/lib/advertorial-pages";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { resolveExperimentsForRender, type ExperimentExposureMeta } from "@/lib/storefront/experiments";
+import { resolveExperimentsForRender, parsePreviewParam, type ExperimentExposureMeta } from "@/lib/storefront/experiments";
 
 /**
  * The single storefront route.
@@ -93,7 +93,9 @@ export default async function StorefrontProductPage({
   // Ad-matched lander modes. Reading searchParams keeps the param-less PDP
   // statically generated (generateStaticParams) and only renders these requests
   // dynamically — and the route still reads no headers/cookies, so it's ISR-safe.
-  searchParams: Promise<{ variant?: string; angle?: string }>;
+  // `sx_preview=<experimentId>:<variantId>` is the owner-only detail-page preview
+  // (forces one arm; paired with `sx_internal=1` so it never pollutes the bandit).
+  searchParams: Promise<{ variant?: string; angle?: string; sx_preview?: string }>;
 }) {
   const { workspace, slug } = await params;
   const sp = await searchParams;
@@ -111,6 +113,7 @@ export default async function StorefrontProductPage({
   let experimentExposures: ExperimentExposureMeta[] = [];
   if (variant && advertorial) {
     try {
+      const preview = parsePreviewParam(sp.sx_preview);
       const identityKey = (await cookies()).get("sid")?.value ?? null;
       const resolved = await resolveExperimentsForRender({
         admin: createAdminClient(),
@@ -122,6 +125,9 @@ export default async function StorefrontProductPage({
         // Conservative until M3's LTV-proxy reconciler calibrates (the goal's
         // "run conservatively until the slow loop calibrates" rule).
         conservative: true,
+        // Owner-only detail-page preview forces a specific arm; the paired
+        // `sx_internal=1` cookie drops the exposure at the pixel write.
+        preview,
       });
       advertorial = resolved.content;
       experimentExposures = resolved.exposures;

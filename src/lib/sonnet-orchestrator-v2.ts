@@ -17,6 +17,7 @@ import { currentDateContext } from "@/lib/ai-date-context";
 import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/product-intelligence/publish";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
+import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrownError } from "@/lib/anthropic-retry";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -1734,6 +1735,16 @@ async function runOrchestratorDecision(
           }
         }
         console.error(`Orchestrator (${modelKey}) API error: ${res.status}`, errBody.slice(0, 300));
+        // Outage resilience (agent-outage-resilience Phase 1): a retryable
+        // dependency failure (429/5xx/overloaded) must THROW so the Inngest
+        // run retries with outage-spanning backoff and decides correctly on
+        // recovery — NOT silently degrade every ticket to a generic escalation
+        // (the old `return fallback…` swallow). A terminal status (4xx other
+        // than 429) is a request/auth bug that won't succeed on retry, so it
+        // still degrades gracefully to escalation.
+        if (isRetryableAnthropicStatus(res.status)) {
+          throw new AnthropicDependencyError(`${modelKey} API error ${res.status}: ${errBody.slice(0, 100)}`, res.status);
+        }
         return fallbackWithCancelRoute(message, `${modelKey} API error ${res.status}: ${errBody.slice(0, 100)}`);
       }
 
@@ -1887,6 +1898,12 @@ async function runOrchestratorDecision(
     }
     return fallbackWithCancelRoute(message, `Max ${MAX_ROUNDS} tool rounds exceeded; force-decision retry: ${forceStatus}`);
   } catch (err) {
+    // Re-throw retryable dependency failures — our own AnthropicDependencyError
+    // (thrown above on a retryable status) and raw network/fetch failures — so
+    // the Inngest run retries across the outage rather than silently escalating
+    // every ticket. Genuine logic errors still degrade to escalation.
+    // (agent-outage-resilience Phase 1.)
+    if (isRetryableThrownError(err)) throw err;
     console.error(`Orchestrator (${modelKey}) error:`, err);
     return fallbackWithCancelRoute(message, `${modelKey} error: ${err instanceof Error ? err.message : String(err)}`);
   }
