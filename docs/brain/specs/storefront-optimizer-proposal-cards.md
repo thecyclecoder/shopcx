@@ -1,4 +1,4 @@
-# Storefront Optimizer proposal review + approve cards ⏳
+# Storefront Optimizer proposal review + approve cards ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** M4 — The Storefront Optimizer agent ([[../goals/storefront-optimizer]])
 **Relates:** [[storefront-optimizer-agent]] (M4, shipped), [[storefront-optimizer-activation-gate]] (the policy surface), [[../dashboard/storefront__optimizer]], [[../libraries/storefront-optimizer-policy]]
@@ -9,7 +9,7 @@ Summary: M4 ([[storefront-optimizer-agent]]) proposes one campaign per due `(pro
 - New `GET /api/workspaces/[id]/storefront-optimizer-proposals` (owner/admin) — return the workspace's `agent_jobs` rows `kind='storefront-optimizer'` AND `status='needs_approval'`, each unpacked into a card: `{ jobId, actionId, spec_slug (product:lander:audience), product name, lander_type, audience, lever, hypothesis/reasoning (from pending_action.preview), variant kind+label (hero vs content patch), created_at }`. Reuse the typed `OptimizerProposal`/`campaign_plan` shape already on the pending_action (scripts/builder-worker.ts).
 - Read-only; no new table. Mirror the auth pattern of [[../dashboard/storefront__optimizer]]'s policy GET.
 
-## Phase 2 — render Build/Approve cards on the optimizer dashboard ⏳
+## Phase 2 — render Build/Approve cards on the optimizer dashboard ✅
 - On `/dashboard/storefront/optimizer` add a "Proposed campaigns" section above the guardrails listing each card with: the lander type, the lever, the agent's reasoning (funnel signal + lever posterior it cited), the variant preview (for a `kind:'hero'` proposal, the hero prompt/label; for a content patch, the diff), and **Approve / Decline** buttons.
 - Approve → `POST /api/roadmap/approve { jobId, actionId, decision:'approve' }` (the existing route — no new approval logic); Decline → `decision:'decline'`. On success optimistically drop the card and toast "Campaign queued — the agent is standing up the experiment."
 - Empty state when none pending: "No proposals awaiting your approval." Keep the existing on/off + auto_run_reversible copy honest by pointing it at this section.
