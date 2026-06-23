@@ -1,5 +1,12 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import {
+  type ExperimentManifest,
+  manifestKey,
+  assignFromManifest,
+  EXPERIMENT_MANIFEST_PATH,
+  EXPERIMENT_MANIFEST_EDGE_KEY,
+} from "@/lib/storefront/experiment-manifest";
 
 const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal", "/journey", "/api/journey", "/api/storefront", "/api/revalidate", "/sitemap.xml", "/robots.txt", "/store/", "/storefront-img",
   // Post-Shopify storefront platform — public storefront routes +
@@ -59,6 +66,109 @@ async function resolveShortlinkWorkspaceByDomain(
   } catch {
     return null;
   }
+}
+
+// ─── PDP edge-served experiment manifest ────────────────────────────────
+// The set of running/promoted PDP experiments, read at the edge to sticky-assign
+// the variant without a per-request DB hit (pdp-edge-served-experiments). Read
+// from Vercel Edge Config when provisioned, else the cached JSON-blob fallback
+// route, then module-cached with a short TTL.
+type ManifestCacheEntry = { data: ExperimentManifest; expiresAt: number };
+let experimentManifestCache: ManifestCacheEntry | null = null;
+const EXPERIMENT_MANIFEST_TTL_MS = 15_000;
+// Sticky for the life of the experiment; the outcome lives in the cookie, so the
+// assignment survives even when the visitor has no `sid` yet.
+const SX_VARIANT_MAX_AGE = 60 * 60 * 24 * 30;
+
+async function loadExperimentManifest(origin: string): Promise<ExperimentManifest> {
+  const now = Date.now();
+  if (experimentManifestCache && experimentManifestCache.expiresAt > now) {
+    return experimentManifestCache.data;
+  }
+  let data: ExperimentManifest = {};
+  try {
+    const edgeConfig = process.env.EDGE_CONFIG;
+    if (edgeConfig) {
+      // Edge Config connection string → its HTTP item endpoint (token rides in the
+      // query). Activates automatically once the owner provisions Edge Config.
+      const u = new URL(edgeConfig);
+      u.pathname = `${u.pathname.replace(/\/$/, "")}/item/${EXPERIMENT_MANIFEST_EDGE_KEY}`;
+      const res = await fetch(u.toString());
+      if (res.ok) data = ((await res.json()) as ExperimentManifest) ?? {};
+    } else {
+      // Fallback: the cached JSON blob the middleware fetches same-origin.
+      const res = await fetch(`${origin}${EXPERIMENT_MANIFEST_PATH}`);
+      if (res.ok) data = ((await res.json()) as ExperimentManifest) ?? {};
+    }
+  } catch {
+    data = {};
+  }
+  experimentManifestCache = { data, expiresAt: now + EXPERIMENT_MANIFEST_TTL_MS };
+  return data;
+}
+
+/** Deterministic visitor×experiment hash → unit float in [0,1). Matches
+ *  `hashToUnit` in the experiments lib (sha256, first 4 bytes / 2^32) so the edge
+ *  assignment agrees with any server-side check. */
+async function hashUnitEdge(key: string): Promise<number> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  const b = new Uint8Array(buf);
+  const int = ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0;
+  return int / 0x100000000;
+}
+
+function parseVariantCookie(raw: string): { experimentId: string; variantId: string; isHoldout: boolean } | null {
+  const parts = raw.split(":");
+  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+  return { experimentId: parts[0], variantId: parts[1], isHoldout: parts[2] === "h" };
+}
+
+/**
+ * Edge sticky-assignment for the bare PDP. Reads the active-experiment manifest for
+ * this `(storefrontSlug, productHandle)`, reuses an existing `sx_variant` cookie or
+ * assigns a fresh arm (holdout-aware, same banding as `assignVariant`), and reports
+ * the `sx_variant` cookie to set + the `_sxv` rewrite param (served variants only —
+ * control/holdout serve the real cached PDP). Internal/bot (`sx_internal`) opt out.
+ */
+async function resolvePdpEdgeAssignment(
+  request: NextRequest,
+  storefrontSlug: string,
+  productHandle: string,
+): Promise<{ cookieValue: string | null; rewriteVariantId: string | null }> {
+  const none = { cookieValue: null, rewriteVariantId: null };
+
+  // Internal/bot devices: no assignment, no rewrite, no exposure.
+  if (request.cookies.get("sx_internal")?.value === "1") return none;
+  // Ad-matched landers (`?variant=`) + owner preview (`?sx_preview=`) aren't the
+  // bare PDP — leave those to the page. `_sxv` already present → don't double-assign.
+  const qp = request.nextUrl.searchParams;
+  if (qp.has("variant") || qp.has("sx_preview") || qp.has("_sxv")) return none;
+
+  const manifest = await loadExperimentManifest(request.nextUrl.origin);
+  const entry = manifest[manifestKey(storefrontSlug, productHandle)];
+  if (!entry || entry.experiments.length === 0) return none;
+  const exp = entry.experiments[0]; // ≤1 active campaign per surface (optimizer invariant)
+
+  // Sticky: reuse a valid existing assignment (don't reset the cookie).
+  const existing = request.cookies.get("sx_variant")?.value ?? null;
+  if (existing) {
+    const parsed = parseVariantCookie(existing);
+    if (parsed && parsed.experimentId === exp.id) {
+      const v = exp.variants.find((x) => x.id === parsed.variantId);
+      const rewriteVariantId = v && !v.is_control && !parsed.isHoldout ? v.id : null;
+      return { cookieValue: null, rewriteVariantId };
+    }
+  }
+
+  // Fresh assignment. Identity = the `sid` anon cookie, else an ephemeral id (the
+  // outcome is stored in sx_variant, so stickiness holds without sid).
+  const identity = request.cookies.get("sid")?.value || crypto.randomUUID();
+  const unit = await hashUnitEdge(`${identity}:${exp.id}`);
+  const a = assignFromManifest(unit, exp, { conservative: true });
+  if (!a) return none;
+  const cookieValue = `${a.experimentId}:${a.variantId}${a.isHoldout ? ":h" : ""}`;
+  const rewriteVariantId = !a.isControl && !a.isHoldout ? a.variantId : null;
+  return { cookieValue, rewriteVariantId };
 }
 
 async function resolveStorefrontSlugByDomain(
@@ -188,7 +298,22 @@ export async function updateSession(request: NextRequest) {
           ) {
             const url = request.nextUrl.clone();
             url.pathname = `/store/${storefrontSlug}/${segs[0]}`;
-            return NextResponse.rewrite(url);
+            // ── PDP edge-served experiment (pdp-edge-served-experiments) ──
+            // Sticky-assign the variant at the edge: set the `sx_variant` cookie
+            // and rewrite served arms to a variant-keyed URL (`?_sxv=<variantId>`)
+            // so each arm is a distinct cacheable render; control/holdout get the
+            // real cached PDP. No-op when no PDP experiment runs on this surface.
+            const assign = await resolvePdpEdgeAssignment(request, storefrontSlug, segs[0]);
+            if (assign.rewriteVariantId) url.searchParams.set("_sxv", assign.rewriteVariantId);
+            const res = NextResponse.rewrite(url);
+            if (assign.cookieValue) {
+              res.cookies.set("sx_variant", assign.cookieValue, {
+                path: "/",
+                maxAge: SX_VARIANT_MAX_AGE,
+                sameSite: "lax",
+              });
+            }
+            return res;
           }
           // Blog post detail — /blog/{handle} → /store/{ws}/blog/{handle}.
           // Only the blog namespace is rewritten as a two-segment path so

@@ -63,6 +63,7 @@ export function StorefrontPixelInit({
     // ── experiment_exposure (one per active experiment) ───────────
     // Sticky arm assignment is resolved server-side; we just log the exposure.
     // The pixel route drops these for is_internal/is_bot sessions.
+    const exposedExperiments = new Set<string>();
     for (const exp of experimentExposures) {
       track("experiment_exposure", {
         product_id: exp.product_id,
@@ -70,6 +71,30 @@ export function StorefrontPixelInit({
         variant_id: exp.variant_id,
         is_holdout: exp.is_holdout,
       });
+      exposedExperiments.add(exp.experiment_id);
+    }
+
+    // Edge-served arms (pdp-edge-served-experiments): the middleware sticky-assigned
+    // the visitor at the edge + set the `sx_variant=<experimentId>:<variantId>[:h]`
+    // cookie. Emit the exposure CLIENT-SIDE so the PDP render stays edge-cached per
+    // variant (no per-request server cookie read) — and so control/holdout arms
+    // (which serve the plain cached PDP with no `_sxv`) still log an exposure.
+    // Deduped against any server-resolved exposure for the same experiment.
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)sx_variant=([^;]+)/);
+      if (m) {
+        const [experimentId, variantId, holdoutFlag] = decodeURIComponent(m[1]).split(":");
+        if (experimentId && variantId && !exposedExperiments.has(experimentId)) {
+          track("experiment_exposure", {
+            product_id: productId,
+            experiment_id: experimentId,
+            variant_id: variantId,
+            is_holdout: holdoutFlag === "h",
+          });
+        }
+      }
+    } catch {
+      /* no document.cookie / malformed value — skip */
     }
 
     // ── pdp_engaged (first of three triggers) ─────────────────────
