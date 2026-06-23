@@ -1,0 +1,1 @@
+- **Control Tower: exclude the is_test spec-test sandbox from renewal-integrity (and sibling) assertions** · verified 2026-06-23 · → [[libraries/control-tower]]
