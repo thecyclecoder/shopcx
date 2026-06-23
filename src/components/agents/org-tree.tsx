@@ -7,13 +7,14 @@
  * clickable. Brain-driven — the tree is the same `getOrgChart()` payload the inbox
  * nav reads (no hand-maintained second copy of the org chart).
  *
- * Click target: Phase 5 ships per-role profile detail pages (`/dashboard/agents/[role]`);
- * until then a click selects that role and opens its inbox via `onSelectRole` (no broken
- * link). When Phase 5 lands, repoint these nodes at the profile route.
+ * Click target (Phase 5): every node links to that role's profile detail page
+ * (`/dashboard/agents/[role]`) — avatar + persona + responsibilities. Same profile
+ * page reached from the Directors/Workers rosters, so no node click is a dead end.
  *
  * Pure presentational client component — personas come from the reskinnable
  * src/lib/agents/personas.ts. See docs/brain/dashboard/agents.md.
  */
+import Link from "next/link";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 
@@ -33,28 +34,27 @@ interface OrgChart {
   directors: DirectorNode[];
 }
 
-// A single clickable node card — avatar + name + role, sized by tier.
+// A single clickable node card — avatar + name + role, sized by tier. Links to the
+// role's profile detail page (Phase 5).
 function Node({
   slug,
   label,
   size,
   subtitle,
   badge,
-  onClick,
 }: {
   slug: string;
   label?: string;
   size: "ceo" | "director" | "worker";
   subtitle?: string;
   badge?: React.ReactNode;
-  onClick: () => void;
 }) {
   const persona = getPersona(slug, label);
   const avatarSize = size === "ceo" ? 48 : size === "director" ? 38 : 24;
   const pad = size === "worker" ? "px-2.5 py-1.5" : "px-3.5 py-3";
   return (
-    <button
-      onClick={onClick}
+    <Link
+      href={`/dashboard/agents/${encodeURIComponent(slug)}`}
       title={`${persona.name} — ${persona.role}${subtitle ? ` · ${subtitle}` : ""}`}
       className={`group flex flex-col items-center gap-1.5 rounded-xl border border-zinc-200 bg-white text-center shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/30 ${pad}`}
     >
@@ -71,11 +71,11 @@ function Node({
       </span>
       {subtitle && <span className="text-[10px] text-zinc-400">{subtitle}</span>}
       {badge}
-    </button>
+    </Link>
   );
 }
 
-export function OrgTree({ org, onSelectRole }: { org: OrgChart; onSelectRole: (role: string) => void }) {
+export function OrgTree({ org }: { org: OrgChart }) {
   const goalCount = org.ceo.goals.length;
   return (
     <div className="overflow-x-auto pb-2">
@@ -85,7 +85,6 @@ export function OrgTree({ org, onSelectRole }: { org: OrgChart; onSelectRole: (r
           slug="ceo"
           size="ceo"
           subtitle={`${goalCount} active goal${goalCount === 1 ? "" : "s"}`}
-          onClick={() => onSelectRole("ceo")}
         />
 
         {/* Connector from CEO down to the directors rail */}
@@ -107,7 +106,6 @@ export function OrgTree({ org, onSelectRole }: { org: OrgChart; onSelectRole: (r
                     <StatusBadge status={d.status} />
                   </span>
                 }
-                onClick={() => onSelectRole(d.slug)}
               />
 
               {/* Workers under the director */}
@@ -122,7 +120,6 @@ export function OrgTree({ org, onSelectRole }: { org: OrgChart; onSelectRole: (r
                         label={w.label}
                         size="worker"
                         subtitle={w.kind}
-                        onClick={() => onSelectRole(w.kind)}
                       />
                     ))}
                   </div>
