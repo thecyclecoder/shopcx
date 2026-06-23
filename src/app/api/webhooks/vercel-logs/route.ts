@@ -19,7 +19,7 @@
  */
 import { NextResponse } from "next/server";
 import crypto from "crypto";
-import { recordError, recordFeedDelivery } from "@/lib/control-tower/error-feed";
+import { recordError, recordFeedDelivery, isAbortedStreamNoise } from "@/lib/control-tower/error-feed";
 
 export const dynamic = "force-dynamic";
 
@@ -103,9 +103,13 @@ function isError(log: VercelLog): boolean {
   const status = log.statusCode ?? log.proxy?.statusCode ?? 0;
   const errorish = log.level === "error" || log.level === "fatal" || status >= 500;
   if (!errorish) return false;
+  const message = (log.message ?? "").trim();
   // Drop bare Lambda lifecycle/REPORT wrappers — non-actionable platform noise around a
   // failure the function already logged (and that already has its own signature).
-  if (isBareLifecycle((log.message ?? "").trim())) return false;
+  if (isBareLifecycle(message)) return false;
+  // Drop Node Web-Streams client-abort teardown noise (status 0, ignore-listed-only
+  // stack) — non-actionable framework noise, same genre as the bare lifecycle wrappers.
+  if (isAbortedStreamNoise(message, status)) return false;
   return true;
 }
 

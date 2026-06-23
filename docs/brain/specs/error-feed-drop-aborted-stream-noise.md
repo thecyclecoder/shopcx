@@ -11,8 +11,10 @@ Error event b9856952 (signature vercel:801aa4e3922198d3, digest 696838421) on /s
 
 **Likely target:** `src/app/api/webhooks/vercel-logs/route.ts (isError — add an isAbortedStreamNoise() companion to isBareLifecycle: drop level:'error' entries with status 0 whose message matches the Node Web-Streams abort family — 'transformAlgorithm is not a function', 'Invalid state: Controller is already closed', ERR_STREAM_PREMATURE_CLOSE/'aborted' — and an 'at ignore-listed frames'-only stack); factor the matcher into src/lib/control-tower/error-feed.ts so other feeds can reuse it`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it 🚧
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Built:** `isAbortedStreamNoise(message, status)` added + exported from `src/lib/control-tower/error-feed.ts` (reusable across feeds), wired as a companion to `isBareLifecycle` in `src/app/api/webhooks/vercel-logs/route.ts` `isError()`. Drops `status:0` `level:'error'` entries whose message matches the Web-Streams abort family (`transformAlgorithm is not a function` · `Invalid state: Controller is already closed` · `ERR_STREAM_PREMATURE_CLOSE`/`aborted`) AND whose stack is `at ignore-listed frames`-only (zero frames in our code). Brain page [[../integrations/vercel-log-drain]] updated. `tsc --noEmit` clean. Verification (re-trigger `vercel:801aa4e3922198d3` → no new incident) pending prod.
 
 ## Verification
 - Re-trigger the originating condition (signature `vercel:801aa4e3922198d3`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.

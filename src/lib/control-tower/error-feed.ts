@@ -67,6 +67,44 @@ export function signatureFor(source: ErrorSource, keyParts: string[]): string {
   return `${source}:${normalizeForSignature(keyParts)}`;
 }
 
+/**
+ * Node.js Web-Streams client-abort teardown noise — the companion to vercel-logs'
+ * `isBareLifecycle`, factored here so any feed can reuse it ([[../specs/error-feed-drop-aborted-stream-noise]]).
+ *
+ * When a visitor aborts an SSR stream mid-flight (client disconnect, `status:0` —
+ * the response never completed), Node core's Web-Streams teardown can race and emit a
+ * `level:'error'` log with NO frame in our code — the documented TransformStream race
+ * (nodejs/node#62040) surfaced by Next.js streaming. It is non-actionable framework
+ * noise with no fix in our code; minting an open incident for it pages owners on a
+ * healthy PDP (Control Tower `vercel:801aa4e3922198d3`). We drop it before grouping.
+ *
+ * Gated tightly so it only ever swallows this signature: requires ALL of
+ *   1. `status === 0` (the aborted-stream marker — the response never completed),
+ *   2. a message naming a member of the Web-Streams abort/teardown family, AND
+ *   3. a stack whose every `at …` frame is an ignore-listed (framework/internal) frame —
+ *      i.e. zero frames in our code. A real error with a frame in our code is kept.
+ */
+export function isAbortedStreamNoise(message: string, status: number): boolean {
+  if (status !== 0) return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const matchesAbortFamily =
+    lower.includes("transformalgorithm is not a function") ||
+    lower.includes("invalid state: controller is already closed") ||
+    lower.includes("err_stream_premature_close") ||
+    /(^|[^a-z])aborted([^a-z]|$)/.test(lower);
+  if (!matchesAbortFamily) return false;
+  // Every stack frame must be an ignore-listed frame (Node collapses framework/internal
+  // frames to "at ignore-listed frames"). No `at …` frame ⇒ not this signature; keep it.
+  const atFrames = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^at\s/i.test(l));
+  if (atFrames.length === 0) return false;
+  return atFrames.every((l) => /^at\s+ignore-listed frames\b/i.test(l));
+}
+
 export interface RecordErrorInput {
   source: ErrorSource;
   /** the grouping key parts (stable bits — function id / route / error class). */
