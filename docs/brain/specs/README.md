@@ -164,6 +164,12 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[db-health-agent-accuracy]] (platform) — first run surfaced 5 findings, only 1 actionable (orders index, approved). Three fix-classification gaps: (1) filter foreign/internal queries (Supabase Realtime WAL, PostgREST/pg_catalog) — don't propose for queries we don't own; (2) distinguish slow-per-call (mean≥50ms → index) vs fast-but-hammered (4ms×1.27M → reduce-calls/cache/GIN, NOT vacuum); (3) allowlist sunset tables (klaviyo_*). Re-run after.
 
+## Active project — Outage resilience + coverage auto-register + test detail page ⏳
+
+- [[agent-outage-resilience]] (platform) — the ~1h Claude outage exposed it: the ticket orchestrator is `retries:1` (can't span an hour → drops the ticket) + some calls swallow the error (`return ""`). Fix: outage-spanning backoff retry + no silent swallow + a Claude-down circuit-breaker (park-and-drain) driven by status.claude.com/api/v2/components.json (Claude API + Claude Code) + a local failure counter.
+- [[coverage-auto-register-agent]] (platform) — the coverage self-audit keeps surfacing unregistered loops (storefront-ltv-reconcile-cron, storefront-optimizer-cron, …) that get hand-added; an agent should propose the MONITORED_LOOPS entry (inferred owner/cadence/window) for one-tap Build, with an intentionally-unmonitored exemption.
+- [[storefront-test-detail-page]] (growth) — a per-experiment view: both-arm preview links (owner-only, exposure-excluded) + per-arm funnel stats (sessions, engagement %, ATC, lead, conversion, sub-attach, predicted-LTV/visitor) with lift-vs-control + win-probability.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
