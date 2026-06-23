@@ -1,4 +1,4 @@
-# Control Tower: grace registered_not_firing for newly-added crons (per-loop registration age) ⏳
+# Control Tower: grace registered_not_firing for newly-added crons (per-loop registration age) 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/monitor.ts::monitor-false-positive`
@@ -11,8 +11,10 @@ In evalCron (src/lib/control-tower/monitor.ts:311) the registered_not_firing red
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** added optional `MonitoredLoop.registeredAt` (ISO code constant, deploy-surviving) to `src/lib/control-tower/registry.ts` and set it on `storefront-experiments-refresh-cron` (`2026-06-22T17:45:00Z`). `evalCron` (`src/lib/control-tower/monitor.ts`) now computes `registrationAgeMs = ageMs(loop.registeredAt)` and, in the 0-beats path, returns **amber "awaiting first run"** when `registrationAgeMs <= window`, so `registered_not_firing` requires `(now - registeredAt) > window` IN ADDITION to `monitorUptimeMs > window`. Legacy crons (no `registeredAt`) keep the old behavior. Stale code comment + `docs/brain/libraries/control-tower.md` updated. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:storefront-experiments-refresh-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.

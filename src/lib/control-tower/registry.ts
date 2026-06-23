@@ -208,6 +208,19 @@ export interface MonitoredLoop {
   livenessWindowMs?: number;
   /** worker only: running_sha may differ from the deployed SHA this long before alerting. */
   shaGraceMs?: number;
+  /**
+   * cron only: ISO timestamp of when THIS cron was added to the registry. A freshly-added
+   * long-cadence cron has had no chance to fire its first scheduled tick yet, but the
+   * deploy-SURVIVING watchdog-uptime reference (monitorUptimeMs) is already past its window —
+   * so the deploy-independent registered_not_firing red would false-page it the moment it's
+   * shipped (control-tower-registered-not-firing-newcron-grace). When set, evalCron requires
+   * (now - registeredAt) > livenessWindowMs IN ADDITION to monitorUptimeMs > window before
+   * firing registered_not_firing: a cron registered for less than a full window stays amber
+   * ("awaiting first run"), graced just like the deploy-anchored never_fired check already
+   * graces it. Unlike deployAgeMs this is a code constant, so it survives the box's
+   * self-update/restart. Unset (legacy crons) ⇒ no grace (registered long ago) ⇒ old behavior.
+   */
+  registeredAt?: string;
   /** agent-kind only: the agent_jobs.kind this loop maps to. */
   agentKind?: string;
   /** agent-kind only: a queued/building job older than this is "stuck" → alert. */
@@ -418,7 +431,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "marketing-coupon-auto-disable", kind: "cron", owner: "cmo", label: "Marketing coupon auto-disable", description: "Auto-disables expired/over-budget marketing coupons.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "meta-performance-daily", kind: "cron", owner: "growth", label: "Meta performance pipeline", description: "Daily Meta ad performance iteration pipeline.", expectedCadence: "daily (30 11 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Daily fan-out: recomputes attribution + bandit posteriors for running storefront experiments.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Daily fan-out: recomputes attribution + bandit posteriors for running storefront experiments.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-22T17:45:00Z" },
   { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "monthly-revenue-snapshot", kind: "cron", owner: "platform", label: "Revenue snapshot", description: "Pre-computes monthly revenue snapshots from daily data.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
