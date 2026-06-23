@@ -77,7 +77,8 @@ interface FailedJob {
 // fold-guard-live-build (Phase 1): a build/spec-test job whose spec was folded/archived/deleted (spec_missing)
 // would 404 at /dashboard/roadmap/{slug} too — route it to the board (always resolves), never a dead link.
 function approvalHref(kind: string, specSlug: string, specMissing?: boolean): string {
-  if (kind === "repair" || kind === "triage-escalations") return "/dashboard/developer/control-tower";
+  // repair / triage / db_health proposals surface on the Control Tower (their slug is a signature, not a spec).
+  if (kind === "repair" || kind === "triage-escalations" || kind === "db_health") return "/dashboard/developer/control-tower";
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
   if (kind === "migration-fix") return "/dashboard/migrations";
   // storefront-optimizer slug is a surface key (product:lander:audience), not a spec — route to the
