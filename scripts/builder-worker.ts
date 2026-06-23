@@ -180,7 +180,7 @@ interface PendingAction {
   summary: string;
   cmd?: string;
   preview?: string;
-  status: "pending" | "approved" | "declined" | "done" | "failed";
+  status: "pending" | "approved" | "declined" | "done" | "failed" | "reject_regen";
   result?: string;
   spec?: ProposedSpec;
   autoSettled?: number; // worker safety net: times a resumed build re-requested this already-`done` cmd
@@ -196,6 +196,18 @@ interface PendingAction {
   // session emitted; the worker stands up the M1 experiment from it on approval (or immediately when the
   // gate is auto_run). Carries hypothesis + lever + reversible variant patch.
   campaign_plan?: unknown;
+  // ── optimizer-hero-preview-gate (preview/reject-with-notes loop) ──
+  // For a kind='hero' campaign the approval is two-stage: 'concept' (the owner approves the idea →
+  // the worker generates a candidate hero, sets stage='preview') then 'preview' (the owner sees the
+  // ACTUAL image → Approve goes live, or Reject-with-notes regenerates). A content lever has no image
+  // to preview, so it skips the gate (stage stays undefined → materialize on the first approve).
+  stage?: "concept" | "preview";
+  // The candidate hero awaiting image-approval (NOT live until the owner approves it).
+  preview_image_url?: string;
+  // The rejected attempts kept on the campaign (the gen learns within the loop). Newest last.
+  preview_attempts?: { url: string; notes?: string; at: string }[];
+  // The owner's free-text notes set by a Reject-with-notes action; consumed (then cleared) on regen.
+  reject_notes?: string;
 }
 interface Job {
   id: string;
@@ -3995,23 +4007,54 @@ async function runStorefrontOptimizerJob(job: Job) {
   const opt = await import("../src/lib/storefront/optimizer-agent");
   const policyLib = await import("../src/lib/storefront/optimizer-policy");
 
-  // ── Approval resume: the owner approved/declined a campaign or a missing-capability Build card. ──
-  const isApprovalResume = (job.pending_actions || []).some((a) => a.status === "approved" || a.status === "declined");
+  // ── Approval resume: the owner approved/declined a campaign, rejected a hero preview with notes,
+  //    or approved/dismissed a missing-capability Build card. ──
+  const isApprovalResume = (job.pending_actions || []).some(
+    (a) => a.status === "approved" || a.status === "declined" || a.status === "reject_regen",
+  );
   if (isApprovalResume) {
     const actions = (job.pending_actions || []).map((a) => ({ ...a }));
     const results: string[] = [];
     for (const act of actions) {
       if (act.type === "storefront_campaign") {
         if (act.status === "declined") { act.result = "declined by owner"; results.push("campaign → declined"); continue; }
+        const plan = act.campaign_plan as Record<string, unknown> | undefined;
+        const variant = (plan?.variant || {}) as Record<string, unknown>;
+        const isHero = String(variant.kind) === "hero";
+
+        // ── optimizer-hero-preview-gate: Reject-with-notes → regenerate a fresh candidate honoring the
+        //    notes; keep the rejected attempt + its note on the campaign; re-surface for preview. Nothing
+        //    serves to a shopper — the gen learns within the loop until the owner approves an image. ──
+        if (act.status === "reject_regen") {
+          if (!plan || !isHero) { act.status = "failed"; act.result = "reject_regen on a non-hero/empty campaign"; results.push("campaign → reject_regen invalid"); continue; }
+          try {
+            const attempts = Array.isArray(act.preview_attempts) ? [...act.preview_attempts] : [];
+            if (act.preview_image_url) attempts.push({ url: act.preview_image_url, notes: act.reject_notes || "", at: new Date().toISOString() });
+            const allNotes = attempts.map((a) => a.notes).filter((n): n is string => !!n && !!n.trim());
+            const url = await regenerateOptimizerHero(opt, surface, plan, allNotes, attempts.length);
+            if (!url) { act.status = "failed"; act.result = "regeneration failed (no isolated product image / Gemini error)"; results.push("campaign → regen failed"); continue; }
+            act.preview_attempts = attempts;
+            act.preview_image_url = url;
+            act.reject_notes = undefined;
+            act.stage = "preview";
+            act.status = "pending"; // re-surface for image-approval (still nothing live)
+            act.result = `regenerated candidate #${attempts.length + 1} from ${allNotes.length} note(s)`;
+            results.push(`campaign → ${act.result} (re-surfaced for preview)`);
+          } catch (e) {
+            act.status = "failed"; act.result = e instanceof Error ? e.message : String(e);
+            results.push(`campaign → regen errored: ${act.result}`);
+          }
+          continue;
+        }
+
         if (act.status !== "approved") continue;
         try {
-          const plan = act.campaign_plan as Record<string, unknown> | undefined;
           if (!plan) { act.status = "failed"; act.result = "no campaign_plan on action"; results.push("campaign → failed (no plan)"); continue; }
           // Re-gate on approval (TOCTOU): the scope/active gate (evaluateProposalGate) only ran at PROPOSE
           // time. If the policy's `product_scope` shrank or `active` flipped false between propose and this
           // approval, the campaign must NOT still materialize — it would violate the "every activation
           // checks product_id ∈ product_scope" contract. Re-load the live policy and re-assert before
-          // standing up the experiment; refuse (surface) if no longer active / in scope.
+          // standing up the experiment (or even generating a preview); refuse (surface) if no longer active / in scope.
           const reAdmin = (await import("../src/lib/supabase/admin")).createAdminClient();
           const livePolicy = await policyLib.loadOptimizerPolicy(reAdmin, surface.workspace_id);
           if (!policyLib.isOptimizerActive(livePolicy)) {
@@ -4026,7 +4069,26 @@ async function runStorefrontOptimizerJob(job: Job) {
             results.push(`campaign → refused (out of scope): ${act.result}`);
             continue;
           }
-          const r = await materializeOptimizerCampaign(opt, surface, plan, job.created_by, false);
+
+          // ── optimizer-hero-preview-gate: STAGE 1 — concept-approve of a HERO campaign. Generate the
+          //    candidate hero (don't go live yet) and re-surface for image-approval. Only the final
+          //    owner-approved image is ever served; nothing reaches live traffic on a prompt alone. ──
+          if (isHero && act.stage !== "preview") {
+            const url = await regenerateOptimizerHero(opt, surface, plan, [], 0);
+            if (!url) { act.status = "failed"; act.result = "hero generation failed (no isolated product image / Gemini error)"; results.push("campaign → gen failed"); continue; }
+            act.preview_image_url = url;
+            act.preview_attempts = act.preview_attempts || [];
+            act.stage = "preview";
+            act.status = "pending"; // re-surface for image-approval (NOT live yet)
+            act.result = "candidate hero generated — awaiting your image-approval (not live)";
+            results.push("campaign → candidate generated, surfaced for image-approval (not live)");
+            continue;
+          }
+
+          // ── STAGE 2 (image-approval of a hero) OR a content lever (no image to preview → skips the gate).
+          //    Only an image-approval (or a content approve) calls materializeCampaign. ──
+          const approvedHero = act.stage === "preview" ? act.preview_image_url : undefined;
+          const r = await materializeOptimizerCampaign(opt, surface, plan, job.created_by, false, approvedHero);
           act.status = r.ok ? "done" : "failed";
           act.result = r.detail;
           results.push(`campaign → ${act.status}: ${r.detail}`);
@@ -4055,8 +4117,16 @@ async function runStorefrontOptimizerJob(job: Job) {
         results.push(`build → ${act.status}: ${act.result}`);
       }
     }
-    await update(job.id, { status: "completed", pending_actions: actions, error: null, log_tail: (results.join("; ") || "no actions").slice(-2000) });
-    console.log(`${tag} resume applied: ${results.join("; ")}`);
+    // If any action was re-surfaced for the owner (a hero preview now awaits image-approval), the job
+    // returns to needs_approval; otherwise it's terminal (completed). ≤1 action per optimizer job.
+    const reSurfaced = actions.some((a) => a.status === "pending");
+    await update(job.id, {
+      status: reSurfaced ? "needs_approval" : "completed",
+      pending_actions: actions,
+      error: null,
+      log_tail: (results.join("; ") || "no actions").slice(-2000),
+    });
+    console.log(`${tag} resume applied (${reSurfaced ? "re-surfaced for preview" : "terminal"}): ${results.join("; ")}`);
     return;
   }
 
@@ -4142,7 +4212,11 @@ async function runStorefrontOptimizerJob(job: Job) {
         return;
       }
 
-      // needs_approval — surface a campaign Approve card carrying the typed plan (materialized on approval).
+      // needs_approval — surface a campaign Approve card carrying the typed plan. For a HERO lever this is
+      // the CONCEPT approve (stage 1 of the preview gate): approving generates a candidate hero, then the
+      // owner sees the actual image and approves it live or rejects-with-notes (optimizer-hero-preview-gate).
+      // A content lever has no image to preview, so it materializes on the first approve (no stage).
+      const variantKind = String((parsed.variant as Record<string, unknown> | undefined)?.kind || "content");
       const action: PendingAction = {
         id: `so${job.id.slice(0, 6)}`,
         type: "storefront_campaign",
@@ -4150,6 +4224,7 @@ async function runStorefrontOptimizerJob(job: Job) {
         preview: `${hypothesis}\n\n${String(parsed.reasoning || "")}`.slice(0, 400),
         status: "pending",
         campaign_plan: planForStore,
+        ...(variantKind === "hero" ? { stage: "concept" as const } : {}),
       };
       await update(job.id, { status: "needs_approval", pending_actions: [action], log_tail: `proposed campaign (lever ${leverKey}) → awaiting owner Approve.\n\n${hypothesis}`.slice(-2000) });
       console.log(`${tag} proposed campaign on ${opt.surfaceKey(surface)} → awaiting approval`);
@@ -4167,22 +4242,53 @@ async function runStorefrontOptimizerJob(job: Job) {
   }
 }
 
+// Generate a candidate hero for the preview gate: composites the isolated pouch at the lander's real
+// hero aspect, augmenting the prompt with the owner's accumulated reject-with-notes (optimizer-hero-
+// preview-gate § grounding). `attemptIndex` keeps each candidate at a distinct storage path so the
+// rejected attempts retain their own images. Returns the public URL (null on failure).
+async function regenerateOptimizerHero(
+  opt: typeof import("../src/lib/storefront/optimizer-agent"),
+  surface: OptimizerSurfaceLite,
+  plan: Record<string, unknown>,
+  notes: string[],
+  attemptIndex: number,
+): Promise<string | null> {
+  const variant = (plan.variant || {}) as Record<string, unknown>;
+  const heroPrompt = String(variant.hero_prompt || "");
+  if (!heroPrompt) return null;
+  return opt.generateCampaignHero({
+    workspaceId: surface.workspace_id,
+    productId: surface.product_id,
+    prompt: heroPrompt,
+    slug: `${surface.lander_type}-${String(plan.lever_key || "hero")}-a${attemptIndex}`,
+    landerType: surface.lander_type,
+    notes,
+  });
+}
+
 // Coerce a stored/parsed plan into an OptimizerProposal, generate the hero if the variant needs one,
-// and stand up the M1 campaign via the library. Returns the library's MaterializeResult.
+// and stand up the M1 campaign via the library. Returns the library's MaterializeResult. When the
+// preview gate already produced an owner-approved candidate (`approvedHeroUrl`), use it verbatim — the
+// approved image is what goes live, never a fresh regen. Only the auto-run path (no preview gate) and a
+// content lever fall through to generate-now (auto_run_reversible pre-authorized reversible auto-run).
 async function materializeOptimizerCampaign(
   opt: typeof import("../src/lib/storefront/optimizer-agent"),
   surface: OptimizerSurfaceLite,
   plan: Record<string, unknown>,
   createdBy: string | null,
   conservative: boolean,
+  approvedHeroUrl?: string,
 ): Promise<{ ok: boolean; detail: string }> {
   const variant = (plan.variant || {}) as Record<string, unknown>;
   let patch = (variant.patch || {}) as Record<string, unknown>;
-  // kind='hero' → generate the hero on the worker, then patch heroImageUrl.
+  // kind='hero' → use the owner-approved candidate from the preview gate, else generate now (auto-run).
   if (String(variant.kind) === "hero") {
-    const heroPrompt = String(variant.hero_prompt || "");
-    if (!heroPrompt) return { ok: false, detail: "hero variant missing hero_prompt" };
-    const url = await opt.generateCampaignHero({ workspaceId: surface.workspace_id, productId: surface.product_id, prompt: heroPrompt, slug: `${surface.lander_type}-${String(plan.lever_key || "hero")}` });
+    let url = approvedHeroUrl;
+    if (!url) {
+      const heroPrompt = String(variant.hero_prompt || "");
+      if (!heroPrompt) return { ok: false, detail: "hero variant missing hero_prompt" };
+      url = (await regenerateOptimizerHero(opt, surface, plan, [], 0)) ?? undefined;
+    }
     if (!url) return { ok: false, detail: "hero generation failed (no isolated product image / Gemini error)" };
     patch = { ...patch, heroImageUrl: url };
   }

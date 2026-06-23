@@ -35,7 +35,15 @@ export interface JobQuestion {
 // the worker authors docs/brain/specs/{slug}.md + queues its build. 'migration_fix' is a typed billing
 // repair proposed by the migration-fix box agent (executed via src/lib/migration-fix.ts on approval).
 // The others are gated prod side-effects.
-export type GatedActionType = "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix";
+export type GatedActionType =
+  | "apply_migration"
+  | "run_prod_script"
+  | "merge_pr"
+  | "spec"
+  | "migration_fix"
+  | "repair_build"
+  | "storefront_campaign"
+  | "storefront_build";
 
 /** A planner-proposed spec branch — carried on a `type:'spec'` PendingAction so the worker can author it on approval. */
 export interface ProposedSpec {
@@ -55,13 +63,21 @@ export interface PendingAction {
   summary: string;
   cmd?: string;
   preview?: string;
-  status: "pending" | "approved" | "declined" | "done" | "failed";
+  status: "pending" | "approved" | "declined" | "done" | "failed" | "reject_regen";
   result?: string;
   spec?: ProposedSpec; // set when type==='spec' (planner proposal)
   // set when type==='migration_fix' (migration-fix agent) — the typed billing repair the worker runs
   // through src/lib/migration-fix.ts `applyMigrationFix` on approval.
   fix_kind?: "price_reconcile" | "variant_backfill" | "appstle_cancel";
   payload?: unknown;
+  // ── optimizer-hero-preview-gate (storefront-optimizer hero preview/reject-with-notes loop) ──
+  // For a kind='hero' storefront_campaign action the approval is two-stage: 'concept' → the worker
+  // generates a candidate hero and flips stage='preview', then the owner sees the image and either
+  // approves it live or rejects-with-notes (status='reject_regen' + reject_notes) to regenerate.
+  stage?: "concept" | "preview";
+  preview_image_url?: string;
+  preview_attempts?: { url: string; notes?: string; at: string }[];
+  reject_notes?: string;
 }
 
 /** 'build' (default — build a spec to a PR) | 'plan' (run plan-goal against a goal → propose specs)

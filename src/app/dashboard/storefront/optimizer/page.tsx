@@ -54,6 +54,11 @@ interface ProposalCard {
   preview: string;
   variant: { kind: string; label: string; hero_prompt?: string; patch?: unknown };
   created_at: string | null;
+  // optimizer-hero-preview-gate: 'concept' = approve the idea (a hero candidate is generated on approve);
+  // 'preview' = a candidate hero is generated and awaiting image-approval (Approve live / Reject-with-notes).
+  stage?: "concept" | "preview";
+  preview_image_url?: string;
+  preview_attempts?: { url: string; notes?: string; at: string }[];
 }
 
 export default function StorefrontOptimizerPage() {
@@ -94,31 +99,39 @@ export default function StorefrontOptimizerPage() {
     loadProposals();
   }, [load, loadProposals]);
 
-  // The approve/decline path goes through the EXISTING /api/roadmap/approve route
+  // After a decision that re-surfaces the card (concept-approve generates a hero candidate; reject
+  // regenerates it), the box worker runs async — re-poll a few times so the new preview shows up.
+  const pollProposals = useCallback(() => {
+    [3000, 8000, 16000, 28000].forEach((ms) => setTimeout(() => loadProposals(), ms));
+  }, [loadProposals]);
+
+  // The approve/decline/reject path goes through the EXISTING /api/roadmap/approve route
   // (approveRoadmapAction) — no new approval logic. On success we optimistically drop the card.
+  // optimizer-hero-preview-gate: a hero campaign is two-stage — concept-approve generates a candidate,
+  // then preview-approve goes live or reject-with-notes regenerates (the loop until the owner approves).
   const decide = useCallback(
-    async (card: ProposalCard, decision: "approve" | "decline") => {
+    async (card: ProposalCard, decision: "approve" | "decline" | "reject", notes?: string) => {
       setDeciding(card.actionId);
       setError(null);
       const res = await fetch(`/api/roadmap/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: card.jobId, actionId: card.actionId, decision }),
+        body: JSON.stringify({ jobId: card.jobId, actionId: card.actionId, decision, notes }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setProposals((prev) => prev.filter((p) => p.actionId !== card.actionId));
-        setToast(
-          decision === "approve"
-            ? "Campaign queued — the agent is standing up the experiment."
-            : "Proposal declined.",
-        );
+        const isHeroConceptApprove = decision === "approve" && card.variant.kind === "hero" && card.stage !== "preview";
+        if (decision === "decline") setToast("Proposal declined.");
+        else if (decision === "reject") { setToast("Regenerating the hero with your notes — it'll re-appear for preview shortly."); pollProposals(); }
+        else if (isHeroConceptApprove) { setToast("Generating a hero candidate — it'll re-appear for your image-approval shortly."); pollProposals(); }
+        else setToast("Campaign queued — the agent is standing up the experiment.");
       } else {
         setError(data.error || "Failed to record your decision");
       }
       setDeciding(null);
     },
-    [],
+    [pollProposals],
   );
 
   const patch = useCallback(
@@ -265,8 +278,10 @@ export default function StorefrontOptimizerPage() {
       <section className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Proposed campaigns</h2>
         <p className="mt-1 mb-4 text-xs text-zinc-500">
-          Each card is one hypothesis the agent formed from your funnel signal. Approving stands up the
-          experiment vs holdout; declining clears it. The agent never runs these without your tap.
+          Each card is one hypothesis the agent formed from your funnel signal. For a copy/chapter test,
+          approving stands up the experiment vs holdout. For a <strong>hero</strong> test you approve the
+          concept first, then <strong>see the actual generated image</strong> and either approve it live or
+          reject with notes to regenerate — nothing reaches live traffic on a prompt alone.
         </p>
         {!proposalsLoaded ? (
           <p className="text-xs text-zinc-400">Loading proposals…</p>
@@ -282,6 +297,7 @@ export default function StorefrontOptimizerPage() {
                 disabled={deciding !== null}
                 onApprove={() => decide(card, "approve")}
                 onDecline={() => decide(card, "decline")}
+                onReject={(notes) => decide(card, "reject", notes)}
               />
             ))}
           </ul>
@@ -353,14 +369,22 @@ function ProposalCardItem({
   disabled,
   onApprove,
   onDecline,
+  onReject,
 }: {
   card: ProposalCard;
   busy: boolean;
   disabled: boolean;
   onApprove: () => void;
   onDecline: () => void;
+  onReject: (notes: string) => void;
 }) {
   const isHero = card.variant.kind === "hero";
+  // optimizer-hero-preview-gate: a hero campaign is in the image-preview stage once a candidate exists.
+  const inPreview = isHero && card.stage === "preview" && !!card.preview_image_url;
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [notes, setNotes] = useState("");
+  const attempts = card.preview_attempts ?? [];
+
   return (
     <li className="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
       <div className="flex flex-wrap items-center gap-2">
@@ -375,6 +399,11 @@ function ProposalCardItem({
             {card.audience}
           </span>
         )}
+        {inPreview && (
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+            preview · approve to go live
+          </span>
+        )}
         {card.product_name && (
           <span className="ml-auto text-xs text-zinc-500">{card.product_name}</span>
         )}
@@ -387,41 +416,139 @@ function ProposalCardItem({
         <p className="mt-1 text-xs leading-relaxed text-zinc-500">{card.reasoning}</p>
       )}
 
-      {/* Variant preview — hero prompt for kind:'hero', content patch diff otherwise. */}
-      <div className="mt-3 rounded border border-zinc-100 bg-zinc-50 p-2.5 dark:border-zinc-800 dark:bg-zinc-900/50">
-        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-          Variant{card.variant.label ? ` — ${card.variant.label}` : ""}
-        </p>
-        {isHero ? (
-          <p className="text-xs text-zinc-600 dark:text-zinc-300">
-            {card.variant.hero_prompt || "(hero — prompt pending)"}
+      {inPreview ? (
+        /* Image-preview stage — show the ACTUAL generated hero; approve it live or reject with notes. */
+        <div className="mt-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={card.preview_image_url}
+            alt="Generated hero candidate"
+            className="w-full rounded-md border border-zinc-200 object-contain dark:border-zinc-800"
+          />
+          {attempts.length > 0 && (
+            <div className="mt-2">
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                Rejected attempts ({attempts.length})
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {attempts.map((a, i) => (
+                  <div key={i} className="w-20" title={a.notes || ""}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={a.url}
+                      alt={`Rejected attempt ${i + 1}`}
+                      className="h-20 w-20 rounded border border-zinc-200 object-cover opacity-70 dark:border-zinc-800"
+                    />
+                    {a.notes && (
+                      <p className="mt-0.5 line-clamp-2 text-[9px] leading-tight text-zinc-400">{a.notes}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Concept stage — hero prompt for kind:'hero', content patch diff otherwise. */
+        <div className="mt-3 rounded border border-zinc-100 bg-zinc-50 p-2.5 dark:border-zinc-800 dark:bg-zinc-900/50">
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+            Variant{card.variant.label ? ` — ${card.variant.label}` : ""}
           </p>
-        ) : card.variant.patch ? (
-          <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-snug text-zinc-600 dark:text-zinc-300">
-            {JSON.stringify(card.variant.patch, null, 2)}
-          </pre>
-        ) : (
-          <p className="text-xs text-zinc-400">(content patch)</p>
-        )}
-      </div>
+          {isHero ? (
+            <p className="text-xs text-zinc-600 dark:text-zinc-300">
+              {card.variant.hero_prompt || "(hero — prompt pending)"}
+            </p>
+          ) : card.variant.patch ? (
+            <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-snug text-zinc-600 dark:text-zinc-300">
+              {JSON.stringify(card.variant.patch, null, 2)}
+            </pre>
+          ) : (
+            <p className="text-xs text-zinc-400">(content patch)</p>
+          )}
+        </div>
+      )}
 
-      <div className="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={onApprove}
-          className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
-        >
-          {busy ? "Working…" : "Approve"}
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={onDecline}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-        >
-          Decline
-        </button>
+      {inPreview && rejectOpen && (
+        <div className="mt-3">
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+            placeholder='What to change? e.g. "warmer light", "show the pouch facing forward", "less busy background"'
+            className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+          />
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {inPreview ? (
+          rejectOpen ? (
+            <>
+              <button
+                type="button"
+                disabled={disabled || !notes.trim()}
+                onClick={() => onReject(notes.trim())}
+                className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
+              >
+                {busy ? "Working…" : "Reject & regenerate"}
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => { setRejectOpen(false); setNotes(""); }}
+                className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={onApprove}
+                className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {busy ? "Working…" : "Approve & go live"}
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => setRejectOpen(true)}
+                className="rounded-md border border-amber-300 px-3 py-1.5 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-50 disabled:opacity-50 dark:border-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-950/30"
+              >
+                Reject with notes
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={onDecline}
+                className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Cancel campaign
+              </button>
+            </>
+          )
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={onApprove}
+              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {busy ? "Working…" : isHero ? "Approve concept → generate preview" : "Approve"}
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={onDecline}
+              className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Decline
+            </button>
+          </>
+        )}
       </div>
     </li>
   );

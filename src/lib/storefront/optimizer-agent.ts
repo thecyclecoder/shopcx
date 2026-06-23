@@ -28,7 +28,7 @@
  * bet) until M3 has calibrated the proxy once.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { generateNanoBananaProCombine } from "@/lib/gemini";
+import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 import { compressToWebp } from "@/lib/blog/generate-images";
 import {
   loadOptimizerPolicy,
@@ -77,6 +77,78 @@ export const ACTIVE_EXPERIMENT_STATUSES = ["draft", "running", "promoted"] as co
 export const CONSERVATIVE_MIN_HOLDOUT = 0.2;
 /** Bucket the optimizer's generated heroes land in (re-signable, same as the lander heroes). */
 const OPTIMIZER_HERO_BUCKET = "product-media";
+
+// ── Hero dimensions / aspect (optimizer-hero-preview-gate § grounding) ──────────
+// Generate at the REAL hero slot, not a guessed size: for the PDP, the variant's stored
+// hero_width × hero_height (what HeroSection renders — sourced from the product's `slot='hero'`
+// product_media row); for the other landers, the hero aspect of that section. Pick the closest
+// Nano-Banana aspectRatio so the result fits the slot with no distortion / awkward crop.
+const NANO_ASPECTS: NanoBananaAspect[] = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
+function aspectRatioOf(a: NanoBananaAspect): number {
+  const [w, h] = a.split(":").map(Number);
+  return w / h;
+}
+/** Closest Nano-Banana aspectRatio to a raw width×height (log-distance — matches how the eye
+ *  reads "off" crops). Defaults to a square-ish 4:5 when dimensions are missing. */
+export function nearestNanoAspect(width?: number | null, height?: number | null): NanoBananaAspect {
+  if (!width || !height || width <= 0 || height <= 0) return "4:5";
+  const target = Math.log(width / height);
+  let best: NanoBananaAspect = NANO_ASPECTS[0];
+  let bestD = Infinity;
+  for (const a of NANO_ASPECTS) {
+    const d = Math.abs(Math.log(aspectRatioOf(a)) - target);
+    if (d < bestD) { bestD = d; best = a; }
+  }
+  return best;
+}
+/** The hero aspect each non-PDP lander section renders (see the storefront _sections):
+ *  advertorial 16:10 product/lifestyle hero · before/after 3:4 · listicle portrait. PDP is
+ *  resolved from the real uploaded hero dimensions, so it's not in this map. */
+const LANDER_HERO_ASPECT: Record<string, NanoBananaAspect> = {
+  advertorial: "3:2", // AdvertorialHero non-avatar = 16:10 → nearest Nano 3:2
+  beforeafter: "3:4", // BeforeAfterHero aspectRatio 3/4
+  listicle: "4:5", // ReasonsListicle portrait hero
+};
+
+/**
+ * Resolve the Nano-Banana aspectRatio the generated hero should target for a surface so it
+ * fits the lander's actual hero slot. PDP reads the product's stored hero dimensions (the
+ * `slot='hero'` product_media row HeroSection renders); the other landers use their section's
+ * fixed aspect. Best-effort — falls back to the lander map / 4:5 if dimensions are missing.
+ */
+export async function resolveHeroAspect(opts: {
+  admin: Admin;
+  productId: string;
+  landerType: string;
+}): Promise<NanoBananaAspect> {
+  if (opts.landerType === "pdp") {
+    try {
+      const { data } = await opts.admin
+        .from("product_media")
+        .select("width, height")
+        .eq("product_id", opts.productId)
+        .eq("slot", "hero")
+        .order("display_order")
+        .limit(1)
+        .maybeSingle();
+      const w = (data as { width?: number | null } | null)?.width ?? null;
+      const h = (data as { height?: number | null } | null)?.height ?? null;
+      if (w && h) return nearestNanoAspect(w, h);
+    } catch {
+      // fall through to the default below
+    }
+    return "4:5"; // HeroSection's own legacy fallback is ~square; 4:5 is the safe slot fit
+  }
+  return LANDER_HERO_ASPECT[opts.landerType] ?? "4:5";
+}
+
+/** Grounding preamble prepended to every optimizer hero prompt: composite the REAL isolated
+ *  pouch faithfully, never redraw the packaging (optimizer-hero-preview-gate § grounding). */
+const HERO_GROUNDING_PREAMBLE =
+  "Composite the EXACT product shown in the attached product image into the scene. " +
+  "The attached image is the real, isolated product pouch — reproduce its packaging, label text, " +
+  "colors and proportions faithfully. NEVER redraw, restyle, or hallucinate the packaging or label. " +
+  "Place it naturally and in sharp focus as the hero of the composition.";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -389,12 +461,26 @@ export async function loadOptimizerBrief(opts: {
  * composites the product's isolated pouch image, compresses to webp, uploads to the
  * product-media bucket. The worker calls this for a kind='hero' variant, then stores the
  * URL into the variant's `heroImageUrl` patch.
+ *
+ * Grounding (optimizer-hero-preview-gate § grounding):
+ *  - Composites the REAL pouch from `product_variants.isolated_image_url` — passed as the
+ *    Nano-Banana Pro *combine* reference image, with a preamble that forbids redrawing the
+ *    packaging, so the label is the exact product (never hallucinated).
+ *  - Targets the lander's actual hero slot: `landerType` resolves the closest Nano aspectRatio
+ *    (PDP = the variant's stored hero_width×hero_height; other landers = their section aspect),
+ *    so the result fits the slot with no distortion / awkward crop.
+ *  - `notes` (owner reject-with-notes) augment the prompt so the regeneration honors the asks.
  */
 export async function generateCampaignHero(opts: {
   workspaceId: string;
   productId: string;
   prompt: string;
   slug: string;
+  landerType?: string;
+  /** Owner revision notes accumulated across the preview/reject loop (oldest → newest). */
+  notes?: string[];
+  /** Override the resolved aspect (else derived from landerType + the real hero slot). */
+  aspectRatio?: NanoBananaAspect;
   admin?: Admin;
 }): Promise<string | null> {
   const admin = opts.admin ?? createAdminClient();
@@ -413,12 +499,29 @@ export async function generateCampaignHero(opts: {
   if (!handle || !isolated) return null;
   const safeSlug = opts.slug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().slice(0, 60) || "hero";
   const path = `workspaces/${opts.workspaceId}/landers/${handle}/optimizer/${safeSlug}.webp`;
+
+  const aspectRatio =
+    opts.aspectRatio ??
+    (await resolveHeroAspect({ admin, productId: opts.productId, landerType: opts.landerType ?? "pdp" }));
+
+  // Augment the prompt: grounding preamble + the hypothesis prompt + any owner revision notes
+  // (the reject-with-notes loop learns within the gate — nothing serves until the owner approves).
+  const notes = (opts.notes ?? []).map((n) => n.trim()).filter(Boolean);
+  const prompt = [
+    HERO_GROUNDING_PREAMBLE,
+    "",
+    opts.prompt,
+    ...(notes.length
+      ? ["", "Owner revision notes — apply ALL of these to this regeneration:", ...notes.map((n) => `- ${n}`)]
+      : []),
+  ].join("\n");
+
   try {
     const { buffer: raw } = await generateNanoBananaProCombine({
       workspaceId: opts.workspaceId,
-      prompt: opts.prompt,
+      prompt,
       imageUrls: [isolated],
-      aspectRatio: "16:9",
+      aspectRatio,
     });
     const { buffer } = await compressToWebp(raw, { maxWidth: 1600, quality: 82 });
     const { error } = await admin.storage
