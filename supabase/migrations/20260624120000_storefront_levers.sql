@@ -32,7 +32,7 @@ create table if not exists public.storefront_levers (
   lever_key text not null unique,
   -- The chapter this lever belongs to (for a chapter-level lever, == lever_key).
   chapter text not null,
-  kind text not null check (kind in ('chapter', 'component')),
+  level text not null check (level in ('chapter', 'component')),
   label text not null,
   description text,
   -- CRO prior importance in [0,1]. Chapter-level priors reflect funnel dwell/CTA share (hero #1).
@@ -45,9 +45,9 @@ create table if not exists public.storefront_levers (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   -- A component must have a parent chapter; a chapter must not.
-  constraint storefront_levers_kind_parent check (
-    (kind = 'chapter' and parent_lever_id is null) or
-    (kind = 'component' and parent_lever_id is not null)
+  constraint storefront_levers_level_parent check (
+    (level = 'chapter' and parent_lever_id is null) or
+    (level = 'component' and parent_lever_id is not null)
   )
 );
 
@@ -109,7 +109,7 @@ create policy storefront_lever_importance_service on public.storefront_lever_imp
 -- ── Seed the canonical taxonomy + CRO priors ──────────────────────────────────
 -- Chapter level — ranked by the funnel-data dwell/CTA share we already have:
 -- hero dominant (#1), pricing-table clarity (#2), social proof near the decision, then the rest.
-insert into public.storefront_levers (lever_key, chapter, kind, label, prior, default_scope, description) values
+insert into public.storefront_levers (lever_key, chapter, level, label, prior, default_scope, description) values
   ('hero',          'hero',          'chapter', 'Hero',                0.90, 'general',          'The above-the-fold hook — the dominant CRO lever.'),
   ('pricing_table', 'pricing_table', 'chapter', 'Pricing table',       0.78, 'general',          'Pricing/offer clarity at the decision — CRO lever #2.'),
   ('social_proof',  'social_proof',  'chapter', 'Social proof',        0.62, 'general',          'Reviews/ratings/testimonials placed near the decision.'),
@@ -122,7 +122,7 @@ insert into public.storefront_levers (lever_key, chapter, kind, label, prior, de
 on conflict (lever_key) do nothing;
 
 -- Component level — decompose the hero (the dominant chapter).
-insert into public.storefront_levers (lever_key, chapter, kind, parent_lever_id, label, prior, default_scope, description)
+insert into public.storefront_levers (lever_key, chapter, level, parent_lever_id, label, prior, default_scope, description)
 select v.lever_key, 'hero', 'component', p.id, v.label, v.prior, v.default_scope, v.description
 from (values
   ('image',         'Hero image',        0.62, 'general',          'The hero visual.'),
@@ -136,7 +136,7 @@ where p.lever_key = 'hero'
 on conflict (lever_key) do nothing;
 
 -- Component level — decompose the pricing table (clarity #2).
-insert into public.storefront_levers (lever_key, chapter, kind, parent_lever_id, label, prior, default_scope, description)
+insert into public.storefront_levers (lever_key, chapter, level, parent_lever_id, label, prior, default_scope, description)
 select v.lever_key, 'pricing_table', 'component', p.id, v.label, v.prior, v.default_scope, v.description
 from (values
   ('price_anchor',  'Price anchor',      0.55, 'general',          'The anchor/compare-at price.'),
@@ -149,7 +149,7 @@ where p.lever_key = 'pricing_table'
 on conflict (lever_key) do nothing;
 
 -- Component level — decompose social proof.
-insert into public.storefront_levers (lever_key, chapter, kind, parent_lever_id, label, prior, default_scope, description)
+insert into public.storefront_levers (lever_key, chapter, level, parent_lever_id, label, prior, default_scope, description)
 select v.lever_key, 'social_proof', 'component', p.id, v.label, v.prior, v.default_scope, v.description
 from (values
   ('testimonial',   'Testimonial',       0.45, 'general',          'A featured customer testimonial.'),
