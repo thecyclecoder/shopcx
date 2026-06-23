@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
-import { findMergedSiblingBuild, handleAutoMergedBuildBranch } from "@/lib/agent-jobs";
+import { findMergedSiblingBuild, handleAutoMergedBuildBranch, getBranchBuildSuccess } from "@/lib/agent-jobs";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -513,10 +513,13 @@ export interface AutoMergeResult {
   syncActive: boolean;
   checked: number;
   ready: number;
+  /** optimizer-launch-hardening Phase 2: PRs that were GitHub-clean but whose owning build job had NOT
+   * succeeded (or no job owned the branch) — refused by the success gate, left for the owner. */
+  buildGateBlocked: number;
   /** 0 or 1 — SERIALIZED: at most one merge per pass (the resulting push-to-main webhook handles the next). */
   merged: number;
   mergedPr?: number;
-  prs: Array<{ number: number; branch: string; mergeableState: string | null; ready: boolean; merged: boolean }>;
+  prs: Array<{ number: number; branch: string; mergeableState: string | null; ready: boolean; buildGateOk?: boolean; merged: boolean }>;
 }
 
 /**
@@ -529,11 +532,17 @@ export interface AutoMergeResult {
  *  - SERIALIZED: merges at most ONE PR per pass so we never fan out N merges → N simultaneous Vercel deploys.
  *    The squash-merge fires a push-to-main webhook, which re-enters this gate to merge the next ready PR.
  *  - mergeable + state==="clean" only — a conflict is left for the resolver, a red/pending check for the human.
+ *  - SUCCESS GATE (optimizer-launch-hardening Phase 2): because the repo has no CI / branch protection,
+ *    GitHub's `clean` is vacuous — so a GitHub-clean PR is merged ONLY if its OWN build job succeeded
+ *    (the branch-owning agent_job is `completed`/`merged`, i.e. the worker's pre-push tsc passed). A
+ *    clean-but-not-successfully-built PR (partial/errored/paused/parked build, or an untracked manual
+ *    push) is left for the owner — a gate-blocked PR never blocks a legitimately-built later PR (the
+ *    serialize guard keeps scanning until one actually merges).
  * Surfaces the pass as a Control Tower heartbeat (loop_id = AUTO_MERGE_GATE_LOOP_ID) + a console log.
  */
 export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult> {
   const db = admin || createAdminClient();
-  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, merged: 0, prs: [] };
+  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, merged: 0, prs: [] };
   let ok = true;
   try {
     if (!ghToken()) return result;
@@ -568,10 +577,23 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
       }
       const ready = isPrReady(mergeable, mergeableState, pr);
       let merged = false;
+      let buildGateOk: boolean | undefined;
       if (ready) {
         result.ready++;
         // SERIALIZE: only attempt the first ready PR — the post-merge push webhook drives the next one.
+        // (A gate-blocked PR leaves result.merged at 0, so the scan continues to the next ready PR.)
         if (result.merged === 0) {
+          // optimizer-launch-hardening Phase 2 — success gate: GitHub's "clean" is vacuous here (no CI /
+          // branch protection), so additionally require the branch's OWN build job to have succeeded
+          // (completed/merged ⇒ the worker's pre-push tsc passed). Refuse a clean-but-unbuilt PR.
+          const gate = await getBranchBuildSuccess(branch, db);
+          buildGateOk = gate.ok;
+          if (!gate.ok) {
+            result.buildGateBlocked++;
+            console.warn(`[auto-merge] PR #${prNumber} (${branch}) is GitHub-clean but the build success gate refused it: ${gate.reason} — left for the owner`);
+            result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
+            continue;
+          }
           const headSha = (pr.head as { sha?: string } | undefined)?.sha;
           try {
             const m = await squashMergeAndDelete(prNumber, branch, headSha);
@@ -600,7 +622,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
           }
         }
       }
-      result.prs.push({ number: prNumber, branch, mergeableState, ready, merged });
+      result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
     }
     return result;
   } catch (e) {
@@ -617,6 +639,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         syncActive: result.syncActive,
         checked: result.checked,
         ready: result.ready,
+        buildGateBlocked: result.buildGateBlocked,
         merged: result.merged,
         mergedPr: result.mergedPr ?? null,
       },

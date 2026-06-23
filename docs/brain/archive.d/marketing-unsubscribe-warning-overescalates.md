@@ -1,0 +1,1 @@
+- **get_customer_account no-shopify-id warning over-escalates already-unsubscribed empty shells** · verified 2026-06-23 · → [[libraries/sonnet-orchestrator-v2]]

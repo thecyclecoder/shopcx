@@ -7,7 +7,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | Folder | Contents | Count |
 |---|---|---|
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 197 |
-| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 75 |
+| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 76 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 22 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 260 |
 | [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 29 |
@@ -305,6 +305,7 @@ Every background job, webhook fan-out, and cron lives here. Each page lists trig
 - [[inngest/klaviyo-engagement-sync]] — Daily 4am CST incremental delta → `profile_events`.
 - [[inngest/klaviyo-events-import]] — Placed Order events + UTM attribution.
 - [[inngest/klaviyo-sms-import]] — Historical Klaviyo SMS campaigns.
+- [[inngest/loop-heartbeats-prune]] — Daily prune of `loop_heartbeats` older than 3 days (Control Tower retention).
 - [[inngest/marketing-coupon-cron]] — Auto-disables expired SMS-campaign coupons.
 - [[inngest/marketing-text]] — SMS campaign send pipeline (schedule + 5-min send tick).
 - [[inngest/meta-historical-comments-sync]] — Backfills `social_comments` from historical posts/ads.

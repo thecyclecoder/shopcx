@@ -1,0 +1,1 @@
+- **Storefront Optimizer — activation + product-scope gate (OFF by default)** · verified 2026-06-23 · → [[libraries/storefront-optimizer-policy]]

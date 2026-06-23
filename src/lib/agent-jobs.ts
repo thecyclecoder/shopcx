@@ -287,6 +287,58 @@ export async function findMergedSiblingBuild(
   return null;
 }
 
+/** The job statuses that prove a branch was BUILT SUCCESSFULLY: the worker only flips a build/fold/
+ * pr-resolve job to `completed` after its pre-push `tsc --noEmit` passed and the PR opened cleanly,
+ * and to `merged` once that PR landed. Every other status is a partial/errored/paused/parked build. */
+export const SUCCESSFUL_BUILD_STATUSES: JobStatus[] = ["completed", "merged"];
+
+/** The job kinds that OWN a claude/* PR branch (each sets `spec_branch` to the branch). */
+const BRANCH_OWNING_KINDS: JobKind[] = ["build", "fold", "pr-resolve"];
+
+/**
+ * optimizer-launch-hardening Phase 2 — the auto-merge SUCCESS GATE. The repo has no CI workflows and
+ * no branch protection, so GitHub reports `mergeable_state==="clean"` for ANY non-conflicting claude/*
+ * PR — a vacuous signal that proves nothing about the build. The real proof a build succeeded is its
+ * OWN agent_job: the worker drives the branch's job to `completed` only after its pre-push
+ * `tsc --noEmit` passed and the PR opened cleanly (→ `merged` once it lands). A branch whose owning
+ * job is anything else — `building`/`queued`/`queued_resume` (partial push), `failed`/`needs_attention`
+ * (errored post-push), `needs_input`/`needs_approval` (paused mid-build), `blocked_on_usage` (parked) —
+ * or a branch with NO owning job (a manual / untracked push) has NOT passed that gate and must NOT
+ * auto-merge unreviewed.
+ *
+ * Returns the verdict for the NEWEST branch-owning job (build/fold/pr-resolve — the kinds that set
+ * `spec_branch` to the PR branch; a stale dirty-PR resolve that just cleaned the branch is its newest
+ * job and reads `completed` correctly). `ok:false` ⇒ leave the PR for the owner. Fails CLOSED: a read
+ * error or a missing job returns `ok:false` (never auto-merge on an unknown).
+ */
+export async function getBranchBuildSuccess(
+  branch: string,
+  adminClient?: Admin,
+): Promise<{ ok: boolean; status: JobStatus | null; reason: string }> {
+  if (!branch || !branch.startsWith("claude/")) {
+    return { ok: false, status: null, reason: "not a claude/* branch" };
+  }
+  try {
+    const admin = adminClient || createAdminClient();
+    const { data } = await admin
+      .from("agent_jobs")
+      .select("status, kind")
+      .eq("spec_branch", branch)
+      .in("kind", BRANCH_OWNING_KINDS)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const job = data as { status: JobStatus; kind: JobKind } | null;
+    if (!job) return { ok: false, status: null, reason: "no build job owns this branch (manual/untracked push)" };
+    if (SUCCESSFUL_BUILD_STATUSES.includes(job.status)) {
+      return { ok: true, status: job.status, reason: `${job.kind} job ${job.status}` };
+    }
+    return { ok: false, status: job.status, reason: `${job.kind} job is ${job.status} (not completed/merged)` };
+  } catch (e) {
+    return { ok: false, status: null, reason: `build-job lookup failed: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
 const GH_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken() {
   return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
