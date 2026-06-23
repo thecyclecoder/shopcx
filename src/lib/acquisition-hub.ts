@@ -1,0 +1,371 @@
+/**
+ * Acquisition Research Hub — the aggregation + routing layer behind one owner surface
+ * (docs/brain/specs/acquisition-research-hub.md, Phase 1; M4 of docs/brain/goals/acquisition-research-engine.md).
+ *
+ * Houses the whole Acquisition Research Engine in one place: the competitor sets (competitor-scout),
+ * both scouts' findings (ad-creative-scout + landing-page-scout), and a UNIFIED gap queue where the
+ * owner approves → routes a gap to Build (a component / ad-creative iteration) or the storefront
+ * optimizer (an experiment), tracked through to shipped/won.
+ *
+ * The two scouts persist their gaps differently: lander gaps already live in `lander_recommendations`
+ * (the Landing Page Scout writes them). Ad gaps are computed DETERMINISTICALLY ON DEMAND by
+ * `buildAdGapReport` and were never persisted — so this module MATERIALIZES them into
+ * `ad_gap_recommendations` (idempotent on dedup_key, always 'proposed') before merging the two sources
+ * into one queue. Throughput (proposed → shipped → won) is DERIVED by joining each approved gap's route
+ * artifact (agent_jobs for a Build, storefront_experiments for an optimizer experiment) — no extra
+ * status columns to drift.
+ *
+ * North-star (docs/brain/operational-rules.md § North star): the scouts PROPOSE gaps with evidence;
+ * the owner (later the Growth director) approves what routes. Nothing here auto-routes.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { buildAdGapReport, type AdGapReport, type AdGapRecommendation } from "@/lib/ad-gap";
+
+// ── Normalized gap-queue item (the union of an ad gap and a lander gap) ──────────
+export type GapSource = "ad" | "lander";
+export type GapRoute = "build" | "optimizer";
+export type GapStatus = "proposed" | "approved" | "rejected";
+
+export interface GapQueueItem {
+  id: string;
+  source: GapSource;
+  product_id: string | null;
+  product_title: string | null;
+  gap_type: string;
+  title: string;
+  rationale: string;
+  route: GapRoute;
+  status: GapStatus;
+  route_result: Record<string, unknown> | null;
+  /** Derived from the route artifact: a Build PR is open, or the experiment has launched. */
+  shipped: boolean;
+  /** Derived: the routed experiment was promoted (a validated win). */
+  won: boolean;
+  evidence: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface GapThroughput {
+  proposed: number;
+  approved: number;
+  shipped: number;
+  won: number;
+}
+
+export interface CompetitorRow {
+  id: string;
+  product_id: string | null;
+  brand: string;
+  domain: string | null;
+  pdp_urls: string[] | null;
+  category: string | null;
+  spend_signal: string | null;
+  source: string;
+  status: string;
+  evidence: Record<string, unknown> | null;
+}
+
+export interface LanderSnapshotRow {
+  id: string;
+  product_id: string | null;
+  competitor_id: string | null;
+  is_ours: boolean;
+  brand: string | null;
+  url: string;
+  source: string;
+  status: string;
+  chapter_count: number;
+  captured_at: string | null;
+}
+
+export interface HubProduct {
+  id: string;
+  title: string | null;
+}
+
+export interface HubData {
+  products: HubProduct[];
+  selectedProductId: string | null;
+  competitors: CompetitorRow[];
+  adFindings: AdGapReport;
+  landerSnapshots: LanderSnapshotRow[];
+  gapQueue: GapQueueItem[];
+  throughput: GapThroughput;
+}
+
+/** Slug-safe handle for an ad-angle label (dedup + target spec slug). */
+function slugifyAngle(label: string): string {
+  return (
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "angle"
+  );
+}
+
+const adDedupKey = (label: string) => `ad-angle:${slugifyAngle(label)}`;
+
+/** Map an AdGapRecommendation to the evidence blob persisted on the row. */
+function adEvidence(rec: AdGapRecommendation): Record<string, unknown> {
+  return {
+    brandCount: rec.brandCount,
+    brands: rec.brands,
+    maxDaysRunning: rec.maxDaysRunning,
+    totalEstimatedSpend: rec.totalEstimatedSpend,
+    formats: rec.formats,
+    offers: rec.offers,
+    ctas: rec.ctas,
+    ads: rec.evidence,
+  };
+}
+
+/**
+ * Materialize the (deterministic) ad-gap report into `ad_gap_recommendations` as 'proposed' rows.
+ * Idempotent: inserts only NEW dedup_keys (ignoreDuplicates) so an already-approved/rejected angle
+ * is never reset to proposed and a re-run never duplicates. Returns the live report for display.
+ */
+export async function materializeAdGaps(
+  workspaceId: string,
+  opts: { minBrands?: number; minDaysRunning?: number } = {},
+): Promise<AdGapReport> {
+  const report = await buildAdGapReport(workspaceId, opts);
+  if (report.recommendations.length === 0) return report;
+
+  const admin = createAdminClient();
+  const rows = report.recommendations.map((rec) => ({
+    workspace_id: workspaceId,
+    gap_type: "ad_angle",
+    title: rec.label,
+    rationale: rec.recommendation,
+    route: "build" as const,
+    target_slug: `ad-angle-${slugifyAngle(rec.label)}`,
+    evidence: adEvidence(rec),
+    status: "proposed" as const,
+    dedup_key: adDedupKey(rec.label),
+  }));
+
+  // Insert only angles we haven't seen — never clobber a settled (approved/rejected) row.
+  await admin.from("ad_gap_recommendations").upsert(rows, {
+    onConflict: "workspace_id,dedup_key",
+    ignoreDuplicates: true,
+  });
+  return report;
+}
+
+// ── Routing an approved AD gap (mirrors landing-page-scout's enactRecommendationRoute) ──
+interface AdGapRow {
+  id: string;
+  workspace_id: string;
+  product_id: string | null;
+  gap_type: string;
+  title: string;
+  rationale: string;
+  route: GapRoute;
+  target_slug: string | null;
+  evidence: Record<string, unknown> | null;
+}
+interface EnactResult {
+  ok: boolean;
+  error?: string;
+  route_result?: Record<string, unknown>;
+}
+
+/**
+ * Enact an approved ad gap's route. Ad gaps go to 'build' — author + build an ad-creative iteration
+ * exploring the competitor angle we don't run (the ad iteration engine). Mirrors the Landing Page
+ * Scout's build route: an `agent_jobs` build keyed on the ad-iteration spec slug.
+ */
+export async function enactAdGapRoute(rec: AdGapRow, userId: string | null): Promise<EnactResult> {
+  const admin = createAdminClient();
+
+  // Ad gaps only ever route to Build in Phase 1; 'optimizer' is reserved for forward-symmetry.
+  if (rec.route !== "build") {
+    return { ok: false, error: `ad gaps route to 'build', not '${rec.route}'` };
+  }
+
+  const slug = rec.target_slug || `ad-angle-${slugifyAngle(rec.title)}`;
+  const instructions = JSON.stringify({
+    source: "ad-creative-scout",
+    gap_type: rec.gap_type,
+    title: rec.title,
+    rationale: rec.rationale,
+    recommendation_id: rec.id,
+    evidence: rec.evidence,
+    note: "Author + build an ad-creative iteration exploring this competitor angle we don't run, then route it into the ad iteration engine.",
+  });
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: rec.workspace_id,
+      spec_slug: slug,
+      kind: "build",
+      status: "queued",
+      instructions,
+      created_by: userId,
+    })
+    .select("id")
+    .single();
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, route_result: { agent_job_id: data.id, spec_slug: slug } };
+}
+
+// ── Throughput: derive shipped/won from each approved gap's route artifact ───────
+async function deriveArtifactState(
+  items: { route_result: Record<string, unknown> | null }[],
+): Promise<{ jobShipped: Set<string>; expLaunched: Set<string>; expWon: Set<string> }> {
+  const admin = createAdminClient();
+  const jobIds = new Set<string>();
+  const expIds = new Set<string>();
+  for (const it of items) {
+    const rr = it.route_result || {};
+    if (typeof rr.agent_job_id === "string") jobIds.add(rr.agent_job_id);
+    if (typeof rr.experiment_id === "string") expIds.add(rr.experiment_id);
+  }
+
+  const jobShipped = new Set<string>();
+  if (jobIds.size > 0) {
+    const { data } = await admin.from("agent_jobs").select("id, status").in("id", [...jobIds]);
+    // "Shipped" = the Build delivered a PR (status completed) — the work is in review/merged.
+    for (const j of data || []) if (j.status === "completed") jobShipped.add(j.id as string);
+  }
+
+  const expLaunched = new Set<string>();
+  const expWon = new Set<string>();
+  if (expIds.size > 0) {
+    const { data } = await admin.from("storefront_experiments").select("id, status").in("id", [...expIds]);
+    for (const e of data || []) {
+      // Launched = anything past 'draft'; won = the bandit promoted the variant.
+      if (e.status !== "draft") expLaunched.add(e.id as string);
+      if (e.status === "promoted") expWon.add(e.id as string);
+    }
+  }
+  return { jobShipped, expLaunched, expWon };
+}
+
+function gapShippedWon(
+  item: { route_result: Record<string, unknown> | null; status: GapStatus },
+  state: { jobShipped: Set<string>; expLaunched: Set<string>; expWon: Set<string> },
+): { shipped: boolean; won: boolean } {
+  if (item.status !== "approved" || !item.route_result) return { shipped: false, won: false };
+  const rr = item.route_result;
+  const jobId = typeof rr.agent_job_id === "string" ? rr.agent_job_id : null;
+  const expId = typeof rr.experiment_id === "string" ? rr.experiment_id : null;
+  const shipped = (jobId ? state.jobShipped.has(jobId) : false) || (expId ? state.expLaunched.has(expId) : false);
+  const won = expId ? state.expWon.has(expId) : false;
+  return { shipped, won };
+}
+
+/**
+ * Load the whole hub payload for a workspace (optionally scoped to a product). Materializes the
+ * current ad gaps first, then aggregates competitors + both scouts' findings + the unified gap queue
+ * + the derived throughput. Read-only apart from the idempotent ad-gap materialization.
+ */
+export async function loadHubData(workspaceId: string, productId?: string | null): Promise<HubData> {
+  const admin = createAdminClient();
+
+  // Materialize ad gaps so they have stable IDs + a lifecycle (idempotent, deterministic).
+  const adFindings = await materializeAdGaps(workspaceId);
+
+  // Products for the selector.
+  const { data: productRows } = await admin
+    .from("products")
+    .select("id, title")
+    .eq("workspace_id", workspaceId)
+    .order("title", { ascending: true });
+  const products: HubProduct[] = (productRows || []).map((p) => ({ id: p.id as string, title: p.title as string | null }));
+  const productTitle = new Map(products.map((p) => [p.id, p.title]));
+  const selectedProductId = productId && products.some((p) => p.id === productId) ? productId : null;
+
+  // Competitor set (scoped to the product when one is selected).
+  let competitorsQ = admin
+    .from("competitors")
+    .select("id, product_id, brand, domain, pdp_urls, category, spend_signal, source, status, evidence")
+    .eq("workspace_id", workspaceId)
+    .order("status", { ascending: true })
+    .order("brand", { ascending: true });
+  if (selectedProductId) competitorsQ = competitorsQ.eq("product_id", selectedProductId);
+  const { data: compRows } = await competitorsQ;
+  const competitors = (compRows || []) as CompetitorRow[];
+
+  // Lander findings — snapshots (light: brand/url/status, no signed images here).
+  let snapsQ = admin
+    .from("lander_snapshots")
+    .select("id, product_id, competitor_id, is_ours, brand, url, source, status, chapters, captured_at")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(60);
+  if (selectedProductId) snapsQ = snapsQ.eq("product_id", selectedProductId);
+  const { data: snapRows } = await snapsQ;
+  const landerSnapshots: LanderSnapshotRow[] = (snapRows || []).map((s) => ({
+    id: s.id as string,
+    product_id: s.product_id as string | null,
+    competitor_id: s.competitor_id as string | null,
+    is_ours: s.is_ours as boolean,
+    brand: s.brand as string | null,
+    url: s.url as string,
+    source: s.source as string,
+    status: s.status as string,
+    chapter_count: Array.isArray(s.chapters) ? s.chapters.length : 0,
+    captured_at: s.captured_at as string | null,
+  }));
+
+  // ── The unified gap queue: ad gaps + lander gaps ──
+  const { data: adGapRows } = await admin
+    .from("ad_gap_recommendations")
+    .select("id, product_id, gap_type, title, rationale, route, status, route_result, evidence, created_at")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false });
+
+  let landerRecsQ = admin
+    .from("lander_recommendations")
+    .select("id, product_id, gap_type, title, rationale, route, status, route_result, evidence, created_at")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false });
+  if (selectedProductId) landerRecsQ = landerRecsQ.eq("product_id", selectedProductId);
+  const { data: landerRecRows } = await landerRecsQ;
+
+  const rawQueue = [
+    ...(adGapRows || []).map((r) => ({ ...r, source: "ad" as GapSource })),
+    ...(landerRecRows || []).map((r) => ({ ...r, source: "lander" as GapSource })),
+  ];
+
+  const artifactState = await deriveArtifactState(
+    rawQueue.map((r) => ({ route_result: (r.route_result as Record<string, unknown> | null) ?? null })),
+  );
+
+  const gapQueue: GapQueueItem[] = rawQueue
+    .map((r) => {
+      const item = {
+        route_result: (r.route_result as Record<string, unknown> | null) ?? null,
+        status: r.status as GapStatus,
+      };
+      const { shipped, won } = gapShippedWon(item, artifactState);
+      return {
+        id: r.id as string,
+        source: r.source,
+        product_id: (r.product_id as string | null) ?? null,
+        product_title: r.product_id ? productTitle.get(r.product_id as string) ?? null : null,
+        gap_type: r.gap_type as string,
+        title: r.title as string,
+        rationale: r.rationale as string,
+        route: r.route as GapRoute,
+        status: r.status as GapStatus,
+        route_result: item.route_result,
+        shipped,
+        won,
+        evidence: (r.evidence as Record<string, unknown> | null) ?? {},
+        created_at: r.created_at as string,
+      };
+    })
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+
+  const throughput: GapThroughput = {
+    proposed: gapQueue.filter((g) => g.status === "proposed").length,
+    approved: gapQueue.filter((g) => g.status === "approved").length,
+    shipped: gapQueue.filter((g) => g.shipped).length,
+    won: gapQueue.filter((g) => g.won).length,
+  };
+
+  return { products, selectedProductId, competitors, adFindings, landerSnapshots, gapQueue, throughput };
+}
