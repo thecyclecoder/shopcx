@@ -1,4 +1,4 @@
-# Scope Control Tower loop-alert writes to the production environment ⏳
+# Scope Control Tower loop-alert writes to the production environment ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** foreign-app-noise
 **Repair-root-cause:** `src/lib/control-tower/monitor.ts::foreign-app-noise`
@@ -11,10 +11,14 @@ claude-status-poll-cron triggered a registered_not_firing loop_alert, but that l
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
+**Shipped:** `runControlTowerMonitor()` (`src/lib/control-tower/monitor.ts`) now builds the read-only snapshot, then guards the entire act phase behind `isCanonicalProductionDeploy()` (= `process.env.VERCEL_ENV === "production"`). On a non-prod deploy it logs the env + evaluated loop count and returns `opened:0, resolved:0` **before** any `loop_alerts` insert/update/resolve, owner page, or Repair/coverage enqueue. The dashboard read path (`buildControlTowerSnapshot`, used by `/api/developer/control-tower`) is unchanged — every env still renders its own tiles. Brain page [[../libraries/control-tower]] updated.
+
 ## Verification
-- Re-trigger the originating condition (signature `loop:claude-status-poll-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- On a preview/branch deploy whose `MONITORED_LOOPS` includes a loop absent from prod HEAD, let `control-tower-monitor` fire → expect NO new `loop_alerts` row in the shared feed, NO owner Slack page, NO `repair`/`coverage-register` `agent_jobs`, and the cron log line `[control-tower] non-production deploy (VERCEL_ENV=…) — … skipping act loop`.
+- On the canonical production deploy (`VERCEL_ENV=production`), let `control-tower-monitor` fire on a genuinely-red loop → expect the de-duped `loop_alerts` insert + owner page + `loop:<id>` Repair enqueue to land exactly as before (no behavior regression).
+- Re-trigger the originating condition (signature `loop:claude-status-poll-cron`) from a non-prod deploy → expect no new `error_events` row / `loop_alert` for it, and the Control Tower tile stays green.
 
 > Authored by the box Repair Agent from Control Tower signature `loop:claude-status-poll-cron` (verdict: foreign-app-noise). Commission the build from the Control Tower / Roadmap board.
