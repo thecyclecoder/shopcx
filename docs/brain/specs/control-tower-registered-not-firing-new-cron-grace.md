@@ -1,4 +1,4 @@
-# Grace registered_not_firing for newly-added crons (anchor to first-observed, not watchdog uptime) ⏳
+# Grace registered_not_firing for newly-added crons (anchor to first-observed, not watchdog uptime) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/monitor.ts::monitor-false-positive`
@@ -11,8 +11,10 @@ The registered_not_firing guard in evalCron (src/lib/control-tower/monitor.ts:31
 
 **Likely target:** `src/lib/control-tower/monitor.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+The general `registeredAt` grace mechanism already shipped in [[control-tower-registered-not-firing-newcron-grace]] (sibling signal `loop:storefront-experiments-refresh-cron`): `evalCron` gates `registered_not_firing` on `(now - registeredAt) > window` IN ADDITION to `monitorUptimeMs > window`, and the registry type carries an optional `MonitoredLoop.registeredAt`. `storefront-lever-decay-cron` simply never got its `registeredAt` stamped, so it still false-paged on day one. Fix = a one-line data change: set `registeredAt: "2026-06-22T19:07:00Z"` on the `storefront-lever-decay-cron` registry entry (its Inngest registration time), so it stays amber "awaiting first run" until a full 26h cadence+grace past registration — covering the gap to its first `0 13 * * *` tick. No new code path; the persisted-`first_observed_at` framing in the Problem section was superseded by the deploy-surviving code-constant `registeredAt` chosen by the sibling build.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:storefront-lever-decay-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
