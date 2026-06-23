@@ -434,6 +434,12 @@ function RoleHeader({ org, role, onChange }: { org: OrgChart; role: string; onCh
             </h2>
             <p className="text-[12px] text-zinc-500 dark:text-zinc-400">{persona.personality}</p>
           </div>
+          <Link
+            href="/dashboard/agents/ceo"
+            className="ml-auto text-[12px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
+          >
+            View profile →
+          </Link>
         </div>
         {org.ceo.goals.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -473,11 +479,16 @@ function RoleHeader({ org, role, onChange }: { org: OrgChart; role: string; onCh
             </h2>
             <p className="text-[12px] text-zinc-500 dark:text-zinc-400">{worker.description}</p>
           </div>
-          <span
-            className="ml-auto text-[12px] text-zinc-400"
-            title={`Reports to ${dp.name} · ${dp.role}`}
-          >
-            reports to {dp.name} · {dp.role}
+          <span className="ml-auto flex flex-col items-end gap-0.5 text-[12px]">
+            <span className="text-zinc-400" title={`Reports to ${dp.name} · ${dp.role}`}>
+              reports to {dp.name} · {dp.role}
+            </span>
+            <Link
+              href={`/dashboard/agents/${encodeURIComponent(worker.kind)}`}
+              className="font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
+            >
+              View profile →
+            </Link>
           </span>
         </div>
       </div>
@@ -495,12 +506,20 @@ function RoleHeader({ org, role, onChange }: { org: OrgChart; role: string; onCh
           </h2>
           <p className="text-[12px] text-zinc-500 dark:text-zinc-400">{persona.personality}</p>
         </div>
-        <Link
-          href={`/dashboard/roadmap/map`}
-          className="ml-auto text-[12px] text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
-        >
-          {d.slug} →
-        </Link>
+        <span className="ml-auto flex flex-col items-end gap-0.5 text-[12px]">
+          <Link
+            href={`/dashboard/agents/${encodeURIComponent(d.slug)}`}
+            className="font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
+          >
+            View profile →
+          </Link>
+          <Link
+            href={`/dashboard/roadmap/map`}
+            className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+          >
+            {d.slug} →
+          </Link>
+        </span>
       </div>
       {d.mandates.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -531,11 +550,14 @@ export default function AgentsPage() {
   // "org" = the visual org-tree / team page (Phase 4); "inbox" = the role nav + three-tab inbox.
   const [view, setView] = useState<"org" | "inbox">("org");
 
-  // Selecting a node in the org tree opens that role's inbox (Phase 5 will repoint nodes
-  // at per-role profile pages; until then the inbox is the coherent destination).
-  const selectRole = useCallback((r: string) => {
-    setRole(r);
-    setView("inbox");
+  // Deep-link support: a profile page (Phase 5) links back here with ?view=inbox&role=…
+  // so its "Open inbox →" lands on that role's inbox. Read once on mount (client-only).
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const r = p.get("role");
+    const v = p.get("view");
+    if (r) setRole(r);
+    if (v === "inbox" || v === "org") setView(v);
   }, []);
 
   const loadOrg = useCallback(
@@ -608,8 +630,8 @@ export default function AgentsPage() {
         </div>
       ) : org && view === "org" ? (
         // The visual employee/org chart — CEO → Directors → Workers (Phase 4). Every node
-        // is clickable → opens that role's inbox (Phase 5 repoints nodes at profile pages).
-        <OrgTree org={org} onSelectRole={selectRole} />
+        // links to that role's profile detail page (Phase 5, /dashboard/agents/[role]).
+        <OrgTree org={org} />
       ) : org ? (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[260px_1fr]">
           <aside className="lg:border-r lg:border-zinc-200 lg:pr-4 dark:lg:border-zinc-800">

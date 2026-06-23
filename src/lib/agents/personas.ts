@@ -28,6 +28,13 @@ export interface AgentPersona {
   emoji: string;
   /** one-line voice for the board posts (M3 reuses this) */
   personality: string;
+  /**
+   * The precise responsibility list rendered on the role's profile page
+   * (Phase 5). Workers carry the MOST precise list (their exact mandate);
+   * directors + the CEO derive theirs from the brain (mandates / goals), so
+   * this is populated for the worker cast only — see RESPONSIBILITIES below.
+   */
+  responsibilities?: string[];
   /** which inline SVG mascot to render (fallback when no avatarUrl) */
   mascotId: MascotId;
   /** real headshot URL (public agent-avatars bucket) — preferred over the mascot */
@@ -170,6 +177,71 @@ export const PERSONAS: Record<string, AgentPersona> = {
   },
 };
 
+/**
+ * Precise per-worker responsibility lists (Phase 5 — the profile detail page).
+ * Keyed by `agent_jobs` kind (the box lane). Workers carry the MOST precise list —
+ * their exact mandate — while directors/CEO derive responsibilities from the brain
+ * (`functions/*.md` mandates / `goals/*.md`). Reskinnable here in one place.
+ */
+const RESPONSIBILITIES: Record<string, string[]> = {
+  repair: [
+    "Triage every inbound error the Control Tower raises",
+    "Root-cause the failure, not just the symptom",
+    "Dismiss foreign / transient / already-fixed errors as noise",
+    "Author the fix (a spec or a direct patch) and escort it to green",
+  ],
+  regression: [
+    "Review every regression alert the test sweep raises",
+    "Dismiss false / flaky regressions with a written rationale",
+    "Author a fix spec for the real ones, directly on the roadmap",
+  ],
+  db_health: [
+    "Watch slow queries + table growth across the schema",
+    "EXPLAIN-diagnose the offending query path",
+    "Propose the index / migration that fixes it (owner-approved)",
+  ],
+  "coverage-register": [
+    "Catch loops + jobs running unregistered in the Control Tower",
+    "Propose the MONITORED_LOOPS registry entry (or an exemption)",
+    "Keep every background loop heartbeat-watched, no blind spots",
+  ],
+  "spec-test": [
+    "Verify shipped specs still hold against live prod state",
+    "Catch false-✅ specs + drift from their verification checklist",
+    "Flag regressions back to the owning function as fix work",
+  ],
+  build: [
+    "Claim queued build jobs off the roadmap",
+    "Build the spec on the box with native tools, phase by phase",
+    "Keep `tsc --noEmit` clean and open a `claude/*` PR",
+  ],
+  "migration-fix": [
+    "Diagnose failed Appstle→internal migration_audits rows",
+    "Apply the judgment fixes the mechanical auto-heal punts",
+    "Reconcile migration-file drift vs the live DB; re-verify to clear",
+  ],
+  "pr-resolve": [
+    "Resolve dirty / conflicted PRs in the merge queue",
+    "Dedupe overlapping branches, rebase onto the default branch",
+    "Keep the queue clean so the owner can squash-merge cleanly",
+  ],
+  fold: [
+    "Fold every fully-shipped, owner-verified spec into the brain",
+    "Cross-link the lifecycle/table/library/inngest pages it touched",
+    "Archive + `git rm` the spec so the brain stays canonical",
+  ],
+  monitor: [
+    "Watch heartbeats / loops / error rates across the system",
+    "Raise alerts when a loop stalls or errors spike",
+    "Feed unhandled errors into the error→repair pipeline",
+  ],
+  plan: [
+    "Decompose a goal into a milestone → spec tree",
+    "Wire blocked_by dependencies between specs",
+    "Assign each leaf spec an owner function + a parent (no orphans)",
+  ],
+};
+
 /** A neutral fallback so a NEW function/*.md or worker with no persona entry still renders. */
 function defaultPersona(slug: string, label?: string): AgentPersona {
   const name = label || slug.replace(/(^|[-_])(\w)/g, (_m, sep, c) => (sep ? " " : "") + c.toUpperCase());
@@ -184,5 +256,7 @@ function defaultPersona(slug: string, label?: string): AgentPersona {
 
 /** Resolve a persona by function slug, worker kind, or "ceo"; falls back to a neutral persona. */
 export function getPersona(slug: string, label?: string): AgentPersona {
-  return PERSONAS[slug] ?? defaultPersona(slug, label);
+  const base = PERSONAS[slug] ?? defaultPersona(slug, label);
+  const responsibilities = RESPONSIBILITIES[slug];
+  return responsibilities ? { ...base, responsibilities } : base;
 }
