@@ -1,0 +1,1 @@
+- **DB Health Agent — watch tables for growth / slow queries / missing indexes, propose fixes** · verified 2026-06-23 · → [[libraries/db-health]]
