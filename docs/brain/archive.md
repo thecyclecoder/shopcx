@@ -24,6 +24,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **DB Health — never author an empty fix spec (re-derive on empty body)** · verified 2026-06-23 · → [[libraries/db-health]]
 - **db-index-orders — composite (workspace_id, created_at DESC) index on orders** · verified 2026-06-23 · → [[tables/orders]]
 - **Dunning payday-retry cron: emit Control Tower heartbeat on empty (no-due-cycle) runs** · verified 2026-06-23 · → [[inngest/dunning]]
+- **Edge experiment manifest — self-heal on the refresh cron** · verified 2026-06-23 · → [[libraries/storefront-experiment-refresh]]
 - **loop_heartbeats retention — prune so the Control Tower RPC stays fast** · verified 2026-06-23 · → [[inngest/loop-heartbeats-prune]]
 - **marketing-coupon-auto-disable cron must beat on the no-work path** · verified 2026-06-23 · → [[inngest/marketing-coupon-cron]]
 - **get_customer_account no-shopify-id warning over-escalates already-unsubscribed empty shells** · verified 2026-06-23 · → [[libraries/sonnet-orchestrator-v2]]
