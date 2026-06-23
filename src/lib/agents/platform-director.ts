@@ -19,6 +19,11 @@
  * Phase 1 a non-leash / unconfirmable request is simply left untouched (it stays needs_approval) and
  * logged as escalated, never auto-approved.
  *
+ * Phase 2 (escortApprovedGoals, at the bottom) adds the other half of the leash — milestone progression
+ * of an ALREADY-APPROVED goal: a proactive sweep that drives the unblocked specs of the goals the
+ * director owns through the EXISTING build chain (auto-queue + builder chain + auto-ship + fold), logging
+ * each advance. Also dormant until live+autonomous; starting a NEW goal is never auto (Phase 3 escalation).
+ *
  * See docs/brain/specs/platform-director-agent.md · docs/brain/libraries/platform-director.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -33,6 +38,8 @@ import {
 } from "@/lib/agents/approval-router";
 import { ownerFunctionForKind, inlineApproveActionId, type ApprovalJobRow } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
+import { getGoals, getRoadmap, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -244,4 +251,142 @@ export async function enqueuePlatformDirectorJobs(admin: Admin): Promise<{ enque
     if (!error) slugs.push(t.spec_slug || String(t.kind));
   }
   return { enqueued: slugs.length, slugs };
+}
+
+// ── Phase 2 — escort approved goals through their milestones ─────────────────────────────────────
+// The chain-driving the operator did by HAND becomes the director's job: for each approved goal it owns,
+// drive every UNBLOCKED, unshipped spec through self-sequence → build → merge → fold. It LEANS on the
+// existing machinery (the blocked_by auto-queue `autoQueueUnblockedBy` fires reactively on a blocker's
+// merge; the builder chain + auto-ship + fold carry a build the rest of the way) and adds only the
+// PROACTIVE sweep + the audited advance: it kicks off the unblocked specs the reactive auto-queue never
+// caught (the first spec of a goal, or one a missed enqueue left stranded) and logs an `escorted_goal`
+// director_activity row each time it advances a goal. It NEVER reimplements the build/merge/fold path.
+//
+// Milestone progression of an ALREADY-APPROVED goal is inside the leash (auto). STARTING a new goal is
+// not — that always escalates to the CEO (Phase 3), so the escort only ever touches a goal with real
+// progress, and the per-spec blocker gate keeps it from queuing anything out of sequence.
+
+/**
+ * Resolve the (effectively single-tenant) workspace the escort queues builds under — ride the latest
+ * agent_jobs row's workspace, else the oldest workspace. Mirrors coverage-register's resolveWorkspace.
+ */
+async function resolveDirectorWorkspace(admin: Admin): Promise<string | null> {
+  const { data: latestJob } = await admin
+    .from("agent_jobs")
+    .select("workspace_id")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const fromJob = (latestJob as { workspace_id?: string } | null)?.workspace_id;
+  if (fromJob) return fromJob;
+  const { data: ws } = await admin.from("workspaces").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
+  return (ws as { id?: string } | null)?.id ?? null;
+}
+
+/**
+ * An already-approved goal the director MAY escort (the leash): one with real progress (`pct > 0` — work
+ * the CEO already greenlit) that isn't yet complete. A ZERO-progress goal is "not yet started"; kicking off
+ * its first spec would be STARTING a new goal, which always escalates to the CEO (Phase 3) — never the
+ * director. (No goal-approval flag exists in the DB; progress is the proxy for "already greenlit".)
+ */
+function isApprovedInProgress(goal: GoalCard): boolean {
+  return goal.pct > 0 && goal.pct < 100;
+}
+
+/** Every distinct spec linked across a goal's milestones, resolved to its live SpecCard. */
+function goalSpecs(goal: GoalCard, specBySlug: Map<string, SpecCard>): SpecCard[] {
+  const slugs = new Set<string>();
+  for (const m of goal.milestones) for (const s of m.specSlugs) slugs.add(s);
+  return [...slugs].map((s) => specBySlug.get(s)).filter((c): c is SpecCard => !!c);
+}
+
+/** Per-goal outcome of one escort pass. */
+export interface GoalEscortResult {
+  goalSlug: string;
+  goalTitle: string;
+  pct: number;
+  queued: string[]; // specs the escort kicked off (the gap the reactive auto-queue didn't cover)
+  inFlight: string[]; // unblocked specs already building (auto-queue / chain / a manual build is handling it)
+}
+
+/**
+ * One escort pass over every approved goal the Platform director owns. For each unblocked, unshipped spec
+ * with NO build job yet, queue one (`created_by=null`, the agent enqueue — same shape as autoQueueUnblockedBy
+ * + queueNextChainedPhase, so the chain/auto-ship/fold pick it up unchanged) and log an `escorted_goal` row.
+ *
+ * Idempotent (a spec that already has a build job is confirmed, never re-queued) and a NO-OP until Platform
+ * is live+autonomous (dormant until Phase 4, exactly like the approval enqueuer above). Best-effort; the
+ * caller logs the result. Never starts a new goal, never re-implements the build path.
+ */
+export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEscortResult[]; queued: string[] }> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return { goals: [], queued: [] }; // dormant until Phase 4 flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return { goals: [], queued: [] };
+
+  const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
+  const owned = goals.filter((g) => g.owner === PLATFORM && isApprovedInProgress(g));
+  if (!owned.length) return { goals: [], queued: [] };
+
+  const specBySlug = new Map(specs.map((s) => [s.slug, s]));
+  const results: GoalEscortResult[] = [];
+  const queuedAll: string[] = [];
+
+  for (const goal of owned) {
+    const queued: string[] = [];
+    const inFlight: string[] = [];
+    for (const card of goalSpecs(goal, specBySlug)) {
+      if (card.status === "shipped") continue; // already landed
+      if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
+      if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
+
+      // Already has a build job (any status)? → the auto-queue / chain / a manual build is handling it.
+      // Confirm it's moving (the escort's "did each land clean" check), don't stack a duplicate.
+      const { data: existing } = await admin
+        .from("agent_jobs")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("spec_slug", card.slug)
+        .eq("kind", "build")
+        .limit(1);
+      if (existing && existing.length) {
+        inFlight.push(card.slug);
+        continue;
+      }
+
+      // The gap: an unblocked, unshipped, never-queued spec of an approved goal. Kick off its build — the
+      // existing chain + auto-ship + fold + blocked_by auto-queue carry it from here (we don't rebuild them).
+      const { error } = await admin.from("agent_jobs").insert({
+        workspace_id: workspaceId,
+        spec_slug: card.slug,
+        kind: "build",
+        status: "queued",
+        created_by: null,
+        instructions: `Escorted by the Platform/DevOps Director: ${goal.title} (${goal.pct}%) — ${card.slug} is unblocked; sequencing its build toward the next milestone.`,
+      });
+      if (!error) {
+        queued.push(card.slug);
+        queuedAll.push(card.slug);
+      }
+    }
+
+    if (queued.length || inFlight.length) {
+      results.push({ goalSlug: goal.slug, goalTitle: goal.title, pct: goal.pct, queued, inFlight });
+    }
+    // Log an escort action only when we actually advanced the goal (queued new work) — an idle confirm-pass
+    // shouldn't flood the audit log. The board post + richer EOD-recap slice land in Phase 4.
+    if (queued.length) {
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "escorted_goal",
+        specSlug: queued[0],
+        reason: `Escorting ${goal.title} (${goal.pct}%): sequenced ${queued.length} unblocked spec(s) toward the next milestone — ${queued.join(", ")}.`,
+        metadata: { goal_slug: goal.slug, pct: goal.pct, queued, in_flight: inFlight, autonomous: true },
+      });
+    }
+  }
+
+  return { goals: results, queued: queuedAll };
 }

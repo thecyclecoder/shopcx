@@ -190,6 +190,14 @@ const PLATFORM_DIRECTOR_INTERVAL_MS = 60 * 1000; // ~1 min — quick to pick up 
 let lastPlatformDirectorSweep = 0; // 0 ⇒ run on the first poll so a routed request is picked up right away.
 let platformDirectorSweepInFlight = false;
 
+// Platform/DevOps Director goal escort (platform-director-agent P2): a throttled sweep that drives each
+// approved goal the director owns forward — kicks off the unblocked specs the reactive blocked_by
+// auto-queue didn't catch + logs the advance. Also a no-op while Platform isn't live+autonomous. Slower
+// cadence than the approval enqueuer: goal/milestone state changes on merges, not seconds. In-flight-guarded.
+const GOAL_ESCORT_INTERVAL_MS = 5 * 60 * 1000; // ~5 min
+let lastGoalEscortSweep = 0;
+let goalEscortSweepInFlight = false;
+
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
 // `blocked_on_dependency` (agent-outage-resilience Phase 2): parked when the Claude-down breaker is
@@ -6120,6 +6128,24 @@ async function main() {
             console.error("[platform-director] enqueue failed (continuing):", e instanceof Error ? e.message : e);
           } finally {
             platformDirectorSweepInFlight = false;
+          }
+        })();
+      }
+      // Platform/DevOps Director goal escort (platform-director-agent P2): drive each approved goal the
+      // director owns forward — queue the unblocked specs the reactive auto-queue didn't catch, log the
+      // advance. Dormant (a no-op) until Platform is live+autonomous (Phase 4). Throttled + in-flight-guarded.
+      if (!goalEscortSweepInFlight && Date.now() - lastGoalEscortSweep > GOAL_ESCORT_INTERVAL_MS) {
+        lastGoalEscortSweep = Date.now();
+        goalEscortSweepInFlight = true;
+        void (async () => {
+          try {
+            const { escortApprovedGoals } = await import("../src/lib/agents/platform-director");
+            const r = await escortApprovedGoals(db);
+            if (r.queued.length) console.log(`[platform-director] escorted goal(s) → queued ${r.queued.length} spec(s): ${r.queued.join(", ")}`);
+          } catch (e) {
+            console.error("[platform-director] goal escort failed (continuing):", e instanceof Error ? e.message : e);
+          } finally {
+            goalEscortSweepInFlight = false;
           }
         })();
       }
