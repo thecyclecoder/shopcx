@@ -125,6 +125,10 @@ const MAX_REPAIR = Number(process.env.AGENT_TODO_MAX_REPAIR || 2);
 // One repair pass: read-only investigation (the signature + sample + the implicated code) + a
 // verdict. Minutes — same ballpark as a migration-fix / ticket-improve turn, not the seed ceiling.
 const REPAIR_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_REGRESSION = Number(process.env.AGENT_TODO_MAX_REGRESSION || 1);
+// One regression review: read-only investigation (the regressed spec + its failing checks + what
+// shipped) + a verdict, and (for a real regression) authoring the fix spec doc. Minutes, like repair.
+const REGRESSION_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
@@ -191,7 +195,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -243,7 +247,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer" | "db_health" | "coverage-register";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -730,7 +734,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer", "db_health", "coverage-register"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -2927,6 +2931,31 @@ async function runSpecTestJob(job: Job) {
     } catch (e) {
       console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
+    // Regression detector (regression-agent Phase 1): an `issues` run on a SHIPPED spec means a ✅
+    // verification no longer holds — a regression (false-✅ / drift). Enqueue a regression review (the
+    // worker reviews → dismiss or author a fix spec directly → the DevOps Director queues the build).
+    // getHumanTestQueue applies the exact regression definition (shipped + unarchived + UNRESOLVED
+    // evidence-backed fails); we filter to the slug just tested. Best-effort — never fail the run.
+    if (agent_verdict === "issues") {
+      try {
+        const { getHumanTestQueue } = await import("../src/lib/spec-test-runs");
+        const { enqueueRegressionJob } = await import("../src/lib/regression-agent");
+        const q = await getHumanTestQueue(job.workspace_id);
+        const reg = q.regressions.find((r) => r.slug === slug);
+        if (reg) {
+          const r = await enqueueRegressionJob(db, {
+            workspaceId: job.workspace_id,
+            specSlug: reg.slug,
+            title: reg.title,
+            failing: reg.failing,
+            runAt: reg.run_at,
+          });
+          console.log(`${tag} regression on ${slug} → ${r.enqueued ? `enqueued review (${r.reason})` : `not enqueued (${r.reason})`}`);
+        }
+      } catch (e) {
+        console.error(`${tag} regression detector failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     console.log(`${tag} ✓ ${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -4347,6 +4376,406 @@ async function runRepairJob(job: Job) {
   }
 }
 
+// ── Box-hosted Regression Agent (regression-agent) ───────────────────────────
+// A kind='regression' job is fired EVENT-driven the moment the box's spec-test agent records a
+// regression on a shipped spec (inline at the end of runSpecTestJob — a ✅ verification that no longer
+// holds). Like repair it runs a TOP-LEVEL `claude -p` on Max (no ANTHROPIC_API_KEY, web search on),
+// KEEPS read-only prod, NEVER mutates product code. It REVIEWS the regression read-only → either
+// DISMISSES it (transient/foreign/false-positive/already-fixed, recorded reasoning) or AUTHORS the fix
+// spec DIRECTLY to main (no "propose" step — a regression is a confirmed break) and routes it to the
+// inbox for the DevOps Director to queue (auto-approve within its leash; until the director is live the
+// fix routes to the CEO). Loop-guard: a fix that fails to hold after REGRESSION_LOOP_GUARD_MAX authored
+// attempts escalates to CEO. Every detect/dismiss/author/escalate writes a director_activity row.
+
+async function runRegressionClaude(prompt: string, sessionId: string | null, cwd: string) {
+  // Same env discipline as repair: KEEP read-only prod creds so the box can trace what regressed; strip
+  // ONLY the API key so all LLM is Max-billed; web search stays on (investigation).
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: REGRESSION_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+interface RegressionBriefInstr {
+  signature?: string;
+  spec_slug?: string;
+  title?: string;
+  failing?: Array<{ text: string; evidence?: string; check_key: string }>;
+  run_at?: string;
+}
+
+// Load the read-only brief: the regressed spec slug, its failing `## Verification` checks (with the
+// evidence the spec-test agent captured), and a pointer to read the spec + trace what shipped.
+function regressionBrief(instr: RegressionBriefInstr): string {
+  const lines: string[] = [
+    `REGRESSED SPEC: docs/brain/specs/${instr.spec_slug}.md  (title: ${instr.title})`,
+    `SIGNATURE: ${instr.signature}  ·  spec-test run_at: ${instr.run_at}`,
+    ``,
+    `This spec is ✅ SHIPPED but its verification no longer holds — the box spec-test agent observed these check(s) FAILING (evidence-backed breakage of prior-working behaviour):`,
+  ];
+  for (const f of instr.failing || []) {
+    lines.push(`  ✗ ${f.text}`);
+    if (f.evidence) lines.push(`      evidence: ${String(f.evidence).slice(0, 600)}`);
+  }
+  lines.push(
+    ``,
+    `Read docs/brain/specs/${instr.spec_slug}.md (esp. its "## Verification"), then trace what shipped that broke it (recent merges / the implicated src/ code) to decide whether this is a REAL regression and what the fix is.`,
+  );
+  return lines.join("\n");
+}
+
+function regressionPrompt(brief: string): string {
+  return [
+    `You are the box's Regression Agent on Max (web search on, no API key). You KEEP read access to prod, but you NEVER mutate and NEVER edit product code in this pass: you REVIEW a regression read-only (a ✅-shipped spec whose verification now fails), trace what regressed in the working tree (cwd is the repo root — read docs/brain/ first, then src/), and either DISMISS it or AUTHOR a fix spec (a doc). The actual code build is queued later by the DevOps Director — not now.`,
+    `You do EXACTLY what the operator did by hand: review each regression and either dismiss it or author a fix spec. A regression is a confirmed break of PRIOR-WORKING behaviour — so unlike the repair agent you SKIP the "propose" step and author the fix spec DIRECTLY when it's real.`,
+    ``,
+    brief,
+    ``,
+    `Decide ONE verdict (cite what regressed + the offending change):`,
+    `  • "real-regression" — a genuine break of prior-working behaviour traceable to a change we shipped. Author a single-phase, ~30-min-scoped fix spec that RESTORES it (what regressed, the offending change, the fix, and verification that the ORIGINAL ✅ holds again).`,
+    `  • "transient" — a deploy-boundary race / momentary upstream blip that already recovered; NOT a real regression. Dismiss with the reason.`,
+    `  • "foreign" — the failing check is foreign noise (a not-ours / flaky external dependency), not a regression of OUR behaviour. Dismiss with the reason.`,
+    `  • "false-positive" — the spec-test CHECK itself mis-fired (the feature is actually fine — the bullet is mis-scoped / the probe was wrong). Dismiss with the reason.`,
+    `  • "already-fixed" — a fix already shipped or is in-flight (pending deploy / re-test); no new spec needed. Dismiss with the reason.`,
+    `  • "needs-human" — you CANNOT confidently review it (ambiguous, needs context only a human has). No spec, no guess — surface it with a plain one-line note.`,
+    ``,
+    `NEGATIVE GUARD — only a regression of PRIOR-WORKING behaviour belongs to you. A brand-new feature error (never worked) is the repair agent's, not yours — if that's what this is, return "false-positive" with that reason (it'll be left to the repair agent).`,
+    ``,
+    `For "real-regression", default owner "[[../functions/platform]]" and parent "extends [[../specs/regression-agent]]" unless a more specific function clearly owns the regressed system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build. Provide the verification bullets that must hold again (reuse the regressed spec's failing checks).`,
+    ``,
+    `Final message = ONLY one JSON object:`,
+    `  {"status":"real-regression","review":"<plain text: what regressed + the offending change + the fix>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/regression-agent]]","intent":"<one paragraph>","what_regressed":"<the ✅ behaviour that broke>","offending_change":"<the change/merge that broke it>","fix":"<what to change to restore it>","verification":["<bullet that must hold again>","..."]}}`,
+    `  {"status":"transient"|"foreign"|"false-positive"|"already-fixed","reason":"<why this is not a real regression to fix>"}`,
+    `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
+  ].join("\n");
+}
+
+interface RegressionFixProposal {
+  slug: string;
+  title: string;
+  owner?: string;
+  parent?: string;
+  intent?: string;
+  what_regressed?: string;
+  offending_change?: string;
+  fix?: string;
+  verification?: string[];
+}
+
+function regressionFixSpecMarkdown(spec: RegressionFixProposal, regressedSlug: string, signature: string): string {
+  const verification = (Array.isArray(spec.verification) ? spec.verification : []).filter((b) => typeof b === "string" && b.trim());
+  const vBullets = verification.length
+    ? verification.map((b) => `- ${b.trim()}`).join("\n")
+    : `- Re-run spec-test on [[${regressedSlug}]] → expect the previously-failing check(s) pass again.`;
+  return [
+    `# ${spec.title} ⏳`,
+    ``,
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/regression-agent]]"} · **Regression-of:** [[${regressedSlug}]]`,
+    `**Regression-signature:** \`${signature}\``,
+    ``,
+    (spec.intent || "Restore the prior-working behaviour that regressed.").trim(),
+    ``,
+    `## What regressed`,
+    (spec.what_regressed || "(see the regression review above)").trim(),
+    ``,
+    `## Offending change`,
+    (spec.offending_change || "(unknown — bisect the recent ships that touched the implicated code)").trim(),
+    ``,
+    `## Phase 1 — restore it ⏳`,
+    (spec.fix || "Scope from the diagnosis above; land the fix + its brain page.").trim(),
+    `Gate on \`npx tsc --noEmit\`.`,
+    ``,
+    `## Verification`,
+    vBullets,
+    `- Re-run spec-test on [[${regressedSlug}]] → expect its previously-failing verification check(s) pass again (the original ✅ holds).`,
+    ``,
+    `> Authored by the box Regression Agent — a confirmed regression of [[${regressedSlug}]] (signature \`${signature}\`). The DevOps Director queues the build (auto-approve within its leash; pre-M4 the CEO queues it).`,
+    ``,
+  ].join("\n");
+}
+
+// Author the fix spec on main DIRECTLY (regression-agent: no "propose" step — a confirmed break). Slugs
+// like repair; same-slug convergence stays idempotent (a recurring regression folds onto one spec).
+// Returns the resolved slug + whether it pre-existed, or null on failure.
+async function authorRegressionFixSpec(raw: unknown, regressedSlug: string, signature: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+  const s = (raw || {}) as RegressionFixProposal;
+  const rawSlug = String(s.slug || "");
+  const title = String(s.title || "");
+  if (!rawSlug || !title) return null;
+  const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
+  if (!slug) return null;
+  const path = `docs/brain/specs/${slug}.md`;
+  try {
+    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+    if (existing.ok) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
+    const put = await putFileMain(
+      path,
+      regressionFixSpecMarkdown({ ...s, slug, title }, regressedSlug, signature),
+      `spec: ${slug} — fix regression of ${regressedSlug} (regression-agent, signature ${signature})`,
+    );
+    return put.ok ? { slug, alreadyExists: false } : null;
+  } catch (e) {
+    console.warn(`[regression] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+// Already-fixed skip (regression-agent): is a prior authored regression fix for THIS spec still
+// in-flight (build queued / PR open / not yet deployed)? If so the daily spec-test re-fire is "pending
+// deploy", not a fresh regression — no-op it (don't re-review, don't count toward the loop-guard).
+// Returns the in-flight fix slug if so. Mirrors the repair-agent already-fixed skip.
+async function findInflightRegressionFix(specSlug: string, selfJobId: string): Promise<{ slug: string } | null> {
+  const { REGRESSION_RECENT_WINDOW_MS } = await import("../src/lib/regression-agent");
+  const sinceIso = new Date(Date.now() - REGRESSION_RECENT_WINDOW_MS).toISOString();
+  const { data } = await db
+    .from("agent_jobs")
+    .select("id, instructions")
+    .eq("kind", "regression")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false });
+  const slugs = new Set<string>();
+  for (const r of (data ?? []) as Array<{ id: string; instructions?: string }>) {
+    if (r.id === selfJobId) continue;
+    try {
+      const i = JSON.parse(String(r.instructions || "{}")) as { spec_slug?: string; authored_slug?: string };
+      if (i.spec_slug === specSlug && i.authored_slug) slugs.add(i.authored_slug);
+    } catch {
+      /* not JSON — skip */
+    }
+  }
+  for (const slug of slugs) {
+    const a = await hasActiveBuildForSlug(slug);
+    if (a.active) return { slug };
+  }
+  return null;
+}
+
+async function runRegressionJob(job: Job) {
+  const tag = `[regression:${job.id.slice(0, 8)}]`;
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  const { regressionAuthoredAttempts, REGRESSION_LOOP_GUARD_MAX, REGRESSION_DISMISS_VERDICTS, REGRESSION_DIRECTOR_FUNCTION } = await import("../src/lib/regression-agent");
+  let instr: RegressionBriefInstr & { authored_slug?: string; verdict?: string } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade to the signature on spec_slug */
+  }
+  const signature = instr.signature || job.spec_slug;
+  const regressedSlug = instr.spec_slug || "";
+
+  // ── Disposer action resume — the routed regression_build was approved (queue) or declined (dismiss). ──
+  const buildAction = (job.pending_actions || []).find((a) => a.type === "regression_build");
+  if (buildAction && (buildAction.status === "approved" || buildAction.status === "declined")) {
+    if (buildAction.status === "approved" && buildAction.spec_slug) {
+      const dupe = await hasActiveBuildForSlug(buildAction.spec_slug);
+      if (dupe.active) {
+        buildAction.status = "done";
+        buildAction.result = `build already live for ${buildAction.spec_slug} (${dupe.reason}) — not re-queued`;
+        await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `queue Build → ${buildAction.result}`.slice(-2000) });
+        console.log(`${tag} queue Build → dedup: ${buildAction.result}`);
+        return;
+      }
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: buildAction.spec_slug,
+        kind: "build",
+        status: "queued",
+        created_by: job.created_by,
+        instructions: `Build the regression fix for ${regressedSlug} (signature ${signature}). Follow the spec exactly; tsc-clean; open a PR.`,
+      });
+      buildAction.status = error ? "failed" : "done";
+      buildAction.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${buildAction.spec_slug}`;
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `queue Build → ${buildAction.result}`.slice(-2000) });
+      console.log(`${tag} queue Build → ${buildAction.result}`);
+    } else {
+      buildAction.result = "declined by disposer";
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `disposer declined the regression fix for ${regressedSlug}`.slice(-2000) });
+      console.log(`${tag} disposer declined`);
+    }
+    return;
+  }
+
+  // ── Already-fixed skip — a prior authored fix for this spec is still building / pending deploy. The
+  // daily spec-test re-fire is "pending deploy", not a fresh regression: no-op (don't re-review, don't
+  // count toward the loop-guard). verdict 'already-fixed' is NOT a no-resurface block, so once the build
+  // resolves the break can re-fire if the fix didn't hold. ──
+  const inflight = await findInflightRegressionFix(regressedSlug, job.id);
+  if (inflight) {
+    const ledger = JSON.stringify({ ...instr, verdict: "already-fixed" });
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: REGRESSION_DIRECTOR_FUNCTION,
+      actionKind: "dismissed_regression",
+      specSlug: regressedSlug,
+      reason: `already-fixed: regression fix [[${inflight.slug}]] is in-flight (pending build/deploy) — no re-review.`,
+      metadata: { signature, verdict: "already-fixed", fix_slug: inflight.slug, job_id: job.id },
+    });
+    await update(job.id, { status: "completed", error: null, instructions: ledger, log_tail: `already-fixed → [[${inflight.slug}]] in-flight, pending deploy (no re-review)`.slice(-2000) });
+    console.log(`${tag} already-fixed by in-flight ${inflight.slug} → no re-review`);
+    return;
+  }
+
+  // ── Loop-guard — a regression fix that didn't hold after N authored attempts → escalate to CEO
+  // (a deeper issue), never infinite re-author. (regression-agent Verification: 2 attempts → CEO.) ──
+  const attempts = await regressionAuthoredAttempts(db, regressedSlug, job.id);
+  if (attempts >= REGRESSION_LOOP_GUARD_MAX) {
+    const note = `Loop-guard: ${attempts} prior authored fix(es) for ${regressedSlug} did not hold — this regression is a DEEPER issue. Escalated to CEO instead of re-authoring.`;
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: REGRESSION_DIRECTOR_FUNCTION,
+      actionKind: "escalated",
+      specSlug: regressedSlug,
+      reason: note,
+      metadata: { signature, attempts, job_id: job.id },
+    });
+    await update(job.id, { status: "needs_attention", error: "regression loop-guard → escalated to CEO", log_tail: note.slice(-2000) });
+    console.log(`${tag} loop-guard (${attempts} attempts) → escalated to CEO`);
+    return;
+  }
+
+  // ── Fresh review — investigate read-only on Max → verdict → dismiss | author + route. ──
+  console.log(`${tag} reviewing regression ${signature} (spec ${regressedSlug})`);
+  try {
+    const { session, resultText, isError, raw } = await runRegressionClaude(regressionPrompt(regressionBrief(instr)), null, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = String(parsed?.status || "");
+    console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
+
+    // DISMISS — transient / foreign / false-positive / already-fixed: recorded reasoning, no spec, no
+    // re-surface (the signature's verdict on instructions blocks a future enqueue of the same break).
+    if (REGRESSION_DISMISS_VERDICTS.has(verdict)) {
+      const reason = String(parsed?.reason || `${verdict} — not a real regression to fix`);
+      const ledger = JSON.stringify({ ...instr, verdict });
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: REGRESSION_DIRECTOR_FUNCTION,
+        actionKind: "dismissed_regression",
+        specSlug: regressedSlug,
+        reason: `Dismissed (${verdict}): ${reason}`,
+        metadata: { signature, verdict, job_id: job.id },
+      });
+      await update(job.id, { status: "completed", error: null, instructions: ledger, log_tail: `dismissed (${verdict}): ${reason}`.slice(-2000) });
+      console.log(`${tag} dismissed (${verdict}) → no spec, no re-surface`);
+      return;
+    }
+
+    if (verdict === "needs-human") {
+      const review = String(parsed?.review || "needs a human — couldn't confidently review the regression");
+      await update(job.id, { status: "needs_attention", error: "needs-human", log_tail: review.slice(-2000) });
+      console.log(`${tag} needs-human → surfaced, no spec`);
+      return;
+    }
+
+    if (verdict === "real-regression") {
+      const review = String(parsed?.review || "");
+      const authored = await authorRegressionFixSpec(parsed?.spec, regressedSlug, signature);
+      if (!authored) {
+        await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real regression but no valid fix spec" });
+        console.log(`${tag} real-regression but no valid spec → surfaced needs-human`);
+        return;
+      }
+      const ledger = JSON.stringify({ ...instr, verdict, authored_slug: authored.slug });
+      const existsNote = authored.alreadyExists ? " (existing slug — converged)" : "";
+
+      // Route to the disposer. resolveApproverLive walks the org chart from 'platform' to the first
+      // live+autonomous boss; a regression fix is low-risk/reversible so a live director auto-approves
+      // it WITHIN its leash. Until the director is live this resolves to the CEO → surface for the
+      // CEO inbox (regression-agent: "Until the director is live, the fix routes to the CEO inbox").
+      let approver = "ceo";
+      try {
+        const { resolveApproverLive } = await import("../src/lib/agents/approval-router");
+        approver = await resolveApproverLive(REGRESSION_DIRECTOR_FUNCTION);
+      } catch (e) {
+        console.warn(`${tag} approver resolve degraded → CEO: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      const autoQueue = approver !== "ceo";
+
+      if (autoQueue) {
+        // The DevOps Director queues the build within its leash (auto-approve a reversible regression fix).
+        const dupe = await hasActiveBuildForSlug(authored.slug);
+        let buildResult: string;
+        if (dupe.active) {
+          buildResult = `build already live (${dupe.reason}) — not re-queued`;
+        } else {
+          const { error } = await db.from("agent_jobs").insert({
+            workspace_id: job.workspace_id,
+            spec_slug: authored.slug,
+            kind: "build",
+            status: "queued",
+            instructions: `Auto-queued by the DevOps Director (${approver}) — regression fix for ${regressedSlug} (reversible/low-risk, within leash). Follow the spec exactly; tsc-clean; open a PR.`,
+          });
+          buildResult = error ? `auto-queue FAILED: ${error.message}` : "auto-queued build";
+        }
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: approver,
+          actionKind: "authored_fix",
+          specSlug: authored.slug,
+          reason: `Real regression of ${regressedSlug} → authored fix [[${authored.slug}]]${existsNote}; ${approver} queued the build within its leash (${buildResult}).`,
+          metadata: { signature, regressed: regressedSlug, fix_slug: authored.slug, approver, job_id: job.id },
+        });
+        await update(job.id, {
+          status: "completed",
+          error: null,
+          instructions: ledger,
+          log_tail: `real-regression → authored [[${authored.slug}]]${existsNote}; ${approver} auto-queued build (${buildResult}).\n\n${review}`.slice(-2000),
+        });
+        console.log(`${tag} real-regression → authored ${authored.slug}${existsNote}; ${approver} auto-queued (${buildResult})`);
+        return;
+      }
+
+      // Pre-M4 (no live director): route to the CEO inbox — surface the authored fix for one-tap queue.
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: REGRESSION_DIRECTOR_FUNCTION,
+        actionKind: "authored_fix",
+        specSlug: authored.slug,
+        reason: `Real regression of ${regressedSlug} → authored fix [[${authored.slug}]]${existsNote}; routed to the CEO inbox to queue (no live director yet).`,
+        metadata: { signature, regressed: regressedSlug, fix_slug: authored.slug, approver: "ceo", job_id: job.id },
+      });
+      const action: PendingAction = {
+        id: `rg${job.id.slice(0, 6)}`,
+        type: "regression_build",
+        summary: `Regression fix for ${regressedSlug} → build [[${authored.slug}]]`,
+        preview: review.slice(0, 400),
+        status: "pending",
+        spec_slug: authored.slug,
+      };
+      await update(job.id, {
+        status: "needs_approval",
+        pending_actions: [action],
+        instructions: ledger,
+        log_tail: `real-regression → authored fix spec ${authored.slug}${existsNote}; routed to the CEO inbox to queue the build.\n\n${review}`.slice(-2000),
+      });
+      console.log(`${tag} real-regression → authored ${authored.slug}${existsNote}, routed to CEO inbox`);
+      return;
+    }
+
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "regression review errored", log_tail: raw.slice(-2000) });
+      return;
+    }
+    await update(job.id, { status: "needs_attention", error: "regression review ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Box-hosted Storefront Optimizer agent (storefront-optimizer-agent) ───────
 // A kind='storefront-optimizer' job is enqueued by the scheduling cron ([[storefront-optimizer]]
 // → enqueueDueCampaigns) — one per DUE (product × lander-type × audience), deduped to ≤1 active
@@ -4801,6 +5230,7 @@ async function runJob(job: Job) {
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
   if (job.kind === "repair") return runRepairJob(job);
+  if (job.kind === "regression") return runRegressionJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
@@ -5170,10 +5600,11 @@ async function main() {
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
+  const countRegression = () => [...active.values()].filter((v) => v.kind === "regression").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -5299,6 +5730,15 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed repair ${job.id.slice(0, 8)} → ${countRepair() + 1}/${MAX_REPAIR} repair lane`);
+        launch(job);
+      }
+      // Fill the regression lane (regression-agent): spec-test-fired ✅-now-failing review, read-only
+      // review → dismiss-with-reasoning OR author the fix spec directly + route to the inbox. Concurrency-1.
+      while (countRegression() < MAX_REGRESSION) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["regression"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed regression ${job.id.slice(0, 8)} → ${countRegression() + 1}/${MAX_REGRESSION} regression lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —
