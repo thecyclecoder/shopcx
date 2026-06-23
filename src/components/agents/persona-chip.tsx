@@ -12,8 +12,22 @@
 import type { AgentPersona } from "@/lib/agents/personas";
 import { Mascot } from "@/components/agents/mascots";
 
-/** The colored mascot avatar tile. */
+/** The avatar tile — the real headshot photo when present, else the colored SVG mascot. */
 export function PersonaAvatar({ persona, size = 40 }: { persona: AgentPersona; size?: number }) {
+  if (persona.avatarUrl) {
+    return (
+      <img
+        src={persona.avatarUrl}
+        alt={`${persona.name} — ${persona.role}`}
+        title={`${persona.name} — ${persona.role}`}
+        width={size + 12}
+        height={size + 12}
+        className={`inline-block shrink-0 rounded-xl object-cover ring-1 ring-black/5 dark:ring-white/10`}
+        style={{ width: size + 12, height: size + 12 }}
+        loading="lazy"
+      />
+    );
+  }
   return (
     <span
       className={`inline-flex shrink-0 items-center justify-center rounded-xl ${persona.ring} ${persona.accent}`}
