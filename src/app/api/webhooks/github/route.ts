@@ -79,7 +79,7 @@ export async function POST(request: Request) {
       try {
         autoMerge = await autoMergeReadyPrs();
         console.log(
-          `[github-webhook] ${event}: auto-merge ${autoMerge.enabled ? (autoMerge.syncActive ? "deferred (sync active)" : `checked ${autoMerge.checked}, ${autoMerge.ready} ready, merged ${autoMerge.merged}${autoMerge.mergedPr ? ` (PR #${autoMerge.mergedPr})` : ""}`) : "disabled (kill-switch)"}`,
+          `[github-webhook] ${event}: auto-merge ${autoMerge.enabled ? (autoMerge.syncActive ? "deferred (sync active)" : `checked ${autoMerge.checked}, ${autoMerge.ready} ready, ${autoMerge.buildGateBlocked} build-gate-blocked, merged ${autoMerge.merged}${autoMerge.mergedPr ? ` (PR #${autoMerge.mergedPr})` : ""}`) : "disabled (kill-switch)"}`,
         );
       } catch (err) {
         console.error("[github-webhook] auto-merge gate failed:", err);
