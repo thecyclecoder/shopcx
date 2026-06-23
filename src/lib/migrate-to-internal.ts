@@ -39,6 +39,22 @@ function isShippingProtectionLine(l: Record<string, unknown>): boolean {
   return String((l.title as string) || "").toLowerCase().includes("shipping protection");
 }
 
+/**
+ * A live Appstle line the migration could NOT map to an internal variant (no
+ * catalog match by shopify_variant_id OR sku — out of stock / discontinued / no
+ * internal product). It is DROPPED from items[] (so `items_on_uuids` can't fail
+ * forever on a dangling Shopify id) and recorded as a migration_audits note. A
+ * $0 line is safe to drop; a `paid` drop also pages a human (short order risk).
+ */
+export interface DroppedLine {
+  title: string;
+  shopifyVariantId: string;
+  sku: string | null;
+  priceCents: number;
+  quantity: number;
+  paid: boolean;
+}
+
 export interface MigrateResult {
   migrated: Array<{ contractId: string; subId: string; billableCustomerId: string }>;
   skipped: Array<{ contractId: string; reason: string }>;
@@ -54,18 +70,36 @@ async function linkedCustomerIds(admin: Admin, customerId: string): Promise<stri
   return ids.length ? ids : [customerId];
 }
 
-/** Pick the link-group member with a default Braintree PM (prefer `preferred`). */
-async function findBillableCustomer(admin: Admin, workspaceId: string, customerIds: string[], preferred: string): Promise<string | null> {
+/**
+ * Pick the link-group member with a default Braintree PM (prefer `preferred`),
+ * AND return that default `customer_payment_methods` row id so the migration can
+ * PIN it onto the flipped sub (mirrors the recovery flow's pin —
+ * payment-method-update.ts). The default-card fallback stays the safety net, but
+ * pinning makes the charge explicit (the portal shows the card; a later default
+ * change can't silently move the renewal).
+ */
+async function findBillableCustomer(
+  admin: Admin,
+  workspaceId: string,
+  customerIds: string[],
+  preferred: string,
+): Promise<{ customerId: string; paymentMethodId: string } | null> {
   const { data: pms } = await admin
     .from("customer_payment_methods")
-    .select("customer_id, braintree_payment_method_token")
+    .select("id, customer_id, braintree_payment_method_token")
     .eq("workspace_id", workspaceId)
     .in("customer_id", customerIds)
     .eq("is_default", true)
     .eq("provider", "braintree");
-  const withPm = new Set((pms || []).filter((p) => p.braintree_payment_method_token).map((p) => p.customer_id as string));
-  if (withPm.has(preferred)) return preferred;
-  for (const id of customerIds) if (withPm.has(id)) return id;
+  // customer_id → its default PM row id (only rows with a usable Braintree token).
+  const pmByCustomer = new Map<string, string>();
+  for (const p of pms || []) {
+    if (p.braintree_payment_method_token && !pmByCustomer.has(p.customer_id as string)) {
+      pmByCustomer.set(p.customer_id as string, p.id as string);
+    }
+  }
+  if (pmByCustomer.has(preferred)) return { customerId: preferred, paymentMethodId: pmByCustomer.get(preferred)! };
+  for (const id of customerIds) if (pmByCustomer.has(id)) return { customerId: id, paymentMethodId: pmByCustomer.get(id)! };
   return null;
 }
 
@@ -75,15 +109,18 @@ async function findBillableCustomer(admin: Admin, workspaceId: string, customerI
  * UUIDs, and we store NO baked price — the pricing engine derives it from the
  * catalog + rule. The only exception is a grandfathered line (the customer was
  * paying below the catalog-derived S&S price): we lock their base via
- * price_override_cents so the engine reproduces it. Lines whose variant isn't in
- * our catalog keep the legacy shape (Shopify id + baked price) as a safety net.
+ * price_override_cents so the engine reproduces it. A line whose variant isn't in
+ * our catalog by shopify_variant_id OR sku is genuinely unmappable: it is DROPPED
+ * (returned in `droppedLines`) rather than left as a dangling Shopify-id line that
+ * fails the `items_on_uuids` audit forever — Therese's out-of-stock ACV Gummies.
  */
 async function appstleLinesToInternalItems(
   admin: Admin,
   workspaceId: string,
   lines: Array<Record<string, unknown>>,
-): Promise<{ items: Array<Record<string, unknown>>; shippingProtectionCents: number }> {
+): Promise<{ items: Array<Record<string, unknown>>; shippingProtectionCents: number; droppedLines: DroppedLine[] }> {
   const items: Array<Record<string, unknown>> = [];
+  const droppedLines: DroppedLine[] = [];
   let shippingProtectionCents = 0;
   for (const l of lines) {
     const quantity = (l.quantity as number) || 1;
@@ -103,16 +140,41 @@ async function appstleLinesToInternalItems(
 
     const shopifyVid = String((l.variantId as string) || "").split("/").pop() || "";
     if (!shopifyVid) continue;
+    const lineSku = String((l.sku as string) || "").trim();
 
-    const { data: v } = await admin
+    // Resolve the internal variant by shopify_variant_id first, then by sku
+    // (workspace-scoped) — a migrated line can carry a Shopify id we never synced
+    // while its sku still resolves the variant (mirrors the audit's auto-heal).
+    let v: { id: string; product_id: string; price_cents: number | null; title: string | null; sku: string | null } | null = null;
+    const { data: byShopId } = await admin
       .from("product_variants")
       .select("id, product_id, price_cents, title, sku")
       .eq("shopify_variant_id", shopifyVid)
       .maybeSingle();
+    v = byShopId;
+    if (!v && lineSku) {
+      const { data: bySku } = await admin
+        .from("product_variants")
+        .select("id, product_id, price_cents, title, sku")
+        .eq("workspace_id", workspaceId)
+        .eq("sku", lineSku)
+        .maybeSingle();
+      v = bySku;
+    }
 
     if (!v) {
-      // Not in our catalog — keep the legacy shape so nothing is lost.
-      items.push({ variant_id: shopifyVid, title, variant_title: variantTitle, quantity, price_cents: currentPriceCents });
+      // Genuinely unmappable (out of stock / discontinued / no internal product).
+      // DROP it — leaving a dangling Shopify-id line fails `items_on_uuids` forever
+      // (the retry loop never clears). A $0 line is safe to drop; a paid drop is
+      // surfaced to the caller, which pages a human (short order risk).
+      droppedLines.push({
+        title: title || variantTitle || shopifyVid,
+        shopifyVariantId: shopifyVid,
+        sku: lineSku || null,
+        priceCents: currentPriceCents,
+        quantity,
+        paid: currentPriceCents > 0,
+      });
       continue;
     }
 
@@ -147,7 +209,7 @@ async function appstleLinesToInternalItems(
     }
     items.push(item);
   }
-  return { items, shippingProtectionCents };
+  return { items, shippingProtectionCents, droppedLines };
 }
 
 /**
@@ -318,7 +380,7 @@ export async function migrateCustomerAppstleSubsToInternal(
   const result: MigrateResult = { migrated: [], skipped: [], failed: [] };
 
   const groupIds = await linkedCustomerIds(admin, customerId);
-  const billableCustomerId = await findBillableCustomer(admin, workspaceId, groupIds, customerId);
+  const billable = await findBillableCustomer(admin, workspaceId, groupIds, customerId);
 
   // ALL Appstle subs across the link group — active, paused, AND cancelled.
   // Adding a payment method sweeps the customer's whole book onto internal rails.
@@ -331,10 +393,15 @@ export async function migrateCustomerAppstleSubsToInternal(
   if (!subs?.length) return result;
 
   // HARD RULE: a migration must be billable — no PM anywhere in the link group → skip all.
-  if (!billableCustomerId) {
+  if (!billable) {
     for (const s of subs) result.skipped.push({ contractId: String(s.shopify_contract_id), reason: "no_braintree_pm_in_link_group" });
     return result;
   }
+  const billableCustomerId = billable.customerId;
+  // PIN the customer's default card onto each migrated sub (the recovery flow
+  // already does this; migration should too). Idempotent — a re-run re-pins the
+  // CURRENT default. Subs left unpinned still bill via the default-card fallback.
+  const defaultPaymentMethodId = billable.paymentMethodId;
 
   const cfg = await getAppstleConfig(workspaceId);
   for (const sub of subs) {
@@ -359,11 +426,14 @@ export async function migrateCustomerAppstleSubsToInternal(
       // Shipping protection moves from an Appstle line → an internal flag on the
       // flipped sub. 0 when the contract had no protection line.
       let shippingProtectionCents = 0;
+      // Lines the migration couldn't map to an internal variant → dropped, noted on
+      // the audit (and a paid drop pages a human). Empty unless something unmappable.
+      let droppedLines: DroppedLine[] = [];
       if (liveUsable) {
         // Translate Appstle lines → internal catalog UUID references (no baked
         // price; grandfathered lines get a price_override_cents). A "Shipping
         // Protection" line is pulled out into the flag below, not items[].
-        ({ items, shippingProtectionCents } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+        ({ items, shippingProtectionCents, droppedLines } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
         interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
         intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
         nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
@@ -398,6 +468,9 @@ export async function migrateCustomerAppstleSubsToInternal(
           is_internal: true,
           status: sub.status,
           customer_id: billableCustomerId,
+          // Pin the default card so the renewal charges it explicitly (the
+          // default-card fallback stays the safety net for any unpinned sub).
+          payment_method_id: defaultPaymentMethodId,
           items,
           // Carry shipping protection across as a flag (engine bills it on top of
           // the product subtotal). Only set when the contract actually had it, so
@@ -452,10 +525,33 @@ export async function migrateCustomerAppstleSubsToInternal(
           internalContractId,
           preMigrationChargeCents: preCharge,
           isRecovery: !!opts.isRecovery,
+          droppedLines,
         });
         if (auditId) await verifyMigration(auditId);
       } catch (e) {
         console.error(`[migrate] audit failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
+      }
+
+      // A PAID line we couldn't map was dropped → the next renewal would ship a
+      // short order. The drop is recorded in the audit note; a paid drop ALSO
+      // pages a human to add the right variant or refund (never silent). A $0
+      // free-gift/promo drop is safe and stays note-only.
+      const paidDrops = droppedLines.filter((d) => d.paid);
+      if (paidDrops.length) {
+        try {
+          const { notifyOpsAlert } = await import("@/lib/notify-ops-alert");
+          await notifyOpsAlert(workspaceId, {
+            severity: "critical",
+            title: "Migration dropped a PAID unmappable subscription line",
+            lines: [
+              `Sub ${sub.id} (${internalContractId}) — ${paidDrops.length} paid line(s) had no internal variant (by id or sku) and were dropped.`,
+              ...paidDrops.map((d) => `• ${d.title} (variant ${d.shopifyVariantId}${d.sku ? `, sku ${d.sku}` : ""}) ×${d.quantity} @ ${d.priceCents}¢`),
+              `Add the correct internal variant to the sub or refund — the next renewal will otherwise ship short.`,
+            ],
+          });
+        } catch (e) {
+          console.error(`[migrate] paid-drop ops alert failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
+        }
       }
     } catch (e) {
       result.failed.push({ contractId, error: e instanceof Error ? e.message : String(e) });

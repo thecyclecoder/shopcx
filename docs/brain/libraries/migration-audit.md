@@ -6,7 +6,7 @@ Full flow: [[../lifecycles/subscription-billing]] § Migration path (verified + 
 
 ## Exports
 
-- **`recordMigrationAudit(input) → auditId`** — creates the `pending` row at migration time. `input`: `{ workspaceId, subscriptionId, appstleContractId (old, pre-flip), internalContractId, preMigrationChargeCents, isRecovery? }`.
+- **`recordMigrationAudit(input) → auditId`** — creates the `pending` row at migration time. `input`: `{ workspaceId, subscriptionId, appstleContractId (old, pre-flip), internalContractId, preMigrationChargeCents, isRecovery?, droppedLines? }`. `droppedLines` (lines the migration couldn't map to an internal variant and dropped) are written **once** into [[../tables/migration_audits]]`.notes` — never overwritten by re-verify, so the drop stays auditable. See [[migrate-to-internal]] § Unmappable items.
 - **`verifyMigration(auditId) → { status, checks }`** — runs the 8-check checklist, **self-heals** mechanically-fixable failures, then re-verifies; updates the row. `passed` when all checks ok; else `retry_count++` → `pending` until `MAX_RETRIES = 3`, then `failed`.
 
 **Self-heal (`autoHealMigration`):** before flagging, fixable failures are auto-repaired — `items_on_uuids` (resolve each Shopify-id item → its catalog UUID + product_id) and `appstle_cancelled`/`no_double_bill` (cancel the lingering Appstle contract). Pricing mismatches are NOT auto-fixed (need judgment) and an item with no catalog match can't be resolved → those flag for human review on `/dashboard/migrations`. So only genuinely-stuck migrations surface.
