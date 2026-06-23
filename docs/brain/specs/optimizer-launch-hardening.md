@@ -1,4 +1,4 @@
-# Post-launch hardening — review findings (optimizer + infra) ⏳
+# Post-launch hardening — review findings (optimizer + infra) 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** hardens the autonomous build pipeline + [[storefront-optimizer-agent]] after the 2026-06-22 launch. · **Source:** two pre-A/B-approval review agents (2026-06-23). tsc clean, no active false-✅, customer-facing optimizer path confirmed SAFE; these are the 5 hardening findings. None block the A/B approval.
 
