@@ -12,11 +12,11 @@
  *
  * On top of those, this module derives the three funnel rates the bandit does NOT
  * persist — engagement %, add-to-cart rate, lead rate — fresh from the append-only
- * [[storefront_events]] log, keyed off the SAME exposure spine the attribution lib
- * uses (an `experiment_exposure` event carries `meta.variant_id` + a `session_id`).
- * A session counts toward an arm's ATC / lead / engagement iff it was exposed to
- * that arm. Internal/bot exposures were already dropped at write time, so this never
- * counts team/crawler noise.
+ * [[storefront_events]] log, keyed off the SAME session-stamp spine the attribution lib
+ * uses (experiment-session-stamped-attribution): a session's arm comes from
+ * `storefront_sessions.experiment_assignments`, NOT the flaky `experiment_exposure`
+ * event. A session counts toward an arm's ATC / lead / engagement iff it's stamped to
+ * that arm. Internal/bot sessions are excluded at this report layer.
  *
  * Read-only: it never writes. The bandit's refresh ([[storefront-experiment-attribution]])
  * owns mutating the rollup columns.
@@ -84,23 +84,34 @@ function chunk<T>(arr: T[], size: number): T[][] {
 const PAGE = 1000;
 const MAX_PAGES = 100;
 
-/** Page through `experiment_exposure` events for the workspace (1000-row windows). */
-async function fetchExposures(
+/** One element of storefront_sessions.experiment_assignments. */
+interface SessionAssignment {
+  experiment_id: string;
+  variant_id: string;
+}
+
+/** Page through the sessions stamped to one experiment (excluding internal/bot — the
+ *  report-layer exclusion). Mirrors the attribution lib's stamped-session spine. */
+async function fetchStampedSessions(
   admin: Admin,
   workspaceId: string,
-): Promise<Array<{ session_id: string | null; meta: Record<string, unknown> }>> {
-  const rows: Array<{ session_id: string | null; meta: Record<string, unknown> }> = [];
+  experimentId: string,
+): Promise<Array<{ id: string; experiment_assignments: SessionAssignment[] }>> {
+  const rows: Array<{ id: string; experiment_assignments: SessionAssignment[] }> = [];
   for (let page = 0; page < MAX_PAGES; page++) {
     const { data } = await admin
-      .from("storefront_events")
-      .select("session_id, meta, created_at, id")
+      .from("storefront_sessions")
+      .select("id, experiment_assignments")
       .eq("workspace_id", workspaceId)
-      .eq("event_type", "experiment_exposure")
+      .eq("is_internal", false)
+      .eq("is_bot", false)
+      .contains("experiment_assignments", [{ experiment_id: experimentId }])
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(page * PAGE, page * PAGE + PAGE - 1);
-    const batch = (data as unknown as Array<{ session_id: string | null; meta: Record<string, unknown> }>) || [];
-    rows.push(...batch);
+    const batch =
+      (data as unknown as Array<{ id: string; experiment_assignments: SessionAssignment[] | null }>) || [];
+    for (const r of batch) rows.push({ id: r.id, experiment_assignments: r.experiment_assignments || [] });
     if (batch.length < PAGE) break;
   }
   return rows;
@@ -128,19 +139,23 @@ export async function computeExperimentFunnel(opts: {
   if (!variants.length) return [];
 
   const variantIds = new Set(variants.map((v) => v.id));
+  const experimentIds = [...new Set(variants.map((v) => v.experiment_id))];
 
-  // 1. Exposure spine: map each exposed session_id → its variant. Sticky assignment
+  // 1. Session-stamp spine: map each stamped session_id → its variant. Sticky assignment
   //    means a session belongs to at most one arm of this experiment.
   const variantBySession = new Map<string, string>();
   const exposedSessionsByVariant = new Map<string, Set<string>>();
   for (const v of variants) exposedSessionsByVariant.set(v.id, new Set());
 
-  const exposures = await fetchExposures(admin, workspaceId);
-  for (const row of exposures) {
-    const variantId = String(row.meta?.variant_id ?? "");
-    if (!variantIds.has(variantId) || !row.session_id) continue;
-    variantBySession.set(row.session_id, variantId);
-    exposedSessionsByVariant.get(variantId)!.add(row.session_id);
+  for (const experimentId of experimentIds) {
+    const sessions = await fetchStampedSessions(admin, workspaceId, experimentId);
+    for (const s of sessions) {
+      for (const a of s.experiment_assignments) {
+        if (a.experiment_id !== experimentId || !variantIds.has(a.variant_id)) continue;
+        variantBySession.set(s.id, a.variant_id);
+        exposedSessionsByVariant.get(a.variant_id)!.add(s.id);
+      }
+    }
   }
 
   // 2. Pull ATC / lead / engagement events for the exposed sessions only (bounded by

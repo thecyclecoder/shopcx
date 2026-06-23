@@ -79,12 +79,31 @@ export interface VariantRow {
   ltv_proxy_cents: number;
 }
 
-/** The exposure payload the client pixel emits as a `experiment_exposure` event. */
+/** The visitor's resolved arm of an experiment. `holdout` = the sacred reserved band
+ *  (served control content, never reallocated); `control`/`variant` = the served arm.
+ *  Canonical on the SESSION stamp (storefront_sessions.experiment_assignments) — the
+ *  attribution spine keys off this, not the flaky client exposure event. */
+export type ExperimentArm = "control" | "variant" | "holdout";
+
+/** Resolve the arm bucket for an assignment. */
+export function armForAssignment(isControl: boolean, isHoldout: boolean): ExperimentArm {
+  if (isHoldout) return "holdout";
+  return isControl ? "control" : "variant";
+}
+
+/** The exposure payload the client pixel emits as a `experiment_exposure` event AND the
+ *  shape that seeds the session stamp (experiment-session-stamped-attribution Phase 1).
+ *  `arm` + `surface` let the pixel write a complete session-stamp element without a
+ *  re-lookup. */
 export interface ExperimentExposureMeta {
   experiment_id: string;
   variant_id: string;
   is_holdout: boolean;
   product_id: string;
+  /** control | variant | holdout — the bucket the visitor landed in. */
+  arm: ExperimentArm;
+  /** The lander surface this arm was served on (pdp | listicle | beforeafter | advertorial). */
+  surface: LanderType;
 }
 
 export interface Assignment {
@@ -367,6 +386,8 @@ export async function resolveExperimentsForRender(opts: {
           variant_id: arm.id,
           is_holdout: arm.is_control,
           product_id: productId,
+          arm: armForAssignment(arm.is_control, false),
+          surface: loaded.experiment.lander_type,
         },
       ],
     };
@@ -389,6 +410,8 @@ export async function resolveExperimentsForRender(opts: {
       variant_id: assignment.variant.id,
       is_holdout: assignment.isHoldout,
       product_id: productId,
+      arm: armForAssignment(assignment.variant.is_control, assignment.isHoldout),
+      surface: experiment.lander_type,
     });
   }
   return { content: patched, exposures };
@@ -435,6 +458,8 @@ export async function resolvePdpExperimentsForRender(opts: {
           variant_id: arm.id,
           is_holdout: arm.is_control,
           product_id: productId,
+          arm: armForAssignment(arm.is_control, false),
+          surface: "pdp",
         },
       ],
     };
@@ -458,6 +483,8 @@ export async function resolvePdpExperimentsForRender(opts: {
       variant_id: assignment.variant.id,
       is_holdout: assignment.isHoldout,
       product_id: productId,
+      arm: armForAssignment(assignment.variant.is_control, assignment.isHoldout),
+      surface: "pdp",
     });
   }
   return { heroImageUrl, exposures };

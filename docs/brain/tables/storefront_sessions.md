@@ -39,6 +39,7 @@ One row per anonymous_id. Device fingerprint, UTMs, click IDs, _fbp/_fbc cookies
 | `fbc` | `text` | ✓ |  |
 | `advertorial_page_id` | `uuid` | ✓ | → [[advertorial_pages]].id · FK `on delete set null`. Phase 2b — resolved lander identity stamped at pixel time. `/api/pixel` `resolveLanderIds()` parses `?angle={slug}` from `landing_url` → `advertorial_pages` (slug is unique per workspace+product, suffix-encodes variant). Stamped at first INSERT **and** re-resolved **set-when-null** on later pixel hits (advertorial-attribution-fix): a session whose first touch landed without a resolving angle is healed when a later hit carries the `?angle=`. Never overwrites a non-null; `landing_url` itself stays insert-only. Null for non-lander landings. Backfilled from `landing_url`'s `?angle=` by `scripts/backfill-advertorial-page-id.ts` (recent window, then all-time). |
 | `ad_campaign_id` | `uuid` | ✓ | → [[ad_campaigns]].id · FK `on delete set null`. Phase 2b — the resolved page's `campaign_id`, stamped alongside `advertorial_page_id`. |
+| `experiment_assignments` | `jsonb` | — | default: `'[]'`. **The canonical experiment-attribution signal** ([[../specs/experiment-session-stamped-attribution]] Phase 1). Array of `{experiment_id, variant_id, arm: control\|variant\|holdout, assigned_at, surface}`. Written server/edge-side at `/api/pixel` the moment the arm is known — **(a)** from the edge `sx_variant` cookie (PDP, `surface:"pdp"`; control vs variant resolved with one `storefront_experiment_variants` lookup), **(b)** from the `experiment_assignments` field the pixel flush carries (advertorial/`resolveExperimentsForRender`, arm + surface resolved at render). **Sticky: first assignment per experiment wins**, never re-bucketed. NOT dependent on the flaky client `experiment_exposure` event (which under-fired). Internal/bot sessions ARE stamped (previews/QA stay inspectable) — excluded at the **reporting** layer ([[../libraries/storefront-experiment-attribution]] / [[../libraries/storefront-experiment-funnel]] filter `is_internal=false, is_bot=false`), not dropped here. GIN-indexed (`jsonb_path_ops`) for the `@> '[{"experiment_id":…}]'` containment filter. |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
 
@@ -55,6 +56,7 @@ One row per anonymous_id. Device fingerprint, UTMs, click IDs, _fbp/_fbc cookies
 
 - [[storefront_events]].`session_id`
 - [[storefront_leads]].`session_id`
+- [[orders]].`session_id` (on delete set null) — the first-class order↔session link ([[../specs/experiment-session-stamped-attribution]] Phase 2).
 
 ## Common queries
 

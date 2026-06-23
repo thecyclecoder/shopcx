@@ -1,42 +1,45 @@
 /**
  * Storefront experiment outcome attribution — Phase 3 of the storefront experiment
- * + bandit framework (docs/brain/specs/storefront-experiment-bandit-framework.md).
+ * + bandit framework, REWRITTEN by experiment-session-stamped-attribution.
  *
- * Joins exposure → outcome per variant across the delayed-purchase window and
- * persists per-variant rollups (sessions, conversions, sub-attach, revenue,
- * LTV-proxy) + the Thompson-sampling posterior onto
- * [[storefront_experiment_variants]].
+ * Persists per-variant rollups (sessions, conversions, sub-attach, revenue, LTV-proxy)
+ * + the Thompson-sampling posterior onto [[storefront_experiment_variants]].
  *
- * Attribution spine — entirely session/identity-keyed off the append-only
- * [[storefront_events]] log, so it never re-parses URLs and never needs
- * orders.anonymous_id (which doesn't exist):
- *   1. `experiment_exposure` events → per variant_id, the set of exposed sessions
- *      keyed by `anonymous_id` with their FIRST-exposure timestamp.
- *   2. `order_placed` events (same session, carry meta.order_id/total_cents) within
- *      the delayed-purchase window AFTER first exposure → an attributed conversion.
- *   3. The orders table (by meta.order_id) supplies authoritative revenue,
- *      `subscription_id` (sub-attach), and refund status (Phase 5 refund-spike).
+ * Attribution spine — session-stamped, literal, no client-event guesswork:
+ *   1. A variant's SESSIONS = `storefront_sessions` whose `experiment_assignments`
+ *      carries that variant's arm, EXCLUDING is_internal / is_bot (the report-layer
+ *      exclusion — internal/bot are still stamped, just not counted). The stamp is
+ *      written server/edge-side off the resolved arm (sx_variant cookie /
+ *      resolveExperimentsForRender), NOT the flaky client `experiment_exposure` event.
+ *   2. A CONVERSION = an `orders` row whose `session_id` is one of those stamped
+ *      sessions — an in-session purchase, no 14-day anonymous_id window. The order
+ *      supplies authoritative revenue, `subscription_id` (sub-attach), refund status.
  *
  * IDEMPOTENT: every refresh recomputes each variant's rollup from source and
- * OVERWRITES the columns — a re-run never double-counts (the
- * [[../specs/storefront-iteration-engine]] Phase 3 discipline). The posterior is
- * DERIVED from the rollup, never incremented.
+ * OVERWRITES the columns — a re-run never double-counts. The posterior is DERIVED from
+ * the rollup, never incremented.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { ExperimentRow, VariantRow } from "@/lib/storefront/experiments";
 
-/** Default consider→buy lag: an order attributes if it lands within this many days
- *  of first exposure. The cold-50+ lander cohort buys with a multi-day lag. */
+/** Retained for the LTV-metrics module ([[storefront-ltv-metrics]]) which mirrors the
+ *  old consider→buy lag. Session-stamped attribution itself is in-session (no window). */
 export const DEFAULT_WINDOW_DAYS = 14;
 
 /** Placeholder estimated incremental sub-LTV bonus (cents) a subscription
- *  conversion contributes to the predicted-LTV proxy ON TOP of its order revenue.
- *  Sub-LTV ≫ one-time, so this steers the bandit toward subscribers. M3's
- *  reconciler RECALIBRATES this weight against actual 4-month cohort LTV; this spec
- *  only records the raw proxy stream. */
+ *  conversion contributes to the predicted-LTV proxy ON TOP of its order revenue. */
 export const EST_SUB_LTV_CENTS = 12000;
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/** One element of storefront_sessions.experiment_assignments. */
+interface SessionAssignment {
+  experiment_id: string;
+  variant_id: string;
+  arm: "control" | "variant" | "holdout";
+  assigned_at?: string;
+  surface?: string | null;
+}
 
 export interface VariantRollupResult {
   experiment_id: string;
@@ -71,29 +74,34 @@ function chunk<T>(arr: T[], size: number): T[][] {
 const PAGE = 1000;
 const MAX_PAGES = 100; // safety cap (100k rows) — logs if hit
 
-/** Page through a query in 1000-row windows (Supabase's default cap), ordered by
- *  created_at then id for stable paging. */
-async function fetchAllEvents(
+/**
+ * Page through the sessions stamped to one experiment (excluding internal/bot — the
+ * report-layer exclusion). Uses the dedicated `.contains` (jsonb @>) filter, which
+ * supabase-js serializes safely, ordered by created_at,id for stable paging.
+ */
+async function fetchStampedSessions(
   admin: Admin,
   workspaceId: string,
-  eventType: string,
-  select: string,
-): Promise<Array<Record<string, unknown>>> {
-  const rows: Array<Record<string, unknown>> = [];
+  experimentId: string,
+): Promise<Array<{ id: string; experiment_assignments: SessionAssignment[] }>> {
+  const rows: Array<{ id: string; experiment_assignments: SessionAssignment[] }> = [];
   for (let page = 0; page < MAX_PAGES; page++) {
     const { data } = await admin
-      .from("storefront_events")
-      .select(select)
+      .from("storefront_sessions")
+      .select("id, experiment_assignments")
       .eq("workspace_id", workspaceId)
-      .eq("event_type", eventType)
+      .eq("is_internal", false)
+      .eq("is_bot", false)
+      .contains("experiment_assignments", [{ experiment_id: experimentId }])
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(page * PAGE, page * PAGE + PAGE - 1);
-    const batch = (data as unknown as Array<Record<string, unknown>>) || [];
-    rows.push(...batch);
+    const batch =
+      (data as unknown as Array<{ id: string; experiment_assignments: SessionAssignment[] | null }>) || [];
+    for (const r of batch) rows.push({ id: r.id, experiment_assignments: r.experiment_assignments || [] });
     if (batch.length < PAGE) break;
     if (page === MAX_PAGES - 1) {
-      console.warn(`[storefront-experiment-attribution] ${eventType} hit ${MAX_PAGES}-page cap for ws=${workspaceId}`);
+      console.warn(`[storefront-experiment-attribution] stamped-sessions hit ${MAX_PAGES}-page cap for exp=${experimentId}`);
     }
   }
   return rows;
@@ -107,13 +115,13 @@ async function fetchAllEvents(
 export async function refreshExperimentAttribution(opts: {
   workspaceId: string;
   experimentId?: string;
+  /** @deprecated session-stamped attribution is in-session; retained for API compat. */
   windowDays?: number;
   now?: Date;
 }): Promise<AttributionRefreshResult> {
   const admin = createAdminClient();
-  const windowDays = opts.windowDays ?? DEFAULT_WINDOW_DAYS;
   const now = opts.now ?? new Date();
-  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+  void opts.windowDays;
 
   // 1. Active experiments + their variants.
   let expQuery = admin
@@ -135,114 +143,71 @@ export async function refreshExperimentAttribution(opts: {
   const variants = (variantsData as Pick<VariantRow, "id" | "experiment_id" | "is_control">[]) || [];
   if (!variants.length) return { experiments: experiments.length, variants: 0, rollups: [] };
 
-  const variantIds = variants.map((v) => v.id);
   const variantById = new Map(variants.map((v) => [v.id, v]));
 
-  void variantIds; // retained for readability; variant membership is checked via variantById
-
-  // 2. Exposure events. Filter to our variants in JS (the meta->>variant_id JSON
-  //    filter is fragile across PostgREST versions; paging + a Set is robust).
-  //    Keyed by anonymous_id (the sticky-assignment identity).
-  type Exposure = { variantId: string; anon: string; sessionId: string; at: number };
-  const exposures: Exposure[] = [];
-  const exposureRows = await fetchAllEvents(admin, opts.workspaceId, "experiment_exposure", "session_id, anonymous_id, meta, created_at");
-  for (const raw of exposureRows) {
-    const row = raw as { session_id: string | null; anonymous_id: string | null; meta: Record<string, unknown>; created_at: string };
-    const variantId = String(row.meta?.variant_id ?? "");
-    if (!variantById.has(variantId) || !row.anonymous_id) continue;
-    exposures.push({
-      variantId,
-      anon: row.anonymous_id,
-      sessionId: row.session_id ?? "",
-      at: new Date(row.created_at).getTime(),
-    });
-  }
-
-  // Per variant: distinct exposed sessions + earliest exposure per anon.
-  const firstExposureByVariantAnon = new Map<string, number>(); // `${variantId}|${anon}` → ms
+  // 2. Stamped sessions → per-variant session sets (excluding internal/bot). A session
+  //    is stamped to at most one arm per experiment, but may span multiple experiments.
   const sessionsByVariant = new Map<string, Set<string>>();
-  const anonsByVariant = new Map<string, Set<string>>();
-  for (const e of exposures) {
-    const key = `${e.variantId}|${e.anon}`;
-    const prev = firstExposureByVariantAnon.get(key);
-    if (prev === undefined || e.at < prev) firstExposureByVariantAnon.set(key, e.at);
-    if (e.sessionId) {
-      const s = sessionsByVariant.get(e.variantId) ?? new Set();
-      s.add(e.sessionId);
-      sessionsByVariant.set(e.variantId, s);
-    }
-    const a = anonsByVariant.get(e.variantId) ?? new Set();
-    a.add(e.anon);
-    anonsByVariant.set(e.variantId, a);
-  }
-
-  // 3. order_placed events for all exposed anons (within window). Pull order ids.
-  const allAnons = [...new Set(exposures.map((e) => e.anon))];
-  type OrderEvent = { anon: string; orderId: string; at: number };
-  const orderEvents: OrderEvent[] = [];
-  for (const ids of chunk(allAnons, 200)) {
-    if (!ids.length) continue;
-    const { data } = await admin
-      .from("storefront_events")
-      .select("anonymous_id, meta, created_at")
-      .eq("workspace_id", opts.workspaceId)
-      .eq("event_type", "order_placed")
-      .in("anonymous_id", ids);
-    for (const row of (data as Array<{ anonymous_id: string | null; meta: Record<string, unknown>; created_at: string }>) || []) {
-      const orderId = String(row.meta?.order_id ?? "");
-      if (!row.anonymous_id || !orderId) continue;
-      orderEvents.push({ anon: row.anonymous_id, orderId, at: new Date(row.created_at).getTime() });
+  const allSessionIds = new Set<string>();
+  for (const exp of experiments) {
+    const sessions = await fetchStampedSessions(admin, opts.workspaceId, exp.id);
+    for (const s of sessions) {
+      for (const a of s.experiment_assignments) {
+        if (a.experiment_id !== exp.id || !variantById.has(a.variant_id)) continue;
+        const set = sessionsByVariant.get(a.variant_id) ?? new Set<string>();
+        set.add(s.id);
+        sessionsByVariant.set(a.variant_id, set);
+        allSessionIds.add(s.id);
+      }
     }
   }
 
-  // 4. Look up the attributed orders (authoritative revenue / sub-attach / refunds).
-  const orderIds = [...new Set(orderEvents.map((o) => o.orderId))];
-  const orderById = new Map<string, { total_cents: number; subscription_id: string | null; financial_status: string | null }>();
-  for (const ids of chunk(orderIds, 200)) {
+  // 3. Orders whose session_id is one of the stamped sessions = the in-session
+  //    conversions. Earliest order per session wins (a session counts once).
+  type OrderRow = { session_id: string; total_cents: number; subscription_id: string | null; financial_status: string | null; created_at: string };
+  const orderBySession = new Map<string, OrderRow>();
+  for (const ids of chunk([...allSessionIds], 200)) {
     if (!ids.length) continue;
     const { data } = await admin
       .from("orders")
-      .select("id, total_cents, subscription_id, financial_status")
-      .in("id", ids);
-    for (const o of (data as Array<{ id: string; total_cents: number | null; subscription_id: string | null; financial_status: string | null }>) || []) {
-      orderById.set(o.id, {
-        total_cents: o.total_cents ?? 0,
-        subscription_id: o.subscription_id,
-        financial_status: o.financial_status,
-      });
+      .select("session_id, total_cents, subscription_id, financial_status, created_at")
+      .eq("workspace_id", opts.workspaceId)
+      .in("session_id", ids);
+    for (const o of (data as Array<{ session_id: string | null; total_cents: number | null; subscription_id: string | null; financial_status: string | null; created_at: string }>) || []) {
+      if (!o.session_id) continue;
+      const prev = orderBySession.get(o.session_id);
+      if (!prev || new Date(o.created_at).getTime() < new Date(prev.created_at).getTime()) {
+        orderBySession.set(o.session_id, {
+          session_id: o.session_id,
+          total_cents: o.total_cents ?? 0,
+          subscription_id: o.subscription_id,
+          financial_status: o.financial_status,
+          created_at: o.created_at,
+        });
+      }
     }
   }
 
-  // 5. Roll up per variant. A converting anon counts once; first qualifying order wins.
+  // 4. Roll up per variant.
   const rollups: VariantRollupResult[] = [];
   for (const v of variants) {
-    const anons = anonsByVariant.get(v.id) ?? new Set();
+    const sset = sessionsByVariant.get(v.id) ?? new Set<string>();
+    const sessions = sset.size;
     let conversions = 0;
     let subAttach = 0;
     let revenueCents = 0;
     let oneTimeRevenue = 0;
     let refunds = 0;
-    for (const anon of anons) {
-      const firstExposed = firstExposureByVariantAnon.get(`${v.id}|${anon}`);
-      if (firstExposed === undefined) continue;
-      // Earliest qualifying order for this anon within the delayed-purchase window.
-      const candidate = orderEvents
-        .filter((o) => o.anon === anon && o.at >= firstExposed && o.at - firstExposed <= windowMs)
-        .sort((a, b) => a.at - b.at)[0];
-      if (!candidate) continue;
-      const order = orderById.get(candidate.orderId);
+    for (const sid of sset) {
+      const order = orderBySession.get(sid);
       if (!order) continue;
       conversions += 1;
       revenueCents += order.total_cents;
-      const isSub = !!order.subscription_id;
-      if (isSub) subAttach += 1;
+      if (order.subscription_id) subAttach += 1;
       else oneTimeRevenue += order.total_cents;
       if (order.financial_status && REFUNDED.has(order.financial_status)) refunds += 1;
     }
-    const sessions = (sessionsByVariant.get(v.id) ?? new Set()).size || anons.size;
-    // Predicted-LTV proxy: one-time order revenue + an est-sub-LTV bonus per sub.
     const ltvProxyCents = oneTimeRevenue + subAttach * EST_SUB_LTV_CENTS;
-    // Beta-Bernoulli posterior over the conversion proxy.
     const alpha = 1 + conversions;
     const beta = 1 + Math.max(0, sessions - conversions);
     rollups.push({
@@ -260,7 +225,7 @@ export async function refreshExperimentAttribution(opts: {
     });
   }
 
-  // 6. Persist (overwrite — idempotent).
+  // 5. Persist (overwrite — idempotent).
   const stamp = now.toISOString();
   for (const r of rollups) {
     await admin

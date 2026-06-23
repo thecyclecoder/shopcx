@@ -1080,6 +1080,17 @@ export async function POST(request: NextRequest) {
       sessionId = (sess?.id as string | null) || null;
       sessionAnon = (sess?.anonymous_id as string | null) || sessionAnon;
     }
+    // Phase 2 (experiment-session-stamped-attribution): persist the converting session
+    // directly on the order so attribution joins it literally (orders.session_id →
+    // storefront_sessions.experiment_assignments) instead of the indirect cart_token →
+    // order_placed event → session_id hop, and the order-detail Journey panel can render
+    // the funnel. Set-when-resolved; best-effort within this already-best-effort block.
+    if (sessionId || sessionAnon) {
+      await admin
+        .from("orders")
+        .update({ session_id: sessionId, anonymous_id: sessionAnon })
+        .eq("id", order.id);
+    }
     if (sessionId && sessionAnon) {
       // product_id scopes the conversion to a product so advertorial-lander →
       // purchase funnels resolve per product (checkout/order previously carried
