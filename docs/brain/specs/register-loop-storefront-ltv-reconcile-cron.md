@@ -1,10 +1,10 @@
-# Register monitored loop: storefront-ltv-reconcile-cron ⏳
+# Register monitored loop: storefront-ltv-reconcile-cron ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** extends the [[control-tower-complete-coverage]] coverage self-audit · auto-proposed by [[../libraries/coverage-register-agent]].
 
 The coverage self-audit found a cron `createFunction` served in code (`storefront-ltv-reconcile-cron`, daily (0 14 * * *)) with **no `MONITORED_LOOPS` tile** — an unregistered loop. This spec adds the inferred registry entry so the loop becomes a real monitored tile. Confirm the inferred **owner-function** (`growth`) + cadence/window before merging.
 
-## Phase 1 — add the MONITORED_LOOPS entry ⏳
+## Phase 1 — add the MONITORED_LOOPS entry ✅
 In `src/lib/control-tower/registry.ts`, add this entry to `MONITORED_LOOPS` (in the Inngest crons group):
 
 ```ts
