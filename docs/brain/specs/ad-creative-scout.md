@@ -1,4 +1,4 @@
-# Ad Creative Scout — DB-fed sweep + capture EVERYTHING + ad-gap layer ⏳
+# Ad Creative Scout — DB-fed sweep + capture EVERYTHING + ad-gap layer ✅
 
 **Owner:** [[../functions/growth]] · **Parent:** [[../goals/acquisition-research-engine]] (M2)
 **Blocked-by:** [[competitor-scout]]
@@ -13,7 +13,7 @@ Our parser keeps ~3 fields; a raw AdLibrary row also carries the **destination**
 - **Get the sweep collecting in prod** (`creative_skeletons` is currently empty — confirm `ADLIBRARY_API_KEY` in Vercel + the cron runs for ad-tool workspaces).
 - **Gap-finding layer:** compare competitors' winning angles/formats/offers/CTAs (from the captured copy + spend + longevity) against ours → surface *"angles competitors run that we don't"* as recommendations into the ad iteration engine ([[../specs/storefront-iteration-engine]]).
 
-## Phase 1 — DB-fed sweep + full-payload capture + ad-gap recommendations 🚧
+## Phase 1 — DB-fed sweep + full-payload capture + ad-gap recommendations ✅�
 Expand the AdLibrary parse + `creative_skeletons` (or a new `competitor_ads` record) to store the complete payload incl. `ecom_advertiser_id`/store domain + copy + spend + longevity + engagement; point the sweep at the `competitors` table; add the gap-analysis pass → recommendations. Brain: [[../goals/acquisition-research-engine]] · [[competitor-scout]] · [[../integrations/adlibrary]] · [[../libraries/adlibrary]] · [[../libraries/ad-gap]] · [[../inngest/creative-finder]] · [[../tables/creative_skeletons]] · [[landing-page-scout]].
 
 ### Status / open work
