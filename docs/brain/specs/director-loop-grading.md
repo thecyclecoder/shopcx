@@ -5,9 +5,11 @@
 
 The supervisory loop that closes the **CEO → Director → tool** chain for the [[../goals/devops-director]] goal. The [[platform-director-agent|Platform/DevOps Director]] runs on a **standing cadence** (a scheduled pass), and the CEO **grades the director's calls 1–10** — *was the auto-approval right? did the escorted goal land clean?* — and those grades **train it and tighten/loosen the leash**. This directly mirrors the shipped [[storefront-campaign-grading-loop|Head-of-Growth campaign-grading loop]] (an AI/human grader against a rubric + human-approved calibration rules, human-overridable, feeding back as a training signal) — reusing its proven shape one level up the org chart. Today the leash in the goal is **static**: the [[platform-director-agent|M4 director]] auto-approves within a fixed policy with no feedback loop that widens or narrows the [[approval-routing-engine|`live + autonomous`]] envelope based on whether its past calls were good. Success metric served: **% of platform approvals the CEO never touches** can *safely* trend up because the director's decision quality is measured and the autonomy envelope is earned, not assumed.
 
-## Phase 1 — the standing cadence ⏳
-- ⏳ planned
+## Phase 1 — the standing cadence ✅
+- ✅ shipped
 - A scheduled Platform-Director pass (a cron enqueueing the [[platform-director-agent|`platform-director`]] [[../tables/agent_jobs]] kind, registered in `MONITORED_LOOPS` per [[coverage-auto-register-agent]] so it can't silently die), in addition to the event-driven processing — so escorting + watching happen on a reliable beat, not only on inbound approvals. Mirror [[../inngest/daily-analysis-report-cron]]'s cron shape.
+
+**Shipped:** `src/lib/inngest/platform-director-cron.ts` — a daily cron (`15 12 * * *`, mirroring [[../inngest/daily-analysis-report-cron]]) that inserts one `queued` `agent_jobs` row `kind='platform-director'` per build-console workspace (any workspace with an agent_jobs row, like [[../inngest/spec-test-cron]]), deduped against in-flight platform-director jobs — no daily pileup. Registered in the Inngest serve list (`src/lib/inngest/registered-functions.ts`) and in `MONITORED_LOOPS` (`src/lib/control-tower/registry.ts`, `owner: platform`, 26h window + `registeredAt` first-tick grace) so a dead cadence surfaces on Control Tower. End-of-run `emitCronHeartbeat`. Brain page [[../inngest/platform-director-cron]]. Free-text `platform-director` agent_jobs kind — no migration. The box lane that *processes* the enqueued job (`runPlatformDirectorJob`) is [[platform-director-agent]]'s deliverable.
 
 ## Phase 2 — the director-decision grade store + rubric ⏳
 - ⏳ planned
@@ -44,7 +46,7 @@ The supervisory loop that closes the **CEO → Director → tool** chain for the
 - A report surface shows per-period grades + trend + recommendations; cross-linked from [[../goals/devops-director]].
 
 ## Verification
-- Confirm the Platform-Director cadence cron is registered in `MONITORED_LOOPS` and produces a live tile on `/dashboard/developer/control-tower` (no unregistered-loop gap).
+- **(Phase 1 ✅)** Confirm `platform-director-cron` (daily `15 12 * * *`) is in the Inngest serve list and registered in `MONITORED_LOOPS` (`owner: platform`) → on `/dashboard/developer/control-tower` it shows a **live Platform tile** "Platform Director cadence" with no "Unregistered loop" amber gap. After a daily tick → `select kind, status, count(*) from agent_jobs where kind='platform-director' group by 1,2;` → one `queued` row per build-console workspace; re-run the cron same-day while one is in-flight → expect **no duplicate** (dedupe on queued/queued_resume/building/claimed).
 - After the director auto-approves a call, on the next grading pass → `select grade, reasoning, graded_by from director_decision_grades where approval_decision_id='<id>';` → a 1–10 grade + reasoning, `graded_by='agent'`; re-run → updated in place, not duplicated.
 - Grade a sound-but-later-tweaked auto-approval vs a careless-but-fine one → expect the sound call to grade higher (soundness over luck).
 - Override a grade in the report surface → `select graded_by, overridden_by from director_decision_grades where id='<id>';` → `graded_by='human'`, `overridden_by=<member>`; a ≥N-point gap proposes a `director_grader_prompts` rule (`status='proposed'`).

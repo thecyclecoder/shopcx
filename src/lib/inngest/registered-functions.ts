@@ -126,6 +126,7 @@ import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
 import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 import { loopHeartbeatsPrune } from "@/lib/inngest/loop-heartbeats-prune";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
+import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
 
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
 export const registeredInngestFunctions = [
@@ -259,6 +260,7 @@ export const registeredInngestFunctions = [
   supabaseLogPollCron,
   loopHeartbeatsPrune,
   dailyDigestCron,
+  platformDirectorCron,
 ];
 
 /** Our Inngest app id prefix (e.g. "shopcx-"), the form Inngest prepends to function ids across apps. */
