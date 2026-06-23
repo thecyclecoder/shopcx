@@ -30,6 +30,8 @@ interface DirectorNode {
   goalSlugs: string[];
   workers: WorkerLane[];
   status: "offline" | "live" | "autonomous";
+  live: boolean;
+  autonomous: boolean;
 }
 interface OrgChart {
   ceo: { goals: { slug: string; title: string; pct: number }[] };
@@ -275,7 +277,59 @@ function InboxRow({ item }: { item: InboxItem }) {
 
 // ── Right pane header ─────────────────────────────────────────────────────────
 
-function RoleHeader({ org, role }: { org: OrgChart; role: string }) {
+// Owner-only toggle behind the approval router — flips a director live / autonomous.
+// live && autonomous ⇒ this director auto-approves its tools' requests; else they route to the CEO.
+function AutonomyToggle({ director, onChange }: { director: DirectorNode; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  const set = async (patch: { live?: boolean; autonomous?: boolean }) => {
+    setBusy(true);
+    try {
+      await fetch("/api/developer/agents/autonomy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ functionSlug: director.slug, ...patch }),
+      });
+      onChange();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-4 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40">
+      <span className="text-[12px] font-medium text-zinc-600 dark:text-zinc-300">Autonomy</span>
+      <label className="flex items-center gap-1.5 text-[12px] text-zinc-600 dark:text-zinc-300">
+        <input
+          type="checkbox"
+          checked={director.live}
+          disabled={busy}
+          onChange={(e) => set({ live: e.target.checked })}
+          className="rounded border-zinc-300 dark:border-zinc-600"
+        />
+        Live <span className="text-zinc-400">(agent running)</span>
+      </label>
+      <label
+        className={`flex items-center gap-1.5 text-[12px] ${director.live ? "text-zinc-600 dark:text-zinc-300" : "text-zinc-400"}`}
+        title={director.live ? "" : "Enable Live first — an offline director can't auto-approve."}
+      >
+        <input
+          type="checkbox"
+          checked={director.autonomous}
+          disabled={busy || !director.live}
+          onChange={(e) => set({ autonomous: e.target.checked })}
+          className="rounded border-zinc-300 dark:border-zinc-600"
+        />
+        Autonomous <span className="text-zinc-400">(auto-approves)</span>
+      </label>
+      <span className="ml-auto text-[11px] text-zinc-400">
+        {director.autonomous ? "Approvals route here + log to history" : "Approvals route to the CEO"}
+      </span>
+    </div>
+  );
+}
+
+function RoleHeader({ org, role, onChange }: { org: OrgChart; role: string; onChange: () => void }) {
   if (role === "ceo") {
     const persona = getPersona("ceo");
     return (
@@ -340,6 +394,7 @@ function RoleHeader({ org, role }: { org: OrgChart; role: string }) {
           ))}
         </div>
       )}
+      <AutonomyToggle director={d} onChange={onChange} />
     </div>
   );
 }
@@ -353,17 +408,23 @@ export default function AgentsPage() {
   const [err, setErr] = useState(false);
   const [role, setRole] = useState("ceo");
 
+  const loadOrg = useCallback(
+    () =>
+      fetch("/api/developer/agents")
+        .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+        .then((d: OrgChart) => {
+          setOrg(d);
+          setErr(false);
+        })
+        .catch(() => setErr(true))
+        .finally(() => setLoading(false)),
+    [],
+  );
+
   useEffect(() => {
     if (workspace.role !== "owner") return;
-    fetch("/api/developer/agents")
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((d: OrgChart) => {
-        setOrg(d);
-        setErr(false);
-      })
-      .catch(() => setErr(true))
-      .finally(() => setLoading(false));
-  }, [workspace.role]);
+    loadOrg();
+  }, [workspace.role, loadOrg]);
 
   if (workspace.role !== "owner") {
     return (
@@ -404,7 +465,7 @@ export default function AgentsPage() {
             <RoleNav org={org} selected={role} onSelect={setRole} />
           </aside>
           <section>
-            <RoleHeader org={org} role={role} />
+            <RoleHeader org={org} role={role} onChange={loadOrg} />
             <InboxShell key={role} role={role} title={title} />
           </section>
         </div>

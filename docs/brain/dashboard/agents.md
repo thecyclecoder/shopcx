@@ -8,7 +8,7 @@ The owner-only **Agents hub** ([[../specs/agents-hub-role-inboxes]], M1 of [[../
 ## Surfaces
 
 - **Left role nav** — **CEO** (the `ceo` persona seat, with its active-goal count from `goals/*.md`), then one row per `functions/*.md` **director** ([[../functions/platform|Platform]] · [[../functions/growth|Growth]] · [[../functions/cmo|CMO]] · [[../functions/cs|CS]] · [[../functions/retention|Retention]]) showing its **persona chip + SVG mascot** + a **live/autonomous badge** (M1: every director is `offline` → "routes to CEO"; the flag itself lands in M2). Under each director, its **Workers** — the box [[../tables/agent_jobs]] lanes it owns (the `agent-kind` loops in the Control Tower [[../libraries/control-tower|registry]], which already carry an owner function: build/plan/fold/spec-chat/spec-test/dev-ask/pr-resolve/repair → Platform; ticket-improve/triage-escalations → CS; migration-fix → Retention; storefront-optimizer → Growth).
-- **Right pane** — the selected role's header (mascot + name + role + personality + mandates/goals) and its **three-tab inbox shell**:
+- **Right pane** — the selected role's header (mascot + name + role + personality + mandates/goals). For a **director**, an owner-only **Autonomy toggle** (approval-routing-engine M2 / Phase 1) — two checkboxes, **Live** (the director-agent is running) + **Autonomous** (trusted to auto-decide), backed by [[../tables/function_autonomy]] via `POST /api/developer/agents/autonomy`. Autonomous is disabled until Live is on (an offline director can't auto-approve); the row reads "Approvals route here + log to history" when on, else "Approvals route to the CEO". The director's **live/autonomous badge** is now derived from these flags (seeded all-off ⇒ every director shows "routes to CEO" until the owner flips it). Below the header, its **three-tab inbox shell**:
   - **Messages** (`agent_message`) — the gamified #directors board (populated by M3).
   - **Approval Requests** (`agent_approval_request`) — the routed approval queue (populated by M2).
   - **Daily Summaries** (`agent_daily_summary`) — the EOD recaps (populated by M3/M4).
@@ -18,7 +18,8 @@ This milestone ships the **shell + personas only** — no approval-routing logic
 
 ## Data source
 
-- `GET /api/developer/agents` (`src/app/api/developer/agents/route.ts`) → `getOrgChart()` ([[../libraries/agent-personas|org-chart.ts]]) — the CEO → Directors → Workers tree from [[../libraries/brain-roadmap]] `getFunctions()` + `getGoals()` + the Control Tower registry's `agent-kind` loops. **Brain is the source of truth — never a hand-maintained second copy of the org chart.**
+- `GET /api/developer/agents` (`src/app/api/developer/agents/route.ts`) → `getOrgChart()` ([[../libraries/agent-personas|org-chart.ts]]) — the CEO → Directors → Workers tree from [[../libraries/brain-roadmap]] `getFunctions()` + `getGoals()` + the Control Tower registry's `agent-kind` loops, with each director's `status`/`live`/`autonomous` derived from [[../tables/function_autonomy]] ([[../libraries/approval-router]] `loadAutonomyMap` + `isAutoApprover`). **Brain is the source of truth — never a hand-maintained second copy of the org chart.**
+- `POST /api/developer/agents/autonomy` (`src/app/api/developer/agents/autonomy/route.ts`) → owner-gated upsert of a director's `live`/`autonomous` flag into [[../tables/function_autonomy]] (the progressive-offload switch behind [[../libraries/approval-router]] `resolveApprover`). Validates the slug against `functions/*.md`; `autonomous` is forced off when `live` is off.
 - `GET /api/developer/agents/inbox?role={ceo|slug}` (`src/app/api/developer/agents/inbox/route.ts`) → the role's three-tab payload. CEO reads [[../tables/dashboard_notifications]] (`type IN agent_*`, `dismissed=false`); director roles return empty + `routesToCeo:true`. **Read-only** — the shell never routes or writes (that is M2).
 
 ## Permissions
@@ -32,8 +33,8 @@ The cast (🛠️ Ada/Platform · 🚀 Max/Growth · 🎨 Iris/CMO · 💬 June/
 ## Files
 
 - `src/app/dashboard/agents/page.tsx` (left role nav + right three-tab inbox shell)
-- `src/app/api/developer/agents/route.ts` (owner-gated org chart) · `src/app/api/developer/agents/inbox/route.ts` (owner-gated role inbox)
-- `src/lib/agents/org-chart.ts` (the CEO→Directors→Workers reader) · `src/lib/agents/personas.ts` (the reskinnable cast) · `src/lib/agents/inbox.ts` (tab + reserved-type config) — [[../libraries/agent-personas]]
+- `src/app/api/developer/agents/route.ts` (owner-gated org chart) · `src/app/api/developer/agents/inbox/route.ts` (owner-gated role inbox) · `src/app/api/developer/agents/autonomy/route.ts` (owner-gated live/autonomous toggle)
+- `src/lib/agents/org-chart.ts` (the CEO→Directors→Workers reader) · `src/lib/agents/approval-router.ts` (the org-chart approval router — [[../libraries/approval-router]]) · `src/lib/agents/personas.ts` (the reskinnable cast) · `src/lib/agents/inbox.ts` (tab + reserved-type config) — [[../libraries/agent-personas]]
 - `src/components/agents/mascots.tsx` (inline SVG mascots) · `src/components/agents/persona-chip.tsx` (avatar + chip + status badge)
 
 ## Related

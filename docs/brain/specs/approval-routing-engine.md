@@ -5,10 +5,10 @@
 
 The **keystone** of the [[../goals/devops-director]] goal. Every agent/tool has an owner function (its director); when it needs sign-off, the approval must route **up the org chart to the first live + autonomous supervisor**, else fall through to the **CEO**. Today every approval is raised against a scattered surface — the [[../dashboard/control-tower]] repair / db-health / coverage-registration feeds, the spec-card `needs_approval` cards, and the box page's `approvalHref` deep-links (defaulting to the Control Tower per [[../operational-rules]]) — all sitting on [[../tables/agent_jobs]] `needs_approval` + `pending_actions` with **no concept of a supervising role**. This milestone adds that concept: a per-function **`live + autonomous` flag** (the progressive-offload switch), a router that walks the org chart, an **autonomous-approval history / audit log** (supervisable autonomy — the CEO can always see what the proxy decided and why), and a migration of every scattered surface to **emit into the M1 routed inbox**. It pays off immediately even before any director is automated: with no director live, everything routes to the **one CEO inbox** instead of N surfaces. Success metric served: **mean time-to-approve down, zero dropped/stuck approvals**, and the auditable history that makes "% of approvals you never touch" measurable.
 
-## Phase 1 — the `live + autonomous` flag + org-chart walk ⏳
-- ⏳ planned
-- A per-function flag store — `function_autonomy` (columns: `function_slug`, `live boolean`, `autonomous boolean`, `updated_by`, `updated_at`), seeded **all-off** (today's reality: no director live). Owner-only toggle on the M1 Agents hub. Brain page [[../tables/function_autonomy]] (probe the live schema before assuming shape, per [[../README]]).
-- `src/lib/agents/approval-router.ts` `resolveApprover(ownerFunction)` — walk the org chart **up** from the raising tool's owner function (read parentage via [[../libraries/brain-roadmap]] `getFunctionMap()`): the first ancestor with `live && autonomous` is the approver; if none, the **CEO**. Pure + unit-testable (the graph is the `functions/*.md` org chart).
+## Phase 1 — the `live + autonomous` flag + org-chart walk ✅
+- ✅ shipped
+- A per-function flag store — `function_autonomy` (columns: `function_slug` PK, `live boolean`, `autonomous boolean`, `updated_by`, `updated_at`), seeded **all-off** (today's reality: no director live). **Global config** (one row per function slug — the org chart is ShopCX's own singular DevOps org, not per-tenant; no `workspace_id`). Owner-only toggle on the M1 Agents hub — two checkboxes (Live + Autonomous; Autonomous disabled until Live, and forced off when Live is cleared) backed by `POST /api/developer/agents/autonomy`. Migration `20260701120000_function_autonomy.sql` + apply-script. Brain page [[../tables/function_autonomy]].
+- `src/lib/agents/approval-router.ts` `resolveApprover(ownerFunction, chart, autonomy)` — **pure**: walk the org chart **up** from the raising tool's owner function (the owner itself the first candidate); the first ancestor with `live && autonomous` is the approver; if none, the **CEO**. Acyclic-safe (visited guard); a missing flag row ⇒ off (fail-safe). The graph (`buildOrgChartGraph`) reads the `functions/*.md` slugs via [[../libraries/brain-roadmap]] `listFunctionSlugs()` and is **flat today** (every director → CEO), generic for a deeper future chart. `resolveApproverLive` / `loadAutonomyMap` read the live flags. Unit-tested (`npm run test:approval-router`, 12 cases). Brain page [[../libraries/approval-router]]. The Agents-hub director badge (`offline ｜ live ｜ autonomous`) is now derived from these flags.
 
 ## Phase 2 — route approvals into the M1 inbox + investigation-inline ⏳
 - ⏳ planned
@@ -39,6 +39,14 @@ The **keystone** of the [[../goals/devops-director]] goal. Every agent/tool has 
 - The scattered surfaces (Control Tower approval feeds, spec cards, box `approvalHref`) are migrated to emit into the routed inbox; brain pages updated.
 
 ## Verification
+
+### Phase 1 (shipped) — flag + router + toggle
+- Apply `npx tsx scripts/apply-function-autonomy-migration.ts` → expect `function_autonomy` present and **5 seeded rows** (growth/cmo/retention/cs/platform), all `live=false, autonomous=false`.
+- Run `npm run test:approval-router` → expect **12 passing** cases (all-off ⇒ CEO; owner live+autonomous ⇒ owner; live-only ⇒ CEO; deeper-tree ancestor walk; cyclic ⇒ CEO; null/CEO owner ⇒ CEO).
+- On `/dashboard/agents` as the owner, select any director → expect an **Autonomy** row with **Live** + **Autonomous** checkboxes; Autonomous is **disabled** until Live is checked. Check Live → badge flips to **live**; check Autonomous → badge flips to **autonomous** and the row reads "Approvals route here + log to history". Uncheck Live → Autonomous clears and the badge returns to **routes to CEO**. (`POST /api/developer/agents/autonomy` returns the resolved `{live, autonomous}`.)
+- As a non-owner, `POST /api/developer/agents/autonomy` → expect **403**.
+
+### Full engine (M2–M4)
 - With all function flags off, trigger any `needs_approval` (e.g. a repair proposal) → expect it to surface as an **Approval Request in the CEO inbox** on `/dashboard/agents`, with the proposal's investigation + cmd preview inline, and **no** standalone card on the old surfaces.
 - Set Platform `live=true, autonomous=true`, raise a Platform-owned approval → expect `resolveApprover` to route it to **Platform**, an `approval_decisions` row to record `routed_to_function='platform'`, and the CEO inbox to NOT show it (it appears in CEO **Decision history** instead).
 - Set Platform `live=true, autonomous=false` → expect a Platform-owned approval to **fall through to the CEO** (live but not autonomous ⇒ not an auto-approver).
