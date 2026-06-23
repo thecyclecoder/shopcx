@@ -7,9 +7,11 @@
  * post shows the author's persona avatar + name/role chip (from src/lib/agents/personas.ts — reskinnable,
  * never hardcoded), a human-readable body with @-mentions highlighted, a timestamp, and threaded replies.
  * Reads GET /api/developer/agents/board (owner-gated). The live Platform director (M4) is the first real
- * author; until then the system seed proves the surface. Two-way reply is Phase 2.
+ * author; until then the system seed proves the surface. Phase 2: the owner replies / asks "why?" under a
+ * post → POST routes it to the dev-ask / spec-chat answer brains; the director's answer posts back in-thread
+ * (the channel polls while a routed turn is still thinking — the inline "investigating…" state).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar } from "@/components/agents/persona-chip";
 import type { BoardMessage, BoardPost, BoardPayload } from "@/lib/agents/board";
@@ -73,7 +75,43 @@ function MessageRow({ msg, nested = false }: { msg: BoardMessage; nested?: boole
   );
 }
 
-function PostBlock({ post }: { post: BoardPost }) {
+/** The inline "the director is investigating…" state under a CEO reply whose routed turn is still running. */
+function Investigating({ name }: { name: string }) {
+  return (
+    <div className="ml-[30px] mt-1 flex items-center gap-1.5 text-[11px] text-zinc-400">
+      <span className="inline-flex gap-0.5">
+        <span className="h-1 w-1 animate-pulse rounded-full bg-zinc-400" />
+        <span className="h-1 w-1 animate-pulse rounded-full bg-zinc-400 [animation-delay:150ms]" />
+        <span className="h-1 w-1 animate-pulse rounded-full bg-zinc-400 [animation-delay:300ms]" />
+      </span>
+      {name} is investigating…
+    </div>
+  );
+}
+
+function PostBlock({
+  post,
+  onReply,
+  sending,
+}: {
+  post: BoardPost;
+  onReply: (parentMessageId: string, body: string) => Promise<boolean>;
+  sending: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const persona = personaFor(post);
+
+  const submit = async () => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    const ok = await onReply(post.id, text);
+    if (ok) {
+      setDraft("");
+      setOpen(false);
+    }
+  };
+
   return (
     <li className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
       <MessageRow msg={post} />
@@ -82,10 +120,57 @@ function PostBlock({ post }: { post: BoardPost }) {
           {post.replies.map((r) => (
             <li key={r.id}>
               <MessageRow msg={r} nested />
+              {r.awaiting && <Investigating name={persona.name} />}
             </li>
           ))}
         </ul>
       )}
+      <div className="ml-9 mt-2">
+        {open ? (
+          <div className="space-y-1.5">
+            <textarea
+              autoFocus
+              rows={2}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void submit();
+                }
+              }}
+              placeholder={`Reply to ${persona.name} — ask "why?" and they'll investigate…`}
+              className="w-full resize-none rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-sm text-zinc-700 outline-none focus:border-indigo-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void submit()}
+                disabled={sending || !draft.trim()}
+                className="rounded-md bg-indigo-600 px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+              >
+                {sending ? "Sending…" : "Send"}
+              </button>
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  setDraft("");
+                }}
+                className="text-[12px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+              >
+                Cancel
+              </button>
+              <span className="text-[11px] text-zinc-400">⌘↵ to send</span>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={() => setOpen(true)}
+            className="text-[12px] font-medium text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+          >
+            Reply
+          </button>
+        )}
+      </div>
     </li>
   );
 }
@@ -94,6 +179,8 @@ export function BoardChannel({ filter }: { filter?: string }) {
   const [posts, setPosts] = useState<BoardPost[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
+  const [sending, setSending] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(
     () =>
@@ -111,6 +198,42 @@ export function BoardChannel({ filter }: { filter?: string }) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Poll while any routed answer-brain turn is still investigating, so the director's reply lands live.
+  useEffect(() => {
+    const awaiting = (posts ?? []).some((p) => p.replies.some((r) => r.awaiting));
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+    if (awaiting) {
+      pollRef.current = setTimeout(() => void refresh(), 4000);
+    }
+    return () => {
+      if (pollRef.current) clearTimeout(pollRef.current);
+    };
+  }, [posts, refresh]);
+
+  const onReply = useCallback(
+    async (parentMessageId: string, body: string): Promise<boolean> => {
+      setSending(true);
+      try {
+        const r = await fetch("/api/developer/agents/board", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ parentMessageId, body }),
+        });
+        if (!r.ok) return false;
+        await refresh();
+        return true;
+      } catch {
+        return false;
+      } finally {
+        setSending(false);
+      }
+    },
+    [refresh],
+  );
 
   const needle = (filter ?? "").trim().toLowerCase();
   const visible = (posts ?? []).filter(
@@ -145,7 +268,7 @@ export function BoardChannel({ filter }: { filter?: string }) {
   return (
     <ul className="space-y-2">
       {visible.map((p) => (
-        <PostBlock key={p.id} post={p} />
+        <PostBlock key={p.id} post={p} onReply={onReply} sending={sending} />
       ))}
     </ul>
   );

@@ -52,8 +52,9 @@ async function markTurnThinking(workspaceId: string, id: string, userMessage?: s
 
 - `src/app/api/roadmap/chat-session/route.ts` (owner-gated POST/GET).
 - `src/app/api/roadmap/chat/route.ts` (owner-gated; `markTurnThinking` + `saveChat`/`loadChat` to drive a box spec-chat turn).
-- `scripts/builder-worker.ts` → `runSpecChatJob` reads/writes the row directly via the service-role admin client (not these helpers).
+- `scripts/builder-worker.ts` → `runSpecChatJob` reads/writes the row directly via the service-role admin client (not these helpers). A board-triggered turn (`instructions` carry a `BoardReplyLink`) also posts the answer back onto the #directors board (`postBoardAnswer`).
+- `src/lib/agents/director-board.ts` → `routeBoardReply` calls `saveChat`/`markTurnThinking` when a board "why?" is about a specific spec (`metadata.spec_slug`) — routes spec context to spec-chat ([[director-board]], directors-board-gamified Phase 2).
 
 ## Related
 
-[[../tables/roadmap_chats]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../specs/box-spec-chat]]
+[[../tables/roadmap_chats]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../specs/box-spec-chat]] · [[director-board]]
