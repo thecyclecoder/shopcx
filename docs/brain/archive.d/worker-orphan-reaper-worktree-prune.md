@@ -1,0 +1,1 @@
+- **Worker-orphan-reaper: prune stale worktrees + idempotent resume worktree-add** · verified 2026-06-23 · → [[recipes/build-box-setup]]
