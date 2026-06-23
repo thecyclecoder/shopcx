@@ -178,6 +178,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[pdp-experiment-wiring]] (growth) — the PDP hero experiment is a NO-OP on the live PDP: resolution is gated behind `if (variant && advertorial)` (the advertorial branch), so the bare PDP skips it; and the patch targets AdvertorialContent.heroImageUrl while the PDP hero renders from media_by_slot['hero']. P1: ungate PDP resolution (+ honor sx_preview), apply heroImageUrl over the hero media slot, render dynamic-only-when-an-active-experiment-exists (else keep the ISR cache). P2 (owner's edge idea): assign the variant in Vercel middleware + cache-key by an sx_variant cookie — edge-cached A/B (fast + tested) for the hot PDP.
 
+## Active project — PDP edge-served experiments ⏳
+
+[[pdp-edge-served-experiments]] (platform) — P2 of the PDP wiring (P1 shipped: dynamic-when-testing). Keep the hot PDP EDGE-CACHED per variant instead of fully dynamic: publish the active-experiment manifest to Vercel Edge Config (optimizer re-publishes on state change) → edge middleware sticky-assigns sx_variant + rewrites to a variant-keyed cacheable URL → page reads the arm + caches per variant → purge on content change. Fast + tested.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]
