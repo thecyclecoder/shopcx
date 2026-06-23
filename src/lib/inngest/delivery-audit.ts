@@ -36,8 +36,6 @@ export const deliveryNightlyAudit = inngest.createFunction(
         .map(w => w.id);
     });
 
-    if (workspaces.length === 0) return { status: "no_workspaces" };
-
     let totalChecked = 0;
     let totalDelivered = 0;
     let totalRefused = 0;

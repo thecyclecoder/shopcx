@@ -40,10 +40,6 @@ export const sonnetPromptAutoReviewCron = inngest.createFunction(
       return data || [];
     });
 
-    if (!workspaces.length) {
-      return { workspaces: 0, reviewed: 0, accepted: 0, humanReview: 0 };
-    }
-
     let totalReviewed = 0,
       totalAccepted = 0,
       totalHumanReview = 0;

@@ -50,8 +50,6 @@ export const metaCapiDispatchCron = inngest.createFunction(
         .eq("is_active", true);
       return (data || []) as Array<{ id: string; workspace_id: string; event_types: string[] }>;
     });
-    if (sinks.length === 0) return { sinks: 0 };
-
     let totalSent = 0;
     let totalFailed = 0;
 

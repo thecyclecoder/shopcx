@@ -39,12 +39,12 @@ export const dailyOrderSnapshotSelfHeal = inngest.createFunction(
       return data || [];
     });
 
-    if (flagged.length === 0) return { rerun: 0 };
-
-    await step.sendEvent("rerun", flagged.map(r => ({
-      name: "snapshot/daily-orders",
-      data: { date: r.snapshot_date as string, workspace_id: r.workspace_id as string },
-    })));
+    if (flagged.length > 0) {
+      await step.sendEvent("rerun", flagged.map(r => ({
+        name: "snapshot/daily-orders",
+        data: { date: r.snapshot_date as string, workspace_id: r.workspace_id as string },
+      })));
+    }
 
     const result = { rerun: flagged.length, dates: flagged.map(r => r.snapshot_date) };
 
