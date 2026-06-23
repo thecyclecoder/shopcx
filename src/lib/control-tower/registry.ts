@@ -478,6 +478,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Every-5-min fan-out: recomputes attribution + bandit posteriors for running storefront experiments (near-live test stats). No-ops when no running experiments.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN, registeredAt: "2026-06-22T17:45:00Z" },
   { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-22T19:07:00Z" },
+  {
+    id: "storefront-ltv-reconcile-cron",
+    kind: "cron",
+    owner: "growth",
+    label: "storefront-ltv-reconcile-cron",
+    description: "Auto-proposed monitored loop for the storefront-ltv-reconcile-cron cron (daily (0 14 * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "daily (0 14 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-06-23T16:00:05.906Z",
+  },
   { id: "monthly-revenue-snapshot", kind: "cron", owner: "platform", label: "Revenue snapshot", description: "Pre-computes monthly revenue snapshots from daily data.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 26 * HOUR },
   // loop-heartbeats-retention spec, Phase 1: daily prune so loop_heartbeats stays small + the
   // control_tower_loop_beats RPC stays fast. registeredAt claims the registered_not_firing grace
