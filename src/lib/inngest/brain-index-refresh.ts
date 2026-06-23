@@ -70,22 +70,27 @@ async function commitIfChanged(file: RegenFile): Promise<{ path: string; committ
 export const brainIndexRefresh = inngest.createFunction(
   { id: "brain-index-refresh", retries: 1, triggers: [{ cron: "0 9 * * *" }, { event: "brain/index.refresh" }] },
   async ({ step }) => {
-    if (!ghToken()) return { skipped: "GitHub not configured" };
+    // Compute the run result on every path (incl. the no-GitHub-token skip) so the
+    // end-of-run heartbeat below always fires — a healthy-but-idle cron must still
+    // beat, or Control Tower false-flags it registered_not_firing.
+    const result = await (async () => {
+      if (!ghToken()) return { skipped: "GitHub not configured" };
 
-    // Regenerate from the bundled docs/brain/ tree (reflects main as of the last deploy; a merged fold
-    // redeploys, so the daily run sees the latest archive.d/).
-    const brainDir = path.join(process.cwd(), "docs", "brain");
-    const { archive, readme } = regenerateBrainIndex(brainDir);
+      // Regenerate from the bundled docs/brain/ tree (reflects main as of the last deploy; a merged fold
+      // redeploys, so the daily run sees the latest archive.d/).
+      const brainDir = path.join(process.cwd(), "docs", "brain");
+      const { archive, readme } = regenerateBrainIndex(brainDir);
 
-    const results: { path: string; committed: boolean; reason?: string }[] = [];
-    for (const file of [archive, readme]) {
-      if (!file) continue;
-      // One step per file: each Contents API commit is independently retryable.
-      const r = await step.run(`commit-${path.basename(file.path)}`, () => commitIfChanged(file));
-      results.push(r);
-    }
+      const results: { path: string; committed: boolean; reason?: string }[] = [];
+      for (const file of [archive, readme]) {
+        if (!file) continue;
+        // One step per file: each Contents API commit is independently retryable.
+        const r = await step.run(`commit-${path.basename(file.path)}`, () => commitIfChanged(file));
+        results.push(r);
+      }
 
-    const result = { committed: results.filter((r) => r.committed).map((r) => r.path), results };
+      return { committed: results.filter((r) => r.committed).map((r) => r.path), results };
+    })();
 
     // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
     await step.run("emit-heartbeat", async () => {

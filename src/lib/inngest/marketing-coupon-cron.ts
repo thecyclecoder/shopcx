@@ -43,8 +43,6 @@ export const marketingCouponAutoDisable = inngest.createFunction(
       return expired as Array<{ id: string; workspace_id: string; coupon_shopify_node_id: string }>;
     });
 
-    if (due.length === 0) return { disabled: 0 };
-
     let disabled = 0;
     for (const c of due) {
       const ok = await step.run(`disable-${c.id}`, async () => {

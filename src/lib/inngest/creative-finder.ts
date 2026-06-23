@@ -51,20 +51,25 @@ function addTotals(a: IngestResult, b: IngestResult): IngestResult {
 export const creativeFinderDailyCron = inngest.createFunction(
   { id: "creative-finder-daily-cron", retries: 1, triggers: [{ cron: "0 9 * * *" }] },
   async ({ step }) => {
-    if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
-    const workspaceIds = await step.run("ad-tool-workspaces", adToolWorkspaceIds);
-    if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals() };
+    // Compute the run result on every path (incl. no-key / no-workspace skips)
+    // so the end-of-run heartbeat below always fires — a healthy-but-idle cron
+    // must still beat, or Control Tower false-flags it registered_not_firing.
+    const result = await (async () => {
+      if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
+      const workspaceIds = await step.run("ad-tool-workspaces", adToolWorkspaceIds);
+      if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals() };
 
-    let totals = emptyTotals();
-    for (const workspaceId of workspaceIds) {
-      for (let i = 0; i < ALL_SEEDS.length; i++) {
-        const seed = ALL_SEEDS[i];
-        const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
-        totals = addTotals(totals, r);
-        if (i < ALL_SEEDS.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
+      let totals = emptyTotals();
+      for (const workspaceId of workspaceIds) {
+        for (let i = 0; i < ALL_SEEDS.length; i++) {
+          const seed = ALL_SEEDS[i];
+          const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
+          totals = addTotals(totals, r);
+          if (i < ALL_SEEDS.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
+        }
       }
-    }
-    const result = { workspaces: workspaceIds.length, totals };
+      return { workspaces: workspaceIds.length, totals };
+    })();
 
     // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
     await step.run("emit-heartbeat", async () => {

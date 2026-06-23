@@ -180,8 +180,6 @@ export const tagCancelRelevanceCron = inngest.createFunction(
       return data || [];
     });
 
-    if (!reviews.length) return { tagged: 0 };
-
     const reviewBatches: typeof reviews[] = [];
     for (let i = 0; i < reviews.length; i += BATCH_SIZE) {
       reviewBatches.push(reviews.slice(i, i + BATCH_SIZE));

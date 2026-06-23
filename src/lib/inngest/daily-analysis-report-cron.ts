@@ -40,8 +40,6 @@ export const dailyAnalysisReportCron = inngest.createFunction(
       return unique;
     });
 
-    if (!workspaces.length) return { date, workspaces: 0, generated: 0 };
-
     let generated = 0;
     const failures: Array<{ workspace_id: string; reason: string }> = [];
     for (const workspaceId of workspaces) {

@@ -101,11 +101,9 @@ export const klaviyoEngagementSync = inngest.createFunction(
       .not("klaviyo_engagement_backfill_completed_at", "is", null)
       .not("klaviyo_api_key_encrypted", "is", null);
 
-    if (!workspaces?.length) return { workspaces_synced: 0, message: "no eligible workspaces" };
-
     const results: Array<{ workspace_id: string; pulled: Record<string, number>; errors: string[] }> = [];
 
-    for (const ws of workspaces) {
+    for (const ws of workspaces || []) {
       const wsResult = await step.run(`sync-${ws.id}`, async () => {
         const admin = createAdminClient();
         const apiKey = decrypt(ws.klaviyo_api_key_encrypted);

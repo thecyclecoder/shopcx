@@ -68,8 +68,6 @@ export const crisisDailyCampaign = inngest.createFunction(
       return data || [];
     });
 
-    if (crises.length === 0) return { status: "no_active_crises" };
-
     let totalNew = 0;
 
     for (const crisis of crises) {
