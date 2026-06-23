@@ -9,12 +9,16 @@
  *
  * See src/lib/agents/personas.ts + src/components/agents/mascots.tsx.
  */
+"use client";
+import { useState } from "react";
 import type { AgentPersona } from "@/lib/agents/personas";
 import { Mascot } from "@/components/agents/mascots";
 
-/** The avatar tile — the real headshot photo when present, else the colored SVG mascot. */
+/** The avatar tile — the real headshot photo when present, else the colored SVG mascot.
+ *  Falls back to the mascot if the headshot fails to load (e.g. not yet uploaded). */
 export function PersonaAvatar({ persona, size = 40 }: { persona: AgentPersona; size?: number }) {
-  if (persona.avatarUrl) {
+  const [imgError, setImgError] = useState(false);
+  if (persona.avatarUrl && !imgError) {
     return (
       <img
         src={persona.avatarUrl}
@@ -25,6 +29,7 @@ export function PersonaAvatar({ persona, size = 40 }: { persona: AgentPersona; s
         className={`inline-block shrink-0 rounded-xl object-cover ring-1 ring-black/5 dark:ring-white/10`}
         style={{ width: size + 12, height: size + 12 }}
         loading="lazy"
+        onError={() => setImgError(true)}
       />
     );
   }

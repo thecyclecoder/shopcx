@@ -175,6 +175,27 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-900/40",
     dot: "bg-purple-500", ring: "bg-purple-50 dark:bg-purple-900/20", accent: "text-purple-600 dark:text-purple-400",
   },
+  "product-seed": {
+    key: "product-seed", name: "Sol", role: "Product Seeding", emoji: "🩷",
+    personality: "Takes a product from nothing to published — pulls intel, builds the page, ships the catalog row.",
+    mascotId: "default", avatarUrl: `${AV}sol-productseed.jpg`,
+    chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
+    dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
+  },
+  "spec-chat": {
+    key: "spec-chat", name: "Sage", role: "Spec Chat", emoji: "🟪",
+    personality: "Answers spec questions on the roadmap and turns the chat into authored spec edits.",
+    mascotId: "default", avatarUrl: `${AV}sage-specchat.jpg`,
+    chip: "bg-indigo-100 text-indigo-800 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-900/40",
+    dot: "bg-indigo-500", ring: "bg-indigo-50 dark:bg-indigo-900/20", accent: "text-indigo-600 dark:text-indigo-400",
+  },
+  "dev-ask": {
+    key: "dev-ask", name: "Dex", role: "Dev Q&A", emoji: "🟩",
+    personality: "Answers read-only 'why / how / is it working' developer questions from the message center.",
+    mascotId: "default", avatarUrl: `${AV}dex-devask.jpg`,
+    chip: "bg-lime-100 text-lime-800 border-lime-200 dark:bg-lime-900/30 dark:text-lime-300 dark:border-lime-900/40",
+    dot: "bg-lime-500", ring: "bg-lime-50 dark:bg-lime-900/20", accent: "text-lime-600 dark:text-lime-400",
+  },
 };
 
 /**
@@ -239,6 +260,21 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Decompose a goal into a milestone → spec tree",
     "Wire blocked_by dependencies between specs",
     "Assign each leaf spec an owner function + a parent (no orphans)",
+  ],
+  "product-seed": [
+    "Take a new product from nothing to published",
+    "Pull product intelligence + build the storefront page",
+    "Seed the catalog rows + variants so it's orderable",
+  ],
+  "spec-chat": [
+    "Answer authoring questions about a specific spec on the roadmap",
+    "Turn the chat thread into concrete spec edits",
+    "Keep the roadmap spec accurate to what was decided",
+  ],
+  "dev-ask": [
+    "Answer read-only 'why / how / is it working' developer questions",
+    "Investigate the code + live state to ground the answer",
+    "Never mutate — surface findings back to the message center",
   ],
 };
 
