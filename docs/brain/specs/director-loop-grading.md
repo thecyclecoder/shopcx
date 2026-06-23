@@ -1,0 +1,46 @@
+# Director continuous loop + grading ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** M5 — Continuous loop + grading
+**Blocked-by:** [[platform-director-agent]]
+
+The supervisory loop that closes the **CEO → Director → tool** chain for the [[../goals/devops-director]] goal. The [[platform-director-agent|Platform/DevOps Director]] runs on a **standing cadence** (a scheduled pass), and the CEO **grades the director's calls 1–10** — *was the auto-approval right? did the escorted goal land clean?* — and those grades **train it and tighten/loosen the leash**. This directly mirrors the shipped [[storefront-campaign-grading-loop|Head-of-Growth campaign-grading loop]] (an AI/human grader against a rubric + human-approved calibration rules, human-overridable, feeding back as a training signal) — reusing its proven shape one level up the org chart. Today the leash in the goal is **static**: the [[platform-director-agent|M4 director]] auto-approves within a fixed policy with no feedback loop that widens or narrows the [[approval-routing-engine|`live + autonomous`]] envelope based on whether its past calls were good. Success metric served: **% of platform approvals the CEO never touches** can *safely* trend up because the director's decision quality is measured and the autonomy envelope is earned, not assumed.
+
+## Phase 1 — the standing cadence ⏳
+- ⏳ planned
+- A scheduled Platform-Director pass (a cron enqueueing the [[platform-director-agent|`platform-director`]] [[../tables/agent_jobs]] kind, registered in `MONITORED_LOOPS` per [[coverage-auto-register-agent]] so it can't silently die), in addition to the event-driven processing — so escorting + watching happen on a reliable beat, not only on inbound approvals. Mirror [[../inngest/daily-analysis-report-cron]]'s cron shape.
+
+## Phase 2 — the director-decision grade store + rubric ⏳
+- ⏳ planned
+- `director_decision_grades` (columns: `id`, `approval_decision_id` (→ [[../tables/approval_decisions]]) or `goal_slug`/`milestone`, `dimension` ∈ `auto-approval｜goal-escort`, `grade` (1–10), `reasoning`, `graded_by` ∈ `agent｜human`, `overridden_by`, `created_at`) — one row per graded call. Brain page [[../tables/director_decision_grades]] (probe live schema first per [[../README]]).
+- A grading rubric calibrated by **human-approved rules** in a `director_grader_prompts` store modeled on [[../tables/grader_prompts]] (`status` ∈ `proposed｜approved`) — so the CEO corrects the grader's scoring on edge cases, exactly as the ticket/campaign graders are calibrated.
+
+## Phase 3 — grade the two dimensions ⏳
+- ⏳ planned
+- `src/lib/agents/director-grader.ts` `gradeDirectorCall(decision, dimension)` — an LLM grader ([[../libraries/ai-models]]) over (a) each **auto-approval** (was the cause+fix actually sound and within the leash? did it hold up — no rollback/repeat-failure after?) and (b) each **escorted goal/milestone** (did it land clean — merged, tsc/CI green, no regression?). Returns a 1–10 grade + reasoning, human-overridable (records `graded_by='human'`/`overridden_by`), mirroring [[storefront-campaign-grading-loop]]'s grader.
+- Fired on the M1 cadence over recently-concluded decisions; idempotent per decision.
+
+## Phase 4 — feed grades back to tighten/loosen the leash ⏳
+- ⏳ planned
+- Grades **train the director**: a sustained high grade in a category widens its autonomy envelope (the CEO can promote a previously-escalated low-risk category into the auto-approve leash); a low grade narrows it (a category reverts to CEO-gated). The recommendation surfaces as an owner-confirmed change to Platform's [[approval-routing-engine|`live + autonomous`]] / leash policy — **the CEO disposes; the loop never widens its own envelope unilaterally** ([[../operational-rules]] § North star).
+- Surface per-period grades + trend + the leash-adjustment recommendations on the M1 Agents hub / M3 board (the CEO's report contract for the director).
+
+## Safety / invariants
+- **Decision graded on soundness, not luck.** A sound auto-approval that later needed a (rare, reversible) tweak still grades well if the *reasoning* was right; a careless approval that happened to be fine grades low — mirror [[storefront-campaign-grading-loop]]'s hypothesis-vs-result separation.
+- **Human-overridable + calibrated.** Every grade can be overridden by the CEO; overrides record (`graded_by`/`overridden_by`) and become calibration rules — never silently lost.
+- **The leash widens only by the CEO.** Grades *recommend* tightening/loosening; the actual `live + autonomous` / leash change is an owner-confirmed action — the director never expands its own authority ([[../operational-rules]] § North star).
+- **Idempotent grading.** A decision is graded once per dimension; a re-run updates in place, never duplicates.
+- **The grader is a supervised tool.** It scores a bounded proxy (decision quality); the CEO owns the objective and overrides it.
+
+## Completion criteria
+- A standing Platform-Director cadence runs on a registered, monitored schedule.
+- `director_decision_grades` + a `director_grader_prompts` calibration store exist (typed, RLS'd, brain pages written).
+- Every concluded director call (auto-approval + goal-escort) gets a 1–10 grade with reasoning, human-overridable + recorded.
+- Grades feed back as leash-adjustment recommendations the CEO confirms (widen/narrow Platform's autonomy envelope) — the director never self-promotes.
+- A report surface shows per-period grades + trend + recommendations; cross-linked from [[../goals/devops-director]].
+
+## Verification
+- Confirm the Platform-Director cadence cron is registered in `MONITORED_LOOPS` and produces a live tile on `/dashboard/developer/control-tower` (no unregistered-loop gap).
+- After the director auto-approves a call, on the next grading pass → `select grade, reasoning, graded_by from director_decision_grades where approval_decision_id='<id>';` → a 1–10 grade + reasoning, `graded_by='agent'`; re-run → updated in place, not duplicated.
+- Grade a sound-but-later-tweaked auto-approval vs a careless-but-fine one → expect the sound call to grade higher (soundness over luck).
+- Override a grade in the report surface → `select graded_by, overridden_by from director_decision_grades where id='<id>';` → `graded_by='human'`, `overridden_by=<member>`; a ≥N-point gap proposes a `director_grader_prompts` rule (`status='proposed'`).
+- After a sustained high grade in a category, expect a **leash-loosen recommendation** to surface for owner confirmation — and confirm the envelope does NOT change until the owner acts (no self-promotion).
