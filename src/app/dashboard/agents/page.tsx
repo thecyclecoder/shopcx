@@ -6,7 +6,12 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { BoardChannel } from "@/components/agents/board-channel";
+import { OrgChartTree } from "@/components/agents/org-chart-tree";
 import { INBOX_TABS, type InboxTab, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
+
+// Sentinel role for the visual org-chart (employee) view (Phase 4) — not a real role,
+// so the right pane renders the tree instead of an inbox.
+const ORG_VIEW = "__org";
 
 // Agents hub (agents-hub-role-inboxes spec) — the owner-only org-chart surface.
 // Left: CEO → Directors → Workers, read from functions/+goals/ via brain-roadmap.
@@ -62,7 +67,25 @@ function RoleNav({
   const ceo = getPersona("ceo");
   return (
     <nav className="space-y-1">
-      <p className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">CEO</p>
+      {/* Visual org-chart (employee) view — the company team page (Phase 4). */}
+      <button
+        onClick={() => onSelect(ORG_VIEW)}
+        className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm font-medium transition-colors ${
+          selected === ORG_VIEW
+            ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+            : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        }`}
+      >
+        <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden>
+          <rect x="9" y="3" width="6" height="5" rx="1" />
+          <rect x="3" y="16" width="6" height="5" rx="1" />
+          <rect x="15" y="16" width="6" height="5" rx="1" />
+          <path d="M12 8v4M6 16v-2h12v2M12 12v2" strokeLinecap="round" />
+        </svg>
+        Org chart
+      </button>
+
+      <p className="px-1 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">CEO</p>
       <button
         onClick={() => onSelect("ceo")}
         className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors ${
@@ -470,8 +493,20 @@ export default function AgentsPage() {
             <RoleNav org={org} selected={role} onSelect={setRole} />
           </aside>
           <section>
-            <RoleHeader org={org} role={role} onChange={loadOrg} />
-            <InboxShell key={role} role={role} title={title} />
+            {role === ORG_VIEW ? (
+              <>
+                <h2 className="mb-1 text-lg font-semibold text-zinc-900 dark:text-zinc-100">Org chart</h2>
+                <p className="mb-5 text-sm text-zinc-500 dark:text-zinc-400">
+                  CEO → Directors → Workers, read live from the brain. Click any node to open its profile.
+                </p>
+                <OrgChartTree org={org} />
+              </>
+            ) : (
+              <>
+                <RoleHeader org={org} role={role} onChange={loadOrg} />
+                <InboxShell key={role} role={role} title={title} />
+              </>
+            )}
           </section>
         </div>
       ) : null}

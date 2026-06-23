@@ -19,8 +19,8 @@ The foundation surface for the [[../goals/devops-director]] goal — an owner-on
 - Each role page renders three filterable tabs — **Messages** (the board; populated by M3), **Approval Requests** (the routed queue; populated by M2), **Daily Summaries** (EOD recaps; populated by M3/M4). This milestone ships the **shell + filters + empty/loading states**; the CEO inbox is wired live first so M2 has a real target to emit into.
 - Reuse [[../tables/dashboard_notifications]] as the backing store for the shell where it fits (it already has `type`/`title`/`body`/`link`/`read`/`dismissed`), or add a thin `agent_inbox_items` view — decided at build time against the live schema (probe first, per [[../README]] § Probing technique). No approval-routing logic here — that is M2's keystone.
 
-## Phase 4 — the org-chart (employee) view ⏳
-- ⏳ planned
+## Phase 4 — the org-chart (employee) view ✅
+- ✅ shipped
 - An Agents sidebar item that renders a **visual employee/org chart** — CEO at top → Directors → their Workers — with each node showing the persona avatar + name + role. **Every node is clickable** → routes to that role's profile detail page (Phase 5). Not just a list: a real org-tree layout (think a company team page).
 - Directors read from `functions/*.md`; Workers are the platform agents grouped under their director (the roster in [[../goals/devops-director]] § The Platform team) — brain-driven, no hand-maintained copy.
 
