@@ -15,6 +15,11 @@ export type JobStatus =
   | "needs_input"
   | "needs_approval"
   | "queued_resume"
+  // `blocked_on_usage` (box-multi-account-failover): the worker parked this job because every Max account
+  // hit its usage wall — it auto-resumes at the soonest reset. It is an ACTIVE (non-terminal) state: a
+  // parked build is still a live build of its spec, so the fold-guard must treat it as such (otherwise a
+  // chained next-phase build that is merely parked could be folded → orphaned). See ACTIVE_STATUSES.
+  | "blocked_on_usage"
   | "completed"
   | "merged"
   | "failed"
@@ -102,8 +107,11 @@ export function phaseScopedInstructions(phaseTitle: string): string {
   return `Implement ONLY this phase of the spec: "${phaseTitle}". Mark that phase's emoji ✅ when done. Do not modify other phases.`;
 }
 
-/** Statuses where a job is live (no new job should be queued for the same spec/goal). */
-export const ACTIVE_STATUSES: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
+/** Statuses where a job is live (no new job should be queued for the same spec/goal). `blocked_on_usage`
+ * is active: a job parked at the usage wall auto-resumes at reset, so it must not read as terminal (the
+ * fold-guard + auto-fold gate would otherwise fold/orphan a spec whose chained next-phase build is merely
+ * parked). Mirrors the worker's own ACTIVE_JOB_STATUSES (scripts/builder-worker.ts). */
+export const ACTIVE_STATUSES: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"];
 
 export function isActive(status: JobStatus): boolean {
   return ACTIVE_STATUSES.includes(status);

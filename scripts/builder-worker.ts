@@ -4007,6 +4007,25 @@ async function runStorefrontOptimizerJob(job: Job) {
         try {
           const plan = act.campaign_plan as Record<string, unknown> | undefined;
           if (!plan) { act.status = "failed"; act.result = "no campaign_plan on action"; results.push("campaign → failed (no plan)"); continue; }
+          // Re-gate on approval (TOCTOU): the scope/active gate (evaluateProposalGate) only ran at PROPOSE
+          // time. If the policy's `product_scope` shrank or `active` flipped false between propose and this
+          // approval, the campaign must NOT still materialize — it would violate the "every activation
+          // checks product_id ∈ product_scope" contract. Re-load the live policy and re-assert before
+          // standing up the experiment; refuse (surface) if no longer active / in scope.
+          const reAdmin = (await import("../src/lib/supabase/admin")).createAdminClient();
+          const livePolicy = await policyLib.loadOptimizerPolicy(reAdmin, surface.workspace_id);
+          if (!policyLib.isOptimizerActive(livePolicy)) {
+            act.status = "failed";
+            act.result = "refused on approval — optimizer is no longer active for this workspace (policy off/absent since propose); campaign NOT materialized";
+            results.push(`campaign → refused (inactive): ${act.result}`);
+            continue;
+          }
+          if (!policyLib.isProductInScope(livePolicy, surface.product_id)) {
+            act.status = "failed";
+            act.result = `refused on approval — product ${surface.product_id} is no longer in the optimizer product_scope (scope shrank since propose); campaign NOT materialized`;
+            results.push(`campaign → refused (out of scope): ${act.result}`);
+            continue;
+          }
           const r = await materializeOptimizerCampaign(opt, surface, plan, job.created_by, false);
           act.status = r.ok ? "done" : "failed";
           act.result = r.detail;
