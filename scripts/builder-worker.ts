@@ -1617,6 +1617,33 @@ async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: 
   return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
 }
 
+// platform-director-agent (Phase 4): the standing director pass the daily platform-director-cron enqueues
+// (a `platform-director` job with NO target_job_id). It runs the proactive, non-approval director work on a
+// reliable beat — escort each approved goal it owns + post the daily Control-Tower watch update to the board
+// — both no-ops unless Platform is live+autonomous. Best-effort: a failure in one half never blocks the other.
+async function runPlatformDirectorStandingPass(job: Job, tag: string) {
+  const lib = await import("../src/lib/agents/platform-director");
+  const notes: string[] = [];
+  try {
+    const escort = await lib.escortApprovedGoals(db);
+    if (escort.queued.length) notes.push(`escorted → queued ${escort.queued.length} spec(s): ${escort.queued.join(", ")}`);
+    if (escort.escalated.length) notes.push(`loop-guard → escalated ${escort.escalated.length}: ${escort.escalated.join(", ")}`);
+    if (!escort.queued.length && !escort.escalated.length) notes.push("escort: nothing to advance");
+  } catch (e) {
+    notes.push(`escort failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing escort failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    const watch = await lib.postPlatformWatchUpdate(db);
+    notes.push(watch.posted ? "posted board watch update" : `no board post (${watch.reason})`);
+  } catch (e) {
+    notes.push(`watch failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing watch failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  await update(job.id, { status: "completed", log_tail: `standing pass — ${notes.join(" · ")}`.slice(-2000) });
+  console.log(`${tag} standing pass — ${notes.join(" · ")}`);
+}
+
 async function runPlatformDirectorJob(job: Job) {
   const tag = `[platform-director:${job.id.slice(0, 8)}]`;
   let instr: { target_job_id?: string; target_kind?: string } = {};
@@ -1627,8 +1654,10 @@ async function runPlatformDirectorJob(job: Job) {
   }
   const targetId = instr.target_job_id;
   if (!targetId) {
-    await update(job.id, { status: "failed", error: "platform-director: no target_job_id in instructions" });
-    console.warn(`${tag} no target_job_id — failing`);
+    // Standing pass (platform-director-cron daily beat / M5 cadence): no target to decide, so run the
+    // standing director work — escort approved goals through their milestones (Phase 2) + post the daily
+    // Control-Tower watch update to the board (Phase 4). Both no-op unless Platform is live+autonomous.
+    await runPlatformDirectorStandingPass(job, tag);
     return;
   }
 

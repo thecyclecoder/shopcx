@@ -55,6 +55,9 @@ import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
+import { postDirectorMessage } from "@/lib/agents/director-board";
+import { getPersona } from "@/lib/agents/personas";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -616,4 +619,135 @@ export async function escalateDiagnosisToCeo(
     metadata: { ...(args.metadata ?? {}), escalation_kind: args.escalationKind, dedupe_key: args.dedupeKey, autonomous: true },
   });
   return { emitted: true };
+}
+
+// ── Phase 4 — watch the platform + report to the board ────────────────────────────────────────────
+// The director's TOP, human-legible layer: read Control Tower health (the EXISTING snapshot library —
+// no new monitoring) and post a conversational update as 🛠️ Ada to the M3 #directors board — what it
+// squashed (auto-approved fixes), what it's escorting (goals advanced), and what it escalated — on the
+// daily standing beat. The other two Phase-4 surfaces reuse what already exists: "answers why?" is the
+// directors-board-gamified Phase-2 dev-ask board wiring (routeBoardReply defaults to Platform), and the
+// EOD-recap slice is the directors-board-gamified Phase-4 director-recap (Platform is a director, so its
+// approved_approval / escorted_goal / escalated activity already rolls into the standup). Dormant until
+// Platform is live+autonomous, exactly like the escort + the approval enqueuer.
+
+/** Platform's Control-Tower health, collapsed from the snapshot's platform department rollup. */
+export interface PlatformHealth {
+  /** worst-of color across platform-owned loops. */
+  color: LoopColor;
+  total: number;
+  healthy: number;
+  red: number;
+  amber: number;
+  openAlerts: number;
+  /** labels of the red loops (for the body). */
+  redLabels: string[];
+}
+
+/** What the director did today — the three headline counts the board update reads back. */
+export interface PlatformWatchActivity {
+  /** auto-approved fixes today (approved_approval rows — "squashed 500s"). */
+  squashed: number;
+  /** goals advanced today (escorted_goal rows). */
+  escorting: number;
+  /** calls escalated to the CEO today (escalated rows). */
+  escalated: number;
+}
+
+/** The health half of the watch line — "all N platform loops green" / "K red (…)" / "X/N green, M degraded". */
+function platformHealthLine(h: PlatformHealth): string {
+  if (h.total === 0) return "no platform loops registered yet";
+  if (h.color === "green") return `all ${h.total} platform loop${h.total === 1 ? "" : "s"} green`;
+  if (h.color === "red") {
+    const shown = h.redLabels.slice(0, 3).join(", ");
+    const more = h.redLabels.length > 3 ? `, +${h.redLabels.length - 3} more` : "";
+    const alerts = h.openAlerts ? `, ${h.openAlerts} open alert${h.openAlerts === 1 ? "" : "s"}` : "";
+    return `${h.red} loop${h.red === 1 ? "" : "s"} red (${shown}${more})${alerts}`;
+  }
+  return `${h.healthy}/${h.total} platform loops green, ${h.amber} degraded`;
+}
+
+/** The activity half — "squashed N fixes · escorted M goals · escalated K to you", or a quiet day. */
+function platformActivityLine(a: PlatformWatchActivity): string {
+  const parts: string[] = [];
+  if (a.squashed) parts.push(`squashed ${a.squashed} fix${a.squashed === 1 ? "" : "es"}`);
+  if (a.escorting) parts.push(`escorted ${a.escorting} goal${a.escorting === 1 ? "" : "s"}`);
+  if (a.escalated) parts.push(`escalated ${a.escalated} to you`);
+  return parts.length ? parts.join(" · ") : "nothing needed a decision";
+}
+
+/** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
+export function composePlatformWatchBody(health: PlatformHealth, activity: PlatformWatchActivity): string {
+  const persona = getPersona(PLATFORM);
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.`;
+}
+
+/**
+ * Post the daily Platform watch update to the M3 #directors board (Phase 4). Reads the Control Tower
+ * snapshot for the platform department's health + today's director_activity for what it squashed /
+ * escorted / escalated, then posts ONE conversational `update` as 🛠️ Ada. Idempotent per (workspace,
+ * UTC day) via `metadata.watch_date` (a box re-claim never double-posts), and a NO-OP until Platform is
+ * live+autonomous. Skips a fully-quiet, all-green day (no empty-board spam). Best-effort; never throws on
+ * a snapshot read — the caller logs the result.
+ */
+export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: string }): Promise<{ posted: boolean; reason?: string }> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return { posted: false, reason: "dormant" }; // dormant until Phase 4 flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return { posted: false, reason: "no_workspace" };
+
+  const date = opts?.date ?? new Date().toISOString().slice(0, 10);
+
+  // Idempotent per UTC day — one watch post per (workspace, day), so a re-claimed standing job never double-posts.
+  const { data: existingPost } = await admin
+    .from("director_messages")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("author_function", PLATFORM)
+    .eq("kind", "update")
+    .eq("metadata->>source", "platform-watch")
+    .eq("metadata->>watch_date", date)
+    .limit(1)
+    .maybeSingle();
+  if (existingPost) return { posted: false, reason: "already_posted" };
+
+  // Health — the EXISTING Control Tower snapshot, collapsed to the platform department (no new monitoring).
+  const snapshot = await buildControlTowerSnapshot(admin);
+  const dept = snapshot.departments.find((d) => d.owner === PLATFORM);
+  const redLabels = snapshot.loops.filter((l) => l.owner === PLATFORM && l.color === "red").map((l) => l.label);
+  const health: PlatformHealth = dept
+    ? { color: dept.color, total: dept.total, healthy: dept.healthy, red: dept.counts.red, amber: dept.counts.amber, openAlerts: dept.openAlerts, redLabels }
+    : { color: "green", total: 0, healthy: 0, red: 0, amber: 0, openAlerts: 0, redLabels: [] };
+
+  // Today's director activity — what it squashed / escorted / escalated (same UTC-day window as the recap).
+  const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
+  const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
+  const { data: activityRows } = await admin
+    .from("director_activity")
+    .select("action_kind")
+    .eq("workspace_id", workspaceId)
+    .eq("director_function", PLATFORM)
+    .gte("created_at", dayStart)
+    .lt("created_at", dayEnd);
+  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0 };
+  for (const r of (activityRows ?? []) as { action_kind: string }[]) {
+    if (r.action_kind === "approved_approval") activity.squashed++;
+    else if (r.action_kind === "escorted_goal") activity.escorting++;
+    else if (r.action_kind === "escalated") activity.escalated++;
+  }
+
+  // Don't spam a fully-quiet, all-green day — post only when there's health to flag or work to report.
+  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0;
+  if (!hasActivity && health.color === "green") return { posted: false, reason: "quiet" };
+
+  await postDirectorMessage({
+    workspaceId,
+    author: "director",
+    authorFunction: PLATFORM,
+    body: composePlatformWatchBody(health, activity),
+    kind: "update",
+    metadata: { source: "platform-watch", watch_date: date, health, activity },
+  });
+  return { posted: true };
 }
