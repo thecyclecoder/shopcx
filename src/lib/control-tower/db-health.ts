@@ -20,6 +20,7 @@ import {
   DB_HEALTH_SLOWQ_LOOP_ID,
   DB_HEALTH_SIZE_LOOP_ID,
 } from "@/lib/control-tower/registry";
+import { isAllowlisted } from "@/lib/control-tower/migration-drift";
 
 export { DB_HEALTH_SLOWQ_LOOP_ID, DB_HEALTH_SIZE_LOOP_ID };
 
@@ -35,6 +36,7 @@ export type DbHealthCause =
   | "sort_spill" // a Sort/Hash spilled to disk (external merge) — work_mem or an index-for-order-by.
   | "full_aggregate" // a full-table aggregate / DISTINCT scan (the control_tower_loop_beats class).
   | "missing_limit" // an unbounded result set with no LIMIT.
+  | "high_call_volume" // fast PER CALL but hammered — a hot endpoint dominating total time by VOLUME, not per-call cost → reduce calls / cache / a hot-predicate (or GIN) index. Never a vacuum.
   | "bloat_stale_stats" // the plan is bad because stats are stale / the table is bloated → vacuum/analyze.
   // size/index/bloat causes (from the daily sweep):
   | "unbounded_growth" // a table growing fast with no apparent retention (the loop_heartbeats case).
@@ -48,6 +50,7 @@ export type DbHealthFixKind =
   | "add_index"
   | "drop_index"
   | "query_rewrite"
+  | "reduce_calls" // a hot, fast-per-call query → cut the call frequency / cache / add a hot-predicate (GIN for an array `@>`) index. NOT a vacuum.
   | "vacuum_tuning";
 
 /** Which pass produced the finding (drives the loop_id + panel grouping). */
@@ -59,6 +62,7 @@ const FIX_KIND_BY_CAUSE: Record<DbHealthCause, DbHealthFixKind> = {
   sort_spill: "add_index",
   full_aggregate: "query_rewrite",
   missing_limit: "query_rewrite",
+  high_call_volume: "reduce_calls",
   bloat_stale_stats: "vacuum_tuning",
   unbounded_growth: "retention_cron",
   missing_index: "add_index",
@@ -108,6 +112,14 @@ export interface IndexStatRow {
 export const SLOW_QUERY_MIN_MEAN_MS = 100;
 /** …but a cheap-per-call query run enough to dominate total DB time still qualifies. */
 export const SLOW_QUERY_MIN_TOTAL_MS = 30_000; // 30s cumulative in the stats window
+/**
+ * The slow-per-call vs high-call-volume boundary (the accuracy upgrade — db-health-agent-accuracy).
+ * At/above this mean a query is a genuine PER-CALL problem (EXPLAIN → index/rewrite — the orders-class
+ * win). BELOW it, a query only ranks high because it's *hammered* (e.g. 4ms × 1.27M calls = a hot
+ * poll), so the fix is to reduce calls / cache / add a hot-predicate (or GIN) index — never a vacuum.
+ * Sub-~20ms is the unambiguous volume case; we resolve the 20–50ms grey zone toward volume too, since
+ * a sub-50ms query rarely justifies a new index from its plan alone. */
+export const SLOW_PER_CALL_MEAN_MS = 50;
 /** Only consider tables at least this big for growth/index/bloat (small tables aren't worth DDL). */
 export const SIZE_MIN_BYTES = 200 * 1024 * 1024; // 200 MB
 /** Day-over-day growth at or above this fraction on a sizeable table ⇒ "growing fast". */
@@ -126,6 +138,53 @@ export const BLOAT_AUTOVACUUM_STALE_MS = 24 * 60 * 60 * 1000; // last autovacuum
  *  the right answer for a real unbounded table is to build its retention, not to allowlist it.
  *  loop_heartbeats got its prune cron (loop-heartbeats-retention). */
 export const RETENTION_AWARE_TABLES: string[] = ["loop_heartbeats"];
+
+/**
+ * Sunset / retiring-system allowlist (db-health-agent-accuracy spec — gap 3). A table being turned
+ * off must NOT get a perf/size/bloat proposal — we don't tune what we're decommissioning. Mirrors
+ * the [[control-tower-migration-drift-check]] sunset allowlist (same `prefix*`/exact match semantics
+ * via `isAllowlisted`). Keep SHORT: the right answer for a table we keep is a fix, not an allowlist.
+ * Klaviyo (`klaviyo_*`) is being turned off as the in-house messaging/marketing stack replaces it. */
+export const DB_HEALTH_SUNSET_ALLOWLIST: string[] = [
+  // Klaviyo — replaced by the in-house messaging/marketing stack; tables retired as the sync winds down.
+  "klaviyo_*",
+];
+
+/**
+ * Does this query touch a sunset/retiring table (so it must NOT produce a proposal)? Shape-based scan
+ * of the normalized query text for any allowlist entry — a `prefix*` entry matches any identifier
+ * starting with the prefix (`klaviyo_*` → `klaviyo_profiles`, `public.klaviyo_events`, …), an exact
+ * entry matches the whole table token. Mirrors the migration-drift allowlist semantics, applied to a
+ * query instead of a single table name. */
+export function isSunsetQuery(query: string, allowlist: string[] = DB_HEALTH_SUNSET_ALLOWLIST): boolean {
+  const q = (query || "").toLowerCase();
+  return allowlist.some((entry) => {
+    const e = entry.toLowerCase();
+    if (e.endsWith("*")) return q.includes(e.slice(0, -1)); // prefix match anywhere in the text
+    return new RegExp(`\\b${e.replace(/[^a-z0-9_]/g, "")}\\b`).test(q); // exact identifier token
+  });
+}
+
+/**
+ * Foreign / not-ours query filter (db-health-agent-accuracy spec — gap 1). Mirrors the [[repair-agent]]
+ * `foreign-app-noise` class: a query we don't own is never our proposal. Shape-based — matches the
+ * Supabase Realtime WAL decoder (`SELECT wal->>'type' …`), PostgREST internals (`pgrst_*`), the
+ * `pg_catalog` / `information_schema` system catalogs, the `realtime`/`_realtime` schema, and
+ * `supabase_admin`-role maintenance queries. None of these index/vacuum/rewrite proposals are ours to
+ * make — they belong to Supabase/PostgREST, not the `public.*` app schema. */
+const FOREIGN_QUERY_RES: RegExp[] = [
+  /wal\s*->>/i, // Supabase Realtime WAL decoder (logical-replication change feed)
+  /\bpgrst_/i, // PostgREST internal helper functions / prepared statements
+  /\bpg_catalog\b/i, // Postgres system catalog
+  /\binformation_schema\b/i, // SQL-standard catalog views
+  /\b_?realtime\s*\./i, // realtime / _realtime schema-qualified objects (subscriptions, etc.)
+  /\bsupabase_admin\b/i, // supabase_admin-role maintenance/replication queries
+];
+
+export function isForeignQuery(query: string): boolean {
+  const q = query || "";
+  return FOREIGN_QUERY_RES.some((re) => re.test(q));
+}
 
 // ── A finding ────────────────────────────────────────────────────────────────
 
@@ -223,17 +282,40 @@ export function classifyExplainPlan(planText: string): ExplainClassification {
  * query text and the fix is a query-rewrite REVIEW rather than a specific index.
  */
 export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): DbHealthFinding | null {
+  // Gap 1 — a query we don't own (Supabase Realtime WAL decoder, PostgREST internals, pg_catalog /
+  // information_schema, the realtime schema, supabase_admin) is NEVER our proposal. Filter first.
+  if (isForeignQuery(row.query)) return null;
+  // Gap 3 — a query against a sunset/retiring table (Klaviyo) gets no proposal: we don't tune what
+  // we're turning off.
+  if (isSunsetQuery(row.query)) return null;
+
   const overFloor = row.mean_exec_time >= SLOW_QUERY_MIN_MEAN_MS || row.total_exec_time >= SLOW_QUERY_MIN_TOTAL_MS;
   if (!overFloor) return null;
+
+  // Gap 2 — slow-per-call (a genuine per-call cost → EXPLAIN → index/rewrite, the orders-class win)
+  // vs high-call-volume (fast per call but hammered → reduce calls / cache / a hot-predicate or GIN
+  // index, NEVER a vacuum). Keyed off mean_exec_time.
+  const highCallVolume = row.mean_exec_time < SLOW_PER_CALL_MEAN_MS;
+  const cls = planText ? classifyExplainPlan(planText) : null;
 
   let cause: DbHealthCause;
   let hint: string;
   let planBlock: string;
-  if (planText) {
-    const cls = classifyExplainPlan(planText);
+  if (highCallVolume) {
+    cause = "high_call_volume";
+    const arrayPredicate = /@>|<@/.test(row.query); // array/JSONB containment (e.g. `tags @> …`) → GIN
+    const meanMs = Math.round(row.mean_exec_time);
+    const calls = row.calls.toLocaleString();
+    hint = arrayPredicate
+      ? `fast per call (${meanMs}ms mean) but run ${calls} times — a hot endpoint dominating total DB time by VOLUME, not per-call cost. It uses an array/JSONB containment predicate (\`@>\`): add a GIN index on that column so each call is cheaper, and reduce how often it runs (cache the result / batch / widen the poll). Do NOT vacuum — the per-call time is already fine.`
+      : `fast per call (${meanMs}ms mean) but run ${calls} times — a hot endpoint dominating total DB time by VOLUME, not per-call cost. Reduce how often it runs (cache the result / batch / widen the poll interval) and/or add a covering or partial index for the hot predicate. Do NOT vacuum — the per-call time is already fine.`;
+    planBlock = planText
+      ? planText.trim()
+      : "(high call volume — the per-call time is already fine; EXPLAIN is not the lever here, call frequency is)";
+  } else if (cls) {
     cause = cls.cause;
     hint = cls.hint;
-    planBlock = planText.trim();
+    planBlock = planText!.trim();
   } else {
     // No plan (couldn't EXPLAIN). Conservative classification from the text: an aggregate/DISTINCT
     // with no LIMIT → full_aggregate; otherwise a generic rewrite-review.
@@ -252,7 +334,7 @@ export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): Db
   }
 
   const fixKind = cause === "seq_scan" || cause === "sort_spill" ? "add_index" : FIX_KIND_BY_CAUSE[cause];
-  const table = (planText ? classifyExplainPlan(planText).seqScanTables[0] : "") || "";
+  const table = (cls ? cls.seqScanTables[0] : "") || "";
   const sigTable = table ? `:${table}` : "";
   const signature = `dbhealth:slowq:${row.queryid}${sigTable}`;
   const impact = `${Math.round(row.mean_exec_time)}ms mean × ${row.calls} calls = ${Math.round(row.total_exec_time / 1000)}s total${row.stddev_exec_time > row.mean_exec_time ? " (erratic plan — high stddev)" : ""}`;
@@ -301,6 +383,7 @@ export function analyzeGrowth(latest: TableSizeRow[], prior: TableSizeRow[]): Db
   for (const cur of latest) {
     if (cur.total_bytes < SIZE_MIN_BYTES) continue;
     if (RETENTION_AWARE_TABLES.includes(cur.table_name)) continue;
+    if (isAllowlisted(cur.table_name, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — don't tune what we're turning off
     const was = priorBy.get(cur.table_name);
     if (!was || was.total_bytes <= 0) continue;
     const frac = (cur.total_bytes - was.total_bytes) / was.total_bytes;
@@ -342,6 +425,7 @@ export function analyzeIndexUsage(tables: TableSizeRow[], indexes: IndexStatRow[
   const out: DbHealthFinding[] = [];
   for (const t of tables) {
     if (t.total_bytes < SIZE_MIN_BYTES) continue;
+    if (isAllowlisted(t.table_name, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — skip
     const scans = t.seq_scan + t.idx_scan;
     if (scans <= 0) continue;
     const share = t.seq_scan / scans;
@@ -366,6 +450,7 @@ export function analyzeIndexUsage(tables: TableSizeRow[], indexes: IndexStatRow[
     }
   }
   for (const ix of indexes) {
+    if (isAllowlisted(ix.table_name, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — skip its indexes
     if (ix.is_primary || ix.is_unique) continue; // never propose dropping a PK / unique constraint index.
     if (ix.idx_scan > 0) continue;
     if (ix.index_bytes < UNUSED_INDEX_MIN_BYTES) continue;
@@ -399,6 +484,7 @@ export function analyzeBloat(tables: TableSizeRow[], now: number): DbHealthFindi
   const out: DbHealthFinding[] = [];
   for (const t of tables) {
     if (t.total_bytes < SIZE_MIN_BYTES) continue;
+    if (isAllowlisted(t.table_name, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — skip
     const total = t.n_live_tup + t.n_dead_tup;
     if (total <= 0) continue;
     const deadRatio = t.n_dead_tup / total;
@@ -458,6 +544,7 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
     add_index: `Add the index the diagnosed predicate needs with \`CREATE INDEX CONCURRENTLY\` (no write lock), in a migration + apply-script ([[../recipes/write-a-migration-apply-script]]). Confirm the exact column(s) from the EXPLAIN/slow-query evidence below; never add an index that already exists.`,
     drop_index: `Drop the unused index with \`DROP INDEX CONCURRENTLY\` in a migration. First confirm it backs no constraint and serves no rare report — an index drop is irreversible cheaply only in that it can be re-created, but the write-overhead it removes is the win.`,
     query_rewrite: `Rewrite the query to its diagnosed cause: bound the set (drive from a small list / add a LIMIT), add the predicate index, or restructure the aggregate. Land it where the query is issued + cite the before/after plan.`,
+    reduce_calls: `This query is fast per call but HAMMERED — the win is fewer/cheaper calls, not a vacuum. Reduce how often it runs at the source (cache the result, batch, or widen the poll interval where the endpoint issues it), and/or add a hot-predicate index so each call is cheaper — a covering or partial index for the exact WHERE, or a **GIN index** if the predicate is an array/JSONB containment (\`@>\`). Cite the call count + mean from the evidence below; do NOT propose a VACUUM (the per-call time is already fine).`,
     vacuum_tuning: `Run a one-off \`VACUUM (ANALYZE)\` and set a tighter per-table \`autovacuum_vacuum_scale_factor\` so the bloat doesn't recur. No data is deleted.`,
   };
   return [
@@ -727,6 +814,7 @@ function slugFor(fixKind: DbHealthFixKind, target: string): string {
     add_index: "db-index",
     drop_index: "db-drop-index",
     query_rewrite: "db-rewrite",
+    reduce_calls: "db-reduce-calls",
     vacuum_tuning: "db-vacuum",
   };
   const clean = target.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 40);
@@ -740,6 +828,7 @@ function specTitleFor(cause: DbHealthCause, target: string, hint: string): strin
     sort_spill: `Fix the disk sort on ${target}`,
     full_aggregate: `Bound the full-table scan on ${target}`,
     missing_limit: `Bound the unbounded query on ${target}`,
+    high_call_volume: `Reduce call volume / cache the hot query on ${target}`,
     bloat_stale_stats: `Refresh stats / vacuum ${target}`,
     unbounded_growth: `Add a retention cron for ${target}`,
     missing_index: `Add an index to ${target}`,
