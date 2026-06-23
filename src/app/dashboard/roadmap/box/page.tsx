@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { routedInboxHref } from "@/lib/agents/inbox";
 
 // Live build-box view (build-box-status-view): box health + SHA, lane grid (what each lane is building
 // right now), queue depth, and a paused callout. Polls /api/roadmap/box every ~5s — phone-friendly,
@@ -71,25 +72,22 @@ interface FailedJob {
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 
-// Route a paused/failed job to where you actually approve/act on it.
-// SAFE-BY-DEFAULT (so a NEW agent kind can never 404 here, even before anyone adds a case):
-// only kinds whose `spec_slug` is a REAL spec/goal — or that have a dedicated approval surface — get a
-// deep link. EVERY other kind (repair, db_health, coverage-register, triage, AND any future agent that
-// surfaces proposals) has a signature/surface-key slug, NOT a spec, so it defaults to the Control Tower
-// (where agent feeds + their Approve buttons live) — which always loads. Previously the default was
-// `/dashboard/roadmap/{slug}`, which 404'd for every such agent until someone hand-added a case.
+// Route a FAILED job to where you'd look at / rebuild it (a failure isn't an approval — see the paused
+// section below, which routes to the routed inbox). SAFE-BY-DEFAULT (a NEW agent kind can never 404 here):
+// only kinds whose `spec_slug` is a REAL spec/goal — or that have a dedicated surface — get a deep link;
+// EVERY other kind (repair, db_health, coverage-register, triage, and any future agent) defaults to the
+// Agents inbox (approval-routing-engine Phase 4 — never the 404-prone `/dashboard/roadmap/{slug}`, never a
+// scattered Control Tower feed). The Control Tower default was retired with the standalone approval cards.
 const SPEC_SLUG_KINDS = new Set(["build", "spec-test"]); // slug = docs/brain/specs/{slug}.md
-function approvalHref(kind: string, specSlug: string, specMissing?: boolean): string {
+function failedHref(kind: string, specSlug: string, specMissing?: boolean): string {
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
   if (kind === "migration-fix") return "/dashboard/migrations";
-  // storefront-optimizer slug is a surface key (product:lander:audience) → the optimizer dashboard's
-  // "Proposed campaigns" section (the Approve/Decline buttons live there).
+  // storefront-optimizer slug is a surface key (product:lander:audience) → the optimizer dashboard.
   if (kind === "storefront-optimizer") return "/dashboard/storefront/optimizer";
   // A real-spec job: the spec page, or the board if the spec was folded/archived (never a dead link).
   if (SPEC_SLUG_KINDS.has(kind)) return specMissing ? "/dashboard/roadmap" : `/dashboard/roadmap/${specSlug}`;
-  // DEFAULT — every agent-proposal kind (signature/surface-key slug): the Control Tower, where the
-  // repair / db_health / coverage-registration / etc. feeds surface with their Approve actions.
-  return "/dashboard/developer/control-tower";
+  // DEFAULT — every agent-proposal kind: the routed Agents inbox (single source), never the Control Tower.
+  return routedInboxHref();
 }
 
 function workerStale(w: Worker): boolean {
@@ -377,7 +375,7 @@ export default function BoxPage() {
                   <li key={j.id} className="flex flex-col gap-1.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <Link
-                        href={approvalHref(j.kind, j.spec_slug, j.spec_missing)}
+                        href={failedHref(j.kind, j.spec_slug, j.spec_missing)}
                         className="font-medium text-red-800 underline decoration-dotted underline-offset-2 hover:text-red-900 dark:text-red-300 dark:hover:text-red-200"
                       >
                         {j.spec_slug}
@@ -418,8 +416,9 @@ export default function BoxPage() {
                     <span className="inline-flex items-center rounded-full bg-amber-200/60 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-800/40 dark:text-amber-200">
                       {j.kind}
                     </span>
+                    {/* A paused job is awaiting owner action → the routed Agents inbox (single source). */}
                     <Link
-                      href={approvalHref(j.kind, j.spec_slug, j.spec_missing)}
+                      href={routedInboxHref()}
                       className="font-medium underline decoration-dotted underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
                     >
                       {j.spec_slug}

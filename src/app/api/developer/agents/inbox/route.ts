@@ -20,6 +20,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { AGENT_INBOX_TYPES, APPROVAL_REQUEST_TYPE, tabForType, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
 import { loadAutonomyMap, isAutoApprover, CEO } from "@/lib/agents/approval-router";
+import { inlineApproveActions, type ApprovalJobRow } from "@/lib/agents/approval-inbox";
 
 export const dynamic = "force-dynamic";
 
@@ -67,6 +68,28 @@ export async function GET(req: Request) {
     .order("created_at", { ascending: false })
     .limit(200);
 
+  // Approval Requests are decided INLINE in the inbox (approval-routing-engine Phase 4 — multi-action /
+  // multi-branch). Read each gated job's LIVE pending_actions (not the notification's emit-time snapshot)
+  // so a half-decided multi-branch plan shows only the still-pending branches. One batched fetch.
+  const approvalJobIds = Array.from(
+    new Set(
+      (rows ?? [])
+        .filter((r) => r.type === APPROVAL_REQUEST_TYPE)
+        .map((r) => (r.metadata as Record<string, unknown> | null)?.["agent_job_id"])
+        .filter((v): v is string => typeof v === "string"),
+    ),
+  );
+  const jobActions = new Map<string, ReturnType<typeof inlineApproveActions>>();
+  if (approvalJobIds.length) {
+    const { data: jobRows } = await admin
+      .from("agent_jobs")
+      .select("id, pending_actions")
+      .in("id", approvalJobIds);
+    for (const j of jobRows ?? []) {
+      jobActions.set(j.id as string, inlineApproveActions({ pending_actions: j.pending_actions } as ApprovalJobRow));
+    }
+  }
+
   const items: InboxItem[] = (rows ?? []).flatMap((r) => {
     const tab = tabForType(r.type as string);
     if (!tab) return [];
@@ -78,6 +101,8 @@ export async function GET(req: Request) {
       const routedTo = typeof meta["routed_to_function"] === "string" ? (meta["routed_to_function"] as string) : CEO;
       if (routedTo !== role) return [];
       const approveActionId = typeof meta["approve_action_id"] === "string" ? (meta["approve_action_id"] as string) : null;
+      const jobId = typeof meta["agent_job_id"] === "string" ? (meta["agent_job_id"] as string) : undefined;
+      const actions = (jobId && jobActions.get(jobId)) || undefined;
       return [
         {
           id: r.id as string,
@@ -88,8 +113,9 @@ export async function GET(req: Request) {
           link: (r.link as string | null) ?? null,
           read: Boolean(r.read),
           createdAt: r.created_at as string,
-          jobId: typeof meta["agent_job_id"] === "string" ? (meta["agent_job_id"] as string) : undefined,
+          jobId,
           approveActionId,
+          actions: actions ?? undefined,
           deepLink: typeof meta["deep_link"] === "string" ? (meta["deep_link"] as string) : (r.link as string | null) ?? null,
           routedTo,
         },

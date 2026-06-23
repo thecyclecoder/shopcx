@@ -6,7 +6,7 @@ The **routed-inbox emitter** — turns every [[../tables/agent_jobs]] `needs_app
 
 ## Why this exists
 
-Phase 1 shipped the pure router ([[approval-router]] `resolveApprover`) + the live flags ([[../tables/function_autonomy]]). This is the module that **uses** them: it resolves *who decides* for a raised approval and surfaces the request in that role's inbox, so the CEO reads **one inbox** instead of the N scattered surfaces ([[../dashboard/control-tower]] feeds, spec cards, the box `approvalHref`). Investigation inline = the decision is one read, no click-through. The scattered surfaces keep working until Phase 4 retires them — this phase **adds** the routed emission alongside them.
+Phase 1 shipped the pure router ([[approval-router]] `resolveApprover`) + the live flags ([[../tables/function_autonomy]]). This is the module that **uses** them: it resolves *who decides* for a raised approval and surfaces the request in that role's inbox, so the CEO reads **one inbox** instead of the N scattered surfaces ([[../dashboard/control-tower]] feeds, spec cards, the box `approvalHref`). Investigation inline = the decision is one read, no click-through. **Phase 4 retired the scattered surfaces:** the Control Tower repair/db-health feeds, the spec cards, and the box `approvalHref` now deep-link into this one inbox (`routedInboxHref()`) instead of raising their own approval cards — one inbox, no orphans.
 
 ## The single chokepoint — `reconcileApprovalInbox(admin)`
 
@@ -23,15 +23,19 @@ Catches **every** kind regardless of which surface raised it (repair / db_health
 
 ## Inline investigation + the decision
 
-`buildApprovalContent(job)` builds the title + the **inline body** from the still-pending `pending_actions` — each action's `summary`/`spec.title`/`spec_title`, its `preview` (the agent's diagnosis), and any `cmd` (the gated command), falling back to `log_tail`. `inlineApproveActionId(job)` returns the single action id the inbox's **Approve / Decline** buttons act on — but **only** when the job has exactly one pending action that is a plain approve/decline (not a `coverage_register` register-vs-exempt or `storefront_campaign` hero-preview multi-choice); otherwise `null`, and the row falls back to `approvalDeepLink(kind, …)` (mirrors the box page `approvalHref`: a real-spec/dedicated surface, else the Control Tower). The decision rides the **unchanged** `POST /api/roadmap/approve` path ([[roadmap-actions]] `approveRoadmapAction` → `queued_resume`) — routing changes *where* a request surfaces, never *how* an approved action runs.
+`buildApprovalContent(job)` builds the title + the **inline body** from the still-pending `pending_actions` — each action's `summary`/`spec.title`/`spec_title`, its `preview` (the agent's diagnosis), and any `cmd` (the gated command), falling back to `log_tail`. `inlineApproveActionId(job)` returns the single action id for the back-compat single-action case; **`inlineApproveActions(job)` (Phase 4) generalizes it to the whole list** — every still-pending **plain** action mapped to an `InboxApprovalAction` (`id`, `summary`, `preview`/`cmd`, and a plan branch's `specOwner`/`specParent`), so a multi-action `build` and a **multi-branch `plan`** are each decided **inline** in the inbox (one Approve/Decline per action). It returns `null` (no inline actions → the row deep-links out) when **any** pending action is multi-CHOICE (`coverage_register` register-vs-exempt, `storefront_campaign` hero reject-with-notes) — the inbox never guesses those; `approvalDeepLink(kind, …)` sends them to the canonical surface (Control Tower coverage / optimizer). The inbox API reads the still-pending list **live** off the job (not the emit-time snapshot) so a half-decided plan shows only the branches left. The decision rides the **unchanged** `POST /api/roadmap/approve` path ([[roadmap-actions]] `approveRoadmapAction` → `queued_resume`) — routing changes *where* a request surfaces, never *how* an approved action runs.
+
+**Phase 4 — one inbox, single source.** The shared `routedInboxHref(role?)` (in `src/lib/agents/inbox.ts`) is the deep-link every **migrated** surface now points at instead of raising its own standalone approval card: the [[control-tower]] repair/db-health feeds (now read-only views), the spec-card [[roadmap|BuildButton/PlanButton]], and the box page [[roadmap|`approvalHref`]] (paused jobs → the inbox; failed jobs → their spec/surface, never the retired Control-Tower default). After migration no approval surfaces anywhere except the routed inbox (genuinely multi-choice surfaces remain only as the inbox's deep-link **targets**).
 
 ## Exports
 
 - **`reconcileApprovalInbox(admin)`** → `Promise<{ created, dismissed }>` — the sweep (above).
 - **`ownerFunctionForKind(kind)`** → `string | null` — kind → owning function (null ⇒ unknown ⇒ CEO).
 - **`buildApprovalContent(job)`** → `{ title, body }` — the inline title + investigation body.
-- **`inlineApproveActionId(job)`** → `string | null` — the single plain approve/decline action, else null.
-- **`approvalDeepLink(kind, specSlug, specMissing?)`** → `string` — the canonical decide-surface fallback.
+- **`inlineApproveActionId(job)`** → `string | null` — the single plain approve/decline action, else null (back-compat).
+- **`inlineApproveActions(job)`** → `InboxApprovalAction[] | null` (Phase 4) — every still-pending plain action for inline multi-action/multi-branch decisioning; `null` when any action is multi-choice.
+- **`approvalDeepLink(kind, specSlug, specMissing?)`** → `string` — the canonical decide-surface fallback (multi-choice).
+- **`routedInboxHref(role?)`** (in `inbox.ts`) → `string` — the `/dashboard/agents?view=inbox&role=…` deep-link every migrated surface points at (Phase 4).
 - **`buildApprovalNotification(job, chart, autonomy)`** → the resolved notification row (pure given the snapshot).
 - Type **`ApprovalJobRow`** — the `agent_jobs` columns the emitter reads.
 

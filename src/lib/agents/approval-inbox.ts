@@ -15,13 +15,14 @@
  * (approved → queued_resume, declined, done) so the inbox never shows a stale gate.
  *
  * This milestone changes WHERE a request surfaces, not how an approved action runs — the execution
- * path is unchanged (POST /api/roadmap/approve → worker flips queued_resume). The richer scattered
- * surfaces (Control Tower feeds, spec cards, box approvalHref) keep working until Phase 4 retires
- * them; here we ADD the routed-inbox emission alongside them.
+ * path is unchanged (POST /api/roadmap/approve → worker flips queued_resume). Phase 4 retired the
+ * scattered surfaces (Control Tower repair/db-health feeds, spec cards, box approvalHref): they now
+ * routedInboxHref()-deep-link into this one inbox, which decides plain approve/decline (incl. multi-
+ * action build + multi-branch plan, inline) and deep-links only genuinely multi-choice actions out.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
-import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
+import { APPROVAL_REQUEST_TYPE, type InboxApprovalAction } from "@/lib/agents/inbox";
 import {
   resolveApprover,
   buildOrgChartGraph,
@@ -42,7 +43,7 @@ interface PendingActionLike {
   preview?: string;
   cmd?: string;
   spec_title?: string;
-  spec?: { title?: string; slug?: string } | null;
+  spec?: { title?: string; slug?: string; owner?: string; parent?: string } | null;
 }
 
 /** The agent_jobs columns this emitter needs (a row that just entered, or sits in, needs_approval). */
@@ -79,10 +80,11 @@ export function ownerFunctionForKind(kind: string): string | null {
 }
 
 /**
- * Where to DECIDE a richer/multi-choice action that inline Approve/Decline can't express. Mirrors
- * the box page's approvalHref (the safe-by-default router: a real-spec/dedicated surface gets a deep
- * link, every other agent-proposal kind defaults to the Control Tower, which always loads). Phase 4
- * folds these surfaces into the routed inbox and retires this fallback.
+ * Where to DECIDE a genuinely multi-CHOICE action that the inbox's inline Approve/Decline can't express
+ * (coverage register-vs-exempt, hero reject-with-notes). Phase 4 made the inbox the single source for
+ * plain approve/decline (incl. multi-action/multi-branch), so this deep-link now only carries multi-choice
+ * out to its canonical surface (coverage-register → the Control Tower coverage section; storefront → the
+ * optimizer; the Control Tower default always loads). Plain kinds keep an informational spec/goal link.
  */
 const SPEC_SLUG_KINDS = new Set(["build", "spec-test"]);
 export function approvalDeepLink(kind: string, specSlug: string | null, specMissing?: boolean | null): string {
@@ -113,6 +115,32 @@ export function inlineApproveActionId(job: ApprovalJobRow): string | null {
   if (!a.id) return null;
   if (a.type && MULTI_CHOICE_TYPES.has(a.type)) return null;
   return a.id;
+}
+
+/**
+ * Every pending plain action this job gates, each decided INLINE in the inbox with its own
+ * Approve/Decline (approval-routing-engine Phase 4 — multi-action/multi-branch inline). Generalizes
+ * `inlineApproveActionId` from the single-action case to the whole list, so a multi-action build or a
+ * multi-branch plan is decided entirely in the inbox (retiring the spec-card / Control-Tower standalone
+ * cards). Returns `null` (no inline decision) when ANY pending action is multi-CHOICE (coverage
+ * register/exempt, hero reject-with-notes) — those can't be expressed as a binary, so the row falls
+ * back to the `deep_link` canonical surface. An action with no id is skipped (can't be acted on).
+ */
+export function inlineApproveActions(job: ApprovalJobRow): InboxApprovalAction[] | null {
+  const pending = pendingActions(job);
+  if (!pending.length) return null;
+  if (pending.some((a) => a.type && MULTI_CHOICE_TYPES.has(a.type))) return null;
+  const actions = pending
+    .filter((a) => a.id)
+    .map((a) => ({
+      id: a.id as string,
+      summary: actionLabel(a),
+      preview: a.preview ?? null,
+      cmd: a.cmd ?? null,
+      specOwner: a.spec?.owner ?? null,
+      specParent: a.spec?.parent ?? null,
+    }));
+  return actions.length ? actions : null;
 }
 
 function actionLabel(a: PendingActionLike): string {

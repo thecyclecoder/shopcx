@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { routedInboxHref } from "@/lib/agents/inbox";
 
 // Control Tower (control-tower spec, Phase 1): the single "is the machine healthy?" screen.
 // A green/amber/red tile per monitored loop — last ran, last produced, status, open alerts, and
@@ -491,6 +492,8 @@ function CoverageRegisterSection({ items, onChange }: { items: CoverageRegisterI
         it infers the cadence-derived window + an owner-function, then surfaces it for one-tap <b>Register</b> (lands
         the entry → the loop becomes a monitored tile). <b>Mark intentionally-unmonitored</b> exempts it (it stops
         re-surfacing); <b>Dismiss</b> defers. It never silently edits the registry — the build is queued only on your tap.
+        This register/exempt choice is multi-way, so it&apos;s decided here; the Agents inbox surfaces the request and
+        deep-links to this section.
       </p>
       <ul className="space-y-2">
         {items.map((item) => (
@@ -640,9 +643,9 @@ function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; on
       <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Repair feed</h2>
       <p className="mb-3 text-[11px] text-zinc-400">
         The Repair Agent triages each new error/alert read-only and proposes a fix — <b>error → proposed fix</b>.
-        It <i>surfaces</i> the fix spec for one-tap <b>Build</b> (it never auto-builds product code); <b>Dismiss</b>
-        clears it and resolves the error. <b>Needs human</b> items couldn&apos;t be confidently diagnosed — no spec,
-        no loop. Empty = nothing waiting on you.
+        Proposed fixes are now <b>approved in the Agents inbox</b> (the single routed approval queue) — this is a
+        read-only view onto them. <b>Needs human</b> items couldn&apos;t be confidently diagnosed (no spec) and are
+        cleared here. Empty = nothing waiting on you.
       </p>
       {items.length === 0 ? (
         <p className="rounded-lg border border-dashed border-zinc-200 px-3 py-4 text-xs text-emerald-700 dark:border-zinc-800 dark:text-emerald-300">
@@ -678,23 +681,25 @@ function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; on
                     <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
                   </p>
                 </div>
-                <div className="flex shrink-0 gap-2">
-                  {item.state === "proposed" && item.specSlug && (
+                <div className="flex shrink-0 items-center gap-2">
+                  {item.state === "needs-human" ? (
+                    // Needs-human (needs_attention) items aren't approvals (no proposed fix) → never enter the
+                    // routed inbox; they're cleared here as a monitoring triage.
                     <button
-                      onClick={() => act(item, "build")}
+                      onClick={() => act(item, "dismiss")}
                       disabled={busy !== null}
-                      className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                      className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                     >
-                      {busy === `${item.jobId}:build` ? "Queuing…" : "Build"}
+                      {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
                     </button>
+                  ) : (
+                    <Link
+                      href={routedInboxHref()}
+                      className="text-[11px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
+                    >
+                      Review in the Agents inbox →
+                    </Link>
                   )}
-                  <button
-                    onClick={() => act(item, "dismiss")}
-                    disabled={busy !== null}
-                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                  >
-                    {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
-                  </button>
                 </div>
               </div>
             </li>
@@ -739,8 +744,9 @@ function DbHealthSection({ panel, onChange }: { panel: DbHealthPanel; onChange: 
       <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">DB Health</h2>
       <p className="mb-3 text-[11px] text-zinc-400">
         The DB Health Agent watches Postgres read-only — top tables by size/growth, the slowest queries
-        (root-caused via <code>EXPLAIN</code>), missing/unused indexes, and bloat — and <b>proposes</b> fix specs
-        for one-tap <b>Build</b>. It never applies DDL or deletes on its own. Last size sweep {elapsed(panel.lastSizeSweepAt)} ago ·
+        (root-caused via <code>EXPLAIN</code>), missing/unused indexes, and bloat — and <b>proposes</b> fix specs.
+        It never applies DDL or deletes on its own; proposed fixes are <b>approved in the Agents inbox</b> (the single
+        routed approval queue). Last size sweep {elapsed(panel.lastSizeSweepAt)} ago ·
         last slow-query pass {elapsed(panel.lastSlowQueryAt)} ago.
       </p>
 
@@ -805,23 +811,24 @@ function DbHealthSection({ panel, onChange }: { panel: DbHealthPanel; onChange: 
                     <code>{item.signature}</code> · surfaced {elapsed(item.createdAt)} ago
                   </p>
                 </div>
-                <div className="flex shrink-0 gap-2">
-                  {item.specSlug && (
-                    <button
-                      onClick={() => act(item, "build")}
-                      disabled={busy !== null}
-                      className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                <div className="flex shrink-0 items-center gap-2">
+                  {item.specSlug ? (
+                    <Link
+                      href={routedInboxHref()}
+                      className="text-[11px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
                     >
-                      {busy === `${item.jobId}:build` ? "Queuing…" : "Build"}
+                      Review in the Agents inbox →
+                    </Link>
+                  ) : (
+                    // No proposed fix spec ⇒ needs-human (needs_attention), not an approval → cleared here.
+                    <button
+                      onClick={() => act(item, "dismiss")}
+                      disabled={busy !== null}
+                      className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    >
+                      {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
                     </button>
                   )}
-                  <button
-                    onClick={() => act(item, "dismiss")}
-                    disabled={busy !== null}
-                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                  >
-                    {busy === `${item.jobId}:dismiss` ? "…" : "Dismiss"}
-                  </button>
                 </div>
               </div>
             </li>

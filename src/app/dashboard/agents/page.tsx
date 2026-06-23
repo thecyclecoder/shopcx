@@ -8,7 +8,7 @@ import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { OrgTree } from "@/components/agents/org-tree";
 import { BoardChannel } from "@/components/agents/board-channel";
 import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
-import { INBOX_TABS, APPROVAL_REQUEST_TYPE, type InboxTab, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
+import { INBOX_TABS, APPROVAL_REQUEST_TYPE, type InboxTab, type InboxItem, type InboxPayload, type InboxApprovalAction } from "@/lib/agents/inbox";
 
 // Agents hub (agents-hub-role-inboxes spec) — the owner-only org-chart surface.
 // Left: CEO → Directors → Workers, read from functions/+goals/ via brain-roadmap.
@@ -447,19 +447,28 @@ function InboxRow({ item, onActed }: { item: InboxItem; onActed: () => void }) {
 }
 
 function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }) {
-  const [busy, setBusy] = useState<null | "approve" | "decline">(null);
+  // approval-routing-engine Phase 4: decide EVERY pending action inline — a multi-action build or a
+  // multi-branch plan is resolved entirely here (the spec-card / Control-Tower standalone cards are
+  // retired). `item.actions` is the live still-pending list; an empty list ⇒ a multi-CHOICE job
+  // (coverage register/exempt, hero reject-with-notes) the inbox can't binary-decide → deep-link out.
+  const actions: InboxApprovalAction[] =
+    item.actions && item.actions.length
+      ? item.actions
+      : item.approveActionId
+        ? [{ id: item.approveActionId, summary: item.title }]
+        : [];
+  const [busy, setBusy] = useState<string | null>(null); // `${actionId}:${decision}`
   const [error, setError] = useState<string | null>(null);
-  const canDecideInline = Boolean(item.jobId && item.approveActionId);
 
-  const decide = async (decision: "approve" | "decline") => {
-    if (!item.jobId || !item.approveActionId) return;
-    setBusy(decision);
+  const decide = async (actionId: string, decision: "approve" | "decline") => {
+    if (!item.jobId) return;
+    setBusy(`${actionId}:${decision}`);
     setError(null);
     try {
       const res = await fetch("/api/roadmap/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: item.jobId, actionId: item.approveActionId, decision }),
+        body: JSON.stringify({ jobId: item.jobId, actionId, decision }),
       });
       if (!res.ok) {
         const j = (await res.json().catch(() => ({}))) as { error?: string };
@@ -471,6 +480,8 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
       setBusy(null);
     }
   };
+
+  const canDecideInline = Boolean(item.jobId && actions.length);
 
   return (
     <li
@@ -487,40 +498,64 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
         </span>
         <span className="shrink-0 text-[10px] text-zinc-400">{elapsed(item.createdAt)}</span>
       </div>
-      {item.body && (
+      {/* Multi-CHOICE job (no inline actions): show the investigation + deep-link to the canonical surface. */}
+      {!canDecideInline && item.body && (
         <pre className="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-2 font-sans text-[12px] leading-relaxed text-zinc-600 dark:bg-zinc-950/40 dark:text-zinc-300">
           {item.body}
         </pre>
       )}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        {canDecideInline ? (
-          <>
-            <button
-              onClick={() => decide("approve")}
-              disabled={busy !== null}
-              className="rounded-md bg-emerald-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-            >
-              {busy === "approve" ? "Approving…" : "Approve"}
-            </button>
-            <button
-              onClick={() => decide("decline")}
-              disabled={busy !== null}
-              className="rounded-md border border-zinc-300 px-3 py-1 text-[12px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-            >
-              {busy === "decline" ? "Declining…" : "Decline"}
-            </button>
-          </>
-        ) : null}
-        {item.deepLink && (
+      {/* One sub-card per pending action — each decided with its own Approve/Decline. */}
+      {canDecideInline &&
+        actions.map((a) => (
+          <div
+            key={a.id}
+            className="mt-2 rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-900"
+          >
+            {a.summary && <div className="text-[12px] font-medium text-zinc-800 dark:text-zinc-200">{a.summary}</div>}
+            {(a.specOwner || a.specParent) && (
+              <div className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                {a.specOwner && (
+                  <>
+                    owner <span className="font-medium text-violet-600 dark:text-violet-400">{a.specOwner}</span>
+                  </>
+                )}
+                {a.specParent && <> · ↳ {a.specParent}</>}
+              </div>
+            )}
+            {(a.preview || a.cmd) && (
+              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-zinc-50 p-1.5 font-sans text-[11px] leading-relaxed text-zinc-600 dark:bg-zinc-950/40 dark:text-zinc-300">
+                {a.preview || (a.cmd ? `$ ${a.cmd}` : "")}
+              </pre>
+            )}
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => decide(a.id, "approve")}
+                disabled={busy !== null}
+                className="rounded-md bg-emerald-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {busy === `${a.id}:approve` ? "Approving…" : "Approve"}
+              </button>
+              <button
+                onClick={() => decide(a.id, "decline")}
+                disabled={busy !== null}
+                className="rounded-md border border-zinc-300 px-3 py-1 text-[12px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                {busy === `${a.id}:decline` ? "Declining…" : "Decline"}
+              </button>
+            </div>
+          </div>
+        ))}
+      {item.deepLink && !canDecideInline && (
+        <div className="mt-2">
           <Link
             href={item.deepLink}
             className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
           >
-            {canDecideInline ? "Open full surface →" : "Decide on the full surface →"}
+            Decide on the full surface →
           </Link>
-        )}
-        {error && <span className="text-[11px] text-rose-500">{error}</span>}
-      </div>
+        </div>
+      )}
+      {error && <p className="mt-1 text-[11px] text-rose-500">{error}</p>}
     </li>
   );
 }
