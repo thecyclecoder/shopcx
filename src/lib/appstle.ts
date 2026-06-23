@@ -75,7 +75,11 @@ export async function appstleSubscriptionAction(
     if (!res.ok && res.status !== 204) {
       const text = await res.text();
       console.error(`Appstle ${action} error for contract ${contractId}:`, text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
+      // Surface the Appstle response body so the portal healer's
+      // classifyPortalFailure() can recognize transient 400s (e.g. "billing
+      // operation is already in progress" right after a renewal bills) and
+      // auto-retry instead of escalating. Mirrors appstleSkipUpcomingOrder.
+      return { success: false, error: text || `Appstle API error: ${res.status}` };
     }
 
     // Update local subscription status
