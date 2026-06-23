@@ -46,6 +46,15 @@ interface LanderSnapshot {
   status: string;
   chapter_count: number;
 }
+interface GapGradeSummary {
+  grade_id: string;
+  grade_initial: number | null;
+  grade_revised: number | null;
+  gap_quality: number | null;
+  outcome_quality: number | null;
+  outcome_state: string;
+  graded_by: string;
+}
 interface GapQueueItem {
   id: string;
   source: "ad" | "lander";
@@ -57,12 +66,20 @@ interface GapQueueItem {
   status: "proposed" | "approved" | "rejected";
   shipped: boolean;
   won: boolean;
+  grade: GapGradeSummary | null;
 }
 interface Throughput {
   proposed: number;
   approved: number;
   shipped: number;
   won: number;
+}
+interface GradeSignal {
+  avgByType: Record<string, number>;
+  avgGapQualityByType: Record<string, number>;
+  countByType: Record<string, number>;
+  overallAvg: number | null;
+  graded: number;
 }
 interface HubData {
   products: { id: string; title: string | null }[];
@@ -72,6 +89,8 @@ interface HubData {
   landerSnapshots: LanderSnapshot[];
   gapQueue: GapQueueItem[];
   throughput: Throughput;
+  gradeSignal: GradeSignal;
+  suppressedTypes: string[];
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -134,6 +153,33 @@ export default function AcquisitionHubPage() {
     }
   };
 
+  // The Growth-director human override of a gap grade (the human-overridable gate, M5).
+  const overrideGrade = async (item: GapQueueItem) => {
+    if (!item.grade) return;
+    const axis = item.grade.grade_revised != null ? "revised" : "initial";
+    const raw = window.prompt(`Override the ${axis} grade (1–10) for "${item.title}":`);
+    if (raw == null) return;
+    const grade = Number(raw);
+    if (!Number.isInteger(grade) || grade < 1 || grade > 10) {
+      alert("Grade must be an integer 1–10.");
+      return;
+    }
+    const reason = window.prompt("Reason for the override (becomes a proposed calibration rule):") || "";
+    if (!reason.trim()) return;
+    setBusy(item.id);
+    const res = await fetch(`/api/ads/acquisition/grades/${item.grade.grade_id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspace.id, grade, reason, axis, propose_rule: true }),
+    });
+    setBusy(null);
+    if (res.ok) load();
+    else {
+      const e = await res.json().catch(() => ({}));
+      alert(e.error || "Failed");
+    }
+  };
+
   if (forbidden) {
     return (
       <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
@@ -163,6 +209,30 @@ export default function AcquisitionHubPage() {
             <StatCard label="Approved" value={data.throughput.approved} accent="text-indigo-600 dark:text-indigo-400" />
             <StatCard label="Shipped" value={data.throughput.shipped} accent="text-sky-600 dark:text-sky-400" />
             <StatCard label="Won" value={data.throughput.won} accent="text-emerald-600 dark:text-emerald-400" />
+          </div>
+
+          {/* M5 grading loop — the Growth-director feedback signal that trains the scouts */}
+          <div className="mb-6 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+              <span className="text-xs uppercase tracking-wide text-zinc-500">Gap grade (avg)</span>
+              <span className="text-2xl font-bold text-fuchsia-600 dark:text-fuchsia-400">
+                {data.gradeSignal.overallAvg != null ? data.gradeSignal.overallAvg.toFixed(1) : "—"}
+              </span>
+              <span className="text-xs text-zinc-400">{data.gradeSignal.graded} gaps graded</span>
+            </div>
+            {data.suppressedTypes.length > 0 && (
+              <div className="mt-2 text-xs text-zinc-500">
+                Down-weighted (no longer re-surfaced):{" "}
+                {data.suppressedTypes.map((t) => (
+                  <span
+                    key={t}
+                    className="mr-1 inline-block rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Product scope */}
@@ -218,6 +288,24 @@ export default function AcquisitionHubPage() {
                     </div>
                     <div className="mt-1 font-medium text-zinc-900 dark:text-zinc-100">{g.title}</div>
                     <div className="text-sm text-zinc-600 dark:text-zinc-400">{g.rationale}</div>
+                    {g.grade && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                        <span className="rounded-full bg-fuchsia-50 px-2 py-0.5 font-semibold text-fuchsia-700 dark:bg-fuchsia-950 dark:text-fuchsia-300">
+                          grade {g.grade.grade_revised ?? g.grade.grade_initial ?? "?"}/10
+                        </span>
+                        <span className="text-zinc-400">
+                          gap {g.grade.gap_quality ?? "?"} · outcome {g.grade.outcome_quality ?? "?"} · {g.grade.outcome_state}
+                          {g.grade.graded_by === "human" ? " · overridden" : ""}
+                        </span>
+                        <button
+                          disabled={busy === g.id}
+                          onClick={() => overrideGrade(g)}
+                          className="rounded border border-zinc-200 px-2 py-0.5 font-semibold text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        >
+                          Override
+                        </button>
+                      </div>
+                    )}
                     {g.status === "proposed" && (
                       <div className="mt-2 flex gap-2">
                         <button

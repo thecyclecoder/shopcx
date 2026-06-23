@@ -452,7 +452,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   // ─ Every-30-min crons (window ~90 min) ─
-  { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN },
+  { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
   // ─ Hourly crons (window ~2h) ─
   { id: "dunning-payday-retry-cron", kind: "cron", owner: "retention", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR, outputAssertion: "stuck-dunning" },
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
@@ -461,6 +461,9 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "amazon-daily-sync", kind: "cron", owner: "growth", label: "Amazon daily sync", description: "Daily sync of the last 3 days of Amazon orders/spend.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "tickets-auto-archive", kind: "cron", owner: "cs", label: "Tickets auto-archive", description: "Archives stale resolved tickets.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "auto-blog-generate", kind: "cron", owner: "cmo", label: "Auto blog generator", description: "Daily SEO blog/content generation pass.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR },
+  // daily-digest-channel spec, Phase 1: one aggregated FYI post/day to #daily-digest (build/ship recap +
+  // dunning + notable ad-perf + ops-warning counts). registeredAt graces the first-tick window (newcron-grace).
+  { id: "daily-digest-cron", kind: "cron", owner: "platform", label: "Daily digest", description: "One aggregated FYI post/day to #daily-digest — build/ship recap + dunning + notable ad-perf shifts + non-critical ops-warning counts, replacing the retired per-event FYI pings.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },

@@ -119,11 +119,13 @@ import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 import { creativeFinderDailyCron, creativeFinderManualSweep } from "@/lib/inngest/creative-finder";
 import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
+import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
 import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 import { loopHeartbeatsPrune } from "@/lib/inngest/loop-heartbeats-prune";
+import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
 export const registeredInngestFunctions = [
@@ -249,11 +251,14 @@ export const registeredInngestFunctions = [
   creativeFinderManualSweep,
   competitorScoutDiscover,
   landingPageScoutAnalyze,
+  acquisitionResearchCadenceCron,
+  acquisitionResearchCadenceManual,
   controlTowerMonitor,
   specDriftReconcileCron,
   inngestFailureCapture,
   supabaseLogPollCron,
   loopHeartbeatsPrune,
+  dailyDigestCron,
 ];
 
 /** Our Inngest app id prefix (e.g. "shopcx-"), the form Inngest prepends to function ids across apps. */
