@@ -269,13 +269,338 @@ function DecisionHistory({ role, functionSlugs }: { role: string; functionSlugs:
   );
 }
 
+// ── Director grades (Phase 4 — feed grades back to tighten/loosen the leash) ──
+
+interface GradeReportRow {
+  id: string;
+  dimension: "auto-approval" | "goal-escort";
+  grade: number | null;
+  reasoning: string | null;
+  graded_by: "agent" | "human";
+  overridden_by: string | null;
+  target_label: string;
+  leash_category: string | null;
+  created_at: string;
+}
+interface DimensionStatUi {
+  dimension: "auto-approval" | "goal-escort";
+  graded: number;
+  avgGrade: number | null;
+  trend: "up" | "down" | "flat" | null;
+}
+interface CategoryStatUi {
+  category: string;
+  graded: number;
+  avgGrade: number | null;
+}
+interface LeashRecUi {
+  id: string;
+  scope: "dimension" | "category";
+  dimension: string;
+  category: string | null;
+  action: "loosen" | "tighten";
+  sampleSize: number;
+  avgGrade: number;
+  rationale: string;
+}
+interface GradeReport {
+  dimensions: DimensionStatUi[];
+  categories: CategoryStatUi[];
+  recommendations: LeashRecUi[];
+  rows: GradeReportRow[];
+  proposedRules: Array<{ id: string; title: string; content: string; created_at: string }>;
+  autonomy: { function: string; live: boolean; autonomous: boolean };
+}
+
+function gradeColor(g: number | null): string {
+  if (g == null) return "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
+  if (g >= 8) return "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300";
+  if (g >= 6) return "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300";
+  return "bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300";
+}
+const TREND_ARROW: Record<string, string> = { up: "↑", down: "↓", flat: "→" };
+
+// The Director grading report (director-loop-grading Phase 4 — the CEO's report contract for the
+// director). Per-dimension + per-category grades with a trend, the actionable leash-adjustment
+// recommendations (loosen/tighten — the CEO disposes via the Autonomy toggle; the loop never widens
+// its own leash), the proposed calibration rules, and the recent grades with a one-click override.
+function DirectorGrades() {
+  const [report, setReport] = useState<GradeReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(false);
+  const [overrideId, setOverrideId] = useState<string | null>(null);
+  const [ovGrade, setOvGrade] = useState("");
+  const [ovReason, setOvReason] = useState("");
+  const [ovProposeRule, setOvProposeRule] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    return fetch("/api/developer/agents/grades")
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((d: GradeReport) => {
+        setReport(d);
+        setErr(false);
+      })
+      .catch(() => setErr(true))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const submitOverride = async (gradeId: string) => {
+    const g = Number(ovGrade);
+    if (!Number.isInteger(g) || g < 1 || g > 10 || !ovReason.trim()) return;
+    setBusy(true);
+    try {
+      await fetch(`/api/developer/agents/grades/${gradeId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grade: g, reason: ovReason.trim(), propose_rule: ovProposeRule }),
+      });
+      setOverrideId(null);
+      setOvGrade("");
+      setOvReason("");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviewRule = async (ruleId: string, status: "approved" | "rejected") => {
+    setBusy(true);
+    try {
+      await fetch(`/api/developer/agents/grader-prompts/${ruleId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading && !report) return <div className="py-12 text-center text-sm text-zinc-400">Loading director grades…</div>;
+  if (err)
+    return (
+      <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
+        Couldn&apos;t load director grades.
+      </div>
+    );
+  if (!report || (report.rows.length === 0 && report.recommendations.length === 0))
+    return (
+      <div className="rounded-lg border border-dashed border-zinc-200 px-4 py-10 text-center dark:border-zinc-800">
+        <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">No director calls graded yet.</p>
+        <p className="mx-auto mt-1 max-w-sm text-[12px] text-zinc-400">
+          Once the Platform/DevOps Director auto-approves calls or escorts goals, each concluded call is graded
+          1–10 here — and sustained grades surface as leash-adjustment recommendations you confirm.
+        </p>
+      </div>
+    );
+
+  const env = report.autonomy;
+  return (
+    <div className="space-y-5">
+      {/* Recommendations — the CEO disposes (no self-promotion). */}
+      <section>
+        <h3 className="text-[12px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Leash-adjustment recommendations
+        </h3>
+        <p className="mt-0.5 text-[11px] text-zinc-400">
+          Current Platform envelope:{" "}
+          <span className="font-medium text-zinc-600 dark:text-zinc-300">
+            {env.autonomous ? "autonomous" : env.live ? "live (not autonomous)" : "offline"}
+          </span>
+          . Recommendations only — the envelope changes when you toggle Autonomy above, never on its own.
+        </p>
+        {report.recommendations.length === 0 ? (
+          <p className="mt-2 text-[12px] text-zinc-400">No leash adjustment recommended — grades are mid-range or the sample is thin.</p>
+        ) : (
+          <ul className="mt-2 space-y-2">
+            {report.recommendations.map((r) => (
+              <li
+                key={r.id}
+                className={`rounded-lg border p-3 ${
+                  r.action === "loosen"
+                    ? "border-emerald-200 bg-emerald-50/50 dark:border-emerald-900/40 dark:bg-emerald-950/10"
+                    : "border-rose-200 bg-rose-50/50 dark:border-rose-900/40 dark:bg-rose-950/10"
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                      r.action === "loosen"
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                        : "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300"
+                    }`}
+                  >
+                    {r.action === "loosen" ? "Widen leash" : "Narrow leash"}
+                  </span>
+                  <span className="text-[12px] font-medium text-zinc-700 dark:text-zinc-200">
+                    {r.category ? `${r.category} · ${r.dimension}` : r.dimension}
+                  </span>
+                  <span className="ml-auto text-[10px] text-zinc-400">
+                    avg {r.avgGrade}/10 · {r.sampleSize} call{r.sampleSize === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <p className="mt-1.5 text-[12px] text-zinc-600 dark:text-zinc-300">{r.rationale}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {/* Per-dimension + per-category stats */}
+      <section>
+        <h3 className="text-[12px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Grades by dimension</h3>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {report.dimensions.map((d) => (
+            <div key={d.dimension} className="rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="text-[12px] font-medium text-zinc-700 dark:text-zinc-200">{d.dimension}</div>
+              <div className="mt-0.5 flex items-center gap-2 text-[12px] text-zinc-500">
+                <span className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${gradeColor(d.avgGrade)}`}>
+                  avg {d.avgGrade ?? "—"}/10
+                </span>
+                <span>· {d.graded} graded</span>
+                {d.trend && <span title="recent vs prior trend">{TREND_ARROW[d.trend]}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+        {report.categories.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {report.categories.map((c) => (
+              <span
+                key={c.category}
+                className="rounded-full border border-zinc-200 px-2 py-0.5 text-[11px] text-zinc-600 dark:border-zinc-700 dark:text-zinc-300"
+                title={`${c.graded} graded auto-approvals`}
+              >
+                {c.category}: avg {c.avgGrade ?? "—"}/10 · {c.graded}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Proposed calibration rules — only an APPROVED rule reaches the grader. */}
+      {report.proposedRules.length > 0 && (
+        <section>
+          <h3 className="text-[12px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Proposed calibration rules
+          </h3>
+          <ul className="mt-2 space-y-2">
+            {report.proposedRules.map((rule) => (
+              <li key={rule.id} className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 dark:border-indigo-900/40 dark:bg-indigo-900/10">
+                <div className="text-[12px] font-medium text-zinc-800 dark:text-zinc-100">{rule.title}</div>
+                <p className="mt-0.5 text-[12px] text-zinc-600 dark:text-zinc-300">{rule.content}</p>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    disabled={busy}
+                    onClick={() => reviewRule(rule.id, "approved")}
+                    className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Approve rule
+                  </button>
+                  <button
+                    disabled={busy}
+                    onClick={() => reviewRule(rule.id, "rejected")}
+                    className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {/* Recent grades — each with a one-click override (records graded_by='human'). */}
+      <section>
+        <div className="flex items-center justify-between">
+          <h3 className="text-[12px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Recent grades</h3>
+          <button
+            onClick={refresh}
+            className="rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            Refresh
+          </button>
+        </div>
+        <ul className="mt-2 space-y-2">
+          {report.rows.map((row) => (
+            <li key={row.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${gradeColor(row.grade)}`}>{row.grade ?? "—"}/10</span>
+                <span className="text-[11px] font-medium uppercase text-zinc-400">{row.dimension}</span>
+                <span className="text-[12px] text-zinc-600 dark:text-zinc-300">{row.target_label}</span>
+                {row.graded_by === "human" && (
+                  <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300">
+                    overridden
+                  </span>
+                )}
+                <button
+                  onClick={() => {
+                    setOverrideId(overrideId === row.id ? null : row.id);
+                    setOvGrade(String(row.grade ?? ""));
+                    setOvReason("");
+                  }}
+                  className="ml-auto text-[11px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
+                >
+                  {overrideId === row.id ? "Cancel" : "Override"}
+                </button>
+              </div>
+              {row.reasoning && <p className="mt-1 text-[12px] text-zinc-500 dark:text-zinc-400">{row.reasoning}</p>}
+              {overrideId === row.id && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900/40">
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={ovGrade}
+                    onChange={(e) => setOvGrade(e.target.value)}
+                    placeholder="1-10"
+                    className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-[12px] dark:border-zinc-700 dark:bg-zinc-900"
+                  />
+                  <input
+                    value={ovReason}
+                    onChange={(e) => setOvReason(e.target.value)}
+                    placeholder="Why you're overriding…"
+                    className="min-w-[12rem] flex-1 rounded-md border border-zinc-300 bg-white px-2 py-1 text-[12px] dark:border-zinc-700 dark:bg-zinc-900"
+                  />
+                  <label className="flex items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <input type="checkbox" checked={ovProposeRule} onChange={(e) => setOvProposeRule(e.target.checked)} className="rounded border-zinc-300 dark:border-zinc-600" />
+                    Propose calibration rule
+                  </label>
+                  <button
+                    disabled={busy}
+                    onClick={() => submitOverride(row.id)}
+                    className="rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    Save override
+                  </button>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}
+
 // ── Inbox shell ─────────────────────────────────────────────────────────────
 
 function InboxShell({ role, title, functionSlugs }: { role: string; title: string; functionSlugs: string[] }) {
   const [payload, setPayload] = useState<InboxPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
-  const [tab, setTab] = useState<InboxTab | "history">("messages");
+  const [tab, setTab] = useState<InboxTab | "history" | "grades">("messages");
+  // The director-grading report (Phase 4) is the CEO's report contract for the Platform director —
+  // show it on the CEO (who grades) and the Platform director (who's graded), not on every role.
+  const showGrades = role === "ceo" || role === "platform";
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [q, setQ] = useState("");
 
@@ -348,11 +673,28 @@ function InboxShell({ role, title, functionSlugs }: { role: string; title: strin
         >
           Decision history
         </button>
+        {/* Director grades (Phase 4) — per-period grades + trend + leash-adjustment recommendations. */}
+        {showGrades && (
+          <button
+            onClick={() => setTab("grades")}
+            className={`relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+              tab === "grades"
+                ? "border-indigo-500 text-indigo-600 dark:text-indigo-400"
+                : "border-transparent text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+            }`}
+          >
+            Director grades
+          </button>
+        )}
       </div>
 
       {tab === "history" ? (
         <div className="mt-3">
           <DecisionHistory role={role} functionSlugs={functionSlugs} />
+        </div>
+      ) : tab === "grades" ? (
+        <div className="mt-3">
+          <DirectorGrades />
         </div>
       ) : (
       <>

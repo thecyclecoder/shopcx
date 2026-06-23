@@ -27,7 +27,7 @@ The defining invariant: **soundness is scored separately from outcome** — a so
 ## Where it's wired
 - **Grading** — [[../inngest/platform-director-cron]]'s daily cron (`15 12 * * *`) runs `gradeConcludedDirectorCalls` per build-console workspace on the same beat it enqueues the box pass. Runs in the **deployed runtime** (it needs `ANTHROPIC_API_KEY`), not on the box. Mirrors [[../inngest/acquisition-research-cadence]]'s grade sweep.
 - **The calls it grades** — the auto-approval rows come from [[platform-director]] `applyDirectorApproval`; the escort rows from `escortApprovedGoals` (`escorted_goal` activity).
-- **Report + override** — the per-period grades + trend + the leash-adjustment recommendations land on the Agents hub in Phase 4 (not yet built); the human override + calibration-rule proposal arc lands there too.
+- **Report + override** — the per-period grades + trend + the leash-adjustment recommendations land on the Agents hub Director-grades tab via [[director-leash-recommendations]] (Phase 4 ✅); the human override (`POST /api/developer/agents/grades/{id}`) + calibration-rule proposal/approval arc lives there too.
 
 ## Gotchas
 - **Supervised tool** ([[../operational-rules]] § North star) — scores a bounded proxy (decision quality); the CEO owns the objective and overrides it. The leash widens only by the CEO (Phase 4) — the grader only recommends.
