@@ -53,7 +53,7 @@ import {
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
-import { getGoals, getRoadmap, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
+import { getGoals, getRoadmap, getSpec, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
@@ -750,4 +750,213 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
     metadata: { source: "platform-watch", watch_date: date, health, activity },
   });
   return { posted: true };
+}
+
+// ── Phase 5 — board grooming (the director MOVES the project board) ───────────────────────────────
+// The director doesn't just build queued specs — it actively GROOMS the board so nothing rots half-built
+// (board-grooming spec). On its standing cadence it assesses every PARTIALLY-shipped spec (≥1 phase ✅,
+// remaining ⏳, no active build) and decides what to do with the leftover phases:
+//   - CONTINUE — the next ⏳ phase is NEEDED NOW (the spec's current promise / a dependent / a goal needs
+//     it) → queue its build to completion (the chain + auto-ship + fold carry it, like the escort).
+//   - SPLIT — the leftover phase(s) are future enhancement/polish the spec doesn't need to be useful today
+//     → author each as its OWN planned card (`{slug}-{phase}.md`, ⏳, a `**Deferred:**` note) and CLOSE OUT
+//     the parent (remove the split phases so its remaining phases are all-✅ → the parent folds/ships).
+//     Future work is PRESERVED as a planned card, never dropped.
+//   - ESCALATE — genuinely unsure / high-stakes (could be load-bearing) → escalate to the CEO, move nothing
+//     (north-star: hit a rail → escalate, never guess).
+//
+// Supervisable: splitting a card + queueing a next-phase build is low-risk/reversible (within the leash);
+// every groom decision writes a director_activity row with the reasoning. The director never DELETES a
+// phase outright — future work is always preserved as a planned card. Dormant until live+autonomous, like
+// the escort + the approval enqueuer. The classification JUDGMENT is the director's Max `claude -p`
+// investigation (the box lane), exactly like the Phase-1 approval verdict + the regression-agent author;
+// this module is the mechanical half — find the candidates, build the prompt, dedup against re-grooming.
+
+/** Cap how many partially-shipped specs one grooming pass investigates (bound the per-pass cost). */
+export const PLATFORM_DIRECTOR_GROOM_CAP = 4;
+
+/** A partially-shipped spec the director may groom: ≥1 ✅ phase, ≥1 ⏳ phase, none 🚧, no active build. */
+export interface GroomCandidate {
+  slug: string;
+  title: string;
+  owner?: string;
+  parent?: string;
+  shippedPhases: string[]; // titles of the ✅ phases (context for the investigation)
+  remainingPhases: string[]; // titles of the leftover ⏳ phases (what gets classified)
+  raw: string; // the parent spec's full markdown — the investigation reads it + (on a split) rewrites it
+  /** prior failed build attempts (no in-flight) — the loop-guard count the continue path reads. */
+  failedBuilds: number;
+  lastError: string | null;
+}
+
+/** The stable dedup key for a terminal groom decision on a spec (split / unsure-escalate). */
+export function groomKey(slug: string): string {
+  return `groom:${slug}`;
+}
+
+/**
+ * Has this spec ALREADY had a terminal groom decision (split into cards, or escalated as unsure)? A split
+ * commits the new card(s) + the folded parent to `main`, which the box's bundled `fs` copy won't reflect
+ * until its next self-update — so without this ledger dedup the same candidate would re-split every pass.
+ * (A `continue` is NOT deduped here: its queued build flips the spec in-flight, which the candidate filter
+ * already excludes, and a later FAILED build should be re-groomed under the loop-guard.) Best-effort.
+ */
+export async function alreadyGroomed(admin: Admin, slug: string): Promise<boolean> {
+  const { data } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("director_function", PLATFORM)
+    .in("action_kind", ["groomed_split", "escalated"])
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  const key = groomKey(slug);
+  return (data ?? []).some((r) => (r.metadata as Record<string, unknown> | null)?.["groom_key"] === key);
+}
+
+/**
+ * Find the partially-shipped specs the Platform director may groom this pass: derived status not yet
+ * shipped, ≥1 phase ✅ AND ≥1 phase ⏳, none in-progress (🚧), no active build job, owner not opted out
+ * (`**Auto-build:** off`, mirroring the escort), and not already groomed (split/escalated). A NO-OP until
+ * Platform is live+autonomous (dormant until activation, like the escort). Capped at GROOM_CAP per pass.
+ */
+export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[]> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return []; // dormant until activation flips the flag
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return [];
+
+  const { specs } = await getRoadmap();
+  const partial = specs.filter(
+    (s) =>
+      s.status !== "shipped" &&
+      s.counts.shipped >= 1 && // at least one phase has landed
+      s.counts.planned >= 1 && // at least one ⏳ phase remains
+      s.counts.in_progress === 0 && // no 🚧 phase (a phase actively building) — that's an active build
+      s.autoBuild !== false, // owner opted out of auto-build → leave it under manual control (mirrors the escort)
+  );
+
+  const out: GroomCandidate[] = [];
+  for (const s of partial) {
+    if (out.length >= PLATFORM_DIRECTOR_GROOM_CAP) break;
+    const state = await specBuildState(admin, workspaceId, s.slug);
+    if (state.inFlight) continue; // an active/landed build is handling it — not "no active build"
+    if (await alreadyGroomed(admin, s.slug)) continue; // already split/escalated (handles the box's stale fs)
+    const got = await getSpec(s.slug);
+    if (!got) continue;
+    out.push({
+      slug: s.slug,
+      title: s.title,
+      owner: s.owner,
+      parent: s.parent,
+      shippedPhases: s.phases.filter((p) => p.status === "shipped").map((p) => p.title),
+      remainingPhases: s.phases.filter((p) => p.status === "planned").map((p) => p.title),
+      raw: got.raw,
+      failedBuilds: state.failedCount,
+      lastError: state.lastError,
+    });
+  }
+  return out;
+}
+
+/** The Max `claude -p` grooming prompt — read-only assess one partially-shipped spec → one JSON verdict. */
+export function groomInvestigationPrompt(c: GroomCandidate): string {
+  return [
+    "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
+    "You GROOM the project board so nothing rots half-built. This spec is PARTIALLY shipped: some phases ✅,",
+    "some ⏳ remain, and NO active build. Decide what to do with the leftover ⏳ phase(s):",
+    "",
+    "1. CONTINUE — the next ⏳ phase is NEEDED NOW: the spec's CURRENT promise (its H1 / its ## Verification)",
+    "   requires it, or a dependent spec / a goal needs it now. → I queue its build to completion.",
+    "2. SPLIT — the leftover ⏳ phase(s) are future enhancement / polish / \"someday\" the spec does NOT need to",
+    "   be useful today. → I author EACH as its own planned card and CLOSE OUT the parent (remove those phases",
+    "   so every remaining parent phase is ✅ and the parent folds). Future work is PRESERVED as a planned card,",
+    "   never dropped.",
+    "3. ESCALATE — genuinely unsure / high-stakes (could this be load-bearing?). → I escalate to the CEO and",
+    "   move nothing. Prefer this over a wrong guess (north-star: hit a rail → escalate).",
+    "",
+    `Spec: ${c.slug} — ${c.title}`,
+    `Owner: ${c.owner ?? "—"} · Parent: ${c.parent ?? "—"}`,
+    `Shipped phases (✅): ${c.shippedPhases.join(" · ") || "—"}`,
+    `Remaining phases (⏳): ${c.remainingPhases.join(" · ") || "—"}`,
+    c.failedBuilds ? `Note: ${c.failedBuilds} prior build attempt(s) failed${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}.` : "",
+    "",
+    "Full spec markdown:",
+    "----------------------------------------",
+    c.raw,
+    "----------------------------------------",
+    "",
+    "Investigate read-only (the spec's promise, the dependents/goals it serves, the leftover phases' scope).",
+    "",
+    "If you choose SPLIT, you MUST provide, for EACH leftover ⏳ phase, a complete new card AND the rewritten",
+    "parent. Rules:",
+    `- New card slug = "${c.slug}-<short-phase-slug>" (lowercase a-z 0-9 -, derived from the phase name).`,
+    "- New card markdown MUST contain: an H1 title ending with ⏳; the SAME **Owner:** and **Parent:** lines as",
+    "  the parent; a line `**Deferred:** split from [[" + c.slug + "]] — not needed now: <reason>`; and the",
+    "  phase's content + any verification, as a `## Phase 1 — <name> ⏳` section (re-number to start at 1).",
+    "- Rewritten parent: REMOVE the split `## Phase` section(s); keep the H1 and EVERY remaining phase ✅; keep",
+    "  whatever Verification still applies. After your edit the parent must have NO ⏳ and NO 🚧 left (it folds).",
+    "",
+    "Final message = ONLY one JSON object (no markdown):",
+    '{"verdict":"continue","reasoning":"<why the next ⏳ phase is needed now>"}',
+    '{"verdict":"split","reasoning":"<why the leftovers are future, not needed now>","splits":[{"phase_title":"<the ⏳ phase>","slug":"' + c.slug + '-<phase>","markdown":"<full new card markdown>","reason":"<not-needed-now reason>"}],"parent_markdown":"<full rewritten parent markdown, every phase ✅>"}',
+    '{"verdict":"escalate","reasoning":"<why this is genuinely ambiguous / possibly load-bearing — needs the CEO>"}',
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** One split card the investigation proposes — a future phase becoming its own planned spec. */
+export interface GroomSplit {
+  phase_title?: string;
+  slug?: string;
+  markdown?: string;
+  reason?: string;
+}
+
+/** The parsed grooming verdict (the box lane's `claude -p` JSON). */
+export interface GroomVerdict {
+  verdict?: string;
+  reasoning?: string;
+  splits?: GroomSplit[];
+  parent_markdown?: string;
+}
+
+/**
+ * Validate a SPLIT verdict before the box commits anything to `main` — the leash is hard, so a malformed
+ * split NEVER lands (a broken board is worse than an un-groomed card). Checks: at least one split; each
+ * split has a `{parentSlug}-…` slug, an H1, a ⏳, a Deferred note, and an Owner + Parent line;
+ * and the rewritten parent is non-empty, still carries the parent's H1 title, and is ALL-✅ (folds — no ⏳/🚧
+ * left). Returns `{ ok }` or `{ ok:false, error }` so the lane can escalate instead of committing garbage.
+ */
+export function validateGroomSplit(
+  c: GroomCandidate,
+  v: GroomVerdict,
+  deriveSpecStatus: (raw: string) => "planned" | "in_progress" | "shipped" | "rejected",
+): { ok: true } | { ok: false; error: string } {
+  const splits = v.splits ?? [];
+  if (!splits.length) return { ok: false, error: "split verdict with no split cards" };
+  const slugRe = /^[a-z0-9-]+$/;
+  for (const s of splits) {
+    const slug = String(s.slug ?? "");
+    const md = String(s.markdown ?? "");
+    if (!slug || !slugRe.test(slug)) return { ok: false, error: `invalid split slug "${slug}"` };
+    if (!slug.startsWith(`${c.slug}-`)) return { ok: false, error: `split slug "${slug}" must start with "${c.slug}-"` };
+    if (slug === c.slug) return { ok: false, error: "split slug collides with the parent" };
+    if (!/^#\s+.+/m.test(md)) return { ok: false, error: `split "${slug}" missing an H1` };
+    if (!/[⏳]/.test(md)) return { ok: false, error: `split "${slug}" missing a ⏳ (must be planned)` };
+    if (!/\*\*Deferred:\*\*/i.test(md)) return { ok: false, error: `split "${slug}" missing a **Deferred:** note` };
+    if (!/\*\*Owner:\*\*/i.test(md) || !/\*\*Parent:\*\*/i.test(md)) return { ok: false, error: `split "${slug}" missing Owner/Parent` };
+  }
+  const parentMd = String(v.parent_markdown ?? "");
+  if (!parentMd.trim()) return { ok: false, error: "split verdict with no rewritten parent" };
+  if (!/^#\s+.+/m.test(parentMd)) return { ok: false, error: "rewritten parent missing an H1" };
+  if (deriveSpecStatus(parentMd) !== "shipped") return { ok: false, error: "rewritten parent is not all-✅ (would not fold)" };
+  // De-dup the split slugs among themselves.
+  const seen = new Set<string>();
+  for (const s of splits) {
+    const slug = String(s.slug);
+    if (seen.has(slug)) return { ok: false, error: `duplicate split slug "${slug}"` };
+    seen.add(slug);
+  }
+  return { ok: true };
 }

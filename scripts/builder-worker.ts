@@ -1634,6 +1634,13 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing escort failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    const groom = await groomBoard(job, tag);
+    notes.push(groom);
+  } catch (e) {
+    notes.push(`groom failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing groom failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const watch = await lib.postPlatformWatchUpdate(db);
     notes.push(watch.posted ? "posted board watch update" : `no board post (${watch.reason})`);
   } catch (e) {
@@ -1642,6 +1649,176 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   }
   await update(job.id, { status: "completed", log_tail: `standing pass — ${notes.join(" · ")}`.slice(-2000) });
   console.log(`${tag} standing pass — ${notes.join(" · ")}`);
+}
+
+// board-grooming (Phase 1): the director MOVES the project board. For each PARTIALLY-shipped spec (≥1 ✅,
+// remaining ⏳, no active build) it runs a read-only Max investigation that classifies the leftover phases:
+//   - continue → queue the next phase's build to completion (loop-guarded, like the escort).
+//   - split    → author each future phase as its own planned card + commit the closed-out (folding) parent.
+//   - escalate → genuinely unsure / load-bearing → route the diagnosis to the CEO, move nothing.
+// Every decision writes a director_activity row with the reasoning. No-op unless Platform is live+autonomous
+// (findGroomCandidates returns []). Bounded per pass (PLATFORM_DIRECTOR_GROOM_CAP). Best-effort per spec —
+// one spec's failure never blocks the rest. Returns a one-line summary for the standing-pass log.
+async function groomBoard(job: Job, tag: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const { deriveSpecStatus } = await import("../src/lib/brain-roadmap");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  const candidates = await lib.findGroomCandidates(db);
+  if (!candidates.length) return "groom: nothing to assess";
+
+  let continued = 0;
+  let split = 0;
+  let escalated = 0;
+  for (const c of candidates) {
+    try {
+      const { resultText } = await runDirectorClaude(lib.groomInvestigationPrompt(c), null, REPO_DIR);
+      const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
+      const verdict = String(parsed.verdict || "");
+      const reasoning = String(parsed.reasoning || "").slice(0, 4000);
+
+      // ── CONTINUE — the next ⏳ phase is needed now → queue its build (loop-guarded like the escort). ──
+      if (verdict === "continue") {
+        // Loop-guard: a build that already failed ≥ the cap with nothing in-flight is a deeper issue —
+        // stop, escalate to the CEO, never re-queue (the leash forbids an infinite resubmit loop).
+        if (c.failedBuilds >= lib.PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+          const diagnosis = `Grooming ${c.slug}: its next phase is needed now, but the build failed ${c.failedBuilds}× without landing — likely a deeper issue, not a flaky retry${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach.`;
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Build stuck (grooming): ${c.slug}`,
+            diagnosis,
+            dedupeKey: `groom-loopguard:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "groom_loop_guard",
+            metadata: { groom_key: lib.groomKey(c.slug), failed_attempts: c.failedBuilds, last_error: c.lastError ?? undefined },
+          });
+          if (r.emitted) escalated++;
+          console.log(`${tag} groom ${c.slug} → continue but loop-guard → escalated to CEO`);
+          continue;
+        }
+        const dupe = await hasActiveBuildForSlug(c.slug);
+        if (dupe.active) {
+          console.log(`${tag} groom ${c.slug} → continue but build already live (${dupe.reason}) — skipped`);
+          continue;
+        }
+        const retry = c.failedBuilds > 0;
+        const { error } = await db.from("agent_jobs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: c.slug,
+          kind: "build",
+          status: "queued",
+          created_by: null,
+          instructions: `Groomed by the Platform/DevOps Director: ${c.slug} is partially shipped and its next phase (${c.remainingPhases[0] ?? "next ⏳"}) is needed now${retry ? ` — re-attempt #${c.failedBuilds + 1} (prior build failed)` : ""}; sequencing its build to completion. Follow the spec exactly; tsc-clean; open a PR.`,
+        });
+        if (error) {
+          console.warn(`${tag} groom ${c.slug} → continue build enqueue failed: ${error.message}`);
+          continue;
+        }
+        continued++;
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "groomed_continue",
+          specSlug: c.slug,
+          reason: reasoning || `Next phase (${c.remainingPhases[0] ?? "next ⏳"}) needed now — queued its build to completion.`,
+          metadata: { remaining_phases: c.remainingPhases, retry, autonomous: true },
+        });
+        console.log(`${tag} groom ${c.slug} → continue → queued next-phase build`);
+        continue;
+      }
+
+      // ── SPLIT — leftover phases are future → author each as its own card + close out the parent. ──
+      if (verdict === "split") {
+        const valid = lib.validateGroomSplit(c, parsed, deriveSpecStatus);
+        if (!valid.ok) {
+          // A malformed split must never land a broken board — escalate it to the CEO instead.
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Grooming needs a look: ${c.slug}`,
+            diagnosis: `I assessed ${c.slug} as future-work to split, but couldn't produce a clean split (${valid.error}). Holding off — please take a look.`,
+            dedupeKey: `groom-unsure:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "groom_split_invalid",
+            metadata: { groom_key: lib.groomKey(c.slug), error: valid.error },
+          });
+          if (r.emitted) escalated++;
+          console.warn(`${tag} groom ${c.slug} → split INVALID (${valid.error}) → escalated to CEO`);
+          continue;
+        }
+        // Author the split cards first (create-only — never clobber an existing slug), then commit the
+        // closed-out parent LAST (the fold trigger). If a card commit fails, abort before touching the parent.
+        const splits = parsed.splits ?? [];
+        const authored: string[] = [];
+        let failed = false;
+        for (const s of splits) {
+          const slug = String(s.slug);
+          const path = `docs/brain/specs/${slug}.md`;
+          const exists = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+          if (exists.ok) {
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} already exists — skipping author`);
+            authored.push(slug); // converged — treat as authored, don't clobber
+            continue;
+          }
+          const put = await putFileMain(path, String(s.markdown), `spec: ${slug} — split future phase from ${c.slug} (board-grooming)`);
+          if (!put.ok) {
+            failed = true;
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
+            break;
+          }
+          authored.push(slug);
+        }
+        if (failed) {
+          console.warn(`${tag} groom ${c.slug} → split aborted (a card commit failed) — parent left intact`);
+          continue;
+        }
+        const parentPut = await putFileMain(
+          `docs/brain/specs/${c.slug}.md`,
+          String(parsed.parent_markdown),
+          `spec: close out ${c.slug} — split ${authored.length} future phase(s) into their own cards (board-grooming)`,
+        );
+        if (!parentPut.ok) {
+          console.warn(`${tag} groom ${c.slug} → parent close-out commit failed (status ${parentPut.status}) — cards authored: ${authored.join(", ")}`);
+          continue;
+        }
+        split++;
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "groomed_split",
+          specSlug: c.slug,
+          reason: reasoning || `Leftover phase(s) are future, not needed now — split into their own planned card(s) (${authored.join(", ")}) and closed out the parent so it folds.`,
+          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authored, autonomous: true },
+        });
+        console.log(`${tag} groom ${c.slug} → split → authored ${authored.join(", ")} + closed out parent (folds)`);
+        continue;
+      }
+
+      // ── ESCALATE — genuinely unsure / load-bearing → route the diagnosis to the CEO, move nothing. ──
+      const diagnosis = reasoning || `${c.slug} is partially shipped with leftover phase(s) I can't confidently classify (possibly load-bearing). Holding off — your call.`;
+      const r = await lib.escalateDiagnosisToCeo(db, {
+        workspaceId: job.workspace_id,
+        specSlug: c.slug,
+        title: `Grooming needs a call: ${c.slug}`,
+        diagnosis,
+        dedupeKey: `groom-unsure:${c.slug}`,
+        deepLink: `/dashboard/roadmap/${c.slug}`,
+        escalationKind: "groom_unsure",
+        metadata: { groom_key: lib.groomKey(c.slug), remaining_phases: c.remainingPhases },
+      });
+      if (r.emitted) escalated++;
+      console.log(`${tag} groom ${c.slug} → ${verdict || "no verdict"} → escalated to CEO`);
+    } catch (e) {
+      console.error(`${tag} groom ${c.slug} failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  const parts: string[] = [];
+  if (continued) parts.push(`continued ${continued}`);
+  if (split) parts.push(`split ${split}`);
+  if (escalated) parts.push(`escalated ${escalated}`);
+  return `groom: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
 
 async function runPlatformDirectorJob(job: Job) {
