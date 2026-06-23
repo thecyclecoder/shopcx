@@ -131,6 +131,15 @@ const MAX_REGRESSION = Number(process.env.AGENT_TODO_MAX_REGRESSION || 1);
 const REGRESSION_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
+// Platform/DevOps Director (platform-director-agent): the first live director. ONE tick at a time
+// (concurrency-1) — a single Max `claude -p` "shift" that investigates+auto-approves its routed inbox
+// within the leash, escorts approved goals through milestones, loop-guards repeated failures, and posts
+// to the #directors board. Dormant until the `platform` function is flipped live+autonomous (the
+// owner-confirmed activation switch); the enqueue tick is gated on that flag, so the lane sits idle
+// otherwise. Re-runnable (a restart just re-reads the inbox). Investigation pass — minutes, like repair.
+const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
+const PLATFORM_DIRECTOR_TIMEOUT_MS = 20 * 60 * 1000;
+let lastPlatformDirectorTick = 0; // throttle the enqueue-tick check in the poll loop.
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -247,7 +256,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -734,7 +743,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -5218,6 +5227,190 @@ async function materializeOptimizerCampaign(
   return { ok: r.ok, detail: r.detail };
 }
 
+// ── Platform/DevOps Director (platform-director-agent) ───────────────────────
+// Run the director's investigation on Max: KEEP read-only DB/crypto creds (so it can investigate the
+// routed approvals + the brain/src), strip ONLY the API key so all LLM is Max-billed. Mirrors
+// runRepairClaude (the read-only-investigation runner shape).
+async function runPlatformDirectorClaude(prompt: string, sessionId: string | null, cwd: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: PLATFORM_DIRECTOR_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+/**
+ * The Platform/DevOps Director tick (platform-director-agent) — the first live director's "shift". One
+ * pass that: (1) investigates → auto-approves its routed inbox WITHIN THE LEASH (escalating anything it
+ * can't confirm sound, or that's high-stakes); (2) escorts approved goals through their milestones by
+ * leaning on the existing blocked_by auto-queue; (3) loop-guards a repeatedly-failing build and
+ * escalates a diagnosis to the CEO; (4) posts a human-readable update to the #directors board as 🛠️ Ada.
+ * Fail-safe: dormant unless `platform` is live+autonomous; uncertainty escalates, never auto-approves.
+ */
+async function runPlatformDirectorJob(job: Job) {
+  const tag = `[platform-director:${job.id.slice(0, 8)}]`;
+  const ws = job.workspace_id;
+  const pd = await import("../src/lib/agents/platform-director");
+  const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+  const { isAutoApprover, loadAutonomyMap } = await import("../src/lib/agents/approval-router");
+
+  try {
+    // Fail-safe — the activation flag may have flipped off since enqueue. Dormant ⇒ no action.
+    const autonomy = await loadAutonomyMap();
+    if (!isAutoApprover(pd.PLATFORM_DIRECTOR_FUNCTION, autonomy)) {
+      await update(job.id, { status: "completed", log_tail: "platform not live+autonomous — director dormant, no action" });
+      console.log(`${tag} dormant (flag off) — no action`);
+      return;
+    }
+
+    const approvals = await pd.getRoutedPlatformApprovals(db, ws);
+    const summary: string[] = [];
+    let approvedN = 0;
+    let escalatedN = 0;
+
+    // ── Phase 1 + 3 — investigate → auto-approve within the leash, else escalate to the CEO ──
+    // Hard guard FIRST: destructive/irreversible + new-goal approvals escalate without the LLM (the
+    // leash is hard — never auto-approve a data-dropping migration even if an investigation "approves").
+    const hardEscalate = approvals.filter((a) => pd.leashClass(a) === "escalate");
+    const toInvestigate = approvals.filter((a) => pd.leashClass(a) !== "escalate");
+    for (const a of hardEscalate) {
+      const diagnosis = pd.isDestructiveApproval(a)
+        ? "Outside the leash — a destructive / irreversible action. Escalated for the CEO to decide; the director never auto-approves these."
+        : "Outside the leash — starting new work is the CEO's call. Escalated for the CEO to greenlight.";
+      await pd.directorEscalateApproval(db, { workspaceId: ws, approval: a, diagnosis });
+      escalatedN++;
+    }
+
+    let boardLine = "";
+    if (toInvestigate.length) {
+      const brief = pd.platformDirectorBrief(toInvestigate);
+      const { session, resultText, isError } = await runPlatformDirectorClaude(pd.platformDirectorPrompt(brief), null, REPO_DIR);
+      if (session) await update(job.id, { claude_session_id: session });
+      const parsed = extractJson<{ verdicts?: Array<{ jobId?: string; decision?: string; reasoning?: string }>; board_update?: string }>(resultText);
+      const verdicts = Array.isArray(parsed?.verdicts) ? parsed!.verdicts! : [];
+      boardLine = typeof parsed?.board_update === "string" ? parsed!.board_update! : "";
+      const byId = new Map(verdicts.filter((v) => v.jobId).map((v) => [String(v.jobId), v]));
+      for (const a of toInvestigate) {
+        const v = byId.get(a.jobId);
+        // Never rubber-stamp: no verdict / parse-or-run error / not an explicit "approve" ⇒ escalate.
+        if (!v || isError || v.decision !== "approve") {
+          const diagnosis =
+            v?.reasoning ||
+            (isError
+              ? "The director's investigation pass errored — escalated rather than auto-approve on uncertainty."
+              : "The director could not confirm the request is sound — escalated rather than auto-approve.");
+          await pd.directorEscalateApproval(db, { workspaceId: ws, approval: a, diagnosis });
+          escalatedN++;
+          continue;
+        }
+        await pd.directorApproveApproval(db, { workspaceId: ws, approval: a, reasoning: v.reasoning || "confirmed sound + within the leash" });
+        approvedN++;
+      }
+    }
+    if (approvals.length) summary.push(`inbox: approved ${approvedN}, escalated ${escalatedN} of ${approvals.length}`);
+
+    // ── Phase 2 — escort approved goals through milestones (reuse the blocked_by auto-queue) +
+    //    Phase 3 — loop-guard: a spec whose build repeatedly failed → escalate, never resubmit. ──
+    let advancedN = 0;
+    let guardN = 0;
+    try {
+      const { getGoals, getRoadmap } = await import("../src/lib/brain-roadmap");
+      const { autoQueueUnblockedBy } = await import("../src/lib/agent-jobs");
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
+      const specBySlug = new Map(specs.map((s) => [s.slug, s]));
+      const goalSpecSlugs = new Set<string>();
+      for (const g of goals) for (const m of g.milestones) for (const s of m.specSlugs) goalSpecSlugs.add(s);
+
+      // Advance: for each SHIPPED spec in an approved goal, ensure its now-unblocked dependents are
+      // queued (idempotent — one build per spec). Milestone progression of an approved goal is in-leash.
+      for (const slug of goalSpecSlugs) {
+        if (specBySlug.get(slug)?.status !== "shipped") continue;
+        const queued = await autoQueueUnblockedBy(ws, slug);
+        advancedN += queued.length;
+      }
+
+      // Loop-guard: an unshipped spec in an approved goal whose build failed ≥ MAX → escalate a "likely
+      // deeper issue" diagnosis to the CEO via the board; do NOT resubmit. Deduped per window.
+      for (const slug of goalSpecSlugs) {
+        const card = specBySlug.get(slug);
+        if (!card || card.status === "shipped") continue;
+        const fails = await pd.buildFailureCount(db, slug);
+        if (fails < pd.PLATFORM_LOOP_GUARD_MAX) continue;
+        if (await pd.alreadyEscalated(db, ws, slug)) continue;
+        const diagnosis = `Build for ${slug} has failed ${fails}× — likely a deeper issue in the spec/approach, not a transient. Stopping resubmission; the CEO should review whether to modify the approach.`;
+        await recordDirectorActivity(db, {
+          workspaceId: ws,
+          directorFunction: pd.PLATFORM_DIRECTOR_FUNCTION,
+          actionKind: "escalated",
+          specSlug: slug,
+          reason: diagnosis,
+          metadata: { build_failures: fails, loop_guard: true, job_id: job.id },
+        });
+        await postDirectorMessage({
+          workspaceId: ws,
+          author: "director",
+          authorFunction: pd.PLATFORM_DIRECTOR_FUNCTION,
+          kind: "update",
+          mentions: ["ceo"],
+          body: `@ceo loop-guard: ${diagnosis}`,
+          metadata: { spec_slug: slug, escalation: true, job_id: job.id },
+        });
+        guardN++;
+        escalatedN++;
+      }
+      if (advancedN || guardN) summary.push(`escort: advanced ${advancedN} unblocked spec(s), loop-guard escalated ${guardN}`);
+    } catch (e) {
+      console.warn(`${tag} escort/loop-guard degraded:`, e instanceof Error ? e.message : e);
+    }
+
+    // ── Phase 4 — watch the platform + post a human-readable board update as 🛠️ Ada ──
+    let health = "";
+    try {
+      const { buildControlTowerSnapshot } = await import("../src/lib/control-tower/monitor");
+      const snap = await buildControlTowerSnapshot(db);
+      health = ` Platform health: ${snap.counts.green} green / ${snap.counts.amber} amber / ${snap.counts.red} red.`;
+    } catch {
+      /* health read best-effort */
+    }
+    const board =
+      (boardLine || `Platform shift done — approved ${approvedN}, escalated ${escalatedN}, advanced ${advancedN} unblocked spec(s).`) + health;
+    try {
+      await postDirectorMessage({
+        workspaceId: ws,
+        author: "director",
+        authorFunction: pd.PLATFORM_DIRECTOR_FUNCTION,
+        kind: "update",
+        body: board,
+        metadata: { job_id: job.id, approved: approvedN, escalated: escalatedN, advanced: advancedN },
+      });
+    } catch (e) {
+      console.warn(`${tag} board post failed:`, e instanceof Error ? e.message : e);
+    }
+
+    await update(job.id, {
+      status: "completed",
+      log_tail: `${summary.join(" · ") || "no routed work this tick"} — ${board}`.slice(-2000),
+    });
+    console.log(`${tag} done — approved ${approvedN}, escalated ${escalatedN}, advanced ${advancedN}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 async function runJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -5234,6 +5427,7 @@ async function runJob(job: Job) {
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
+  if (job.kind === "platform-director") return runPlatformDirectorJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -5604,7 +5798,8 @@ async function main() {
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register").length;
+  const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -5775,6 +5970,17 @@ async function main() {
         console.log(`claimed coverage-register ${job.id.slice(0, 8)} → ${countCoverageRegister() + 1}/${MAX_COVERAGE_REGISTER} coverage-register lane`);
         launch(job);
       }
+      // Fill the platform-director lane (platform-director-agent): the first live director. A single Max
+      // `claude -p` tick that investigates+auto-approves its routed inbox within the leash, escorts
+      // approved goals through milestones, loop-guards repeated failures + escalates the high-stakes
+      // calls to the CEO, and posts to the #directors board. Concurrency-1, re-runnable.
+      while (countPlatformDirector() < MAX_PLATFORM_DIRECTOR) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["platform-director"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed platform-director ${job.id.slice(0, 8)} → ${countPlatformDirector() + 1}/${MAX_PLATFORM_DIRECTOR} platform-director lane`);
+        launch(job);
+      }
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —
       // read funnel+lever map+proxy → propose a hypothesis/variant → stand up an M1 experiment (or
       // surface a missing-capability spec). Own concurrency-1 lane, read-only diagnose on Max.
@@ -5822,6 +6028,19 @@ async function main() {
         lastDbHealthSize = Date.now();
         dbHealthSizeInFlight = true;
         void runDbHealthSizeJob().finally(() => { dbHealthSizeInFlight = false; });
+      }
+      // Platform/DevOps Director (platform-director-agent): enqueue a director tick when the `platform`
+      // function is live+autonomous AND there's routed work (or the escort cadence is due). No-op +
+      // deduped otherwise — dormant until the owner flips the activation flag. Throttled to ~60s.
+      if (Date.now() - lastPlatformDirectorTick > 60_000) {
+        lastPlatformDirectorTick = Date.now();
+        try {
+          const { enqueuePlatformDirectorTick } = await import("../src/lib/agents/platform-director");
+          const r = await enqueuePlatformDirectorTick(db);
+          if (r.enqueued) console.log(`[platform-director] enqueued tick (${r.reason})`);
+        } catch (e) {
+          console.error("[platform-director] enqueue tick failed (continuing):", e instanceof Error ? e.message : e);
+        }
       }
       // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
       // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
