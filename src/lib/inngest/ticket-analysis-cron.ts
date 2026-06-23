@@ -11,11 +11,17 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { analyzeTicket } from "@/lib/ticket-analyzer";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { isRetryableThrownError } from "@/lib/anthropic-retry";
 
 export const ticketAnalysisCron = inngest.createFunction(
   {
     id: "ticket-analysis-cron",
-    retries: 1,
+    // Bumped from 1 for in-run infra resilience. The outage-spanning behaviour
+    // for the analyzer comes from per-ticket DEFERRAL (below) + this cron's
+    // */30 cadence: a Claude outage leaves the ticket un-marked so the next
+    // tick re-grades it on recovery (park-and-drain), rather than relying on a
+    // single long-running run that could overlap the next tick.
+    retries: 3,
     triggers: [{ cron: "*/30 * * * *" }],  // every 30 min
   },
   async ({ step }) => {
@@ -63,6 +69,7 @@ export const ticketAnalysisCron = inngest.createFunction(
 
     let analyzed = 0;
     let skipped = 0;
+    let deferred = 0;
     const skipReasons: Record<string, number> = {};
 
     // Process serially — each Sonnet call is non-trivial and we don't
@@ -72,13 +79,25 @@ export const ticketAnalysisCron = inngest.createFunction(
         try {
           return await analyzeTicket(t.id, "auto_close");
         } catch (err) {
+          // Park-and-drain (agent-outage-resilience Phase 1): a Claude/
+          // dependency outage must NOT mark the ticket analyzed — that would
+          // silently drop the grade for good. Flag it for deferral so we leave
+          // last_analyzed_at untouched and the next */30 tick re-grades it on
+          // recovery. A non-dependency (logic) error stays swallowed-and-marked
+          // so one bad ticket can't wedge the batch every cycle.
+          if (isRetryableThrownError(err)) {
+            return { ok: false as const, reason: "deferred_dependency", _defer: true as const };
+          }
           console.error("[ticket-analysis-cron] analyzeTicket error:", err);
-          return { ok: false, reason: "exception" };
+          return { ok: false as const, reason: "exception" };
         }
       });
 
       if (result.ok) {
         analyzed++;
+      } else if ((result as { _defer?: boolean })._defer) {
+        // Deferred: leave last_analyzed_at untouched so it's re-selected next tick.
+        deferred++;
       } else {
         skipped++;
         skipReasons[result.reason || "unknown"] = (skipReasons[result.reason || "unknown"] || 0) + 1;
@@ -92,7 +111,7 @@ export const ticketAnalysisCron = inngest.createFunction(
       }
     }
 
-    const result = { analyzed, skipped, skip_reasons: skipReasons };
+    const result = { analyzed, skipped, deferred, skip_reasons: skipReasons };
 
     // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
     await step.run("emit-heartbeat", async () => {
