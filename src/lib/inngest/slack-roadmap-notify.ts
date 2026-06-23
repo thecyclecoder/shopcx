@@ -28,6 +28,13 @@ const MAX_PER_RUN = 25; // bound message volume per workspace per tick
 export const slackRoadmapNotify = inngest.createFunction(
   { id: "slack-roadmap-notify", retries: 1, triggers: [{ cron: "* * * * *" }] }, // every minute (cron's finest granularity)
   async () => {
+    // DISABLED 2026-06-23 — build/roadmap transitions are no longer pushed to Slack (#roadmap retired).
+    // They now live in the Agents hub (CEO inbox + Message Board / Approval Requests), drained by the
+    // Platform/DevOps director. This kills the per-minute build-status flood. See goals/devops-director.md.
+    // (boolean-typed flag so the body stays type-checked/reachable to tsc — flip to false to restore.)
+    const ROADMAP_SLACK_ENABLED: boolean = false;
+    if (!ROADMAP_SLACK_ENABLED) return { skipped: "roadmap-slack-retired — build/approval flow moved to the Agents hub" };
+
     const admin = createAdminClient();
     const since = new Date(Date.now() - WINDOW_MS).toISOString();
 
