@@ -350,3 +350,72 @@ export async function resolveExperimentsForRender(opts: {
   }
   return { content: patched, exposures };
 }
+
+/**
+ * PDP-aware experiment resolution. The bare product page is the odd render model:
+ * it has no `AdvertorialContent` and renders its hero from `media_by_slot["hero"]`
+ * (product media), NOT from `AdvertorialContent.heroImageUrl`. So instead of
+ * patching content, this returns the assigned arm's `heroImageUrl` override (if
+ * any) for the caller to apply over the hero slot, plus the `experiment_exposure`
+ * payloads the client pixel emits.
+ *
+ * Same sticky-assignment + preview semantics as `resolveExperimentsForRender`,
+ * specialized to `lander_type='pdp'` (the hero-image lever is the only PDP lever
+ * today; other patch fields belong to the advertorial layouts). Best-effort —
+ * returns no override when the tables are absent, there's no identity, or no
+ * active PDP experiment exists.
+ */
+export async function resolvePdpExperimentsForRender(opts: {
+  admin: Admin;
+  workspaceId: string;
+  productId: string;
+  identityKey: string | null;
+  conservative?: boolean;
+  preview?: { experimentId: string; variantId: string } | null;
+}): Promise<{ heroImageUrl: string | null; exposures: ExperimentExposureMeta[] }> {
+  const { admin, workspaceId, productId, identityKey, preview } = opts;
+
+  // Preview: force the requested arm (any status), no identity needed. Scoped to
+  // the experiment that actually targets THIS product's PDP.
+  if (preview) {
+    const loaded = await loadExperimentById(admin, workspaceId, preview.experimentId);
+    if (!loaded || loaded.experiment.product_id !== productId || loaded.experiment.lander_type !== "pdp") {
+      return { heroImageUrl: null, exposures: [] };
+    }
+    const arm = loaded.variants.find((v) => v.id === preview.variantId);
+    if (!arm) return { heroImageUrl: null, exposures: [] };
+    return {
+      heroImageUrl: arm.patch?.heroImageUrl ?? null,
+      exposures: [
+        {
+          experiment_id: loaded.experiment.id,
+          variant_id: arm.id,
+          is_holdout: arm.is_control,
+          product_id: productId,
+        },
+      ],
+    };
+  }
+
+  if (!identityKey) return { heroImageUrl: null, exposures: [] };
+
+  const active = await loadActiveExperiments(admin, workspaceId, productId, "pdp");
+  if (!active.length) return { heroImageUrl: null, exposures: [] };
+
+  let heroImageUrl: string | null = null;
+  const exposures: ExperimentExposureMeta[] = [];
+  for (const { experiment, variants } of active) {
+    const assignment = assignVariant(identityKey, experiment, variants, { conservative: opts.conservative });
+    if (!assignment) continue;
+    // The hero-image lever: the assigned arm's heroImageUrl wins (control arms
+    // carry no patch → null → the product's real hero is left untouched).
+    if (assignment.variant.patch?.heroImageUrl) heroImageUrl = assignment.variant.patch.heroImageUrl;
+    exposures.push({
+      experiment_id: experiment.id,
+      variant_id: assignment.variant.id,
+      is_holdout: assignment.isHoldout,
+      product_id: productId,
+    });
+  }
+  return { heroImageUrl, exposures };
+}
