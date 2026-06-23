@@ -1,6 +1,8 @@
 # inngest/platform-director-cron
 
-The **standing cadence** for the box-hosted **Platform/DevOps Director** ([[../specs/platform-director-agent]], M5 [[../specs/director-loop-grading]] Phase 1). The director already runs **event-driven** — a `platform-director` [[../tables/agent_jobs]] row is enqueued when a Platform approval is routed to it ([[../specs/approval-routing-engine]]). What this adds: a **reliable beat** so escorting approved goals through their milestones + watching the platform happen even when no approval happens to arrive. The box has no internal ticker, so (exactly like [[triage-escalations]] / [[spec-test-cron]]) an Inngest cron is the trigger; **this cron does NO reasoning** — it is purely the enqueue. Mirrors [[daily-analysis-report-cron]]'s daily cron shape.
+The **standing cadence** for the box-hosted **Platform/DevOps Director** ([[../specs/platform-director-agent]], M5 [[../specs/director-loop-grading]] Phase 1 + 3). The director already runs **event-driven** — a `platform-director` [[../tables/agent_jobs]] row is enqueued when a Platform approval is routed to it ([[../specs/approval-routing-engine]]). What this adds: a **reliable beat** so escorting approved goals through their milestones + watching the platform happen even when no approval happens to arrive. The box has no internal ticker, so (exactly like [[triage-escalations]] / [[spec-test-cron]]) an Inngest cron is the trigger. Mirrors [[daily-analysis-report-cron]]'s daily cron shape.
+
+Two halves: (1) the **enqueue** — purely the box-job insert, no reasoning. (2) the **grading loop** ([[../specs/director-loop-grading]] Phase 3, `grade-concluded-director-calls` step) — on the same beat it grades every recently-CONCLUDED director call (each autonomous auto-approval + each escorted milestone that landed) 1–10 into [[../tables/director_decision_grades]] via [[../libraries/director-grader]] `gradeConcludedDirectorCalls`. The grade sweep runs HERE (the deployed runtime has `ANTHROPIC_API_KEY`), not on the box; it mirrors [[acquisition-research-cadence]]'s grade sweep. Best-effort + idempotent; a no-op while the director made no calls.
 
 **File:** `src/lib/inngest/platform-director-cron.ts` (registered in `src/lib/inngest/registered-functions.ts` → served by `src/app/api/inngest/route.ts`)
 
@@ -30,12 +32,16 @@ _None._ The box polls [[../tables/agent_jobs]] and claims the row; there is no H
 ## Tables written
 
 - [[../tables/agent_jobs]] (inserts the `platform-director` job)
+- [[../tables/director_decision_grades]] (the grading loop — one grade per concluded director call, via [[../libraries/director-grader]])
 - [[../tables/loop_heartbeats]] (end-of-run heartbeat)
 
 ## Tables read (not written)
 
-- [[../tables/agent_jobs]] (build-console workspace scan + in-flight dedupe)
+- [[../tables/agent_jobs]] (build-console workspace scan + in-flight dedupe; target-build conclusion for the auto-approval grade)
+- [[../tables/approval_decisions]] (the autonomous director approvals to grade)
+- [[../tables/director_activity]] (the `escorted_goal` rows that flag a goal the director escorted)
+- [[../tables/director_grader_prompts]] (approved calibration rules injected into the grader prompt)
 
 ---
 
-[[../README]] · [[../integrations/inngest]] · [[../specs/director-loop-grading]] · [[../../CLAUDE]]
+[[../README]] · [[../integrations/inngest]] · [[../libraries/director-grader]] · [[../specs/director-loop-grading]] · [[../../CLAUDE]]

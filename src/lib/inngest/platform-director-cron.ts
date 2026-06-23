@@ -11,13 +11,20 @@
  * platform-director lane (scripts/builder-worker.ts → runPlatformDirectorJob) to run the standing pass.
  *
  * Dedupe: skip a workspace that already has an in-flight platform-director job (queued / queued_resume
- * / building / claimed) — a standing pass must never pile up day over day. This cron does NO reasoning
- * itself; it is purely the enqueue. Mirrors daily-analysis-report-cron's daily cron shape.
- * See docs/brain/inngest/platform-director-cron.md.
+ * / building / claimed) — a standing pass must never pile up day over day.
+ *
+ * On the SAME beat it also runs the GRADING LOOP ([[../specs/director-loop-grading]] Phase 3): grade
+ * every recently-CONCLUDED director call — each autonomous auto-approval + each escorted milestone that
+ * landed — 1–10 with reasoning into director_decision_grades (src/lib/agents/director-grader.ts
+ * `gradeConcludedDirectorCalls`). The grade sweep runs HERE, in the deployed runtime (it needs the
+ * Anthropic API key), not on the box; the enqueue half is purely the box-job insert. Mirrors
+ * daily-analysis-report-cron's daily cron shape + acquisition-research-cadence's grade sweep.
+ * See docs/brain/inngest/platform-director-cron.md · docs/brain/libraries/director-grader.md.
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
 
 export const platformDirectorCron = inngest.createFunction(
   {
@@ -34,7 +41,7 @@ export const platformDirectorCron = inngest.createFunction(
       // Build-console workspaces — any workspace that uses the agent-jobs queue (mirrors spec-test-cron).
       const { data: wsRows } = await admin.from("agent_jobs").select("workspace_id").limit(1000);
       const workspaceIds = Array.from(new Set((wsRows || []).map((r) => r.workspace_id as string)));
-      if (!workspaceIds.length) return { workspaces: 0, enqueued: 0 };
+      if (!workspaceIds.length) return { workspaces: 0, enqueued: 0, workspaceIds: [] as string[] };
 
       // Skip any workspace that already has an in-flight platform-director job (no daily pileup).
       const { data: inflight } = await admin
@@ -56,15 +63,35 @@ export const platformDirectorCron = inngest.createFunction(
         });
         if (!error) enqueued++;
       }
-      return { workspaces: workspaceIds.length, enqueued };
+      return { workspaces: workspaceIds.length, workspaceIds, enqueued };
+    });
+
+    // The grading loop (director-loop-grading Phase 3): on the SAME standing beat, grade every
+    // recently-CONCLUDED director call — each autonomous auto-approval + each escorted milestone that
+    // landed — 1–10 with reasoning (director_decision_grades). Mirrors the acquisition-research-cadence
+    // grade sweep; runs HERE (the deployed runtime has the API key) not on the box. Best-effort +
+    // idempotent (an already-graded call is skipped). A no-op while the director made no calls.
+    const grading = await step.run("grade-concluded-director-calls", async () => {
+      let considered = 0;
+      let graded = 0;
+      for (const workspaceId of result.workspaceIds || []) {
+        try {
+          const r = await gradeConcludedDirectorCalls({ workspaceId, admin });
+          considered += r.considered;
+          graded += r.graded;
+        } catch (e) {
+          console.error(`[platform-director-cron] grade sweep failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      return { considered, graded };
     });
 
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: result });
+      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading } });
     });
 
-    return result;
+    return { ...result, grading };
   },
 );
