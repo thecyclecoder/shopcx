@@ -1,0 +1,1 @@
+- **Ticket-analysis cron: emit Control Tower heartbeat on empty (no-tickets) runs** · verified 2026-06-23 · → [[inngest/ticket-analysis-cron]]
