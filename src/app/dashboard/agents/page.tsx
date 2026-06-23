@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
+import { OrgTree } from "@/components/agents/org-tree";
 import { BoardChannel } from "@/components/agents/board-channel";
 import { INBOX_TABS, APPROVAL_REQUEST_TYPE, type InboxTab, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
 
@@ -452,7 +453,36 @@ function RoleHeader({ org, role, onChange }: { org: OrgChart; role: string; onCh
   }
 
   const d = org.directors.find((x) => x.slug === role);
-  if (!d) return null;
+  if (!d) {
+    // A Worker node (a box agent_jobs lane) was selected from the org tree (Phase 4).
+    // Phase 5 gives workers their own profile/responsibilities page; until then show a
+    // minimal header + its routes-to-CEO inbox so the node click lands somewhere coherent.
+    const parent = org.directors.find((x) => x.workers.some((w) => w.kind === role));
+    const worker = parent?.workers.find((w) => w.kind === role);
+    if (!parent || !worker) return null;
+    const wp = getPersona(worker.kind, worker.label);
+    const dp = getPersona(parent.slug, parent.title);
+    return (
+      <div className="mb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <PersonaAvatar persona={wp} size={42} />
+          <div className="min-w-0">
+            <h2 className="flex flex-wrap items-center gap-2 text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+              {wp.name} <span className="text-sm font-normal text-zinc-400">· {wp.role}</span>
+              <span className="font-mono text-[11px] text-zinc-400">{worker.kind}</span>
+            </h2>
+            <p className="text-[12px] text-zinc-500 dark:text-zinc-400">{worker.description}</p>
+          </div>
+          <span
+            className="ml-auto text-[12px] text-zinc-400"
+            title={`Reports to ${dp.name} · ${dp.role}`}
+          >
+            reports to {dp.name} · {dp.role}
+          </span>
+        </div>
+      </div>
+    );
+  }
   const persona = getPersona(d.slug, d.title);
   return (
     <div className="mb-4">
@@ -498,6 +528,15 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
   const [role, setRole] = useState("ceo");
+  // "org" = the visual org-tree / team page (Phase 4); "inbox" = the role nav + three-tab inbox.
+  const [view, setView] = useState<"org" | "inbox">("org");
+
+  // Selecting a node in the org tree opens that role's inbox (Phase 5 will repoint nodes
+  // at per-role profile pages; until then the inbox is the coherent destination).
+  const selectRole = useCallback((r: string) => {
+    setRole(r);
+    setView("inbox");
+  }, []);
 
   const loadOrg = useCallback(
     () =>
@@ -532,12 +571,29 @@ export default function AgentsPage() {
     <div className="mx-auto w-full max-w-screen-xl p-6">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Agents</h1>
-        <Link
-          href="/dashboard/developer/control-tower"
-          className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
-        >
-          Control Tower →
-        </Link>
+        <div className="flex items-center gap-3">
+          <div className="inline-flex rounded-lg border border-zinc-200 p-0.5 dark:border-zinc-800">
+            {(["org", "inbox"] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                  view === v
+                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+                    : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                }`}
+              >
+                {v === "org" ? "Org chart" : "Inbox"}
+              </button>
+            ))}
+          </div>
+          <Link
+            href="/dashboard/developer/control-tower"
+            className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+          >
+            Control Tower →
+          </Link>
+        </div>
       </div>
       <p className="mb-5 text-sm text-zinc-500 dark:text-zinc-400">
         The org chart — CEO · Directors · Workers — read live from the brain, each role with the same three-tab
@@ -550,6 +606,10 @@ export default function AgentsPage() {
         <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
           Couldn&apos;t load the Agents hub.
         </div>
+      ) : org && view === "org" ? (
+        // The visual employee/org chart — CEO → Directors → Workers (Phase 4). Every node
+        // is clickable → opens that role's inbox (Phase 5 repoints nodes at profile pages).
+        <OrgTree org={org} onSelectRole={selectRole} />
       ) : org ? (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[260px_1fr]">
           <aside className="lg:border-r lg:border-zinc-200 lg:pr-4 dark:lg:border-zinc-800">
