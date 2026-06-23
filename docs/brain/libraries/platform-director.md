@@ -49,6 +49,15 @@ The director's top layer is **reporting up in human terms** — and it **supervi
 
 **Activation (owner-confirmed).** `scripts/apply-platform-live-autonomous.ts` upserts the [[../tables/function_autonomy]] `platform` row to `live + autonomous` — the Phase-4 switch that takes every dormant surface above live (the approval router then routes platform-owned approvals to the director instead of the CEO). Idempotent + reversible (toggle off from the [[../dashboard/agents|Agents hub]]).
 
+## Board grooming (Phase 5 — the director MOVES the project board, [[../specs/board-grooming]])
+
+The director doesn't just build queued specs — it **grooms the board** so nothing rots half-built. On its standing cadence it assesses every **partially-shipped** spec (≥1 phase ✅, remaining ⏳, **no active build**) and decides what to do with the leftover phases — *moving the card* accordingly. This formalizes the need-now-vs-future call the operator made by hand (and replaces the escort's blind "re-queue every phase").
+
+- **The decision (the Max `claude -p` investigation, `groomInvestigationPrompt`):** per partially-shipped spec — **continue** (the next ⏳ phase is needed now: the spec's current promise / a dependent / a goal needs it → queue its build to completion, the chain carries it) · **split** (the leftover phase(s) are future enhancement/polish → author EACH as its own planned card `{slug}-{phase}.md` with a `**Deferred:**` note, then CLOSE OUT the parent — remove the split phases so its remaining phases are all-✅ → the parent **folds**) · **escalate** (genuinely unsure / possibly load-bearing → route the diagnosis to the CEO, move nothing — north-star: hit a rail → escalate).
+- **Net effect:** every partially-shipped spec either **completes** (needed-now phases built) or **cleanly splits** (future phases become their own planned cards) — cards flow *out* of "In progress," the future work is captured (not lost) in "Planning." Future work is **never dropped** — a split always preserves the phase as a planned card; the director never deletes a phase.
+- **Supervisable + audited:** splitting + queueing a next-phase build is low-risk/reversible (within the leash); every decision writes a [[../tables/director_activity]] row (`groomed_continue` / `groomed_split` / `escalated`) with the reasoning. **Dormant** until live+autonomous, like the escort. **Loop-guarded** (a continue whose build already failed ≥ `PLATFORM_DIRECTOR_LOOP_GUARD_MAX` with nothing in-flight escalates instead of resubmitting). **A malformed split never lands** (`validateGroomSplit` gates the commit — a broken board is worse than an un-groomed card; it escalates instead).
+- **Idempotent:** a `continue`'s queued build flips the spec in-flight (the candidate filter excludes it next pass); a `split`/`escalate` writes a `groom_key` (`groom:{slug}`) the next pass dedups on via `alreadyGroomed` — this is what survives the box's bundled `fs` copy lagging `main` until its next self-update (without it the same card would re-split every pass).
+
 ## Exports
 
 - **`enqueuePlatformDirectorJobs(admin)`** → `{ enqueued, slugs }` — the poll-loop background sweep. Finds every open `needs_approval` [[../tables/agent_jobs]] routed to Platform and queues one `kind='platform-director'` job per target (instructions `{ target_job_id, target_kind }`). **Idempotent** (one director job per target, ever — the dedup that stops an infinite re-enqueue of a deferred target). No-op unless `platformIsAutoApprover`.
@@ -62,7 +71,11 @@ The director's top layer is **reporting up in human terms** — and it **supervi
 - **`escalateDiagnosisToCeo(admin, { workspaceId, specSlug, title, diagnosis, dedupeKey, deepLink, escalationKind, metadata? })`** → `{ emitted }` (Phase 3) — the deduped standalone CEO escalation (loop-guard / new goal).
 - **`postPlatformWatchUpdate(admin, opts?)`** → `{ posted, reason? }` (Phase 4) — the daily board watch post (see *Watch the platform* above). Reads [[control-tower]] `buildControlTowerSnapshot` + today's [[../tables/director_activity]] and posts ONE `update` as 🛠️ Ada to [[../tables/director_messages]]. Idempotent per (workspace, UTC day) on `metadata.watch_date`; `reason` ∈ `dormant｜no_workspace｜already_posted｜quiet` when it doesn't post. No-op until live+autonomous.
 - **`composePlatformWatchBody(health, activity)`** → `string` (Phase 4) — the pure persona-voice body composer (health line + activity line); types **`PlatformHealth`**, **`PlatformWatchActivity`**.
-- Const **`PLATFORM`**, **`LEASH_CATEGORIES`**, **`PLATFORM_DIRECTOR_LOOP_GUARD_MAX`** (2), **`PLATFORM_DIRECTOR_RECENT_WINDOW_MS`** (7d); types **`LeashCategory`**, **`DirectorTargetJob`**, **`DirectorActionLike`**, **`DirectorBrief`**, **`GoalEscortResult`**, **`SpecBuildState`**.
+- **`findGroomCandidates(admin)`** → `GroomCandidate[]` (Phase 5, board-grooming) — the partially-shipped specs to groom this pass (≥1 ✅ + ≥1 ⏳ phase, none 🚧, no in-flight build, `**Auto-build:** off` excluded, not already groomed). No-op until live+autonomous; capped at `PLATFORM_DIRECTOR_GROOM_CAP` (4). Carries the parent's raw markdown + its failed-build count for the loop-guard.
+- **`groomInvestigationPrompt(candidate)`** → `string` (Phase 5) — the read-only Max `claude -p` classify prompt (continue｜split｜escalate; on split, author each new card + the rewritten all-✅ parent inline).
+- **`validateGroomSplit(candidate, verdict, deriveSpecStatus)`** → `{ ok } | { ok:false, error }` (Phase 5) — gate a split before any commit: each card has a `{slug}-…` slug + H1 + ⏳ + a Deferred note + Owner/Parent; the rewritten parent is all-✅ (folds). A malformed split escalates instead of landing.
+- **`groomKey(slug)`** / **`alreadyGroomed(admin, slug)`** (Phase 5) — the `groom:{slug}` ledger dedup (over `groomed_split` + `escalated` `director_activity` rows) that stops a re-split while the box's `fs` lags `main`.
+- Const **`PLATFORM`**, **`LEASH_CATEGORIES`**, **`PLATFORM_DIRECTOR_LOOP_GUARD_MAX`** (2), **`PLATFORM_DIRECTOR_RECENT_WINDOW_MS`** (7d), **`PLATFORM_DIRECTOR_GROOM_CAP`** (4); types **`LeashCategory`**, **`DirectorTargetJob`**, **`DirectorActionLike`**, **`DirectorBrief`**, **`GoalEscortResult`**, **`SpecBuildState`**, **`GroomCandidate`**, **`GroomSplit`**, **`GroomVerdict`**.
 
 ## The box lane
 
@@ -72,7 +85,7 @@ The director's top layer is **reporting up in human terms** — and it **supervi
 
 It **never** edits product code, opens a PR, or runs a migration — it only decides on the existing gated action.
 
-**Standing pass (Phase 4).** When the job carries **no `target_job_id`** — the daily [[../inngest/platform-director-cron]] enqueue — `runPlatformDirectorJob` instead runs `runPlatformDirectorStandingPass`: `escortApprovedGoals` (Phase 2) **and** `postPlatformWatchUpdate` (the board watch) on the reliable cron beat. Best-effort (a failure in one half never blocks the other); both no-op unless live+autonomous.
+**Standing pass (Phase 4 + Phase 5).** When the job carries **no `target_job_id`** — the daily [[../inngest/platform-director-cron]] enqueue — `runPlatformDirectorJob` instead runs `runPlatformDirectorStandingPass`: `escortApprovedGoals` (Phase 2), `groomBoard` (Phase 5 board-grooming — the per-candidate `claude -p` investigation + dispatch: queue a build, `putFileMain` a split + closed-out parent, or escalate), **and** `postPlatformWatchUpdate` (the board watch) on the reliable cron beat. Best-effort (a failure in one part never blocks the others); all no-op unless live+autonomous. `groomBoard` is the only standing surface that **commits to `main`** (the split cards + the folded parent) and runs `claude -p` per candidate — bounded by `PLATFORM_DIRECTOR_GROOM_CAP`.
 
 ## Safety invariants
 
@@ -84,4 +97,4 @@ It **never** edits product code, opens a PR, or runs a migration — it only dec
 
 ## Related
 
-[[../specs/platform-director-agent]] · [[../goals/devops-director]] · [[approval-router]] · [[approval-inbox]] · [[approval-decisions]] · [[../tables/agent_jobs]] · [[../tables/approval_decisions]] · [[../tables/function_autonomy]] · [[../tables/director_activity]] · [[../operational-rules]] (§ North star)
+[[../specs/platform-director-agent]] · [[../specs/board-grooming]] · [[../goals/devops-director]] · [[approval-router]] · [[approval-inbox]] · [[approval-decisions]] · [[brain-roadmap]] · [[../tables/agent_jobs]] · [[../tables/approval_decisions]] · [[../tables/function_autonomy]] · [[../tables/director_activity]] · [[../operational-rules]] (§ North star)

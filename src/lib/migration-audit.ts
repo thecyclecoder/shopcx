@@ -28,22 +28,34 @@ export interface RecordAuditInput {
   internalContractId: string;  // the new internal-* id
   preMigrationChargeCents: number;
   isRecovery?: boolean;
+  /**
+   * Lines the migration couldn't map to an internal variant and DROPPED (out of
+   * stock / discontinued / no internal product). Logged once into `notes` so the
+   * drop is auditable; never overwritten by re-verify. A paid drop is separately
+   * escalated by the migration caller.
+   */
+  droppedLines?: Array<{ title: string; shopifyVariantId: string; sku: string | null; priceCents: number; quantity: number; paid: boolean }>;
 }
 
 /** Create the pending audit row at migration time. Returns its id. */
 export async function recordMigrationAudit(input: RecordAuditInput): Promise<string | null> {
   const admin = createAdminClient();
+  const row: Record<string, unknown> = {
+    workspace_id: input.workspaceId,
+    subscription_id: input.subscriptionId,
+    appstle_contract_id: input.appstleContractId,
+    internal_contract_id: input.internalContractId,
+    pre_migration_charge_cents: input.preMigrationChargeCents,
+    is_recovery: !!input.isRecovery,
+    status: "pending",
+  };
+  // Record any dropped-unmappable-items note (column defaults to [] when none).
+  if (input.droppedLines?.length) {
+    row.notes = [{ type: "dropped_unmappable_items", items: input.droppedLines }];
+  }
   const { data, error } = await admin
     .from("migration_audits")
-    .insert({
-      workspace_id: input.workspaceId,
-      subscription_id: input.subscriptionId,
-      appstle_contract_id: input.appstleContractId,
-      internal_contract_id: input.internalContractId,
-      pre_migration_charge_cents: input.preMigrationChargeCents,
-      is_recovery: !!input.isRecovery,
-      status: "pending",
-    })
+    .insert(row)
     .select("id")
     .single();
   if (error) { console.error("[migration-audit] record failed:", error.message); return null; }

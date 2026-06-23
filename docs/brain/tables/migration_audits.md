@@ -19,6 +19,7 @@ One row per **Appstle→internal migration**. Records the verification checklist
 | `checks` | `jsonb` | — | default `'[]'` — `[{ key, ok, detail }]` |
 | `retry_count` | `int4` | — | default `0` — incremented each re-verify; at `MAX_RETRIES=3` a still-failing audit flips to `failed` |
 | `last_error` | `text` | ✓ | concatenated failing-check details |
+| `notes` | `jsonb` | — | default `'[]'` — non-check annotations, written **once** at record time and **never** overwritten by re-verify (unlike `checks`/`last_error`). Currently `[{ type: "dropped_unmappable_items", items: [{ title, shopifyVariantId, sku, priceCents, quantity, paid }] }]` — lines the migration couldn't map to an internal variant and dropped (a `paid` drop is also escalated via [[../libraries/notify-ops-alert]]). See [[../libraries/migrate-to-internal]]. |
 | `created_at` / `updated_at` | `timestamptz` | — | default `now()` |
 
 ## The checklist (8 checks)
