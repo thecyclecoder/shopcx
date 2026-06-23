@@ -59,6 +59,8 @@ Synced from Shopify. line_items, fulfillments, financial/fulfillment status, att
 | `braintree_payment_method_token` | `text` | ✓ |  |
 | `braintree_customer_id` | `text` | ✓ |  |
 | `cart_token` | `text` | ✓ |  |
+| `session_id` | `uuid` | ✓ | → [[storefront_sessions]].id · FK `on delete set null`. The first-class order↔session link ([[../specs/experiment-session-stamped-attribution]] Phase 2). Written at `/api/checkout` (§ 10c) from the converting session it already resolves for the `order_placed` event. Replaces the old indirect hop (`cart_token` → `order_placed` event → `session_id`). Session-stamped experiment attribution joins it literally (`orders.session_id` → `storefront_sessions.experiment_assignments`); the order-detail Journey panel renders off it. Null for synced Shopify orders. Backfill: `scripts/backfill-order-session-link.ts`. |
+| `anonymous_id` | `text` | ✓ | The converting session's `anonymous_id`, persisted alongside `session_id` at checkout. |
 | `shipping_protection_added` | `bool` | — | default: `false` |
 | `shipping_protection_amount_cents` | `int4` | ✓ |  |
 | `shipping_method_code` | `text` | ✓ |  |
@@ -74,6 +76,7 @@ Synced from Shopify. line_items, fulfillments, financial/fulfillment status, att
 - `advertorial_page_id` → [[advertorial_pages]].`id` (on delete set null)
 - `ad_campaign_id` → [[ad_campaigns]].`id` (on delete set null)
 - `customer_id` → [[customers]].`id`
+- `session_id` → [[storefront_sessions]].`id` (on delete set null)
 - `shipping_rate_id` → [[shipping_rates]].`id`
 - `subscription_id` → [[subscriptions]].`id`
 - `workspace_id` → [[workspaces]].`id`

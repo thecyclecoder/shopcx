@@ -53,6 +53,73 @@ interface TimelineEvent {
   detail?: string;
 }
 
+interface JourneyStep {
+  event_type: string;
+  first_at: string;
+  last_at: string;
+  count: number;
+}
+
+interface Journey {
+  session: {
+    id: string;
+    anonymous_id: string | null;
+    landing_url: string | null;
+    referrer: string | null;
+    first_seen_at: string | null;
+    last_seen_at: string | null;
+    device: string | null;
+    geo: string | null;
+    is_internal: boolean;
+    is_bot: boolean;
+  };
+  source: {
+    utm_source: string | null;
+    utm_medium: string | null;
+    utm_campaign: string | null;
+    utm_content: string | null;
+    utm_term: string | null;
+    lander: { slug: string | null; render_variant: string | null } | null;
+    ad_campaign: { id: string; name: string | null } | null;
+  };
+  experiments: Array<{
+    experiment_id: string;
+    variant_id: string;
+    arm: string;
+    surface: string | null;
+    assigned_at: string | null;
+    lever: string | null;
+    audience: string | null;
+    variant_label: string | null;
+    status: string | null;
+  }>;
+  steps: JourneyStep[];
+}
+
+const FUNNEL_STEP_LABEL: Record<string, string> = {
+  landing: "Landing",
+  pdp_view: "PDP view",
+  pdp_engaged: "Engaged",
+  chapter_view: "Chapter viewed",
+  chapter_dwell: "Chapter dwell",
+  scroll_depth: "Scroll depth",
+  experiment_exposure: "Experiment exposure",
+  lead_captured: "Lead captured",
+  pack_selected: "Pack selected",
+  add_to_cart: "Add to cart",
+  cta_click: "CTA click",
+  customize_view: "Customize",
+  checkout_view: "Checkout",
+  checkout_step_completed: "Checkout step",
+  order_placed: "Order placed",
+};
+
+const ARM_BADGE: Record<string, string> = {
+  variant: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
+  control: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
+  holdout: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+};
+
 const FINANCIAL_BADGE: Record<string, string> = {
   paid: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   refunded: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
@@ -106,6 +173,7 @@ export default function OrderDetailPage() {
   const [subscription, setSubscription] = useState<{ id: string; shopify_contract_id: string; status: string } | null>(null);
   const [shopifyDomain, setShopifyDomain] = useState("");
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
+  const [journey, setJourney] = useState<Journey | null>(null);
   const [replacementOrder, setReplacementOrder] = useState<{ id: string; order_name: string; status: string } | null>(null);
   const [isReplacementFor, setIsReplacementFor] = useState<{ id: string; original_order: string } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -120,6 +188,7 @@ export default function OrderDetailPage() {
         setSubscription(data.subscription || null);
         setShopifyDomain(data.shopify_domain || "");
         setTimeline(data.timeline || []);
+        setJourney(data.journey || null);
         setReplacementOrder(data.replacement_order || null);
         setIsReplacementFor(data.is_replacement_for || null);
         setLoading(false);
@@ -264,6 +333,105 @@ export default function OrderDetailPage() {
               )}
             </div>
           </div>
+
+          {/* Journey — storefront session → source → experiment arm → funnel */}
+          {journey && (
+            <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+                <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Journey</h2>
+                {(journey.session.is_internal || journey.session.is_bot) && (
+                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                    {journey.session.is_internal ? "internal" : "bot"} — excluded from reports
+                  </span>
+                )}
+              </div>
+              <div className="space-y-4 px-4 py-3">
+                {/* Source */}
+                <div>
+                  <p className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-400">Source</p>
+                  <div className="space-y-1 text-sm text-zinc-600 dark:text-zinc-400">
+                    {journey.source.lander?.slug && (
+                      <p>
+                        Lander: <span className="font-medium text-zinc-800 dark:text-zinc-200">{journey.source.lander.slug}</span>
+                        {journey.source.lander.render_variant && (
+                          <span className="ml-1 text-xs text-zinc-400">(?variant={journey.source.lander.render_variant})</span>
+                        )}
+                      </p>
+                    )}
+                    {(journey.source.utm_source || journey.source.utm_campaign) && (
+                      <p>
+                        UTM: {[journey.source.utm_source, journey.source.utm_medium, journey.source.utm_campaign, journey.source.utm_content]
+                          .filter(Boolean)
+                          .join(" / ")}
+                      </p>
+                    )}
+                    {journey.source.ad_campaign && (
+                      <p>Ad campaign: <span className="font-medium text-zinc-800 dark:text-zinc-200">{journey.source.ad_campaign.name || journey.source.ad_campaign.id}</span></p>
+                    )}
+                    {!journey.source.lander?.slug && !journey.source.utm_source && !journey.source.ad_campaign && (
+                      <p className="text-zinc-400">
+                        Direct{journey.session.referrer ? ` — referred from ${journey.session.referrer}` : ""}
+                      </p>
+                    )}
+                    {(journey.session.device || journey.session.geo) && (
+                      <p className="text-xs text-zinc-400">{[journey.session.device, journey.session.geo].filter(Boolean).join(" · ")}</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Experiment + arm */}
+                {journey.experiments.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-400">Experiment</p>
+                    <div className="space-y-2">
+                      {journey.experiments.map((e) => (
+                        <div key={e.experiment_id} className="flex flex-wrap items-center gap-2 text-sm">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${ARM_BADGE[e.arm] || ARM_BADGE.control}`}>{e.arm}</span>
+                          <span className="text-zinc-700 dark:text-zinc-300">{e.variant_label || e.variant_id.slice(0, 8)}</span>
+                          {e.lever && <span className="text-xs text-zinc-400">{e.lever}{e.surface ? ` · ${e.surface}` : ""}</span>}
+                          {e.status && <span className="text-[10px] text-zinc-400">({e.status})</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Funnel steps */}
+                <div>
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-400">Funnel</p>
+                  {journey.steps.length === 0 ? (
+                    <p className="text-sm text-zinc-400">No tracked events.</p>
+                  ) : (
+                    <div className="space-y-0">
+                      {journey.steps.map((s, i) => (
+                        <div key={`${s.event_type}-${i}`} className="relative flex gap-3 pb-3 last:pb-0">
+                          {i < journey.steps.length - 1 && (
+                            <div className="absolute left-[5px] top-3 h-full w-px bg-zinc-200 dark:bg-zinc-700" />
+                          )}
+                          <div className={`relative z-10 mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full ${
+                            s.event_type === "order_placed"
+                              ? "bg-emerald-500"
+                              : s.event_type === "add_to_cart" || s.event_type === "checkout_view"
+                              ? "bg-indigo-500"
+                              : "bg-zinc-300 dark:bg-zinc-600"
+                          }`} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                                {FUNNEL_STEP_LABEL[s.event_type] || s.event_type}
+                                {s.count > 1 && <span className="ml-1 text-xs text-zinc-400">×{s.count}</span>}
+                              </p>
+                              <p className="text-xs text-zinc-400">{formatDateTime(s.first_at)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right column — sidebar */}

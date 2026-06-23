@@ -62,7 +62,20 @@ interface SessionContext {
   fbc?: string;
 }
 
+/** One server-resolved experiment assignment to stamp on the session
+ *  (experiment-session-stamped-attribution Phase 1). Carried on EVERY pixel flush —
+ *  separate from the `experiment_exposure` event — so the session stamp lands reliably
+ *  even when the exposure event is dropped (internal/bot) or never fires. The server
+ *  merges these into storefront_sessions.experiment_assignments (sticky: first wins). */
+interface PixelExperimentAssignment {
+  experiment_id: string;
+  variant_id: string;
+  arm: "control" | "variant" | "holdout";
+  surface: string;
+}
+
 let workspaceId: string | null = null;
+let experimentAssignments: PixelExperimentAssignment[] = [];
 let queue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let listenersBound = false;
@@ -158,6 +171,19 @@ export function track(eventType: string, meta?: EventMeta, eventId?: string) {
   } else {
     scheduleFlush();
   }
+}
+
+/**
+ * Register the server-resolved experiment assignments for the current page so the
+ * session gets stamped server-side (experiment-session-stamped-attribution Phase 1).
+ * These ride on every /api/pixel flush — the session stamp is the canonical attribution
+ * signal, decoupled from whether the `experiment_exposure` event survives. Call once per
+ * page (in StorefrontPixelInit) BEFORE the first track() so the pdp_view flush carries
+ * them. The edge-served PDP arm is read server-side from the `sx_variant` cookie, so it
+ * needn't be passed here.
+ */
+export function setExperimentAssignments(assignments: PixelExperimentAssignment[]) {
+  experimentAssignments = assignments || [];
 }
 
 /**
@@ -272,6 +298,7 @@ function flush() {
     customer_id: customerId,
     events,
     session_context: getSessionContext(),
+    experiment_assignments: experimentAssignments,
   });
 
   // Fire-and-forget POST. keepalive lets the request survive a
@@ -310,6 +337,7 @@ function flushBeacon() {
     customer_id: customerId,
     events,
     session_context: getSessionContext(),
+    experiment_assignments: experimentAssignments,
   });
 
   try {

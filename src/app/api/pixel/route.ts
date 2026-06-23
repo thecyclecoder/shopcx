@@ -73,6 +73,28 @@ interface InboundEvent {
   url?: string;
 }
 
+/** A server-resolved experiment assignment carried on the pixel flush — seeds the
+ *  canonical session stamp (experiment-session-stamped-attribution Phase 1). */
+interface InboundAssignment {
+  experiment_id?: string;
+  variant_id?: string;
+  arm?: string;
+  surface?: string;
+}
+
+type SessionArm = "control" | "variant" | "holdout";
+
+/** One element of storefront_sessions.experiment_assignments. */
+interface SessionAssignment {
+  experiment_id: string;
+  variant_id: string;
+  arm: SessionArm;
+  assigned_at: string;
+  surface: string | null;
+}
+
+const VALID_ARMS = new Set<SessionArm>(["control", "variant", "holdout"]);
+
 interface SessionContext {
   landing_url?: string;
   referrer?: string;
@@ -101,6 +123,7 @@ export async function POST(request: NextRequest) {
     events?: InboundEvent[];
     session_context?: SessionContext;
     customer_id?: string | null;
+    experiment_assignments?: InboundAssignment[];
   } = {};
   try {
     body = await request.json();
@@ -126,6 +149,7 @@ export async function POST(request: NextRequest) {
     customerId: body.customer_id || null,
     events,
     sessionContext: body.session_context || {},
+    experimentAssignments: body.experiment_assignments || [],
   });
 
   return new NextResponse(null, { status: 204 });
@@ -172,6 +196,7 @@ export async function GET(request: NextRequest) {
         gclid: sp.get("gclid") || undefined,
         ttclid: sp.get("ttclid") || undefined,
       },
+      experimentAssignments: [],
     }).catch(() => { /* swallow — pixel must always 200 */ });
   }
 
@@ -213,6 +238,7 @@ interface PersistParams {
   customerId: string | null;
   events: InboundEvent[];
   sessionContext: SessionContext;
+  experimentAssignments: InboundAssignment[];
 }
 
 /**
@@ -253,6 +279,64 @@ async function resolveLanderIds(
   return none;
 }
 
+/** Parse the edge `sx_variant=experimentId:variantId[:h]` cookie. Mirrors
+ *  `parseVariantCookie` in supabase/middleware.ts. */
+function parseVariantCookie(
+  raw: string | null | undefined,
+): { experimentId: string; variantId: string; isHoldout: boolean } | null {
+  if (!raw) return null;
+  const parts = raw.split(":");
+  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+  return { experimentId: parts[0], variantId: parts[1], isHoldout: parts[2] === "h" };
+}
+
+/**
+ * Build the session experiment-stamp candidates from the two reliable, server-visible
+ * sources (experiment-session-stamped-attribution Phase 1) — NOT the client
+ * `experiment_exposure` event:
+ *   (a) `experiment_assignments` carried on the pixel flush body — the advertorial /
+ *       `resolveExperimentsForRender` arm, with its arm bucket + surface resolved at render.
+ *   (b) the edge `sx_variant` cookie — the edge-served PDP arm; control vs variant is
+ *       resolved with one lookup (only when the experiment isn't already stamped).
+ * `alreadyStamped` lets us skip work (and the cookie lookup) for experiments the session
+ * already carries — the stamp is sticky (first assignment wins).
+ */
+async function buildSessionAssignmentCandidates(
+  admin: ReturnType<typeof createAdminClient>,
+  bodyAssignments: InboundAssignment[],
+  variantCookie: string | null,
+  alreadyStamped: Set<string>,
+): Promise<Array<Omit<SessionAssignment, "assigned_at">>> {
+  const out: Array<Omit<SessionAssignment, "assigned_at">> = [];
+  const seen = new Set<string>(alreadyStamped);
+
+  for (const a of bodyAssignments || []) {
+    const eid = (a.experiment_id || "").trim();
+    const vid = (a.variant_id || "").trim();
+    const arm = (a.arm || "") as SessionArm;
+    if (!eid || !vid || !VALID_ARMS.has(arm) || seen.has(eid)) continue;
+    seen.add(eid);
+    out.push({ experiment_id: eid, variant_id: vid, arm, surface: a.surface || null });
+  }
+
+  const cookie = parseVariantCookie(variantCookie);
+  if (cookie && !seen.has(cookie.experimentId)) {
+    let arm: SessionArm = cookie.isHoldout ? "holdout" : "variant";
+    if (!cookie.isHoldout) {
+      // Resolve control vs variant — the cookie alone can't distinguish them.
+      const { data: v } = await admin
+        .from("storefront_experiment_variants")
+        .select("is_control")
+        .eq("id", cookie.variantId)
+        .maybeSingle();
+      if (v?.is_control) arm = "control";
+    }
+    out.push({ experiment_id: cookie.experimentId, variant_id: cookie.variantId, arm, surface: "pdp" });
+  }
+
+  return out;
+}
+
 async function persistEvents({
   request,
   workspaceId,
@@ -260,6 +344,7 @@ async function persistEvents({
   customerId,
   events,
   sessionContext,
+  experimentAssignments,
 }: PersistParams) {
   const admin = createAdminClient();
 
@@ -281,6 +366,11 @@ async function persistEvents({
   // ONLY this boolean — the raw IP is never persisted. See datacenter-ip.ts.
   const isBot = isDatacenterIp(clientIpFromHeaders(request.headers));
 
+  // Edge-served PDP arm rides on the request as the `sx_variant` cookie (same-origin).
+  // Internal/bot sessions are STILL stamped (previews/QA stay inspectable) — they're
+  // excluded at the reporting layer, not dropped here.
+  const variantCookie = request.cookies.get("sx_variant")?.value ?? null;
+
   // Upsert session. ON CONFLICT (workspace_id, anonymous_id) updates
   // last_seen_at + customer_id (if newly known); first-touch
   // attribution fields are only set on INSERT, never overwritten.
@@ -290,7 +380,7 @@ async function persistEvents({
   // unique index.
   const { data: existingSession } = await admin
     .from("storefront_sessions")
-    .select("id, customer_id, is_internal, is_bot, advertorial_page_id")
+    .select("id, customer_id, is_internal, is_bot, advertorial_page_id, experiment_assignments")
     .eq("workspace_id", workspaceId)
     .eq("anonymous_id", anonymousId)
     .maybeSingle();
@@ -326,6 +416,24 @@ async function persistEvents({
         updates.ad_campaign_id = landerIds.ad_campaign_id;
       }
     }
+    // Stamp the session's experiment arm(s) — sticky (first assignment per experiment
+    // wins). Canonical attribution signal; merges any newly-resolved arm not already
+    // present. Set-when-new only: never re-buckets an experiment the session already carries.
+    const existingAssignments = (existingSession.experiment_assignments as SessionAssignment[] | null) || [];
+    const stampedExperimentIds = new Set(existingAssignments.map((a) => a.experiment_id));
+    const newAssignments = await buildSessionAssignmentCandidates(
+      admin,
+      experimentAssignments,
+      variantCookie,
+      stampedExperimentIds,
+    );
+    if (newAssignments.length) {
+      const nowIso = new Date().toISOString();
+      updates.experiment_assignments = [
+        ...existingAssignments,
+        ...newAssignments.map((a) => ({ ...a, assigned_at: nowIso })),
+      ];
+    }
     await admin
       .from("storefront_sessions")
       .update(updates)
@@ -334,6 +442,14 @@ async function persistEvents({
     // Phase 2b: stamp the resolved lander identity at first touch (alongside
     // landing_url, which is likewise INSERT-only / never overwritten).
     const landerIds = await resolveLanderIds(admin, workspaceId, sessionContext.landing_url);
+    // Stamp the experiment arm(s) at first touch (session-stamped attribution Phase 1).
+    const firstAssignments = await buildSessionAssignmentCandidates(
+      admin,
+      experimentAssignments,
+      variantCookie,
+      new Set(),
+    );
+    const nowIso = new Date().toISOString();
     const { data: inserted, error } = await admin
       .from("storefront_sessions")
       .insert({
@@ -344,6 +460,7 @@ async function persistEvents({
         is_bot: isBot,
         advertorial_page_id: landerIds.advertorial_page_id,
         ad_campaign_id: landerIds.ad_campaign_id,
+        experiment_assignments: firstAssignments.map((a) => ({ ...a, assigned_at: nowIso })),
         user_agent: ua || null,
         device_type: deviceType,
         os,

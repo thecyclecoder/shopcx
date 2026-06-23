@@ -18,7 +18,7 @@
  */
 
 import { useEffect } from "react";
-import { initPixel, track } from "@/lib/storefront-pixel";
+import { initPixel, track, setExperimentAssignments } from "@/lib/storefront-pixel";
 import type { ExperimentExposureMeta } from "@/lib/storefront/experiments";
 
 interface Props {
@@ -53,6 +53,21 @@ export function StorefrontPixelInit({
 }: Props) {
   useEffect(() => {
     initPixel({ workspaceId, customerId: customerId || null, metaPixelId: metaPixelId || null });
+
+    // ── session experiment stamp (canonical attribution) ──────────
+    // Register the server-resolved arm assignments BEFORE the first flush so the
+    // pdp_view POST carries them. The pixel route merges these into
+    // storefront_sessions.experiment_assignments — reliable, decoupled from the
+    // flaky experiment_exposure event. The edge-served PDP arm is read server-side
+    // from the sx_variant cookie, so it isn't passed here.
+    setExperimentAssignments(
+      experimentExposures.map((e) => ({
+        experiment_id: e.experiment_id,
+        variant_id: e.variant_id,
+        arm: e.arm,
+        surface: e.surface,
+      })),
+    );
 
     // ── pdp_view (always fires once) ──────────────────────────────
     track("pdp_view", {
