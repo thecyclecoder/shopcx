@@ -15,6 +15,6 @@ src/lib/inngest/dunning.ts gates its only emitCronHeartbeat('dunning-payday-retr
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
-- Re-trigger the originating condition (signature `loop:dunning-payday-retry-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- ✅ Re-trigger the originating condition (signature `loop:dunning-payday-retry-cron`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
 
 > Authored by the box Repair Agent from Control Tower signature `loop:dunning-payday-retry-cron` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.
