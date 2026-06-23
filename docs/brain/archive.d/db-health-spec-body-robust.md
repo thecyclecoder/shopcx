@@ -1,0 +1,1 @@
+- **DB Health — never author an empty fix spec (re-derive on empty body)** · verified 2026-06-23 · → [[libraries/db-health]]

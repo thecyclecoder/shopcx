@@ -1,0 +1,1 @@
+- **DB Health Agent — accuracy upgrade (filter foreign, slow-vs-volume, sunset allowlist)** · verified 2026-06-23 · → [[libraries/db-health]]
