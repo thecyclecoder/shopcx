@@ -25,11 +25,12 @@ The serverless-runnable half of [[../specs/landing-page-scout]] (M3 of [[../goal
 - **The ad-destination bridge degrades gracefully.** `adDestinationsForBrand` scans [[../tables/creative_skeletons]] `raw` for a destination URL; today that field is rarely captured, so competitor-scout `pdp_urls` is the reliable source. It lights up automatically once [[../specs/ad-creative-scout]] captures ad destinations. We never invent a URL.
 - **optimizer route needs a `product_id`** — `storefront_experiments.product_id` is NOT NULL; `enactRecommendationRoute` returns an error if absent.
 - **Vision needs both sides** — `analyzeLanderGaps` returns `{ skipped }` unless there's ≥1 captured competitor snapshot AND our snapshot.
+- **M5 grade suppression** — `analyzeLanderGaps` skips proposing a gap whose `gap_type` was down-weighted by the gap-grade loop ([[acquisition-gap-grader]] `loadSuppressedGapTypes`), reported as `skippedSuppressed` — the loop stops re-surfacing low-value types ([[../specs/acquisition-research-loop-grading]]).
 
 ## Callers
 
 - `scripts/landing-page-snapshot.ts` (capture + `loadChapterStats` + `analyzeLanderGaps`).
-- [[../inngest/landing-page-scout]] (`analyzeLanderGaps`).
+- [[../inngest/landing-page-scout]] (`analyzeLanderGaps`), re-fired on cadence by [[../inngest/acquisition-research-cadence]].
 - `src/app/api/ads/lander-scout` (list snapshots / fire analyze) + `src/app/api/ads/lander-recommendations` (list / approve-reject → `enactRecommendationRoute`).
 
 ## Related

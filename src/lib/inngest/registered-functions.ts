@@ -119,6 +119,7 @@ import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 import { creativeFinderDailyCron, creativeFinderManualSweep } from "@/lib/inngest/creative-finder";
 import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
+import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
@@ -250,6 +251,8 @@ export const registeredInngestFunctions = [
   creativeFinderManualSweep,
   competitorScoutDiscover,
   landingPageScoutAnalyze,
+  acquisitionResearchCadenceCron,
+  acquisitionResearchCadenceManual,
   controlTowerMonitor,
   specDriftReconcileCron,
   inngestFailureCapture,

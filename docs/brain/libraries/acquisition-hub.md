@@ -12,8 +12,8 @@ The aggregation + routing layer behind one owner surface — [[../specs/acquisit
 
 | Export | Notes |
 |---|---|
-| `loadHubData(workspaceId, productId?)` | → `HubData` — materializes ad gaps, then aggregates products + competitors + `adFindings` (the `AdGapReport`) + `landerSnapshots` + the merged `gapQueue` + `throughput`. Read-only apart from the idempotent ad-gap materialization. |
-| `materializeAdGaps(workspaceId, opts?)` | `buildAdGapReport` → insert NEW dedup_keys into [[../tables/ad_gap_recommendations]] as `proposed` (`ignoreDuplicates` — never clobbers a settled row). Returns the live report. |
+| `loadHubData(workspaceId, productId?)` | → `HubData` — materializes ad gaps, then aggregates products + competitors + `adFindings` (the `AdGapReport`) + `landerSnapshots` + the merged `gapQueue` + `throughput` + the M5 `gradeSignal` + `suppressedTypes`. Each `GapQueueItem` carries its `grade` ([[../tables/acquisition_gap_grades]]). Read-only apart from the idempotent ad-gap materialization. |
+| `materializeAdGaps(workspaceId, opts?)` | `buildAdGapReport` → insert NEW dedup_keys into [[../tables/ad_gap_recommendations]] as `proposed` (`ignoreDuplicates` — never clobbers a settled row). **Skips materializing when the `ad_angle` type is suppressed** by the M5 grade loop ([[acquisition-gap-grader]] `loadSuppressedGapTypes`). Returns the live report. |
 | `enactAdGapRoute(rec, userId)` | Called by the ad-gap approve action: route=`build` → an [[../tables/agent_jobs]] build for an ad-creative iteration. Mirrors [[../libraries/landing-page-scout]] `enactRecommendationRoute`. → `{ ok, route_result, error? }`. |
 | `GapQueueItem` / `GapThroughput` / `HubData` / `CompetitorRow` / `LanderSnapshotRow` / `HubProduct` | types |
 
@@ -27,5 +27,6 @@ The aggregation + routing layer behind one owner surface — [[../specs/acquisit
 - **Ad gaps are workspace-level** (angle clusters), so they show regardless of the product selector; competitors + lander gaps + lander snapshots scope to the selected product.
 - **Owner-only.** Both the read (`/api/ads/acquisition`) and the ad-gap approve route gate `role === 'owner'` (the negative test). Lander/competitor approve endpoints keep their own owner/admin gates.
 - Materialization runs on every hub GET — cheap + idempotent (the ad-gap report is deterministic).
+- **M5 grading loop visibility** — `loadHubData` attaches each acted-on gap's `grade` + a `gradeSignal` (per-gap_type avg) + `suppressedTypes` so the Growth-director feedback is visible; the standing re-scan + grading runs in [[../inngest/acquisition-research-cadence]]. See [[acquisition-gap-grader]] + [[../specs/acquisition-research-loop-grading]].
 
 See [[../specs/acquisition-research-hub]] · [[../tables/ad_gap_recommendations]] · [[../dashboard/marketing__acquisition]].

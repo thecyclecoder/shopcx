@@ -20,6 +20,12 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildAdGapReport, type AdGapReport, type AdGapRecommendation } from "@/lib/ad-gap";
+import {
+  loadSuppressedGapTypes,
+  isSuppressed,
+  loadGapTypeGradeSignal,
+  type GapTypeGradeSignal,
+} from "@/lib/acquisition-gap-grader";
 
 // ── Normalized gap-queue item (the union of an ad gap and a lander gap) ──────────
 export type GapSource = "ad" | "lander";
@@ -43,6 +49,19 @@ export interface GapQueueItem {
   won: boolean;
   evidence: Record<string, unknown>;
   created_at: string;
+  /** The Growth-director gap→outcome grade (M5 loop), null until the gap is acted-on + graded. */
+  grade: GapGradeSummary | null;
+}
+
+/** The grade attached to an acted-on gap (from acquisition_gap_grades). */
+export interface GapGradeSummary {
+  grade_id: string;
+  grade_initial: number | null;
+  grade_revised: number | null;
+  gap_quality: number | null;
+  outcome_quality: number | null;
+  outcome_state: string;
+  graded_by: string;
 }
 
 export interface GapThroughput {
@@ -91,6 +110,10 @@ export interface HubData {
   landerSnapshots: LanderSnapshotRow[];
   gapQueue: GapQueueItem[];
   throughput: GapThroughput;
+  /** The M5 grading loop's training signal: per-gap_type avg grades + the overall average. */
+  gradeSignal: GapTypeGradeSignal;
+  /** `${source}:${gap_type}` keys currently down-weighted (suppressed from re-surfacing). */
+  suppressedTypes: string[];
 }
 
 /** Slug-safe handle for an ad-angle label (dedup + target spec slug). */
@@ -133,6 +156,14 @@ export async function materializeAdGaps(
   if (report.recommendations.length === 0) return report;
 
   const admin = createAdminClient();
+
+  // The loop's training feedback: if the Growth-director grade has down-weighted the ad-angle gap
+  // type (consistently rejected / lost), STOP re-surfacing new ad-angle gaps — the loop learns
+  // (docs/brain/specs/acquisition-research-loop-grading.md, Phase 1). The report still renders for
+  // transparency; we just don't materialize new 'proposed' rows for a suppressed type.
+  const suppressed = await loadSuppressedGapTypes({ workspaceId, admin });
+  if (isSuppressed(suppressed, "ad", "ad_angle")) return report;
+
   const rows = report.recommendations.map((rec) => ({
     workspace_id: workspaceId,
     gap_type: "ad_angle",
@@ -334,6 +365,24 @@ export async function loadHubData(workspaceId: string, productId?: string | null
     rawQueue.map((r) => ({ route_result: (r.route_result as Record<string, unknown> | null) ?? null })),
   );
 
+  // Attach the M5 gap→outcome grades (keyed by `${source}:${gap_id}`) so the grade history is visible.
+  const { data: gradeRows } = await admin
+    .from("acquisition_gap_grades")
+    .select("id, gap_source, gap_id, grade_initial, grade_revised, gap_quality, outcome_quality, outcome_state, graded_by")
+    .eq("workspace_id", workspaceId);
+  const gradeByGap = new Map<string, GapGradeSummary>();
+  for (const gr of gradeRows || []) {
+    gradeByGap.set(`${gr.gap_source}:${gr.gap_id}`, {
+      grade_id: gr.id as string,
+      grade_initial: (gr.grade_initial as number | null) ?? null,
+      grade_revised: (gr.grade_revised as number | null) ?? null,
+      gap_quality: (gr.gap_quality as number | null) ?? null,
+      outcome_quality: (gr.outcome_quality as number | null) ?? null,
+      outcome_state: gr.outcome_state as string,
+      graded_by: gr.graded_by as string,
+    });
+  }
+
   const gapQueue: GapQueueItem[] = rawQueue
     .map((r) => {
       const item = {
@@ -356,6 +405,7 @@ export async function loadHubData(workspaceId: string, productId?: string | null
         won,
         evidence: (r.evidence as Record<string, unknown> | null) ?? {},
         created_at: r.created_at as string,
+        grade: gradeByGap.get(`${r.source}:${r.id as string}`) ?? null,
       };
     })
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
@@ -367,5 +417,18 @@ export async function loadHubData(workspaceId: string, productId?: string | null
     won: gapQueue.filter((g) => g.won).length,
   };
 
-  return { products, selectedProductId, competitors, adFindings, landerSnapshots, gapQueue, throughput };
+  const gradeSignal = await loadGapTypeGradeSignal({ workspaceId, admin });
+  const suppressedTypes = [...(await loadSuppressedGapTypes({ workspaceId, admin }))];
+
+  return {
+    products,
+    selectedProductId,
+    competitors,
+    adFindings,
+    landerSnapshots,
+    gapQueue,
+    throughput,
+    gradeSignal,
+    suppressedTypes,
+  };
 }
