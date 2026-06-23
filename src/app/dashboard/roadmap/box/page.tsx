@@ -71,22 +71,25 @@ interface FailedJob {
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 
-// Route a paused/failed job to where you actually approve/act on it. A spec page (/dashboard/roadmap/{slug})
-// only exists for build-kind jobs whose slug is a real spec — so repair (slug = error signature), plan
-// (slug = goal slug), and migration-fix (slug = fix id) all 404'd there. Send each to its real surface.
-// fold-guard-live-build (Phase 1): a build/spec-test job whose spec was folded/archived/deleted (spec_missing)
-// would 404 at /dashboard/roadmap/{slug} too — route it to the board (always resolves), never a dead link.
+// Route a paused/failed job to where you actually approve/act on it.
+// SAFE-BY-DEFAULT (so a NEW agent kind can never 404 here, even before anyone adds a case):
+// only kinds whose `spec_slug` is a REAL spec/goal — or that have a dedicated approval surface — get a
+// deep link. EVERY other kind (repair, db_health, coverage-register, triage, AND any future agent that
+// surfaces proposals) has a signature/surface-key slug, NOT a spec, so it defaults to the Control Tower
+// (where agent feeds + their Approve buttons live) — which always loads. Previously the default was
+// `/dashboard/roadmap/{slug}`, which 404'd for every such agent until someone hand-added a case.
+const SPEC_SLUG_KINDS = new Set(["build", "spec-test"]); // slug = docs/brain/specs/{slug}.md
 function approvalHref(kind: string, specSlug: string, specMissing?: boolean): string {
-  // repair / triage / db_health proposals surface on the Control Tower (their slug is a signature, not a spec).
-  if (kind === "repair" || kind === "triage-escalations" || kind === "db_health") return "/dashboard/developer/control-tower";
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug}`;
   if (kind === "migration-fix") return "/dashboard/migrations";
-  // storefront-optimizer slug is a surface key (product:lander:audience), not a spec — route to the
-  // optimizer dashboard's "Proposed campaigns" section, the surface that actually has the
-  // Approve/Decline buttons (docs/brain/specs/storefront-optimizer-proposal-cards.md Phase 2).
+  // storefront-optimizer slug is a surface key (product:lander:audience) → the optimizer dashboard's
+  // "Proposed campaigns" section (the Approve/Decline buttons live there).
   if (kind === "storefront-optimizer") return "/dashboard/storefront/optimizer";
-  if (specMissing) return "/dashboard/roadmap";
-  return `/dashboard/roadmap/${specSlug}`;
+  // A real-spec job: the spec page, or the board if the spec was folded/archived (never a dead link).
+  if (SPEC_SLUG_KINDS.has(kind)) return specMissing ? "/dashboard/roadmap" : `/dashboard/roadmap/${specSlug}`;
+  // DEFAULT — every agent-proposal kind (signature/surface-key slug): the Control Tower, where the
+  // repair / db_health / coverage-registration / etc. feeds surface with their Approve actions.
+  return "/dashboard/developer/control-tower";
 }
 
 function workerStale(w: Worker): boolean {
