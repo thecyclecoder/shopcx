@@ -7,6 +7,7 @@ import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { OrgTree } from "@/components/agents/org-tree";
 import { BoardChannel } from "@/components/agents/board-channel";
+import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
 import { INBOX_TABS, APPROVAL_REQUEST_TYPE, type InboxTab, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
 
 // Agents hub (agents-hub-role-inboxes spec) — the owner-only org-chart surface.
@@ -578,7 +579,17 @@ function AutonomyToggle({ director, onChange }: { director: DirectorNode; onChan
   );
 }
 
-function RoleHeader({ org, role, onChange }: { org: OrgChart; role: string; onChange: () => void }) {
+function RoleHeader({
+  org,
+  role,
+  onChange,
+  xp,
+}: {
+  org: OrgChart;
+  role: string;
+  onChange: () => void;
+  xp: Record<string, DirectorXp>;
+}) {
   if (role === "ceo") {
     const persona = getPersona("ceo");
     return (
@@ -691,6 +702,8 @@ function RoleHeader({ org, role, onChange }: { org: OrgChart; role: string; onCh
           ))}
         </div>
       )}
+      {/* Gamified XP card (directors-board-gamified, M3 Phase 3) — derived, display-only counts. */}
+      {xp[d.slug] && <XpCard xp={xp[d.slug]} />}
       <AutonomyToggle director={d} onChange={onChange} />
     </div>
   );
@@ -704,6 +717,8 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
   const [role, setRole] = useState("ceo");
+  // Derived per-director XP (directors-board-gamified M3 Phase 3) — display-only counts.
+  const [xp, setXp] = useState<Record<string, DirectorXp>>({});
   // "org" = the visual org-tree / team page (Phase 4); "inbox" = the role nav + three-tab inbox.
   const [view, setView] = useState<"org" | "inbox">("org");
 
@@ -730,10 +745,20 @@ export default function AgentsPage() {
     [],
   );
 
+  const loadXp = useCallback(
+    () =>
+      fetch("/api/developer/agents/xp")
+        .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+        .then((d: { xp: Record<string, DirectorXp> }) => setXp(d.xp ?? {}))
+        .catch(() => setXp({})),
+    [],
+  );
+
   useEffect(() => {
     if (workspace.role !== "owner") return;
     loadOrg();
-  }, [workspace.role, loadOrg]);
+    loadXp();
+  }, [workspace.role, loadOrg, loadXp]);
 
   if (workspace.role !== "owner") {
     return (
@@ -795,7 +820,7 @@ export default function AgentsPage() {
             <RoleNav org={org} selected={role} onSelect={setRole} />
           </aside>
           <section>
-            <RoleHeader org={org} role={role} onChange={loadOrg} />
+            <RoleHeader org={org} role={role} onChange={loadOrg} xp={xp} />
             <InboxShell key={role} role={role} title={title} functionSlugs={org.directors.map((d) => d.slug)} />
           </section>
         </div>
