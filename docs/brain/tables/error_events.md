@@ -18,6 +18,7 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 | `sample` | `jsonb?` | latest raw sample (function_id, run_id, path, status, code, …) |
 | `count` | `int` | total occurrences folded into this incident · default 1 |
 | `status` | `text` | `open` (default) ｜ `resolved` · CHECK-constrained (reserved; the dashboard drives panel color off recency, not this) |
+| `outage_correlated` | `bool` | **agent-outage-resilience Phase 2** — set when recorded WHILE the Claude-down breaker ([[claude_health]]) was tripped. Such errors are outage symptoms, not new bugs: `recordError` still records them (grouped under the outage) but suppresses paging + the repair fan-out, and a NEW signature is auto-`resolved` as transient. Default `false` |
 | `first_seen_at` | `timestamptz` | when this signature first appeared · default `now()` |
 | `last_seen_at` | `timestamptz` | bumped every occurrence · default `now()` |
 | `last_paged_at` | `timestamptz?` | when we last paged owners — the rate-limit spine (one page per incident per 30 min) |

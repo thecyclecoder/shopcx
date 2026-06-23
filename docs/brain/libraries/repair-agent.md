@@ -50,6 +50,7 @@ The first live run (2026-06-22) **over-produced** — 8 specs + 6 PRs for ~3 roo
 - **Spec marker lines are machine-parsed** — `**Repair-root-cause:**` + `**Repair-signature:**` (one per grouped signature) under the metadata line; `parseRepairSpecMeta` reads them. Don't reformat them away.
 - **No migration** — `repair` is a free-text [[agent_jobs]] `kind`; the surfaced fix parks in the existing `pending_actions` jsonb (`type:'repair_build'`, `spec_slug`).
 - **The repairer is watched too** — registered as an `agent:repair` agent-kind tile in [[control-tower]] `registry.ts` (idle = green; a stuck repair job → red).
+- **Outage-aware — don't triage into a dead API** ([[../specs/agent-outage-resilience]] Phase 2, [[claude-health]]): while the Claude-down breaker is tripped, `recordError` does NOT enqueue a repair job (it would just 529 — the repair agent needs Claude to triage) and tags the error `outage_correlated` (a NEW signature is auto-resolved as transient — outage-window 5xx are symptoms, not bugs). Already-queued `repair` jobs park `blocked_on_dependency` on the box and drain on recovery. So a Claude outage no longer spawns N redundant "retry the 5xx" proposals; the genuine gap (a call with no retry) is Phase 1's comprehensive fix, not a per-error churn.
 
 ## Callers
 

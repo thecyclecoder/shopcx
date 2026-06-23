@@ -179,7 +179,10 @@ const DB_HEALTH_TREND_WINDOW_DAYS = 21; // Phase 2: trailing size-history window
 
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
-type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "blocked_on_usage" | "completed" | "failed" | "needs_attention";
+// `blocked_on_dependency` (agent-outage-resilience Phase 2): parked when the Claude-down breaker is
+// tripped (autonomous agent jobs need Claude to run — don't dispatch them to a dead API). Non-terminal —
+// requeueBlockedOnDependency flips it back once the breaker recovers (park-and-drain).
+type JobStatus = "queued" | "claimed" | "building" | "needs_input" | "needs_approval" | "queued_resume" | "blocked_on_usage" | "blocked_on_dependency" | "completed" | "failed" | "needs_attention";
 // A planner-proposed spec branch, carried on a type:'spec' action (goal-decomposition-engine).
 interface ProposedSpec {
   slug: string;
@@ -493,6 +496,57 @@ async function requeueBlockedOnUsage() {
   console.log(`[multi-account] re-queued ${data.length} blocked_on_usage job(s) — a healthy account is available`);
 }
 
+// ── Claude-down breaker park-and-drain (agent-outage-resilience Phase 2) ──────────────────────────
+// The box's AUTONOMOUS agents need Claude to run (the repair agent literally 529'd mid-outage trying to
+// triage). When the Claude-down breaker is tripped, parking these jobs `blocked_on_dependency` stops the
+// box hammering a dead API; they drain automatically on recovery — the box analog of `blocked_on_usage`.
+// Scope = the autonomous agents the spec names (repair, optimizer, db-health, spec-test); interactive
+// (dev-ask/spec-chat/ticket-improve) + owner-driven build/plan jobs are left alone (their failure is the
+// owner's to see + retry). The customer-facing ticket path is covered by Phase 1's outage-spanning retry.
+const CLAUDE_OUTAGE_PARK_KINDS = ["repair", "storefront-optimizer", "db_health", "spec-test"] as const;
+
+// Read the Claude-down breaker once per tick (best-effort; defaults to "up" so a breaker-read hiccup
+// never wrongly parks the box). The lib lives in src/lib — dynamic-import it like the other src helpers.
+async function isClaudeDown(): Promise<boolean> {
+  try {
+    const { isClaudeBreakerTripped } = await import("../src/lib/claude-health");
+    return await isClaudeBreakerTripped(db);
+  } catch {
+    return false;
+  }
+}
+
+// Park queued/queued_resume autonomous-agent jobs `blocked_on_dependency` while the breaker is tripped.
+// Best-effort — a sweep failure must never break the poll loop.
+async function parkClaudeDependentJobs() {
+  const { data, error } = await db
+    .from("agent_jobs")
+    .select("id")
+    .in("kind", CLAUDE_OUTAGE_PARK_KINDS as unknown as string[])
+    .in("status", ["queued", "queued_resume"])
+    .limit(200);
+  if (error || !data?.length) return;
+  for (const r of data as { id: string }[]) {
+    await update(r.id, { status: "blocked_on_dependency", error: "Claude is down (breaker tripped) — auto-resumes on recovery" });
+  }
+  console.warn(`[claude-breaker] parked ${data.length} autonomous-agent job(s) blocked_on_dependency — Claude is down`);
+}
+
+// Drain jobs parked `blocked_on_dependency` once the breaker has recovered. A job that had a session
+// goes back to queued_resume (its account pin re-resolves on claim); a fresh job → queued. Best-effort.
+async function requeueBlockedOnDependency() {
+  const { data, error } = await db
+    .from("agent_jobs")
+    .select("id, claude_session_id")
+    .eq("status", "blocked_on_dependency")
+    .limit(200);
+  if (error || !data?.length) return;
+  for (const r of data as { id: string; claude_session_id: string | null }[]) {
+    await update(r.id, { status: r.claude_session_id ? "queued_resume" : "queued", error: null });
+  }
+  console.log(`[claude-breaker] re-queued ${data.length} blocked_on_dependency job(s) — Claude recovered`);
+}
+
 // Shared usage-cap handler for the build/plan pool (box-multi-account-failover Phase 1): pull the
 // account from rotation, then either re-dispatch on a healthy account (back to queued_resume if a session
 // exists so the branch/PR is reused, else queued) or park blocked_on_usage when ALL accounts are capped.
@@ -759,7 +813,7 @@ const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations"
 const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Jobs whose worktree is sacrosanct — a live or paused build the owner may still resume. Anything else
 // (completed/failed/needs_attention, i.e. terminal) or a job that no longer exists ⇒ the tree is cruft.
-const ACTIVE_JOB_STATUSES = new Set<JobStatus>(["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"]);
+const ACTIVE_JOB_STATUSES = new Set<JobStatus>(["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage", "blocked_on_dependency"]);
 
 // Parse `git worktree list --porcelain` → [{ path, branch }]. branch is the short name (refs/heads/
 // stripped) or null when detached. Tolerates odd/empty git output by returning what it parsed.
@@ -5675,7 +5729,15 @@ async function main() {
       .catch(async (e) => {
         errored = true;
         console.error(`[${job.spec_slug}] failed:`, e);
-        await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+        const msg = e instanceof Error ? e.message : String(e);
+        // Local breaker signal (agent-outage-resilience Phase 2): a `claude -p` job that died on a
+        // 529/overloaded/timeout is evidence Claude is down — feed the consecutive-failure counter
+        // (auto-expires; the status poll is the authoritative external signal). Best-effort.
+        try {
+          const { noteClaudeFailureFromText } = await import("../src/lib/claude-health");
+          await noteClaudeFailureFromText(db, msg, `box ${job.kind} job`);
+        } catch { /* breaker note is best-effort */ }
+        await update(job.id, { status: "failed", error: msg });
       })
       .finally(async () => {
         active.delete(job.id);
@@ -5714,6 +5776,18 @@ async function main() {
         await requeueBlockedOnUsage();
       } catch (e) {
         console.error("[multi-account] blocked_on_usage requeue failed (continuing):", e instanceof Error ? e.message : e);
+      }
+
+      // Claude-down breaker (agent-outage-resilience Phase 2): when Claude is down, park the autonomous
+      // agents `blocked_on_dependency` (don't dispatch them to a dead API); when it recovers, drain them.
+      // Read once per tick + gate the lanes below. Best-effort — never breaks the poll loop.
+      let claudeDown = false;
+      try {
+        claudeDown = await isClaudeDown();
+        if (claudeDown) await parkClaudeDependentJobs();
+        else await requeueBlockedOnDependency();
+      } catch (e) {
+        console.error("[claude-breaker] park/drain failed (continuing):", e instanceof Error ? e.message : e);
       }
 
       // Approval routing (approval-routing-engine spec, M2): the "one inbox, no orphans" sweep. Surface
@@ -5771,7 +5845,8 @@ async function main() {
         launch(job);
       }
       // Fill the spec-test lane (spec-test-agent): non-destructive QA pass over a shipped spec, concurrency-1.
-      while (countSpecTest() < MAX_SPEC_TEST) {
+      // Gated on the Claude-down breaker (Phase 2) — parked jobs drain on recovery.
+      while (!claudeDown && countSpecTest() < MAX_SPEC_TEST) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["spec-test"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -5803,7 +5878,9 @@ async function main() {
         launch(job);
       }
       // Fill the repair lane (repair-agent): event-fired Control Tower triage, read-only diagnose → propose-fix.
-      while (countRepair() < MAX_REPAIR) {
+      // Gated on the Claude-down breaker (Phase 2) — the repair agent needs Claude to triage, so during a
+      // Claude outage its jobs park `blocked_on_dependency` (it would just 529) and drain on recovery.
+      while (!claudeDown && countRepair() < MAX_REPAIR) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["repair"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -5821,7 +5898,7 @@ async function main() {
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —
       // materialize the pre-authored fix spec to main + queue its build. Concurrency-1, fast.
-      while (countDbHealth() < MAX_DB_HEALTH) {
+      while (!claudeDown && countDbHealth() < MAX_DB_HEALTH) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["db_health"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -5840,7 +5917,7 @@ async function main() {
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —
       // read funnel+lever map+proxy → propose a hypothesis/variant → stand up an M1 experiment (or
       // surface a missing-capability spec). Own concurrency-1 lane, read-only diagnose on Max.
-      while (countStorefrontOptimizer() < MAX_STOREFRONT_OPTIMIZER) {
+      while (!claudeDown && countStorefrontOptimizer() < MAX_STOREFRONT_OPTIMIZER) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["storefront-optimizer"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;

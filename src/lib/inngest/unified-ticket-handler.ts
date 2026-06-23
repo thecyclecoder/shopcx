@@ -19,7 +19,8 @@
 import { NonRetriableError } from "inngest";
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { OUTAGE_SPANNING_RETRIES, throwForAnthropicStatus, throwForAnthropicNetworkError } from "@/lib/anthropic-retry";
+import { OUTAGE_SPANNING_RETRIES, throwForAnthropicStatus, throwForAnthropicNetworkError, isRetryableAnthropicStatus } from "@/lib/anthropic-retry";
+import { recordClaudeFailure } from "@/lib/claude-health";
 import { assembleTicketContext } from "@/lib/ai-context";
 import { retrieveContext } from "@/lib/rag";
 import { matchPatterns } from "@/lib/pattern-matcher";
@@ -189,6 +190,9 @@ async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max =
       body: JSON.stringify({ model: mid, max_tokens: max, messages: [{ role: "user", content: prompt }] }),
     });
   } catch (e) {
+    // Local breaker signal (agent-outage-resilience Phase 2): a network failure is always a retryable
+    // dependency failure — feed the consecutive-failure counter before throwing/degrading.
+    await recordClaudeFailure(undefined, where);
     if (ctx?.optional) return "";
     throwForAnthropicNetworkError(e, where);
   }
@@ -196,6 +200,8 @@ async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max =
     // Was `return ""` — a silent swallow that let callers proceed on empty
     // data (unified-ticket-handler.ts:173). Now throw: retryable status →
     // the run retries with backoff; terminal status → fail fast.
+    // A retryable status also feeds the Phase-2 breaker's local signal.
+    if (isRetryableAnthropicStatus(r.status)) await recordClaudeFailure(undefined, `${where} → ${r.status}`);
     if (ctx?.optional) return "";
     throwForAnthropicStatus(r.status, where);
   }
