@@ -13,7 +13,7 @@ Do the build with **your own native tools** (`Read`/`Edit`/`Bash`/`Grep`). The b
 
 ## Procedure
 
-1. **Read the spec.** `docs/brain/specs/{slug}.md`. Note every `## Phase` and its emoji (`⏳ planned · 🚧 in progress · ✅ shipped`), the `## Safety / invariants`, and `## Completion criteria`.
+1. **Read the spec.** `docs/brain/specs/{slug}.md`. Note every `## Phase` and its emoji (`⏳ planned · 🚧 in progress · ✅ shipped`), the `## Safety / invariants`, and `## Completion criteria`. **An empty (0-byte) or phaseless spec is a build failure, not a build target** — if the file is blank or has no `## Phase` section, do NOT invent a spec or merge an empty PR: stop and surface it (`needs_input`, "spec body is empty/phaseless — re-author it before building"). A real spec to build always has at least one `## Phase`. (db-health-spec-body-robust.)
 2. **Probe before assuming.** Use the `probe-db` skill for any table/enum/column the spec touches — the database is the spec. Don't trust column shapes from prose.
 3. **Implement phase by phase.** Match surrounding code style. For schema changes use the `write-migration` skill. Every new table/inngest fn/library/integration also needs a brain page (CLAUDE.md hard rule) — use `write-brain-page`/`fold-to-brain`.
 4. **Update the spec emojis as you go** — `⏳`→`🚧`→`✅` on each phase, in the same change. **On completion, flip the H1 title emoji to match the phase consensus** — set the `# Title …` emoji to `✅` once every phase has shipped (none `⏳`/`🚧`), so the markdown is self-consistent and a forgotten title doesn't read as "Doing." (The board's parser already treats an all-`✅` phase set as shipped regardless of the title — this is belt-and-suspenders so the raw markdown agrees. Leave an explicit `❌` cut title alone.)
