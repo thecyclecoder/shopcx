@@ -1,0 +1,1 @@
+- **Post-launch hardening — review findings (optimizer + infra)** · verified 2026-06-23 · → [[lifecycles/roadmap-build-console]]
