@@ -1046,6 +1046,18 @@ export async function runControlTowerMonitor(): Promise<MonitorResult> {
   // but log them so a coverage gap is greppable in the cron's run output too.
   if (snap.selfAudit.unregistered.length) {
     console.warn(`[control-tower] self-audit: ${snap.selfAudit.unregistered.length} unregistered cron(s) in code with no tile: ${snap.selfAudit.unregistered.map((u) => u.id).join(", ")}`);
+    // coverage-register agent trigger (event-driven on the audit): for each unregistered loop, propose
+    // the inferred MONITORED_LOOPS entry for one-tap owner Build (deduped: one open proposal per loop
+    // id). Best-effort — never let it break the monitor's act loop. See docs/brain/specs/
+    // coverage-auto-register-agent.md · docs/brain/libraries/coverage-register-agent.md.
+    try {
+      const { enqueueCoverageRegisterJob } = await import("@/lib/coverage-register-agent");
+      for (const u of snap.selfAudit.unregistered) {
+        await enqueueCoverageRegisterJob(admin, { loopId: u.id, cadence: u.cadence });
+      }
+    } catch (e) {
+      console.warn(`[control-tower] coverage-register enqueue failed:`, e instanceof Error ? e.message : e);
+    }
   }
   if (snap.selfAudit.inngestRegistration.status === "ok" && snap.selfAudit.inngestRegistration.missing.length) {
     console.warn(`[control-tower] self-audit: ${snap.selfAudit.inngestRegistration.missing.length} fn(s) served in code but not registered with Inngest: ${snap.selfAudit.inngestRegistration.missing.join(", ")}`);

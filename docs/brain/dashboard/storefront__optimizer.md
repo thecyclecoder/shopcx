@@ -37,6 +37,7 @@ test). See [[../specs/storefront-optimizer-activation-gate]].
 
 - `GET /api/workspaces/[id]/storefront-optimizer-policy` — load the policy (OFF defaults synthesized if no row) + the workspace's products for the scope picker.
 - `PATCH /api/workspaces/[id]/storefront-optimizer-policy` — upsert the policy. **Owner/admin only.** Validates scope ids, booleans, and the numeric guardrails.
+- `GET /api/workspaces/[id]/storefront-optimizer-proposals` — list the workspace's pending `storefront-optimizer` proposals ([[../tables/agent_jobs]] `kind='storefront-optimizer'`, `status='needs_approval'`), each unpacked from its `pending_action` into a Build/Approve card (`spec_slug` `product:lander:audience`, product name, lander_type, audience, lever, the agent's reasoning, the variant preview — hero prompt/label or content diff). **Owner/admin only**; read-only, no new table. The **Proposed campaigns** section above the guardrails renders these; Approve/Decline POST the existing `/api/roadmap/approve` (no new approval path). See [[../specs/storefront-optimizer-proposal-cards]].
 - `GET /api/workspaces/[id]/storefront-experiments` — the tests index. **Owner/admin only.**
 - `GET /api/workspaces/[id]/storefront-experiments/[experimentId]` — one experiment + product + per-arm funnel ([[../libraries/storefront-experiment-funnel]]) + per-arm preview links. **Owner/admin only.**
 

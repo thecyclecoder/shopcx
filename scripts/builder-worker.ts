@@ -126,6 +126,7 @@ const MAX_REPAIR = Number(process.env.AGENT_TODO_MAX_REPAIR || 2);
 // verdict. Minutes — same ballpark as a migration-fix / ticket-improve turn, not the seed ceiling.
 const REPAIR_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
+const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -190,7 +191,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build" | "db_health_build";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -207,7 +208,7 @@ interface PendingAction {
   // (db_health: pre-authored at detection, committed on Build) + surfaced for one-tap owner Build. The
   // build is queued on approval, NOT auto.
   spec_slug?: string;
-  // set when type==='db_health_build': the human-readable title of the proposed fix spec (for the panel).
+  // set when type==='db_health_build' OR type==='coverage_register': the human-readable title of the proposed fix spec.
   spec_title?: string;
   // set when type==='db_health_build' (db-health-spec-body-robust): the diagnostic carried ON the action,
   // un-clobberable by an approval that overwrites the free-text `instructions` (approve mutates the action
@@ -216,6 +217,10 @@ interface PendingAction {
   // first, falling back to `instructions.spec_body` for proposals enqueued before this field existed.
   spec_body?: string;
   finding?: import("../src/lib/control-tower/db-health").DbHealthFinding;
+  // set when type==='coverage_register' (coverage-register-agent): the owner's decision on a surfaced
+  // unregistered-loop proposal — 'register' lands the MONITORED_LOOPS entry, 'exempt' adds the
+  // INTENTIONALLY_UNMONITORED_CRONS exemption. The box materializes the matching fix spec + queues its build.
+  decision?: "register" | "exempt";
   // set when type==='storefront_campaign' (storefront-optimizer): the typed OptimizerProposal the box
   // session emitted; the worker stands up the M1 experiment from it on approval (or immediately when the
   // gate is auto_run). Carries hypothesis + lever + reversible variant patch.
@@ -238,7 +243,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer" | "db_health";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "storefront-optimizer" | "db_health" | "coverage-register";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -725,7 +730,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer", "db_health"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "storefront-optimizer", "db_health", "coverage-register"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -1381,6 +1386,81 @@ async function runDbHealthJob(job: Job) {
   }
   // No actionable owner decision on the action — nothing to do (shouldn't normally be claimed). Park it.
   await update(job.id, { status: "needs_approval", log_tail: `awaiting owner Build/Dismiss for ${signature}`.slice(-2000) });
+  console.log(`${tag} no owner decision yet — parked as needs_approval`);
+}
+
+// coverage-register-agent (coverage-auto-register-agent spec, Phase 1): the owner's decision on a surfaced
+// unregistered-loop proposal. The proposal itself is authored deterministically by the deployed monitor
+// (src/lib/coverage-register-agent.ts enqueueCoverageRegisterJob) — both fix-spec bodies (register +
+// exempt) ride the job's instructions. This runner only materializes the CHOSEN fix spec to main + queues
+// its build on the owner's tap (Register → land the MONITORED_LOOPS entry · Intentionally-unmonitored →
+// add the INTENTIONALLY_UNMONITORED_CRONS exemption). The agent NEVER silently edits registry.ts.
+async function runCoverageRegisterJob(job: Job) {
+  const tag = `[coverage-register:${job.id.slice(0, 8)}]`;
+  let instr: {
+    signature?: string;
+    loop_id?: string;
+    register_spec_slug?: string;
+    register_spec_body?: string;
+    exempt_spec_slug?: string;
+    exempt_spec_body?: string;
+  } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fall back to spec_slug as the signature */
+  }
+  const signature = instr.signature || job.spec_slug;
+  const loopId = instr.loop_id || signature.replace("coverage-register:", "");
+
+  const action = (job.pending_actions || []).find((a) => a.type === "coverage_register");
+  if (action && (action.status === "approved" || action.status === "declined")) {
+    if (action.status === "approved") {
+      const register = action.decision !== "exempt"; // default to register
+      const specSlug = register ? instr.register_spec_slug : instr.exempt_spec_slug;
+      const specBody = register ? instr.register_spec_body : instr.exempt_spec_body;
+      const what = register ? "register entry" : "intentionally-unmonitored exemption";
+      if (!specSlug || !specBody) {
+        await update(job.id, { status: "needs_attention", error: "no fix spec body to materialize", pending_actions: job.pending_actions, log_tail: `owner ${what} → missing spec body for ${loopId}`.slice(-2000) });
+        console.warn(`${tag} owner ${what} → missing spec body`);
+        return;
+      }
+      // Auto-build dedup: never enqueue a second build / open a 4th identical PR for a slug already live.
+      const dupe = await hasActiveBuildForSlug(specSlug);
+      if (dupe.active) {
+        action.status = "done";
+        action.result = `build already live for ${specSlug} (${dupe.reason}) — not re-queued`;
+        await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner ${what} → ${action.result}`.slice(-2000) });
+        console.log(`${tag} owner ${what} → dedup: ${action.result}`);
+        return;
+      }
+      const wrote = await materializeDbHealthSpec(specSlug, specBody, signature);
+      if (!wrote) {
+        await update(job.id, { status: "needs_attention", error: "spec commit failed", pending_actions: job.pending_actions, log_tail: `owner ${what} → failed to author docs/brain/specs/${specSlug}.md`.slice(-2000) });
+        console.warn(`${tag} owner ${what} → spec commit failed`);
+        return;
+      }
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: specSlug,
+        kind: "build",
+        status: "queued",
+        created_by: job.created_by,
+        instructions: `Build from coverage-register agent (${what} for loop ${loopId}). Follow the spec exactly — a small src/lib/control-tower/registry.ts edit; tsc-clean; open a PR.`,
+      });
+      action.status = error ? "failed" : "done";
+      action.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${specSlug}`;
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner ${what} → ${action.result}`.slice(-2000) });
+      console.log(`${tag} owner ${what} → ${action.result}`);
+    } else {
+      action.result = "dismissed by owner";
+      await update(job.id, { status: "completed", error: "dismissed by owner", pending_actions: job.pending_actions, log_tail: `owner Dismiss → cleared ${loopId}`.slice(-2000) });
+      console.log(`${tag} owner Dismiss → cleared`);
+    }
+    return;
+  }
+  // No actionable owner decision — shouldn't normally be claimed. Park it.
+  await update(job.id, { status: "needs_approval", log_tail: `awaiting owner decision for ${loopId}`.slice(-2000) });
   console.log(`${tag} no owner decision yet — parked as needs_approval`);
 }
 
@@ -4723,6 +4803,7 @@ async function runJob(job: Job) {
   if (job.kind === "repair") return runRepairJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
+  if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -5091,7 +5172,8 @@ async function main() {
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "storefront-optimizer").length;
+  const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -5226,6 +5308,15 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed db_health ${job.id.slice(0, 8)} → ${countDbHealth() + 1}/${MAX_DB_HEALTH} db_health lane`);
+        launch(job);
+      }
+      // Fill the coverage-register lane (coverage-register-agent): owner Register/Exempt resume on a
+      // surfaced unregistered-loop proposal — materialize the chosen registry fix spec + queue its build.
+      while (countCoverageRegister() < MAX_COVERAGE_REGISTER) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["coverage-register"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed coverage-register ${job.id.slice(0, 8)} → ${countCoverageRegister() + 1}/${MAX_COVERAGE_REGISTER} coverage-register lane`);
         launch(job);
       }
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —

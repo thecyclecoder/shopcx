@@ -21,6 +21,7 @@ import { cleanEmailBody } from "@/lib/email-cleaner";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
+import { throwForAnthropicStatus, throwForAnthropicNetworkError } from "@/lib/anthropic-retry";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -546,24 +547,34 @@ async function analyzeTicketInner(
 
   const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${guidanceBlock ? `\n\n--- AGENT GUIDANCE (binding directives from a human agent for this ticket — the AI was expected to follow these; grade with these as the ground truth, not your default judgment) ---\n${guidanceBlock}` : ""}${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
 
-  // Call Sonnet
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: GRADER_MODEL,
-      max_tokens: 1500,
-      system,
-      messages: [{ role: "user", content: userMsg }],
-    }),
-  });
+  // Call Sonnet. A grader failure must NOT be swallowed into a grade-skip
+  // (`return { ok:false, reason: grader_http_* }`) — that silently dropped the
+  // grade for good during a Claude outage. Throw instead: a retryable status /
+  // network failure → AnthropicDependencyError (the cron defers the ticket and
+  // the next */30 tick re-grades it on recovery — park-and-drain); a terminal
+  // status → NonRetriableError (fail fast). (agent-outage-resilience Phase 1.)
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: GRADER_MODEL,
+        max_tokens: 1500,
+        system,
+        messages: [{ role: "user", content: userMsg }],
+      }),
+    });
+  } catch (err) {
+    throwForAnthropicNetworkError(err, "ticket-analyzer grader");
+  }
 
   if (!res.ok) {
-    return { ok: false, reason: `grader_http_${res.status}` };
+    throwForAnthropicStatus(res.status, "ticket-analyzer grader");
   }
 
   const data = await res.json();

@@ -1,0 +1,1 @@
+- **Storefront Optimizer proposal review + approve cards** · verified 2026-06-23 · → [[dashboard/storefront__optimizer]]

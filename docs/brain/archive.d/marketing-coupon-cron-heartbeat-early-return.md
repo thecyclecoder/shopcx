@@ -1,0 +1,1 @@
+- **marketing-coupon-auto-disable cron must beat on the no-work path** · verified 2026-06-23 · → [[inngest/marketing-coupon-cron]]

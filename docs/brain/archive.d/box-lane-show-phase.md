@@ -1,0 +1,1 @@
+- **Build box lane shows which phase it's building** · verified 2026-06-23 · → [[lifecycles/roadmap-build-console]]

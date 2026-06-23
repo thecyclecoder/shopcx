@@ -20,8 +20,30 @@ A real outage must be a **pause, not a drop**: work parks in the queue and drain
 - With the breaker tripped (Claude down): new ticket/agent work parks (`blocked_on_dependency`) instead of each hammering the API; when Claude recovers, the parked backlog drains automatically — no manual re-queue. The Control Tower shows the breaker state.
 - Negative: a terminal logic error still fails fast (not retried for hours); optional-enrichment failures degrade explicitly, not accidentally.
 
-## Phase 1 — outage-spanning retry + kill the silent swallows (ticket path) ⏳
+## Phase 1 — outage-spanning retry + kill the silent swallows (ticket path) ✅
 Bump the ticket handler + analyzer to outage-spanning backoff retries on retryable-dependency errors; convert the swallow-on-!ok Claude calls to throw-and-retry. Brain: [[../inngest/unified-ticket-handler]] · [[../integrations/anthropic]] · [[control-tower]].
 
-## Phase 2 — Claude-down circuit-breaker (park-and-drain) ⏳
-A Claude-health breaker driven by the local consecutive-failure counter + the `status.claude.com/api/v2/components.json` poll (Claude API + Claude Code components); parks agent work `blocked_on_dependency` when down + drains on recovery; an "is Claude up?" Control Tower tile; align the autonomous agents. Brain: [[box-multi-account-failover]] · [[../libraries/control-tower]] · [[../integrations/anthropic]].
+**Shipped:**
+- New [[../libraries/anthropic-retry]] — the shared classifier: `AnthropicDependencyError` (retryable 429/5xx/529/timeout/network) vs `NonRetriableError` (terminal 4xx/missing-key), `OUTAGE_SPANNING_RETRIES = 20`, `throwForAnthropicStatus` / `throwForAnthropicNetworkError` / `isRetryableThrownError`.
+- [[../inngest/unified-ticket-handler]] `claude()` helper: the `if (!r.ok) return ""` swallow (line 173) and the missing-key `return ""` now **throw** (retryable → retry, terminal → fail fast); network failures throw too. Fn `retries: 1 → OUTAGE_SPANNING_RETRIES`. `personalizeMacroText` is the one explicit `{ optional: true }` enrichment call that still degrades gracefully.
+- [[../libraries/sonnet-orchestrator-v2]] `runOrchestratorDecision`: a retryable API-error / network throw now **throws** (so the run retries) instead of degrading every ticket to `fallbackWithCancelRoute("escalate")`. Terminal/parse/max-rounds/no-key still degrade as before.
+- [[../libraries/ticket-analyzer]] grader fetch: `return { ok:false, grader_http_* }` swallow → throws. [[../inngest/ticket-analysis-cron]] catches the dependency case and **defers** the ticket (leaves `last_analyzed_at` untouched → re-graded next */30 tick = park-and-drain); `retries: 1 → 3`.
+
+### Verification — Phase 1 (prod-facing)
+- On the box, `npx tsc --noEmit` → expect clean (no new errors).
+- In Inngest, open the `unified-ticket-handler` fn config → expect **Retries: 20** (was 1). Simulate a sustained Anthropic 5xx/overloaded (e.g. temporarily point `ANTHROPIC_API_KEY` at an overloaded/invalid-5xx proxy) while sending a `ticket/inbound-message` → expect the run to **retry with growing backoff** and **complete on recovery** (customer gets a real response), NOT fail-and-drop after 2 attempts and NOT send an empty/`""` reply.
+- Force a Claude **5xx/529** on a quick-turn call (classify-bucket / clarify) → expect the step to **throw** (visible as a retrying step in the Inngest run), never proceed on empty data.
+- Force a Claude **terminal 4xx** (e.g. a deliberately malformed request / bad key) → expect the step to **fail fast** (`NonRetriableError`, no hours of retries); the orchestrator path still degrades to a graceful escalation reply.
+- On `ticket-analysis-cron`: with Claude returning 5xx, run the cron → expect affected tickets counted as **`deferred`** in the run output and their `last_analyzed_at` **unchanged**; after recovery the next */30 tick **grades them** (`analyzed` increments). A genuine per-ticket logic error still counts as `exception`/`skipped` and is marked so it can't wedge the batch.
+- Send a macro reply during a transient Claude blip on `personalizeMacroText` only → expect the **raw macro still sends** (explicit `optional` degrade), not a thrown/parked ticket.
+
+## Phase 2 — Claude-down circuit-breaker + outage-aware error/repair loop (park-and-drain) ⏳
+A Claude-health breaker driven by the local consecutive-failure counter + the `status.claude.com/api/v2/components.json` poll (Claude API + Claude Code components); parks agent work `blocked_on_dependency` when down + drains on recovery; an "is Claude up?" Control Tower tile; align the autonomous agents.
+
+**Plus — make the error-feed + repair agent outage-aware (the outage exposed this, 2026-06-23):**
+- **The repair agent must NOT triage during a Claude outage.** During the downtime a repair job (`vercel:43e4b03698fb1c38`) **itself failed with `529 Overloaded`** — it needs Claude to triage, so it self-fails when Claude is down. When the breaker is tripped → **park repair jobs** (don't dispatch them to a dead API); drain after recovery. (The box analog of [[box-multi-account-failover]]'s `blocked_on_usage`.)
+- **Outage-window errors are symptoms, not bugs — don't churn fixes on them.** A flood of transient 5xx/`529 Overloaded`/timeout errors *during a known Claude outage window* (breaker tripped) are downstream of the outage. **Tag them outage-correlated** and **auto-resolve as transient** (no proposal, no `recordError`-spawned repair) rather than the repair agent proposing N redundant "retry"/"5xx" fixes. (The genuine *gap* it found — a call with no retry — is the right signal ONCE; the comprehensive fix is Phase 1's retry/no-swallow, not a per-error proposal.)
+- **Suppress the recordError → repair fan-out while the breaker is tripped** — error feed still records (for visibility, grouped under the outage) but doesn't enqueue repair jobs that would just 529.
+
+## Phase 3 — finish the no-swallow audit (residual paths) ⏳
+Phase 1 hardened the ticket handler / orchestrator / analyzer, but the outage feed surfaced a residual: **`/api/portal` remedy-selection** swallows a `529` (`"AI remedy selection failed: Anthropic API error: 529 … falls back to the first 3 remedies"`, zero retries) — it degrades the customer's remedy set silently on a transient. Extend the no-silent-swallow conversion (throw → retry, or explicit-optional-degrade) to the portal remedy path + any other LLM call still doing `catch → default` on a retryable error. Brain: [[../libraries/anthropic-retry]] · [[box-multi-account-failover]] · [[../libraries/control-tower]] · [[repair-agent]] · [[../integrations/anthropic]].

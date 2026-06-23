@@ -43,8 +43,8 @@ One index satisfies all three at once: the `workspace_id =` equality (leading co
 **Shipped:** `npx tsc --noEmit` clean. Prod apply gated on owner approval (run `npx tsx scripts/apply-orders-workspace-created-at-index.ts`). Brain: [[db-health-agent]] · [[../tables/orders]] · [[../recipes/write-a-migration-apply-script]].
 
 ## Verification
-- Run `npx tsx scripts/apply-orders-workspace-created-at-index.ts` → expect `Verified: orders_workspace_id_created_at_idx — CREATE INDEX … (workspace_id, created_at DESC)` printed and exit 0.
+- ✅ Run `npx tsx scripts/apply-orders-workspace-created-at-index.ts` → expect `Verified: orders_workspace_id_created_at_idx — CREATE INDEX … (workspace_id, created_at DESC)` printed and exit 0.
 - In Supabase SQL editor, `EXPLAIN (ANALYZE) SELECT * FROM public.orders WHERE workspace_id = '<ws-uuid>' ORDER BY created_at DESC LIMIT 50;` → expect an `Index Scan using orders_workspace_id_created_at_idx` with **no** separate `Sort` node and **no** Seq Scan (was a seq scan + top-N heapsort before); execution time drops from ~120 ms to single-digit ms.
 - Re-run the apply-script a second time → expect it to be a no-op (`IF NOT EXISTS`) and still exit 0 (idempotent).
-- On a fresh/local DB after `supabase db reset`, `\d public.orders` → expect `orders_workspace_id_created_at_idx` present (migration built it).
+- ✅ On a fresh/local DB after `supabase db reset`, `\d public.orders` → expect `orders_workspace_id_created_at_idx` present (migration built it).
 - `pg_stat_statements` mean for queryid 4495583167845289108 falls sharply on subsequent calls.
