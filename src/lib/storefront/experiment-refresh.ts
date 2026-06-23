@@ -22,6 +22,7 @@ import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
 import { updatePosterior } from "@/lib/storefront/lever-memory";
 import { gradeCampaign } from "@/lib/storefront/campaign-grader";
 import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
+import { isEdgeConfigWriteConfigured } from "@/lib/storefront/experiment-manifest";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -269,6 +270,19 @@ export async function refreshStorefrontExperiments(opts: {
         rule: decision.rule,
         posteriors: decision.posteriors,
       });
+    }
+
+    // Self-heal the edge manifest on EVERY refresh tick (not only on a state change above).
+    // An unconditional republish keeps `storefront_experiment_manifest` matching the current
+    // set of running/promoted experiments within ≤5 min regardless of how state drifted (a
+    // manual DB change, a missed event, a stale entry, or experiments that were already
+    // running before the publish code shipped). Idempotent — an upsert of the same manifest is
+    // a no-op write — and best-effort (republishExperimentManifest never throws). Gated on
+    // isEdgeConfigWriteConfigured() so it no-ops to the blob fallback when Edge Config isn't
+    // provisioned. The state-change republishes above stay as the fast path; this is the safety
+    // net (edge-manifest-self-heal · pdp-edge-served-experiments).
+    if (isEdgeConfigWriteConfigured()) {
+      await republishExperimentManifest(admin);
     }
 
     const finishedAt = new Date();

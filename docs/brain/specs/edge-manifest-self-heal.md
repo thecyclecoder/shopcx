@@ -1,4 +1,4 @@
-# Edge experiment manifest — self-heal on the refresh cron ⏳
+# Edge experiment manifest — self-heal on the refresh cron ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** hardens [[pdp-edge-served-experiments]].
 
@@ -15,5 +15,7 @@
 - No running experiments → the cron writes an empty manifest (or no-ops), never errors.
 - Negative: Edge Config not provisioned → the cron no-ops to the blob fallback, no crash.
 
-## Phase 1 — republish the manifest on the refresh cron ⏳
+## Phase 1 — republish the manifest on the refresh cron ✅
 Add `republishExperimentManifest(admin)` to the `storefront-experiments-refresh` per-workspace pass (gated on write-config), idempotent. Brain: [[pdp-edge-served-experiments]] · [[../libraries/storefront-experiments]] · [[../integrations/vercel]].
+
+**Shipped:** `refreshStorefrontExperiments()` ([[../libraries/storefront-experiment-refresh]]) now calls `republishExperimentManifest(admin)` after the rollup, gated on `isEdgeConfigWriteConfigured()` ([[../libraries/experiment-manifest]]) — unconditional self-heal on every refresh tick, idempotent (same-manifest upsert is a no-op), best-effort (never throws). State-change republishes inside the per-experiment loop stay as the fast path. Brain folded into [[../libraries/storefront-experiment-refresh]] + [[../inngest/storefront-experiments]].

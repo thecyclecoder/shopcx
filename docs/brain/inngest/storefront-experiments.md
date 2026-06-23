@@ -17,6 +17,7 @@ The bandit-refresh loop for the storefront experiment framework (Phases 4–5 of
 - **Event data:** `{ workspace_id, trigger?: "cron"|"manual", window_days? }`
 - Calls `refreshStorefrontExperiments()` — attribution recompute → Phase-5 rollback guardrail → Phase-4 promote/kill decision → run record. The manual-trigger entry point too (fire this event with `trigger:"manual"` to force a refresh).
 - After the rollup it fires `storefront/ltv-metrics-refresh` (`step.sendEvent`) to recompute the M3 predicted-LTV-per-visitor metric ([[storefront-ltv-metrics]]) on the fresh attribution.
+- **Edge-manifest self-heal:** the per-workspace pass also unconditionally `republishExperimentManifest(admin)` (gated on `isEdgeConfigWriteConfigured()`) after the rollup, so `storefront_experiment_manifest` in Edge Config always reflects the live running/promoted set within ≤5 min regardless of how state drifted — the safety net for the state-change-only fast path. Idempotent. See [[../libraries/storefront-experiment-refresh]] · [[../specs/pdp-edge-served-experiments]].
 
 ## Gotchas
 - **Conservative until M3 calibrates.** Reads `isConservative()` ([[../libraries/storefront-calibration]]) per run; tighter promote thresholds + a higher exposure floor until the LTV-proxy reconciler lands.
