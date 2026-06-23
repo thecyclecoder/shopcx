@@ -1,0 +1,1 @@
+- **Control Tower: grace registered_not_firing for newly-added crons (per-loop registration age)** · verified 2026-06-23 · → [[libraries/control-tower]]
