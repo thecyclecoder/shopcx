@@ -182,6 +182,10 @@ Two real bugs the human-queue verification workflow surfaced (2026-06-22):
 
 [[pdp-edge-served-experiments]] (platform) — P2 of the PDP wiring (P1 shipped: dynamic-when-testing). Keep the hot PDP EDGE-CACHED per variant instead of fully dynamic: publish the active-experiment manifest to Vercel Edge Config (optimizer re-publishes on state change) → edge middleware sticky-assigns sx_variant + rewrites to a variant-keyed cacheable URL → page reads the arm + caches per variant → purge on content change. Fast + tested.
 
+## Active project — Acquisition Research Engine (goal) ⏳
+
+[[../goals/acquisition-research-engine]] — always-on competitor research + gap-finding for ads + landers. Hand-authored milestone specs (engine flaked): [[competitor-scout]] (M1, foundation) → [[ad-creative-scout]] (M2, captures the FULL AdLibrary payload incl. destination domains) + [[landing-page-scout]] (M3, snapshots competitor landers from those domains) → [[acquisition-research-hub]] (M4) → [[acquisition-research-loop-grading]] (M5). DB-driven competitors table replaces hardcoded COMPETITOR_SEEDS.
+
 ## Active project — Repair Agent ⏳
 
 **Spec:** [[repair-agent]] · **Owner:** [[../functions/platform]]

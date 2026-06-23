@@ -19,6 +19,9 @@ This **replaces every scattered approval surface** (Control Tower feeds, spec ca
 ## The inbox (each role — CEO + every Director — gets the same shape)
 Three filterable tabs: **Messages** (the board) · **Approval Requests** (the routed queue, with the agent's *investigation + proposed fix* inline so a decision is one read) · **Daily Summaries** (EOD recaps). Owner-only sidebar for now.
 
+## The activity log — one timestamped source of truth (powers history + board + recap)
+Every director writes a **timestamped `director_activity` row on each action** it takes (approved migration X, fixed bug Y, escorted goal Z to milestone N — with the reasoning). That single log is the substrate for **(1)** the autonomous-approval **audit history** (M2), **(2)** the **board posts** (M3), and **(3)** the **EOD recap** — which is just a read over *today's* rows, summarized into the standup post. The recap is never hand-maintained; it's a query (`director_activity WHERE day = today GROUP BY type` → "Shipped 8 specs · advanced 1 goal · fixed 2 bugs · approved 4 migrations").
+
 ## The gamified `#directors` board (Messages)
 Not a log — a **team channel**. Each director is a **character** (name, personality, color, a fun **SVG mascot avatar**) posting conversationally: *"🛠️ Ada · Platform — squashed a 500 on the portal path, all green; escorting the Acquisition goal, 3/5 milestones down 💪"*. **Two-way** (you reply / @-mention / ask "why?" → it answers, wired to dev-ask/spec-chat). **Per-director XP card** (specs shipped · bugs fixed · goals escorted · streak). **EOD recap** as a standup post: *"Shipped 8 specs · advanced 1 goal · fixed 2 bugs · approved 4 migrations."* Cast: 🛠️ Ada (Platform) · 🚀 Max (Growth) · 🎨 Iris (CMO) · 💬 June (CS) · 🧲 Theo (Retention) · 👑 You (CEO). *(Names/mascots reskinnable.)*
 
