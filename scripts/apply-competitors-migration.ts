@@ -1,48 +1,32 @@
-/**
- * Apply the competitors table migration (docs/brain/specs/competitor-scout.md, Phase 1).
- *
- *   npx tsx scripts/apply-competitors-migration.ts
- *
- * Creates public.competitors and migrates the 11 hardcoded COMPETITOR_SEEDS → approved rows
- * for every ad-tool workspace. Idempotent (create-if-not-exists + ON CONFLICT DO NOTHING).
- */
+// apply-competitors-migration — create the Competitor Scout DB-driven competitor set
+// (docs/brain/specs/competitor-scout.md, Phase 1):
+//   competitors — per-workspace, supervisable competitor brands (proposed→approved→rejected),
+//                 replacing the hardcoded COMPETITOR_SEEDS. Seeds the 11 legacy brands in as
+//                 status='approved' for every ad-tool workspace.
+// Idempotent (CREATE TABLE / INDEX / POLICY IF NOT EXISTS + ON CONFLICT DO NOTHING). Run via:
+//   npx tsx scripts/apply-competitors-migration.ts
 import { readFileSync } from "fs";
 import { resolve } from "path";
-import { Client } from "pg";
+import { pgClient } from "./_bootstrap";
 
-const envPath = resolve(__dirname, "../.env.local");
-for (const line of readFileSync(envPath, "utf8").split("\n")) {
-  const t = line.trim();
-  if (!t || t.startsWith("#")) continue;
-  const eq = t.indexOf("=");
-  if (eq < 0) continue;
-  const k = t.slice(0, eq);
-  if (!process.env[k]) process.env[k] = t.slice(eq + 1);
-}
-
-const password = process.env.SUPABASE_DB_PASSWORD!;
-const cs = `postgres://postgres.urjbhjbygyxffrfkarqn:${encodeURIComponent(password)}@aws-1-us-east-1.pooler.supabase.com:6543/postgres`;
+const MIGRATIONS = ["20260623120000_competitors.sql"];
 
 async function main() {
-  const c = new Client({ connectionString: cs });
+  const c = pgClient();
   await c.connect();
   try {
-    const sql = readFileSync(
-      resolve(__dirname, "../supabase/migrations/20260623120000_competitors.sql"),
-      "utf8",
-    );
-    await c.query(sql);
-    console.log("✓ applied 20260623120000_competitors.sql");
-
+    for (const file of MIGRATIONS) {
+      await c.query(readFileSync(resolve(__dirname, "../supabase/migrations", file), "utf8"));
+      console.log(`✓ applied ${file}`);
+    }
     const { rows } = await c.query(
       "select status, count(*)::int as n from public.competitors group by status order by status",
     );
-    console.log("competitors by status:", rows);
+    console.log("✓ competitors by status:", rows);
   } finally {
     await c.end();
   }
 }
-
 main().catch((e) => {
   console.error(e);
   process.exit(1);
