@@ -19,6 +19,16 @@ The foundation surface for the [[../goals/devops-director]] goal — an owner-on
 - Each role page renders three filterable tabs — **Messages** (the board; populated by M3), **Approval Requests** (the routed queue; populated by M2), **Daily Summaries** (EOD recaps; populated by M3/M4). This milestone ships the **shell + filters + empty/loading states**; the CEO inbox is wired live first so M2 has a real target to emit into.
 - Reuse [[../tables/dashboard_notifications]] as the backing store for the shell where it fits (it already has `type`/`title`/`body`/`link`/`read`/`dismissed`), or add a thin `agent_inbox_items` view — decided at build time against the live schema (probe first, per [[../README]] § Probing technique). No approval-routing logic here — that is M2's keystone.
 
+## Phase 4 — the org-chart (employee) view ⏳
+- ⏳ planned
+- An Agents sidebar item that renders a **visual employee/org chart** — CEO at top → Directors → their Workers — with each node showing the persona avatar + name + role. **Every node is clickable** → routes to that role's profile detail page (Phase 5). Not just a list: a real org-tree layout (think a company team page).
+- Directors read from `functions/*.md`; Workers are the platform agents grouped under their director (the roster in [[../goals/devops-director]] § The Platform team) — brain-driven, no hand-maintained copy.
+
+## Phase 5 — profile detail pages (responsibilities) ⏳
+- ⏳ planned
+- A profile detail page per role (`/dashboard/agents/[role]`): avatar, name, persona, and a **responsibilities list**. **Workers carry the most precise responsibility list** (their exact mandate — e.g. Repair: "triage inbound errors, root-cause, dismiss foreign/transient, author fixes"); directors a higher-level mandate (from `functions/*.md`); the CEO the company-objective level (from `goals/*.md`). Clickable from any tab (the org-chart nodes, a director row, a worker chip) — same profile page everywhere.
+- Worker personas extend the Phase-2 persona module with the full Platform worker cast (Rafa/Repair · Remi/Regression · Devi/DB-Health · Cole/Coverage · Vera/Verify · Bo/Build · Mira/Migrations · Pax/PR-Resolve · Fenn/Fold · Tao/Monitor · Pia/Planner), each with avatar + precise responsibilities.
+
 ## Safety / invariants
 - **Owner-only.** The Agents hub + every inbox is gated to the workspace owner (mirror the Control Tower gate); no member-facing surface in this milestone.
 - **Brain is the source of truth.** The org chart renders from `functions/*.md` + `goals/*.md` via [[../libraries/brain-roadmap]] — never a hand-maintained second copy of the org chart (no drift).

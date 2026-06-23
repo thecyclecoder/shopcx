@@ -5,8 +5,8 @@
 
 The **Messages** tab of the M1 inbox, built as a Slack-style **team channel** — not a log. Each director is a **character** (name, personality, color, SVG mascot from the [[agents-hub-role-inboxes]] persona module) posting conversationally: *"🛠️ Ada · Platform — squashed a 500 on the portal path, all green; escorting the Acquisition goal, 3/5 milestones down 💪"*. It's **two-way**: the CEO replies, `@`-mentions, or asks "why?" and the director answers — wired to the existing "answer why" brains (**dev-ask** [[../libraries/dev-message-threads]] for read-only investigation, **spec-chat** [[../libraries/roadmap-chats]] for spec context). Each director carries an **XP card** (specs shipped · bugs fixed · goals escorted · streak), and the day closes with an **EOD recap** standup post (*"Shipped 8 specs · advanced 1 goal · fixed 2 bugs · approved 4 migrations"*), extending the existing daily-report pattern ([[../libraries/daily-analysis-report]] `generateDailyReport`, today ticket-only) to a director standup. Today none of this exists — [[../tables/dashboard_notifications]] is a generic bell, with no personas, no board, no XP. Success metric served: the CEO **reads the board + the daily recap, not the details** — the human-legible top layer that makes the offload trustworthy.
 
-## Phase 1 — the board store + conversational posts ⏳
-- ⏳ planned
+## Phase 1 — the board store + conversational posts ✅
+- ✅ shipped
 - `director_messages` (columns: `id`, `workspace_id`, `author_function` / `author='ceo'`, `body`, `kind` ∈ `update｜reply｜recap｜approval-note`, `parent_message_id` (threading), `mentions text[]`, `metadata jsonb`, `created_at`) backing the Messages tab. Brain page [[../tables/director_messages]] (probe live schema first per [[../README]]).
 - Render the channel in the M1 Messages tab: each post shows the author's persona chip + mascot ([[agents-hub-role-inboxes]] `agent-personas`), conversational human-readable body, timestamps, threads. The Platform director (M4) is the first real author; until then a seeded/system post proves the surface.
 
@@ -40,6 +40,7 @@ The **Messages** tab of the M1 inbox, built as a Slack-style **team channel** �
 - Brain pages written + cross-linked from [[../goals/devops-director]].
 
 ## Verification
+- **(Phase 1, shipped)** On `/dashboard/agents` as the workspace owner, select any role → **Messages** tab → expect the Slack-style **#directors board** (the same workspace-wide channel for every role): each post shows a persona avatar + name/role, a conversational body with `@mentions` highlighted, a timestamp, and threaded replies. After running `npx tsx scripts/seed-director-board.ts`, expect three seeded posts — a **System** welcome, an **Ada · Platform** update ("🛠️ Squashed a 500…"), and a **CEO** reply threaded under Ada's post. `GET /api/developer/agents/board` returns `{posts:[{…,replies:[…]}]}`; the same endpoint returns **403** for a non-owner.
 - On `/dashboard/agents` Messages tab, expect a Slack-style channel: persona chip + mascot per post, conversational body, timestamps, threaded replies — populated once the M4 director (or a seed) posts.
 - Reply to a director's post with "why did you approve that migration?" → expect a `dev-ask` job to spin up (thread shows a thinking state), and the director's answer to post back as a threaded `reply`.
 - Open a director's XP card → expect specs-shipped / bugs-fixed / goals-escorted / streak counts that reconcile against [[../tables/agent_jobs]] merged builds + [[../tables/approval_decisions]] for that function.

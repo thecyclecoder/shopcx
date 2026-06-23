@@ -33,6 +33,22 @@ Not a log — a **team channel**. Each director is a **character** (name, person
 - **Watch the platform** ([[control-tower]]) + post human-readable updates to the board.
 - **Loop-guard + CEO escalation:** tracks attempts/decisions per spec; a build that **repeatedly fails on the same error** → it *stops*, diagnoses "likely deeper issue," and **escalates to the CEO** to approve modifying the approach — never an infinite resubmit loop.
 
+## The Platform team (workers reporting to the DevOps Director)
+The autonomous workers the director supervises — each a real agent_jobs lane / agent. They show up in the **Workers tab + the org-chart view**, each with an avatar (all 20s) + a **precise responsibility list** on its profile page:
+- **🟢 Rafa — Repair Agent:** triage every inbound error (Vercel/Supabase/loop), root-cause via logs, dismiss foreign/transient/already-fixed, author/propose fixes for real bugs, dedup repeat signals.
+- **🔴 Remi — Regression Agent:** review regressions (a ✅ spec/feature that broke), dismiss false ones, **author the fix spec directly**, hand to the director to queue, loop-guard repeat-failing fixes. ([[../specs/regression-agent]])
+- **🔵 Devi — DB Health Agent:** watch `pg_stat_statements` slow queries + table growth, EXPLAIN-diagnose, classify slow-per-call vs high-call-volume vs bloat, filter foreign/sunset, propose indexes/rewrites/vacuum. ([[../specs/db-health-agent]])
+- **🟦 Cole — Coverage Register Agent:** detect Inngest fns served but missing from `MONITORED_LOOPS`, infer cadence/window/owner, propose registry entries or exemptions. ([[../specs/coverage-auto-register-agent]])
+- **🟡 Vera — Verification (Spec-Test) Agent:** verify shipped specs actually hold (browser/db deep checks), catch false-✅ + drift, flag regressions to Remi, maintain the human-test queue.
+- **🟠 Bo — Build Agent (the box):** claim build jobs, build specs on the box (Max), keep tsc clean, open PRs, fold-ready; multi-account failover.
+- **🟢 Mira — Migration Agent:** apply/repair migrations, diagnose failed/blocked ones, reconcile migration-file drift vs the live DB.
+- **⬜ Pax — PR-Resolve Agent:** resolve dirty/conflicted PRs (rebase, dedupe duplicate findings), keep the merge queue clean.
+- **🟤 Fenn — Fold Agent:** fold shipped specs into the brain (lifecycle/table/inngest/library pages) + archive the spec files — keep the brain the source of truth.
+- **🔷 Tao — Control Tower Monitor:** watch heartbeats/loops/errors, evaluate liveness windows, raise alerts on silent/failing loops, feed the error→repair pipeline.
+- **🟣 Pia — Planner (Goal Decomposition):** decompose goals into milestone→spec trees with `blocked_by` deps, propose for approval, self-sequence the build order.
+
+**The Agents sidebar includes an org-chart (employee) view** — CEO → Directors → Workers, every node clickable → its **profile detail page** (responsibilities; workers the most precise). See [[../specs/agents-hub-role-inboxes]] Phases 4–5.
+
 ## The leash (autonomy policy — the north-star guardrail)
 **Auto-approves (no CEO):** error fixes · db indexes/health · additive/reversible migrations · **milestone progression of an already-approved goal** · platform-monitoring fixes.
 **Escalates UP to CEO:** a **repeatedly-failing build** (deeper issue → modify the spec/approach) · **modifying or abandoning an approved goal** · **destructive/irreversible** actions (data-dropping migration, deleting infra) · **starting a NEW goal** (only the CEO greenlights goals). Mirrors the standing autonomy rule (autonomous for low-risk/reversible; gate high-stakes/irreversible).
@@ -53,6 +69,8 @@ Not a log — a **team channel**. Each director is a **character** (name, person
   - [[../specs/director-loop-grading]] ⏳ — the standing Platform-Director cadence + the CEO's 1–10 grade of its calls (auto-approval soundness + goal-escort), human-overridable + calibrated, feeding back as owner-confirmed leash widen/narrow. *(blocked by [[../specs/platform-director-agent]])*
 - **M6 — Regression Agent (a DevOps worker):** reviews each regression (a ✅ spec/feature that broke) → **dismiss or author the fix spec directly** (skips "propose"); the DevOps Director queues the build within its leash. Does by-machine what the operator did by hand this session.
   - [[../specs/regression-agent]] ⏳ — detect (spec-test-✅-now-failing / tsc-CI regression / ship-correlated error) → review → dismiss-with-reasoning or author `docs/brain/specs/{slug}.md` directly → route to the inbox for the director to queue; loop-guard escalates a repeatedly-failing fix to CEO. *(blocked by [[../specs/approval-routing-engine]])*
+- **M7 — Worker coaching loop (the org learns):** the director **communicates with + improves its workers** — a repeated worker mistake → the director amends that worker's runtime **instruction set** (a learning), logs the director→worker message, and the worker improves next run. Guidance, not code; reversible; escalates a not-taking lesson to CEO.
+  - [[../specs/worker-coaching-loop]] ⏳ — per-worker `worker_instructions` (versioned, loaded into the prompt) + `worker_coaching_log`; repeated-error detection off grades/`director_activity`; coach→amend→log→post-to-board→re-grade; routes a real code bug to Repair/Regression instead. *(blocked by [[../specs/platform-director-agent]])*
 
 ## Ownership & mirrors
 Owner: [[../functions/platform]] (the Platform/DevOps director). Parent: reports to [[ceo-mode]]. Mirrors the [[storefront-optimizer]] goal (foundation → agent → grading) and is the **template every other director inherits** (Growth, CMO, CS, Retention each get the same inbox + board + autonomy pattern).

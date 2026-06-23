@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
+import { BoardChannel } from "@/components/agents/board-channel";
 import { INBOX_TABS, type InboxTab, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
 
 // Agents hub (agents-hub-role-inboxes spec) — the owner-only org-chart surface.
@@ -220,7 +221,11 @@ function InboxShell({ role, title }: { role: string; title: string }) {
 
       {/* Body */}
       <div className="mt-3">
-        {loading && !payload ? (
+        {tab === "messages" ? (
+          // The Messages tab is the Slack-style #directors board (directors-board-gamified, M3) —
+          // ONE workspace-wide team channel rendered in every role's inbox, not a per-role log.
+          <BoardChannel filter={q} />
+        ) : loading && !payload ? (
           <div className="py-12 text-center text-sm text-zinc-400">Loading inbox…</div>
         ) : err ? (
           <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
