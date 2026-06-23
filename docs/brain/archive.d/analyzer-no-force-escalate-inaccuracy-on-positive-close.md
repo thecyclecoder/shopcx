@@ -1,0 +1,1 @@
+- **Don't force-escalate an 'inaccuracy'-only flag on a high-score positively-closed ticket** · verified 2026-06-23 · → [[libraries/ticket-analyzer]]
