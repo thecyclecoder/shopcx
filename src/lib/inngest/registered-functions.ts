@@ -117,6 +117,7 @@ import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
 import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 import { creativeFinderDailyCron, creativeFinderManualSweep } from "@/lib/inngest/creative-finder";
+import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
@@ -245,6 +246,7 @@ export const registeredInngestFunctions = [
   brainIndexRefresh,
   creativeFinderDailyCron,
   creativeFinderManualSweep,
+  competitorScoutDiscover,
   controlTowerMonitor,
   specDriftReconcileCron,
   inngestFailureCapture,
