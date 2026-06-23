@@ -1,4 +1,4 @@
-# Error feed: drop client-abort framework-internal stream errors from Vercel capture ⏳
+# Error feed: drop client-abort framework-internal stream errors from Vercel capture ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/app/api/webhooks/vercel-logs/route.ts (iserror — add an isabortedstreamnoise() companion to isbarelifecycle: drop level:error entries with status 0 whose message matches the node web-streams abort family — transformalgorithm is not a function, invalid state: controller is already closed, err_stream_premature_close/aborted — and an at ignore-listed frames-only stack); factor the matcher into src/lib/control-tower/error-feed.ts so other feeds can reuse it::monitor-false-positive`
@@ -11,7 +11,7 @@ Error event b9856952 (signature vercel:801aa4e3922198d3, digest 696838421) on /s
 
 **Likely target:** `src/app/api/webhooks/vercel-logs/route.ts (isError — add an isAbortedStreamNoise() companion to isBareLifecycle: drop level:'error' entries with status 0 whose message matches the Node Web-Streams abort family — 'transformAlgorithm is not a function', 'Invalid state: Controller is already closed', ERR_STREAM_PREMATURE_CLOSE/'aborted' — and an 'at ignore-listed frames'-only stack); factor the matcher into src/lib/control-tower/error-feed.ts so other feeds can reuse it`
 
-## Phase 1 — close it 🚧
+## Phase 1 — close it ✅�
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 **Built:** `isAbortedStreamNoise(message, status)` added + exported from `src/lib/control-tower/error-feed.ts` (reusable across feeds), wired as a companion to `isBareLifecycle` in `src/app/api/webhooks/vercel-logs/route.ts` `isError()`. Drops `status:0` `level:'error'` entries whose message matches the Web-Streams abort family (`transformAlgorithm is not a function` · `Invalid state: Controller is already closed` · `ERR_STREAM_PREMATURE_CLOSE`/`aborted`) AND whose stack is `at ignore-listed frames`-only (zero frames in our code). Brain page [[../integrations/vercel-log-drain]] updated. `tsc --noEmit` clean. Verification (re-trigger `vercel:801aa4e3922198d3` → no new incident) pending prod.
