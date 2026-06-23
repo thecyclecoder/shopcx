@@ -103,6 +103,30 @@ export function landerTypeForVariant(variant: AdvertorialVariant): LanderType {
   return variant === "reasons" ? "listicle" : variant;
 }
 
+/** Map an experiment `lander_type` → the storefront render `?variant=` that renders
+ *  it. Inverse of `landerTypeForVariant`; `pdp` has no advertorial render variant, so
+ *  the detail-page preview falls back to `advertorial` (the patch fields are
+ *  advertorial content). Used to build the owner-only preview link. */
+export function renderVariantForLanderType(landerType: LanderType): AdvertorialVariant {
+  if (landerType === "listicle") return "reasons";
+  if (landerType === "beforeafter") return "beforeafter";
+  return "advertorial";
+}
+
+/** Parse the detail-page preview param `sx_preview=<experimentId>:<variantId>` into
+ *  its parts. Returns null for any malformed value. */
+export function parsePreviewParam(
+  raw: string | null | undefined,
+): { experimentId: string; variantId: string } | null {
+  if (!raw) return null;
+  const idx = raw.indexOf(":");
+  if (idx <= 0) return null;
+  const experimentId = raw.slice(0, idx).trim();
+  const variantId = raw.slice(idx + 1).trim();
+  if (!experimentId || !variantId) return null;
+  return { experimentId, variantId };
+}
+
 /** Stable hash of a string → a unit float in [0,1). Deterministic across processes
  *  (sha256), so assignment is sticky without persisting anything. */
 export function hashToUnit(key: string): number {
@@ -225,6 +249,38 @@ export async function loadActiveExperiments(
   }
 }
 
+/** Load ONE experiment + its variants by id (any status), for the owner-only
+ *  detail-page preview. Unlike `loadActiveExperiments` this isn't status-gated — the
+ *  owner can preview an arm of a paused/promoted/killed experiment too. Returns null
+ *  if the experiment isn't in this workspace or has no control arm. */
+export async function loadExperimentById(
+  admin: Admin,
+  workspaceId: string,
+  experimentId: string,
+): Promise<{ experiment: ExperimentRow; variants: VariantRow[] } | null> {
+  try {
+    const { data: experiment } = await admin
+      .from("storefront_experiments")
+      .select("id, workspace_id, product_id, lander_type, audience, lever, status, holdout_pct, promoted_variant_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", experimentId)
+      .maybeSingle();
+    if (!experiment) return null;
+
+    const { data: variants } = await admin
+      .from("storefront_experiment_variants")
+      .select(
+        "id, experiment_id, workspace_id, label, is_control, patch, alpha, beta, reward_sum, n, sessions, conversions, sub_attach, revenue_cents, ltv_proxy_cents",
+      )
+      .eq("experiment_id", experimentId);
+    const arms = (variants as VariantRow[]) || [];
+    if (!arms.some((v) => v.is_control)) return null;
+    return { experiment: experiment as ExperimentRow, variants: arms };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The single call the storefront lander render makes. Resolves every active
  * experiment for this (product, lander_type), sticky-assigns the visitor, patches
@@ -232,6 +288,13 @@ export async function loadActiveExperiments(
  *
  * No identity (null cookie) → no experiments served (we can't sticky-assign), and
  * the un-patched control content renders.
+ *
+ * PREVIEW MODE (`opts.preview`): the owner-only detail-page preview link
+ * (`?sx_preview=<experimentId>:<variantId>`) FORCES that one arm's patch regardless
+ * of sticky assignment or identity, so the owner sees exactly what a shopper in that
+ * arm sees (control = current hero; variant = the generated hero). The link also
+ * carries `sx_internal=1`, so the emitted exposure is dropped at the pixel write —
+ * the bandit is never polluted (the existing internal-traffic exclusion).
  */
 export async function resolveExperimentsForRender(opts: {
   admin: Admin;
@@ -241,8 +304,29 @@ export async function resolveExperimentsForRender(opts: {
   identityKey: string | null;
   content: AdvertorialContent;
   conservative?: boolean;
+  preview?: { experimentId: string; variantId: string } | null;
 }): Promise<{ content: AdvertorialContent; exposures: ExperimentExposureMeta[] }> {
-  const { admin, workspaceId, productId, renderVariant, identityKey, content } = opts;
+  const { admin, workspaceId, productId, renderVariant, identityKey, content, preview } = opts;
+
+  // Preview: force the requested arm. No identity needed (assignment is bypassed).
+  if (preview) {
+    const loaded = await loadExperimentById(admin, workspaceId, preview.experimentId);
+    if (!loaded || loaded.experiment.product_id !== productId) return { content, exposures: [] };
+    const arm = loaded.variants.find((v) => v.id === preview.variantId);
+    if (!arm) return { content, exposures: [] };
+    return {
+      content: applyVariantPatch(content, arm.patch),
+      exposures: [
+        {
+          experiment_id: loaded.experiment.id,
+          variant_id: arm.id,
+          is_holdout: arm.is_control,
+          product_id: productId,
+        },
+      ],
+    };
+  }
+
   if (!identityKey) return { content, exposures: [] };
 
   const landerType = landerTypeForVariant(renderVariant);
