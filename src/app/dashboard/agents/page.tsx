@@ -130,13 +130,151 @@ function RoleNav({
   );
 }
 
+// ── Decision history (Phase 3 — the supervisable-autonomy ledger) ────────────
+
+interface DecisionRow {
+  id: string;
+  agent_job_id: string | null;
+  pending_action_id: string | null;
+  raised_by_function: string;
+  routed_to_function: string;
+  decided_by: "ceo" | "director" | "human";
+  decision: "approved" | "declined" | "escalated";
+  reasoning: string | null;
+  autonomous: boolean;
+  created_at: string;
+}
+
+const DECISION_STYLE: Record<DecisionRow["decision"], string> = {
+  approved: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300",
+  declined: "bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300",
+  escalated: "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300",
+};
+
+// The Decision-history view (approval-routing-engine Phase 3): a read-only ledger of every routed
+// decision, so the CEO can always audit what a proxy decided + why — in history, never the queue.
+// The CEO sees all; a director sees the decisions routed to it. Filterable by decision + autonomy
+// (and, for the CEO, by function).
+function DecisionHistory({ role, functionSlugs }: { role: string; functionSlugs: string[] }) {
+  const [rows, setRows] = useState<DecisionRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(false);
+  const [decision, setDecision] = useState("");
+  const [autonomy, setAutonomy] = useState("");
+  const [fn, setFn] = useState("");
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    const p = new URLSearchParams({ role });
+    if (decision) p.set("decision", decision);
+    if (autonomy) p.set("autonomy", autonomy);
+    if (fn) p.set("function", fn);
+    return fetch(`/api/developer/agents/decisions?${p.toString()}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((d: { items: DecisionRow[] }) => {
+        setRows(d.items);
+        setErr(false);
+      })
+      .catch(() => setErr(true))
+      .finally(() => setLoading(false));
+  }, [role, decision, autonomy, fn]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const selectCls =
+    "rounded-md border border-zinc-300 bg-white px-2 py-1 text-[12px] text-zinc-700 focus:border-indigo-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={decision} onChange={(e) => setDecision(e.target.value)} className={selectCls}>
+          <option value="">All decisions</option>
+          <option value="approved">Approved</option>
+          <option value="declined">Declined</option>
+          <option value="escalated">Escalated</option>
+        </select>
+        <select value={autonomy} onChange={(e) => setAutonomy(e.target.value)} className={selectCls}>
+          <option value="">Autonomous + human</option>
+          <option value="autonomous">Autonomous only</option>
+          <option value="human">Human only</option>
+        </select>
+        {role === "ceo" && functionSlugs.length > 0 && (
+          <select value={fn} onChange={(e) => setFn(e.target.value)} className={selectCls}>
+            <option value="">All functions</option>
+            <option value="ceo">ceo</option>
+            {functionSlugs.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        )}
+        <button
+          onClick={refresh}
+          className="ml-auto rounded-md border border-zinc-300 px-2.5 py-1 text-[12px] font-medium text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        >
+          Refresh
+        </button>
+      </div>
+
+      <div className="mt-3">
+        {loading && !rows ? (
+          <div className="py-12 text-center text-sm text-zinc-400">Loading decision history…</div>
+        ) : err ? (
+          <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
+            Couldn&apos;t load decision history.
+          </div>
+        ) : !rows || rows.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-zinc-200 px-4 py-10 text-center dark:border-zinc-800">
+            <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">No decisions recorded yet.</p>
+            <p className="mx-auto mt-1 max-w-sm text-[12px] text-zinc-400">
+              Every routed approve/decline lands here — and once a director is autonomous, its auto-approvals
+              are logged here (never the queue), with the reasoning.
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {rows.map((d) => (
+              <li key={d.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${DECISION_STYLE[d.decision]}`}>
+                    {d.decision}
+                  </span>
+                  <span className="text-[12px] text-zinc-600 dark:text-zinc-300">
+                    <span className="font-mono text-zinc-400">{d.raised_by_function}</span> → routed to{" "}
+                    <span className="font-medium">{d.routed_to_function}</span>
+                  </span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                      d.autonomous
+                        ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300"
+                        : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                    }`}
+                    title={`decided by ${d.decided_by}`}
+                  >
+                    {d.autonomous ? "autonomous" : d.decided_by}
+                  </span>
+                  <span className="ml-auto shrink-0 text-[10px] text-zinc-400">{elapsed(d.created_at)}</span>
+                </div>
+                {d.reasoning && <p className="mt-1.5 text-[12px] text-zinc-500 dark:text-zinc-400">{d.reasoning}</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Inbox shell ─────────────────────────────────────────────────────────────
 
-function InboxShell({ role, title }: { role: string; title: string }) {
+function InboxShell({ role, title, functionSlugs }: { role: string; title: string; functionSlugs: string[] }) {
   const [payload, setPayload] = useState<InboxPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
-  const [tab, setTab] = useState<InboxTab>("messages");
+  const [tab, setTab] = useState<InboxTab | "history">("messages");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [q, setQ] = useState("");
 
@@ -174,7 +312,7 @@ function InboxShell({ role, title }: { role: string; title: string }) {
     );
   }, [items, tab, unreadOnly, q]);
 
-  const activeTabDef = INBOX_TABS.find((t) => t.id === tab)!;
+  const activeTabDef = INBOX_TABS.find((t) => t.id === tab);
 
   return (
     <div>
@@ -198,8 +336,25 @@ function InboxShell({ role, title }: { role: string; title: string }) {
             )}
           </button>
         ))}
+        {/* Decision history (Phase 3) — the supervisable-autonomy ledger, not a notification type. */}
+        <button
+          onClick={() => setTab("history")}
+          className={`relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+            tab === "history"
+              ? "border-indigo-500 text-indigo-600 dark:text-indigo-400"
+              : "border-transparent text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+          }`}
+        >
+          Decision history
+        </button>
       </div>
 
+      {tab === "history" ? (
+        <div className="mt-3">
+          <DecisionHistory role={role} functionSlugs={functionSlugs} />
+        </div>
+      ) : (
+      <>
       {/* Filters */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <input
@@ -242,8 +397,8 @@ function InboxShell({ role, title }: { role: string; title: string }) {
           </div>
         ) : visible.length === 0 ? (
           <div className="rounded-lg border border-dashed border-zinc-200 px-4 py-10 text-center dark:border-zinc-800">
-            <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">No {activeTabDef.label.toLowerCase()} yet.</p>
-            <p className="mx-auto mt-1 max-w-sm text-[12px] text-zinc-400">{activeTabDef.emptyHint}</p>
+            <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">No {activeTabDef?.label.toLowerCase() ?? "items"} yet.</p>
+            <p className="mx-auto mt-1 max-w-sm text-[12px] text-zinc-400">{activeTabDef?.emptyHint}</p>
           </div>
         ) : (
           <ul className="space-y-2">
@@ -253,6 +408,8 @@ function InboxShell({ role, title }: { role: string; title: string }) {
           </ul>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }
@@ -639,7 +796,7 @@ export default function AgentsPage() {
           </aside>
           <section>
             <RoleHeader org={org} role={role} onChange={loadOrg} />
-            <InboxShell key={role} role={role} title={title} />
+            <InboxShell key={role} role={role} title={title} functionSlugs={org.directors.map((d) => d.slug)} />
           </section>
         </div>
       ) : null}
