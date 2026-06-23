@@ -635,12 +635,18 @@ export async function enqueueDbHealthProposal(admin: Admin, finding: DbHealthFin
     if (!workspaceId) return { enqueued: false, reason: "no workspace to attach the proposal to" };
 
     const actionId = `dbh-${finding.signature.replace(/[^a-z0-9]+/gi, "-")}`.slice(0, 80);
+    const specBody = buildFixSpecMarkdown(finding);
     const { error } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
       spec_slug: finding.signature,
       kind: "db_health",
       status: "needs_approval",
       log_tail: `${finding.title} · ${finding.impact}`.slice(-2000),
+      // Panel-only metadata (title/impact/cause/…): a manual approval that overwrites this free-text field
+      // only degrades the panel, never the build. The BUILD-CRITICAL diagnostic (`spec_body` + structured
+      // `finding`) now lives on the un-clobberable `db_health_build` action below (which approve mutates by
+      // STATUS only), so the owner-Build resume can always author — or re-render — a non-empty fix spec.
+      // db-health-spec-body-robust.
       instructions: JSON.stringify({
         signature: finding.signature,
         category: finding.category,
@@ -651,10 +657,19 @@ export async function enqueueDbHealthProposal(admin: Admin, finding: DbHealthFin
         impact: finding.impact,
         spec_slug: finding.specSlug,
         spec_title: finding.specTitle,
-        spec_body: buildFixSpecMarkdown(finding),
       }),
       pending_actions: [
-        { id: actionId, type: "db_health_build", status: "pending", spec_slug: finding.specSlug, spec_title: finding.specTitle },
+        {
+          id: actionId,
+          type: "db_health_build",
+          status: "pending",
+          spec_slug: finding.specSlug,
+          spec_title: finding.specTitle,
+          // Un-clobberable diagnostic: the pre-rendered fix spec + the structured finding it re-renders
+          // from if `spec_body` is ever empty. Never author an empty spec (db-health-spec-body-robust).
+          spec_body: specBody,
+          finding,
+        },
       ],
     });
     if (error) return { enqueued: false, reason: error.message };

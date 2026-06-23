@@ -209,6 +209,13 @@ interface PendingAction {
   spec_slug?: string;
   // set when type==='db_health_build': the human-readable title of the proposed fix spec (for the panel).
   spec_title?: string;
+  // set when type==='db_health_build' (db-health-spec-body-robust): the diagnostic carried ON the action,
+  // un-clobberable by an approval that overwrites the free-text `instructions` (approve mutates the action
+  // by STATUS only). `spec_body` is the pre-rendered fix spec; `finding` is the structured DbHealthFinding
+  // the body re-renders from if `spec_body` is ever empty. The owner-Build resume reads the body from HERE
+  // first, falling back to `instructions.spec_body` for proposals enqueued before this field existed.
+  spec_body?: string;
+  finding?: import("../src/lib/control-tower/db-health").DbHealthFinding;
   // set when type==='storefront_campaign' (storefront-optimizer): the typed OptimizerProposal the box
   // session emitted; the worker stands up the M1 experiment from it on approval (or immediately when the
   // gate is auto_run). Carries hypothesis + lever + reversible variant patch.
@@ -1043,11 +1050,44 @@ async function explainQuery(c: import("pg").Client, query: string): Promise<stri
   }
 }
 
+// Resolve the fix-spec body for an owner-Build resume, robust to a clobbered `instructions`
+// (db-health-spec-body-robust). Resolution order: the un-clobberable action-carried body → the (older)
+// instructions body → re-render from the structured `finding` carried on the action. Returns `{error}`
+// ONLY when the body is genuinely empty AND there's no finding to reconstruct from — the caller then
+// surfaces needs_input instead of ever committing an empty spec.
+async function resolveDbHealthSpecBody(
+  buildAction: PendingAction,
+  instr: { spec_body?: string },
+): Promise<{ body: string } | { error: string }> {
+  const isNonEmpty = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0;
+  if (isNonEmpty(buildAction.spec_body)) return { body: buildAction.spec_body };
+  if (isNonEmpty(instr.spec_body)) return { body: instr.spec_body };
+  // Empty/whitespace body — re-derive deterministically from the structured finding on the action.
+  if (buildAction.finding) {
+    try {
+      const { buildFixSpecMarkdown } = await import("../src/lib/control-tower/db-health");
+      const rederived = buildFixSpecMarkdown(buildAction.finding);
+      if (isNonEmpty(rederived)) return { body: rederived };
+      return { error: "re-rendered spec body from the carried finding was still empty" };
+    } catch (e) {
+      return { error: `re-derive from carried finding threw: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  return { error: "spec body empty and no carried finding to re-derive from" };
+}
+
 // Author the proposed fix spec to main + queue the build — the owner-gate, run on a db_health Build
 // resume. The spec body was pre-authored deterministically at detection time (carried on the job's
-// instructions), so there's no LLM step. Mirrors the repair-agent owner-Build path.
+// db_health_build action), so there's no LLM step. Mirrors the repair-agent owner-Build path.
 async function materializeDbHealthSpec(specSlug: string, specBody: string, signature: string): Promise<boolean> {
   try {
+    // Final backstop (db-health-spec-body-robust): NEVER putFileMain an empty/phaseless spec. The caller
+    // already resolves + re-derives a non-empty body, so this should be unreachable — but a 0-byte commit
+    // is exactly the failure this spec exists to stop, so refuse it here too.
+    if (!specBody || !specBody.trim() || !/^##\s+Phase/m.test(specBody)) {
+      console.warn(`[db-health] refusing to author empty/phaseless spec ${specSlug} (signature ${signature})`);
+      return false;
+    }
     const put = await putFileMain(
       `docs/brain/specs/${specSlug}.md`,
       specBody,
@@ -1299,7 +1339,22 @@ async function runDbHealthJob(job: Job) {
         console.log(`${tag} owner Build → dedup: ${buildAction.result}`);
         return;
       }
-      const wrote = await materializeDbHealthSpec(buildAction.spec_slug, String(instr.spec_body || ""), signature);
+      // db-health-spec-body-robust: resolve the body from the un-clobberable action (re-deriving from the
+      // carried finding if it's empty) BEFORE committing — never author a 0-byte spec.
+      const bodyResult = await resolveDbHealthSpecBody(buildAction, instr);
+      if ("error" in bodyResult) {
+        buildAction.result = `cannot author spec body: ${bodyResult.error}`;
+        await update(job.id, {
+          status: "needs_input",
+          error: `db_health: ${bodyResult.error} — refused to commit an empty spec`,
+          questions: [{ id: "spec_body", q: `The DB Health fix spec for \`${signature}\` has an empty body and can't be reconstructed (${bodyResult.error}). Re-run the DB Health pass to regenerate the proposal, or paste the fix spec body to author manually.` }],
+          pending_actions: job.pending_actions,
+          log_tail: `owner Build → empty spec body, re-derive failed: ${bodyResult.error}`.slice(-2000),
+        });
+        console.warn(`${tag} owner Build → empty spec body, re-derive failed: ${bodyResult.error}`);
+        return;
+      }
+      const wrote = await materializeDbHealthSpec(buildAction.spec_slug, bodyResult.body, signature);
       if (!wrote) {
         await update(job.id, { status: "needs_attention", error: "spec commit failed", log_tail: `owner Build → failed to author docs/brain/specs/${buildAction.spec_slug}.md`.slice(-2000) });
         console.warn(`${tag} owner Build → spec commit failed`);
@@ -4747,6 +4802,28 @@ async function runJob(job: Job) {
   // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
   // Force (-sfn) so a leftover/broken link from a prior run is always replaced.
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  // db-health-spec-body-robust (Phase 1): refuse to build a 0-byte / phaseless spec — belt-and-suspenders
+  // against ANY empty spec reaching the builder (db-health or otherwise). It must FAIL loudly, never run
+  // claude on an empty file and silently merge an empty PR. Resumes are exempt: the spec was validated on
+  // the first pass and branch WIP already exists.
+  if (!isResume) {
+    const specPath = join(wt, "docs/brain/specs", `${slug}.md`);
+    let specText = "";
+    try { specText = readFileSync(specPath, "utf8"); } catch { /* missing → treated as empty below */ }
+    if (!specText.trim() || !/^##\s+Phase/m.test(specText)) {
+      const why = !specText.trim() ? "is empty / 0-byte / missing" : 'has no "## Phase" section';
+      await update(job.id, {
+        status: "failed",
+        error: `spec docs/brain/specs/${slug}.md ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
+        log_tail: `build aborted — docs/brain/specs/${slug}.md ${why}; no PR opened`,
+      });
+      console.error(`${tag} ${why} spec → failed (no silent empty merge)`);
+      chosenAccount.inFlight--; // release the round-robin slot we took above (we return before the try/finally)
+      sh("git", ["worktree", "remove", "--force", wt]);
+      return;
+    }
+  }
 
   try {
     // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.
