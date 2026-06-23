@@ -1,0 +1,1 @@
+- **Portal healer: recognize self-resolved cancels and surface Appstle error bodies** · verified 2026-06-23 · → [[libraries/portal__remediation]]

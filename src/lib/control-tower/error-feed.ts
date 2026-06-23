@@ -202,11 +202,33 @@ export function feedLoopId(source: ErrorSource): string {
  * Supabase-logs poll) — proof the feed is wired + live, independent of whether the
  * delivery contained any errors. Best-effort, never throws.
  */
+// Throttle feed-delivery beats to ≤1/min per source. A feed beat is a LIVENESS signal
+// ("the drain is wired + delivering") — one per minute proves that. The Vercel log drain
+// firehoses batches (observed ~175/sec), and an unthrottled insert-per-delivery grew
+// loop_heartbeats to 21M rows / 4.5 GB and timed out the control_tower_loop_beats RPC.
+// In-memory debounce per warm instance + a DB recency guard so it holds across instances.
+const FEED_BEAT_MIN_INTERVAL_MS = 60_000;
+const lastFeedBeatAt = new Map<string, number>();
+
 export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admin): Promise<void> {
+  const loopId = feedLoopId(source);
+  const now = Date.now();
+  // Fast path: this warm instance beat for this source < 1 min ago → skip (no DB call).
+  const lastLocal = lastFeedBeatAt.get(loopId) ?? 0;
+  if (now - lastLocal < FEED_BEAT_MIN_INTERVAL_MS) return;
   try {
     const admin = adminClient ?? createAdminClient();
+    // Cross-instance guard: skip if ANY instance already beat for this source < 1 min ago.
+    const { data: recent } = await admin
+      .from("loop_heartbeats")
+      .select("ran_at")
+      .eq("loop_id", loopId)
+      .gte("ran_at", new Date(now - FEED_BEAT_MIN_INTERVAL_MS).toISOString())
+      .limit(1);
+    lastFeedBeatAt.set(loopId, now);
+    if (recent && recent.length) return; // a beat in the last minute already exists
     await admin.from("loop_heartbeats").insert({
-      loop_id: feedLoopId(source),
+      loop_id: loopId,
       kind: "feed",
       ok: true,
       ran_at: new Date().toISOString(),
