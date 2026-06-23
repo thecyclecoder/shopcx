@@ -499,22 +499,38 @@ function resolveAccountForJob(
   return { kind: "run", configDir: acct.configDir, sessionId: null, startedFresh: false };
 }
 
-// Re-queue jobs parked `blocked_on_usage` once ANY account is healthy again. A job that had a session
-// goes back to `queued_resume` (resolveAccountForJob re-pins / starts fresh on claim); a fresh job →
-// `queued`. Best-effort — a sweep failure must never break the poll loop.
+// Re-queue jobs parked `blocked_on_usage` once an account that would actually RUN them is healthy again.
+// A job that had a session goes back to `queued_resume` (resolveAccountForJob re-pins / starts fresh on
+// claim); a fresh job → `queued`. Best-effort — a sweep failure must never break the poll loop.
+//
+// Per-job gate (optimizer-launch-hardening Phase 3, finding #4): only un-park a job when dispatch would
+// actually dispatch it now. A plan RESUME is PINNED to its owning account (canStartFresh=false): if that
+// account is capped but ANOTHER is healthy, a blanket un-park would un-park → claim → re-pin-to-capped →
+// re-park `blocked_on_usage`, every poll tick (DB churn + lane occupancy; no token burn). We mirror the
+// exact dispatch decision via `resolveAccountForJob` and skip any job it would still `block` — so a pinned
+// plan-resume stays parked until its OWN account resets, while a start-fresh-able build resumes on any
+// healthy account as before.
 async function requeueBlockedOnUsage() {
   const now = Date.now();
   if (allAccountsCapped(now)) return; // nothing healthy yet — leave them parked until a reset
   const { data, error } = await db
     .from("agent_jobs")
-    .select("id, claude_session_id")
+    .select("id, kind, claude_session_id, claude_session_config_dir")
     .eq("status", "blocked_on_usage")
     .limit(100);
   if (error || !data?.length) return;
-  for (const r of data as { id: string; claude_session_id: string | null }[]) {
-    await update(r.id, { status: r.claude_session_id ? "queued_resume" : "queued", error: null });
+  let requeued = 0;
+  for (const r of data as Pick<Job, "id" | "kind" | "claude_session_id" | "claude_session_config_dir">[]) {
+    const isResume = !!r.claude_session_id;
+    // Mirror dispatch's canStartFresh: a plan RESUME authoring approved specs is not idempotent and must
+    // re-pin to its owning account (runPlanJob passes canStartFresh=false); everything else can start fresh.
+    const canStartFresh = !(r.kind === "plan" && isResume);
+    // Only un-park if dispatch would RUN it now — else we'd un-park → reclaim → re-park every tick.
+    if (resolveAccountForJob(r, isResume, canStartFresh).kind !== "run") continue;
+    await update(r.id, { status: isResume ? "queued_resume" : "queued", error: null });
+    requeued++;
   }
-  console.log(`[multi-account] re-queued ${data.length} blocked_on_usage job(s) — a healthy account is available`);
+  if (requeued) console.log(`[multi-account] re-queued ${requeued} blocked_on_usage job(s) — a healthy account is available`);
 }
 
 // ── Claude-down breaker park-and-drain (agent-outage-resilience Phase 2) ──────────────────────────

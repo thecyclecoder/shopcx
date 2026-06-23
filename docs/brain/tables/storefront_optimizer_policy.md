@@ -8,9 +8,14 @@ fields, rationale, authorship) so the future **Growth director** operates it lat
 — but the engine reads it **read-only and never writes its own policy**. With
 **`active=false` (the table default) the agent does not even propose** (fully idle)
 — the safe-by-default invariant, enforced in [[../libraries/storefront-optimizer-policy]]
-`evaluateProposalGate`. Migration `20260627120000_storefront_optimizer_policy.sql`.
-RLS: workspace-member SELECT, service-role write. See
-[[../specs/storefront-optimizer-activation-gate]] · [[../functions/growth]].
+`evaluateProposalGate`. Migration `20260627120000_storefront_optimizer_policy.sql`
+(SELECT-RLS scope corrected by `20260629120000_optimizer_policy_select_rls_scope.sql`).
+RLS: **workspace-member SELECT** (`workspace_id ∈ workspace_members where user_id = auth.uid()`),
+service-role write. The original table migration shipped an over-permissive
+`auth.uid() is not null` SELECT despite this comment (a cross-workspace read gap —
+optimizer-launch-hardening Phase 3, finding #5); the forward migration tightened it to
+the canonical [[products]] / [[workspace_members]] member scope. See
+[[../specs/storefront-optimizer-activation-gate]] · [[../specs/optimizer-launch-hardening]] · [[../functions/growth]].
 
 **Primary key:** `id`
 
