@@ -51,4 +51,6 @@ The Growth director **grades each campaign 1–10** (human-overridable), scoring
 - **M6 (gated, when offer levers turn on) — dynamic pricing-rules for persist-to-renewal offers.**
   - [[../specs/storefront-dynamic-renewal-offers]] ⏳ — make `pricing_rules` dynamic/time-boxed for persist-to-renewal offers + wire the optimizer's approval-gated offer lever (margin-floor rail, contributes-to CFO/Retention). *(blocked by M4)*
 
+## Ownership & mirrors
+
 Owner: [[../functions/growth]] (the boss). Reports to: [[ceo-mode]]. Mirrors: [[../specs/storefront-iteration-engine]] (ads) · [[../specs/repair-agent]] (the build-or-request pattern).
