@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Control Tower: fix ticket-analysis-cron cadence/window mismatch (false cron_freshness red)** · verified 2026-06-23 · → [[libraries/control-tower]]
 - **Don't force-escalate an 'inaccuracy'-only flag on a high-score positively-closed ticket** · verified 2026-06-23 · → [[libraries/ticket-analyzer]]
 - **Build box lane shows which phase it's building** · verified 2026-06-23 · → [[lifecycles/roadmap-build-console]]
 - **Box multi-account round-robin + failover — survive (and outrun) the Max usage wall** · verified 2026-06-23 · → [[recipes/build-box-setup]]
