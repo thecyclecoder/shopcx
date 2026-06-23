@@ -66,6 +66,8 @@ export async function GET(
   // Owner-only preview link per arm: forces that arm (`sx_preview`) and is
   // exposure-excluded (`sx_internal=1`). Null if we can't build a public URL.
   const renderVariant = renderVariantForLanderType(experiment.lander_type as LanderType);
+  // PDP (renderVariant null) = the bare product page; only non-PDP landers take a ?variant=.
+  const variantParam = renderVariant ? `variant=${renderVariant}&` : "";
   const slug = workspace?.storefront_slug ?? null;
   const handle = product?.handle ?? null;
   const previewByVariant = new Map<string, string | null>();
@@ -73,7 +75,7 @@ export async function GET(
     previewByVariant.set(
       v.id,
       slug && handle
-        ? `/store/${slug}/${handle}?variant=${renderVariant}&sx_preview=${experimentId}:${v.id}&sx_internal=1`
+        ? `/store/${slug}/${handle}?${variantParam}sx_preview=${experimentId}:${v.id}&sx_internal=1`
         : null,
     );
   }

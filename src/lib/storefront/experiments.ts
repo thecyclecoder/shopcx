@@ -103,14 +103,16 @@ export function landerTypeForVariant(variant: AdvertorialVariant): LanderType {
   return variant === "reasons" ? "listicle" : variant;
 }
 
-/** Map an experiment `lander_type` → the storefront render `?variant=` that renders
- *  it. Inverse of `landerTypeForVariant`; `pdp` has no advertorial render variant, so
- *  the detail-page preview falls back to `advertorial` (the patch fields are
- *  advertorial content). Used to build the owner-only preview link. */
-export function renderVariantForLanderType(landerType: LanderType): AdvertorialVariant {
+/** Map an experiment `lander_type` → the storefront render `?variant=` that renders it.
+ *  Inverse of `landerTypeForVariant`. **`pdp` returns null** — the PDP is the DEFAULT product
+ *  page (no `?variant=`), NOT the advertorial lander; the preview-URL builder omits `variant=`
+ *  when this is null. (Previously this fell back to `advertorial`, so a PDP preview wrongly
+ *  rendered the advertorial lander.) Used to build the owner-only preview link. */
+export function renderVariantForLanderType(landerType: LanderType): AdvertorialVariant | null {
   if (landerType === "listicle") return "reasons";
   if (landerType === "beforeafter") return "beforeafter";
-  return "advertorial";
+  if (landerType === "advertorial") return "advertorial";
+  return null; // pdp → bare product page, no variant param
 }
 
 /** Parse the detail-page preview param `sx_preview=<experimentId>:<variantId>` into
