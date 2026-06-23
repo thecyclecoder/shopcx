@@ -39,6 +39,16 @@ The leash is hard, so a high-stakes call **always escalates to the CEO** — it 
 - **Re-route a declined request → CEO** (`escalateApprovalRequestToCeo`). The box lane's two escalate branches (out-of-leash / multi-choice, and the investigation `escalate`/ambiguous verdict — e.g. a **destructive** migration the runner won't auto-approve) now flip the target's routed Approval Request to `routed_to_function='ceo'` and prepend Ada's diagnosis to the body, so the **CEO** inbox shows it and Platform's no longer does. The target job stays `needs_approval` (never auto-approved); the CEO approves/declines via the normal `/api/roadmap/approve` gate. Creates a CEO-routed request if the reconciler hadn't emitted one yet (idempotent on `agent_job_id`).
 - **Standalone diagnosis → CEO** (`escalateDiagnosisToCeo`). A high-stakes call with **no approvable target** — a loop-guard "deeper issue," or a **zero-progress owned goal** (only the CEO greenlights a NEW goal). Emits a CEO-routed Approval Request (no inline approve — it deep-links the CEO to the spec/goal) **and** an `escalated` [[../tables/director_activity]] row. **Deduped** on a `dedupe_key` (`loopguard:{slug}` / `newgoal:{goalSlug}`) via the `director_activity` ledger so it pings once (survives a dismissed notification). Carries **no `agent_job_id`** so [[approval-inbox]] `reconcileApprovalInbox` — which dismisses any request whose job left `needs_approval` — never reaps this standalone escalation.
 
+## Watch the platform + report to the board (Phase 4 — the human-legible top layer)
+
+The director's top layer is **reporting up in human terms** — and it **supervises, doesn't rebuild**: it reads the *existing* [[../dashboard/control-tower]] snapshot rather than standing up new monitoring, and reuses the *existing* board/recap/dev-ask plumbing rather than a parallel path.
+
+- **Daily board watch** (`postPlatformWatchUpdate`). Reads [[control-tower]] `buildControlTowerSnapshot` → the **platform department rollup** (worst-of color, healthy/total, open alerts) + its red loops, plus today's [[../tables/director_activity]] (squashed = `approved_approval`, escorting = `escorted_goal`, escalated = `escalated`), and posts ONE conversational `update` as 🛠️ Ada to the [[../tables/director_messages]] board (`composePlatformWatchBody` — *"🛠️ Platform watch — all 9 platform loops green. Today: squashed 2 fixes · escorted 1 goal."*). **Idempotent** per (workspace, UTC day) on `metadata.watch_date`; skips a fully-quiet all-green day (no empty-board spam); **dormant** until live+autonomous like the escort.
+- **"Answers why?"** — no new code: the [[../specs/directors-board-gamified]] Phase-2 board→dev-ask wiring ([[director-board]] `routeBoardReply`) already defaults the answer brain to Platform, so a "why?" reply under Ada's post routes to a `dev-ask` box turn that posts the answer back in-thread.
+- **EOD-recap slice** — no new code: Platform is a director, so [[director-recap]] `generateDirectorRecap` already rolls its day's activity into the standup (`goalsAdvanced` ← `escorted_goal`; `bugsFixed`/`approvalsHandled` ← the director's [[../tables/approval_decisions]]) + the CEO roll-up.
+
+**Activation (owner-confirmed).** `scripts/apply-platform-live-autonomous.ts` upserts the [[../tables/function_autonomy]] `platform` row to `live + autonomous` — the Phase-4 switch that takes every dormant surface above live (the approval router then routes platform-owned approvals to the director instead of the CEO). Idempotent + reversible (toggle off from the [[../dashboard/agents|Agents hub]]).
+
 ## Exports
 
 - **`enqueuePlatformDirectorJobs(admin)`** → `{ enqueued, slugs }` — the poll-loop background sweep. Finds every open `needs_approval` [[../tables/agent_jobs]] routed to Platform and queues one `kind='platform-director'` job per target (instructions `{ target_job_id, target_kind }`). **Idempotent** (one director job per target, ever — the dedup that stops an infinite re-enqueue of a deferred target). No-op unless `platformIsAutoApprover`.
@@ -50,6 +60,8 @@ The leash is hard, so a high-stakes call **always escalates to the CEO** — it 
 - **`specBuildState(admin, workspaceId, specSlug)`** → `{ inFlight, failedCount, lastError, total }` (Phase 3) — the per-spec build classification the escort + loop-guard read.
 - **`escalateApprovalRequestToCeo(admin, target, diagnosis)`** → `{ ok, created }` (Phase 3) — re-route a declined Approval Request to the CEO inbox with the diagnosis (see above).
 - **`escalateDiagnosisToCeo(admin, { workspaceId, specSlug, title, diagnosis, dedupeKey, deepLink, escalationKind, metadata? })`** → `{ emitted }` (Phase 3) — the deduped standalone CEO escalation (loop-guard / new goal).
+- **`postPlatformWatchUpdate(admin, opts?)`** → `{ posted, reason? }` (Phase 4) — the daily board watch post (see *Watch the platform* above). Reads [[control-tower]] `buildControlTowerSnapshot` + today's [[../tables/director_activity]] and posts ONE `update` as 🛠️ Ada to [[../tables/director_messages]]. Idempotent per (workspace, UTC day) on `metadata.watch_date`; `reason` ∈ `dormant｜no_workspace｜already_posted｜quiet` when it doesn't post. No-op until live+autonomous.
+- **`composePlatformWatchBody(health, activity)`** → `string` (Phase 4) — the pure persona-voice body composer (health line + activity line); types **`PlatformHealth`**, **`PlatformWatchActivity`**.
 - Const **`PLATFORM`**, **`LEASH_CATEGORIES`**, **`PLATFORM_DIRECTOR_LOOP_GUARD_MAX`** (2), **`PLATFORM_DIRECTOR_RECENT_WINDOW_MS`** (7d); types **`LeashCategory`**, **`DirectorTargetJob`**, **`DirectorActionLike`**, **`DirectorBrief`**, **`GoalEscortResult`**, **`SpecBuildState`**.
 
 ## The box lane
@@ -59,6 +71,8 @@ The leash is hard, so a high-stakes call **always escalates to the CEO** — it 
 - **`escalate`** (or any ambiguous/unparseable verdict — fail safe) → a `director_activity` `escalated` row **and** `escalateApprovalRequestToCeo` re-routes the request to the CEO inbox with the diagnosis (Phase 3). The target stays `needs_approval` (never auto-approved).
 
 It **never** edits product code, opens a PR, or runs a migration — it only decides on the existing gated action.
+
+**Standing pass (Phase 4).** When the job carries **no `target_job_id`** — the daily [[../inngest/platform-director-cron]] enqueue — `runPlatformDirectorJob` instead runs `runPlatformDirectorStandingPass`: `escortApprovedGoals` (Phase 2) **and** `postPlatformWatchUpdate` (the board watch) on the reliable cron beat. Best-effort (a failure in one half never blocks the other); both no-op unless live+autonomous.
 
 ## Safety invariants
 

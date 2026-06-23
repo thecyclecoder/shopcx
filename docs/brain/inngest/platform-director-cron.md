@@ -13,7 +13,7 @@ The **standing cadence** for the box-hosted **Platform/DevOps Director** ([[../s
 
 ## What it enqueues
 
-For each **build-console workspace** — any workspace that uses the agent-jobs queue (has at least one [[../tables/agent_jobs]] row, mirrors [[spec-test-cron]]) — it inserts one `queued` `agent_jobs` row `kind='platform-director'`. The box claims it on its platform-director lane (`scripts/builder-worker.ts` → `runPlatformDirectorJob`) and runs the standing pass on Max — escort approved goals through their unblocked milestones, watch [[../dashboard/control-tower]] health, and report up.
+For each **build-console workspace** — any workspace that uses the agent-jobs queue (has at least one [[../tables/agent_jobs]] row, mirrors [[spec-test-cron]]) — it inserts one `queued` `agent_jobs` row `kind='platform-director'` with **no `target_job_id`**. The box claims it on its platform-director lane (`scripts/builder-worker.ts` → `runPlatformDirectorJob`); a target-less job runs the **standing pass** (`runPlatformDirectorStandingPass`, Phase 4): `escortApprovedGoals` (escort each approved goal's unblocked specs through their milestones) **and** `postPlatformWatchUpdate` (read [[../dashboard/control-tower]] health via its snapshot library + post the daily human-readable watch update as 🛠️ Ada to the [[../tables/director_messages]] board). Both are no-ops unless Platform is `live + autonomous` ([[../tables/function_autonomy]]).
 
 ## Dedupe
 
