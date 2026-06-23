@@ -134,6 +134,20 @@ export const UNUSED_INDEX_MIN_BYTES = 50 * 1024 * 1024; // 50 MB
 export const BLOAT_DEAD_RATIO_FLAG = 0.2;
 export const BLOAT_AUTOVACUUM_STALE_MS = 24 * 60 * 60 * 1000; // last autovacuum older than a day
 
+// ── Phase 2 trend thresholds (project the size-history forward, not just day-over-day) ──
+/** Need at least this many snapshots in the window to fit a trend (fewer ⇒ no projection — honest). */
+export const TREND_MIN_POINTS = 3;
+/** …and the snapshots must span at least this many days (a one-day spread isn't a trend). */
+export const TREND_MIN_SPAN_DAYS = 2;
+/** Project growth this far ahead — a table whose linear fit crosses the ceiling within this window is flagged. */
+export const GROWTH_TREND_HORIZON_DAYS = 30;
+/** The size a single table crossing is operationally significant (loop_heartbeats was 4.5 GB at crisis). */
+export const GROWTH_TREND_CEILING_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
+/** A bloat TREND fires at a lower dead ratio than the single-snapshot flag — to catch it earlier… */
+export const BLOAT_TREND_MIN_RATIO = 0.1; // below BLOAT_DEAD_RATIO_FLAG (0.2) on purpose
+/** …but only when the dead-tuple ratio has CLIMBED at least this much across the window (genuinely worsening). */
+export const BLOAT_TREND_RISE = 0.05; // +5 points dead-tuple ratio over the window
+
 /** Tables already covered by a retention cron — never re-propose retention for these. Keep SHORT;
  *  the right answer for a real unbounded table is to build its retention, not to allowlist it.
  *  loop_heartbeats got its prune cron (loop-heartbeats-retention). */
@@ -508,6 +522,178 @@ export function analyzeBloat(tables: TableSizeRow[], now: number): DbHealthFindi
       ].join("\n"),
       specSlug: slugFor("vacuum_tuning", t.table_name),
       specTitle: `Vacuum / autovacuum-tune ${t.table_name} (bloat)`,
+    });
+  }
+  return out;
+}
+
+// ── Phase 2 — trend projection (growth-to-ceiling + autovacuum-lag trend) ─────
+//
+// The Phase-1 detectors look at the latest reading (analyzeBloat) or a single day-over-day delta
+// (analyzeGrowth). Those catch a *spike* but miss a steady climb under the 25%/day spike threshold,
+// and they only see bloat once it's already past 20%. Phase 2 uses the whole db_table_size_history
+// window: fit a line through the per-table series and project it forward. A growth trend that crosses
+// a size ceiling within N days → a retention proposal; a dead-tuple ratio that is RISING across the
+// window while autovacuum isn't keeping up → a vacuum proposal. Both reuse the Phase-1 signatures
+// (`dbhealth:growth:<table>` / `dbhealth:bloat:<table>`) so dedupeFindings collapses a spike + a trend
+// for the same table into ONE proposal (same fix) — never two cards for one table.
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+interface TableSeries {
+  table: string;
+  /** snapshots oldest→newest, with `t` = days since the first snapshot. */
+  points: Array<{ t: number; row: TableSizeRow }>;
+}
+
+/** Group a flat history window into per-table series (oldest→newest), x = days since the first point. */
+function groupSeries(history: TableSizeRow[]): TableSeries[] {
+  const byTable = new Map<string, TableSizeRow[]>();
+  for (const r of history) {
+    if (!r.captured_at) continue;
+    const arr = byTable.get(r.table_name);
+    if (arr) arr.push(r);
+    else byTable.set(r.table_name, [r]);
+  }
+  const out: TableSeries[] = [];
+  for (const [table, rows] of byTable) {
+    const sorted = [...rows].sort((a, b) => Date.parse(a.captured_at!) - Date.parse(b.captured_at!));
+    const t0 = Date.parse(sorted[0].captured_at!);
+    out.push({ table, points: sorted.map((row) => ({ t: (Date.parse(row.captured_at!) - t0) / DAY_MS, row })) });
+  }
+  return out;
+}
+
+/** Ordinary least-squares fit of y over x. Returns slope (per unit x) + intercept; slope 0 if degenerate. */
+export function linearFit(points: Array<{ x: number; y: number }>): { slope: number; intercept: number } {
+  const n = points.length;
+  if (n === 0) return { slope: 0, intercept: 0 };
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const p of points) {
+    sx += p.x;
+    sy += p.y;
+    sxx += p.x * p.x;
+    sxy += p.x * p.y;
+  }
+  const denom = n * sxx - sx * sx;
+  if (denom === 0) return { slope: 0, intercept: sy / n };
+  const slope = (n * sxy - sx * sy) / denom;
+  return { slope, intercept: (sy - slope * sx) / n };
+}
+
+function deadRatio(r: TableSizeRow): number {
+  const tot = r.n_live_tup + r.n_dead_tup;
+  return tot > 0 ? r.n_dead_tup / tot : 0;
+}
+
+/** Render a few series points (oldest, middle, newest) for the spec evidence — show the trend, don't assert it. */
+function sampleSeriesLines(points: TableSeries["points"], render: (r: TableSizeRow) => string): string[] {
+  const idxs = points.length <= 4 ? points.map((_, i) => i) : [0, Math.floor(points.length / 2), points.length - 1];
+  const seen = new Set<number>();
+  return idxs
+    .filter((i) => !seen.has(i) && seen.add(i))
+    .map((i) => `  ${points[i].row.captured_at ?? "?"}: ${render(points[i].row)}`);
+}
+
+/**
+ * GROWTH TREND: fit each big table's size series and flag the ones projected to cross
+ * GROWTH_TREND_CEILING_BYTES within GROWTH_TREND_HORIZON_DAYS — a steady climb the day-over-day spike
+ * check (analyzeGrowth, +25%/day) misses. Reuses the `dbhealth:growth:<table>` signature so a table
+ * that ALSO tripped the spike check dedupes to one retention proposal. Honest: a table without enough
+ * snapshots, with a flat/negative slope, or whose projection lands beyond the horizon is not flagged.
+ */
+export function analyzeGrowthTrend(history: TableSizeRow[], now: number): DbHealthFinding[] {
+  void now;
+  const out: DbHealthFinding[] = [];
+  for (const { table, points } of groupSeries(history)) {
+    if (points.length < TREND_MIN_POINTS) continue;
+    const span = points[points.length - 1].t - points[0].t;
+    if (span < TREND_MIN_SPAN_DAYS) continue;
+    if (RETENTION_AWARE_TABLES.includes(table)) continue;
+    if (isAllowlisted(table, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — don't tune what we're turning off
+    const latest = points[points.length - 1].row;
+    if (latest.total_bytes < SIZE_MIN_BYTES) continue;
+    const fit = linearFit(points.map((p) => ({ x: p.t, y: p.row.total_bytes })));
+    if (fit.slope <= 0) continue; // flat or shrinking — no projection to make
+    const bytesPerDay = fit.slope;
+    const cur = latest.total_bytes;
+    const daysToCeiling = cur >= GROWTH_TREND_CEILING_BYTES ? 0 : (GROWTH_TREND_CEILING_BYTES - cur) / bytesPerDay;
+    if (daysToCeiling > GROWTH_TREND_HORIZON_DAYS) continue; // not on track to cross the ceiling within the horizon
+    const projected = cur + bytesPerDay * GROWTH_TREND_HORIZON_DAYS;
+    const reach =
+      daysToCeiling <= 0
+        ? `already past ${humanBytes(GROWTH_TREND_CEILING_BYTES)} and still climbing`
+        : `reaches ${humanBytes(GROWTH_TREND_CEILING_BYTES)} in ~${Math.round(daysToCeiling)}d`;
+    const impact = `+${humanBytes(bytesPerDay)}/day trend over ${points.length} snapshots / ${span.toFixed(1)}d → ${reach} (now ${humanBytes(cur)}, ~${humanBytes(projected)} projected in ${GROWTH_TREND_HORIZON_DAYS}d)`;
+    out.push({
+      signature: `dbhealth:growth:${table}`,
+      category: "growth",
+      cause: "unbounded_growth",
+      fixKind: "retention_cron",
+      table,
+      title: `${table} on a growth trend — ${reach}`,
+      impact,
+      score: projected,
+      evidence: [
+        `Table: ${table}`,
+        `Trend: ${humanBytes(bytesPerDay)}/day (least-squares fit over ${points.length} snapshots spanning ${span.toFixed(1)} days).`,
+        `Now ${humanBytes(cur)}; projected ~${humanBytes(projected)} in ${GROWTH_TREND_HORIZON_DAYS} days; ${reach} (ceiling ${humanBytes(GROWTH_TREND_CEILING_BYTES)}).`,
+        `History (size):`,
+        ...sampleSeriesLines(points, (r) => `${humanBytes(r.total_bytes)} (~${r.row_estimate.toLocaleString()} rows)`),
+        `A steady climb under the +${pct(GROWTH_FLAG_FRACTION)}/day spike threshold still has no natural ceiling — the loop_heartbeats class, caught from the trend before it's a crisis.`,
+      ].join("\n"),
+      specSlug: slugFor("retention_cron", table),
+      specTitle: `Add a retention cron for ${table} (growth trend → ${humanBytes(GROWTH_TREND_CEILING_BYTES)})`,
+    });
+  }
+  return out;
+}
+
+/**
+ * BLOAT / AUTOVACUUM-LAG TREND: flag a big table whose dead-tuple ratio is RISING across the window
+ * (≥ BLOAT_TREND_RISE) and is now ≥ BLOAT_TREND_MIN_RATIO, while autovacuum isn't keeping up (its
+ * last_autovacuum hasn't advanced across the window, or is stale). This catches a slowly-bloating hot
+ * table BEFORE it crosses the single-snapshot 20% flag (analyzeBloat). If autovacuum DID fire and
+ * isn't stale, a transient ratio rise is churn it's handling — not flagged. Reuses the
+ * `dbhealth:bloat:<table>` signature so it dedupes with the single-snapshot bloat finding.
+ */
+export function analyzeBloatTrend(history: TableSizeRow[], now: number): DbHealthFinding[] {
+  const out: DbHealthFinding[] = [];
+  for (const { table, points } of groupSeries(history)) {
+    if (points.length < TREND_MIN_POINTS) continue;
+    if (isAllowlisted(table, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — skip
+    const latest = points[points.length - 1].row;
+    const earliest = points[0].row;
+    if (latest.total_bytes < SIZE_MIN_BYTES) continue;
+    const latestRatio = deadRatio(latest);
+    const earliestRatio = deadRatio(earliest);
+    if (latestRatio < BLOAT_TREND_MIN_RATIO) continue; // not yet meaningfully bloated
+    if (latestRatio - earliestRatio < BLOAT_TREND_RISE) continue; // not actually worsening
+    const latestVac = latest.last_autovacuum ? Date.parse(latest.last_autovacuum) : NaN;
+    const earliestVac = earliest.last_autovacuum ? Date.parse(earliest.last_autovacuum) : NaN;
+    const vacAdvanced = !Number.isNaN(latestVac) && (Number.isNaN(earliestVac) || latestVac > earliestVac);
+    const stale = Number.isNaN(latestVac) || now - latestVac > BLOAT_AUTOVACUUM_STALE_MS;
+    if (vacAdvanced && !stale) continue; // autovacuum is keeping up — the rise is churn it's handling
+    const span = points[points.length - 1].t - points[0].t;
+    out.push({
+      signature: `dbhealth:bloat:${table}`,
+      category: "bloat",
+      cause: "bloat_vacuum_lag",
+      fixKind: "vacuum_tuning",
+      table,
+      title: `${table} — dead tuples climbing ${pct(earliestRatio)} → ${pct(latestRatio)}, autovacuum not keeping up`,
+      impact: `dead ratio ${pct(earliestRatio)} → ${pct(latestRatio)} over ${span.toFixed(1)}d, last autovacuum ${latest.last_autovacuum ?? "never"}`,
+      score: latest.total_bytes * latestRatio,
+      evidence: [
+        `Table: ${table} (${humanBytes(latest.total_bytes)})`,
+        `Dead-tuple ratio is RISING: ${pct(earliestRatio)} → ${pct(latestRatio)} over ${points.length} snapshots / ${span.toFixed(1)} days.`,
+        `Last autovacuum: ${latest.last_autovacuum ?? "never"} — ${vacAdvanced ? "advanced but still stale" : "has not advanced across the window"} (not keeping up with the churn).`,
+        `History (dead ratio · last autovacuum):`,
+        ...sampleSeriesLines(points, (r) => `${pct(deadRatio(r))} · ${r.last_autovacuum ?? "never"}`),
+        `Caught from the trend before the single-snapshot ${pct(BLOAT_DEAD_RATIO_FLAG)} flag — propose a VACUUM (ANALYZE) + a tighter per-table autovacuum_vacuum_scale_factor so it doesn't recur. No data is deleted.`,
+      ].join("\n"),
+      specSlug: slugFor("vacuum_tuning", table),
+      specTitle: `Vacuum / autovacuum-tune ${table} (rising bloat trend)`,
     });
   }
   return out;

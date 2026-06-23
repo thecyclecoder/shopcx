@@ -175,6 +175,7 @@ let lastDbHealthSize = 0;
 let dbHealthSlowQInFlight = false;
 let dbHealthSizeInFlight = false;
 const DB_HEALTH_MAX_PROPOSALS_PER_PASS = 5; // don't flood: surface at most the top-N findings/pass.
+const DB_HEALTH_TREND_WINDOW_DAYS = 21; // Phase 2: trailing size-history window for the trend projection.
 
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
@@ -1304,17 +1305,47 @@ async function runDbHealthSizeJob(): Promise<void> {
       is_primary: Boolean(r.is_primary),
     }));
 
+    // Phase 2 — the trailing size-history WINDOW (incl. the just-inserted current batch) for the trend
+    // projection: growth-to-ceiling + the autovacuum-lag trend. Bounded to the currently-big tables (the
+    // only ones a trend can flag) so the row count stays well under PostgREST's default cap. Honest:
+    // <TREND_MIN_POINTS snapshots ⇒ no trend findings, just the spike/single-snapshot ones.
+    let history: import("../src/lib/control-tower/db-health").TableSizeRow[] = [];
+    const bigTableNames = tables.filter((t) => t.total_bytes >= mod.SIZE_MIN_BYTES).map((t) => t.table_name);
+    if (bigTableNames.length > 0) {
+      const trendWindowStart = new Date(Date.now() - DB_HEALTH_TREND_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+      const { data: histRows } = await db
+        .from("db_table_size_history")
+        .select("table_name, total_bytes, row_estimate, seq_scan, idx_scan, n_live_tup, n_dead_tup, last_autovacuum, captured_at")
+        .in("table_name", bigTableNames)
+        .gte("captured_at", trendWindowStart)
+        .order("captured_at", { ascending: true })
+        .limit(5000);
+      history = ((histRows ?? []) as Array<Record<string, unknown>>).map((r) => ({
+        table_name: String(r.table_name ?? ""),
+        total_bytes: Number(r.total_bytes ?? 0),
+        row_estimate: Number(r.row_estimate ?? 0),
+        seq_scan: Number(r.seq_scan ?? 0),
+        idx_scan: Number(r.idx_scan ?? 0),
+        n_live_tup: Number(r.n_live_tup ?? 0),
+        n_dead_tup: Number(r.n_dead_tup ?? 0),
+        last_autovacuum: (r.last_autovacuum as string | null) ?? null,
+        captured_at: (r.captured_at as string | null) ?? undefined,
+      }));
+    }
+
     const findings = [
       ...mod.analyzeGrowth(tables, prior),
+      ...mod.analyzeGrowthTrend(history, Date.now()),
       ...mod.analyzeIndexUsage(tables, indexes),
       ...mod.analyzeBloat(tables, Date.now()),
+      ...mod.analyzeBloatTrend(history, Date.now()),
     ];
     const proposed = await surfaceDbHealthFindings(findings);
     const top = tables.slice(0, 10).map((t) => ({ table: t.table_name, total_bytes: t.total_bytes, row_estimate: t.row_estimate }));
     await writeCronHeartbeat(
       mod.DB_HEALTH_SIZE_LOOP_ID,
       true,
-      { status: "ok", tables_snapshotted: tables.length, had_prior: prior.length > 0, findings: findings.length, proposed, top },
+      { status: "ok", tables_snapshotted: tables.length, had_prior: prior.length > 0, history_rows: history.length, findings: findings.length, proposed, top },
       Date.now() - startedAt,
       `db-health size sweep — ${tables.length} tables, ${mod.summarizeFindings(findings)}, ${proposed} proposed`,
     );

@@ -28,7 +28,7 @@ The [[../libraries/db-health|DB Health Agent]]'s daily per-table size/stat snaps
 ## Who writes / reads
 
 - **Writer:** `scripts/builder-worker.ts` `runDbHealthSizeJob` (the daily size sweep) — reads the per-table size + `pg_stat_user_tables` row over the pooler (raw `pg`; not exposed via PostgREST) and inserts the batch with one shared `captured_at`. Service role.
-- **Readers:** the same job reads the **prior** day's batch (latest `captured_at` ≥20h back) to compute the growth rate (`analyzeGrowth` in [[../libraries/db-health]]); `getDbHealthPanel` reads the **latest** batch's top-N tables by size for the [[../dashboard/control-tower]] DB Health panel.
+- **Readers:** the same job reads the **prior** day's batch (latest `captured_at` ≥20h back) to compute the day-over-day growth rate (`analyzeGrowth` in [[../libraries/db-health]]), AND **(Phase 2)** a trailing **21-day window** (bounded to the currently-big tables) for the trend projection (`analyzeGrowthTrend` / `analyzeBloatTrend` — least-squares fit → projected days-to-ceiling + a rising-bloat trend); `getDbHealthPanel` reads the **latest** batch's top-N tables by size for the [[../dashboard/control-tower]] DB Health panel.
 
 ## Gotchas
 
