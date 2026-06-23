@@ -16,7 +16,13 @@ This **extends the [[daily-analysis-report]] `generateDailyReport` aggregate-the
 - **`type DirectorRecapMap = Record<string, DirectorDayStats>`** — keyed by function slug.
 - **`composeDirectorRecap(slug, stats): string`** — the persona-voiced director recap line.
 - **`composeCeoRollup(total, activeDirectors): string`** — the CEO company-standup line.
-- **`generateDirectorRecap(workspaceId, date): Promise<{ ok; reason?; date?; directorsPosted?; ceoPosted? }>`** — aggregate → post. Returns `{ ok:false, reason:'no_activity' }` for a quiet workspace (no empty-standup spam).
+- **`recapDetailHref(fn, date): string`** — deep-link to the human-readable EOD detail page (`/dashboard/agents/recap/{fn}/{date}`).
+- **`generateDirectorRecap(workspaceId, date): Promise<{ ok; reason?; date?; directorsPosted?; ceoPosted? }>`** — aggregate → post. Returns `{ ok:false, reason:'no_activity' }` for a quiet workspace (no empty-standup spam). Each Daily Summaries notification now carries a `link` to the detail page.
+- **`buildDirectorDayDetail(workspaceId, date, functionSlug): Promise<DirectorDayDetail>`** — the **human-readable EOD detail** ([[../specs/director-loop-grading]] **Phase 5**): a pure read over that day's [[../tables/director_activity]] rows grouped into narrative sections (`fixed｜goals｜escalated｜other`) — what it fixed + why, which goal it moved, what it escalated — plus the headline counts. `functionSlug='ceo'` aggregates every director's rows under the company roll-up. Never writes.
+
+## The EOD detail page (director-loop-grading Phase 5)
+
+The one-line standup post links to **its own human-readable detail page** — a readable narrative of the director's day built by **reading that day's `director_activity` rows** (open-vocabulary `action_kind` → a narrative section + a human verb; the row's plain-text `reason` is the "why"). Deterministic (no LLM), the same display-only-proxy stance as the standup line. Sections, in order, dropping empties: **Fixes & approvals** (`authored_fix｜approved_approval｜approved_migration｜detected/dismissed_regression｜coaching_routed_to_repair`), **Goals moved** (`escorted_goal｜advanced_milestone｜shipped_milestone`), **Escalations** (`escalated*`), **Other actions** (`coached_worker｜groomed_*` + any unmapped kind). Served by `GET /api/developer/agents/recap?function={slug|ceo}&date={YYYY-MM-DD}` (owner-gated) → rendered at `/dashboard/agents/recap/[function]/[date]` ([[../dashboard/agents]]), reached by clicking a row in the M1 **Daily Summaries** tab.
 
 ## How each count is derived (for `date`, UTC `[00:00, 24:00)`)
 

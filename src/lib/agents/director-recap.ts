@@ -88,6 +88,11 @@ export function composeDirectorRecap(slug: string, s: DirectorDayStats): string 
   return `${persona.emoji} EOD recap — ${summaryLine(s)}.`;
 }
 
+/** Deep-link to a director's (or the CEO's) human-readable EOD detail page (director-loop-grading Phase 5). */
+export function recapDetailHref(fn: string, date: string): string {
+  return `/dashboard/agents/recap/${encodeURIComponent(fn)}/${encodeURIComponent(date)}`;
+}
+
 /** The CEO company-standup roll-up across every active director (plain text, no markdown). */
 export function composeCeoRollup(total: DirectorDayStats, activeDirectors: number): string {
   const ceo = getPersona("ceo");
@@ -115,6 +120,120 @@ export async function generateDirectorRecap(workspaceId: string, date: string): 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, reason: "bad_date_format" };
 
   const admin = createAdminClient();
+  const { byFn, functions } = await aggregateDirectorDay(admin, workspaceId, date);
+
+  // Active directors only — no empty standup spam for a director who did nothing today.
+  const activeSlugs = functions.map((f) => f.slug).filter((slug) => isActive(byFn[slug]));
+  if (!activeSlugs.length) return { ok: false, reason: "no_activity", date, directorsPosted: 0, ceoPosted: false };
+
+  // Idempotency: skip any author whose recap for this date already landed (cron retry safe).
+  const { data: existing } = await admin
+    .from("director_messages")
+    .select("author, author_function")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "recap")
+    .eq("metadata->>recap_date", date);
+  const postedDirectors = new Set<string>();
+  let ceoPosted = false;
+  for (const e of (existing ?? []) as { author: string; author_function: string | null }[]) {
+    if (e.author === "ceo") ceoPosted = true;
+    else if (e.author === "director" && e.author_function) postedDirectors.add(e.author_function);
+  }
+
+  // Per-director recap → board `recap` post + Daily Summaries notification.
+  let directorsPosted = 0;
+  for (const slug of activeSlugs) {
+    if (postedDirectors.has(slug)) continue;
+    const stats = byFn[slug];
+    const persona = getPersona(slug);
+    const body = composeDirectorRecap(slug, stats);
+    await postDirectorMessage({
+      workspaceId,
+      author: "director",
+      authorFunction: slug,
+      body,
+      kind: "recap",
+      metadata: { recap_date: date, source: "eod-recap", stats },
+    });
+    await insertDailySummary(admin, {
+      workspaceId,
+      title: `${persona.name} · ${persona.role} — daily recap`,
+      body,
+      // Deep-link to the human-readable detail page (director-loop-grading Phase 5) — the day narrated.
+      link: recapDetailHref(slug, date),
+      metadata: { recap_date: date, source: "eod-recap", author_function: slug, stats },
+    });
+    directorsPosted++;
+  }
+
+  // CEO roll-up — the company standup across every active director.
+  if (!ceoPosted) {
+    const total = emptyStats();
+    for (const slug of activeSlugs) {
+      const s = byFn[slug];
+      total.specsShipped += s.specsShipped;
+      total.goalsAdvanced += s.goalsAdvanced;
+      total.bugsFixed += s.bugsFixed;
+      total.migrationsApproved += s.migrationsApproved;
+      total.approvalsHandled += s.approvalsHandled;
+      total.actions += s.actions;
+    }
+    const body = composeCeoRollup(total, activeSlugs.length);
+    await postDirectorMessage({
+      workspaceId,
+      author: "ceo",
+      body,
+      kind: "recap",
+      metadata: { recap_date: date, source: "eod-recap", scope: "ceo-rollup", stats: total },
+    });
+    await insertDailySummary(admin, {
+      workspaceId,
+      title: `Company standup — ${date}`,
+      body,
+      // The CEO roll-up detail aggregates every director's day under the `ceo` scope.
+      link: recapDetailHref("ceo", date),
+      metadata: { recap_date: date, source: "eod-recap", scope: "ceo-rollup", stats: total },
+    });
+    ceoPosted = true;
+  }
+
+  return { ok: true, date, directorsPosted, ceoPosted };
+}
+
+type Admin = ReturnType<typeof createAdminClient>;
+
+/** Surface a recap in the M1 Daily Summaries tab — a reserved `agent_daily_summary` notification. */
+async function insertDailySummary(
+  admin: Admin,
+  input: { workspaceId: string; title: string; body: string; link?: string | null; metadata: Record<string, unknown> },
+): Promise<void> {
+  await admin.from("dashboard_notifications").insert({
+    workspace_id: input.workspaceId,
+    type: DAILY_SUMMARY_TYPE,
+    title: input.title,
+    body: input.body,
+    link: input.link ?? null,
+    metadata: input.metadata,
+    read: false,
+    dismissed: false,
+  });
+}
+
+interface RoadmapFn {
+  slug: string;
+}
+
+/**
+ * Aggregate a workspace's per-director activity for `date` (UTC `[00:00, 24:00)`) from existing truth —
+ * the shared substrate for both the one-line recap ([[generateDirectorRecap]]) and the human-readable
+ * detail page ([[buildDirectorDayDetail]]). A pure read; never writes. Returns a zeroed map seeded for
+ * every known function so attribution only ever lands on a real director.
+ */
+async function aggregateDirectorDay(
+  admin: Admin,
+  workspaceId: string,
+  date: string,
+): Promise<{ byFn: DirectorRecapMap; functions: RoadmapFn[] }> {
   const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
   const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
 
@@ -180,94 +299,194 @@ export async function generateDirectorRecap(workspaceId: string, date: string): 
     if (GOAL_ADVANCE_KINDS.has(a.action_kind)) stats.goalsAdvanced++;
   }
 
-  // Active directors only — no empty standup spam for a director who did nothing today.
-  const activeSlugs = functions.map((f) => f.slug).filter((slug) => isActive(byFn[slug]));
-  if (!activeSlugs.length) return { ok: false, reason: "no_activity", date, directorsPosted: 0, ceoPosted: false };
-
-  // Idempotency: skip any author whose recap for this date already landed (cron retry safe).
-  const { data: existing } = await admin
-    .from("director_messages")
-    .select("author, author_function")
-    .eq("workspace_id", workspaceId)
-    .eq("kind", "recap")
-    .eq("metadata->>recap_date", date);
-  const postedDirectors = new Set<string>();
-  let ceoPosted = false;
-  for (const e of (existing ?? []) as { author: string; author_function: string | null }[]) {
-    if (e.author === "ceo") ceoPosted = true;
-    else if (e.author === "director" && e.author_function) postedDirectors.add(e.author_function);
-  }
-
-  // Per-director recap → board `recap` post + Daily Summaries notification.
-  let directorsPosted = 0;
-  for (const slug of activeSlugs) {
-    if (postedDirectors.has(slug)) continue;
-    const stats = byFn[slug];
-    const persona = getPersona(slug);
-    const body = composeDirectorRecap(slug, stats);
-    await postDirectorMessage({
-      workspaceId,
-      author: "director",
-      authorFunction: slug,
-      body,
-      kind: "recap",
-      metadata: { recap_date: date, source: "eod-recap", stats },
-    });
-    await insertDailySummary(admin, {
-      workspaceId,
-      title: `${persona.name} · ${persona.role} — daily recap`,
-      body,
-      metadata: { recap_date: date, source: "eod-recap", author_function: slug, stats },
-    });
-    directorsPosted++;
-  }
-
-  // CEO roll-up — the company standup across every active director.
-  if (!ceoPosted) {
-    const total = emptyStats();
-    for (const slug of activeSlugs) {
-      const s = byFn[slug];
-      total.specsShipped += s.specsShipped;
-      total.goalsAdvanced += s.goalsAdvanced;
-      total.bugsFixed += s.bugsFixed;
-      total.migrationsApproved += s.migrationsApproved;
-      total.approvalsHandled += s.approvalsHandled;
-      total.actions += s.actions;
-    }
-    const body = composeCeoRollup(total, activeSlugs.length);
-    await postDirectorMessage({
-      workspaceId,
-      author: "ceo",
-      body,
-      kind: "recap",
-      metadata: { recap_date: date, source: "eod-recap", scope: "ceo-rollup", stats: total },
-    });
-    await insertDailySummary(admin, {
-      workspaceId,
-      title: `Company standup — ${date}`,
-      body,
-      metadata: { recap_date: date, source: "eod-recap", scope: "ceo-rollup", stats: total },
-    });
-    ceoPosted = true;
-  }
-
-  return { ok: true, date, directorsPosted, ceoPosted };
+  return { byFn, functions };
 }
 
-type Admin = ReturnType<typeof createAdminClient>;
+// ── The human-readable EOD detail page (director-loop-grading Phase 5) ──────────────────────────────
+//
+// A readable narrative of the director's day — what it fixed + why, which goal it moved + how far, what
+// it escalated — built by READING that day's director_activity rows (never hand-maintained). Each row's
+// open-vocabulary action_kind maps to a narrative SECTION + a human verb; the row's plain-text reason is
+// the "why". Deterministic (no LLM) — the same display-only-proxy stance as the one-line recap above.
 
-/** Surface a recap in the M1 Daily Summaries tab — a reserved `agent_daily_summary` notification. */
-async function insertDailySummary(
-  admin: Admin,
-  input: { workspaceId: string; title: string; body: string; metadata: Record<string, unknown> },
-): Promise<void> {
-  await admin.from("dashboard_notifications").insert({
-    workspace_id: input.workspaceId,
-    type: DAILY_SUMMARY_TYPE,
-    title: input.title,
-    body: input.body,
-    metadata: input.metadata,
-    read: false,
-    dismissed: false,
-  });
+type RecapSectionId = "fixed" | "goals" | "escalated" | "other";
+
+interface RecapKindMeta {
+  /** the human verb phrase for this action_kind (no spec slug — that's appended). */
+  verb: string;
+  section: RecapSectionId;
+}
+
+/** action_kind → { verb, section }. Open vocabulary: an unknown kind falls back to a humanized "other". */
+const KIND_META: Record<string, RecapKindMeta> = {
+  detected_regression: { verb: "Detected a regression", section: "fixed" },
+  dismissed_regression: { verb: "Dismissed a regression", section: "fixed" },
+  authored_fix: { verb: "Authored a fix", section: "fixed" },
+  approved_approval: { verb: "Auto-approved a request", section: "fixed" },
+  approved_migration: { verb: "Approved a migration", section: "fixed" },
+  coaching_routed_to_repair: { verb: "Routed coaching to a repair", section: "fixed" },
+  escorted_goal: { verb: "Escorted a goal", section: "goals" },
+  advanced_milestone: { verb: "Advanced a milestone", section: "goals" },
+  shipped_milestone: { verb: "Shipped a milestone", section: "goals" },
+  escalated: { verb: "Escalated to the CEO", section: "escalated" },
+  escalated_coaching: { verb: "Escalated a coaching case", section: "escalated" },
+  coached_worker: { verb: "Coached a worker", section: "other" },
+  groomed_continue: { verb: "Groomed the board (continue)", section: "other" },
+  groomed_split: { verb: "Groomed the board (split)", section: "other" },
+};
+
+const SECTION_TITLES: Record<RecapSectionId, string> = {
+  fixed: "Fixes & approvals",
+  goals: "Goals moved",
+  escalated: "Escalations",
+  other: "Other actions",
+};
+const SECTION_ORDER: RecapSectionId[] = ["fixed", "goals", "escalated", "other"];
+
+/** Resolve an action_kind to its narrative metadata (humanizing an unknown kind into the "other" bucket). */
+function kindMeta(kind: string): RecapKindMeta {
+  if (KIND_META[kind]) return KIND_META[kind];
+  // Heuristic fallbacks for open-vocabulary kinds the live directors add later.
+  if (/escalat/i.test(kind)) return { verb: "Escalated", section: "escalated" };
+  if (/goal|milestone/i.test(kind)) return { verb: humanizeKind(kind), section: "goals" };
+  if (/fix|repair|approv/i.test(kind)) return { verb: humanizeKind(kind), section: "fixed" };
+  return { verb: humanizeKind(kind), section: "other" };
+}
+
+/** "advanced_milestone" → "Advanced milestone" — a readable fallback verb for an unmapped kind. */
+function humanizeKind(kind: string): string {
+  const words = kind.replace(/_/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+export interface RecapActivityLine {
+  kind: string;
+  /** the human verb + spec slug — "Authored a fix · migration-pin-and-item-robustness". */
+  label: string;
+  specSlug: string | null;
+  /** the plain-text "why" the row recorded (may be empty). */
+  reason: string;
+  createdAt: string;
+}
+
+export interface RecapSection {
+  id: RecapSectionId;
+  title: string;
+  lines: RecapActivityLine[];
+}
+
+export interface DirectorDayDetail {
+  ok: boolean;
+  reason?: string;
+  date: string;
+  /** the function slug, or "ceo" for the company-wide roll-up. */
+  function: string;
+  isCeo: boolean;
+  personaName: string;
+  personaRole: string;
+  personaEmoji: string;
+  /** the one-line standup headline (same counts as the board recap). */
+  summaryLine: string;
+  stats: DirectorDayStats;
+  sections: RecapSection[];
+  totalActions: number;
+}
+
+/**
+ * Build the human-readable EOD detail for one director (or the CEO roll-up) on `date` — a pure read over
+ * that day's [[director_activity]] rows grouped into narrative sections, plus the headline counts (so the
+ * detail page shows both the standup line and the underlying actions). `function='ceo'` aggregates every
+ * director's rows under the company roll-up. Never writes; safe to call on demand. See
+ * docs/brain/libraries/director-recap.md.
+ */
+export async function buildDirectorDayDetail(
+  workspaceId: string,
+  date: string,
+  functionSlug: string,
+): Promise<DirectorDayDetail> {
+  const isCeo = functionSlug === "ceo";
+  const persona = getPersona(functionSlug);
+  const base: DirectorDayDetail = {
+    ok: false,
+    date,
+    function: functionSlug,
+    isCeo,
+    personaName: persona.name,
+    personaRole: persona.role,
+    personaEmoji: persona.emoji,
+    summaryLine: "",
+    stats: emptyStats(),
+    sections: [],
+    totalActions: 0,
+  };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ...base, reason: "bad_date_format" };
+
+  const admin = createAdminClient();
+  const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
+  const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+  // Headline counts — the CEO roll-up sums every active director; a single director takes its own slice.
+  const { byFn } = await aggregateDirectorDay(admin, workspaceId, date);
+  let stats = emptyStats();
+  if (isCeo) {
+    for (const s of Object.values(byFn)) {
+      stats.specsShipped += s.specsShipped;
+      stats.goalsAdvanced += s.goalsAdvanced;
+      stats.bugsFixed += s.bugsFixed;
+      stats.migrationsApproved += s.migrationsApproved;
+      stats.approvalsHandled += s.approvalsHandled;
+      stats.actions += s.actions;
+    }
+  } else {
+    stats = byFn[functionSlug] ?? emptyStats();
+  }
+
+  // The narrative — that day's activity rows, full shape (reason + spec + when), the function's own (or all).
+  let q = admin
+    .from("director_activity")
+    .select("director_function, action_kind, spec_slug, reason, created_at")
+    .eq("workspace_id", workspaceId)
+    .gte("created_at", dayStart)
+    .lt("created_at", dayEnd)
+    .order("created_at", { ascending: true });
+  if (!isCeo) q = q.eq("director_function", functionSlug);
+  const { data: rows } = await q;
+  const activityRows = (rows ?? []) as {
+    director_function: string;
+    action_kind: string;
+    spec_slug: string | null;
+    reason: string | null;
+    created_at: string;
+  }[];
+
+  // Group into ordered narrative sections — drop empty sections so the page reads clean.
+  const bySection = new Map<RecapSectionId, RecapActivityLine[]>();
+  for (const r of activityRows) {
+    const meta = kindMeta(r.action_kind);
+    const label = r.spec_slug ? `${meta.verb} · ${r.spec_slug}` : meta.verb;
+    const line: RecapActivityLine = {
+      kind: r.action_kind,
+      label,
+      specSlug: r.spec_slug,
+      reason: (r.reason || "").trim(),
+      createdAt: r.created_at,
+    };
+    const bucket = bySection.get(meta.section) ?? [];
+    bucket.push(line);
+    bySection.set(meta.section, bucket);
+  }
+  const sections: RecapSection[] = SECTION_ORDER.filter((id) => (bySection.get(id) ?? []).length > 0).map((id) => ({
+    id,
+    title: SECTION_TITLES[id],
+    lines: bySection.get(id) ?? [],
+  }));
+
+  return {
+    ...base,
+    ok: true,
+    summaryLine: summaryLine(stats),
+    stats,
+    sections,
+    totalActions: activityRows.length,
+  };
 }
