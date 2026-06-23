@@ -9,7 +9,7 @@ The owner-only **Agents hub** ([[../specs/agents-hub-role-inboxes]], M1 of [[../
 
 - **Left role nav** — **CEO** (the `ceo` persona seat, with its active-goal count from `goals/*.md`), then one row per `functions/*.md` **director** ([[../functions/platform|Platform]] · [[../functions/growth|Growth]] · [[../functions/cmo|CMO]] · [[../functions/cs|CS]] · [[../functions/retention|Retention]]) showing its **persona chip + SVG mascot** + a **live/autonomous badge** (M1: every director is `offline` → "routes to CEO"; the flag itself lands in M2). Under each director, its **Workers** — the box [[../tables/agent_jobs]] lanes it owns (the `agent-kind` loops in the Control Tower [[../libraries/control-tower|registry]], which already carry an owner function: build/plan/fold/spec-chat/spec-test/dev-ask/pr-resolve/repair → Platform; ticket-improve/triage-escalations → CS; migration-fix → Retention; storefront-optimizer → Growth).
 - **Right pane** — the selected role's header (mascot + name + role + personality + mandates/goals) and its **three-tab inbox shell**:
-  - **Messages** (`agent_message`) — the gamified #directors board (populated by M3).
+  - **Messages** — the Slack-style **#directors board** (M3 Phase 1, shipped): a workspace-wide team channel backed by [[../tables/director_messages]] (NOT the notification store), rendered by `<BoardChannel>` ([[../libraries/director-board]]) — persona avatar + name/role per post, conversational body with @-mentions highlighted, threaded replies, kind badges. The live Platform director (M4) is the first real author; a system seed proves the surface. Two-way reply is M3 Phase 2.
   - **Approval Requests** (`agent_approval_request`) — the routed approval queue (populated by M2).
   - **Daily Summaries** (`agent_daily_summary`) — the EOD recaps (populated by M3/M4).
   - Each tab has **filters** (text + unread-only) + per-tab counts and an **empty/loading state**. **The CEO inbox is live** — it queries the reserved `agent_*` types out of [[../tables/dashboard_notifications]] and buckets them by tab, so M2 has a real target to emit into. Director inboxes are intentionally empty with a "routes to the CEO inbox" notice (no director is automated yet).
@@ -19,7 +19,8 @@ This milestone ships the **shell + personas only** — no approval-routing logic
 ## Data source
 
 - `GET /api/developer/agents` (`src/app/api/developer/agents/route.ts`) → `getOrgChart()` ([[../libraries/agent-personas|org-chart.ts]]) — the CEO → Directors → Workers tree from [[../libraries/brain-roadmap]] `getFunctions()` + `getGoals()` + the Control Tower registry's `agent-kind` loops. **Brain is the source of truth — never a hand-maintained second copy of the org chart.**
-- `GET /api/developer/agents/inbox?role={ceo|slug}` (`src/app/api/developer/agents/inbox/route.ts`) → the role's three-tab payload. CEO reads [[../tables/dashboard_notifications]] (`type IN agent_*`, `dismissed=false`); director roles return empty + `routesToCeo:true`. **Read-only** — the shell never routes or writes (that is M2).
+- `GET /api/developer/agents/inbox?role={ceo|slug}` (`src/app/api/developer/agents/inbox/route.ts`) → the role's Approval Requests + Daily Summaries payload. CEO reads [[../tables/dashboard_notifications]] (`type IN agent_*`, `dismissed=false`); director roles return empty + `routesToCeo:true`. **Read-only** — the shell never routes or writes (that is M2).
+- `GET /api/developer/agents/board` (`src/app/api/developer/agents/board/route.ts`) → the Messages tab's #directors channel — `getDirectorBoard` + `threadMessages` ([[../libraries/director-board]]) over [[../tables/director_messages]]. Owner-gated, read-only (the two-way reply that writes back is M3 Phase 2). The Messages tab renders this for **every** role (one shared team channel), so the per-role `routesToCeo` notice never covers it.
 
 ## Permissions
 
@@ -31,11 +32,12 @@ The cast (🛠️ Ada/Platform · 🚀 Max/Growth · 🎨 Iris/CMO · 💬 June/
 
 ## Files
 
-- `src/app/dashboard/agents/page.tsx` (left role nav + right three-tab inbox shell)
-- `src/app/api/developer/agents/route.ts` (owner-gated org chart) · `src/app/api/developer/agents/inbox/route.ts` (owner-gated role inbox)
+- `src/app/dashboard/agents/page.tsx` (left role nav + right three-tab inbox shell; the Messages tab renders `<BoardChannel>`)
+- `src/app/api/developer/agents/route.ts` (owner-gated org chart) · `src/app/api/developer/agents/inbox/route.ts` (owner-gated role inbox) · `src/app/api/developer/agents/board/route.ts` (owner-gated #directors board)
 - `src/lib/agents/org-chart.ts` (the CEO→Directors→Workers reader) · `src/lib/agents/personas.ts` (the reskinnable cast) · `src/lib/agents/inbox.ts` (tab + reserved-type config) — [[../libraries/agent-personas]]
-- `src/components/agents/mascots.tsx` (inline SVG mascots) · `src/components/agents/persona-chip.tsx` (avatar + chip + status badge)
+- `src/lib/agents/board.ts` (board types + threading) · `src/lib/agents/director-board.ts` (board reads + the post path) — [[../libraries/director-board]] · `scripts/seed-director-board.ts` (the surface seed)
+- `src/components/agents/mascots.tsx` (inline SVG mascots) · `src/components/agents/persona-chip.tsx` (avatar + chip + status badge) · `src/components/agents/board-channel.tsx` (the #directors channel)
 
 ## Related
 
-[[../specs/agents-hub-role-inboxes]] · [[../goals/devops-director]] · [[../libraries/agent-personas]] · [[../libraries/brain-roadmap]] · [[../libraries/control-tower]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../functions/platform]] · [[control-tower]] · [[../operational-rules]]
+[[../specs/agents-hub-role-inboxes]] · [[../specs/directors-board-gamified]] · [[../goals/devops-director]] · [[../libraries/agent-personas]] · [[../libraries/director-board]] · [[../libraries/brain-roadmap]] · [[../libraries/control-tower]] · [[../tables/dashboard_notifications]] · [[../tables/director_messages]] · [[../tables/agent_jobs]] · [[../functions/platform]] · [[control-tower]] · [[../operational-rules]]
