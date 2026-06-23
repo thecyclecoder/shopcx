@@ -1037,10 +1037,36 @@ export interface MonitorResult {
   resolved: number;
 }
 
+/**
+ * The Control Tower act loop (alert insert/update/resolve, owner paging, Repair +
+ * coverage-register enqueue) writes to the SHARED loop_alerts feed, so it must run
+ * only on the canonical production deploy. A preview/branch deploy carries a
+ * branch-local MONITORED_LOOPS registry — e.g. a cron that exists only on an
+ * unmerged WIP branch — so letting it write leaks phantom registered_not_firing
+ * alerts into prod and wakes the Repair Agent for loops absent from HEAD (the
+ * loop:claude-status-poll-cron incident). Every other env may still build the
+ * read-only snapshot for its own dashboard; it just never writes to the feed.
+ * Vercel sets VERCEL_ENV="production" only on the production deployment.
+ */
+function isCanonicalProductionDeploy(): boolean {
+  return process.env.VERCEL_ENV === "production";
+}
+
 /** Evaluate + act: open de-duped alerts on red loops (paging on first sight), auto-resolve on recovery. */
 export async function runControlTowerMonitor(): Promise<MonitorResult> {
   const admin = createAdminClient();
   const snap = await buildControlTowerSnapshot(admin);
+
+  // Environment guard — only the canonical production deploy may act on the snapshot
+  // (write to the shared loop_alerts feed, page owners, enqueue Repair/coverage jobs).
+  // Non-prod deploys still evaluate the snapshot above (for counts / their own
+  // dashboard) but return here before any write. See isCanonicalProductionDeploy.
+  if (!isCanonicalProductionDeploy()) {
+    console.warn(
+      `[control-tower] non-production deploy (VERCEL_ENV=${process.env.VERCEL_ENV ?? "unset"}) — evaluated ${snap.loops.length} loop(s) read-only; skipping act loop (no alert writes, paging, or job enqueues).`,
+    );
+    return { evaluated: snap.loops.length, red: snap.counts.red, amber: snap.counts.amber, green: snap.counts.green, opened: 0, resolved: 0 };
+  }
 
   // Self-audit findings are amber (surfaced on the dashboard + folded into counts), not a page —
   // but log them so a coverage gap is greppable in the cron's run output too.
