@@ -1,0 +1,1 @@
+- **Scope Control Tower loop-alert writes to the production environment** · verified 2026-06-23 · → [[libraries/control-tower]]
