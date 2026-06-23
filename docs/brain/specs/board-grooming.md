@@ -25,4 +25,4 @@ Splitting a card + queueing a next-phase build is low-risk/reversible → within
 - A spec with P1 ✅ + a P2 ⏳ that's a *future enhancement* → the director authors `docs/brain/specs/{slug}-p2.md` (⏳ planned, `**Deferred:** split from [[{slug}]] — not needed now: …`), removes P2 from the parent so the parent is all-✅ → the **parent folds/ships** and a new **Planning** card appears; a `director_activity` row records the split + reason.
 - A spec whose leftover phase is genuinely ambiguous (could be load-bearing) → **escalates to CEO** (no silent guess); no card moved until the CEO rules.
 - Future work is **never dropped** — every split preserves the phase as a planned card.
-- Negative: a fully-shipped spec (all ✅) or one with an active build → left alone (not re-groomed).
+- ✅ Negative: a fully-shipped spec (all ✅) or one with an active build → left alone (not re-groomed).
