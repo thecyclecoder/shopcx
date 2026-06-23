@@ -77,7 +77,7 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/team/page.tsx` — sub-route
 - `src/app/dashboard/tickets/page.tsx` — sub-route
 - `src/app/dashboard/layout.tsx` — component
-- `src/app/dashboard/sidebar.tsx` — component
+- `src/app/dashboard/sidebar.tsx` — component. Mounted for **every** user on **every** dashboard page; its `fetchCounts` effect issues ~11 authenticated API requests per tick (ticket-views, escalation counts, fraud-cases, reviews, todos, improve-queue, branches, spec-test human-queue, …). It polls at **30 000 ms** (`setInterval(fetchCounts, 30000)`), **not** 10s — badge counts tolerate 30s staleness, and the always-on, authenticated REST rate is the dominant source of PostgREST's per-request RLS-context `set_config` statement (the highest-call-volume query in `pg_stat_statements`). Widening it 10s→30s cut that always-on round-trip rate ~3× — the canonical shipped [[../libraries/db-health|DB Health Agent]] `high_call_volume → reduce_calls` fix. Don't tighten this poll without a reason.
 - `src/app/dashboard/layout.tsx` — layout wrapper
 
 ## Related
