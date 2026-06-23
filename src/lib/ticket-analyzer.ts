@@ -30,6 +30,64 @@ const GRADER_MODEL = SONNET_MODEL;
 // "Severe issue" types that force escalation regardless of overall score
 const SEVERE_ISSUE_TYPES = new Set(["inaccuracy", "false_promise", "broken_action"]);
 
+// The system note emitted on a clean AI positive close
+// (src/lib/inngest/unified-ticket-handler.ts:1593). The real note appends
+// "Active playbook cleared." — we match the stable prefix as a substring so
+// the detection survives future trailing-text tweaks.
+const POSITIVE_CLOSE_NOTE = "[System] Positive close. Ticket closed.";
+
+// Markers that uniquely identify an analyzer RE-OPEN note (as opposed to a
+// "would have re-opened … but skipped" note, which does NOT reactivate the
+// ticket). Used to confirm a positive close is the most recent lifecycle
+// event. See applySeverityActions noteBody variants below.
+const REOPEN_NOTE_MARKERS = [
+  "[Auto-Analysis] Re-opened + escalated silently",
+  "this ticket needs another look",
+];
+
+/**
+ * Deterministically decide whether the ticket's CURRENT, most-recent
+ * lifecycle state is a clean positive close. Scans the FULL message history
+ * (not just the analysis window — the close note often predates it) for the
+ * positive-close system note and confirms nothing has reactivated the ticket
+ * since: no re-open/escalation note after it, and no UNANSWERED inbound
+ * customer message after it. A ticket that was re-opened then re-closed
+ * (e.g. 9a6e53d9, which had a prior score-3 reopen) is classified by its
+ * LATEST close, so it still counts as positively closed.
+ *
+ * Deliberately NOT keyed on tickets.status/closed_at/resolved_at: the
+ * analyzer only runs on closed tickets, so status='closed' is near-universal
+ * and would suppress the override globally.
+ */
+async function hasCleanPositiveClose(admin: Admin, ticketId: string): Promise<boolean> {
+  const { data: all } = await admin.from("ticket_messages")
+    .select("direction, author_type, body, visibility, created_at")
+    .eq("ticket_id", ticketId)
+    .order("created_at", { ascending: true });
+  if (!all || all.length === 0) return false;
+
+  // Most recent positive-close system note timestamp.
+  let closeAt: string | null = null;
+  for (const m of all) {
+    if ((m.body || "").includes(POSITIVE_CLOSE_NOTE)) closeAt = m.created_at;
+  }
+  if (!closeAt) return false;
+
+  for (const m of all) {
+    if (m.created_at <= closeAt) continue;
+    // A re-open / escalation note after the close means the ticket was
+    // reactivated since — not cleanly closed.
+    if (REOPEN_NOTE_MARKERS.some(marker => (m.body || "").includes(marker))) return false;
+    // An inbound (customer) message after the close that no outbound has
+    // answered is a live, unanswered turn — not cleanly closed.
+    if (m.direction === "inbound") {
+      const answered = all.some(o => o.direction === "outbound" && o.created_at > m.created_at);
+      if (!answered) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Map analyzer issue types to research recipe slugs that can verify
  * whether the AI's claim matches reality. Keep this conservative —
@@ -705,6 +763,11 @@ async function detectUnfulfilledCancelClaim(
  * Overrides (force escalate regardless of score):
  *   - Any 'inaccuracy', 'false_promise', or 'broken_action' issue
  *   - Customer message in window contained chargeback/lawyer/BBB/social-media keywords
+ *
+ * Exception (ticket 9a6e53d9): when the ONLY severe trigger is 'inaccuracy'
+ * (no false_promise / broken_action), there's no customer threat, the score
+ * is ≥7, and the ticket is cleanly positively closed, the inaccuracy
+ * force-escalate is suppressed and logged as a non-actionable note instead.
  */
 async function applySeverityActions(
   admin: Admin,
@@ -718,7 +781,8 @@ async function applySeverityActions(
   const score = analysis.score;
   const issues = analysis.issues || [];
 
-  const hasSevereIssue = issues.some(i => SEVERE_ISSUE_TYPES.has(i.type));
+  const severeTypes = new Set(issues.map(i => i.type).filter(t => SEVERE_ISSUE_TYPES.has(t)));
+  const hasSevereIssue = severeTypes.size > 0;
   const customerThreat = msgs.some(m => {
     if (m.direction !== "inbound") return false;
     // Scan the CLEANED body, not the raw one. Inbound email replies quote
@@ -732,7 +796,28 @@ async function applySeverityActions(
     return CUSTOMER_ESCALATION_KEYWORDS.some(k => matchesEscalationKeyword(txt, k));
   });
 
-  const forceEscalate = hasSevereIssue || customerThreat;
+  // ── Inaccuracy-only positive-close override (ticket 9a6e53d9) ──
+  // A grader can tag a harmless closing phrase (e.g. "your loyalty points
+  // stay intact") as an 'inaccuracy' even on a 7+ ticket the customer closed
+  // happily. The rubric already caps REAL factual errors at score ≤5, so an
+  // inaccuracy-typed issue surviving on a ≥7, cleanly-positively-closed
+  // ticket is cosmetic phrasing — re-opening + escalating it to a human is
+  // the same churn the customerThreat path already avoids (Melissa Sachs
+  // 246163b4). Suppress the force-escalate ONLY when the inaccuracy type is
+  // the SOLE severe trigger. false_promise / broken_action still escalate
+  // exactly as before (no heal-verification gating — verify_refund_issued is
+  // an unimplemented future recipe, so gating those would be a silent-drop
+  // hole). customerThreat still always escalates.
+  const onlyInaccuracySevere =
+    severeTypes.has("inaccuracy") &&
+    !severeTypes.has("false_promise") &&
+    !severeTypes.has("broken_action");
+  let suppressInaccuracyEscalation = false;
+  if (hasSevereIssue && onlyInaccuracySevere && !customerThreat && score >= 7) {
+    suppressInaccuracyEscalation = await hasCleanPositiveClose(admin, ticketId);
+  }
+
+  const forceEscalate = (hasSevereIssue && !suppressInaccuracyEscalation) || customerThreat;
 
   // Decide tier
   // ≤5: escalate + customer message
@@ -769,6 +854,20 @@ async function applySeverityActions(
     } catch (err) {
       console.warn("[ticket-analyzer] research.requested send failed:", err);
     }
+  }
+
+  // Log a non-actionable note when we suppressed the inaccuracy-only
+  // force-escalate, so the decision is auditable. Worded so it can NEVER be
+  // mistaken for a re-open note (no REOPEN_NOTE_MARKERS) or a positive-close
+  // note (no POSITIVE_CLOSE_NOTE) by a later hasCleanPositiveClose() scan.
+  if (suppressInaccuracyEscalation) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — an 'inaccuracy'-typed issue would normally force-escalate, but skipped: it was the only severe-issue trigger (no false_promise/broken_action), the score is ≥7, and the ticket is cleanly positively closed. Not re-opening a happy, well-resolved ticket over cosmetic phrasing. Regression guard for ticket 9a6e53d9. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
   }
 
   if (action === "none") return;
