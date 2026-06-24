@@ -30,6 +30,8 @@ async function isSlackConnected(workspaceId: string) : Promise<boolean>
 async function postMessage(token: string, channel: string, blocks: unknown[], text: string,) : Promise<boolean>
 ```
 
+THE chokepoint for every Slack channel/DM post (daily digest, ops alerts, ticket notifications all go through it). On each successful send it beats the **`slack-delivery`** Control Tower loop (`reactive`, 28h liveness window) — ONE monitor for all Slack comms instead of per-channel cron monitors. A sustained delivery outage stops the beats → the monitor flags it; the daily digest guarantees a beat every ~24h. Throttled to ≤1 beat/5 min, fire-and-forget.
+
 ### `lookupUserByEmail` — function
 
 ```ts

@@ -554,6 +554,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // liveness-when-work-exists / error-rate (same logic as inline-agent). Each beats once
   // at end-of-run (end-of-run try/finally — ok:false on throw). (control-tower-complete-coverage P1.)
   {
+    id: "slack-delivery",
+    kind: "reactive",
+    owner: "platform",
+    label: "Slack delivery",
+    description: "ONE monitor for ALL Slack comms (#alerts-critical, #daily-digest, ops + ticket notifications) — beats on every successful chat.postMessage (src/lib/slack.ts). Replaces per-channel cron monitors: a sustained delivery outage (revoked token / Slack down) stops the beats. The daily digest guarantees a beat every ~24h, so a red here means Slack genuinely isn't delivering — not that one channel was quiet.",
+    expectedCadence: "every successful Slack send (≥ daily via the digest)",
+    livenessWindowMs: 28 * HOUR,
+  },
+  {
     id: "unified-ticket-handler",
     kind: "reactive",
     owner: "cs",

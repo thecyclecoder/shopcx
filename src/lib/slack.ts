@@ -76,6 +76,26 @@ async function slackApi(token: string, method: string, body?: Record<string, unk
   return res.json() as Promise<Record<string, unknown>>;
 }
 
+// Control Tower — ONE monitor for ALL Slack comms (replaces per-channel cron monitors). Every successful
+// chat.postMessage beats the `slack-delivery` loop; a sustained delivery outage (revoked token / Slack down)
+// stops the beats and the monitor flags it after the liveness window. The daily digest alone guarantees a
+// beat every ~24h, so a red here means Slack genuinely isn't delivering — not "this one channel was quiet."
+// Throttled (≤1 beat / 5 min) + fire-and-forget so it never adds latency or row-spam to the hot send path.
+let lastSlackBeatMs = 0;
+function beatSlackDelivery(channel: string): void {
+  const now = Date.now();
+  if (now - lastSlackBeatMs < 5 * 60_000) return;
+  lastSlackBeatMs = now;
+  void (async () => {
+    try {
+      const { emitLoopHeartbeat } = await import("@/lib/control-tower/heartbeat");
+      await emitLoopHeartbeat("slack-delivery", "reactive", { ok: true, detail: `delivered → ${channel}` });
+    } catch {
+      /* best-effort — a heartbeat write must never affect the send */
+    }
+  })();
+}
+
 export async function postMessage(
   token: string,
   channel: string,
@@ -87,6 +107,7 @@ export async function postMessage(
     console.error("[Slack] postMessage error:", result.error);
     return false;
   }
+  beatSlackDelivery(channel);
   return true;
 }
 
