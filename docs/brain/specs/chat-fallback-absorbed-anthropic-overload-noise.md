@@ -1,5 +1,7 @@
 # Don't open a Control Tower incident when the chat Haiku fallback absorbs a Sonnet overload ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/remedy-selector.ts::monitor-false-positive`
 **Repair-signature:** `vercel:43e4b03698fb1c38`
