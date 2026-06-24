@@ -42,7 +42,10 @@ function preprocessWikilinks(md: string, specSlugs: string[]): string {
 
 export default async function SpecDetailPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const [spec, specSlugs, workspaceId] = await Promise.all([getSpec(slug), listSpecSlugs(), getActiveWorkspaceId()]);
+  const workspaceId = await getActiveWorkspaceId();
+  // spec-status-db-driven Phase 1: getSpec(slug, workspaceId) overlays the DB mirror's status / critical
+  // / deferred / per-phase status onto the markdown card — the detail page reads DB-authoritatively.
+  const [spec, specSlugs] = await Promise.all([getSpec(slug, workspaceId ?? undefined), listSpecSlugs()]);
   if (!spec) notFound();
 
   const [jobsBySlug, folds, testRuns, resolutions, cardStates] = workspaceId

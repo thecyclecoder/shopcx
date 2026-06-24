@@ -1,46 +1,25 @@
 /**
  * POST /api/roadmap/spec-drift — the one-tap owner resolution for a surfaced spec-drift case
  * (spec-drift-agent spec). The Control Tower's "Spec drift" section lists phases whose code is on
- * `main` but whose emoji is still ⏳/🚧 with no merged build on record — cases the reconciler won't
- * auto-flip. Two actions, owner-gated (mirrors /api/roadmap/status):
+ * `main` but whose DB mirror still reads ⏳/🚧 with no merged build on record — cases the reconciler
+ * won't auto-flip. Two actions, owner-gated (mirrors /api/roadmap/status):
  *
- *   - flip:    rewrite the phase's leading emoji → ✅ on `main` (shared flipPhaseToShipped writer, so
- *              the manual flip and the auto-flip behave identically), resolve the drift row, and — if
- *              the spec is now fully shipped — enqueue a spec-test (spec-test-on-ship).
- *   - dismiss: leave the markdown; just resolve the drift row (the owner judged it not-drift).
+ *   - flip:    mark the phase ✅ in `spec_card_state` (+ `spec_status_history`), resolve the drift row,
+ *              and — if the spec is now fully shipped — enqueue a spec-test (spec-test-on-ship).
+ *   - dismiss: leave the state alone; just resolve the drift row (the owner judged it not-drift).
  *
- * Only ever touches the leading phase emoji (+ a now-consistent H1) — never spec logic. Body:
- * { slug, phaseIndex, action }. See docs/brain/dashboard/control-tower.md.
+ * spec-status-db-driven Phase 2: this used to PUT the spec markdown to `main` on every flip (one of the
+ * six git-committing status writers). Now it writes the DB mirror only — instant, zero deploys.
+ * Body: { slug, phaseIndex, action }. See docs/brain/dashboard/control-tower.md.
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { deriveSpecStatus } from "@/lib/brain-roadmap";
+import { getSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
-import { flipPhaseToShipped, resolveSpecDrift, phaseStatesFromRaw } from "@/lib/spec-drift";
-import { markSpecCardStatus } from "@/lib/spec-card-state";
-
-const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
-function ghToken(): string | undefined {
-  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
-}
-
-async function gh(method: string, path: string, body?: unknown): Promise<{ ok: boolean; status: number; json: Record<string, unknown> }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${ghToken()}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
-}
+import { resolveSpecDrift } from "@/lib/spec-drift";
+import { getSpecCardStates, markSpecCardStatus, rollupPhaseStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { slug?: unknown; phaseIndex?: unknown; action?: unknown };
@@ -75,44 +54,44 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Only the workspace owner can resolve spec drift" }, { status: 403 });
   }
 
-  // Dismiss: leave the markdown, just clear the surfaced row.
+  // Dismiss: leave the state, just clear the surfaced row.
   if (action === "dismiss") {
     await resolveSpecDrift(workspaceId, slug, phaseIndex);
     return NextResponse.json({ ok: true, action: "dismiss" });
   }
 
-  // Flip: rewrite the phase emoji → ✅ on main (shared writer).
-  if (!ghToken()) return NextResponse.json({ error: "GitHub not configured" }, { status: 400 });
-  const filePath = `docs/brain/specs/${slug}.md`;
-  const get = await gh("GET", `/repos/${REPO}/contents/${filePath}?ref=main`);
-  if (!get.ok) return NextResponse.json({ error: "spec not found" }, { status: 404 });
+  // Flip: mark the phase ✅ in the DB mirror, then resolve the drift row.
+  const spec = await getSpec(slug, workspaceId);
+  if (!spec) return NextResponse.json({ error: "spec not found" }, { status: 404 });
 
-  const sha = get.json.sha as string;
-  const current = Buffer.from(String(get.json.content || "").replace(/\s/g, ""), "base64").toString("utf8");
-  const updated = flipPhaseToShipped(current, phaseIndex);
-  if (updated === current) {
-    // Already ✅ (or index out of range) — clear the stale row and report no-op.
-    await resolveSpecDrift(workspaceId, slug, phaseIndex);
-    return NextResponse.json({ ok: true, action: "flip", unchanged: true });
+  const states = await getSpecCardStates(workspaceId);
+  const existing = states[slug];
+  const phaseStates: SpecCardPhaseState[] = (existing?.phase_states && existing.phase_states.length)
+    ? [...existing.phase_states]
+    : spec.card.phases.map((p, i) => ({ index: i, title: p.title, status: p.status as Phase }));
+
+  const target = phaseStates.find((p) => p.index === phaseIndex);
+  if (target) {
+    if (target.status === "shipped") {
+      await resolveSpecDrift(workspaceId, slug, phaseIndex);
+      return NextResponse.json({ ok: true, action: "flip", unchanged: true });
+    }
+    target.status = "shipped";
+  } else if (phaseIndex >= 0 && phaseIndex < spec.card.phases.length) {
+    phaseStates.push({ index: phaseIndex, title: spec.card.phases[phaseIndex].title, status: "shipped" });
+    phaseStates.sort((a, b) => a.index - b.index);
+  } else {
+    return NextResponse.json({ error: "phaseIndex out of range" }, { status: 400 });
   }
 
-  const put = await gh("PUT", `/repos/${REPO}/contents/${filePath}`, {
-    message: `spec-drift: owner flip ${slug} P${phaseIndex + 1} → ✅`,
-    content: Buffer.from(updated, "utf8").toString("base64"),
-    sha,
-    branch: "main",
+  const nextStatus: SpecStatus = rollupPhaseStatus(phaseStates);
+  await markSpecCardStatus(workspaceId, slug, nextStatus, phaseStates, {
+    actor: `owner:${user.id}`,
+    reason: `spec-drift one-tap flip P${phaseIndex + 1} → ✅`,
   });
-  if (!put.ok) return NextResponse.json({ error: "commit failed", status: put.status }, { status: 502 });
-
   await resolveSpecDrift(workspaceId, slug, phaseIndex);
 
-  // spec-card-db-companion: mirror the flipped status + per-phase snapshot to the board instantly (the
-  // markdown bundle won't redeploy for minutes). Best-effort — never fail the flip on the mirror write.
-  await markSpecCardStatus(workspaceId, slug, deriveSpecStatus(updated), phaseStatesFromRaw(updated));
-
-  // spec-test-on-ship: if this flip leaves the spec fully shipped, enqueue a spec-test over the
-  // just-committed content (local disk hasn't redeployed yet). Shared dedupe no-ops dupes.
-  if (deriveSpecStatus(updated) === "shipped") {
+  if (nextStatus === "shipped") {
     try {
       await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
     } catch {
@@ -120,6 +99,5 @@ export async function POST(request: Request) {
     }
   }
 
-  const commit = put.json.commit as { html_url?: string } | undefined;
-  return NextResponse.json({ ok: true, action: "flip", status: deriveSpecStatus(updated), commit: commit?.html_url });
+  return NextResponse.json({ ok: true, action: "flip", status: nextStatus });
 }

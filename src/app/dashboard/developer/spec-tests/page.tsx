@@ -20,7 +20,8 @@ function timeAgo(iso: string): string {
 }
 
 export default async function SpecTestsPage() {
-  const [{ specs }, archived, workspaceId] = await Promise.all([getRoadmap(), listArchivedSlugs(), getActiveWorkspaceId()]);
+  const workspaceId = await getActiveWorkspaceId();
+  const [{ specs }, archived] = await Promise.all([getRoadmap(workspaceId ?? undefined), listArchivedSlugs()]);
   const archivedSet = new Set(archived);
   const shipped: SpecCard[] = specs
     .filter((s) => s.status === "shipped" && !archivedSet.has(s.slug))

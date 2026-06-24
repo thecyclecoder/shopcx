@@ -2106,16 +2106,28 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
       const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR);
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
       if (String(parsed?.verdict) === "shipped") {
+        // spec-status-db-driven Phase 2: Ada's drift-supervise flip used to PUT the spec markdown to `main`
+        // (one of the six git-committing status writers). Now we write the DB mirror only — instant, zero
+        // deploys. Still read the on-disk markdown so we can seed phase_states when the DB row is empty.
         const path = join(REPO_DIR, `docs/brain/specs/${row.spec_slug}.md`);
         if (!existsSync(path)) { await sd.resolveDriftRow(db, row.id); continue; } // spec gone (folded) → resolve
         const raw = readFileSync(path, "utf8");
-        const flippedRaw = sd.flipPhaseToShipped(raw, row.phase_index);
-        if (flippedRaw === raw) { await sd.resolveDriftRow(db, row.id); continue; } // already ✅ on main → just resolve
-        const put = await putFileMain(`docs/brain/specs/${row.spec_slug}.md`, flippedRaw, `spec-drift: ${row.spec_slug} phase ${row.phase_index} → ✅ (Ada confirmed shipped)`);
-        if (put.ok) {
-          await sd.resolveDriftRow(db, row.id);
-          flipped.push(`${row.spec_slug} P${row.phase_index + 1}`);
-        }
+        const scs = await import("../src/lib/spec-card-state");
+        const states = await scs.getSpecCardStates(job.workspace_id);
+        const existing = states[row.spec_slug];
+        const phaseStates = (existing?.phase_states && existing.phase_states.length)
+          ? [...existing.phase_states]
+          : sd.phaseStatesFromRaw(raw);
+        const target = phaseStates.find((p) => p.index === row.phase_index);
+        if (!target || target.status === "shipped") { await sd.resolveDriftRow(db, row.id); continue; }
+        target.status = "shipped";
+        const status = scs.rollupPhaseStatus(phaseStates);
+        await scs.markSpecCardStatus(job.workspace_id, row.spec_slug, status, phaseStates, {
+          actor: "ada",
+          reason: `Ada confirmed P${row.phase_index + 1} shipped (drift-supervise)`,
+        });
+        await sd.resolveDriftRow(db, row.id);
+        flipped.push(`${row.spec_slug} P${row.phase_index + 1}`);
       }
     } catch (e) {
       console.error(`${tag} drift-supervise ${row.spec_slug} failed (continuing):`, e instanceof Error ? e.message : e);

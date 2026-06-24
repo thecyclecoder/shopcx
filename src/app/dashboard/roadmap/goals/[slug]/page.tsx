@@ -41,12 +41,12 @@ function SpecChip({ spec }: { spec: SpecCard }) {
 
 export default async function GoalDetailPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const [goal, specSlugs, goalSlugs, functionSlugs, workspaceId] = await Promise.all([
-    getGoal(slug),
+  const workspaceId = await getActiveWorkspaceId();
+  const [goal, specSlugs, goalSlugs, functionSlugs] = await Promise.all([
+    getGoal(slug, workspaceId ?? undefined),
     listSpecSlugs(),
     listGoalSlugs(),
     listFunctionSlugs(),
-    getActiveWorkspaceId(),
   ]);
   if (!goal) notFound();
 

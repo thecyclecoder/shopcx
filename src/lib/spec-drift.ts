@@ -357,31 +357,26 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
     }
   }
 
-  // Apply auto-flips in one commit (re-parse positions after each flip since lines stay aligned by index).
+  // spec-status-db-driven Phase 2: the auto-flip used to PUT the spec markdown to `main` (one of the six
+  // git-committing status writers). Now it updates the in-memory `raw` so the rollup downstream still
+  // reads the new ✅ for derivation, but skips the deploy-triggering commit — the DB mirror write below
+  // is the SOLE persistence path.
   if (flipped.length) {
     for (const f of flipped) raw = flipPhaseToShipped(raw, f.index);
-    if (!sha) {
-      const re = await fetchSpecRawFromMain(slug); // need the current sha to PUT
-      if (re) sha = re.sha;
-    }
-    if (sha) {
-      const idxs = flipped.map((f) => `P${f.index + 1}`).join(", ");
-      await gh("PUT", `/repos/${REPO}/contents/docs/brain/specs/${slug}.md`, {
-        message: `spec-drift: flip ${idxs} → ✅ on ${slug} (code on main + build merged)`,
-        content: Buffer.from(raw, "utf8").toString("base64"),
-        sha,
-        branch: "main",
-      }).catch(() => {});
-    }
   }
+  // suppress unused-warning for `sha` (the markdown PUT was the only caller).
+  void sha;
 
   await syncDriftRows(workspaceId, slug, surfaced);
 
-  // spec-card-db-companion: mirror the post-reconcile status + per-phase snapshot to the board instantly,
-  // so a drift flip (auto on a merge, or the cron backstop) reflects without waiting for the markdown redeploy.
+  // Write the post-reconcile status + per-phase snapshot to the board mirror. spec-status-db-driven Phase 2:
+  // zero markdown commits, zero deploys for status; the audit row records the auto-flip.
   const status = deriveSpecStatus(raw);
   const phaseStates = phaseStatesFromRaw(raw);
-  await markSpecCardStatus(workspaceId, slug, status, phaseStates);
+  const reason = flipped.length
+    ? `auto-flip ${flipped.map((f) => `P${f.index + 1}`).join(", ")} → ✅ (code on main + build merged)`
+    : "drift reconcile (no flip)";
+  await markSpecCardStatus(workspaceId, slug, status, phaseStates, { actor: "drift:reconciler", reason });
 
   return { slug, flipped, surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status, phaseStates };
 }

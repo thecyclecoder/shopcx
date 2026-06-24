@@ -1,6 +1,8 @@
 # libraries/spec-drift
 
-The **Spec-Drift Agent** ([[../specs/spec-drift-agent]]) — keeps a spec's `⏳/🚧/✅` phase emojis in sync with shipped code, so shipped work stops parking in the Planned/In-progress columns. The flip side of [[../specs/spec-test-agent|spec-test]]: that proves a *shipped* spec works; this proves a spec's *status* is true. **Per-phase + evidence-gated** — it never guesses "merged ⇒ done".
+The **Spec-Drift Agent** ([[../specs/spec-drift-agent]]) — keeps a spec's per-phase status in [[../tables/spec_card_state]] in sync with shipped code, so shipped work stops parking in the Planned/In-progress columns. The flip side of [[../specs/spec-test-agent|spec-test]]: that proves a *shipped* spec works; this proves a spec's *status* is true. **Per-phase + evidence-gated** — it never guesses "merged ⇒ done".
+
+**spec-status-db-driven Phase 2** (2026-06-24): the reconciler no longer commits the spec markdown to `main` on a flip. It writes the DB mirror (`spec_card_state`) directly — instant, zero deploys. The markdown is still parsed off `main` (for the phase body + named code paths), but the flip lands in the DB.
 
 **File:** `src/lib/spec-drift.ts`
 

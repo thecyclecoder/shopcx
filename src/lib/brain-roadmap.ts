@@ -351,9 +351,50 @@ async function readTracks(): Promise<ProjectTrack[]> {
   }
 }
 
-export async function getRoadmap(): Promise<RoadmapData> {
+/**
+ * spec-status-db-driven Phase 1: overlay the DB mirror onto a markdown-parsed SpecCard. status /
+ * critical / deferred / per-phase status come from the DB authoritatively (the markdown lags by a
+ * deploy, and Phase 3 strips the emojis entirely). Markdown is consulted only as a fallback when no DB
+ * row exists yet (a brand-new spec the backfill hasn't reached).
+ */
+function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/spec-card-state").SpecCardState | undefined): T {
+  if (!state) return spec;
+  const PHASE_RANK: Record<Phase, number> = { rejected: -1, planned: 0, in_progress: 1, shipped: 2 };
+  // `flags.deferred` wins over phase rollup for display. Un-defer reveals the underlying rollup.
+  const status: SpecStatus = state.flags?.deferred ? "deferred" : state.status;
+  // Per-phase: DB is authoritative; markdown is the fallback for indices the DB doesn't know.
+  const byIndex = new Map((state.phase_states ?? []).map((p) => [p.index, p.status]));
+  const phases = spec.phases.map((p, i) => {
+    const dbStatus = byIndex.get(i);
+    return dbStatus !== undefined ? { ...p, status: dbStatus } : p;
+  });
+  // Forward-merge safety: if markdown has a more-advanced phase than the DB (a fresh edit), keep it.
+  for (let i = 0; i < phases.length; i++) {
+    if (PHASE_RANK[spec.phases[i].status] > PHASE_RANK[phases[i].status]) {
+      phases[i] = spec.phases[i];
+    }
+  }
+  const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
+  for (const p of phases) counts[p.status]++;
+  return { ...spec, status, critical: !!state.flags?.critical || spec.critical, phases, counts };
+}
+
+/**
+ * Read every spec from disk + (optionally) overlay the DB mirror so status / critical / deferred / phases
+ * reflect live PM truth. Pass the active workspaceId to get DB-driven status (the spec-status-db-driven
+ * default for boardable surfaces); call with no arg to get markdown-only (legacy, used by agents/scripts
+ * with no workspace context). Tracks parse the README + are stable across both modes.
+ */
+export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
   const [specs, tracks] = await Promise.all([readSpecs(), readTracks()]);
-  return { specs, tracks };
+  if (!workspaceId) return { specs, tracks };
+  const { getSpecCardStates } = await import("@/lib/spec-card-state");
+  const cardStates = await getSpecCardStates(workspaceId);
+  const overlaid = specs.map((s) => overlayDbStateOnSpec(s, cardStates[s.slug]));
+  // Re-sort because overlay can change a spec's status (e.g. a deferred-by-DB card moves columns).
+  const rank: Record<SpecStatus, number> = { in_progress: 0, planned: 1, shipped: 2, deferred: 3, rejected: 4 };
+  overlaid.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
+  return { specs: overlaid, tracks };
 }
 
 /** Slugs of every spec file (no README). Used to resolve [[wikilinks]] to detail pages. */
@@ -408,8 +449,8 @@ const FUNCTION_ORDER = ["growth", "cmo", "retention", "cfo", "logistics", "cs", 
  * big-picture taxonomy view. Built from the specs themselves (owner +
  * parent lines), so it's always in sync with the no-orphan rule.
  */
-export async function getFunctionMap(): Promise<FunctionMap> {
-  const { specs } = await getRoadmap();
+export async function getFunctionMap(workspaceId?: string): Promise<FunctionMap> {
+  const { specs } = await getRoadmap(workspaceId);
   const byFn = new Map<string, SpecCard[]>();
   const unassigned: SpecCard[] = [];
   for (const s of specs) {
@@ -567,7 +608,7 @@ export function deriveSpecStatus(raw: string): SpecStatus {
   return parseSpec("_", raw).status;
 }
 
-export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCard } | null> {
+export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
   let raw: string;
   try {
@@ -575,11 +616,18 @@ export async function getSpec(slug: string): Promise<{ raw: string; card: SpecCa
   } catch {
     return null;
   }
-  const card = parseSpec(slug, raw);
+  let card = parseSpec(slug, raw);
   // Resolve Blocked-by against the live spec set so the detail page's BuildButton sees the same
   // cleared/uncleared state as the board (spec-blockers).
   const specs = await readSpecs();
   card.blockedBy = resolveBlockedBy(card, new Map(specs.map((c) => [c.slug, c])));
+  // spec-status-db-driven Phase 1: overlay DB-authoritative status / critical / deferred when the caller
+  // has workspace context (boardable surfaces) — markdown-only otherwise (agent helpers, scripts).
+  if (workspaceId) {
+    const { getSpecCardStates } = await import("@/lib/spec-card-state");
+    const cardStates = await getSpecCardStates(workspaceId);
+    card = overlayDbStateOnSpec(card, cardStates[slug]);
+  }
   return { raw, card };
 }
 
@@ -867,7 +915,7 @@ export async function getFunctions(): Promise<FunctionCard[]> {
 }
 
 /** One function: its card, raw markdown, and the live owner→parent spec groups (from getFunctionMap). */
-export async function getFunction(slug: string): Promise<{ raw: string; card: FunctionCard; group: FunctionGroup | null } | null> {
+export async function getFunction(slug: string, workspaceId?: string): Promise<{ raw: string; card: FunctionCard; group: FunctionGroup | null } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
   let raw: string;
   try {
@@ -876,12 +924,12 @@ export async function getFunction(slug: string): Promise<{ raw: string; card: Fu
     return null;
   }
   const card = parseFunction(slug, raw);
-  const { functions } = await getFunctionMap();
+  const { functions } = await getFunctionMap(workspaceId);
   return { raw, card, group: functions.find((f) => f.fn === slug) ?? null };
 }
 
-export async function getGoals(): Promise<GoalCard[]> {
-  const [{ specs }, slugs] = await Promise.all([getRoadmap(), listGoalSlugs()]);
+export async function getGoals(workspaceId?: string): Promise<GoalCard[]> {
+  const [{ specs }, slugs] = await Promise.all([getRoadmap(workspaceId), listGoalSlugs()]);
   const cards = await Promise.all(
     slugs.map(async (s) => parseGoal(s, await fs.readFile(path.join(GOALS_DIR, `${s}.md`), "utf8"), specs)),
   );
@@ -889,7 +937,7 @@ export async function getGoals(): Promise<GoalCard[]> {
 }
 
 /** One goal: card (with rollup), raw markdown, and the resolved SpecCard for each linked milestone spec. */
-export async function getGoal(slug: string): Promise<{ raw: string; card: GoalCard; specs: Record<string, SpecCard> } | null> {
+export async function getGoal(slug: string, workspaceId?: string): Promise<{ raw: string; card: GoalCard; specs: Record<string, SpecCard> } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
   let raw: string;
   try {
@@ -897,7 +945,7 @@ export async function getGoal(slug: string): Promise<{ raw: string; card: GoalCa
   } catch {
     return null;
   }
-  const { specs } = await getRoadmap();
+  const { specs } = await getRoadmap(workspaceId);
   const card = parseGoal(slug, raw, specs);
   const bySlug: Record<string, SpecCard> = {};
   for (const s of specs) bySlug[s.slug] = s;
@@ -937,8 +985,8 @@ function parentReferencesGoal(parent: string | undefined, goal: { slug: string; 
  * the spec carries a **Repair-signature:** line, else 🎯 goal if it's wikilinked from a goal doc (the
  * planner/goal-milestone signal — wikilink only, not parent-match), else ✋ manual. No schema change.
  */
-export async function getRoadmapFilters(): Promise<RoadmapFilterData> {
-  const [{ specs }, goalSlugs] = await Promise.all([getRoadmap(), listGoalSlugs()]);
+export async function getRoadmapFilters(workspaceId?: string): Promise<RoadmapFilterData> {
+  const [{ specs }, goalSlugs] = await Promise.all([getRoadmap(workspaceId), listGoalSlugs()]);
   const goalDocs = await Promise.all(
     goalSlugs.map(async (slug) => {
       const raw = await fs.readFile(path.join(GOALS_DIR, `${slug}.md`), "utf8");
