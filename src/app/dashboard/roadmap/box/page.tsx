@@ -21,6 +21,7 @@ interface LaneRow {
   since: string;
   phase?: string | null; // "Phase N" for a chained/per-phase build, else null (box-lane-show-phase)
   intent?: string | null; // director-coach lanes only: "ask" | "coach" (the CEO's button) — for the label
+  account?: string | null; // which Round Robin Max account this lane is running on (box-lane-show-account)
 }
 interface AccountSlot {
   label: string;
@@ -169,7 +170,14 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
           <span className="truncate text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{title}</span>
           <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
         </span>
-        <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
+        <span className="flex shrink-0 items-center gap-1.5">
+          {lane.account && (
+            <span title={`Running on ${lane.account}`} className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+              {lane.account}
+            </span>
+          )}
+          <span className="text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
+        </span>
       </div>
       {isCoach ? (
         <span className="block text-[11px] text-zinc-400">{action}</span>

@@ -13,6 +13,18 @@ The box that runs autonomous spec builds on the **Max subscription** for the [[.
 - **No inbound.** The box only reaches *out* (to Supabase + GitHub). Public SSH (:22) is firewalled; the trigger is a DB row the worker polls, never an HTTP call in.
 - **One worker.** Only the `shopcx-builder` service runs the worker (don't also start a `nohup` copy).
 
+## Which Max accounts the box uses
+
+The box round-robins across three Max logins. The dashboard ([[../dashboard/roadmap]] `/dashboard/roadmap/box`) labels them **Round Robin 1/2/3** (it never shows the email — kept here, not in the UI):
+
+| Box slot (UI) | Config dir | Max account email |
+|---|---|---|
+| **Round Robin 1** | `/home/builder/.claude` | `dylan@superfoodscompany.com` |
+| **Round Robin 2** | `/home/builder/.claude-personal` | `dylanralston@gmail.com` |
+| **Round Robin 3** | `/home/builder/.claude-third` | `dylan@apptivi.com` |
+
+Slot order = the `CLAUDE_CONFIG_DIRS` order (the default in `builder-worker.ts`, overridable in `/root/shopcx-worker.env`). A build card on the box view shows the **Round Robin N** it's running on, so you can see which account a live build is drawing down.
+
 ## Multi-account round-robin + usage-cap failover (box-multi-account-failover)
 
 A single Max account hits a **5-hour usage wall**; with one account a burst of builds caps it and *everything* fails until the reset (the 2026-06-22 "12 builds failed at once"). So the box keeps a **pool of `CLAUDE_CONFIG_DIR`s** — each an isolated, once-logged-in Max account — round-robins **new** sessions across them (~2× sustained throughput, each account hits its wall ~2× slower), pulls a capped account from rotation until its estimated reset, **pins every resume to the account that created its session** (a cross-account `claude --resume` is a guaranteed "No conversation found"), and parks `blocked_on_usage` (auto-resumes, never a hard fail) only when **all** accounts are capped. The worker logic is in `scripts/builder-worker.ts` (the `ACCOUNT_POOL` / `accounts` block). The pool is `CLAUDE_CONFIG_DIRS` (comma-separated; default `/home/builder/.claude,/home/builder/.claude-personal`).
