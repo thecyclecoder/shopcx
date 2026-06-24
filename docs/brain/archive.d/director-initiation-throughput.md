@@ -1,0 +1,1 @@
+- **Saturate the build pool — keep all 8 lanes full, not 4 per 15 min** · verified 2026-06-24 · → [[libraries/platform-director]]
