@@ -16,7 +16,7 @@ Auto-building product-code fixes off a noisy error feed is the exact Goodhart fa
 - With Platform live+autonomous, an OPEN error_events row with no live repair job + no fix spec gets a `repair` job enqueued on the next standing pass (and, downstream, an auto-built fix), plus a `reconciled_error` activity row. The current 16-open backlog trends down across passes.
 - An error already covered by an in-flight fix is NOT re-enqueued (dedup). A signature Rafa resolved as transient is not re-opened.
 
-## Phase 2 — the external-blocker escalation class (the ONLY routine CEO touch) ⏳
+## Phase 2 — the external-blocker escalation class (the ONLY routine CEO touch) ✅
 - Make 'the root cause is OUTSIDE our system' a first-class outcome, distinct from internally-fixable. When the verified diagnosis is an external dependency break (a third-party API contract change, a vendor outage beyond our retry/breaker, a credential/permission change on their side), the Director does NOT author a code fix — it `escalateDiagnosisToCeo` with the diagnosis + 2–3 concrete ALTERNATIVE options (wait/retry, swap provider, degrade gracefully). Everything internally-fixable is fixed without the CEO.
 - This refines the `needs-human` verdict + the [[../specs/agent-outage-resilience]] outage-aware path: 'needs a human judgment we can make internally' → I take it (author/build or supervised-dismiss); 'needs the CEO because it's external and needs a business call' → the only routine escalation. Deduped per signature so it pings once.
 

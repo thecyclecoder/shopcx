@@ -2098,11 +2098,14 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
 // director-supervised-repair-dismissal (Phase 1): SUPERVISE + clear Rafa's no-fix Control Tower items. For each
 // of Rafa's open `needs-human` repair items (a `needs_attention` job, surfaced Dismiss-only) it runs a read-only
 // Max investigation that adversarially RE-CHECKS his no-fix call and decides:
-//   - dismiss  → independently confirmed transient/foreign/benign → clear it via the EXISTING owner Dismiss path
+//   - dismiss  → independently confirmed transient/foreign-noise/benign → clear it via the EXISTING owner Dismiss path
 //                (resolve the error_events row + complete the job) + a `dismissed_repair` activity row (Ada's OWN reasoning).
-//   - escalate → suspects Rafa mislabeled a REAL bug → do NOT dismiss; escalate the contrary diagnosis to the CEO.
+//   - escalate → suspects Rafa mislabeled a REAL bug in OUR code → do NOT dismiss; escalate the contrary diagnosis to the CEO.
+//   - external → verified the root cause is OUTSIDE our system (a vendor/API/credential break we can't code-fix) → do NOT
+//                author a fix; escalate to the CEO with the diagnosis + 2–3 alternatives (the ONLY routine error→CEO touch,
+//                director-zero-backlog-error-autonomy Phase 2). Deduped per signature so it pings once.
 //   - keep     → a genuine needs-human call → leave it on the Control Tower untouched for the human; record the review.
-// DEFAULT is not-dismissing; unsure ⇒ escalate, never dismiss (north-star: hit a rail → escalate). Idempotent via
+// DEFAULT is not-dismissing; unsure ⇒ escalate/keep, never dismiss (north-star: hit a rail → escalate). Idempotent via
 // the repair_job_id ledger (each item reviewed once; a re-fire is a new job → fresh review). No-op unless Platform
 // is live+autonomous (findRepairDismissalCandidates returns []). Bounded per pass (PLATFORM_DIRECTOR_DISMISS_CAP).
 // Best-effort per item. Returns a one-line summary for the standing-pass log.
@@ -2115,6 +2118,7 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
 
   let dismissed = 0;
   let escalated = 0;
+  let external = 0;
   let kept = 0;
   for (const c of candidates) {
     try {
@@ -2170,6 +2174,44 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
         continue;
       }
 
+      // ── EXTERNAL — verified the root cause is OUTSIDE our system → no code fix; escalate to the CEO with alternatives. ──
+      // The ONLY routine error→CEO touch (Phase 2): a third-party API/contract change, a vendor outage beyond our
+      // retry/breaker, or a credential/permission change on their side. We can't code-fix it; the CEO makes the business
+      // call. Carry the diagnosis + 2–3 concrete options (wait/retry, swap provider, degrade gracefully). Deduped per
+      // signature (external:{sig}) so it pings once, distinct from the suspected-real-bug escalate key.
+      if (verdict === "external") {
+        const alts = Array.isArray(parsed.alternatives) ? parsed.alternatives.map((a) => String(a).trim()).filter(Boolean).slice(0, 3) : [];
+        const altText = alts.length ? `\n\nYour options:\n${alts.map((a, i) => `${i + 1}. ${a}`).join("\n")}` : "";
+        const diagnosis = `${reasoning || `${c.signature}'s root cause is an external dependency break, not our code — it needs a business call, not a code fix.`}${altText}`.slice(0, 4000);
+        const r = await lib.escalateDiagnosisToCeo(db, {
+          workspaceId: job.workspace_id,
+          specSlug: null,
+          title: `External blocker — your call: ${c.signature}`,
+          diagnosis,
+          dedupeKey: lib.externalBlockerKey(c.signature),
+          deepLink: "/dashboard/developer/control-tower",
+          escalationKind: "external_blocker",
+          metadata: { repair_job_id: c.jobId, signature: c.signature, verdict: "external", alternatives: alts },
+        });
+        if (r.emitted) {
+          external++;
+          console.log(`${tag} repair-supervise ${c.signature} → external → surfaced blocker + ${alts.length} option(s) to CEO`);
+        } else {
+          if (r.error) console.error(`${tag} repair-supervise ${c.signature} → external escalation FAILED to surface to CEO: ${r.error.message}`);
+          // Already surfaced (or a surface error) — record the review so this same job isn't re-investigated each pass.
+          await recordDirectorActivity(db, {
+            workspaceId: job.workspace_id,
+            directorFunction: "platform",
+            actionKind: "kept_repair",
+            specSlug: null,
+            reason: diagnosis,
+            metadata: { dismiss_key: lib.dismissKey(c.signature), repair_job_id: c.jobId, signature: c.signature, verdict: "external-already-surfaced", autonomous: true },
+          });
+          console.log(`${tag} repair-supervise ${c.signature} → external but already surfaced — recorded review`);
+        }
+        continue;
+      }
+
       // ── KEEP (or no verdict) — a genuine needs-human call → leave it on the Control Tower untouched for the human. ──
       kept++;
       await recordDirectorActivity(db, {
@@ -2189,6 +2231,7 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
   const parts: string[] = [];
   if (dismissed) parts.push(`dismissed ${dismissed}`);
   if (escalated) parts.push(`escalated ${escalated}`);
+  if (external) parts.push(`external→CEO ${external}`);
   if (kept) parts.push(`kept ${kept}`);
   return `repair-supervise: reviewed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
