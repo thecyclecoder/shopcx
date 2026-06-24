@@ -7,7 +7,7 @@
 
 [[../libraries/platform-director]] `escortFixSpecs` gates on `card.phases.length === 0 && card.repairSignature && owner === platform`. The box Repair Agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so `phases.length` is 1 (or more) and the lane skips them. These specs have no ✅ phase (grooming skips) and no goal link (the goal-walk skips), so nothing ever queues them. The 7-day `inFlight` cooldown ([[groom-advance-next-phase-after-merge]]) is unrelated — it only affects grooming, which never sees a 0-✅ spec; do not conflate the two.
 
-## Phase 1 — fix the fix-escort gate: any unstarted authored platform fix spec ⏳
+## Phase 1 — fix the fix-escort gate: any unstarted authored platform fix spec ✅
 - Change the `escortFixSpecs` candidate test from `phases.length === 0` to **no shipped phase** (`counts.shipped === 0`), keeping the rest: `repairSignature` present, `owner === platform`, unblocked, `**Auto-build:** off` excluded, no active build, loop-guard on repeated failures. So a Repair-authored platform fix spec is queued regardless of whether it has 0, 1, or N ⏳ phases — the existing build chain then carries its phases to completion.
 - No waiting period: initiation has no prior build, so no cooldown applies. Queue on the next standing pass; write the `escorted_fix` [[../tables/director_activity]] row + the P6 `spec_card_state` mirror as today.
 - Brain: [[../libraries/platform-director]] (`escortFixSpecs`, `FixEscortResult`) · [[worker-grading-and-director-management]].

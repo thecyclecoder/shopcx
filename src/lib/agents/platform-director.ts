@@ -535,21 +535,22 @@ function phaseStatesOf(card: SpecCard): { index: number; title: string; status: 
 }
 
 export interface FixEscortResult {
-  /** 0-phase authored fix specs (Repair-signature) whose build we queued. */
+  /** unstarted authored fix specs (Repair-signature, no ✅ phase) whose build we queued. */
   fixQueued: string[];
   /** fix specs whose build repeatedly failed (≥ loop-guard cap) → escalated to the CEO. */
   escalated: string[];
 }
 
 /**
- * Escort the work both other lanes miss — **0-phase authored fix specs** (worker-grading-and-director-
+ * Escort the work both other lanes miss — **unstarted authored fix specs** (worker-grading-and-director-
  * management Phase 4; absorbed the removed director-escort-inflight-specs gap). The two existing lanes already
  * drive *started* work: escortApprovedGoals walks goal→milestone→spec trees, and board-grooming
  * (findGroomCandidates) drives every in-flight spec (≥1 ✅ + ≥1 ⏳) via a careful Max continue/split/escalate
  * investigation, regardless of goal linkage. The remaining gap is a spec authored by the box Repair /
- * Regression agent for a REAL bug that has **0 phases** (so grooming, which needs ≥1 ✅, can't see it) and
- * **no goal** (so the goal-walk can't see it). Building it IS the director's `error_fix` mandate the CEO
- * already greenlit, so it's inside the leash — we don't blind-queue a 0-phase FEATURE spec (a new product
+ * Regression agent for a REAL bug that has **no shipped phase** (so grooming, which needs ≥1 ✅, can't see it)
+ * and **no goal** (so the goal-walk can't see it) — whether it has 0 ⏳ phases or a `## Phase 1 — close it ⏳`
+ * section the Repair agent now authors. Building it IS the director's `error_fix` mandate the CEO already
+ * greenlit, so it's inside the leash — we don't blind-queue an unstarted FEATURE spec (a new product
  * capability, which has no Repair-signature and still escalates).
  *
  * The gate is the **Repair-signature** (`SpecCard.repairSignature`) + platform ownership. Same guards as the
@@ -573,9 +574,12 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
-    // The gap: a 0-phase, platform-owned spec carrying a Repair-signature (an authored fix for a real bug).
-    // A 0-phase spec with NO repair signature is a new feature — never auto-built (it still escalates).
-    const isFixSpec = card.phases.length === 0 && card.repairSignature && (card.owner ?? PLATFORM) === PLATFORM;
+    // The gap: an UNSTARTED (no ✅ phase), platform-owned spec carrying a Repair-signature (an authored fix
+    // for a real bug). The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section,
+    // so gating on `phases.length === 0` skipped them; gate on `counts.shipped === 0` instead so a fix spec
+    // with 0, 1, or N ⏳ phases (but nothing landed) is escorted, and the build chain carries its phases to
+    // completion. An unstarted spec with NO repair signature is a new feature — never auto-built here.
+    const isFixSpec = card.counts.shipped === 0 && card.repairSignature && (card.owner ?? PLATFORM) === PLATFORM;
     if (!isFixSpec) continue;
 
     const state = await specBuildState(admin, workspaceId, card.slug);
@@ -610,7 +614,7 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     if (error) continue;
 
     fixQueued.push(card.slug);
-    // P6 — instant PM-companion mirror so the board shows the fix moving (0 phases → status only).
+    // P6 — instant PM-companion mirror so the board shows the fix moving (its phase snapshot, if any).
     await markSpecCardStatus(workspaceId, card.slug, "in_progress", phaseStatesOf(card));
     await recordDirectorActivity(admin, {
       workspaceId,
