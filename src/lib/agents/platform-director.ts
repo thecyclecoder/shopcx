@@ -53,7 +53,7 @@ import {
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
-import { getGoals, getRoadmap, getSpec, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
+import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
@@ -1160,4 +1160,155 @@ export function validateGroomSplit(
     seen.add(slug);
   }
   return { ok: true };
+}
+
+// ── Phase 2 (director-initialize-platform-specs-no-wait) — initiate non-fix platform specs ─────────
+// The other lanes drive every STARTED or fix-shaped spec: escortApprovedGoals walks goal→milestone→spec
+// trees, escortFixSpecs builds unstarted authored fix specs (Repair-signature), and groomBoard moves
+// in-flight (≥1 ✅) specs. The remaining gap is a platform-owned, unblocked, UNSTARTED (0 ✅) spec that is
+// NEITHER goal-linked NOR Repair-signed: fix-escort rejects it (no Repair-signature), the goal-walk can't
+// see it (no goal), and grooming needs a ✅. Per CEO policy the director may INITIATE its OWN department's
+// specs with NO waiting period (initiation has no prior build, so no cooldown applies) — but NEVER blindly.
+// Like grooming, the decision is a read-only Max `claude -p` SOUNDNESS investigation (the spec is sound +
+// in-scope) before any build is queued; a failed/ambiguous verdict ESCALATES to the CEO and queues nothing
+// (CEO decision 2026-06-24: the investigation step is mandatory, same soundness rail as approval/groom).
+//
+// Hard rails (unchanged): a NON-platform unstarted spec is NEVER initialized here (other departments are only
+// babysat via grooming once they have ≥1 ✅ phase); a spec that is part of an unstarted (0%) GOAL is NOT
+// touched here — escortApprovedGoals already surfaces a zero-progress owned goal to the CEO as a new-goal call;
+// destructive/irreversible/multi-choice still escalate (the investigation's job). Dormant until live+autonomous.
+
+/** Cap how many unstarted non-fix specs one initiation pass investigates (bound the per-pass cost). */
+export const PLATFORM_DIRECTOR_INIT_CAP = 4;
+
+/** A platform-owned, unstarted, non-fix, non-goal spec the director may initiate after a soundness check. */
+export interface InitCandidate {
+  slug: string;
+  title: string;
+  owner?: string;
+  parent?: string;
+  summary: string;
+  plannedPhases: string[]; // titles of the ⏳ phases (what the build will carry to completion)
+  raw: string; // the spec's full markdown — the soundness investigation reads it
+  /** prior failed build attempts (no in-flight) — the loop-guard count the dispatch reads. */
+  failedBuilds: number;
+  lastError: string | null;
+}
+
+/** The init-lane escalation dedup keys for a spec (ambiguous-soundness + loop-guard). */
+export function initEscalationKeys(slug: string): string[] {
+  return [`init-unsure:${slug}`, `initguard:${slug}`];
+}
+
+/**
+ * Has this spec ALREADY had a TERMINAL init escalation (ambiguous soundness, or a loop-guard "deeper issue")?
+ * After such an escalation the spec is still unstarted + unblocked, so without this ledger dedup it would be
+ * re-investigated (a wasted `claude -p`) and re-escalated every pass. A successful INITIATE doesn't need this —
+ * its queued build flips the spec in-flight, which findInitCandidates already excludes. Best-effort.
+ */
+export async function alreadyInitiated(admin: Admin, slug: string): Promise<boolean> {
+  const { data } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("director_function", PLATFORM)
+    .eq("action_kind", "escalated")
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  const keys = new Set(initEscalationKeys(slug));
+  return (data ?? []).some((r) => keys.has(String((r.metadata as Record<string, unknown> | null)?.["dedupe_key"] ?? "")));
+}
+
+/**
+ * Find the platform-owned, unblocked, UNSTARTED (0 ✅) specs the director may initiate this pass — the gap no
+ * other lane covers: NOT Repair-signed (escortFixSpecs owns those), NOT goal-linked (the goal-walk / new-goal
+ * escalation owns those), not opted out (`**Auto-build:** off`), no in-flight build, and not already
+ * terminally escalated by this lane. A NO-OP until Platform is live+autonomous (like the escort). Capped at
+ * INIT_CAP per pass. Each candidate is still SOUNDNESS-investigated by the box lane before any build — this
+ * only assembles the unblinded gap; it never queues.
+ */
+export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return []; // dormant until activation flips the flag
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return [];
+
+  const [{ specs }, filters] = await Promise.all([getRoadmap(), getRoadmapFilters()]);
+  const unstarted = specs.filter(
+    (s) =>
+      s.status !== "shipped" &&
+      s.counts.shipped === 0 && // unstarted — no phase has landed
+      s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
+      !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
+      (s.owner ?? PLATFORM) === PLATFORM && // ONLY the director's own department (the hard rail)
+      !s.blockedBy.some((b) => !b.cleared) && // still blocked → its auto-queue fires when its last blocker ships
+      (filters.goalsBySpec[s.slug] ?? []).length === 0, // goal-linked → the goal-walk / new-goal escalation owns it
+  );
+
+  const out: InitCandidate[] = [];
+  for (const s of unstarted) {
+    if (out.length >= PLATFORM_DIRECTOR_INIT_CAP) break;
+    const state = await specBuildState(admin, workspaceId, s.slug);
+    if (state.inFlight) continue; // a build is already carrying it — not "unstarted with no build"
+    if (await alreadyInitiated(admin, s.slug)) continue; // already terminally escalated — don't re-investigate
+    const got = await getSpec(s.slug);
+    if (!got) continue;
+    out.push({
+      slug: s.slug,
+      title: s.title,
+      owner: s.owner,
+      parent: s.parent,
+      summary: s.summary,
+      plannedPhases: s.phases.filter((p) => p.status === "planned").map((p) => p.title),
+      raw: got.raw,
+      failedBuilds: state.failedCount,
+      lastError: state.lastError,
+    });
+  }
+  return out;
+}
+
+/** The parsed init soundness verdict (the box lane's `claude -p` JSON). */
+export interface InitVerdict {
+  verdict?: string;
+  reasoning?: string;
+}
+
+/**
+ * The Max `claude -p` SOUNDNESS investigation prompt — read-only assess ONE unstarted platform spec and
+ * decide whether to INITIATE its build (it is sound + in-scope) or ESCALATE to the CEO. NEVER a blind build:
+ * this is the same soundness rail as the approval / groom lanes (CEO decision 2026-06-24).
+ */
+export function initInvestigationPrompt(c: InitCandidate): string {
+  return [
+    "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
+    "This is a PLATFORM-owned spec on the board that is UNSTARTED (0 phases shipped), unblocked, NOT a Repair-",
+    "authored fix, and NOT part of any goal. Per CEO policy you may INITIATE your OWN department's specs with no",
+    "waiting period — but NEVER blindly. Investigate read-only and decide whether to kick off its build now.",
+    "",
+    "1. INITIATE — the spec is SOUND and IN-SCOPE for Platform: it is well-formed (a real ## Phase plan), its",
+    "   approach is reasonable, it is additive / reversible, and it is squarely platform work. → I queue its build,",
+    "   and the existing chain + auto-ship + fold carry its phases to completion.",
+    "2. ESCALATE — anything you cannot confirm sound: it is ambiguous / under-specified / possibly out of scope,",
+    "   it implies a destructive or irreversible change, it is really a NEW GOAL (a large new product capability)",
+    "   rather than a scoped spec, or it is a non-binary CHOICE. → I escalate to the CEO and queue NOTHING.",
+    "   Prefer this over a wrong guess (north-star: hit a rail → escalate).",
+    "",
+    `Spec: ${c.slug} — ${c.title}`,
+    `Owner: ${c.owner ?? "—"} · Parent: ${c.parent ?? "—"}`,
+    c.summary ? `Summary: ${c.summary}` : "",
+    `Planned phases (⏳): ${c.plannedPhases.join(" · ") || "—"}`,
+    c.failedBuilds ? `Note: ${c.failedBuilds} prior build attempt(s) failed${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}.` : "",
+    "",
+    "Full spec markdown:",
+    "----------------------------------------",
+    c.raw,
+    "----------------------------------------",
+    "",
+    "Investigate read-only (the spec's promise + phases, the code/tables it touches, whether it's scoped platform work).",
+    "Final message = ONLY one JSON object (no markdown):",
+    '{"verdict":"initiate","reasoning":"<why the spec is sound, in-scope, and safe to build now>"}',
+    '{"verdict":"escalate","reasoning":"<why this needs the CEO — ambiguous / out of scope / a new goal / destructive / a choice>"}',
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

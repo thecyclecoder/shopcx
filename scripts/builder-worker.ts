@@ -1644,6 +1644,16 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing fix-escort failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // director-initialize-platform-specs-no-wait (Phase 2) — INITIATE unstarted non-fix, non-goal platform
+    // specs (no waiting period), each gated by a read-only soundness investigation. The gap fix-escort +
+    // goal-walk + grooming all miss.
+    const init = await initiatePlatformSpecs(job, tag);
+    notes.push(init);
+  } catch (e) {
+    notes.push(`init failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing init failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const groom = await groomBoard(job, tag);
     notes.push(groom);
   } catch (e) {
@@ -1832,6 +1842,115 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   if (split) parts.push(`split ${split}`);
   if (escalated) parts.push(`escalated ${escalated}`);
   return `groom: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
+}
+
+// director-initialize-platform-specs-no-wait (Phase 2): INITIATE unstarted, non-fix, non-goal PLATFORM specs
+// with no waiting period. For each candidate (the gap fix-escort + goal-walk + grooming all miss) it runs a
+// read-only Max SOUNDNESS investigation that decides:
+//   - initiate → the spec is sound + in-scope → queue its build to completion (loop-guarded like the escort).
+//   - escalate → ambiguous / out of scope / a new goal / destructive → route the diagnosis to the CEO, queue nothing.
+// The investigation is MANDATORY (CEO decision 2026-06-24 — never a blind build; the same soundness rail as
+// the approval/groom lanes). No-op unless Platform is live+autonomous (findInitCandidates returns []). Bounded
+// per pass (PLATFORM_DIRECTOR_INIT_CAP). Best-effort per spec. Returns a one-line summary for the standing log.
+async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  const { markSpecCardStatus } = await import("../src/lib/spec-card-state");
+  const { getSpec } = await import("../src/lib/brain-roadmap");
+
+  const candidates = await lib.findInitCandidates(db);
+  if (!candidates.length) return "init: nothing to assess";
+
+  let initiated = 0;
+  let escalated = 0;
+  for (const c of candidates) {
+    try {
+      // P7: inject the CEO's coaching into the soundness decision too (same as grooming/approval).
+      const di = await import("../src/lib/agents/director-instructions");
+      const investPrompt = await di.appendDirectorInstructions(db, job.workspace_id, "platform", lib.initInvestigationPrompt(c));
+      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
+      const verdict = String(parsed.verdict || "");
+      const reasoning = String(parsed.reasoning || "").slice(0, 4000);
+
+      // ── INITIATE — the spec is sound + in-scope → queue its build (loop-guarded like the escort). ──
+      if (verdict === "initiate") {
+        // Loop-guard: a build that already failed ≥ the cap with nothing in-flight is a deeper issue —
+        // stop, escalate to the CEO, never re-queue (the leash forbids an infinite resubmit loop).
+        if (c.failedBuilds >= lib.PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+          const diagnosis = `Initiating ${c.slug}: I confirmed it's sound, but its build failed ${c.failedBuilds}× without landing — likely a deeper issue, not a flaky retry${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach.`;
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Build stuck (initiation): ${c.slug}`,
+            diagnosis,
+            dedupeKey: `initguard:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "init_loop_guard",
+            metadata: { failed_attempts: c.failedBuilds, last_error: c.lastError ?? undefined },
+          });
+          if (r.emitted) escalated++;
+          console.log(`${tag} init ${c.slug} → initiate but loop-guard → escalated to CEO`);
+          continue;
+        }
+        const dupe = await hasActiveBuildForSlug(c.slug);
+        if (dupe.active) {
+          console.log(`${tag} init ${c.slug} → initiate but build already live (${dupe.reason}) — skipped`);
+          continue;
+        }
+        const retry = c.failedBuilds > 0;
+        const { error } = await db.from("agent_jobs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: c.slug,
+          kind: "build",
+          status: "queued",
+          created_by: null,
+          instructions: `Initiated by the Platform/DevOps Director: ${c.slug} is an unstarted, unblocked platform spec I confirmed sound + in-scope${retry ? ` — re-attempt #${c.failedBuilds + 1} (prior build failed)` : ""}; sequencing its build to completion. Follow the spec exactly; tsc-clean; open a PR.`,
+        });
+        if (error) {
+          console.warn(`${tag} init ${c.slug} → build enqueue failed: ${error.message}`);
+          continue;
+        }
+        initiated++;
+        // P6 — instant PM-companion mirror so the board shows the spec moving (its planned-phase snapshot).
+        const got = await getSpec(c.slug);
+        const phaseStates = (got?.card.phases ?? []).map((p, i) => ({ index: i, title: p.title, status: p.status }));
+        await markSpecCardStatus(job.workspace_id, c.slug, "in_progress", phaseStates);
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "escorted_init",
+          specSlug: c.slug,
+          reason: reasoning || `Unstarted platform spec confirmed sound + in-scope — initiated its build (no waiting period).`,
+          metadata: { planned_phases: c.plannedPhases, retry, autonomous: true },
+        });
+        console.log(`${tag} init ${c.slug} → initiate → queued build`);
+        continue;
+      }
+
+      // ── ESCALATE — ambiguous / out of scope / a new goal / destructive → route to the CEO, queue nothing. ──
+      const diagnosis = reasoning || `${c.slug} is an unstarted platform spec I can't confidently confirm sound + in-scope to initiate (possibly out of scope, a new goal, or destructive). Holding off — your call.`;
+      const r = await lib.escalateDiagnosisToCeo(db, {
+        workspaceId: job.workspace_id,
+        specSlug: c.slug,
+        title: `Initiation needs a call: ${c.slug}`,
+        diagnosis,
+        dedupeKey: `init-unsure:${c.slug}`,
+        deepLink: `/dashboard/roadmap/${c.slug}`,
+        escalationKind: "init_unsure",
+        metadata: { planned_phases: c.plannedPhases },
+      });
+      if (r.emitted) escalated++;
+      console.log(`${tag} init ${c.slug} → ${verdict || "no verdict"} → escalated to CEO`);
+    } catch (e) {
+      console.error(`${tag} init ${c.slug} failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  const parts: string[] = [];
+  if (initiated) parts.push(`initiated ${initiated}`);
+  if (escalated) parts.push(`escalated ${escalated}`);
+  return `init: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
 
 async function runPlatformDirectorJob(job: Job) {
