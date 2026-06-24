@@ -32,8 +32,8 @@ import {
   type OrgChartGraph,
   type AutonomyMap,
 } from "@/lib/agents/approval-router";
-import { getSlackToken, postAsAda } from "@/lib/slack";
-import { buildInboxApprovalCard } from "@/lib/slack-ada";
+import { getSlackToken, postAsAda, updateMessage } from "@/lib/slack";
+import { buildInboxApprovalCard, type InboxCardAction } from "@/lib/slack-ada";
 import { createChatModeInvitationThread } from "@/lib/agents/director-coach-threads";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -523,6 +523,89 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
   }
 
   return { created, dismissed };
+}
+
+/**
+ * Phase 4 (ada-slack-routed-approvals) — mirror a non-Slack-inbox approval decision back to the
+ * #cto-ada Slack surface so the two surfaces never show stale state. Called from
+ * `approveRoadmapAction` AFTER the job has been updated + the ledger entry recorded; the decision
+ * path is unchanged. Best-effort: a Slack failure must never roll back the decision.
+ *
+ * Behavior forks on the original Slack surface (Phase 1 vs Phase 3):
+ *   - **card** (default): `chat.update` the stored ts so the just-decided action's row reads
+ *     "✅ Approved (in web inbox)" / "✕ Declined (in web inbox)"; remaining pending rows stay
+ *     tappable. The card is rebuilt from the LIVE job state — same approach the Slack tap takes
+ *     in `handleInboxDecision`, so a multi-action bundle stays consistent.
+ *   - **chat-mode invitation** (`metadata.slack_chat_mode === true`): post a short Ada thread
+ *     reply ("Decided in the web inbox — approved/declined. Anything to dig into?") so the
+ *     conversation doesn't dangle.
+ *
+ * No-op when the notification has no Slack mirror (`slack_message_ts` absent — the non-CEO routed
+ * case, or a workspace without `slack_ada_channel_id`). Skipped at the caller for in-Slack taps
+ * (their handler updates the card locally without the "(in web inbox)" suffix).
+ */
+export async function mirrorWebDecisionToAdaSlack(
+  admin: Admin,
+  workspaceId: string,
+  jobId: string,
+  actionId: string,
+  decision: "approve" | "decline",
+): Promise<void> {
+  try {
+    const { data: notif } = await admin
+      .from("dashboard_notifications")
+      .select("id, title, body, metadata")
+      .eq("workspace_id", workspaceId)
+      .eq("type", APPROVAL_REQUEST_TYPE)
+      .filter("metadata->>agent_job_id", "eq", jobId)
+      .maybeSingle();
+    if (!notif) return;
+    const meta = (notif.metadata || {}) as Record<string, unknown>;
+    const slackTs = typeof meta["slack_message_ts"] === "string" ? (meta["slack_message_ts"] as string) : null;
+    if (!slackTs) return;
+
+    const surface = await loadAdaSurface(admin, workspaceId, new Map());
+    if (!surface.channelId || !surface.token) return;
+
+    // Chat-mode (Phase 3): the Slack surface is an invitation thread, not a card. A thread reply
+    // closes the loop without making us guess how to render an "approval card" for a multi-choice
+    // or brain-touching ask that never had buttons in the first place.
+    if (meta["slack_chat_mode"] === true) {
+      const text = decision === "approve"
+        ? "Decided in the web inbox — approved. Anything to dig into?"
+        : "Decided in the web inbox — declined. Anything to dig into?";
+      await postAsAda(surface.token, surface.channelId, [], text, { thread_ts: slackTs });
+      return;
+    }
+
+    // Card surface — rebuild from the LIVE job state so a multi-action bundle keeps still-pending
+    // rows tappable while the just-decided row flips to "(in web inbox)". Other previously-decided
+    // rows keep their default label (we only mark THIS decision's row as web-inbox-decided).
+    const { data: job } = await admin
+      .from("agent_jobs")
+      .select("pending_actions")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (!job) return;
+    const actions = (job.pending_actions as PendingActionLike[] | null) ?? [];
+    const cardActions: InboxCardAction[] = actions
+      .filter((a): a is PendingActionLike & { id: string } => !!a.id)
+      .map((a) => ({
+        id: a.id as string,
+        summary: actionLabel(a),
+        status: a.status === "approved" ? "approved" : a.status === "declined" ? "declined" : "pending",
+        decidedInWebInbox: a.id === actionId && (a.status === "approved" || a.status === "declined"),
+      }));
+    const card = buildInboxApprovalCard({
+      notificationId: notif.id as string,
+      title: (notif.title as string | null) ?? "",
+      body: (notif.body as string | null) ?? "",
+      actions: cardActions,
+    });
+    await updateMessage(surface.token, surface.channelId, slackTs, card.blocks, card.text);
+  } catch (e) {
+    console.warn(`[approval-inbox] mirrorWebDecisionToAdaSlack failed (best-effort, ignoring): ${(e as Error).message}`);
+  }
 }
 
 /**

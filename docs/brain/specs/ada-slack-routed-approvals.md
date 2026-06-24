@@ -1,4 +1,4 @@
-# ⏳ Ada surfaces routed CEO inbox approvals in #cto-ada
+# ✅ Ada surfaces routed CEO inbox approvals in #cto-ada
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform" (phone-first idea→spec→build, extended from founder↔CTO conversation to the routed approval inbox itself)
 
@@ -35,19 +35,20 @@ Extend the `#cto-ada` surface ([[ada-slack-chat]]) so it also mirrors the **rout
   - Decision happens **inside the thread** — either Ada posts an Approve/Reject card after the conversation reaches resolution (a `pending_action` she emits during a turn, already supported by [[ada-slack-chat]] Phase 5), or the founder decides in the web inbox and the thread mirrors it (Phase 4).
 
 ## Phase 4 — Bidirectional mirror with the web inbox
-- ⏳ planned
+- ✅ shipped
 - **Slack decision → web inbox:** Approving/rejecting in Slack already moves the underlying job out of `needs_approval` (Phase 2 reuses `approveRoadmapAction`); the reconciler's dismiss pass flips `dashboard_notifications.dismissed=true` on the next sweep. So the web inbox naturally stops showing it.
-- **Web inbox decision → Slack card:** when the `/api/agents/inbox/decide` route runs (or any path that calls `approveRoadmapAction`), check the `dashboard_notifications` row for a `metadata.slack_message_ts`; if present, `chat.update` the Slack card to "✅ Approved (in web inbox)" / "✕ Declined (in web inbox)". This requires threading the `notification_id` (or looking it up by `agent_job_id`) through the decide route.
-- **Chat-mode parity:** if the underlying job is decided externally while a chat-mode thread is open, post a short Ada note in the thread ("Decided in the web inbox — declined. Anything to dig into?") so the conversation doesn't dangle.
+- **Web inbox decision → Slack card:** `approveRoadmapAction` (`src/lib/roadmap-actions.ts`) now calls `mirrorWebDecisionToAdaSlack(admin, workspaceId, jobId, actionId, decision)` after a terminal approve/decline. The mirror looks up the routed `dashboard_notifications` row by `metadata.agent_job_id` and, if `slack_message_ts` is present, `chat.update`s the stored card from the LIVE job state with the just-decided row's tail swapped to "✅ Approved (in web inbox)" / "✕ Declined (in web inbox)" (other rows keep their default labels — same multi-action consistency as the Slack-tap path). The Slack-tap path passes `source: 'slack-inbox'` so it skips the mirror (its own `updateMessage` is the canonical "applying…" render).
+- **Chat-mode parity:** when `metadata.slack_chat_mode === true`, the mirror posts a short Ada thread reply via `postAsAda` keyed off `slack_message_ts` ("Decided in the web inbox — approved/declined. Anything to dig into?") instead of trying to render an Approve/Reject card for a surface that never had buttons.
+- **Safety:** best-effort — `mirrorWebDecisionToAdaSlack` swallows its own errors so a Slack outage never blocks a decision that already landed on the job. `reject` (the optimizer hero reject-with-notes regen, not terminal) is skipped; only `approve`/`decline` mirror.
 
 ## Phase 5 — Brain pages (CLAUDE.md hard rule)
-- ⏳ planned
-- New `lifecycles/ada-slack-routed-approvals.md` — end-to-end trace: routed inbox emit → Slack card OR chat-mode thread → button tap / chat turn → approveRoadmapAction → dismiss + chat.update.
-- Update `libraries/approval-inbox.md` — the Phase 1 Slack emit branch, the `slack_message_ts` metadata key, the chat-mode dispatch rule.
-- Update `libraries/slack.md` / `integrations/slack.md` — the `inbox_approve` / `inbox_reject` action_ids.
-- Update `tables/dashboard_notifications.md` — the `metadata.slack_message_ts` field (Phase 1 stash).
-- Update `tables/director_coach_threads.md` — chat-mode threads carry the pre-seeded `agent_job_id` / `notification_id` context.
-- Cross-link and run `brain:index`.
+- ✅ shipped
+- New `lifecycles/ada-slack-routed-approvals.md` — end-to-end trace: routed inbox emit → Slack card OR chat-mode thread → button tap / chat turn → `approveRoadmapAction` → dismiss + `chat.update`, plus the Phase 4 web→Slack mirror.
+- `libraries/approval-inbox.md` — adds the Slack `#cto-ada` mirror section (Phase 1 card branch, Phase 3 chat-mode dispatch, `slack_message_ts` / `slack_chat_mode` / `coach_thread_id` metadata) and the Phase 4 `mirrorWebDecisionToAdaSlack` export.
+- `tables/dashboard_notifications.md` — adds the `metadata.slack_message_ts` / `slack_chat_mode` / `coach_thread_id` gotcha.
+- `tables/director_coach_threads.md` — already carried the Phase 3 chat-mode `metadata` (no further edit needed).
+- The `inbox_approve` / `inbox_reject` action_ids and `INBOX_ACTIONS` live in `src/lib/slack-ada.ts` (no separate brain page — picked up by the next `regenerate-brain` sweep alongside the existing `slack.md` auto-section).
+- Cross-links land on the next `brain:index` regen.
 
 ## Safety / invariants
 - **Decision path is unchanged.** Slack Approve / Reject calls `approveRoadmapAction` — the same function the web inbox calls. The leash, the bundle ALL-OR-NOTHING rule, `escalateApprovalRequestToCeo`, every safety invariant is inherited. This spec adds a surface, not a new gate.
@@ -67,9 +68,12 @@ Extend the `#cto-ada` surface ([[ada-slack-chat]]) so it also mirrors the **rout
 - `#alerts-critical` and `#daily-digest` still post as "shopcx" (persona override didn't leak).
 
 ## Verification
-- Trigger a build that pauses for CEO approval (or replay an existing one). Within ~20s, expect a new top-level #cto-ada post authored as Ada, with the investigation body + Approve / Reject. Tap Approve → expect the card to flip to "✅ Approved — applying…", the job to resume (`agent_jobs.status` moves to `queued_resume`), the `dashboard_notifications` row to dismiss on the next sweep, and a one-line confirmation in the same thread.
-- Trigger a `proposed-goal` from a director. Expect a chat-style invitation in #cto-ada ("want to talk through this goal?"), NOT an Approve/Reject card. Reply in the thread → expect a coach turn that resumes with the goal context already loaded (check `director_coach_threads.metadata.agent_job_id`).
-- Approve an item in the web `/dashboard/agents?view=inbox&role=ceo` that originated as a Slack-card → expect the Slack card to `chat.update` to "✅ Approved (in web inbox)".
-- Approve as a non-owner Slack user → expect a 403 / ephemeral "only the founder can decide here" reply, the job unchanged.
-- Re-park a job (decline an approve_action that leaves it pending again) → expect no second Slack post.
-- Run a normal critical-ops alert → expect it to still post as "shopcx" in `#alerts-critical`, never as Ada.
+- **Phase 1 emit (card path).** Trigger a build that pauses for CEO approval (or replay an existing one — set `agent_jobs.status='needs_approval'` on a routed-to-CEO job with a single plain pending action). Within ~20s of the box worker's next reconciler tick, expect a new top-level `#cto-ada` post authored as **Ada** (her name + avatar), with the investigation body + Approve / Reject buttons → also expect `dashboard_notifications.metadata.slack_message_ts` to be set on the matching row.
+- **Phase 2 in-Slack tap.** Tap **Approve** on that card → expect the card to `chat.update` to "✅ Approved — applying…" (NOT "(in web inbox)"), the job to resume (`agent_jobs.status` moves to `queued_resume`), the `dashboard_notifications` row to dismiss on the next sweep, and a one-line confirmation in the same thread ("✅ Approved — PR #N resumed." / "✕ Declined — build returned to me.").
+- **Phase 3 chat-mode invitation.** Trigger a `proposed-goal` from a director (or any job where `inlineApproveActions` returns null, the kind is `proposed-goal`/has a `spec` action, or the investigation preview exceeds 1200 chars). Expect a chat-style invitation in `#cto-ada` ("…paused for your call. …Want to walk through it?"), NOT an Approve/Reject card; `dashboard_notifications.metadata.slack_chat_mode === true` and `coach_thread_id` set on the matching row. Reply in the thread → expect a coach turn that resumes with the goal context already loaded (check `director_coach_threads.metadata.agent_job_id`).
+- **Phase 4 web→Slack mirror (card).** Approve an item in the web `/dashboard/agents?view=inbox&role=ceo` that originated as a Slack card → expect the Slack card to `chat.update` to "✅ Approved (in web inbox)" / "✕ Declined (in web inbox)" on the just-decided row, with any remaining pending rows still tappable.
+- **Phase 4 web→Slack mirror (chat-mode).** Decide a chat-mode invitation's underlying job in the web inbox (or via any non-Slack-inbox path) → expect a fresh Ada thread reply on the invitation: "Decided in the web inbox — approved/declined. Anything to dig into?"
+- **Owner re-gate.** Tap Approve as a non-owner Slack user in `#cto-ada` → expect a 403 / ephemeral "Owner-only — that action is reserved for the workspace owner." reply, the job unchanged in the database.
+- **Idempotency on re-park.** Re-park a job (decline one action of a multi-action bundle that leaves the rest pending, then re-park the job back to `needs_approval`) → expect no second Slack post on the next reconciler tick (`metadata.slack_message_ts` already set ⇒ skip).
+- **Persona scoping.** Run a normal critical-ops alert → expect it to still post as "shopcx" in `#alerts-critical`, never as Ada.
+- **Non-CEO route stays in dashboard.** Decision routed to a live+autonomous director (not the CEO) → expect NO Slack post in `#cto-ada`, the director's own queue still shows the item, the row's metadata carries `routed_to_function !== 'ceo'`.

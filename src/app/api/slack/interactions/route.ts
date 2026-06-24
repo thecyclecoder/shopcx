@@ -318,7 +318,15 @@ async function handleInboxDecision(
   const jobId = typeof meta.agent_job_id === "string" ? meta.agent_job_id : "";
   if (!jobId) return ephem("That approval is missing job context.");
 
-  const result = await approveRoadmapAction(workspaceId, userId, { jobId, actionId: actId, decision });
+  const result = await approveRoadmapAction(workspaceId, userId, {
+    jobId,
+    actionId: actId,
+    decision,
+    // ada-slack-routed-approvals Phase 4: tag this call so the web→Slack mirror is skipped — we
+    // already chat.update the card a few lines down (without the "(in web inbox)" suffix), and
+    // mirroring would double-update it with the wrong label for a Slack-side decision.
+    source: "slack-inbox",
+  });
   if (!result.ok) return ephem(`Couldn't record decision: ${result.error}`);
 
   // Rebuild the card from the updated job state so a multi-action bundle keeps tappable rows for the

@@ -123,6 +123,12 @@ export interface InboxCardAction {
   id: string;
   summary: string;
   status?: "pending" | "approved" | "declined";
+  /**
+   * Phase 4 (ada-slack-routed-approvals) — on a resolved row, swap the default label tail for
+   * "(in web inbox)" so the founder can tell at a glance which surface decided this one. Set by
+   * the web→Slack mirror; the in-Slack tap leaves it false so its own update reads "applying…".
+   */
+  decidedInWebInbox?: boolean;
 }
 
 /**
@@ -166,7 +172,9 @@ export function buildInboxApprovalCard(opts: {
         ],
       });
     } else {
-      const tail = status === "approved" ? "✅ Approved — applying…" : "✕ Declined";
+      const tail = status === "approved"
+        ? a.decidedInWebInbox ? "✅ Approved (in web inbox)" : "✅ Approved — applying…"
+        : a.decidedInWebInbox ? "✕ Declined (in web inbox)" : "✕ Declined";
       const prefix = a.summary ? `${a.summary} — ` : "";
       blocks.push({
         type: "context",
