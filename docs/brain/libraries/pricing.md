@@ -25,6 +25,10 @@ sns%   = pricing_rule.subscribe_discount_pct, else workspaces.subscription_disco
 unit   = round(base × (1 − break%/100) × (1 − sns%/100))
 ```
 
+### Persist-to-renewal offer overlay
+
+When the sub carries `pricing_offer_id` ([[../tables/subscriptions]] → [[../tables/pricing_rule_offers]]), the engine loads that offer and — only when it is `status='active'` and `now() ∈ [starts_at, ends_at]` — overlays it on the in-scope product lines: `renewal_price_cents` pins the per-unit charge outright, else `subscribe_discount_pct` **overrides** the resolved S&S % (break still applies). `product_id = null` covers every product line; otherwise only that product's lines. Out-of-scope subs (no / expired / un-approved offer) get untouched base rule pricing. Because the sub stores a **reference, not a baked price**, expiring the offer reverts it automatically — the same reversibility the engine relies on everywhere. An applied offer adds a `renewal_offer` discount pill (the offer's `label`). This is the M6 lever's read path; nothing populates `pricing_offer_id` until the deferred `storefront-renewal-offer-lever` ships, so the path is dormant by default. Spec: `storefront-dynamic-renewal-offers.md`.
+
 Pricing data lives in [[../tables/pricing_rules]] (linked to products via [[../tables/product_pricing_rule]]): `quantity_breaks`, `subscribe_discount_pct`, `free_shipping`. Free shipping mirrors the storefront's authoritative rule — `free_shipping && (!free_shipping_subscription_only || isSubscribing)`. Internal subs are **always** subscription-mode, so a rule with `free_shipping = true` grants it outright; `free_shipping_threshold_cents` does **not** gate the decision (it's a one-time-order / banner concept).
 
 ## Identifier discipline

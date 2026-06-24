@@ -38,6 +38,7 @@ Synced from Appstle. items JSONB, billing interval, next billing date. Will beco
 | `avalara_quote_address` | `jsonb` | ✓ |  |
 | `comp` | `bool` | — | default: `false`. **Comp sub** — ships free on schedule (base $0, no PM, no charge). Pairs with item `price_override_cents=0` + `is_internal=true`. Renewal ships free only when the customer is comp-allowlisted ([[customers]].`comp_role`); else fails closed. |
 | `comp_note` | `text` | ✓ | Free-text reason on the comp sub ("employee"). |
+| `pricing_offer_id` | `uuid` | ✓ | → [[pricing_rule_offers]].id, `ON DELETE SET NULL`. The **persist-to-renewal offer** this sub was acquired under — a *reference, not a baked price*. The renewal engine ([[../libraries/pricing]]) applies the offer's delta while it is `active` + in-window; expiring/removing the offer reverts to base pricing automatically. Set by the deferred activation lever (owner-approval-gated). |
 
 ## Foreign keys
 
@@ -45,6 +46,7 @@ Synced from Appstle. items JSONB, billing interval, next billing date. Will beco
 
 - `customer_id` → [[customers]].`id`
 - `shipping_rate_id` → [[shipping_rates]].`id`
+- `pricing_offer_id` → [[pricing_rule_offers]].`id`
 - `workspace_id` → [[workspaces]].`id`
 
 **In (others → this):**
