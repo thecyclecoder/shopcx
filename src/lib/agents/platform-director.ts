@@ -751,6 +751,39 @@ const ACTIVE_BUILD_STATUSES: ReadonlySet<string> = new Set([
   "queued_resume",
 ]);
 
+/**
+ * The build/plan pool ceiling — the SATURATION TARGET's denominator (director-initiation-throughput Phase 1).
+ * MUST stay in sync with `scripts/builder-worker.ts` `MAX_CONCURRENT` (the box's lane count). The REAL ceiling
+ * is Max rate limits (Phase 4's 529-backoff), not this number — bump both together to widen the pool.
+ */
+export const BUILD_POOL_CAPACITY = 8;
+
+/** Statuses a build/plan job sits in while it OCCUPIES or is HEADED FOR a lane (queued included) — the
+ *  saturation denominator. `claimed` (the RPC's pre-launch flip) counts; a terminal/held job does not. */
+const INFLIGHT_POOL_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
+
+/**
+ * Saturation target (director-initiation-throughput Phase 1): how many MORE builds the pool can take right
+ * now = {@link BUILD_POOL_CAPACITY} − (build/plan jobs already in-flight). Counts every in-flight status
+ * (queued included) so a build queued earlier in THIS pass shrinks the target for the next lane — the pass
+ * tops the pool up to capacity and never over-fills it. When lanes are full it returns 0 (enqueue nothing);
+ * with 2 idle it returns 2; with 8 it returns 8. Clamped ≥0. Fail-CLOSED: a read error yields 0 so a
+ * transient blip never over-saturates.
+ */
+export async function idleBuildCapacity(admin: Admin, workspaceId: string): Promise<number> {
+  try {
+    const { count } = await admin
+      .from("agent_jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .in("kind", ["build", "plan"])
+      .in("status", INFLIGHT_POOL_STATUSES);
+    return Math.max(0, BUILD_POOL_CAPACITY - (count ?? 0));
+  } catch {
+    return 0;
+  }
+}
+
 /** One escort spec's build state — what the escort reads to decide queue vs in-flight vs loop-guard. */
 export interface SpecBuildState {
   /**
@@ -1640,8 +1673,10 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
 // investigation (the box lane), exactly like the Phase-1 approval verdict + the regression-agent author;
 // this module is the mechanical half — find the candidates, build the prompt, dedup against re-grooming.
 
-/** Cap how many partially-shipped specs one grooming pass investigates (bound the per-pass cost). */
-export const PLATFORM_DIRECTOR_GROOM_CAP = 4;
+/** Absolute per-pass safety ceiling on grooming `claude -p` investigations. The SATURATION TARGET
+ *  ({@link idleBuildCapacity}, director-initiation-throughput Phase 1) normally binds first; this is the
+ *  hard cap = the pool ceiling, so a pass never runs more investigations than there are lanes to fill. */
+export const PLATFORM_DIRECTOR_GROOM_CAP = BUILD_POOL_CAPACITY;
 
 /** A partially-shipped spec the director may groom: ≥1 ✅ phase, ≥1 ⏳ phase, none 🚧, no active build. */
 export interface GroomCandidate {
@@ -1693,6 +1728,12 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
   const workspaceId = await resolveDirectorWorkspace(admin);
   if (!workspaceId) return [];
 
+  // Saturation target (Phase 1): groom only enough to fill the idle lanes — a grooming `continue` queues a
+  // build, so a full pool means nothing to top up this pass (the 5-min beat / merge top-up retries). Bounded
+  // also by the absolute GROOM_CAP ceiling. Lanes full → no candidates.
+  const target = Math.min(PLATFORM_DIRECTOR_GROOM_CAP, await idleBuildCapacity(admin, workspaceId));
+  if (target <= 0) return [];
+
   const { specs } = await getRoadmap();
   const partial = specs.filter(
     (s) =>
@@ -1706,7 +1747,7 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
 
   const out: GroomCandidate[] = [];
   for (const s of partial) {
-    if (out.length >= PLATFORM_DIRECTOR_GROOM_CAP) break;
+    if (out.length >= target) break;
     const state = await specBuildState(admin, workspaceId, s.slug);
     if (state.activeBuild) continue; // an ACTIVE build is carrying it — a merged/completed (landed) build does NOT block: a landed phase should advance the next ⏳ phase
     if (await alreadyGroomed(admin, s.slug)) continue; // already split/escalated (handles the box's stale fs)
@@ -1851,8 +1892,11 @@ export function validateGroomSplit(
 // already surfaces a zero-progress owned goal to the CEO as a new-goal call; a deferred spec is skipped (Phase 1);
 // destructive/irreversible/multi-choice still escalate (the investigation's job). Dormant until live+autonomous.
 
-/** Cap how many unstarted non-fix specs one initiation pass investigates (bound the per-pass cost). */
-export const PLATFORM_DIRECTOR_INIT_CAP = 4;
+/** Absolute per-pass safety ceiling on initiation `claude -p` investigations. The SATURATION TARGET
+ *  ({@link idleBuildCapacity}, director-initiation-throughput Phase 1) normally binds first; this is the
+ *  hard cap = the pool ceiling, so a single pass fills up to all 8 lanes (not the old fixed 4) but never
+ *  investigates more specs than there are lanes to feed. */
+export const PLATFORM_DIRECTOR_INIT_CAP = BUILD_POOL_CAPACITY;
 
 /** An unblocked, unstarted, non-fix, non-goal spec the director drives — a candidate to initiate after a soundness check. */
 export interface InitCandidate {
@@ -1931,9 +1975,14 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
   const gate = await buildGate(admin, workspaceId, PLATFORM);
   const candidates = gate ? unstarted.filter((s) => s.slug === gate.gatedUntil || s.critical) : unstarted; // gate lets the gate spec + critical priority builds through
 
+  // Saturation target (Phase 1): fill the idle lanes — investigate up to (pool ceiling − in-flight) specs,
+  // not a fixed 4. Lanes full → 0 → enqueue nothing this pass; 2 idle → top up 2; 8 idle → fill all 8.
+  const target = Math.min(PLATFORM_DIRECTOR_INIT_CAP, await idleBuildCapacity(admin, workspaceId));
+  if (target <= 0) return [];
+
   const out: InitCandidate[] = [];
   for (const s of candidates) {
-    if (out.length >= PLATFORM_DIRECTOR_INIT_CAP) break;
+    if (out.length >= target) break;
     const state = await specBuildState(admin, workspaceId, s.slug);
     if (state.inFlight) continue; // a build is already carrying it — not "unstarted with no build"
     if (await alreadyInitiated(admin, s.slug)) continue; // already terminally escalated — don't re-investigate

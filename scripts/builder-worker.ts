@@ -143,6 +143,10 @@ const MAX_PROPOSED_GOAL = Number(process.env.AGENT_TODO_MAX_PROPOSED_GOAL || 1);
 // a verdict (auto-approve within the leash, else escalate). Minutes — same ballpark as a repair/
 // db-health turn. Re-claimable (a restart re-runs it). Stays on Max (KEEPS read-only DB creds).
 const PLATFORM_DIRECTOR_TIMEOUT_MS = 15 * 60 * 1000;
+// director-initiation-throughput Phase 2: how many per-candidate soundness investigations the initiation lane
+// runs CONCURRENTLY (instead of the old one-at-a-time loop, which trickled). Bounded to stay Max-safe — the
+// real ceiling is Max rate limits, so a 529 backs the whole batch off (Phase 4) rather than hammering harder.
+const DIRECTOR_INVEST_CONCURRENCY = Number(process.env.DIRECTOR_INVEST_CONCURRENCY || 4);
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -1836,6 +1840,30 @@ async function directorDecisionPrompt(workspaceId: string, basePrompt: string): 
   return di.appendDirectorInstructions(db, workspaceId, "platform", `${basePrompt}\n\n${liveState}`);
 }
 
+// director-initiation-throughput Phase 2: a tiny bounded worker-pool so the per-candidate soundness
+// investigations run CONCURRENTLY (capped at `limit`) instead of sequentially — one slow Max call no longer
+// gates the next. `shift()` is single-threaded-safe; each task owns its own DB writes (distinct specs), so
+// there's no cross-task contention. Never throws — `fn` is expected to swallow its own per-item error.
+async function runWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  const queue = [...items];
+  const n = Math.max(1, Math.min(limit, queue.length));
+  const workers = Array.from({ length: n }, async () => {
+    for (;;) {
+      const item = queue.shift();
+      if (item === undefined) return;
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+// director-initiation-throughput Phase 4: detect a Max 529 / overloaded signal in a director investigation
+// result so the lane can BACK OFF (the real ceiling is Max rate limits, not the lane count) — don't hammer a
+// throttled API; resume on the next pass. Mirrors the build lane's transient-vs-usage-wall classifier.
+function isMaxOverloaded(text: string): boolean {
+  return /\b529\b|overloaded/i.test(text || "");
+}
+
 // platform-director-agent (Phase 4): the standing director pass the daily platform-director-cron enqueues
 // (a `platform-director` job with NO target_job_id). It runs the proactive, non-approval director work on a
 // reliable beat — escort each approved goal it owns + post the daily Control-Tower watch update to the board
@@ -2227,13 +2255,25 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
 
   let initiated = 0;
   let escalated = 0;
-  for (const c of candidates) {
+  // director-initiation-throughput Phase 4: a Max 529 / overloaded mid-batch backs off the REST of the pass
+  // (the real ceiling is Max rate limits, not the lane count). Set once, checked by every not-yet-started task.
+  let overloaded = false;
+  // director-initiation-throughput Phase 2: investigate the candidates CONCURRENTLY (bounded), not one-at-a-time,
+  // so one pass produces a full batch instead of a trickle. Each task owns its own spec's DB writes (no contention).
+  await runWithConcurrency(candidates, DIRECTOR_INVEST_CONCURRENCY, async (c) => {
+    if (overloaded) return; // Phase 4 — Max is throttled; stop investigating, resume next pass
     try {
       // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
-      const { resultText, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      const { resultText, isError, raw, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+      // Phase 4: a 529/overloaded is a transient throttle, NOT a spec problem — back off the batch, escalate nothing.
+      if (isError && isMaxOverloaded(`${resultText} ${raw}`)) {
+        overloaded = true;
+        console.warn(`${tag} init ${c.slug} → Max 529/overloaded — backing off the rest of this pass (resume next beat)`);
+        return;
+      }
       const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -2257,12 +2297,12 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           if (r.emitted) escalated++;
           else if (r.error) console.error(`${tag} init ${c.slug} → initiate/loop-guard escalation FAILED to surface to CEO: ${r.error.message}`);
           console.log(`${tag} init ${c.slug} → initiate but loop-guard → escalated to CEO`);
-          continue;
+          return;
         }
         const dupe = await hasActiveBuildForSlug(c.slug);
         if (dupe.active) {
           console.log(`${tag} init ${c.slug} → initiate but build already live (${dupe.reason}) — skipped`);
-          continue;
+          return;
         }
         const retry = c.failedBuilds > 0;
         const { error } = await db.from("agent_jobs").insert({
@@ -2275,7 +2315,7 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
         });
         if (error) {
           console.warn(`${tag} init ${c.slug} → build enqueue failed: ${error.message}`);
-          continue;
+          return;
         }
         initiated++;
         // P6 — instant PM-companion mirror so the board shows the spec moving (its planned-phase snapshot).
@@ -2291,7 +2331,7 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           metadata: { planned_phases: c.plannedPhases, retry, autonomous: true },
         });
         console.log(`${tag} init ${c.slug} → initiate → queued build`);
-        continue;
+        return;
       }
 
       // ── ESCALATE — ambiguous / out of scope / a new goal / destructive → route to the CEO, queue nothing. ──
@@ -2312,11 +2352,12 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
     } catch (e) {
       console.error(`${tag} init ${c.slug} failed (continuing):`, e instanceof Error ? e.message : e);
     }
-  }
+  });
 
   const parts: string[] = [];
   if (initiated) parts.push(`initiated ${initiated}`);
   if (escalated) parts.push(`escalated ${escalated}`);
+  if (overloaded) parts.push("backed off on Max 529");
   return `init: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
 

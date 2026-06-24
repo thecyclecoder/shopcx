@@ -9,7 +9,8 @@
  * each KPI over a TRAILING window with a PRIOR equal-length window delta (mirroring the meta
  * scorecards window model), and UPSERTS every value into platform_scorecard_snapshots so a daily /
  * weekly / monthly tile can chart the curve — the CEO sees loop health, error backlog + MTTR, build
- * throughput, autonomy ratio, and escalations with zero hand-counting.
+ * throughput, lane utilization + enqueue rate (the build-pool saturation KPIs,
+ * director-initiation-throughput Phase 4), autonomy ratio, and escalations with zero hand-counting.
  *
  * Server-only (createAdminClient + brain-roadmap fs reads, like director-xp / director-recap).
  *
@@ -28,6 +29,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { reportDbError } from "@/lib/control-tower/error-feed";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
 import { getFunctions } from "@/lib/brain-roadmap";
+import { BUILD_POOL_CAPACITY } from "@/lib/agents/platform-director";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -309,6 +311,60 @@ const buildThroughput: MetricDef = {
 };
 
 /**
+ * lane_utilization — how saturated the build pool is RIGHT NOW: build/plan jobs OCCUPYING a lane
+ * (claimed / building / awaiting input/approval / queued_resume — a plain `queued` job is backlog
+ * WAITING for a lane, not occupying one) ÷ {@link BUILD_POOL_CAPACITY} lanes. The visible KPI for the
+ * saturation goal (director-initiation-throughput Phase 4): the curve should trend toward full. A
+ * current-state metric — prior comes from the prior snapshot. Capped at 1 (a transient claimed+queued
+ * overlap can't read as >100%).
+ */
+const OCCUPYING_LANE_STATUSES = ["claimed", "building", "needs_input", "needs_approval", "queued_resume"];
+const laneUtilization: MetricDef = {
+  key: "lane_utilization",
+  unit: "ratio",
+  compute: async (ctx) => {
+    const { admin, workspaceId } = ctx;
+    const { count } = await admin
+      .from("agent_jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .in("kind", ["build", "plan"])
+      .in("status", OCCUPYING_LANE_STATUSES);
+    const busy = count ?? 0;
+    const value = BUILD_POOL_CAPACITY > 0 ? round(Math.min(1, busy / BUILD_POOL_CAPACITY)) : 0;
+    const priorValue = await ctx.getPriorSnapshot("lane_utilization");
+    return { value, priorValue, detail: { busy, capacity: BUILD_POOL_CAPACITY } };
+  },
+};
+
+/**
+ * build_enqueue_rate — builds the director FED INTO the pool in the window: agent_jobs kind='build'
+ * created_at in-window (the enqueue, vs build_throughput's merge). The saturation feed-rate KPI
+ * (director-initiation-throughput Phase 4) — paired with lane_utilization it shows whether the pool is
+ * being kept topped up. Windowed count metric with the prior equal-length window as the delta.
+ */
+const buildEnqueueRate: MetricDef = {
+  key: "build_enqueue_rate",
+  unit: "count",
+  compute: async (ctx) => {
+    const { admin, workspaceId, curr, prev } = ctx;
+    const countEnqueued = async (w: MetricWindow["curr"]): Promise<number> => {
+      const { count } = await admin
+        .from("agent_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspaceId)
+        .eq("kind", "build")
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      return count ?? 0;
+    };
+    const value = await countEnqueued(curr);
+    const prior = await countEnqueued(prev);
+    return { value, priorValue: prior, detail: { enqueued_in_window: value } };
+  },
+};
+
+/**
  * autonomy_ratio — share of terminal approval decisions that were autonomous director auto-approvals:
  * approval_decisions autonomous=true ÷ all terminal decisions (decision ∈ approved|declined) in-window.
  * Escalated decisions (routed up, not decided here) are excluded from the denominator.
@@ -398,6 +454,8 @@ const DAILY_METRICS: MetricDef[] = [
   errorBacklog,
   errorMttrHours,
   buildThroughput,
+  laneUtilization,
+  buildEnqueueRate,
   autonomyRatio,
   escalations,
 ];

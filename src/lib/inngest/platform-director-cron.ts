@@ -6,9 +6,12 @@
  * Platform approval is routed to it). But escorting approved goals through their milestones + watching
  * the platform must happen on a RELIABLE BEAT, not only on inbound approvals — otherwise a goal stalls
  * silently whenever no approval happens to arrive. So, exactly like triage-escalations / spec-test
- * (the box has no internal ticker), this cron is the trigger: every 15 min it inserts ONE `agent_jobs`
+ * (the box has no internal ticker), this cron is the trigger: every 5 min it inserts ONE `agent_jobs`
  * row `kind='platform-director'` per build-console workspace, and the box claims it on its
  * platform-director lane (scripts/builder-worker.ts → runPlatformDirectorJob) to run the standing pass.
+ * (director-initiation-throughput Phase 3 tightened the beat 15→5 min; the event-driven top-up on a build
+ * merge — agent-jobs `enqueueDirectorTopUp` from applyMergedBuildEffects — refills a freed lane within
+ * seconds, so this cron is the BACKSTOP heartbeat, not the primary refill trigger.)
  * (A responsive beat so the director actively drives in-flight work; the in-flight dedupe below keeps it
  * to one pass at a time — it never piles up.)
  *
@@ -36,7 +39,7 @@ export const platformDirectorCron = inngest.createFunction(
     name: "Platform/DevOps Director — daily standing-cadence enqueue",
     retries: 1,
     concurrency: [{ limit: 1 }],
-    triggers: [{ cron: "*/15 * * * *" }], // every 15 min — a RESPONSIVE standing beat so the director actively drives in-flight work, not once a day (dedupe below prevents pileup)
+    triggers: [{ cron: "*/5 * * * *" }], // every 5 min — a TIGHT standing beat so the pool stays saturated (director-initiation-throughput Phase 3); the event-driven top-up (applyMergedBuildEffects) refills a freed lane within seconds, this cron is the backstop heartbeat. Dedupe below prevents pileup
   },
   async ({ step }) => {
     const admin = createAdminClient();

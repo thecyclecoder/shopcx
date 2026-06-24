@@ -577,6 +577,39 @@ export async function retestOriginIfFixMerged(workspaceId: string, fixSlug: stri
  *
  * Never throws — every sub-step swallows its own error (the daily spec-drift / spec-test crons backstop).
  */
+/**
+ * director-initiation-throughput Phase 3 — the event-driven top-up. A just-merged build FREED a lane;
+ * enqueue ONE `platform-director` standing-pass job so the freed lane refills within seconds instead of
+ * waiting up to the (now 5-min) cron beat. Deduped on a PENDING pass (queued / queued_resume) so a burst
+ * of merges adds at most one waiting pass — a pass already mid-run still gets a fresh follow-up queued so
+ * it re-saturates after it finishes, but two never pile up. Best-effort; never throws. Returns whether it
+ * queued one.
+ */
+export async function enqueueDirectorTopUp(workspaceId: string, adminClient?: Admin): Promise<boolean> {
+  const admin = adminClient || createAdminClient();
+  try {
+    const { data: pending } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "platform-director")
+      .in("status", ["queued", "queued_resume"])
+      .limit(1);
+    if (pending && pending.length) return false; // a pass is already waiting — it'll see the freed lane
+    const { error } = await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: "platform-director",
+      kind: "platform-director",
+      status: "queued",
+      created_by: null,
+      instructions: "event-driven top-up: a build merged + freed a lane — refill the pool to saturation (director-initiation-throughput Phase 3)",
+    });
+    return !error;
+  } catch {
+    return false; // best-effort — the 5-min cron backstop refills regardless
+  }
+}
+
 export async function applyMergedBuildEffects(
   workspaceId: string,
   slug: string,
@@ -628,6 +661,13 @@ export async function applyMergedBuildEffects(
     await retestOriginIfFixMerged(workspaceId, slug);
   } catch {
     /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
+  }
+  // director-initiation-throughput Phase 3: this merge freed a build lane — trigger an event-driven director
+  // top-up so the pool re-saturates within seconds instead of waiting for the cron beat. Deduped + best-effort.
+  try {
+    await enqueueDirectorTopUp(workspaceId);
+  } catch {
+    /* best-effort — the 5-min platform-director-cron backstop refills the pool regardless */
   }
 }
 
