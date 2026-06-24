@@ -1,26 +1,39 @@
-# Initiation throughput — clear the eligible backlog per pass + lean toward initiate ⏳
+# Saturate the build pool — keep all 8 lanes full, not 4 per 15 min ⏳
 
-**Owner:** [[../functions/platform]] · **Parent:** [[director-initialize-platform-specs-no-wait]] — opens the throughput throttle on the initiation lane under [[../goals/devops-director]]
-**Found in use 2026-06-24:** the CEO observed 'plenty of platform specs aren't starting — can you only analyze one per pass?' Confirmed: `scripts/builder-worker.ts` `initiatePlatformSpecs` pulls only `PLATFORM_DIRECTOR_INIT_CAP` candidates per standing pass and loops them SEQUENTIALLY (a full Max soundness investigation each), on the ~15-min [[../inngest/platform-director-cron]] beat. So the eligible backlog trickles a few specs per pass over an hour+ (9 platform specs not-shipped, only 2 moving). And the mandatory soundness gate escalates specs it can't instantly confirm — the last 90 min of activity is mostly `init_unsure` escalations — flooding the CEO inbox instead of building sound specs.
+**Owner:** [[../functions/platform]] · **Parent:** [[director-initialize-platform-specs-no-wait]] — opens the throughput throttle on the initiation/groom lanes under [[../goals/devops-director]]
+**Found in use 2026-06-24:** build capacity is `MAX_CONCURRENT = 8` lanes, but the director enqueues at most `PLATFORM_DIRECTOR_INIT_CAP = 4` (+ `GROOM_CAP = 4`) per pass, runs the soundness investigations SEQUENTIALLY (a slow Max call each), fires the [[../inngest/platform-director-cron]] only every 15 min, and escalates sound specs instead of building them. Snapshot: 6/8 lanes building, 0 queued, 2 idle — the pool runs under-fed. The CEO: 'we have 8 lanes, why not fill them?'
 
-## North star — faster, but the rails hold
+## North star — saturate, but respect the real ceiling
 
-Throughput up does NOT mean blind-build. The soundness investigation stays (no blind builds — the CEO's 2026-06-24 rail); the loop-guard + active-build dedup stay; destructive / new-goal / out-of-scope still escalate. This only (a) stops the per-pass trickle and (b) stops escalating specs that are actually sound.
+The binding constraint is NOT the box or the lane count — it's **Max rate limits** (the `MAX_CONCURRENT` comment warns to watch for Max 529/overloaded). So 'fill the lanes' targets lane capacity AND backs off on 529s. The soundness rail, loop-guard, dedup, and escalation-of-destructive all stay — this changes the RATE, not the safety.
 
-## Phase 1 — clear the eligible backlog in one pass (throughput) ⏳
-- Replace the sequential, low-capped loop with BOUNDED-PARALLEL soundness investigations across all eligible candidates: raise `PLATFORM_DIRECTOR_INIT_CAP` substantially (or make it the full eligible set) and run the per-candidate `runDirectorClaude` investigations concurrently up to a sane concurrency limit (respecting the box's Max session limits), so ONE standing pass clears the eligible platform backlog instead of a few specs. Keep loop-guard + `hasActiveBuildForSlug` dedup unchanged.
-- Optional cheap pre-screen: a fast structural check (platform-owned, unblocked, non-deferred, non-destructive, has Verification) fast-tracks obviously-sound specs and reserves the full Max investigation for genuinely ambiguous ones — cuts cost and latency.
-- Brain: [[../libraries/platform-director]] (`findInitCandidates`, `PLATFORM_DIRECTOR_INIT_CAP`) · `scripts/builder-worker.ts` `initiatePlatformSpecs`.
+## Phase 1 — target queue depth = lane capacity (kill the fixed per-pass cap) ⏳
+- Replace the fixed `INIT_CAP`/`GROOM_CAP` ceilings with a SATURATION target: each pass computes idle capacity = `MAX_CONCURRENT` − (active build jobs) and enqueues that many sound specs to fill the pool. When lanes are full, enqueue nothing; when 2 are idle, fill 2; when 8, fill 8. The pool stays topped up whenever eligible work exists.
+- Keep loop-guard + `hasActiveBuildForSlug` dedup so no spec double-queues and a repeatedly-failing build still escalates.
+- Brain: [[../libraries/platform-director]] (`findInitCandidates`, `findGroomCandidates`, the caps) · `scripts/builder-worker.ts` (`initiatePlatformSpecs`, `groomBoard`).
 
 ### Verification — Phase 1
-- With several eligible platform specs queued, ONE standing pass initiates ALL the sound ones (not a capped few); each writes an `escorted_init` activity row. A spec with an active build is still not double-queued; a build that failed ≥ loop-guard cap still escalates.
+- With ≥8 eligible specs and an empty queue, one pass enqueues enough to fill all 8 lanes (not 4). With 6 lanes busy, a pass tops up only the 2 idle. No double-queue; no over-fill beyond capacity.
 
-## Phase 2 — calibrate the gate toward initiate (cut the escalation noise) ⏳
-- For a PLATFORM-owned spec, the soundness verdict should INITIATE when the spec is sound + in-scope (the CEO's standing 'build platform specs that check out' direction). Reserve ESCALATE for genuinely destructive / irreversible / new-goal / out-of-scope / unconfirmable — NOT mild uncertainty. Tighten `initInvestigationPrompt` so a sound, in-scope platform spec is initiated, not parked as `init_unsure`.
-- Net: your inbox stops filling with 'Initiation needs a call' on sound specs; you only see the genuinely high-stakes ones.
+## Phase 2 — parallel investigations + lean toward initiate ⏳
+- Run the per-candidate soundness investigations CONCURRENTLY (bounded by a Max-safe concurrency limit) instead of the sequential loop, so a single pass produces a full batch instead of a trickle.
+- Calibrate the gate: a sound, in-scope, unblocked platform spec is INITIATED, not escalated; ESCALATE is reserved for destructive / new-goal / out-of-scope / unconfirmable. Stops wasting passes (and your inbox) on 'needs a call' for sound specs.
 
 ### Verification — Phase 2
-- A sound, in-scope, unblocked platform spec → initiated (not escalated). A destructive / new-goal / out-of-scope spec → still escalated. The ratio of init_unsure escalations to initiations drops sharply on the next passes.
+- A pass with N sound candidates initiates them in parallel within the pass (not one-per-cron-cycle). The init_unsure-escalation-to-initiation ratio drops sharply.
+
+## Phase 3 — refill fast: event-driven top-up + a tighter beat ⏳
+- Add an event-driven top-up: when a `build` job completes/merges (a lane frees), trigger a director top-up enqueue so the freed lane refills immediately rather than waiting up to 15 min. Keep the cron as the backstop heartbeat but tighten it (15 → ~5 min). The existing cron dedupe prevents pileup.
+- Net: lanes refill within seconds of freeing, not on a 15-min boundary — the pool stays saturated end-to-end.
+
+### Verification — Phase 3
+- A completing build triggers a top-up that refills the freed lane within one cycle (not the next 15-min tick). The queue depth tracks lane capacity continuously.
+
+## Phase 4 — Max-rate-limit guardrail + visibility ⏳
+- Back off enqueuing/investigations on Max 529/overloaded (the real ceiling) — don't hammer a throttled API; resume when it clears. Surface lane utilization (lanes busy / 8) + enqueue rate on the [[Platform Department Scorecard]] so saturation is a visible KPI.
+
+### Verification — Phase 4
+- Under a Max 529 burst, the director throttles enqueuing and resumes on recovery (no runaway). The scorecard shows lane utilization trending toward full.
 
 ## Open decision (for the CEO)
-How far to open it: (a) assess ALL eligible per pass with a concurrency cap (fastest; default), or (b) a higher fixed cap (e.g. 8/pass) if you want to bound box load. And whether to keep the full Max investigation for every platform spec or let the cheap pre-screen fast-track obviously-sound ones (recommended — faster + cheaper, same rails). Default: assess-all with a concurrency cap + the pre-screen fast-track.
+How hard to push past 8: the box (CCX33, 8-core/30GB) sat at ~14% load on 5 lanes, so it has headroom — but Max rate limits are the wall. Default: saturate to 8 with a 529-backoff and watch box/Max logs before bumping MAX_CONCURRENT higher. Say the word to raise the lane count itself (separate from this spec, which fills whatever the count is).
