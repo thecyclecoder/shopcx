@@ -21,7 +21,7 @@ Warning: no stdin data received in 3s, proceeding without it. If piping from a s
 
 ## Phases
 
-### Phase 1 — diagnose + fix ✅
+### Phase 1 — diagnose + fix
 **Built 2026-06-24.** The trace pointed at `scripts/builder-worker.ts:resolveReviewVerdict` — the shared verdict-resolution helper for security/repair/regression agents. The parked security-review claude run COMPLETED (`terminal_reason: "completed"`, ~$0.47 spent, ~26.5k output tokens) but its `result` field carried no parseable `{"status":...}` envelope. The existing retry path then ran a SECOND fresh investigation from scratch — which (per the same model tendency that flubbed the first envelope) produced no parseable verdict either, and the job parked.
 
 **Fix:** wire the spec-test agent's proven parse-repair re-prompt pattern (builder-worker.ts:4649) into the shared `resolveReviewVerdict` helper, then opt the security-review path in.
