@@ -1,6 +1,6 @@
 # Dynamic pricing-rules for persist-to-renewal offers ⏳
 
-**Priority:** critical
+**Deferred:** parked by the CEO — every auto-build lane skips it until promoted back to Planned.
 
 **Owner:** [[../functions/growth]] · **Parent:** M6 — dynamic pricing-rules for persist-to-renewal offers
 **Blocked-by:** [[storefront-optimizer-agent]]
