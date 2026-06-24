@@ -1587,6 +1587,176 @@ export async function reconcileRegressionBacklog(admin: Admin): Promise<Regressi
   return { enqueued, escalated, confirmed, scanned: handled.size };
 }
 
+// ── needs-attention-triage-and-verdict-robustness Phase 1 — triage every NON-build needs_attention item ──
+// The build loop-guard (FAILED_BUILD_STATUSES → specBuildState, which queries kind='build') only treats a
+// `needs_attention` as a failed attempt for kind='build' jobs. A `needs_attention` on a NON-build QC job
+// (security-review / spec-test / regression / proposed-goal / greenlight commit failure) is triaged by
+// NOTHING — it just SITS (the 2026-06-24 director-executable-plans security-review that parked with "ended
+// without a recognizable verdict" and nobody handled). This standing reconciler is the backstop: each pass it
+// classifies every parked NON-build item and either RE-RUNS a RECOVERABLE one (an inconclusive/unparseable QC
+// verdict — re-queue the same job; it re-investigates from `instructions` and is re-dispatched by kind) ONCE,
+// or SURFACES a HUMAN-NEEDED blocker to the CEO with a CLEAR diagnosis (the reason + an excerpt — never a bare
+// "needs attention"). Loop-guarded (a re-run that parks AGAIN escalates, never churns), deduped per job (a
+// `triaged_needs_attention` director_activity row per action), bounded per pass, and DORMANT until Platform is
+// live+autonomous — like every other standing lane. Conservative fail-safe: only a clearly-recoverable QC
+// inconclusive is auto-re-run; everything else surfaces to the human (never a silent pass).
+//
+// NOT double-handled: kind='build' is the existing build loop-guard's; kind='repair' is superviseRepairDismissals'
+// (it adversarially re-checks every repair needs_attention item); the director's OWN jobs are skipped.
+
+/** Cap how many NEW triage ACTIONS (re-runs + CEO escalations) one pass takes. */
+export const PLATFORM_DIRECTOR_TRIAGE_CAP = 8;
+
+/** Kinds another director lane already owns — never double-handle a parked item of these kinds. */
+const TRIAGE_SKIP_KINDS: ReadonlySet<string> = new Set(["build", "repair", "platform-director"]);
+
+/** QC kinds whose handler re-investigates cleanly from `instructions`, so a recoverable park can be re-run. */
+const TRIAGE_RERUNNABLE_KINDS: ReadonlySet<string> = new Set(["security-review", "spec-test", "regression"]);
+
+/** A recoverable park: an inconclusive / unparseable QC verdict (a transient failure to produce a verdict). */
+const TRIAGE_RECOVERABLE_ERROR = /no parseable verdict|without a recognizable (verdict|status)|inconclusive/i;
+
+/** The outcome of one needs_attention triage pass — what it drove off the parked feed. */
+export interface NeedsAttentionReconcileResult {
+  /** parked items re-run once (a recoverable inconclusive QC result). */
+  rerun: string[];
+  /** parked items surfaced to the CEO with a diagnosis (a genuine blocker, or a re-run that parked again). */
+  escalated: string[];
+  /** parked items left as-is (already triaged a prior pass — deduped). */
+  confirmed: number;
+  /** total non-build, non-repair parked items examined this pass. */
+  scanned: number;
+}
+
+/**
+ * Triage every NON-build `needs_attention` agent_job: re-run a recoverable inconclusive QC result ONCE, or
+ * surface a genuine blocker to the CEO with a clear reason + excerpt. Loop-guarded (a re-run that parks again
+ * escalates, never re-run twice), deduped per job (a `triaged_needs_attention` director_activity row per
+ * action), bounded per pass (PLATFORM_DIRECTOR_TRIAGE_CAP), and a NO-OP until Platform is live+autonomous.
+ * Best-effort; the caller logs the result.
+ */
+export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttentionReconcileResult> {
+  const empty: NeedsAttentionReconcileResult = { rerun: [], escalated: [], confirmed: 0, scanned: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+
+  // Every parked item NOT owned by the build loop-guard / the repair-dismissal lane / the director itself.
+  const { data: parked } = await admin
+    .from("agent_jobs")
+    .select("id, kind, status, error, log_tail, spec_slug, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "needs_attention")
+    .order("created_at", { ascending: false })
+    .limit(200);
+  const items = ((parked ?? []) as Array<{ id: string; kind: string; error?: string | null; log_tail?: string | null; spec_slug?: string | null }>)
+    .filter((j) => !TRIAGE_SKIP_KINDS.has(String(j.kind)));
+  if (!items.length) return empty;
+
+  // The triage ledger — every `triaged_needs_attention` row carries `metadata.job_id` + `metadata.action`
+  // (rerun | escalated). A job already escalated is left (deduped); a job re-run once is the loop-guard input.
+  const { data: acts } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("director_function", PLATFORM)
+    .eq("action_kind", "triaged_needs_attention")
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  const reran = new Set<string>();
+  const surfaced = new Set<string>();
+  for (const a of acts ?? []) {
+    const m = (a.metadata as Record<string, unknown> | null) ?? {};
+    const jid = typeof m.job_id === "string" ? m.job_id : null;
+    if (!jid) continue;
+    if (m.action === "escalated") surfaced.add(jid);
+    else if (m.action === "rerun") reran.add(jid);
+  }
+
+  const rerun: string[] = [];
+  const escalated: string[] = [];
+  let confirmed = 0;
+
+  for (const j of items) {
+    // Already surfaced to the CEO a prior pass — leave it for the human (deduped, no churn).
+    if (surfaced.has(j.id)) { confirmed++; continue; }
+    const atCap = rerun.length + escalated.length >= PLATFORM_DIRECTOR_TRIAGE_CAP;
+
+    const kind = String(j.kind);
+    const error = String(j.error ?? "").trim();
+    const excerpt = String(j.log_tail ?? "").trim().slice(-400) || error || "(no detail)";
+    const specSlug = (j.spec_slug as string | null) ?? null;
+    const deepLink = specSlug ? `/dashboard/roadmap/${specSlug}` : `/dashboard/developer/control-tower`;
+    const recoverable = TRIAGE_RECOVERABLE_ERROR.test(error) && TRIAGE_RERUNNABLE_KINDS.has(kind);
+    const alreadyReran = reran.has(j.id);
+
+    // RECOVERABLE + not yet re-run → re-run the QC step ONCE. Re-queue the same job (claim_agent_job re-claims
+    // `queued`; the handler re-investigates from `instructions` and is re-dispatched by kind). Loop-guarded: a
+    // re-run that parks AGAIN falls through to escalation below (alreadyReran), never re-run twice.
+    if (recoverable && !alreadyReran) {
+      if (atCap) continue; // bounded — re-drives next pass; nothing is lost
+      // Re-assert it's still parked (never clobber an item a human / another lane just moved).
+      const { data: fresh } = await admin.from("agent_jobs").select("status").eq("id", j.id).maybeSingle();
+      if ((fresh as { status?: string } | null)?.status !== "needs_attention") { confirmed++; continue; }
+      const { error: upErr } = await admin
+        .from("agent_jobs")
+        .update({ status: "queued", claimed_at: null, error: null, log_tail: `re-run by director triage (recoverable: ${error.slice(0, 200)})`.slice(-2000) })
+        .eq("id", j.id);
+      if (upErr) { console.error(`[platform-director] triage re-run FAILED (${j.id.slice(0, 8)}): ${upErr.message}`); continue; }
+      rerun.push(`${kind}:${j.id.slice(0, 8)}`);
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "triaged_needs_attention",
+        specSlug,
+        reason: `A ${kind} job parked with an inconclusive QC result ("${error.slice(0, 200)}") — re-ran it once (recoverable). If it parks again I'll surface it to you.`,
+        metadata: { job_id: j.id, target_kind: kind, action: "rerun", error, autonomous: true },
+      });
+      continue;
+    }
+
+    // HUMAN-NEEDED (a genuine blocker) OR a re-run that parked AGAIN (loop-guard) → surface to the CEO with a
+    // CLEAR diagnosis (the reason + an excerpt), never a bare flag. Conservative: anything not a clearly-
+    // recoverable QC inconclusive lands here.
+    if (atCap) continue; // bounded — re-drives next pass
+    const why = alreadyReran
+      ? "re-ran once after an inconclusive QC result and parked AGAIN — likely a real blocker, not a transient"
+      : recoverable
+        ? "parked with an inconclusive QC result that couldn't be auto-recovered"
+        : "parked and nothing automated can resolve it";
+    const diagnosis = `A ${kind} job is parked in needs_attention: it ${why}. Reason: ${error || "(none recorded)"}. Detail: ${excerpt}`.slice(0, 4000);
+    const r = await escalateDiagnosisToCeo(admin, {
+      workspaceId,
+      specSlug,
+      title: `Parked ${kind}${specSlug ? `: ${specSlug}` : ""}`,
+      diagnosis,
+      dedupeKey: `needsattn:${j.id}`,
+      deepLink,
+      escalationKind: "needs_attention",
+      metadata: { kind: "needs_attention_triage", job_id: j.id, target_kind: kind, error, loop_guard: alreadyReran },
+    });
+    if (r.emitted) {
+      escalated.push(`${kind}:${j.id.slice(0, 8)}`);
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "triaged_needs_attention",
+        specSlug,
+        reason: diagnosis,
+        metadata: { job_id: j.id, target_kind: kind, action: "escalated", error, loop_guard: alreadyReran, autonomous: true },
+      });
+    } else if (r.error) {
+      console.error(`[platform-director] triage CEO escalation FAILED to surface (needsattn:${j.id.slice(0, 8)}): ${r.error.message}`);
+    } else {
+      // notification already exists (dedup) but no triage row yet — count as surfaced so we don't reprocess.
+      confirmed++;
+    }
+  }
+
+  return { rerun, escalated, confirmed, scanned: items.length };
+}
+
 // ── Phase 3 (goal-milestone-build-sequencing) — re-sequence an out-of-order milestone fan-out ──────
 // A goal is a DAG of milestones: building them concurrently without deps corrupts the build (a later spec
 // references an earlier one's outputs). When the decomposition emits a goal whose milestone specs lack the
@@ -1837,6 +2007,13 @@ export interface PlatformWatchActivity {
   dismissedRepairs: number;
   /** of those reviews, how many she escalated back to the CEO (escalated rows, repair_dismissal_suspect). */
   escalatedRepairs: number;
+  // needs-attention-triage-and-verdict-robustness Phase 3 — the parked-work KPI (so nothing rots silently).
+  /** open needs_attention items the triage lane owns RIGHT NOW (non-build, non-repair) — a point-in-time count. */
+  needsAttention: number;
+  /** age in hours of the OLDEST open parked item (0 when none) — the "oldest Xh" half of the KPI. */
+  needsAttentionOldestHours: number;
+  /** recoverable parked items the director re-ran today (triaged_needs_attention action=rerun) — the day's triage. */
+  triagedReran: number;
 }
 
 /** The health half of the watch line — "all N platform loops green" / "K red (…)" / "X/N green, M degraded". */
@@ -1871,11 +2048,24 @@ function platformRepairReviewLine(a: PlatformWatchActivity): string | null {
   return `Reviewed ${calls} — dismissed ${a.dismissedRepairs}, escalated ${a.escalatedRepairs} back to you.`;
 }
 
+/**
+ * The parked-work line (Phase 3) — "N items need attention, oldest Xh" + the day's triage ("re-ran K"), so a
+ * rotting needs_attention item is VISIBLE on the board. Only rendered when something's parked or was re-run.
+ */
+function platformNeedsAttentionLine(a: PlatformWatchActivity): string | null {
+  if (!a.needsAttention && !a.triagedReran) return null;
+  const parts: string[] = [];
+  if (a.needsAttention) parts.push(`${a.needsAttention} item${a.needsAttention === 1 ? "" : "s"} need${a.needsAttention === 1 ? "s" : ""} attention, oldest ${a.needsAttentionOldestHours}h`);
+  if (a.triagedReran) parts.push(`re-ran ${a.triagedReran} today`);
+  return parts.join("; ") || null;
+}
+
 /** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
 export function composePlatformWatchBody(health: PlatformHealth, activity: PlatformWatchActivity): string {
   const persona = getPersona(PLATFORM);
   const repairLine = platformRepairReviewLine(activity);
-  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}`;
+  const parkedLine = platformNeedsAttentionLine(activity);
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}`;
 }
 
 /**
@@ -1926,7 +2116,7 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
     .eq("director_function", PLATFORM)
     .gte("created_at", dayStart)
     .lt("created_at", dayEnd);
-  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0 };
+  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0, needsAttention: 0, needsAttentionOldestHours: 0, triagedReran: 0 };
   for (const r of (activityRows ?? []) as { action_kind: string; metadata: Record<string, unknown> | null }[]) {
     const repairEscalation = r.action_kind === "escalated" && r.metadata?.["escalation_kind"] === "repair_dismissal_suspect";
     if (r.action_kind === "approved_approval") activity.squashed++;
@@ -1942,10 +2132,26 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
       activity.escalatedRepairs++;
       activity.reviewedRepairs++;
     }
+    // Phase 3 — the day's needs_attention triage: how many recoverable parked items the director re-ran.
+    if (r.action_kind === "triaged_needs_attention" && r.metadata?.["action"] === "rerun") activity.triagedReran++;
   }
 
-  // Don't spam a fully-quiet, all-green day — post only when there's health to flag or work to report.
-  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0 || activity.reviewedRepairs > 0;
+  // needs-attention KPI (Phase 3) — the open parked-work snapshot (count + oldest age), scoped to the items
+  // the triage lane owns (non-build, non-repair), so a rotting item is visible on the board even on a green day.
+  const { data: parkedRows } = await admin
+    .from("agent_jobs")
+    .select("kind, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "needs_attention")
+    .order("created_at", { ascending: true })
+    .limit(200);
+  const parked = ((parkedRows ?? []) as { kind: string; created_at: string }[]).filter((j) => !TRIAGE_SKIP_KINDS.has(String(j.kind)));
+  activity.needsAttention = parked.length;
+  activity.needsAttentionOldestHours = parked.length ? Math.max(0, Math.floor((Date.now() - Date.parse(String(parked[0].created_at))) / 3_600_000)) : 0;
+
+  // Don't spam a fully-quiet, all-green day — post only when there's health to flag, work to report, or a
+  // parked item that needs eyes (so a rotting needs_attention surfaces even when every loop is green).
+  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0 || activity.reviewedRepairs > 0 || activity.needsAttention > 0 || activity.triagedReran > 0;
   if (!hasActivity && health.color === "green") return { posted: false, reason: "quiet" };
 
   await postDirectorMessage({

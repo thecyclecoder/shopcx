@@ -446,6 +446,36 @@ const escalations: MetricDef = {
 };
 
 /**
+ * needs_attention — open parked work the director triages (needs-attention-triage-and-verdict-robustness
+ * Phase 3): agent_jobs in status='needs_attention' EXCLUDING the kinds another lane already owns (build →
+ * the build loop-guard; repair → the repair-dismissal lane). The count is the headline value; detail carries
+ * the OLDEST open item's age in hours + a by-kind breakdown, so a rotting parked item is a tracked, trending
+ * KPI (not just a transient board line). A current-state metric — prior comes from the prior snapshot.
+ */
+const TRIAGED_NA_SKIP_KINDS = new Set(["build", "repair", "platform-director"]);
+const needsAttention: MetricDef = {
+  key: "needs_attention",
+  unit: "count",
+  compute: async (ctx) => {
+    const { admin, workspaceId } = ctx;
+    const now = Date.now();
+    const { data } = await admin
+      .from("agent_jobs")
+      .select("kind, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "needs_attention")
+      .order("created_at", { ascending: true })
+      .limit(500);
+    const parked = ((data ?? []) as Array<{ kind: string; created_at: string }>).filter((j) => !TRIAGED_NA_SKIP_KINDS.has(String(j.kind)));
+    const byKind: Record<string, number> = {};
+    for (const j of parked) byKind[j.kind] = (byKind[j.kind] ?? 0) + 1;
+    const oldestHours = parked.length ? round(Math.max(0, (now - new Date(parked[0].created_at).getTime()) / 3_600_000), 2) : 0;
+    const priorValue = await ctx.getPriorSnapshot("needs_attention");
+    return { value: parked.length, priorValue, detail: { open: parked.length, oldest_hours: oldestHours, by_kind: byKind } };
+  },
+};
+
+/**
  * The per-cadence KPI registry — declarative so a new KPI needs no migration. This spec seeds the
  * DAILY set; platform-scorecard-weekly + platform-scorecard-monthly add their own cadence registries.
  */
@@ -458,6 +488,7 @@ const DAILY_METRICS: MetricDef[] = [
   buildEnqueueRate,
   autonomyRatio,
   escalations,
+  needsAttention,
 ];
 
 const REGISTRY: Record<Cadence, MetricDef[]> = {
