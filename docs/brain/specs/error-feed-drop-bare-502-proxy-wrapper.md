@@ -1,4 +1,4 @@
-# Drop bare Lambda 502 proxy-summary wrappers in the Vercel error feed ⏳
+# Drop bare Lambda 502 proxy-summary wrappers in the Vercel error feed 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] (sibling of [[../specs/error-feed-drop-aborted-stream-noise]]) · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/app/api/webhooks/vercel-logs/route.ts (isbarelifecycle — relax the proxy-summary matcher to drop the $ anchor / tolerate trailing tokens after status=nnn; add a regression test fixture using the leaked vercel:ebdf493a37c60c34 blob)::monitor-false-positive`
@@ -11,8 +11,10 @@ Signature vercel:ebdf493a37c60c34 is open (count=2) for '502 /api/portal: START�
 
 **Likely target:** `src/app/api/webhooks/vercel-logs/route.ts (isBareLifecycle — relax the proxy-summary matcher to drop the $ anchor / tolerate trailing tokens after status=NNN; add a regression test fixture using the leaked vercel:ebdf493a37c60c34 blob)`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+Shipped: `isBareLifecycle` moved out of the route into [[../libraries/control-tower]] `error-feed.ts` (exported, reusable + unit-testable — same factoring as sibling `isAbortedStreamNoise`), with the proxy-summary matcher relaxed from `/^\[[A-Z]+\]\s+\S+\s+status=\d{3}$/i` to `/^\[[A-Z]+\]\s+\S+\s+status=\d{3}\b/i` — the `$` anchor dropped so the line is matched even with trailing tokens (`… status=502 669ms`) after the status. `src/app/api/webhooks/vercel-logs/route.ts` now imports it. Regression fixture using the leaked `vercel:ebdf493a37c60c34` blob added in `error-feed.test.ts` (`npm run test:error-feed`, 6 tests pass). Brain pages updated: [[../integrations/vercel-log-drain]] + [[../libraries/control-tower]]. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `vercel:ebdf493a37c60c34`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
