@@ -1746,6 +1746,18 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing escalation reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // director-zero-backlog-error-autonomy (Phase 1) — reconcile the OPEN error backlog: every open
+    // error_events row + open loop_alerts incident that slipped Rafa's event trigger gets re-driven to a
+    // terminal state (enqueue a diagnosis where none exists, confirm a covered one, escalate a stuck fix).
+    const recon = await lib.reconcileErrorBacklog(db);
+    if (recon.enqueued.length) notes.push(`backlog → enqueued ${recon.enqueued.length} repair(s): ${recon.enqueued.join(", ")}`);
+    if (recon.escalated.length) notes.push(`backlog loop-guard → escalated ${recon.escalated.length}: ${recon.escalated.join(", ")}`);
+    if (recon.scanned && !recon.enqueued.length && !recon.escalated.length) notes.push(`backlog: ${recon.scanned} open, all covered`);
+  } catch (e) {
+    notes.push(`backlog reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
     const fixes = await lib.escortFixSpecs(db);
     if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);
