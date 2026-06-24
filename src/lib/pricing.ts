@@ -67,8 +67,21 @@ export interface PricedLine {
 }
 
 export interface DiscountPill {
-  kind: "sns" | "quantity_break" | "free_shipping" | "coupon";
+  kind: "sns" | "quantity_break" | "free_shipping" | "coupon" | "renewal_offer";
   label: string;
+}
+
+/** An active, in-window persist-to-renewal offer overlaid on the base pricing rules.
+ *  See pricing_rule_offers + docs/brain/specs/storefront-dynamic-renewal-offers.md. */
+interface OfferRow {
+  id: string;
+  product_id: string | null;
+  subscribe_discount_pct: number | null;
+  renewal_price_cents: number | null;
+  status: string;
+  starts_at: string | null;
+  ends_at: string | null;
+  label: string | null;
 }
 
 export interface SubscriptionPricing {
@@ -117,7 +130,16 @@ interface RuleRow {
  */
 export async function resolveSubscriptionPricing(
   workspaceId: string,
-  sub: { items?: unknown; delivery_price_cents?: number | null },
+  sub: {
+    items?: unknown;
+    delivery_price_cents?: number | null;
+    /** The persist-to-renewal offer this sub was acquired under (subscriptions.pricing_offer_id).
+     *  Read at renewal: an `active`, in-window offer overrides the resolved S&S % (or pins a
+     *  fixed renewal unit price) for its in-scope product lines. A reference, not a baked
+     *  price — expiring/removing the offer reverts to base automatically. Absent on what-if
+     *  quotes (no offer applied). See storefront-dynamic-renewal-offers.md (P1). */
+    pricing_offer_id?: string | null;
+  },
 ): Promise<SubscriptionPricing> {
   const admin = createAdminClient();
   const items = (Array.isArray(sub.items) ? sub.items : []) as PricingItem[];
@@ -171,6 +193,31 @@ export async function resolveSubscriptionPricing(
     .maybeSingle();
   const fallbackSns = ws?.subscription_discount_pct ?? 25;
 
+  // 2.5 Persist-to-renewal offer. The sub carries a REFERENCE to the offer it was
+  //     acquired under (pricing_offer_id), never a baked price — so the offer
+  //     persists to renewal yet stays cleanly reversible. Apply it only when it is
+  //     still `active` and inside its [starts_at, ends_at] window; an expired /
+  //     un-approved offer reverts the sub to base pricing with no row mutation.
+  //     `product_id = null` scopes the offer to every product line; otherwise only
+  //     lines for that product receive the delta.
+  let offer: OfferRow | null = null;
+  if (sub.pricing_offer_id) {
+    const { data: offerRow } = await admin
+      .from("pricing_rule_offers")
+      .select("id, product_id, subscribe_discount_pct, renewal_price_cents, status, starts_at, ends_at, label")
+      .eq("id", sub.pricing_offer_id)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    if (offerRow && offerRow.status === "active") {
+      const now = Date.now();
+      const startsOk = !offerRow.starts_at || Date.parse(offerRow.starts_at) <= now;
+      const endsOk = !offerRow.ends_at || Date.parse(offerRow.ends_at) > now;
+      if (startsOk && endsOk) offer = offerRow as OfferRow;
+    }
+  }
+  const offerApplies = (productId: string | null): boolean =>
+    !!offer && (offer.product_id == null || offer.product_id === productId);
+
   // 3. Mix-and-match: total quantity per rule across product lines.
   const ruleTotalQty = new Map<string, number>();
   for (const i of items) {
@@ -211,8 +258,24 @@ export async function resolveSubscriptionPricing(
     const base = hasOverride ? Number(i.price_override_cents) : (v?.price_cents ?? i.price_cents ?? 0);
     const ruleId = v ? ruleIdByProduct.get(v.product_id) : undefined;
     const rule = ruleId ? ruleMap.get(ruleId) : undefined;
-    const snsPct = rule ? Number(rule.subscribe_discount_pct || 0) : fallbackSns;
+    const productId = common.product_id;
+    const ruleSnsPct = rule ? Number(rule.subscribe_discount_pct || 0) : fallbackSns;
     const breakPct = rule ? breakPctForQty(rule.quantity_breaks, ruleTotalQty.get(ruleId!) || quantity) : 0;
+
+    // Persist-to-renewal offer overlay (when this line is in the offer's scope).
+    // renewal_price_cents pins the per-unit charge outright; otherwise the offer's
+    // subscribe_discount_pct OVERRIDES the resolved S&S % for this line. Out of
+    // scope → base rule pricing, untouched.
+    if (offerApplies(productId)) {
+      if (offer!.renewal_price_cents != null) {
+        return { ...common, kind: "product" as const, base_cents: base, unit_cents: offer!.renewal_price_cents, break_pct: 0, sns_pct: 0, is_grandfathered: hasOverride };
+      }
+      const offerSns = Number(offer!.subscribe_discount_pct || 0);
+      const unit = Math.round(base * (1 - breakPct / 100) * (1 - offerSns / 100));
+      return { ...common, kind: "product" as const, base_cents: base, unit_cents: unit, break_pct: breakPct, sns_pct: offerSns, is_grandfathered: hasOverride };
+    }
+
+    const snsPct = ruleSnsPct;
     const unit = Math.round(base * (1 - breakPct / 100) * (1 - snsPct / 100));
     return { ...common, kind: "product" as const, base_cents: base, unit_cents: unit, break_pct: breakPct, sns_pct: snsPct, is_grandfathered: hasOverride };
   });
@@ -247,6 +310,11 @@ export async function resolveSubscriptionPricing(
     }
   }
   if (free_shipping) discounts.push({ kind: "free_shipping", label: "Free Shipping" });
+  // Persist-to-renewal offer pill — honest, owner-approved offer labeling. Only when
+  // the offer actually touched a line on this sub.
+  if (offer && productLines.some((l) => offerApplies(l.product_id))) {
+    discounts.push({ kind: "renewal_offer", label: offer.label || "Renewal Offer" });
+  }
 
   return { lines, product_subtotal_cents, product_msrp_cents, shipping_cents, free_shipping, discounts };
 }

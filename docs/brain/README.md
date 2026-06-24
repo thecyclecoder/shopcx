@@ -197,6 +197,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/posts]] — Blog/resource object — imported (Superfood Scoop) or auto-generated ([[lifecycles/auto-blog-generation]]); self-hosted images, AI-classified is_resource + grouping. Rendered on the public storefront blog + portal Resources. See [[lifecycles/blog-resources]].
 - [[tables/post_products]] — Join: a [[tables/posts|post]] → many [[tables/products]] (a recipe shows under each product it uses).
 - [[tables/pricing_rules]] — Storefront pricing rules — tier qty, mode (subscription vs one-time), frequency, discount %, line-item price.
+- [[tables/pricing_rule_offers]] — Dynamic, time-boxed persist-to-renewal offers overlaying a [[tables/pricing_rules|rule]] for a scoped (product × lander × audience) / experiment arm; owner-approval-gated (M6).
 - [[tables/shipping_rates]] — Storefront shipping rates per (region, weight) — referenced by orders + subscriptions.
 - [[tables/storefront_events]] — Append-only storefront event log (pdp_view, pack_selected, order_placed, etc.). PK is client-generated UUID for CAPI dedup. 90d retention.
 - [[tables/storefront_leads]] — Lead-capture events on the storefront. Customer is created/matched, this row logs the capture surface.

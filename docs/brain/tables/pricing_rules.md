@@ -35,6 +35,7 @@ Storefront pricing rules — tier qty, mode (subscription vs one-time), frequenc
 **In (others → this):**
 
 - [[product_pricing_rule]].`pricing_rule_id`
+- [[pricing_rule_offers]].`pricing_rule_id` — dynamic, time-boxed persist-to-renewal offers that overlay this (static) rule
 
 ## Common queries
 
@@ -55,7 +56,8 @@ const { count } = await admin.from("pricing_rules")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **Static per product; offers make it dynamic.** A `pricing_rules` row is one static rule applied to many products via [[product_pricing_rule]]. A **time-boxed persist-to-renewal offer** ([[pricing_rule_offers]]) overlays it — overriding `subscribe_discount_pct` (or pinning a fixed renewal unit price) for a scoped `(product × lander_type × audience)` / experiment arm while the offer is `active` + in-window. The offer is owner-approval-gated (never autonomous); the rule is not.
+- Probe before assuming — see [[../README]] § Probing technique.
 
 ---
 
