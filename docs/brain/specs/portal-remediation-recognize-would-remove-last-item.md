@@ -15,6 +15,6 @@ src/lib/portal/handlers/remove-line-item.ts normalizes BOTH the local last-item 
 - ✅ **P1 — implement the fix** — `classifyPortalFailure()` dismiss branch matches `would_remove_last_item` (landed earlier in #474) and now also the friendly detail substring `at least one recurring item must remain`, keeping the legacy raw Appstle strings as a fallback. `getFailureContext` already joins error+message+detail. Unit coverage added in `src/lib/portal/remediation.test.ts` (`npm run test:portal-remediation`, 8 cases incl. the exact `would_remove_last_item` → dismiss case). Brain pages updated: [[../libraries/portal__remediation]] (dismiss table + design note) and [[../lifecycles/customer-portal]] (last-item removal mis-escalation note). `npx tsc --noEmit` clean.
 
 ## Verification
-- Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).
+- ✅ Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).
 
 > Authored by the box escalation-triage routine (solver+skeptic quorum) from escalated ticket `055e807d-7122-415f-8b45-82a88f57cc42`. Commission the build from the Roadmap board (owner = cs).
