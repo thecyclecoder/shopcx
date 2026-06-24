@@ -155,8 +155,14 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
 }
 
 export default async function RoadmapPage() {
-  const [{ specs }, archive, filters] = await Promise.all([getRoadmap(), getArchive(), getRoadmapFilters()]);
   const workspaceId = await getActiveWorkspaceId();
+  // spec-status-db-driven Phase 1: getRoadmap(workspaceId) overlays the DB mirror onto every spec —
+  // status / critical / deferred / per-phase status all come from spec_card_state authoritatively.
+  const [{ specs }, archive, filters] = await Promise.all([
+    getRoadmap(workspaceId ?? undefined),
+    getArchive(),
+    getRoadmapFilters(workspaceId ?? undefined),
+  ]);
   const [jobsBySlug, folds, testRuns, humanResolvedBySlug] = workspaceId
     ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId), getHumanResolutionCounts(workspaceId)])
     : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, {} as Record<string, number>];

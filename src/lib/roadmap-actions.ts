@@ -106,7 +106,9 @@ export async function queueRoadmapBuild(
   // the chain step use). A spec with no phase structure falls through to a normal whole-spec build.
   let chainPhases = false;
   if (opts.chainPhases === true) {
-    const spec = await getSpec(slug);
+    // spec-status-db-driven Phase 1: pass workspaceId so spec.card.phases reflects DB-authoritative
+    // per-phase status (the DB is the source of truth post-backfill — markdown lags by a deploy).
+    const spec = await getSpec(slug, workspaceId);
     const phases = spec?.card.phases ?? [];
     const next = phases.find((p) => p.status === "planned");
     if (next) {

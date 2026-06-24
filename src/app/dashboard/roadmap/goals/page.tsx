@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getGoals } from "@/lib/brain-roadmap";
+import { getActiveWorkspaceId } from "@/lib/workspace";
 import { GoalStatusBadge } from "./GoalStatusBadge";
 
 // Reads docs/brain/goals + specs at request time — always reflects the live brain.
@@ -20,7 +21,8 @@ function RollupBar({ pct }: { pct: number }) {
 }
 
 export default async function GoalsBoardPage() {
-  const goals = await getGoals();
+  const workspaceId = await getActiveWorkspaceId();
+  const goals = await getGoals(workspaceId ?? undefined);
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl p-6">

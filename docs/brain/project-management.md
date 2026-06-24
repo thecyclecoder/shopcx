@@ -45,10 +45,14 @@ This hierarchy is operationalized by the [[specs/goal-decomposition-engine|goal-
 | State | Where it lives | How you change it |
 |---|---|---|
 | **Idea** | An informal note in agent memory or a chat — not yet committed | Write a spec to promote it |
-| **Planned** | `docs/brain/specs/{slug}.md` with all phases marked ⏳ | git add + commit the spec |
-| **In progress** | Same spec file, phases marked 🚧 as they're picked up | Update the phase checkboxes as work lands |
-| **Shipped** | All phases ✅ in `specs/{slug}.md` — **built + deployed**, stamped automatically by the build pipeline. The spec **stays** in `specs/` (the board's "Shipped — awaiting verification" column). Not yet folded. | Mark phases ✅ as builds land |
+| **Planned** | `docs/brain/specs/{slug}.md` exists; the [[tables/spec_card_state]] row's `status='planned'`, every phase `planned` | git add + commit the spec |
+| **In progress** | Same spec file; the DB row's phase status flips → `in_progress` as work lands. *Markdown is content-only.* | Build pipeline + drift reconciler update the DB row instantly |
+| **Shipped** | Every phase in [[tables/spec_card_state]] is `shipped` — **built + deployed**. The spec file **stays** in `specs/` (the board's "Shipped — awaiting verification" column). Not yet folded. | Build merges flip the DB row; [[tables/spec_status_history]] audits who/when/why |
 | **Verified** | Spec content folded into the relevant `lifecycles/`/`tables/`/`libraries/`/`inngest/`/`integrations/`/`recipes/`/`dashboard/` pages, a one-line entry appended to [[archive]], spec file `git rm`'d. The "Status / open work" block on the lifecycle reads `Shipped:`. | **Owner** clicks **Mark verified & archive** → fold-build → merge |
+
+### Where status lives — DB, not markdown
+
+**spec-status-db-driven** ([[specs/spec-status-db-driven]], 2026-06-24): the markdown is **content-only** (title, phase titles, owner, parent, blockedBy, autoBuild, repairSignature, summary, verification). **Status / per-phase status / critical / deferred live in [[tables/spec_card_state]] authoritatively**, with an audit row per transition in [[tables/spec_status_history]]. The board reads the DB. Every status writer (owner flip, build merge, drift reconciler, Ada drift-supervise, priority/defer) writes the DB only — zero markdown commits, zero deploys. The phase emojis you may still see in older specs are legacy noise; the [[tables/spec_card_state]] row wins.
 
 ### Shipped vs Verified — why the extra gate
 
@@ -73,11 +77,10 @@ One-paragraph summary of what we're building + why. Tie it to a
 business outcome.
 
 ## Phase 1 — {phase name}
-- ⏳ planned (or 🚧 in progress, or ✅ shipped)
 - Concrete tasks, file paths, schema additions
 
 ## Phase 2 — {phase name}
-- ⏳ planned
+- More concrete tasks
 
 ## Safety / invariants
 - Non-negotiable rules (e.g. "never delete approved prompts")
@@ -93,7 +96,7 @@ business outcome.
 - **Never** vague ("test it works"). Every bullet names a concrete place + a concrete expected observation.
 ```
 
-The phase emoji convention (⏳ 🚧 ✅) keeps progress visible at a glance — no separate Kanban needed. Anyone reading the spec sees what's done + what's next inline.
+Phase status is tracked in [[tables/spec_card_state]] (DB), not the markdown. The roadmap board reads it live, no deploy needed. Phase titles + the `## Phase N` headings stay in markdown as the durable record of what was planned.
 
 The **`## Verification` section** is the "how do I test this?" checklist ([[specs/verification-guides]]). The build that ships a spec **writes it** from the routes/tables/actions it actually touched, so a shipped spec arrives test-ready — and the spec detail page renders it as a prominent card right beside **Mark verified & archive** (the [[dashboard/roadmap]] verify gate), where the owner needs it. A shipped spec missing the section offers an owner-only **Generate test plan** button (Opus drafts one, brain-grounded). It folds into the brain with the rest of the spec on archive.
 

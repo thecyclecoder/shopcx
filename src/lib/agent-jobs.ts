@@ -398,7 +398,9 @@ export async function enqueueSpecTestIfDue(
   if (knownStatus !== undefined) {
     if (knownStatus !== "shipped") return { enqueued: false, reason: "not-shipped" };
   } else {
-    const [spec, archived] = await Promise.all([getSpec(slug), listArchivedSlugs()]);
+    // spec-status-db-driven Phase 1: pass workspaceId so the DB mirror's status wins (it's the source
+    // of truth post-backfill; the markdown lags by a deploy or — after Phase 3 — has no status at all).
+    const [spec, archived] = await Promise.all([getSpec(slug, workspaceId), listArchivedSlugs()]);
     if (!spec || spec.card.status !== "shipped") return { enqueued: false, reason: "not-shipped" };
     if (archived.includes(slug)) return { enqueued: false, reason: "archived" };
   }
@@ -450,7 +452,9 @@ export async function enqueueSpecTestIfDue(
  * (an agent enqueue). Returns the slugs it queued.
  */
 export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: string): Promise<string[]> {
-  const { specs } = await getRoadmap();
+  // spec-status-db-driven Phase 1: overlay the DB mirror so a just-shipped prerequisite (DB-only flip)
+  // unblocks dependents this render — no deploy wait for the markdown emoji to land.
+  const { specs } = await getRoadmap(workspaceId);
   const dependents = specs.filter(
     (s) =>
       s.autoBuild !== false &&

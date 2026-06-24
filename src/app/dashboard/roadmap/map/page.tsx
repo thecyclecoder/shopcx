@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getFunctionMap, type SpecStatus, type SpecCard } from "@/lib/brain-roadmap";
+import { getActiveWorkspaceId } from "@/lib/workspace";
 
 // Reads docs/brain/specs at request time — always reflects the live brain.
 export const dynamic = "force-dynamic";
@@ -44,7 +45,8 @@ function SpecChip({ spec }: { spec: SpecCard }) {
 }
 
 export default async function RoadmapMapPage() {
-  const { functions, unassigned } = await getFunctionMap();
+  const workspaceId = await getActiveWorkspaceId();
+  const { functions, unassigned } = await getFunctionMap(workspaceId ?? undefined);
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl p-6">

@@ -1,4 +1,4 @@
-# Spec status → 100% DB-driven (kill the status-commit deploys) ⏳
+# Spec status → 100% DB-driven (kill the status-commit deploys) ✅
 
 **Owner:** [[../functions/platform]]
 **Parent:** Platform mandate — the spec/board system stays fast + honest (continues the spec-card-db-companion lineage)
@@ -64,26 +64,31 @@ All six PUT `docs/brain/specs/{slug}.md` on `branch:main` → bundle redeploy. *
 
 ## Phases
 
-## Phase 1 — DB authoritative for status (schema + backfill + reads) ⏳
+## Phase 1 — DB authoritative for status (schema + backfill + reads) ✅
 - Migration: add `deferred` to the status CHECK; add `critical` (+ `deferred`) to `spec_card_state`; create `spec_status_history`.
 - Backfill: parse current markdown status for every spec → write `spec_card_state` (status, phase_states, critical, deferred). One-time.
 - Flip every reader to **DB-only** for status: `brain-roadmap.parseSpec` parses CONTENT only (title, phase *titles*, owner, parent, blockedBy, autoBuild, repairSignature, summary) — stop deriving status/critical/deferred. Board + rollups + gate + box read status from `spec_card_state`. `resolveBoardStatus`/`mergePhaseStates` collapse to a plain DB read.
 
-## Phase 2 — Writers go DB-only (the deploy kill) ⏳
+## Phase 2 — Writers go DB-only (the deploy kill) ✅
 - Rewrite the six git-committing writers to write `spec_card_state` (+ `spec_status_history`) and **stop the markdown PUT**. Status/priority/drift/supervise/verification all become instant DB writes, zero deploys.
 - `roadmap-actions` chaining + the build gate read phase status from the DB.
 
-## Phase 3 — Strip status from markdown + simplify ⏳
+## Phase 3 — Strip status from markdown + simplify ✅
 - One migration commit: strip phase emojis, `**Deferred:**`, `**Priority:** critical`, H1 status emoji from all spec markdown (phases become plain `## Phase N — title`). One deploy, then quiet.
 - Delete now-dead code: `deriveStatus`, the spec `statusFromText`/marker regexes, `resolveBoardStatus`, `deploymentState`, `mergePhaseStates` forward-merge, the deploy-pending/SHA dance.
 
-## Phase 4 — Repurpose spec-drift + docs ⏳
+## Phase 4 — Repurpose spec-drift + docs ✅
 - spec-drift shrinks to a light DB backstop ("did a merged build's phase get marked shipped in the DB?") — most of the markdown reconciler retires.
 - Update brain docs: `project-management.md` ("markdown is the source of truth" → "content in markdown, status in DB"), `brain-roadmap.md`, `tables/spec_card_state.md`, fold this spec away.
 
 ## Verification
-- Defer a spec from the board → status changes instantly, **no commit appears on main**, no deploy.
-- Build a multi-phase spec → each phase flips ✅ in the DB on merge, board updates instantly, **no per-phase status commit**.
-- `git log docs/brain/specs/` over a day shows only content authoring/edits/folds — zero `roadmap:`/`spec-drift:` status commits.
-- A fresh spec file with no status markers renders correct status from the DB on the board + detail page.
-- `spec_status_history` records who/what/when for each transition.
+- On psql (pooler), run `\d public.spec_status_history` → expect the table to exist with columns `(id, workspace_id, spec_slug, field, phase_index, from_value, to_value, actor, reason, at)` and the two indexes `spec_status_history_slug_at` + `spec_status_history_field_at`.
+- On the build box, run `npx tsx scripts/backfill-spec-status-from-markdown.ts` (dry run) → expect a list of per-workspace per-spec rows that would be upserted; pass `--apply` to write, then expect every spec in `docs/brain/specs/` to have a row in `spec_card_state` for the active workspace AND a `backfill` actor row per spec in `spec_status_history`.
+- On `/dashboard/roadmap`, defer a spec via the PriorityControl (state="deferred") → expect the card moves to the **Deferred** column instantly AND `git log -1 docs/brain/specs/{slug}.md` shows no new commit on `main`. `select * from spec_status_history where spec_slug='{slug}' and field='deferred' order by at desc limit 1` → expect a `to_value='true'` row with `actor='owner:<uuid>'`.
+- On `/dashboard/roadmap`, mark a spec critical via the PriorityControl → expect the **🔴 Critical** pip appears on the card instantly AND no markdown commit appears. `select * from spec_card_state where spec_slug='{slug}'` → expect `flags->>'critical'` is `'true'`.
+- On `/dashboard/roadmap`, click an owner-only phase flip from ⏳ → ✅ via StatusControl → expect the phase pip flips on the board within ~1s, no `main` commit appears, and `spec_status_history` records a `field='status'` row with actor `owner:<uuid>`.
+- On `/dashboard/control-tower`, one-tap-flip a surfaced spec-drift row → expect the row resolves, the spec card's status reflects the flip, and `spec_status_history` shows a row authored by `owner:<uuid>` with reason "spec-drift one-tap flip P{N} → ✅".
+- Merge a `claude/*` build PR for any multi-phase spec → expect the phase flips to `shipped` in `spec_card_state`, the board card updates within seconds, the deploy chip shows `shipped · deploying` then `shipped · live` once the deploy lands, AND `spec_status_history` records the merge with `actor='merge:<sha>'`.
+- Run `git log --oneline -200 docs/brain/specs/` from any day after this ships → expect only `spec:` content edits, `fold:` archives, and `build:` PRs — zero `roadmap:`, `spec-drift:`, or `spec-test: reflect ... green` status commits.
+- Create a brand-new spec file with no `**Deferred:**` / `**Priority:**` / phase emojis → expect the board renders it as Planned (no DB row yet); after one flip the row appears with the expected status.
+- On the build box, run `npx tsx scripts/strip-spec-status-markers.ts` (dry run) → expect a list of specs whose `# Title ⏳/🚧/✅`, `## Phase N — title ⏳/🚧/✅`, `**Deferred:**`, `**Priority:** critical`, and `## Verification` leading `✅` would be removed; pass `--apply` to commit the strip in one content-only deploy.
