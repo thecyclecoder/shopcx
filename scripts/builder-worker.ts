@@ -2285,7 +2285,7 @@ async function runPlatformDirectorJob(job: Job) {
   // Load the target approval job.
   const { data: target } = await db
     .from("agent_jobs")
-    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail")
+    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail, spec_branch")
     .eq("id", targetId)
     .maybeSingle();
   if (!target) {
@@ -2327,12 +2327,37 @@ async function runPlatformDirectorJob(job: Job) {
 
   // Investigate read-only on Max → one JSON verdict. Never rubber-stamps: must confirm EVERY action sound + in-leash.
   console.log(`${tag} investigating ${t.kind} (${bundleLabel}) for target ${targetId.slice(0, 8)}`);
+  // Visibility fix (director-executable-plans-and-priority): a build's migration SQL / apply script / new code
+  // live on its PR BRANCH, not main. Investigating on REPO_DIR (main) makes Ada (correctly) escalate everything
+  // as "the script doesn't exist / premise false". So when the target has a branch, run the read-only
+  // investigation in a worktree of THAT branch — the proposed artifacts are present + inspectable. Fall back to
+  // main when there's no branch (e.g. a db_health/coverage proposal that didn't open a PR).
+  const targetBranch = (target as { spec_branch?: string | null }).spec_branch ?? null;
+  let investCwd = REPO_DIR;
+  let investWt: string | null = null;
+  if (targetBranch) {
+    const key = targetBranch.replace(/[^a-zA-Z0-9_-]/g, "");
+    investWt = join(BUILDS_DIR, `director-review-${key}`);
+    sh("git", ["fetch", "origin", targetBranch]);
+    sh("git", ["worktree", "remove", "--force", investWt]);
+    const add = sh("git", ["worktree", "add", "--detach", investWt, `origin/${targetBranch}`]);
+    if (add.code === 0) {
+      sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(investWt, "node_modules")]);
+      investCwd = investWt;
+    } else {
+      console.warn(`${tag} could not check out branch ${targetBranch} for review (${add.err.slice(0, 120)}) — investigating on main`);
+      investWt = null;
+    }
+  }
   try {
     const brief = lib.buildDirectorBrief(t, leashActions);
     // Phase 2 live-state + P7 coaching: she approves on the authoritative function_autonomy flag (never stale
     // brain prose), and a coached rule ("auto-approve these going forward") still steers this call.
-    const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief));
-    const { session, resultText, isError } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+    const branchNote = investCwd !== REPO_DIR
+      ? `\n\nYou are in a read-only worktree of the build's BRANCH (${targetBranch}) — the proposed migration SQL (supabase/migrations/), the apply script, and the new code ARE present here. READ them directly to confirm soundness; do NOT assume a file is missing just because it isn't on main.`
+      : "";
+    const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief) + branchNote);
+    const { session, resultText, isError } = await runDirectorClaude(investPrompt, null, investCwd);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
     const verdict = String(parsed?.verdict || "");
@@ -2360,6 +2385,8 @@ async function runPlatformDirectorJob(job: Job) {
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  } finally {
+    if (investWt) sh("git", ["worktree", "remove", "--force", investWt]); // clean up the branch-review worktree
   }
 }
 

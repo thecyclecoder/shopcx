@@ -30,5 +30,8 @@ A directive re-prioritizes WHAT Ada does, never loosens HOW. Her leash, loop-gua
 - On the next standing pass, Ada pursues the directive first; with `gate_builds_until` set, no new build is enqueued until that spec ships, then the gate lifts + the directive completes. A `critical` spec is queued ahead of normal Planned specs.
 - Asked "what are you working on?" Ada names the active directive + the gate. `npx tsc --noEmit` clean.
 
+## Follow-up fix — director approval investigation reads the build's BRANCH ✅
+**Found in use 2026-06-24:** the box built this spec in parallel (PR #456) and parked its migration-apply for approval. Ada's read-only soundness investigation ran on `REPO_DIR` (main), where the build's migration SQL / apply script / new code don't exist yet (they're on the PR branch) — so she truthfully escalated as "the script doesn't exist / premise is false." A pure **visibility gap**: it systematically broke migration auto-approval (the additive_migration leash can never be confirmed when the artifact is on an unmerged branch). **Fix:** the director approval lane (`scripts/builder-worker.ts`) now loads the target's `spec_branch` and runs the investigation in a read-only **worktree of that branch** (the proposed artifacts are present + inspectable), with a prompt note that the changes are on the branch; falls back to main when there's no branch. The redundant PR #456 was closed (superseded by #457). tsc clean.
+
 ## Open decision (resolved)
 Directive-first-then-routine (not directive-only); build BOTH levers (the chat build-gate + the `**Priority:** critical` board marker). — CEO, 2026-06-24.
