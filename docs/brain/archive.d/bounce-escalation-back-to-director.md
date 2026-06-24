@@ -1,0 +1,1 @@
+- **Bounce escalation back to its director — CEO 'you handle this' affordance** · verified 2026-06-24 · → [[libraries/director-bounce-back]]
