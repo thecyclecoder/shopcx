@@ -41,7 +41,7 @@ function stripH1(lines: string[]): { lines: string[]; changed: boolean } {
 function stripPhaseHeadings(lines: string[]): { lines: string[]; changed: boolean } {
   let changed = false;
   for (let i = 0; i < lines.length; i++) {
-    if (!/^##\s+Phase\b/.test(lines[i])) continue;
+    if (!/^#{2,3}\s+Phase\b/.test(lines[i])) continue; // H2 (## Phase) OR H3 (### Phase under ## Phases)
     const stripped = lines[i].replace(EMOJI, "").replace(/\s+$/, "");
     if (stripped !== lines[i]) {
       lines[i] = stripped;

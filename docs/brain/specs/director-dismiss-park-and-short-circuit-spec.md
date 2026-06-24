@@ -1,4 +1,4 @@
-# Ada can dismiss a stale park + short-circuit a no-longer-needed spec ✅
+# Ada can dismiss a stale park + short-circuit a no-longer-needed spec
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the director's action surface so I can clear cleanly instead of leaving stale park rows or part-shipped specs sitting forever.
 
@@ -10,7 +10,7 @@ The one-off runtime application to the Amazing Creamer park itself is tracked se
 
 The CEO's instinct was right: don't train me to suppress with a coaching rule when the real answer is an action you can SEE in `director_activity`. A dismiss/short-circuit row in the ledger is supervisable; a coaching rule that suppresses a class of parks is not.
 
-## Phase 1 — `dismiss-park` director action ✅
+## Phase 1 — `dismiss-park` director action
 
 A new `pending_action` shape the director emits when a parked `agent_jobs` row is genuinely not worth pursuing (the underlying work is being short-circuited, a prereq won't be supplied, the park is stale and not auto-routable).
 
@@ -29,7 +29,7 @@ A new `pending_action` shape the director emits when a parked `agent_jobs` row i
 - I emit `dismiss-park` with no reason → rejected as a schema error.
 - The board-watch post counts the day's dismissed parks alongside the existing rollup (squashed / escorted / escalated).
 
-## Phase 2 — `spec-status` `shortCircuit` flag ✅
+## Phase 2 — `spec-status` `shortCircuit` flag
 
 Today `spec-status` flips `planned|in_progress|shipped|rejected`. None fit "we changed our mind, this isn't needed anymore": `rejected` reads as "the spec was wrong" and `shipped` implies the phases actually built. Add a `shortCircuit:true` flag carried alongside `status:'shipped'` that means "closed cleanly without all phases shipped — work is no longer needed."
 

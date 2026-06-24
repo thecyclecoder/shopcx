@@ -1,10 +1,8 @@
-# Apply dismiss-park + short-circuit to the Amazing Creamer park ⏳
+# Apply dismiss-park + short-circuit to the Amazing Creamer park
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]]
 
-**Deferred:** split from [[director-dismiss-park-and-short-circuit-spec]] — not needed now: the capability (the `dismiss-park` director action + the `spec-status` `shortCircuit` flag) is fully shipped. This is a one-off runtime application of those actions to the original motivating case, explicitly carved out of the parent's Verification ("a runtime conversation the director runs once deployed"). Preserved as its own card so the keystroke isn't lost and the parent can fold.
-
-## Phase 1 — apply both to the Amazing Creamer park ⏳
+## Phase 1 — apply both to the Amazing Creamer park
 
 With the `dismiss-park` action and the `spec-status` `shortCircuit` flag live in prod, run the two actions on the live state:
 

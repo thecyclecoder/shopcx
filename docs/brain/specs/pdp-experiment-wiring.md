@@ -8,7 +8,7 @@
 - **Apply the hero patch to the PDP's real hero source.** The PDP hero reads `media_by_slot["hero"]`; the variant's `heroImageUrl` must **override that slot** for the PDP render (a `pdp`-aware apply, not only `AdvertorialContent.heroImageUrl`). Confirm the rendered `<HeroSection>` shows the variant image; control is untouched.
 - **Dynamic-only-when-testing.** The PDP is ISR-cached (`revalidate = 3600`). Per-visitor assignment can't run under a static cache. Cheapest correct step: when an **active experiment exists** for `(product, pdp)`, render the PDP **dynamically** (it already must read the `sid` cookie → dynamic); when there's **no** active experiment, keep the ISR cache (no perf hit on the common case). A `loadActiveExperiments` check gates dynamic-vs-cached.
 
-### Phase 2 — edge-cached A/B (keep the cache even under test) ⏳
+### Phase 2 — edge-cached A/B (keep the cache even under test)
 The owner's pattern: don't make the hot PDP fully dynamic — **assign the variant at the edge**. Vercel **middleware** reads/sets a sticky `sx_variant` cookie (deterministic hash of the visitor × experiment, holdout-aware) and the PDP **caches keyed by that cookie** (`Vary`/cache-tag by variant), so each arm gets its own edge-cached render — fast *and* tested, no per-request server compute. The page reads the assigned cookie instead of assigning inline; exposures still emit (internal/bot excluded). This is the durable architecture for high-traffic landers; Phase 1's dynamic-when-testing is the correct stopgap.
 
 ## Verification
@@ -17,7 +17,7 @@ The owner's pattern: don't make the hot PDP fully dynamic — **assign the varia
 - With **no** active PDP experiment → the PDP serves from the ISR cache (no added latency); with one active → it renders the assigned arm (dynamic in Phase 1, edge-cached-per-variant in Phase 2).
 - Negative: the existing advertorial/listicle/before-after experiments still apply unchanged; killing/rolling back a PDP experiment reverts every visitor to the product's real hero.
 
-## Phase 1 — ungate PDP resolution + patch the hero slot + dynamic-when-testing
+## Implementation notes — Phase 1 (shipped)
 `store/[workspace]/[slug]/page.tsx`: resolve experiments for the PDP (honor `sx_preview`); apply `heroImageUrl` over `media_by_slot["hero"]`; render dynamic only when an active `(product, pdp)` experiment exists. Brain: [[storefront-optimizer-agent]] · [[storefront-experiment-bandit-framework]] · [[../libraries/storefront-experiments]] · [[../dashboard/storefront__optimizer]].
 
 **Shipped:** new `resolvePdpExperimentsForRender()` in [[../libraries/storefront-experiments]] — PDP-specialized (`lander_type='pdp'`) sticky-assign + preview that returns the assigned arm's `heroImageUrl` (+ exposures) instead of patching `AdvertorialContent`. The bare-PDP branch in `page.tsx` calls `loadActiveExperiments(…, "pdp")` first (no cookies); only when one is active does it read the `sid` cookie (→ dynamic render) and resolve. A new `applyPdpHeroOverride()` helper clones `data` and swaps the `hero` media slot (primary image) with the variant URL (responsive variants nulled → `pictureSources` falls back to the plain edge-proxied URL; control hero dims/alt kept). The `sx_preview` path forces an arm with no cookie (already dynamic via searchParams); `sx_internal=1` still drops the exposure at the pixel. No schema change. Phase 2 (edge-cached A/B) remains ⏳.

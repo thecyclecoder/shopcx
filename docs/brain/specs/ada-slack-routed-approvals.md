@@ -1,4 +1,4 @@
-# ✅ Ada surfaces routed CEO inbox approvals in #cto-ada
+#  Ada surfaces routed CEO inbox approvals in #cto-ada
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform" (phone-first idea→spec→build, extended from founder↔CTO conversation to the routed approval inbox itself)
 
