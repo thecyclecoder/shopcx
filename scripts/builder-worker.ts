@@ -1879,11 +1879,12 @@ async function runPlatformDirectorJob(job: Job) {
     return;
   }
 
-  // Structural leash gate — only a single, plain inline-approve action of a leash type is auto-approvable.
-  // Anything else (multi-choice, non-leash, multi-action) is OUTSIDE the envelope → escalate, never approve.
-  const candidate = lib.directorLeashCandidate(t);
-  if (!candidate) {
-    const reason = "outside the auto-approve leash (multi-choice / non-leash / multi-action) — needs the CEO";
+  // Structural leash gate (worker-grading P8 — multi-action): auto-approvable iff EVERY pending action is
+  // in-leash (a single plain action OR a bundle like an additive migration + its idempotent backfill). One
+  // out-of-leash action — a multi-CHOICE, a non-leash type, a destructive op — escalates the WHOLE request.
+  const { actions: leashActions, verdict: leashVerdict } = lib.directorLeashCandidates(t);
+  if (leashVerdict === "none") {
+    const reason = "outside the auto-approve leash (multi-choice / non-leash / a destructive action) — needs the CEO";
     await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind } });
     await lib.escalateApprovalRequestToCeo(db, t, reason); // Phase 3: route the request UP to the CEO inbox.
     await update(job.id, { status: "completed", log_tail: `escalate → ${reason}; routed to CEO inbox`.slice(-2000) });
@@ -1891,10 +1892,13 @@ async function runPlatformDirectorJob(job: Job) {
     return;
   }
 
-  // Investigate read-only on Max → one JSON verdict. Never rubber-stamps: must confirm sound + in-leash.
-  console.log(`${tag} investigating ${t.kind} (${candidate.category}) for target ${targetId.slice(0, 8)}`);
+  const categories = leashActions.map((a) => a.category).join("+");
+  const bundleLabel = leashVerdict === "multi" ? `${leashActions.length}-action bundle (${categories})` : categories;
+
+  // Investigate read-only on Max → one JSON verdict. Never rubber-stamps: must confirm EVERY action sound + in-leash.
+  console.log(`${tag} investigating ${t.kind} (${bundleLabel}) for target ${targetId.slice(0, 8)}`);
   try {
-    const brief = lib.buildDirectorBrief(t, candidate);
+    const brief = lib.buildDirectorBrief(t, leashActions);
     const { session, resultText, isError } = await runDirectorClaude(lib.directorInvestigationPrompt(brief), null, REPO_DIR);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
@@ -1902,15 +1906,15 @@ async function runPlatformDirectorJob(job: Job) {
     const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
 
     if (verdict === "auto-approve") {
-      const res = await lib.applyDirectorApproval(db, t, candidate.actionId, reasoning || `auto-approved (${candidate.category}) within the leash`);
+      const res = await lib.applyDirectorApproval(db, t, leashActions.map((a) => a.actionId), reasoning || `auto-approved (${bundleLabel}) within the leash`);
       if (!res.ok) {
         await update(job.id, { status: "needs_attention", error: `director approve failed: ${res.error}`, log_tail: `auto-approve FAILED: ${res.error}`.slice(-2000) });
         console.warn(`${tag} auto-approve FAILED: ${res.error}`);
         return;
       }
-      await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${candidate.category})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: candidate.category, autonomous: true } });
-      await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${candidate.category}) → target queued_resume.\n${reasoning}`.slice(-2000) });
-      console.log(`${tag} auto-approved ${t.kind} (${candidate.category})`);
+      await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${bundleLabel})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true } });
+      await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → target queued_resume.\n${reasoning}`.slice(-2000) });
+      console.log(`${tag} auto-approved ${t.kind} (${bundleLabel})`);
       return;
     }
 

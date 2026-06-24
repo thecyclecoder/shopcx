@@ -69,15 +69,18 @@ export const PLATFORM = "platform";
 // What the director MAY auto-approve. A structural gate (which action class) plus — enforced by the
 // runner's read-only investigation — a soundness gate ("never rubber-stamps"). Anything outside this,
 // and anything destructive/irreversible/goal-touching, ALWAYS escalates to the CEO.
-export type LeashCategory = "error_fix" | "db_health" | "additive_migration" | "monitoring_fix";
+export type LeashCategory = "error_fix" | "db_health" | "additive_migration" | "monitoring_fix" | "additive_backfill";
 
-export const LEASH_CATEGORIES: LeashCategory[] = ["error_fix", "db_health", "additive_migration", "monitoring_fix"];
+export const LEASH_CATEGORIES: LeashCategory[] = ["error_fix", "db_health", "additive_migration", "monitoring_fix", "additive_backfill"];
 
 /**
- * The pending-action types that are EVER leash candidates → their leash category. The action must
- * still be a single, plain inline-approve (inlineApproveActionId) AND pass the investigation verdict.
- * Multi-choice actions (coverage_register register-vs-exempt, hero preview) are never auto-decided in
- * Phase 1 — they fall through to the CEO. Milestone progression (escorting goals) is Phase 2.
+ * The pending-action types that are UNCONDITIONALLY leash candidates → their leash category. Each must
+ * still pass the read-only investigation verdict (the soundness gate). `run_prod_script` is NOT here:
+ * a prod script is only in-leash as the dependent backfill of an additive migration in the SAME bundle
+ * (the worker-grading P8 multi-action case) — see `categoryFor` / `directorLeashCandidates`.
+ *
+ * Multi-CHOICE action types (coverage_register register-vs-exempt, storefront_campaign) are deliberately
+ * absent — a non-binary CHOICE isn't auto-decided; those still escalate to the CEO.
  */
 const LEASH_ACTION_TYPES: Record<string, LeashCategory> = {
   repair_build: "error_fix",
@@ -114,52 +117,119 @@ export function routesToPlatform(kind: string, chart: OrgChartGraph, autonomy: A
   return resolveApprover(ownerFunctionForKind(kind), chart, autonomy) === PLATFORM;
 }
 
-/**
- * The single, plain-approve action of a LEASH type the director may consider, or null. Reuses the
- * canonical inline-approve gate (inlineApproveActionId — single pending action, not multi-choice) and
- * adds the leash-type filter. Null ⇒ outside the auto-approve envelope ⇒ escalate, never approve.
- */
-export function directorLeashCandidate(job: DirectorTargetJob): { actionId: string; category: LeashCategory } | null {
-  const actionId = inlineApproveActionId(job as unknown as ApprovalJobRow);
-  if (!actionId) return null;
-  const action = (job.pending_actions || []).find((a) => a.id === actionId);
-  const category = action?.type ? LEASH_ACTION_TYPES[action.type] : undefined;
-  if (!category) return null;
-  return { actionId, category };
+/** One in-leash pending action the director may consider — its id + the leash class it falls into. */
+export interface LeashAction {
+  actionId: string;
+  category: LeashCategory;
 }
 
-/** The read-only brief the director investigates — the cause + proposed fix, inline. */
-export interface DirectorBrief {
-  jobId: string;
-  kind: string;
-  specSlug: string | null;
+/** The still-pending actions on a target (default status 'pending' when absent) — what the gate decides on. */
+function pendingTargetActions(job: DirectorTargetJob): DirectorActionLike[] {
+  return (job.pending_actions || []).filter((a) => (a.status ?? "pending") === "pending" && a.id);
+}
+
+/**
+ * The leash class for ONE pending action within its bundle, or null (out of leash). Unconditional leash
+ * types map via LEASH_ACTION_TYPES. A `run_prod_script` is in-leash ONLY as `additive_backfill` — and only
+ * when the SAME bundle also applies an additive migration (the migration-plus-its-dependent-backfill case,
+ * worker-grading P8 / the a2edeca0 escalation). A standalone prod script has no migration to anchor it →
+ * null → escalate. The soundness gate (the investigation) still confirms the script is an idempotent backfill.
+ */
+function categoryFor(action: DirectorActionLike, bundle: DirectorActionLike[]): LeashCategory | null {
+  const type = action.type;
+  if (!type) return null;
+  if (LEASH_ACTION_TYPES[type]) return LEASH_ACTION_TYPES[type];
+  if (type === "run_prod_script" && bundle.some((a) => a.type === "apply_migration")) return "additive_backfill";
+  return null;
+}
+
+/**
+ * The leash gate (worker-grading P8 — multi-action). Returns EVERY pending action the director may
+ * auto-approve, with its leash class, plus a verdict:
+ *   - `none`   — empty, OR ANY pending action is out of leash (multi-choice / non-leash / a destructive type).
+ *                A bundle is ALL-OR-NOTHING: one out-of-leash action escalates the whole request.
+ *   - `single` — exactly one in-leash action (the original single-inline-approve case).
+ *   - `multi`  — a bundle where EVERY action is in-leash (e.g. an additive migration + its idempotent
+ *                backfill). Approved atomically; the soundness gate still confirms the bundle is reversible.
+ * Replaces the single-action `directorLeashCandidate` (which required exactly one plain action).
+ */
+export function directorLeashCandidates(job: DirectorTargetJob): { actions: LeashAction[]; verdict: "none" | "single" | "multi" } {
+  const pending = pendingTargetActions(job);
+  if (!pending.length) return { actions: [], verdict: "none" };
+  const actions: LeashAction[] = [];
+  for (const a of pending) {
+    const category = categoryFor(a, pending);
+    if (!category) return { actions: [], verdict: "none" }; // one out-of-leash action ⇒ escalate the whole bundle
+    actions.push({ actionId: a.id as string, category });
+  }
+  return { actions, verdict: actions.length === 1 ? "single" : "multi" };
+}
+
+/** Back-compat: the single in-leash action when the request is exactly that, else null. */
+export function directorLeashCandidate(job: DirectorTargetJob): LeashAction | null {
+  const { actions, verdict } = directorLeashCandidates(job);
+  return verdict === "single" ? actions[0] : null;
+}
+
+/** One action inside the brief — what the investigation reads to confirm it (and the bundle) is sound. */
+export interface DirectorBriefAction {
   category: LeashCategory;
   summary: string;
   preview: string;
   cmd: string;
+}
+
+/** The read-only brief the director investigates — the cause + the proposed action(s), inline. */
+export interface DirectorBrief {
+  jobId: string;
+  kind: string;
+  specSlug: string | null;
+  /** every leash class in the request (one for single, ≥2 for a bundle). */
+  categories: LeashCategory[];
+  /** each in-leash action's summary/preview/cmd, in bundle order. */
+  actions: DirectorBriefAction[];
+  /** true when the request bundles >1 action (approved atomically, all-or-nothing). */
+  multi: boolean;
   logTail: string;
 }
 
-export function buildDirectorBrief(job: DirectorTargetJob, candidate: { actionId: string; category: LeashCategory }): DirectorBrief {
-  const action = (job.pending_actions || []).find((a) => a.id === candidate.actionId) ?? {};
+export function buildDirectorBrief(job: DirectorTargetJob, candidates: LeashAction[]): DirectorBrief {
+  const actions: DirectorBriefAction[] = candidates.map((c) => {
+    const a = (job.pending_actions || []).find((p) => p.id === c.actionId) ?? {};
+    return { category: c.category, summary: a.summary || "", preview: a.preview || "", cmd: a.cmd || "" };
+  });
   return {
     jobId: job.id,
     kind: job.kind,
     specSlug: job.spec_slug,
-    category: candidate.category,
-    summary: action.summary || "",
-    preview: action.preview || "",
-    cmd: action.cmd || "",
+    categories: candidates.map((c) => c.category),
+    actions,
+    multi: actions.length > 1,
     logTail: (job.log_tail || "").slice(-2000),
   };
 }
 
-/** The Max `claude -p` investigation prompt — read-only diagnose → one JSON verdict. */
+/** The Max `claude -p` investigation prompt — read-only diagnose → one JSON verdict (single or bundle). */
 export function directorInvestigationPrompt(brief: DirectorBrief): string {
+  const actionBlock = brief.actions
+    .map((a, i) => {
+      const head = brief.multi ? `Action ${i + 1} — category=${a.category}:` : `This request — category=${a.category}, kind=${brief.kind}, spec=${brief.specSlug ?? "—"}:`;
+      return [head, `  summary: ${a.summary}`, a.preview ? `  proposed fix / preview:\n${a.preview}` : "", a.cmd ? `  command that runs on approval: ${a.cmd}` : ""].filter(Boolean).join("\n");
+    })
+    .join("\n\n");
+
+  const bundleRule = brief.multi
+    ? [
+        `This Approval Request BUNDLES ${brief.actions.length} actions that run together (kind=${brief.kind}, spec=${brief.specSlug ?? "—"}) — most often an additive migration plus its dependent idempotent backfill.`,
+        "Decide ALL-OR-NOTHING: AUTO-APPROVE only if EVERY action is sound + within the leash AND the bundle is REVERSIBLE as a whole. If ANY single action is destructive, irreversible, out of leash, or unconfirmable, ESCALATE the WHOLE request. Never partial-approve.",
+        "For an additive_backfill action: confirm the script is an IDEMPOTENT, re-runnable backfill (no destructive writes, safe to re-run) that depends on the additive migration in this same bundle.",
+      ].join("\n")
+    : "Investigate the cause + the proposed fix and decide.";
+
   return [
     "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
     "A platform tool you supervise raised an Approval Request that routed to YOU (Platform is live + autonomous).",
-    "Your job: investigate the cause + the proposed fix READ-ONLY, then decide — AUTO-APPROVE only if it is",
+    "Your job: investigate the cause + the proposed action(s) READ-ONLY, then decide — AUTO-APPROVE only if it is",
     "SOUND, LOW-RISK, and WITHIN THE LEASH; otherwise ESCALATE to the CEO. NEVER rubber-stamp: if you cannot",
     "confirm it is sound and in-leash, escalate.",
     "",
@@ -167,21 +237,22 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
     "- error_fix: a repair-agent fix for a real bug — the authored fix spec is sound + scoped.",
     "- db_health: a DB index / health fix — no destructive DDL.",
     "- additive_migration: an ADDITIVE, REVERSIBLE migration (new table/column/index) — NO DROP/DELETE/destructive ALTER/data loss.",
+    "- additive_backfill: an IDEMPOTENT, re-runnable backfill script that accompanies an additive migration in the SAME request (never a standalone prod script).",
     "- monitoring_fix: a platform-monitoring registry fix.",
     "ALWAYS ESCALATE (never auto-approve): anything destructive or irreversible (DROP/DELETE/data-dropping),",
-    "modifying or abandoning an approved goal, starting a NEW goal, or anything you cannot confirm is sound.",
+    "a non-binary CHOICE (register-vs-exempt / campaign), modifying or abandoning an approved goal, starting a",
+    "NEW goal, or anything you cannot confirm is sound.",
     "",
-    `This request — category=${brief.category}, kind=${brief.kind}, spec=${brief.specSlug ?? "—"}:`,
-    `summary: ${brief.summary}`,
-    brief.preview ? `proposed fix / preview:\n${brief.preview}` : "",
-    brief.cmd ? `command that runs on approval: ${brief.cmd}` : "",
-    brief.logTail ? `investigation log so far:\n${brief.logTail}` : "",
+    bundleRule,
     "",
-    "Investigate read-only (the implicated spec / the migration SQL / the diagnosed code). Confirm the fix is",
-    "sound and within the leash before approving.",
+    actionBlock,
+    brief.logTail ? `\ninvestigation log so far:\n${brief.logTail}` : "",
+    "",
+    "Investigate read-only (the implicated spec / the migration SQL / the backfill script / the diagnosed code).",
+    "Confirm every action is sound and within the leash before approving.",
     "Final message = ONLY one JSON object:",
-    '{"verdict":"auto-approve","leash_category":"error_fix|db_health|additive_migration|monitoring_fix","reasoning":"<why it is sound + low-risk + within the leash>"}',
-    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash>"}',
+    '{"verdict":"auto-approve","leash_category":"error_fix|db_health|additive_migration|additive_backfill|monitoring_fix","reasoning":"<why every action is sound + low-risk + within the leash, and the bundle is reversible>"}',
+    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice>"}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -196,10 +267,14 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
 export async function applyDirectorApproval(
   admin: Admin,
   target: DirectorTargetJob,
-  actionId: string,
+  actionIds: string | string[],
   reasoning: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const actions = (target.pending_actions || []).map((a) => (a.id === actionId ? { ...a, status: "approved" } : a));
+  // Multi-action (worker-grading P8): approve EVERY listed action atomically — a bundle is all-or-nothing,
+  // so the job flips to queued_resume only once none stay pending (the execution path is unchanged: the
+  // worker runs each approved action in order on resume).
+  const ids = new Set(Array.isArray(actionIds) ? actionIds : [actionIds]);
+  const actions = (target.pending_actions || []).map((a) => (a.id && ids.has(a.id) ? { ...a, status: "approved" } : a));
   const stillPending = actions.some((a) => (a.status ?? "pending") === "pending");
   const patch: Record<string, unknown> = { pending_actions: actions, updated_at: new Date().toISOString() };
   if (!stillPending) patch.status = "queued_resume";
@@ -209,7 +284,9 @@ export async function applyDirectorApproval(
   await recordApprovalDecision(admin, {
     workspaceId: target.workspace_id,
     agentJobId: target.id,
-    pendingActionId: actionId,
+    // One ledger row per approval. For a single action keep its id; for a bundle the row keys on the job
+    // (the grader reads approval_decision_id, not the action), so pending_action_id is null.
+    pendingActionId: ids.size === 1 ? Array.from(ids)[0] : null,
     raisedByFunction: ownerFunctionForKind(target.kind) ?? CEO,
     routedToFunction: PLATFORM,
     decidedBy: "director",
