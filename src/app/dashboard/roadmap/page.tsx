@@ -5,7 +5,7 @@ import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, ty
 import { getSpecCardStates, resolveBoardStatus, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
 import StatusControl from "./StatusControl";
-import CriticalToggle from "./CriticalToggle";
+import PriorityControl from "./PriorityControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
@@ -143,7 +143,7 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
       <div className="mt-2 space-y-2">
         <div className="flex flex-wrap items-center gap-1.5">
           <StatusControl slug={spec.slug} status={spec.status} />
-          <CriticalToggle slug={spec.slug} critical={!!spec.critical} />
+          <PriorityControl slug={spec.slug} status={spec.status} critical={spec.critical} />
         </div>
         <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} blockedBy={spec.blockedBy} />
       </div>
