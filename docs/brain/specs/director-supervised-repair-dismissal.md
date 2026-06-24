@@ -1,4 +1,4 @@
-# Ada supervises + dismisses Rafa's no-fix Control Tower items ⏳
+# Ada supervises + dismisses Rafa's no-fix Control Tower items ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the director's supervision of [[repair-agent]] under [[../goals/devops-director]]
 **Found in use 2026-06-24:** the CEO has to manually Dismiss Control Tower warnings whenever Rafa (the [[../libraries/repair-agent|Repair Agent]]) declines to propose a fix. Two `repair` jobs are sitting in `needs_attention` awaiting a manual dismiss right now (signatures `vercel:bb28f61b887be822`, `vercel:aef5e5da7ae32431`). The CEO wants the Platform Director to clear these — but to **double-check Rafa's reasoning so a real bug mislabeled 'not a problem' is never silently cleared.**
@@ -26,12 +26,17 @@ Rafa classifies each problem with a `RepairVerdict`. `transient` already auto-re
 - On a re-run of the standing pass with no new repair jobs → expect no double-review and no new `claude -p` for an already-reviewed item (the `repair_job_id` ledger dedup); a re-fired error (a NEW repair job, same signature) IS reviewed afresh.
 - With Platform NOT yet live+autonomous → expect `findRepairDismissalCandidates` returns `[]` and the lane is a no-op (dormant). The lane NEVER dismisses a `real-bug` / `needs_approval` fix-proposed item (`applyDirectorDismissal` re-asserts `status === 'needs_attention'` before clearing).
 
-## Phase 2 — surface the dismissal + a CEO re-open override ⏳
+## Phase 2 — surface the dismissal + a CEO re-open override ✅
 - On the [[../dashboard/control-tower]] tile, render a dismissed item as `🛠️ Dismissed by Ada — <reasoning>` (instead of it silently vanishing) with a one-tap **Re-open** that restores the warning and re-enqueues Rafa. This is YOUR supervision over Ada — full visibility into what she cleared and an instant undo.
 - A daily rollup line in the [[../libraries/platform-director]] board watch: 'reviewed N of Rafa's calls — dismissed K, escalated J back to you.'
 
+**Shipped:** `getDirectorDismissedRepairs(admin, workspaceId)` ([[../libraries/repair-agent]]) reads the recent (14-day) `dismissed_repair` [[../tables/director_activity]] rows minus any the owner re-opened (a later `reopened_repair` row on the same `repair_job_id`); `applyDirectorDismissal` now carries the item `title` in the dismissal metadata so the surface needs no job lookup. The Control Tower GET (`/api/developer/control-tower`) returns `directorDismissed`, rendered under the Repair feed tile as `🛠️ Dismissed by Ada — <reasoning>` with a **Re-open** button. `POST /api/developer/control-tower/repair` gains `action: 'reopen'` (owner-gated): re-opens the `error_events` row (`resolved`→`open`), re-fires `enqueueRepairJob` with the original brief, and logs a `reopened_repair` row. The board watch (`composePlatformWatchBody` / `postPlatformWatchUpdate`) appends "Reviewed N of Rafa's calls — dismissed K, escalated J back to you." on any day she reviewed ≥1 (counting `dismissed_repair` + `kept_repair` + `escalated` w/ `escalation_kind: repair_dismissal_suspect`).
+
 ### Verification — Phase 2
-- A Director-dismissed item shows `Dismissed by Ada` + reasoning on the Control Tower; tapping Re-open restores the open warning and a fresh `repair` job. The board-watch post counts the day's dismissals + escalations.
+- On `/dashboard/developer/control-tower`, after Ada dismisses a `needs-human` repair item → expect a line under the Repair feed reading `🛠️ Dismissed by Ada — <her reasoning>` with the signature + "dismissed Xm ago" and a **Re-open** button (the item no longer silently vanishes).
+- On that line, tap **Re-open** → expect `POST /api/developer/control-tower/repair {action:'reopen'}` to flip the matching `error_events` row back to `open`, enqueue a fresh `queued` `repair` job (same signature/brief), write a `reopened_repair` `director_activity` row (`metadata.repair_job_id` = the dismissed job), and the dismissed line drops off the tile on refresh.
+- Re-open is owner-gated and only acts on a `completed` repair job → expect a 403 for a non-owner and a 409 if the job isn't `completed`.
+- On a standing pass where Ada reviewed Rafa's calls, the daily `🛠️ Ada` Platform-watch board post → expect a trailing sentence "Reviewed N of Rafa's calls — dismissed K, escalated J back to you." with N = dismissed + kept + escalated-back for the UTC day; a day with zero reviews omits the sentence.
 
 ## Open decision (for the CEO)
 When Ada's review finds Rafa actually MISSED a real bug (not just 'unsure'), Phase 1 escalates it to you. Alternatively she could author a fix spec herself (her `error_fix` mandate is already greenlit) and let the fix-escort build it — closing the loop without a CEO round-trip. Default here is escalate-only (conservative); say the word and I'll add 'author the fix' as the action when her diagnosis is high-confidence.
