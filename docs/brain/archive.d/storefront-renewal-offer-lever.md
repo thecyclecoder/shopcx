@@ -1,0 +1,1 @@
+- **Persist-to-renewal offer lever (storefront optimizer)** · verified 2026-06-24 · → [[libraries/storefront-optimizer-agent]]
