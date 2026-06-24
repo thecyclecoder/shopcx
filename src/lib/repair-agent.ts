@@ -340,3 +340,67 @@ export async function getOpenRepairs(admin: Admin, workspaceId: string): Promise
     };
   });
 }
+
+// ── Director-dismissed surface (director-supervised-repair-dismissal Phase 2) ──
+// When the Platform/DevOps Director (Ada) clears one of Rafa's no-fix items, the repair job flips to
+// `completed` and leaves getOpenRepairs — so without this it would silently vanish. Phase 2 keeps it
+// VISIBLE on the Control Tower as "🛠️ Dismissed by Ada — <reasoning>" with a one-tap Re-open (the CEO's
+// supervision over the supervisor). The list is the recent `dismissed_repair` director_activity rows
+// MINUS any the owner already re-opened (a later `reopened_repair` row on the same job).
+
+/** A repair item the Director dismissed — surfaced read-only with Ada's reasoning + a Re-open affordance. */
+export interface DirectorDismissedRepairItem {
+  /** the completed repair job Ada dismissed (the Re-open target). */
+  jobId: string;
+  /** the error_events signature / loop:<id> the dismissal cleared. */
+  signature: string;
+  /** short label of the originating error/alert. */
+  title: string;
+  /** Ada's OWN independent reasoning for clearing it (the activity row's `reason`). */
+  reasoning: string;
+  dismissedAt: string;
+}
+
+/** How far back the Control Tower shows Ada's dismissals (a 14-day audit window — old, settled noise drops off). */
+const DIRECTOR_DISMISS_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * READ-ONLY: the Director's recent repair dismissals still standing (not re-opened) for this workspace.
+ * Reads `dismissed_repair` director_activity rows in the last 14 days and drops any whose job carries a
+ * later `reopened_repair` row (the owner tapped Re-open). Title comes from the dismissal's metadata
+ * (written by `applyDirectorDismissal`), falling back to the signature.
+ */
+export async function getDirectorDismissedRepairs(admin: Admin, workspaceId: string): Promise<DirectorDismissedRepairItem[]> {
+  const sinceIso = new Date(Date.now() - DIRECTOR_DISMISS_WINDOW_MS).toISOString();
+  const { data } = await admin
+    .from("director_activity")
+    .select("action_kind, reason, metadata, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("director_function", "platform")
+    .in("action_kind", ["dismissed_repair", "reopened_repair"])
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  const rows = (data ?? []) as Array<{ action_kind: string; reason: string | null; metadata: Record<string, unknown> | null; created_at: string }>;
+  const reopened = new Set<string>();
+  for (const r of rows) {
+    if (r.action_kind !== "reopened_repair") continue;
+    const jobId = r.metadata?.["repair_job_id"];
+    if (typeof jobId === "string") reopened.add(jobId);
+  }
+
+  const out: DirectorDismissedRepairItem[] = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    if (r.action_kind !== "dismissed_repair") continue;
+    const meta = r.metadata ?? {};
+    const jobId = typeof meta["repair_job_id"] === "string" ? (meta["repair_job_id"] as string) : "";
+    if (!jobId || reopened.has(jobId) || seen.has(jobId)) continue; // re-opened or already listed → skip
+    seen.add(jobId);
+    const signature = typeof meta["signature"] === "string" ? (meta["signature"] as string) : "";
+    const title = typeof meta["title"] === "string" && meta["title"] ? (meta["title"] as string) : signature;
+    out.push({ jobId, signature, title, reasoning: r.reason ?? "", dismissedAt: r.created_at });
+  }
+  return out;
+}

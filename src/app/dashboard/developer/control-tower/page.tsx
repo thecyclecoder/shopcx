@@ -90,6 +90,13 @@ interface RepairSurfaceItem {
   state: "proposed" | "needs-human";
   createdAt: string;
 }
+interface DirectorDismissedRepairItem {
+  jobId: string;
+  signature: string;
+  title: string;
+  reasoning: string;
+  dismissedAt: string;
+}
 interface DbHealthProposalItem {
   jobId: string;
   signature: string;
@@ -170,6 +177,7 @@ interface Snapshot {
   errorFeed?: ErrorFeedSnapshot;
   specDrift?: SpecDriftRow[];
   repairs?: RepairSurfaceItem[];
+  directorDismissed?: DirectorDismissedRepairItem[];
   dbHealth?: DbHealthPanel;
   coverageRegister?: CoverageRegisterItem[];
   claudeHealth?: ClaudeHealth;
@@ -644,7 +652,7 @@ function SpecDriftSection({ rows, onChange }: { rows: SpecDriftRow[]; onChange: 
   );
 }
 
-function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; onChange: () => void }) {
+function RepairFeedSection({ items, dismissed, onChange }: { items: RepairSurfaceItem[]; dismissed: DirectorDismissedRepairItem[]; onChange: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
 
   const act = async (item: RepairSurfaceItem, action: "build" | "dismiss") => {
@@ -654,6 +662,20 @@ function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; on
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobId: item.jobId, action }),
+      });
+      if (res.ok) onChange();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reopen = async (item: DirectorDismissedRepairItem) => {
+    setBusy(`${item.jobId}:reopen`);
+    try {
+      const res = await fetch("/api/developer/control-tower/repair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: item.jobId, action: "reopen" }),
       });
       if (res.ok) onChange();
     } finally {
@@ -728,6 +750,40 @@ function RepairFeedSection({ items, onChange }: { items: RepairSurfaceItem[]; on
             </li>
           ))}
         </ul>
+      )}
+
+      {dismissed.length > 0 && (
+        <div className="mt-4">
+          <p className="mb-2 text-[11px] text-zinc-400">
+            Cleared by the Platform/DevOps Director (Ada) — she adversarially re-checked Rafa&apos;s no-fix call and
+            confirmed each benign. <b>Re-open</b> restores the warning and re-enqueues Rafa for a fresh triage.
+          </p>
+          <ul className="space-y-2">
+            {dismissed.map((item) => (
+              <li
+                key={item.jobId}
+                className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-[12px] dark:border-zinc-800 dark:bg-zinc-900/40"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="font-semibold text-zinc-700 dark:text-zinc-200">🛠️ Dismissed by Ada</span>
+                    <span className="ml-1 text-zinc-600 dark:text-zinc-300">— {item.reasoning || item.title}</span>
+                    <p className="mt-0.5 text-[10px] text-zinc-400">
+                      <code>{item.signature}</code> · dismissed {elapsed(item.dismissedAt)} ago
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => reopen(item)}
+                    disabled={busy !== null}
+                    className="shrink-0 rounded-md border border-zinc-300 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    {busy === `${item.jobId}:reopen` ? "…" : "Re-open"}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );
@@ -1065,7 +1121,7 @@ export default function ControlTowerPage() {
 
           <CoverageRegisterSection items={snap.coverageRegister ?? []} onChange={refresh} />
 
-          <RepairFeedSection items={snap.repairs ?? []} onChange={refresh} />
+          <RepairFeedSection items={snap.repairs ?? []} dismissed={snap.directorDismissed ?? []} onChange={refresh} />
 
           {snap.dbHealth && <DbHealthSection panel={snap.dbHealth} onChange={refresh} />}
 
