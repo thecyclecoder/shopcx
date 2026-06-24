@@ -121,7 +121,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   },
   "spec-drift": {
     key: "spec-drift", name: "Reese", role: "Spec Drift", emoji: "🔄",
-    personality: "Keeps the board honest — reconciles each phase's emoji against the code on main, flips the confirmed-shipped, surfaces the ambiguous for the director.",
+    personality: "The DB-vs-code backstop — for every phase the DB marks shipped, checks its code is actually on main, and surfaces a bad/reverted merge for the director to escalate.",
     mascotId: "default", avatarUrl: `${AV}reese-specdrift.jpg`,
     chip: "bg-cyan-100 text-cyan-800 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-300 dark:border-cyan-900/40",
     dot: "bg-cyan-500", ring: "bg-cyan-50 dark:bg-cyan-900/20", accent: "text-cyan-600 dark:text-cyan-400",
