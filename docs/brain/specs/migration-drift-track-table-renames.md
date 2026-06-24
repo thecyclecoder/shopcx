@@ -1,4 +1,4 @@
-# Migration-drift parser: follow ALTER TABLE … RENAME TO ⏳
+# Migration-drift parser: follow ALTER TABLE … RENAME TO ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/migration-drift.ts::monitor-false-positive`
@@ -11,8 +11,10 @@ parseExpectedTables() in src/lib/control-tower/migration-drift.ts tracks extract
 
 **Likely target:** `src/lib/control-tower/migration-drift.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+Shipped: added `extractRenamedTables(sql)` (`ALTER TABLE … RENAME TO …`, comment-stripped, ignores `RENAME COLUMN`) + a pure fs-free `foldMigrations(files)` core that applies create→rename→drop in filename order — `parseExpectedTables` now delegates to it. A renamed table's old name is deleted from `expected`, the new name carried forward mapped to the original's first-creating migration (fallback: the rename file), and dropped-set membership cleared. New unit test `src/lib/control-tower/migration-drift.test.ts` (`npm run test:migration-drift`, 7 cases incl. the worker_*→agent_* create-then-rename net = only agent_*). Brain page `libraries/control-tower.md` updated. `npx tsc --noEmit` clean. Parser-only — no schema/DB changes.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:migration-drift-check`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
