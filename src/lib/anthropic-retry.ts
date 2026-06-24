@@ -104,3 +104,44 @@ export function isRetryableThrownError(err: unknown): boolean {
   }
   return false;
 }
+
+export interface InlineRetryOptions {
+  /** Total attempts including the first. Default 3 — a synchronous customer is waiting. */
+  attempts?: number;
+  /** Base backoff in ms; doubles each attempt (400 → 800 → …). Default 400. */
+  baseDelayMs?: number;
+}
+
+/**
+ * In-line bounded retry for a Claude call on a SYNCHRONOUS (non-Inngest) path —
+ * an API route / portal handler where the customer is waiting on the response,
+ * so there's no Inngest queue to span an outage (agent-outage-resilience
+ * Phase 3). The thunk must classify its own failures via `throwForAnthropicStatus`
+ * / `throwForAnthropicNetworkError` (and feed the breaker's local signal); this
+ * helper:
+ *
+ *   • retries a retryable throw (`isRetryableThrownError`) a few times with
+ *     short exponential backoff — absorbs a transient blip without degrading;
+ *   • fails fast on a terminal throw (`NonRetriableError`) — never retries a bug;
+ *   • re-throws the last retryable error once attempts are exhausted, so the
+ *     caller degrades EXPLICITLY (or surfaces the error) rather than silently
+ *     swallowing the first 529.
+ *
+ * For a long-outage case the caller should short-circuit on the breaker BEFORE
+ * calling this (don't make the customer sit through retries to a known-dead API).
+ */
+export async function withAnthropicRetry<T>(fn: () => Promise<T>, opts: InlineRetryOptions = {}): Promise<T> {
+  const attempts = Math.max(1, opts.attempts ?? 3);
+  const base = opts.baseDelayMs ?? 400;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableThrownError(err)) throw err; // terminal → fail fast
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, base * 2 ** i));
+    }
+  }
+  throw lastErr;
+}

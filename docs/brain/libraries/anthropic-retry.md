@@ -31,12 +31,16 @@ A network-level fetch failure (DNS/reset/hang-up/timeout) → always `AnthropicD
 ### `isRetryableThrownError(err): boolean`
 For generic catch sites: `true` for `AnthropicDependencyError` + raw undici/network fetch failures (`fetch failed` + ECONNRESET/ETIMEDOUT/… causes); `false` for `NonRetriableError`. Lets a catch re-throw / defer the outage cases while still degrading on genuine logic errors.
 
+### `withAnthropicRetry<T>(fn, opts?): Promise<T>` — Phase 3
+In-line bounded retry for a Claude call on a **synchronous (non-Inngest) path** — an API route / portal handler where the customer is waiting, so there's no Inngest queue to span an outage. The thunk classifies its own failures (`throwForAnthropicStatus` / `throwForAnthropicNetworkError`); the helper retries a *retryable* throw a few times with short exponential backoff (`attempts` default 3, `baseDelayMs` default 400 → 800 → …), **fails fast** on a `NonRetriableError`, and re-throws the last retryable error once exhausted so the caller degrades **explicitly**. Callers should short-circuit on the breaker (`isClaudeBreakerTripped`) *before* this — don't make the customer sit through retries to a known-dead API.
+
 ## Callers
 
 - [[unified-ticket-handler]] — `claude()` helper throws via `throwForAnthropicStatus` / `throwForAnthropicNetworkError`; fn `retries: OUTAGE_SPANNING_RETRIES`.
 - [[sonnet-orchestrator-v2]] — API-error block throws `AnthropicDependencyError` on `isRetryableAnthropicStatus`; top-level catch re-throws on `isRetryableThrownError`.
 - [[ticket-analyzer]] — grader fetch throws instead of returning `grader_http_*`.
 - [[../inngest/ticket-analysis-cron]] — catches `isRetryableThrownError` → **defers** the ticket (leaves `last_analyzed_at` untouched → next */30 tick re-grades on recovery).
+- [[remedy-selector]] — **Phase 3**: `selectRemedies` wraps its Haiku fetch in `withAnthropicRetry` + breaker short-circuit; `generateOpenEndedResponse` (cancel chat) feeds the breaker signal + short-circuits. Both degrade **explicitly** (priority-ordered remedies / escalation reply), never a silent swallow of the first 529.
 
 ## Gotchas
 

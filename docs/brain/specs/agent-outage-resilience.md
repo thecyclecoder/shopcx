@@ -1,4 +1,4 @@
-# Agent outage resilience — survive a Claude/API outage queue-driven, never drop work ⏳
+# Agent outage resilience — survive a Claude/API outage queue-driven, never drop work ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** hardens every Claude-dependent agent (customer-facing first); relates to [[box-multi-account-failover]] (the box's version of this). · **Found in use 2026-06-23:** Claude (Code + API) was down ~1 hour. Audit of the **ticket orchestrator** ([[../inngest/unified-ticket-handler]]) shows it's an Inngest fn but `retries: 1` — two attempts with minute-scale backoff can't span an hour, so an in-flight ticket **fails with no AI response and no auto-recovery** when Claude returns. And some calls **swallow the error** (`unified-ticket-handler.ts:173` `if (!r.ok) return ""`) → proceed on empty data instead of retrying. The work isn't queue-durable across an outage.
 
@@ -62,5 +62,18 @@ A Claude-health breaker driven by the local consecutive-failure counter + the `s
 - **Repair fan-out suppressed:** with the breaker tripped, `recordError` for a NEW signature → the `error_events` row is created with `outage_correlated=true` and `status='resolved'`, NO owner page fires, and NO `repair` `agent_jobs` row is enqueued. With the breaker UP, the same new signature pages + enqueues a repair job as before.
 - **Negative:** a poll that can't reach Statuspage records `poll_ok=false` but does NOT trip the breaker (the tile still reads up); a breaker-read failure defaults to "up" (never wrongly parks the box).
 
-## Phase 3 — finish the no-swallow audit (residual paths) ⏳
+## Phase 3 — finish the no-swallow audit (residual paths) ✅
 Phase 1 hardened the ticket handler / orchestrator / analyzer, but the outage feed surfaced a residual: **`/api/portal` remedy-selection** swallows a `529` (`"AI remedy selection failed: Anthropic API error: 529 … falls back to the first 3 remedies"`, zero retries) — it degrades the customer's remedy set silently on a transient. Extend the no-silent-swallow conversion (throw → retry, or explicit-optional-degrade) to the portal remedy path + any other LLM call still doing `catch → default` on a retryable error. Brain: [[../libraries/anthropic-retry]] · [[box-multi-account-failover]] · [[../libraries/control-tower]] · [[repair-agent]] · [[../integrations/anthropic]].
+
+**Shipped:**
+- These are **synchronous customer-facing** cancel-flow paths (no Inngest queue to span an outage), so the conversion is: **breaker short-circuit → in-line retry → explicit degrade**, not Phase 1's throw-and-Inngest-retry.
+- New [[../libraries/anthropic-retry]] `withAnthropicRetry(fn, opts?)` — bounded in-line retry (default 3 attempts, 400ms→800ms backoff) for a synchronous Claude call: retries a *retryable* classified throw, fails fast on `NonRetriableError`, re-throws once exhausted so the caller degrades explicitly.
+- [[../libraries/remedy-selector]] `selectRemedies`: the `catch → first-3-remedies` swallow (degraded the save offer on the **first** 529, zero retries) now (1) short-circuits on `isClaudeBreakerTripped` → degrade immediately when Claude is known-down; (2) wraps the Haiku fetch in `withAnthropicRetry` with classified throws + `recordClaudeFailure` (feeds the Phase-2 breaker's local signal); (3) only the catch degrades to the priority-ordered first-3 remedies — **explicitly**, logged retryable-vs-terminal. The fallback is a valid un-personalised save offer, so the cancel flow never breaks.
+- `generateOpenEndedResponse` (cancel chat): kept its Sonnet→Haiku fallback + canned escalation reply, now breaker-aware (short-circuits when down) and feeds `recordClaudeFailure` on retryable Sonnet/Haiku failures.
+- [[../libraries/cancel-lead-in]] `generateCancelLeadIn`: audited and left as-is — the **legitimate explicit-optional-degrade** (a cosmetic one-liner whose `null` fallback is intended, like `personalizeMacroText`'s `optional`).
+
+### Verification — Phase 3 (prod-facing)
+- On the box, `npx tsc --noEmit` → clean (no new errors).
+- Force a Claude **5xx/529** on the cancel-flow remedies step (`/api/journey/[token]/remedies` or the portal cancel-journey handler): expect the call to **retry in-line** (not degrade on the first 529); if it recovers within the window the customer gets the **AI-selected** remedies; if it exhausts retries it degrades to the priority-ordered first-3 **with a loud `AI remedy selection failed (retryable/outage — exhausted in-line retries)` log**, never a silent swallow.
+- With the **breaker tripped** (Claude down): the remedies step and the cancel chat **degrade immediately** (priority-ordered remedies / escalation reply) without hammering the dead API; the local failure counter (`claude_health.consecutive_failures`) advances from these synchronous calls too.
+- **Terminal** 4xx (bad request/key) on the remedies step → fails fast (no in-line retry loop) and degrades, logged as `terminal`.
