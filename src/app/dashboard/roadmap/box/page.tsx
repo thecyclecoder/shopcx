@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { routedInboxHref } from "@/lib/agents/inbox";
+import { getPersona } from "@/lib/agents/personas";
 
 // Live build-box view (build-box-status-view): box health + SHA, lane grid (what each lane is building
 // right now), queue depth, and a paused callout. Polls /api/roadmap/box every ~5s — phone-friendly,
@@ -108,31 +109,66 @@ const KIND_CHIP: Record<string, string> = {
   build: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300",
   plan: "bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300",
   fold: "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300",
+  "spec-test": "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300",
+  "pr-resolve": "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
+  repair: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300",
+  regression: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300",
+  "migration-fix": "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-300",
+  "director-coach": "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300",
+  "product-seed": "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300",
+};
+
+// What each agent is *doing* — a short present-tense verb shown under its name (box-lane readability).
+const KIND_ACTION: Record<string, string> = {
+  build: "building",
+  plan: "planning",
+  fold: "folding into the brain",
+  "spec-test": "QA-verifying",
+  "pr-resolve": "resolving conflicts on",
+  repair: "diagnosing",
+  regression: "reviewing regression in",
+  "migration-fix": "repairing migration for",
+  "director-coach": "coaching on",
+  "platform-director": "standing pass",
+  "triage-escalations": "triaging",
+  "product-seed": "seeding",
+  "spec-chat": "speccing",
+  "dev-ask": "investigating",
+  db_health: "tuning the DB for",
+  "coverage-register": "registering coverage for",
+  "storefront-optimizer": "optimizing",
+  "ticket-improve": "improving ticket",
 };
 
 function LaneCell({ lane }: { lane: LaneRow | null }) {
   if (!lane) {
     return (
-      <div className="flex min-h-[64px] flex-col items-center justify-center rounded-lg border border-dashed border-zinc-200 text-xs text-zinc-400 dark:border-zinc-800">
+      <div className="flex min-h-[88px] flex-col items-center justify-center rounded-lg border border-dashed border-zinc-200 text-xs text-zinc-400 dark:border-zinc-800">
         open
       </div>
     );
   }
+  const persona = getPersona(lane.kind);
+  const action = KIND_ACTION[lane.kind] ?? "working on";
   return (
-    <div className="flex min-h-[64px] flex-col gap-1.5 rounded-lg border border-zinc-200 bg-white p-2.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex items-center justify-between gap-2">
-        <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>
-          {lane.kind}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{persona.name}</span>
+          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
         </span>
-        <span className="text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
+        <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
       </div>
       <Link
         href={`/dashboard/roadmap/${lane.spec_slug}`}
-        className="truncate text-xs font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400"
+        className="group block min-w-0"
         title={lane.phase ? `${lane.spec_slug} · ${lane.phase}` : lane.spec_slug}
       >
-        {lane.spec_slug}
-        {lane.phase && <span className="text-zinc-400 dark:text-zinc-500"> · {lane.phase}</span>}
+        <span className="block text-[11px] text-zinc-400">{action}</span>
+        <span className="block truncate text-[12px] font-medium text-zinc-700 group-hover:text-indigo-600 dark:text-zinc-200 dark:group-hover:text-indigo-400">
+          {lane.spec_slug}
+          {lane.phase && <span className="text-zinc-400 dark:text-zinc-500"> · {lane.phase}</span>}
+        </span>
       </Link>
     </div>
   );
@@ -224,7 +260,7 @@ function LaneRowGrid({ label, total, lanes }: { label: string; total: number; la
           {lanes.length}/{total} in use
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
         {cells.map((c, i) => (
           <LaneCell key={c?.job_id ?? `open-${i}`} lane={c} />
         ))}
