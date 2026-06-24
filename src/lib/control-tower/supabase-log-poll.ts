@@ -24,7 +24,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt, decrypt } from "@/lib/crypto";
-import { recordError, recordFeedDelivery, signatureFor } from "@/lib/control-tower/error-feed";
+import { recordError, recordFeedDelivery, signatureFor, isTransientSupabaseLogNoise } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -121,13 +121,16 @@ export async function clearSupabaseAccessToken(adminClient?: Admin): Promise<voi
 // Each pulls error-severity rows from one Supabase log source via the logs.all SQL
 // endpoint, following the documented `cross join unnest(metadata)` nesting pattern.
 // `mapRow` turns a result row into a grouped incident: keyParts (STABLE bits only —
-// the normalizer strips ids/numbers), a panel title, and a fuller detail.
+// the normalizer strips ids/numbers), a panel title, a fuller detail, and a `transient`
+// flag (a momentary edge 5xx / Postgres statement-timeout blip — see
+// `isTransientSupabaseLogNoise`) so a self-healing saturation blip auto-resolves on first
+// sighting and only escalates on recurrence ([[../specs/error-feed-supabase-logs-transient-5xx-scoping]]).
 
 interface LogQuery {
   /** which log source — also the leading bit of the grouping key + the title prefix. */
   key: "postgres" | "auth" | "api";
   sql: string;
-  mapRow: (row: Record<string, unknown>) => { keyParts: string[]; title: string; detail: string } | null;
+  mapRow: (row: Record<string, unknown>) => { keyParts: string[]; title: string; detail: string; transient: boolean } | null;
 }
 
 const str = (v: unknown): string => (v == null ? "" : String(v));
@@ -147,6 +150,7 @@ const LOG_QUERIES: LogQuery[] = [
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
         detail: message,
+        transient: isTransientSupabaseLogNoise("postgres", { severity, message }),
       };
     },
   },
@@ -164,6 +168,8 @@ const LOG_QUERIES: LogQuery[] = [
         keyParts: ["auth", severity, message],
         title: `auth ${severity}: ${message}`,
         detail: message,
+        // Auth errors aren't part of the self-healing saturation class — page on first sighting.
+        transient: false,
       };
     },
   },
@@ -185,6 +191,7 @@ const LOG_QUERIES: LogQuery[] = [
         keyParts: ["api", status, method, path],
         title: `api ${status} ${method} ${path}`,
         detail: `${method} ${path} → ${status}${row.event_message ? ` · ${str(row.event_message)}` : ""}`,
+        transient: isTransientSupabaseLogNoise("api", { statusCode: row.status_code }),
       };
     },
   },
@@ -246,7 +253,7 @@ export async function pollSupabaseLogs(adminClient?: Admin): Promise<PollResult>
   let totalRows = 0;
   // Group every error row across all sources by (source, signature) BEFORE recording,
   // so a burst of the same error is one recordError call with an occurrences count.
-  const groups = new Map<string, { keyParts: string[]; title: string; detail: string; sample: Record<string, unknown>; count: number }>();
+  const groups = new Map<string, { keyParts: string[]; title: string; detail: string; sample: Record<string, unknown>; count: number; transient: boolean }>();
 
   for (const q of LOG_QUERIES) {
     let rows: Record<string, unknown>[];
@@ -265,7 +272,7 @@ export async function pollSupabaseLogs(adminClient?: Admin): Promise<PollResult>
       if (existing) {
         existing.count += 1;
       } else {
-        groups.set(sig, { keyParts: mapped.keyParts, title: mapped.title, detail: mapped.detail, sample: { source_kind: q.key, ...row }, count: 1 });
+        groups.set(sig, { keyParts: mapped.keyParts, title: mapped.title, detail: mapped.detail, sample: { source_kind: q.key, ...row }, count: 1, transient: mapped.transient });
       }
     }
   }
@@ -280,6 +287,9 @@ export async function pollSupabaseLogs(adminClient?: Admin): Promise<PollResult>
         detail: g.detail,
         sample: g.sample,
         occurrences: g.count,
+        // A momentary edge 5xx / Postgres statement-timeout blip auto-resolves on first
+        // sighting + escalates only on recurrence; a chronic 5xx still surfaces.
+        transient: g.transient,
       },
       admin,
     );

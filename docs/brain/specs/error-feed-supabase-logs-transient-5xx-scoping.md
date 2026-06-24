@@ -1,4 +1,4 @@
-# Scope supabase-logs poller: transient-classify one-off edge 5xx / statement-timeout noise ⏳
+# Scope supabase-logs poller: transient-classify one-off edge 5xx / statement-timeout noise ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/supabase-log-poll.ts::monitor-false-positive`
@@ -11,8 +11,10 @@ pollSupabaseLogs (src/lib/control-tower/supabase-log-poll.ts) records EVERY api 
 
 **Likely target:** `src/lib/control-tower/supabase-log-poll.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** added `isTransientSupabaseLogNoise(kind, ctx)` to `src/lib/control-tower/error-feed.ts` (the supabase-logs sibling of `isBareLifecycle` / `isTransientInngestTransportError`) — `true` for any edge API 5xx (`500–599`) or a Postgres `statement timeout` / connection-saturation ERROR, never for a Postgres `FATAL`/`PANIC`, a non-timeout (constraint) ERROR, an auth error, or a non-5xx. `pollSupabaseLogs` (`supabase-log-poll.ts`) now carries a `transient` flag per grouped incident (computed in each `mapRow`) and passes it to `recordError`, so a self-healing blip auto-resolves on first sighting (recorded, no page, no repair fan-out) and only escalates on recurrence within `TRANSIENT_RECUR_WINDOW_MS`; a chronic 5xx still surfaces. Unit tests added to `error-feed.test.ts` (17 pass). Brain pages updated: [[../libraries/control-tower]] + [[../inngest/supabase-log-poll]]. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `cluster:repair`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
