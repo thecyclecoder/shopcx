@@ -29,7 +29,7 @@ The board is the source of truth on whether a spec is shipped. If `spec_card_sta
 
 ### Phase 2 — one-shot reclassification of the stuck rows ✅
 
-- ✅ `scripts/_reclassify-stuck-shipped-parks.ts` — read-only by default, `--apply` flag.
+- ✅ `scripts/reclassify-stuck-shipped-parks.ts` — read-only by default, `--apply` flag. (Filename drops the `_` prefix on purpose: `scripts/_*` is gitignored, and the worker has to run this through the gated-actions flow against a re-checked-out tree, so the file must be tracked.)
 - ✅ Selects `agent_jobs` where `status='needs_attention'`, `needs_attention_class IS NULL OR ='unknown'`, joins `spec_card_state` by `(workspace_id, spec_slug)`, keeps only rows where the card's `status='shipped'`, and on `--apply` re-stamps `needs_attention_class='already_shipped'`.
 - ✅ The Phase 1 auto-fold cron in [[no-parked-specs-auto-route-needs-attention]] picks them up within ~10 min and dismisses them.
 - ✅ One-off — not a recurring script. **Awaiting prod approval to run** (the build box has no prod creds — the worker emits the apply action for one-tap owner approval).
@@ -37,7 +37,7 @@ The board is the source of truth on whether a spec is shipped. If `spec_card_sta
 ## Verification
 
 - On the build box, run `npx tsx --test src/lib/agents/needs-attention-classify.test.ts` → expect every assertion green (board-first short-circuit fires for build/regression/repair; skips for plan/fold/spec-test; skips for non-shipped statuses).
-- On the build box, run `npx tsx scripts/_reclassify-stuck-shipped-parks.ts` (no `--apply`) → expect a dry-run log listing the stuck rows (≥ the 5 found 2026-06-24: `agent-outage-resilience`, `director-loop-grading`, `regression-backlog-reconciliation`, `experiment-session-stamped-attribution`, `goal-milestone-build-sequencing`) without any DB writes.
+- On the build box, run `npx tsx scripts/reclassify-stuck-shipped-parks.ts` (no `--apply`) → expect a dry-run log listing the stuck rows (≥ the 5 found 2026-06-24: `agent-outage-resilience`, `director-loop-grading`, `regression-backlog-reconciliation`, `experiment-session-stamped-attribution`, `goal-milestone-build-sequencing`) without any DB writes.
 - After running the script with `--apply` (one-tap owner approval — the build box has no prod creds), query Supabase `select count(*) from agent_jobs where status='needs_attention' and (needs_attention_class is null or needs_attention_class='unknown') and spec_slug in (...)` → expect `0` within ~1 min.
 - On `/dashboard/developer/control-tower` (or wherever the needs_attention queue surfaces), the 5 listed parks → expect them gone within ~10 min of `--apply` (auto-folded by the Phase 1 cron in [[no-parked-specs-auto-route-needs-attention]]).
 - Inspect `src/lib/agents/needs-attention-classify.ts` → expect `classifyByBoardState` to be invoked **before** `classifyByHeuristic` inside `classifyNeedsAttention` (the call order is what guarantees the board verdict wins).
