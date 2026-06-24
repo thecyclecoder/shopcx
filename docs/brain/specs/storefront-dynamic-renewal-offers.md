@@ -10,15 +10,8 @@ The gated, highest-stakes lever for the [[../goals/storefront-optimizer]] — **
 - Extend [[../tables/pricing_rules]] (or add a `pricing_rule_offers` child) to express a **scoped, time-boxed renewal offer**: an effective window (`starts_at`/`ends_at`), the persist-to-renewal price delta (an additional `subscribe_discount_pct` override or a fixed renewal price), the `(product × lander-type × audience)` / experiment scope it applies to, and `status` ∈ `proposed｜approved｜active｜expired`. Migration + update [[write-brain-page]] `tables/pricing_rules.md` (it currently documents no offer/time-boxing construct).
 - Ensure `resolveSubscriptionPricing` (the renewal + portal pricing engine, [[../libraries/pricing]]) reads the active scoped offer correctly at renewal time — the offer persists to renewal, not just first order; **probe the live pricing path before assuming its shape** (CLAUDE.md "database is the spec").
 
-## Phase 2 — the approval-gated offer lever in the optimizer ⏳
-- ⏳ planned
-- Add an `offer` variant type to the [[storefront-experiment-bandit-framework|M1 framework]] / [[storefront-optimizer-agent|M4 agent]] that, instead of a reversible content patch, proposes a **persist-to-renewal `pricing_rules` offer** — created `proposed`/inactive and surfaced for **owner approval** (the M4 build-approval gate / `pending_actions`), never auto-activated. First-order-only offers stay coupons ([[../tables/coupons]]) on the autonomous path; only persist-to-renewal offers hit this gate.
-- On approval, activate the scoped offer for the experiment arm; the M1 bandit runs it vs holdout and attributes outcomes on the predicted-LTV proxy exactly like any other lever (the offer's renewal-margin cost is in the LTV math — [[storefront-ltv-proxy-reconciler|M3]] — so a margin-bleeding offer that wins first-order but loses on LTV is caught).
-
-## Phase 3 — guardrails, expiry + rollback ⏳
-- ⏳ planned
-- A margin floor: the agent may never *propose* (and the owner is warned before approving) an offer whose modeled renewal margin drops below a configured floor; breaching escalates to the [[../functions/growth|Growth director]] + CFO, it is not surfaced as a normal proposal.
-- Auto-expire at `ends_at`; on an LTV-proxy or refund-spike regression (M1 auto-rollback), **deactivate the offer** and revert affected subscriptions' renewal pricing to the base `pricing_rules` — with a clear audit trail (a persist-to-renewal offer touched real renewals, so rollback must un-touch them).
+## Phases 2 + 3 — the offer lever + its guardrails → **split to [[storefront-renewal-offer-lever]] (deferred, 2026-06-23)**
+The offer-*activation* lever (former P2) **and its guardrails/expiry/rollback** (former P3) were **deferred to their own card** — they're the margin-bleeding part that "turns on only once the optimizer's reversible levers are proven," so they shouldn't build alongside the foundation. A box build (PR #281, closed) built them prematurely; moved to [[storefront-renewal-offer-lever]] (⏳ deferred, `Blocked-by` this spec) so they're tracked, not lost, and not re-built until wanted. **This spec now ships only the offer *model* (P1)** — the dynamic, time-boxed `pricing_rule_offers` schema + the renewal pricing read; the lever + its guardrails activate separately.
 
 ## Safety / invariants
 - **Never autonomous.** A persist-to-renewal offer is ALWAYS owner-approved before activation (it bleeds margin on every renewal). The agent proposes; the owner disposes. First-order coupons stay on the autonomous path; persist-to-renewal offers do not.
@@ -28,17 +21,12 @@ The gated, highest-stakes lever for the [[../goals/storefront-optimizer]] — **
 - **LTV-accounted.** The offer's renewal-margin cost flows into the M3 predicted-LTV proxy, so a first-order win that churns is caught by the reconciler, not rewarded.
 - **Compliance.** No misrepresented pricing; honest offer labeling (brand voice + supplement compliance, the goal § hard rails).
 
-## Completion criteria
+## Completion criteria (this spec = the offer *model* only — P1)
 - `pricing_rules` (or a child table) expresses a scoped, time-boxed, persist-to-renewal offer with `status`, and `resolveSubscriptionPricing` honors the active offer at renewal.
-- The M4 agent can propose an `offer`-type variant that is created inactive and requires owner approval before activation (first-order coupons stay autonomous).
-- An approved offer runs as an M1 arm vs holdout, attributed on the M3 LTV proxy (renewal-margin cost included).
-- A margin-floor breach is blocked/escalated; an offer auto-expires at `ends_at`.
-- Rollback/expiry reverts affected subscriptions to base renewal pricing with an audit trail.
+- *(The offer lever + its margin-floor/expiry/rollback guardrails are [[storefront-renewal-offer-lever]], deferred.)*
 
 ## Verification
 - Apply the migration → expect the new offer columns/table present (`✓ … starts_at/ends_at/status …`); confirm the `status` CHECK and the scope columns in Supabase.
-- Create a `proposed` persist-to-renewal offer scoped to an Amazing Coffee experiment arm → confirm it is **inactive** and surfaces as an M4 owner-approval `pending_actions` card; it does NOT activate autonomously.
-- Approve it → expect `status='active'`; place a subscription order on that arm and confirm `resolveSubscriptionPricing` applies the offer **at renewal** (not just first order) for an in-scope sub, and base pricing for an out-of-scope sub.
-- Propose an offer below the modeled margin floor → expect it blocked/escalated to Growth + CFO, not surfaced as a normal approvable proposal.
-- Let an offer pass `ends_at` (or trigger an M1 LTV-proxy regression rollback) → expect `status='expired'`/deactivated and affected subscriptions reverted to base renewal pricing with an audit row.
+- With an `active` offer row scoped to an Amazing Coffee experiment arm, place a subscription order on that arm → confirm `resolveSubscriptionPricing` applies the offer **at renewal** (not just first order) for an in-scope sub, and base pricing for an out-of-scope sub.
 - Confirm a first-order-only discount still uses the autonomous coupon path ([[../tables/coupons]]) and does NOT hit this gate.
+- *(Lever + guardrail verification — proposing/approving an offer, margin-floor block, auto-expire, rollback — moves to [[storefront-renewal-offer-lever]].)*
