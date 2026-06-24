@@ -1,4 +1,4 @@
-# Orchestrator: retry Anthropic 5xx, not just 529 ⏳
+# Orchestrator: retry Anthropic 5xx, not just 529 ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/sonnet-orchestrator-v2.ts::real-bug`
@@ -11,10 +11,16 @@ A single Anthropic 500 (api_error "Internal server error", request_id req_011CcL
 
 **Likely target:** `src/lib/sonnet-orchestrator-v2.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
+**What landed.** The **main `!res.ok` round-loop branch** (`src/lib/sonnet-orchestrator-v2.ts:1745-1748`) already retried *all* transient statuses — `isRetryableAnthropicStatus(status)` (429/5xx incl. 500/502/503/529) throws `AnthropicDependencyError` so the Inngest run retries across the outage, only terminal 4xx degrades to `fallbackWithCancelRoute`. That part was closed by [[agent-outage-resilience]] Phase 1 and covers the originating 500 signature directly.
+
+The remaining gap this spec closes is the **max-rounds force-decision call** (`:1885-1907`), which still swallowed a transient 5xx/network throw into the generic fallback. It now applies the identical rule: a retryable `forceRes.status` throws `AnthropicDependencyError`, and the inner `catch` re-throws any `isRetryableThrownError` (incl. raw network failures) so the outer catch propagates it and Inngest retries; a terminal 4xx / parse failure still degrades gracefully. Brain page [[../libraries/sonnet-orchestrator-v2]] updated to note both call sites are covered.
+
 ## Verification
+- In `src/lib/sonnet-orchestrator-v2.ts`, confirm the main round-loop `!res.ok` branch throws `AnthropicDependencyError` when `isRetryableAnthropicStatus(res.status)` (covers the originating 500) → expect throw, not `fallbackWithCancelRoute`, for a 500/502/503.
+- In the same file's max-rounds **force-decision** branch (`forceRes` not ok), confirm a retryable status (e.g. 503) now throws `AnthropicDependencyError` and a raw network throw is re-thrown via `isRetryableThrownError` → expect the Inngest run to retry, not degrade to escalation; a terminal 4xx still returns `fallbackWithCancelRoute`.
 - Re-trigger the originating condition (signature `vercel:caec228f9136b469`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
 
 > Authored by the box Repair Agent from Control Tower signature `vercel:caec228f9136b469` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.
