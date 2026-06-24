@@ -1,4 +1,4 @@
-# Initialize unblocked platform specs with no waiting period ⏳
+# Initialize unblocked platform specs with no waiting period ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (the org learns + self-manages) — extends the fix-escort lane (`escortFixSpecs`)
 **Found in use 2026-06-24:** the CEO asked why [[orchestrator-retry-5xx]] hasn't started. It's a platform-owned authored fix spec (Repair-signature `vercel:caec228f9136b469`, verdict real-bug), unblocked, with a single `## Phase 1 — close it ⏳` section and ZERO builds ever. It falls through every auto-build lane: the fix-escort lane requires `phases.length === 0`; grooming requires ≥1 ✅ phase; the goal-walk requires a goal link. [[slack-fetch-timeout-hardening]] is in the identical state. CEO policy: a platform-owned spec that checks out should initialize with NO waiting period; other-department specs are only babysat through their phases once started (never initialized by me).
@@ -16,7 +16,7 @@
 - With Platform live+autonomous, orchestrator-retry-5xx and slack-fetch-timeout-hardening each get a `kind='build'` `agent_jobs` row (`created_by=null`, instructions starting `Escorted by the Platform/DevOps Director:`) on the next standing pass, plus an `escorted_fix` `director_activity` row.
 - Re-run the sweep → no duplicate build (the spec is now in-flight). A still-blocked fix spec is NOT queued. A fix spec whose build failed ≥ loop-guard cap escalates, not resubmits.
 
-## Phase 2 — initiation lane for non-fix platform specs (no waiting period) ⏳
+## Phase 2 — initiation lane for non-fix platform specs (no waiting period) ✅
 - A platform-owned, unblocked, unstarted (0 ✅) spec that is NEITHER goal-linked NOR Repair-signed currently has no lane (fix-escort rejects non-fixes, the goal-walk needs a goal, grooming needs a ✅). Per CEO policy I should be able to initialize my OWN department's specs without a waiting period. Add a platform-spec initiation sweep that queues such a spec — gated by the SAME read-only soundness investigation as the approval/groom lanes (a Max `claude -p` verdict that the spec is sound and in-scope) so I don't blind-build a feature, NOT auto-queued blindly.
 - Hard rails unchanged: other departments' unstarted specs are NEVER initialized here (they're only babysat via grooming once they have ≥1 ✅ phase); starting a new GOAL still escalates to the CEO; destructive/irreversible/multi-choice still escalate.
 - Brain: [[../libraries/platform-director]] · [[platform-director-agent]] · [[board-grooming]].
@@ -24,6 +24,14 @@
 ### Verification — Phase 2
 - An unblocked platform-owned planned spec with 0 ✅, no goal link, no Repair-signature → after a passing soundness investigation, a `kind='build'` row + a `director_activity` row; a failed/ambiguous investigation → escalates to the CEO, queues nothing.
 - A non-platform unstarted spec → never initialized. A platform spec that is part of an unstarted (0%) goal → still escalates as a new-goal call, not initialized.
+
+## Verification
+- With Platform live+autonomous, on the next `platform-director-cron` standing pass (or `runPlatformDirectorStandingPass`), an **unblocked, platform-owned, planned spec with 0 ✅ phases, no goal link, and no `**Repair-signature:**`** is picked up by `findInitCandidates` → a Max `claude -p` soundness investigation runs → on `{"verdict":"initiate"}` expect a `kind='build'` `agent_jobs` row (`created_by=null`, instructions starting `Initiated by the Platform/DevOps Director:`), an `escorted_init` `director_activity` row, and the `spec_card_state` mirror flipped `in_progress`.
+- On a `{"verdict":"escalate"}` (or an ambiguous/unparseable verdict), expect a CEO-routed Approval Request notification (`metadata.routed_to_function='ceo'`, `escalation_kind='init_unsure'`) + an `escalated` `director_activity` row (dedupe_key `init-unsure:{slug}`), and **no** build job queued.
+- Re-run the standing pass after an initiate → expect **no duplicate build** (`specBuildState.inFlight` excludes the in-flight spec). Re-run after an escalate → expect **no second escalation and no re-investigation** (`alreadyInitiated` skips it).
+- Confirm the hard rails: a **non-platform** unstarted spec is never a candidate (owner gate); a spec **part of any goal** (`getRoadmapFilters().goalsBySpec[slug]` non-empty) is never initialized here — a 0% owned goal is still surfaced by `escortApprovedGoals` as a `new_goal` escalation; a spec with `**Auto-build:** off` or an uncleared blocker is skipped.
+- An initiated build that fails ≥ `PLATFORM_DIRECTOR_LOOP_GUARD_MAX` (2) times with nothing in-flight → expect an `init_loop_guard` CEO escalation (dedupe_key `initguard:{slug}`), not another resubmit.
+- `npx tsc --noEmit` is clean.
 
 ## CEO decision (resolved 2026-06-24)
 **Confirmed: Phase 2 requires a read-only soundness investigation before initializing a non-fix platform spec** (a Max `claude -p` verdict that the spec is sound + in-scope), never a blind build. Do NOT drop the investigation step — initiation of a platform feature is gated by the same soundness rail as the approval/groom lanes.
