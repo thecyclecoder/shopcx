@@ -72,19 +72,31 @@ export async function POST(request: Request) {
       await admin.from("error_events").update({ status: "open" }).eq("signature", job.spec_slug).eq("status", "resolved");
     }
     // Re-enqueue Rafa for a fresh triage, re-firing the SAME brief (source/title/error refs) from the job.
-    let instr: { source?: unknown; title?: unknown; signature?: unknown; error_event_id?: unknown; loop_alert_id?: unknown } = {};
+    let instr: { source?: unknown; title?: unknown; signature?: unknown; error_event_id?: unknown; loop_alert_id?: unknown; members?: unknown } = {};
     try {
       instr = job.instructions ? JSON.parse(String(job.instructions)) : {};
     } catch {
       /* instructions not JSON — fall back to the signature below */
     }
     const signature = job.spec_slug || (typeof instr.signature === "string" ? instr.signature : "");
+    // A dismissed `cluster:repair` job batches N signatures in instructions.members — carry them through so the
+    // re-triage investigates the SAME cluster instead of an empty '0 signatures' brief (members are dropped today).
+    const members = Array.isArray(instr.members)
+      ? (instr.members as Array<Record<string, unknown>>).map((m) => ({
+          source: typeof m.source === "string" ? m.source : "",
+          signature: typeof m.signature === "string" ? m.signature : "",
+          title: typeof m.title === "string" ? m.title : "",
+          errorEventId: typeof m.errorEventId === "string" ? m.errorEventId : null,
+          loopAlertId: typeof m.loopAlertId === "string" ? m.loopAlertId : null,
+        }))
+      : undefined;
     const requeue = await enqueueRepairJob(admin, {
       source: typeof instr.source === "string" && instr.source ? instr.source : (signature.split(":")[0] || "vercel"),
       signature,
       title: typeof instr.title === "string" && instr.title ? instr.title : signature || "re-opened repair",
       errorEventId: typeof instr.error_event_id === "string" ? instr.error_event_id : null,
       loopAlertId: typeof instr.loop_alert_id === "string" ? instr.loop_alert_id : null,
+      members,
     });
     await recordDirectorActivity(admin, {
       workspaceId,
