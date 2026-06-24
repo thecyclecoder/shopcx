@@ -35,14 +35,18 @@ The **Deploy Guardian's** deploy-watch store ([[../specs/deploy-health-rollback-
 Stamped by [[../inngest/deploy-guardian-cron]] once the window elapses (see [[../libraries/deploy-guardian]] `verdictFor`):
 
 - **`healthy`** — no NEW deploy-correlated error signature, no NEW red loop. The deploy is marked good + logged.
-- **`regressed`** — a clear deploy-correlated spike: a NEW [[loop_alerts]] going red, OR `≥ DEPLOY_REGRESSION_MIN_SIGNATURES` (default 2) distinct NEW [[error_events]] signatures, OR a single NEW signature recurring `≥ DEPLOY_REGRESSION_MIN_COUNT` (default 3) times in the window. (Phase 2 will auto-rollback on this.)
-- **`unsure`** — one NEW low-count signature — ambiguous, could be foreign transient noise → escalate, never auto-act (Phase 2 owns the escalation).
+- **`regressed`** — a clear deploy-correlated spike: a NEW [[loop_alerts]] going red, OR `≥ DEPLOY_REGRESSION_MIN_SIGNATURES` (default 2) distinct NEW [[error_events]] signatures, OR a single NEW signature recurring `≥ DEPLOY_REGRESSION_MIN_COUNT` (default 3) times in the window. **Phase 2 auto-reverts on this** (restore known-good) + escalates.
+- **`unsure`** — one NEW low-count signature — ambiguous, could be foreign transient noise → escalate, never auto-act.
+
+## Phase 2 — act on the verdict
+
+Once the verdict is stamped, [[../libraries/deploy-guardian]] **claims** the watch atomically (`update … where verdict='pending' returning id`) and acts: `regressed` → `revertDeployMerge` restores known-good (auto-revert of the offending squash via the GitHub git-data API) + an `escalateDiagnosisToCeo` carrying the revert; `unsure` → escalate, never auto-act; a slug stuck in a rollback-then-reland loop trips the loop-guard (STOP + escalate). The rollback outcome is written into `findings.rollback` = `{ status: reverted｜loop_guard｜conflict｜revert_failed, revert_sha?, reason?, prior_rollbacks? }` (**no new column**) alongside a `deploy_rolled_back`/`deploy_regressed` [[director_activity]] row.
 
 ## Gotchas
 
 - **Only auto-merged `claude/*` deploys get a watch.** `openDeployWatch` resolves the workspace + slug from the branch's `kind='build'` [[agent_jobs]] row; a non-build branch (or a branch with no build job) is a no-op — the watch is scoped to the director's auto-fix path.
 - **Outage-window errors are excluded.** The correlation gate filters `outage_correlated = true` [[error_events]] (Claude-down symptoms, not this deploy's regression — [[../specs/agent-outage-resilience]]).
-- **Evaluation is idempotent.** The verdict stamp updates `where verdict = 'pending'`, so only the first evaluator stamps it; a concurrent re-run is a no-op.
+- **Evaluation is idempotent.** The verdict stamp updates `where verdict = 'pending'` and **returns the row** — only the evaluator that wins the claim acts, so a concurrent re-run never double-reverts.
 
 ## Migration
 

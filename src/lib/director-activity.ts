@@ -26,7 +26,9 @@ export type DirectorActionKind =
   // deploy-health-rollback-guardian Phase 1 — the Deploy Guardian (Reva) stamps one per evaluated deploy-watch.
   | "deploy_healthy" // a deploy's canary window closed clean — no new deploy-correlated regression.
   | "deploy_regressed" // a deploy introduced a clear deploy-correlated regression (a spike / a loop went red).
-  | "deploy_unsure"; // a deploy's post-deploy signal was ambiguous → escalate, never auto-act.
+  | "deploy_unsure" // a deploy's post-deploy signal was ambiguous → escalate, never auto-act.
+  // deploy-health-rollback-guardian Phase 2 — Reva acts on `regressed`.
+  | "deploy_rolled_back"; // a regressed deploy was auto-reverted to the prior good build (+ escalated to the CEO).
 
 export interface DirectorActivityInput {
   workspaceId: string;
