@@ -1,0 +1,10 @@
+# Error autonomy visible + reversible — the nightly error-autonomy rollup ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — the error-autonomy capstone over [[../libraries/repair-agent]] under [[../goals/devops-director]]
+**Deferred:** split from [[director-zero-backlog-error-autonomy]] — not needed now: the parent's promise (every error self-fixes or escalates as external) and its supervision-by-construction rails ship in Phases 1–2 (✅). Baseline after-the-fact visibility already exists — `postPlatformWatchUpdate` posts a daily [[../libraries/platform-director]] board watch with squashed/escorted/escalated counts, the [[../libraries/director-recap]] EOD standup rolls `bugsFixed`/`escalated`, `buildDirectorDayNarrative` narrates a Fixes & repairs｜Escalations section, and [[daily-digest-channel]] posts the day's fixes/escalations — and every reconcile/escalate writes a `reconciled_error`/`escalated` [[../tables/director_activity]] row with its reasoning, so the autonomy is not a silent proxy-optimizer. Reversibility is already structural: each auto-fix is a normal `claude/<slug>` PR with its CI + spec-test trail, one `git revert` away. This card is the enhancement only: a single error-autonomy-SPECIFIC F/D/R/E rollup. No dependent spec or goal blocks on it.
+
+## Phase 1 — the autonomy is visible + reversible (your supervision over me) ⏳
+- A daily [[../libraries/platform-director]] board-watch rollup: 'errors tonight — F fixed & shipped, D dismissed-benign, R reconciled from backlog, E escalated to you as external.' Each auto-merged fix is a normal `claude/<slug>` PR with the verification trail, so any one is one `git revert` away. You get after-the-fact visibility and an instant undo without being in the loop up front.
+
+### Verification — Phase 1
+- After a day of error activity, ONE board-watch post summarizes fixed/dismissed/reconciled/escalated counts; each auto-fix is a revertable PR with its CI + spec-test trail.
