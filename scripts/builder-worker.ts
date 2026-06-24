@@ -2731,6 +2731,54 @@ async function recordDeclined(goalSlug: string, declined: ProposedSpec[]) {
   });
 }
 
+// Parse a planner's needs_approval `actions` into typed spec PendingActions. No-orphan rule: drop any
+// proposal missing slug/owner/parent (the planner rejects its own orphans). Shared by the initial
+// propose round and the Phase 1 (goal-milestone-build-sequencing) re-plan round.
+function parsePlannerSpecs(parsed: { status: string } | Record<string, unknown> | null): PendingAction[] {
+  const incoming: Array<Record<string, unknown>> = Array.isArray((parsed as Record<string, unknown>)?.actions)
+    ? ((parsed as Record<string, unknown>).actions as Array<Record<string, unknown>>)
+    : [];
+  const pending: PendingAction[] = [];
+  incoming.forEach((a, i) => {
+    const sp = (a.spec as Record<string, unknown>) || {};
+    if (typeof sp.slug !== "string" || typeof sp.owner !== "string" || typeof sp.parent !== "string") return;
+    pending.push({
+      id: `s${Date.now().toString(36)}${i}`,
+      type: "spec",
+      summary: String(a.summary || sp.title || sp.slug),
+      preview: typeof a.preview === "string" ? a.preview : String(sp.intent || ""),
+      status: "pending",
+      spec: {
+        slug: sp.slug,
+        title: String(sp.title || a.summary || sp.slug),
+        owner: sp.owner,
+        parent: sp.parent,
+        milestone: typeof sp.milestone === "string" ? sp.milestone : undefined,
+        intent: String(sp.intent || a.preview || ""),
+        gap: typeof sp.gap === "string" ? sp.gap : undefined,
+        // Prerequisite slugs (goal-decomposition-encodes-blockers). Keep only string slugs;
+        // a missing/malformed list → no declared blockers (the spec authors with no Blocked-by).
+        blocked_by: Array.isArray(sp.blocked_by)
+          ? (sp.blocked_by as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+          : undefined,
+      },
+    });
+  });
+  return pending;
+}
+
+/**
+ * Phase 1 (goal-milestone-build-sequencing) — a multi-milestone decomposition that declares NO build-order
+ * dependency anywhere is INVALID: a flat fan-out builds milestones concurrently, and later milestones
+ * reference earlier ones' outputs (the metrics before the surfacing, the framework before its consumers).
+ * Returns true when the proposal is ≥2 specs with not a single `blocked_by` edge among them. A genuinely
+ * independent set is allowed — but the planner must make that explicit on the re-plan, never default to flat.
+ */
+function isFlatBlockerlessTree(pending: PendingAction[]): boolean {
+  if (pending.length < 2) return false; // a single spec has nothing to sequence against
+  return !pending.some((p) => (p.spec?.blocked_by?.length ?? 0) > 0);
+}
+
 // A kind='plan' job. First run: the plan-goal skill proposes a milestone→spec tree → needs_approval
 // (no files written, no PR). Resume (after the owner approves branches): author the approved specs +
 // wikilink them into the goal doc (committed to main), record declines (❌), and queue their builds.
@@ -2797,39 +2845,42 @@ async function runPlanJob(job: Job) {
         return;
       }
       if (parsed?.status === "needs_approval") {
-        const incoming: Array<Record<string, unknown>> = Array.isArray((parsed as Record<string, unknown>).actions)
-          ? ((parsed as Record<string, unknown>).actions as Array<Record<string, unknown>>)
-          : [];
-        const pending: PendingAction[] = [];
-        incoming.forEach((a, i) => {
-          const sp = (a.spec as Record<string, unknown>) || {};
-          // No-orphan rule: drop any proposal missing slug/owner/parent — the planner rejects its own orphans.
-          if (typeof sp.slug !== "string" || typeof sp.owner !== "string" || typeof sp.parent !== "string") return;
-          pending.push({
-            id: `s${Date.now().toString(36)}${i}`,
-            type: "spec",
-            summary: String(a.summary || sp.title || sp.slug),
-            preview: typeof a.preview === "string" ? a.preview : String(sp.intent || ""),
-            status: "pending",
-            spec: {
-              slug: sp.slug,
-              title: String(sp.title || a.summary || sp.slug),
-              owner: sp.owner,
-              parent: sp.parent,
-              milestone: typeof sp.milestone === "string" ? sp.milestone : undefined,
-              intent: String(sp.intent || a.preview || ""),
-              gap: typeof sp.gap === "string" ? sp.gap : undefined,
-              // Prerequisite slugs (goal-decomposition-encodes-blockers). Keep only string slugs;
-              // a missing/malformed list → no declared blockers (the spec authors with no Blocked-by).
-              blocked_by: Array.isArray(sp.blocked_by)
-                ? (sp.blocked_by as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
-                : undefined,
-            },
-          });
-        });
+        let pending = parsePlannerSpecs(parsed);
         if (!pending.length) {
           await update(job.id, { status: "completed", log_tail: "planner proposed no valid (owner+parent) specs" });
           return;
+        }
+        // DECOMPOSITION INTEGRITY (goal-milestone-build-sequencing Phase 1): reject a FLAT, blocker-less
+        // multi-milestone tree and re-plan ONCE — in-session, before it ever reaches the CEO. The planner
+        // must either declare the real build-order edges (`blocked_by`) or explicitly affirm the milestones
+        // are independent. One bounded corrective round: whatever it returns second is its explicit choice.
+        if (isFlatBlockerlessTree(pending)) {
+          console.log(`${tag} INVALID decomposition — ${pending.length} milestone specs, no blocked_by edge; re-planning once`);
+          const fixPrompt = [
+            `INVALID DECOMPOSITION (goal-milestone-build-sequencing Phase 1). You proposed ${pending.length} milestone specs but NOT ONE declares a \`blocked_by\` prerequisite — a flat, blocker-less tree. Building these concurrently corrupts the build, because a later milestone references an earlier one's outputs (the metrics before the surfacing, the framework before its consumers). A flat multi-milestone decomposition is rejected.`,
+            `Re-emit the SAME tree, but make the build order EXPLICIT. For every spec that depends on another, set its \`blocked_by\` to the slug(s) of its prerequisite milestone spec(s) — M2 blocked_by M1, the metric before the dashboard that surfaces it, etc. The graph MUST stay acyclic. ONLY if the milestones are genuinely independent (no spec consumes another's output) may a spec keep \`blocked_by: []\` — and then you MUST say so outright in that spec's \`intent\` ("independent of the other milestones — no build-order dependency"), so parallelism is a deliberate, visible choice, never an omission.`,
+            `Final message = ONLY one JSON object, SAME shape as before: {"status":"needs_approval","actions":[{"type":"spec","summary":"…","preview":"…","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…","blocked_by":["<prereq-slug>"]}}]}.`,
+          ].join("\n");
+          const r2 = await runClaude(fixPrompt, session || sessionId, wt, configDir);
+          await meterAgentJob(job, configDir, r2.usage, r2.model);
+          if (r2.session) await update(job.id, { claude_session_id: r2.session, claude_session_config_dir: configDir });
+          if (r2.isError && isUsageCapError(`${r2.resultText}\n${r2.raw}`)) {
+            await handlePoolUsageCap(job.id, tag, configDir, !!r2.session, r2.raw.slice(-2000));
+            return;
+          }
+          const parsed2 = parseStatus(r2.resultText);
+          console.log(`${tag} re-plan finished — status: ${parsed2?.status ?? "(none)"} isError=${r2.isError}`);
+          if (parsed2?.status === "needs_input") {
+            await update(job.id, { status: "needs_input", questions: parsed2.questions ?? [] });
+            return;
+          }
+          if (parsed2?.status === "needs_approval") {
+            const repl = parsePlannerSpecs(parsed2);
+            if (repl.length) pending = repl; // accept the corrected (or explicitly-reaffirmed) tree
+          }
+          // A still-flat re-plan stands as the planner's explicit, deliberate parallel decision — proceed,
+          // but record it so the CEO sees the proposal came back flat by choice, not by the default omission.
+          if (isFlatBlockerlessTree(pending)) console.log(`${tag} re-plan still flat — proceeding as the planner's explicit parallel decision`);
         }
         await update(job.id, { status: "needs_approval", pending_actions: pending });
         return;
