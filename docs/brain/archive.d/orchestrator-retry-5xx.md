@@ -1,0 +1,1 @@
+- **Orchestrator: retry Anthropic 5xx, not just 529** · verified 2026-06-24 · → [[libraries/sonnet-orchestrator-v2]]
