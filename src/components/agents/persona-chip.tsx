@@ -16,21 +16,28 @@ import { Mascot } from "@/components/agents/mascots";
 
 /** The avatar tile — the real headshot photo when present, else the colored SVG mascot.
  *  Falls back to the mascot if the headshot fails to load (e.g. not yet uploaded). */
-export function PersonaAvatar({ persona, size = 40 }: { persona: AgentPersona; size?: number }) {
+export function PersonaAvatar({ persona, size = 40, zoom = 1 }: { persona: AgentPersona; size?: number; zoom?: number }) {
   const [imgError, setImgError] = useState(false);
   if (persona.avatarUrl && !imgError) {
+    const dim = size + 12;
     return (
-      <img
-        src={persona.avatarUrl}
-        alt={`${persona.name} — ${persona.role}`}
+      // A clipping wrapper so an optional `zoom` (>1) crops tighter on the face — at zoom=1 this renders
+      // identically to a plain object-cover avatar. Useful at small sizes (the box lanes) where the face
+      // would otherwise be a small part of the frame.
+      <span
+        className="inline-block shrink-0 overflow-hidden rounded-xl ring-1 ring-black/5 dark:ring-white/10"
+        style={{ width: dim, height: dim }}
         title={`${persona.name} — ${persona.role}`}
-        width={size + 12}
-        height={size + 12}
-        className={`inline-block shrink-0 rounded-xl object-cover ring-1 ring-black/5 dark:ring-white/10`}
-        style={{ width: size + 12, height: size + 12 }}
-        loading="lazy"
-        onError={() => setImgError(true)}
-      />
+      >
+        <img
+          src={persona.avatarUrl}
+          alt={`${persona.name} — ${persona.role}`}
+          className="h-full w-full object-cover"
+          style={zoom !== 1 ? { transform: `scale(${zoom})`, objectPosition: "center 22%" } : undefined}
+          loading="lazy"
+          onError={() => setImgError(true)}
+        />
+      </span>
     );
   }
   return (

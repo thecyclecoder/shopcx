@@ -165,7 +165,7 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          <PersonaAvatar persona={persona} size={20} />
+          <PersonaAvatar persona={persona} size={20} zoom={1.45} />
           <span className="truncate text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{title}</span>
           <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
         </span>
