@@ -450,47 +450,66 @@ export interface DriftSweepResult {
 }
 
 /**
- * Control-Tower self-audit backstop (Part B): reconcile EVERY drift-candidate spec for a workspace.
- * Candidates = live specs not yet `shipped` (shipped specs have nothing to flip) PLUS any spec with an
- * open `spec_drift` row (so we can resolve it once the owner flips). Skips archived specs. The
- * merged-build set is fetched once and shared across all per-spec reconciliations.
+ * Reese, repurposed (spec-status-db-driven Phase 4): the DB-vs-CODE consistency backstop. Status is now
+ * DB-driven, so the old "markdown emoji vs code" reconciler is gone. Reese's new job is the INVERSE + the
+ * one that actually matters in the DB world: for every phase `spec_card_state` marks **shipped**, verify the
+ * phase's code is ACTUALLY on `main`. If a shipped phase's code paths are missing (a bad/reverted merge, a
+ * wrong DB write), surface a `spec_drift` row — "DB says shipped, code is gone" — for Ada's supervision lane
+ * to confirm + escalate. NEVER mutates status here (surface-don't-auto-correct, North star). The phase code
+ * paths still live in the markdown body (content stayed in markdown); only STATUS moved to the DB.
  */
-export async function runSpecDriftReconciler(_workspaceId: string): Promise<DriftSweepResult> {
-  // spec-status-db-driven Phase 4: RETIRED. This reconciler existed to flip markdown phase emojis a merged
-  // build didn't (markdown WAS the source of truth). Status is now 100% DB-driven — the writers + merge hook
-  // (markSpecCardMergeShipped) keep spec_card_state correct, and the markdown no longer carries status emojis
-  // (Phase 3 stripped them). Running the old markdown reconciler now would be HARMFUL: it reads the emoji-less
-  // markdown as all-`planned`, re-processes every spec, and could regress a shipped DB status it can't
-  // re-confirm from code paths or spam spec_drift rows. No-op. (Dead body below kept for history.)
-  void _workspaceId;
-  return { specsScanned: 0, flipped: 0, surfaced: 0 };
+export async function runSpecDriftReconciler(workspaceId: string): Promise<DriftSweepResult> {
+  if (!ghToken()) return { specsScanned: 0, flipped: 0, surfaced: 0 };
+  const { getSpecCardStates } = await import("@/lib/spec-card-state");
+  const archived = new Set(await listArchivedSlugs());
+  const states = await getSpecCardStates(workspaceId);
+  const cache = new Map<string, boolean>();
+  const suspects: { slug: string; index: number; title: string }[] = [];
+  let scanned = 0;
+
+  for (const [slug, state] of Object.entries(states)) {
+    if (archived.has(slug)) continue;
+    const shipped = (state.phase_states ?? []).filter((p) => p.status === "shipped");
+    if (!shipped.length) continue;
+    const fetched = await fetchSpecRawFromMain(slug);
+    if (!fetched) continue; // spec folded / not on main → nothing to verify against
+    scanned++;
+    const phases = parsePhasesWithLines(fetched.raw);
+    for (const sp of shipped) {
+      const phase = phases.find((p) => p.index === sp.index);
+      if (!phase) continue;
+      const paths = extractCodePaths(phase.body);
+      if (!paths.length) continue; // no code paths declared → can't verify → trust the DB (don't false-flag)
+      const checks = await Promise.all(paths.map((p) => pathExistsOnMain(p, cache)));
+      if (!checks.every(Boolean)) suspects.push({ slug, index: sp.index, title: sp.title }); // shipped in DB, code missing on main
+    }
+  }
+  await syncReverseDriftRows(workspaceId, suspects);
+  return { specsScanned: scanned, flipped: 0, surfaced: suspects.length };
 }
 
-async function runSpecDriftReconciler_RETIRED(workspaceId: string): Promise<DriftSweepResult> {
-  if (!ghToken()) return { specsScanned: 0, flipped: 0, surfaced: 0 };
+/** Upsert an open `spec_drift` row per DB-shipped-but-code-missing phase; resolve rows that recovered. */
+async function syncReverseDriftRows(workspaceId: string, suspects: { slug: string; index: number; title: string }[]): Promise<void> {
   const admin = createAdminClient();
-
-  const [{ specs }, archived, mergedRows, openRows] = await Promise.all([
-    getRoadmap(),
-    listArchivedSlugs(),
-    admin.from("agent_jobs").select("spec_slug").eq("workspace_id", workspaceId).eq("kind", "build").eq("status", "merged"),
-    admin.from("spec_drift").select("spec_slug").eq("workspace_id", workspaceId).eq("status", "open"),
-  ]);
-
-  const archivedSet = new Set(archived);
-  const mergedBuildSlugs = new Set((mergedRows.data ?? []).map((r) => (r as { spec_slug: string }).spec_slug));
-  const openDriftSlugs = new Set((openRows.data ?? []).map((r) => (r as { spec_slug: string }).spec_slug));
-
-  const candidates = specs.filter((s) => !archivedSet.has(s.slug) && (s.status !== "shipped" || openDriftSlugs.has(s.slug)));
-
-  let flipped = 0;
-  let surfaced = 0;
-  for (const c of candidates) {
-    const r = await reconcileSpecDrift(workspaceId, c.slug, { mergedBuildSlugs });
-    flipped += r.flipped.length;
-    surfaced += r.surfaced.length;
+  const nowIso = new Date().toISOString();
+  const keep = new Set(suspects.map((s) => `${s.slug}#${s.index}`));
+  for (const s of suspects) {
+    const detail = `${s.slug} — P${s.index + 1} (${s.title}) is marked SHIPPED in the DB, but its code is NOT on main (possible bad/reverted merge or a wrong status write). Confirm + escalate.`;
+    const { data: existing } = await admin
+      .from("spec_drift").select("id").eq("workspace_id", workspaceId).eq("spec_slug", s.slug).eq("phase_index", s.index).eq("status", "open").limit(1);
+    if (existing && existing.length) {
+      await admin.from("spec_drift").update({ last_seen_at: nowIso, phase_title: s.title, current_emoji: "✅↛", detail }).eq("id", (existing[0] as { id: string }).id);
+    } else {
+      await admin.from("spec_drift").insert({ workspace_id: workspaceId, spec_slug: s.slug, phase_index: s.index, phase_title: s.title, current_emoji: "✅↛", detail, status: "open" }).then(undefined, () => {});
+    }
   }
-  return { specsScanned: candidates.length, flipped, surfaced };
+  // Resolve any open row that's no longer a suspect (the code came back / the phase was downgraded).
+  const { data: open } = await admin.from("spec_drift").select("id, spec_slug, phase_index").eq("workspace_id", workspaceId).eq("status", "open");
+  for (const row of (open ?? []) as { id: string; spec_slug: string; phase_index: number }[]) {
+    if (!keep.has(`${row.spec_slug}#${row.phase_index}`)) {
+      await admin.from("spec_drift").update({ status: "resolved", last_seen_at: nowIso }).eq("id", row.id);
+    }
+  }
 }
 
 /** Open spec-drift rows for a workspace (newest-bumped first) — the Control Tower's "Spec drift" surface. */

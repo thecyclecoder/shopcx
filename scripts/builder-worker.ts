@@ -2182,57 +2182,45 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   const rows = await sd.getOpenSpecDrift(job.workspace_id);
   if (!rows.length) return "drift: none open";
   const CAP = 5;
-  const flipped: string[] = [];
+  const confirmed: string[] = []; // confirmed reverse-drift (DB shipped, code genuinely gone) → escalated
   let reviewed = 0;
   for (const row of rows.slice(0, CAP)) {
     reviewed++;
     try {
+      // Reese (DB-vs-code backstop) flagged a phase the DB marks SHIPPED whose code looks MISSING on main.
+      // Ada confirms: is the code genuinely gone (a real bad/reverted merge → escalate) or a false positive
+      // (moved/renamed → resolve)? She NEVER auto-downgrades the DB status (surface-don't-auto-correct).
       const prompt = [
         "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only main checkout + the brain, no API key).",
-        `The spec-drift reconciler flagged ${row.spec_slug} phase ${row.phase_index} ("${row.phase_title}"): its board emoji is still ${row.current_emoji}, but the code may already be on main (it couldn't auto-confirm). Detail: ${row.detail}`,
-        "Investigate READ-ONLY: read the spec phase + the implicated code on main. Decide whether this phase is ACTUALLY shipped — its code is on main and implements what the phase describes.",
+        `Reese (the DB-vs-code backstop) flagged ${row.spec_slug} phase ${row.phase_index} ("${row.phase_title}"): the DB marks this phase SHIPPED, but its code looks MISSING from main. Detail: ${row.detail}`,
+        "Investigate READ-ONLY: read the spec phase's declared files/functions and check whether that code actually exists on main right now (it may have been renamed/moved, or genuinely reverted/never-landed).",
         "Final message = ONLY one JSON object:",
-        '{"verdict":"shipped","reasoning":"<the code on main implements this phase — cite the file/function>"}',
-        '{"verdict":"not-shipped","reasoning":"<the code is NOT there / only partial>"}',
+        '{"verdict":"code-missing","reasoning":"<the code is genuinely NOT on main — a bad/reverted merge or wrong status; cite what is missing>"}',
+        '{"verdict":"code-present","reasoning":"<false positive — the code IS on main, just moved/renamed; cite where>"}',
         '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
       ].join("\n");
       const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
-      if (String(parsed?.verdict) === "shipped") {
-        // spec-status-db-driven Phase 2: Ada's drift-supervise flip used to PUT the spec markdown to `main`
-        // (one of the six git-committing status writers). Now we write the DB mirror only — instant, zero
-        // deploys. Still read the on-disk markdown so we can seed phase_states when the DB row is empty.
-        const path = join(REPO_DIR, `docs/brain/specs/${row.spec_slug}.md`);
-        if (!existsSync(path)) { await sd.resolveDriftRow(db, row.id); continue; } // spec gone (folded) → resolve
-        const raw = readFileSync(path, "utf8");
-        const scs = await import("../src/lib/spec-card-state");
-        const states = await scs.getSpecCardStates(job.workspace_id);
-        const existing = states[row.spec_slug];
-        const phaseStates = (existing?.phase_states && existing.phase_states.length)
-          ? [...existing.phase_states]
-          : sd.phaseStatesFromRaw(raw);
-        const target = phaseStates.find((p) => p.index === row.phase_index);
-        if (!target || target.status === "shipped") { await sd.resolveDriftRow(db, row.id); continue; }
-        target.status = "shipped";
-        const status = scs.rollupPhaseStatus(phaseStates);
-        await scs.markSpecCardStatus(job.workspace_id, row.spec_slug, status, phaseStates, {
-          actor: "ada",
-          reason: `Ada confirmed P${row.phase_index + 1} shipped (drift-supervise)`,
-        });
-        await sd.resolveDriftRow(db, row.id);
-        flipped.push(`${row.spec_slug} P${row.phase_index + 1}`);
+      const verdict = String(parsed?.verdict);
+      if (verdict === "code-present") {
+        await sd.resolveDriftRow(db, row.id); // false positive — code is there, just moved → clear it
+      } else if (verdict === "code-missing") {
+        // Genuine reverse-drift: a shipped spec's code vanished. Surface to the CEO — keep the row open +
+        // escalate (the CEO decides: re-merge, intentional revert, or downgrade). Never auto-mutate status.
+        confirmed.push(`${row.spec_slug} P${row.phase_index + 1}: ${(parsed?.reasoning || "").slice(0, 180)}`);
       }
+      // unsure → leave the row open for the next pass
     } catch (e) {
       console.error(`${tag} drift-supervise ${row.spec_slug} failed (continuing):`, e instanceof Error ? e.message : e);
     }
   }
-  if (flipped.length) {
+  if (confirmed.length) {
     try {
       const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `🔄 Reviewed Reese's spec-drift findings — confirmed + flipped ${flipped.length} phase(s) to ✅: ${flipped.join(", ")}.`, kind: "update", metadata: { spec_drift_supervise: true } });
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `⚠️ Reese caught DB-vs-code drift — ${confirmed.length} spec phase(s) marked SHIPPED in the DB but their code is GONE from main (possible bad/reverted merge):\n${confirmed.map((c) => `• ${c}`).join("\n")}`, kind: "update", mentions: ["ceo"], metadata: { spec_drift_supervise: true, reverse_drift: true } });
     } catch { /* best-effort */ }
   }
-  return `drift-supervise: reviewed ${reviewed}, flipped ${flipped.length}${flipped.length ? ": " + flipped.join(", ") : ""}`;
+  return `drift-supervise: reviewed ${reviewed}, confirmed reverse-drift ${confirmed.length}${confirmed.length ? " → escalated" : ""}`;
 }
 
 async function runPlatformDirectorStandingPass(job: Job, tag: string) {
@@ -2394,7 +2382,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   // to advance / all healthy) is skipped so the board isn't flooded every ~15m; the daily watch + activity feed
   // cover the all-quiet heartbeat.
   try {
-    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|drift: none|flipped 0/i;
+    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|drift: none|flipped 0|reverse-drift 0/i;
     const meaningful = notes.filter((n) => n && !QUIET.test(n));
     if (meaningful.length) {
       const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));
