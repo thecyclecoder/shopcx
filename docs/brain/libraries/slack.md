@@ -27,10 +27,26 @@ async function isSlackConnected(workspaceId: string) : Promise<boolean>
 ### `postMessage` — function
 
 ```ts
-async function postMessage(token: string, channel: string, blocks: unknown[], text: string,) : Promise<boolean>
+async function postMessage(token: string, channel: string, blocks: unknown[], text: string, opts?: { thread_ts?: string }) : Promise<boolean>
 ```
 
-THE chokepoint for every Slack channel/DM post (daily digest, ops alerts, ticket notifications all go through it). On each successful send it beats the **`slack-delivery`** Control Tower loop (`reactive`, 28h liveness window) — ONE monitor for all Slack comms instead of per-channel cron monitors. A sustained delivery outage stops the beats → the monitor flags it; the daily digest guarantees a beat every ~24h. Throttled to ≤1 beat/5 min, fire-and-forget.
+THE chokepoint for every Slack channel/DM post (daily digest, ops alerts, ticket notifications all go through it). On each successful send it beats the **`slack-delivery`** Control Tower loop (`reactive`, 28h liveness window) — ONE monitor for all Slack comms instead of per-channel cron monitors. A sustained delivery outage stops the beats → the monitor flags it; the daily digest guarantees a beat every ~24h. Throttled to ≤1 beat/5 min, fire-and-forget. `opts.thread_ts` posts into a thread (used to relay a web reply into a `#cto-ada` thread — [[../lifecycles/ada-slack-chat]]).
+
+### `postAsAda` — function
+
+```ts
+async function postAsAda(token: string, channel: string, blocks: unknown[], text: string, opts?: { thread_ts?: string }) : Promise<{ ok: boolean; ts?: string }>
+```
+
+Post a message **as Ada** — her name + avatar — via the `chat:write.customize` override (`ADA_SLACK_IDENTITY` ← `getPersona("platform")`). Used **only** by the `#cto-ada` chat ([[../lifecycles/ada-slack-chat]]); every other caller uses plain `postMessage` and stays "shopcx", so the persona override never leaks to ops alerts / the daily digest. Returns the posted `ts` so an approval card can be `chat.update`d later; `opts.thread_ts` threads the reply.
+
+### `addReaction` — function
+
+```ts
+async function addReaction(token: string, channel: string, ts: string, name: string) : Promise<boolean>
+```
+
+Add an emoji reaction (`reactions.add`) — the 👀 "received, thinking" ack on a founder's `#cto-ada` message while the box runs. `already_reacted` is treated as a benign no-op.
 
 ### `lookupUserByEmail` — function
 

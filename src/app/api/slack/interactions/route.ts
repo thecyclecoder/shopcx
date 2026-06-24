@@ -26,6 +26,8 @@ import { getSpec } from "@/lib/brain-roadmap";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob } from "@/lib/agent-jobs";
 import { ACTIONS, buildAnswerModal, buildNeedsApprovalMessage } from "@/lib/slack-roadmap";
 import { HOME, buildHomeView, publishHome, noticeModal, buildSpecModal, buildSpecConfirmModal } from "@/lib/slack-home";
+import { setActionDecision } from "@/lib/agents/director-coach-threads";
+import { ADA_ACTIONS, buildAdaResolvedCard } from "@/lib/slack-ada";
 
 export const maxDuration = 60;
 
@@ -128,6 +130,12 @@ async function handleBlockActions(p: BlockActionsPayload, workspaceId: string, t
   if (!isOwner(actor)) return ephem("Owner-only — that action is reserved for the workspace owner.");
   const userId = actor!.userId;
 
+  // ada-slack-chat: Approve / Reject on one of Ada's #cto-ada coaching cards. Same path the web coach chat
+  // uses (setActionDecision → enqueue approve_action); resolve the card in place so it's not re-clickable.
+  if (action.action_id === ADA_ACTIONS.approve || action.action_id === ADA_ACTIONS.reject) {
+    return handleAdaDecision(action.action_id, value, channel, messageTs, workspaceId, userId, token, ephem);
+  }
+
   switch (action.action_id) {
     case ACTIONS.answerOpen: {
       const jobId = String(value.jobId || "");
@@ -185,6 +193,54 @@ async function handleBlockActions(p: BlockActionsPayload, workspaceId: string, t
     default:
       return ack();
   }
+}
+
+// ── ada-slack-chat: resolve an #cto-ada approval card ──
+
+/**
+ * Approve / Reject a director-coach pending_action from #cto-ada. Records the decision via the SAME
+ * setActionDecision the web coach chat uses, then (on approve) enqueues the identical `approve_action`
+ * job the box executes — no Slack-only mutation path. The card is rebuilt without buttons so it reads as
+ * resolved and can't be tapped twice (setActionDecision only flips a still-`pending` card, so re-taps no-op).
+ */
+async function handleAdaDecision(
+  actionId: string,
+  value: Record<string, unknown>,
+  channel: string | undefined,
+  messageTs: string | undefined,
+  workspaceId: string,
+  userId: string,
+  token: string,
+  ephem: (msg: string) => Promise<NextResponse>,
+) {
+  const decision = actionId === ADA_ACTIONS.approve ? "approve" : "decline";
+  const threadId = String(value.thread_id || "");
+  const cardId = String(value.actionId || "");
+  if (!threadId || !cardId) return ack();
+
+  const thread = await setActionDecision(workspaceId, threadId, cardId, decision);
+  if (!thread) return ephem("That conversation is no longer available.");
+
+  // Resolve the card in place (drop the buttons → "✅ Approved — applying…" / "✕ Declined").
+  const card = thread.pending_actions.find((a) => a.id === cardId);
+  if (card && channel && messageTs) {
+    const rebuilt = buildAdaResolvedCard({ id: card.id, type: card.type, summary: card.summary, guidance: card.guidance }, decision);
+    await updateMessage(token, channel, messageTs, rebuilt.blocks, rebuilt.text);
+  }
+
+  // Approve → run the action through the exact same box path the dashboard uses.
+  if (decision === "approve") {
+    const admin = createAdminClient();
+    await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      kind: "director-coach",
+      spec_slug: threadId,
+      status: "queued",
+      instructions: JSON.stringify({ thread_id: threadId, mode: "approve_action" }),
+      created_by: userId,
+    });
+  }
+  return ack();
 }
 
 // ── App Home: open the spec-detail modal ──

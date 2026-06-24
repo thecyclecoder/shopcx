@@ -5186,11 +5186,15 @@ interface CoachThreadRow {
   messages: { role: "user" | "assistant"; content: string }[];
   box_session_id: string | null;
   pending_actions: Record<string, unknown>[];
+  // ada-slack-chat: a 'slack'-sourced thread posts Ada's reply + cards back to #cto-ada.
+  source: string;
+  slack_channel_id: string | null;
+  slack_thread_ts: string | null;
 }
 async function loadCoachThread(threadId: string): Promise<CoachThreadRow | null> {
   const { data } = await db
     .from("director_coach_threads")
-    .select("id, director_function, messages, box_session_id, pending_actions")
+    .select("id, director_function, messages, box_session_id, pending_actions, source, slack_channel_id, slack_thread_ts")
     .eq("id", threadId)
     .maybeSingle();
   if (!data) return null;
@@ -5201,7 +5205,46 @@ async function loadCoachThread(threadId: string): Promise<CoachThreadRow | null>
     messages: Array.isArray(row.messages) ? (row.messages as { role: "user" | "assistant"; content: string }[]) : [],
     box_session_id: (row.box_session_id as string | null) ?? null,
     pending_actions: Array.isArray(row.pending_actions) ? (row.pending_actions as Record<string, unknown>[]) : [],
+    source: (row.source as string) ?? "web",
+    slack_channel_id: (row.slack_channel_id as string | null) ?? null,
+    slack_thread_ts: (row.slack_thread_ts as string | null) ?? null,
   };
+}
+
+/**
+ * ada-slack-chat: post Ada's turn output back to #cto-ada (her reply + an approval card per NEW pending
+ * action), threaded under the founder's message. Mutates each posted action with its Slack message `ts`
+ * (so a later approve/reject can chat.update it in place). Best-effort: a Slack failure never fails the turn.
+ */
+async function postCoachTurnToSlack(
+  thread: CoachThreadRow,
+  workspaceId: string,
+  reply: string,
+  actions: Record<string, unknown>[],
+): Promise<void> {
+  if (thread.source !== "slack" || !thread.slack_channel_id) return;
+  try {
+    const { getSlackToken, postAsAda } = await import("../src/lib/slack");
+    const { buildAdaApprovalCard } = await import("../src/lib/slack-ada");
+    const token = await getSlackToken(workspaceId);
+    if (!token) return;
+    const channel = thread.slack_channel_id;
+    const thread_ts = thread.slack_thread_ts ?? undefined;
+    if (reply) await postAsAda(token, channel, [], reply, { thread_ts });
+    for (const a of actions) {
+      if (a.status !== "pending") continue;
+      const card = buildAdaApprovalCard(thread.id, {
+        id: String(a.id),
+        type: String(a.type),
+        summary: String(a.summary || ""),
+        guidance: typeof a.guidance === "string" ? a.guidance : undefined,
+      });
+      const res = await postAsAda(token, channel, card.blocks, card.text, { thread_ts });
+      if (res.ts) a.slackTs = res.ts; // so the interactions/web approve can resolve THIS card
+    }
+  } catch (e) {
+    console.error("[director-coach] postCoachTurnToSlack failed:", e instanceof Error ? e.message : e);
+  }
 }
 
 function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown>[] {
@@ -5358,7 +5401,7 @@ async function runDirectorCoachJob(job: Job) {
     /* not JSON */
   }
   const mode = (params.mode as "turn" | "approve_action") || "turn";
-  const intent = (params.intent as "ask" | "coach" | "plan") || "ask";
+  const intent = (params.intent as "ask" | "coach" | "plan" | "auto") || "ask";
   const threadId = params.thread_id || job.spec_slug;
   if (!threadId) {
     await update(job.id, { status: "failed", error: "director-coach job missing thread_id" });
@@ -5535,6 +5578,16 @@ async function runDirectorCoachJob(job: Job) {
       const summary = notes.length ? notes.join("; ") : "No approved actions to execute.";
       const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: `Done: ${summary}` }];
       await db.from("director_coach_threads").update({ messages, pending_actions: actions, turn_status: "idle", last_error: null, updated_at: new Date().toISOString() }).eq("id", threadId);
+      // ada-slack-chat: confirm the execution back in the #cto-ada thread, as Ada.
+      if (thread.source === "slack" && thread.slack_channel_id && notes.length) {
+        try {
+          const { getSlackToken, postAsAda } = await import("../src/lib/slack");
+          const token = await getSlackToken(job.workspace_id);
+          if (token) await postAsAda(token, thread.slack_channel_id, [], `Done: ${summary}`, { thread_ts: thread.slack_thread_ts ?? undefined });
+        } catch (e) {
+          console.error(`${tag} slack confirm failed:`, e instanceof Error ? e.message : e);
+        }
+      }
       await update(job.id, { status: "completed", log_tail: `approve_action — ${summary}`.slice(-2000) });
       console.log(`${tag} ✓ executed approved actions: ${summary}`);
       return;
@@ -5549,7 +5602,9 @@ async function runDirectorCoachJob(job: Job) {
         ? `INTENT: COACH. The CEO is coaching you — distill their directive (from this whole conversation) into ONE durable coaching rule and emit a 'coaching' pending_action for their confirmation. Acknowledge briefly in reply, but the rule is what matters. Stay within your leash.`
         : intent === "plan"
           ? `INTENT: PLAN. The CEO is handing you a PLAN to EXECUTE — it should trump your day-to-day work until done. Investigate read-only, then emit a 'directive' pending_action: {summary, steps[<ordered plain steps>], gateBuildsUntil?:"<spec-slug>", criticalSpecs?:["<slug>"], holdBuilds?:["<slug to cancel>"]}. On approval the worker acts THIS pass: it QUEUES the gate spec + every criticalSpecs build immediately (no waiting), marks them critical, and CANCELS any parked holdBuilds (out-of-order builds to clear). gateBuildsUntil pauses ROUTINE builds until that spec ships — but the gate spec + criticalSpecs (the priority builds) STILL run, so the plan can actually unjam. holdBuilds is for clearing wedged out-of-order builds. Stay within the leash — a directive re-prioritizes WHAT you do, never authorizes something destructive/irreversible or a new goal.`
-          : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
+          : intent === "auto"
+            ? `INTENT: AUTO. This message came from Slack (#cto-ada) as one natural message — there is no explicit Ask/Coach/Plan button. DEFAULT to answering read-only + honestly, exactly like ASK. But if your answer IMPLIES a durable change, ALSO emit the one matching pending_action, exactly as if the CEO had pressed that button: a 'coaching' card when they're telling you to do something differently going forward; a 'directive' card when they hand you a plan to execute; a 'spec' card for a real code/capability gap; a 'spec-edit' card when they ask you to modify an existing spec; a 'goal' card for a strategic multi-spec initiative; a 'model_tier' card when an agent's model should change. Emit AT MOST one card, and only when it's clearly warranted — when in doubt, just answer. Your reply is plain text (no markdown). Stay within your leash: a card never auto-does something destructive/irreversible or starts a goal — it always stops at the CEO's approval.`
+            : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
     const prompt = isResume
       ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
@@ -5567,11 +5622,14 @@ async function runDirectorCoachJob(job: Job) {
     }
     const ts = Date.now().toString(36);
     const newActions = normalizeCoachActions(parsed?.pending_actions, ts);
+    // ada-slack-chat: mirror the turn to #cto-ada (Ada's reply + a card per new action). This stamps each
+    // posted action with its Slack message ts BEFORE we persist, so a later approve/reject can resolve it.
+    await postCoachTurnToSlack(thread, job.workspace_id, reply, newActions);
     const fresh = await loadCoachThread(threadId);
     const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: reply }];
     await db.from("director_coach_threads").update({ messages, box_session_id: newSession, turn_status: "idle", last_error: null, pending_actions: newActions, updated_at: new Date().toISOString() }).eq("id", threadId);
     await update(job.id, { status: "completed", log_tail: logTail });
-    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} card[s])` : ""}`);
+    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} card[s])` : ""}${thread.source === "slack" ? " → #cto-ada" : ""}`);
   } finally {
     sh("git", ["worktree", "remove", "--force", wt]);
   }
