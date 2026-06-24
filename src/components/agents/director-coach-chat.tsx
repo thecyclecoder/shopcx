@@ -1,0 +1,216 @@
+"use client";
+
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// CEO↔Director coaching chat (worker-grading-and-director-management Phase 7). A resumable Max
+// conversation with the Platform/DevOps Director (Ada): the CEO asks "why haven't you built spec X?",
+// she explains read-only, and the CEO coaches her. TWO explicit buttons resolve "is this a chat or a
+// directive?": ASK (she explains, never writes a rule) vs COACH HER (distills the directive into a
+// durable director_instruction → an approval card → on approve it's injected into her future decisions).
+// Each turn POSTs /api/director/coach then polls GET ?id= while turn_status='thinking'. Owner-only.
+
+type Msg = { role: "user" | "assistant"; content: string };
+type Action = {
+  id: string;
+  type: "coaching" | "spec";
+  summary: string;
+  errorClass?: string;
+  guidance?: string;
+  reasoning?: string;
+  slug?: string;
+  content?: string;
+  status: "pending" | "approved" | "declined" | "done" | "failed";
+  result?: string;
+};
+type Thread = {
+  id: string;
+  messages: Msg[];
+  turn_status: "idle" | "thinking" | "error";
+  last_error: string | null;
+  pending_actions: Action[];
+};
+
+export function DirectorCoachChat() {
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [actions, setActions] = useState<Action[]>([]);
+  const [input, setInput] = useState("");
+  const [thinking, setThinking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [messages, actions, thinking]);
+
+  // Poll while a turn is on the box.
+  useEffect(() => {
+    if (!threadId || !thinking) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/director/coach?id=${encodeURIComponent(threadId)}`);
+        const d = await res.json();
+        const t = d.thread as Thread | null;
+        if (!t || stop) return;
+        setMessages(t.messages);
+        setActions(t.pending_actions || []);
+        if (t.turn_status === "error") {
+          setError(t.last_error || "The box turn failed.");
+          setThinking(false);
+        } else if (t.turn_status === "idle") {
+          setThinking(false);
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+    };
+    const handle = setInterval(tick, 3000);
+    void tick();
+    return () => {
+      stop = true;
+      clearInterval(handle);
+    };
+  }, [threadId, thinking]);
+
+  const send = useCallback(
+    async (intent: "ask" | "coach") => {
+      const text = input.trim();
+      if (!text || thinking) return;
+      setInput("");
+      setError(null);
+      setMessages((m) => [...m, { role: "user", content: text }]);
+      setThinking(true);
+      try {
+        const res = await fetch("/api/director/coach", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: threadId ?? undefined, message: text, action: "chat", intent }),
+        });
+        const d = await res.json();
+        const t = d.thread as Thread | null;
+        if (t) {
+          setThreadId(t.id);
+          setMessages(t.messages);
+          setActions(t.pending_actions || []);
+        } else {
+          setError(d.error || "Could not start the turn.");
+          setThinking(false);
+        }
+      } catch {
+        setError("Network error.");
+        setThinking(false);
+      }
+    },
+    [input, thinking, threadId],
+  );
+
+  const decide = useCallback(
+    async (actionId: string, decision: "approve" | "decline") => {
+      if (!threadId) return;
+      setError(null);
+      if (decision === "approve") setThinking(true);
+      try {
+        const res = await fetch("/api/director/coach", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: threadId, actionId, decision, action: "approve" }),
+        });
+        const d = await res.json();
+        const t = d.thread as Thread | null;
+        if (t) {
+          setActions(t.pending_actions || []);
+          setMessages(t.messages);
+        }
+      } catch {
+        setError("Network error.");
+        setThinking(false);
+      }
+    },
+    [threadId],
+  );
+
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800">
+      <div ref={scrollRef} className="max-h-96 space-y-3 overflow-y-auto p-3">
+        {!messages.length && (
+          <p className="px-1 py-6 text-center text-[12px] text-zinc-400">
+            Ask Ada why she has or hasn&apos;t done something — &ldquo;why haven&apos;t you built spec X?&rdquo; She explains from her real state. When you want to change how she acts, press <span className="font-medium">Coach her</span> and she&apos;ll turn it into a rule you confirm.
+          </p>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div className={`max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-[13px] ${m.role === "user" ? "bg-indigo-600 text-white" : "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100"}`}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+
+        {/* Coaching / spec approval cards. */}
+        {actions.map((a) => (
+          <div key={a.id} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-[12px] dark:border-amber-800 dark:bg-amber-950/30">
+            <div className="flex items-center gap-2">
+              <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-medium text-amber-900 dark:bg-amber-800 dark:text-amber-100">
+                {a.type === "coaching" ? "new coaching rule" : "spec handoff"}
+              </span>
+              <span className="font-medium text-zinc-800 dark:text-zinc-100">{a.summary}</span>
+            </div>
+            {a.type === "coaching" && a.guidance && <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">“{a.guidance}”{a.reasoning ? ` — ${a.reasoning}` : ""}</p>}
+            {a.type === "spec" && a.slug && <p className="mt-1.5 font-mono text-[11px] text-zinc-500">specs/{a.slug}.md</p>}
+            {a.status === "pending" ? (
+              <div className="mt-2 flex gap-2">
+                <button onClick={() => decide(a.id, "approve")} className="rounded bg-green-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-green-700">
+                  {a.type === "coaching" ? "Apply rule" : "Approve"}
+                </button>
+                <button onClick={() => decide(a.id, "decline")} className="rounded border border-zinc-300 px-2.5 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                  Dismiss
+                </button>
+              </div>
+            ) : (
+              <p className={`mt-2 text-[11px] font-medium ${a.status === "done" ? "text-green-600 dark:text-green-400" : a.status === "failed" ? "text-red-600 dark:text-red-400" : "text-zinc-500"}`}>
+                {a.status === "done" ? "✓ applied" : a.status}{a.result ? ` — ${a.result}` : ""}
+              </p>
+            )}
+          </div>
+        ))}
+
+        {thinking && <p className="px-1 text-[12px] text-zinc-400">Ada is thinking… (a box turn runs on Max — up to a couple of minutes)</p>}
+        {error && <p className="px-1 text-[12px] text-red-600 dark:text-red-400">{error}</p>}
+      </div>
+
+      <div className="border-t border-zinc-200 p-2 dark:border-zinc-800">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              void send("ask");
+            }
+          }}
+          placeholder="Ask Ada anything about what she's doing…"
+          rows={2}
+          className="w-full resize-none rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-[13px] text-zinc-800 outline-none placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+        />
+        <div className="mt-1.5 flex items-center justify-end gap-2">
+          <span className="mr-auto text-[10px] text-zinc-400">⌘↵ to ask</span>
+          <button
+            onClick={() => void send("ask")}
+            disabled={thinking || !input.trim()}
+            className="rounded-md border border-zinc-300 px-3 py-1.5 text-[12px] font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            Ask
+          </button>
+          <button
+            onClick={() => void send("coach")}
+            disabled={thinking || !input.trim()}
+            title="Turn what you just wrote into a durable rule she'll follow going forward (you'll confirm it)"
+            className="rounded-md bg-indigo-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
+          >
+            Coach her
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

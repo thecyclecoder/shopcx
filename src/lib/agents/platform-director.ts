@@ -543,7 +543,7 @@ export interface FixEscortResult {
 
 /**
  * Escort the work both other lanes miss — **0-phase authored fix specs** (worker-grading-and-director-
- * management Phase 4, folding director-escort-inflight-specs). The two existing lanes between them already
+ * management Phase 4; absorbed the removed director-escort-inflight-specs gap). The two existing lanes already
  * drive *started* work: escortApprovedGoals walks goal→milestone→spec trees, and board-grooming
  * (findGroomCandidates) drives every in-flight spec (≥1 ✅ + ≥1 ⏳) via a careful Max continue/split/escalate
  * investigation, regardless of goal linkage. The remaining gap is a spec authored by the box Repair /
