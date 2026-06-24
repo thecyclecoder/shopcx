@@ -86,13 +86,15 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
   const lines = raw.split("\n");
   const phases: DriftPhase[] = [];
 
-  // Primary: one "## Phase …" heading per phase.
+  // Primary: a phase heading at H2 (`## Phase …`) OR H3 (`### Phase …` under a `## Phases` wrapper). Matching
+  // only H2 left H3-phase specs with zero phases → stuck at `planned`. `Phase\b` skips the `## Phases` wrapper.
+  const isPhaseHeading = (l: string) => /^#{2,3}\s+Phase\b/.test(l);
   for (let i = 0; i < lines.length; i++) {
-    if (!/^##\s+Phase\b/.test(lines[i])) continue;
+    if (!isPhaseHeading(lines[i])) continue;
     let emojiLine = i;
     let st = statusFromText(lines[i]);
     if (!st) {
-      for (let j = i + 1; j < lines.length && !lines[j].startsWith("## "); j++) {
+      for (let j = i + 1; j < lines.length && !lines[j].startsWith("## ") && !isPhaseHeading(lines[j]); j++) {
         const s = statusFromText(lines[j]);
         if (s) {
           st = s;
@@ -101,12 +103,12 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
         }
       }
     }
-    // Body = heading line → next "## " heading.
+    // Body = heading line → the next phase heading (H2/H3) or the next top-level "## " section.
     let end = i + 1;
-    while (end < lines.length && !lines[end].startsWith("## ")) end++;
+    while (end < lines.length && !lines[end].startsWith("## ") && !isPhaseHeading(lines[end])) end++;
     phases.push({
       index: phases.length,
-      title: cleanTitle(lines[i].replace(/^##\s+/, "")),
+      title: cleanTitle(lines[i].replace(/^#{2,3}\s+/, "")),
       status: st ?? "planned",
       emojiLine,
       body: lines.slice(i, end).join("\n"),
