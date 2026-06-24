@@ -11,7 +11,16 @@ import { PersonaAvatar, WorkerStatusBadge, type WorkerLiveness } from "@/compone
 // its `/dashboard/agents/[role]` profile + precise responsibilities. Brain-driven via
 // GET /api/developer/agents (the Control Tower registry's agent-kind loops).
 
-interface WorkerLane { kind: string; label: string; description: string; status: WorkerLiveness; statusReason?: string; flagged?: boolean }
+interface WorkerLane { kind: string; label: string; description: string; status: WorkerLiveness; statusReason?: string; flagged?: boolean; loopKind?: string }
+
+// How this agent runs — surfaced as a small type chip so a human can tell a box lane from a cron / reactive
+// agent at a glance. agent-kind = a box claude -p lane; cron = scheduled; reactive = fired by an event.
+const LOOP_TYPE: Record<string, { label: string; cls: string }> = {
+  "agent-kind": { label: "lane", cls: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300" },
+  cron: { label: "cron", cls: "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300" },
+  reactive: { label: "reactive", cls: "bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300" },
+  "inline-agent": { label: "inline", cls: "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300" },
+};
 interface DirectorNode {
   slug: string;
   title: string;
@@ -48,7 +57,8 @@ function ScoreBadge({ score }: { score?: Rollup }) {
 }
 
 function AgentChip({ worker, score }: { worker: WorkerLane; score?: Rollup }) {
-  const { kind, label, description, status, statusReason, flagged } = worker;
+  const { kind, label, description, status, statusReason, flagged, loopKind } = worker;
+  const loopType = loopKind ? LOOP_TYPE[loopKind] : undefined;
   const persona = getPersona(kind, label);
   return (
     <Link
@@ -64,6 +74,11 @@ function AgentChip({ worker, score }: { worker: WorkerLane; score?: Rollup }) {
         </span>
         <span className="mt-0.5 flex items-center gap-1.5">
           <span className="truncate font-mono text-[10px] text-zinc-400">{kind}</span>
+          {loopType && (
+            <span title={`Runs as a ${loopKind} loop`} className={`rounded px-1 text-[9px] font-medium ${loopType.cls}`}>
+              {loopType.label}
+            </span>
+          )}
           {flagged && (
             <span
               title="Live lane with no MONITORED_LOOPS row — flagged by the roster drift audit."
