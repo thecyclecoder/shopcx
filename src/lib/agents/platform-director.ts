@@ -648,10 +648,28 @@ export const PLATFORM_DIRECTOR_RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 
 /** A build job's status means it FAILED (the loop-guard counts these). Everything else = active or landed. */
 const FAILED_BUILD_STATUSES: ReadonlySet<string> = new Set(["failed", "needs_attention"]);
 
+/**
+ * A build job's status means it is ACTIVELY building (don't re-queue — a duplicate would result). A LANDED
+ * build (`completed` / `merged`) is deliberately NOT here: a phase that just landed should TRIGGER the next
+ * phase via grooming, not start a cooldown. See docs/brain/specs/groom-advance-next-phase-after-merge.md.
+ */
+const ACTIVE_BUILD_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "building",
+  "needs_input",
+  "needs_approval",
+  "queued_resume",
+]);
+
 /** One escort spec's build state — what the escort reads to decide queue vs in-flight vs loop-guard. */
 export interface SpecBuildState {
-  /** an active (queued/building/…) or already-landed (completed/merged) build exists → leave it alone. */
+  /**
+   * an active (queued/building/…) OR already-landed (completed/merged) build exists. Back-compat signal for
+   * the escort's duplicate-guard; grooming gates on {@link activeBuild} instead so a merged phase advances.
+   */
   inFlight: boolean;
+  /** an ACTIVE (queued/building/needs_input/needs_approval/queued_resume) build exists — a landed one does NOT count. */
+  activeBuild: boolean;
   /** failed/needs_attention build attempts within the window. */
   failedCount: number;
   /** the most recent failure's error text (for the diagnosis). */
@@ -678,6 +696,7 @@ export async function specBuildState(admin: Admin, workspaceId: string, specSlug
     .limit(20);
   const rows = (data ?? []) as Array<{ status?: string; error?: string | null }>;
   let inFlight = false;
+  let activeBuild = false;
   let failedCount = 0;
   let lastError: string | null = null;
   for (const r of rows) {
@@ -686,10 +705,11 @@ export async function specBuildState(admin: Admin, workspaceId: string, specSlug
       failedCount++;
       if (lastError === null && r.error) lastError = String(r.error);
     } else {
-      inFlight = true; // queued / building / needs_input / needs_approval / queued_resume / completed / merged
+      inFlight = true; // active OR landed: queued / building / needs_input / needs_approval / queued_resume / completed / merged
+      if (ACTIVE_BUILD_STATUSES.has(status)) activeBuild = true; // active only — a landed (completed/merged) build does NOT block grooming
     }
   }
-  return { inFlight, failedCount, lastError, total: rows.length };
+  return { inFlight, activeBuild, failedCount, lastError, total: rows.length };
 }
 
 /**
@@ -1020,7 +1040,7 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
   for (const s of partial) {
     if (out.length >= PLATFORM_DIRECTOR_GROOM_CAP) break;
     const state = await specBuildState(admin, workspaceId, s.slug);
-    if (state.inFlight) continue; // an active/landed build is handling it — not "no active build"
+    if (state.activeBuild) continue; // an ACTIVE build is carrying it — a merged/completed (landed) build does NOT block: a landed phase should advance the next ⏳ phase
     if (await alreadyGroomed(admin, s.slug)) continue; // already split/escalated (handles the box's stale fs)
     const got = await getSpec(s.slug);
     if (!got) continue;

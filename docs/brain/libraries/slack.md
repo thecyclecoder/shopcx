@@ -151,6 +151,16 @@ function buildNewTicketMessage(data: { ticketId: string; ticketNumber?: string; 
 - `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` ([[../integrations/slack-roadmap-console]])
 - `src/lib/slack-notify.ts` · `src/lib/slack-roadmap.ts` · `src/lib/slack-home.ts` · `src/lib/slack-identity.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
 
+## Fetch hardening (`slackFetch`)
+
+Every Slack API call goes through a private `slackFetch(url, init)` wrapper (added by [[../specs/slack-fetch-timeout-hardening]]):
+
+- **Per-request timeout** — `AbortSignal.timeout(SLACK_TIMEOUT_MS = 5000)`. On timeout `fetch` rejects with a `TimeoutError`, which propagates to the caller's `try/catch`. This is the fix for the `loop:slack-roadmap-notify` hang: an un-timed fetch against a slow Slack endpoint froze the per-minute cron past Inngest's budget (killed before `emitCronHeartbeat`), going freshness-red. A thrown error still lets the heartbeat fire — one slow tick, not an open-ended outage.
+- **Bounded 429 retry** — on HTTP 429 it honors `Retry-After` capped at `SLACK_MAX_RETRY_WAIT_MS = 3000`, up to `SLACK_MAX_RETRIES = 2` times, then returns the 429 response.
+- **Pagination cap** — `listChannels`' `collect` loop is bounded by `SLACK_MAX_PAGES = 20` (× `limit:200` = 4000 channels) so a never-emptying `next_cursor` can't fetch forever.
+
+`slackFetch` throws on timeout/network error (fail fast); the `result.ok` checks still handle Slack-level API errors as before.
+
 ## Gotchas
 
 - **Inbound signature verification needs the raw body.** Read `await request.text()` and verify **before** parsing — verifying a re-serialized body fails the HMAC.
