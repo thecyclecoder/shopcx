@@ -57,7 +57,7 @@ Under a spec's H1, one-per-concept bold metadata lines, each resolving `[[wikili
 
 ## Callers
 
-`src/app/dashboard/roadmap/**` (board, `[slug]`, map, goals, functions) · `src/lib/roadmap-actions.ts` (the build gate) · `src/lib/slack-home.ts` / `slack-roadmap.ts` (Slack console) · the spec-test cron ([[../specs/spec-test-agent]]) · `src/lib/brain-links.ts`.
+`src/app/dashboard/roadmap/**` (board, `[slug]`, map, goals, functions) · `src/lib/roadmap-actions.ts` (the build gate) · the spec-test cron ([[../specs/spec-test-agent]]) · `src/lib/brain-links.ts`.
 
 ## Gotchas
 

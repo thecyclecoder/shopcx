@@ -1,6 +1,8 @@
 # libraries/slack-identity
 
-Slack user → ShopCX member bridge for the [[../integrations/slack-roadmap-console|Slack Roadmap Console]]. A **UX filter, not the security boundary** — the real gate is re-checked server-side in [[roadmap-actions]].
+> **Deprecated (2026-06-24):** built for the since-removed Slack roadmap console; retained as a record.
+
+Slack user → ShopCX member bridge for the former Slack roadmap console. A **UX filter, not the security boundary** — the real gate is re-checked server-side in [[roadmap-actions]].
 
 **File:** `src/lib/slack-identity.ts`
 
@@ -28,7 +30,7 @@ True only for `role === "owner"` — the one role allowed to mutate from Slack.
 
 ## Related
 
-[[../integrations/slack-roadmap-console]] · [[roadmap-actions]] · [[slack]] · [[../tables/workspace_members]]
+[[roadmap-actions]] · [[slack]] · [[../tables/workspace_members]]
 
 ---
 

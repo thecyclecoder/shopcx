@@ -150,7 +150,6 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Roadmap Build Console — describe → spec → autonomous build → merge, all from the web app** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
 - **Roadmap status accuracy — phase-consensus + live-job board status** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
 - **Slack Home detail — make the App Home a destination, retire the List** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
-- **Slack Roadmap Console — run the build console from Slack** · verified 2026-06-19 · → [[integrations/slack-roadmap-console]]
 - **Slack Roadmap Home — mirror the board to the App Home tab (view + build, not messages)** · verified 2026-06-19 · → [[libraries/slack-home]]
 - **Spec lifecycle + archival — verify → fold → archive → re-hydrate** · verified 2026-06-19 · → [[lifecycles/roadmap-build-console]]
 - **Verification guides — "how to test this" on the spec detail page** · verified 2026-06-19 · → [[dashboard/roadmap]]

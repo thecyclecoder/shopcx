@@ -1,6 +1,8 @@
 # libraries/slack-home
 
-App **Home tab** for the [[../integrations/slack-roadmap-console|Slack Roadmap Console]] — the App Home is a **destination, not a launcher** ([[../specs/slack-home-detail]]). The roadmap board is mirrored onto the ShopCX app's persistent, app-owned Block Kit surface (NOT a message): specs grouped **In progress / Planned / Shipped** with counts + a build-box health header, each a **compact one-line row with a single Details affordance**. Tapping **Details** opens an in-Slack **modal** carrying the spec's full detail — and the build/verify actions live IN the modal, so you review + build a spec end-to-end without leaving Slack. **Pure rendering, no token spend**; rebuilt from `getRoadmap()` / `getSpec()` ([[brain-roadmap]]) on every open, so it never drifts from the brain.
+> **Deprecated (2026-06-24):** the Slack roadmap console this page served has been removed; the roadmap build console is web-app-only now. Retained as a record of the App-Home surface.
+
+App **Home tab** for the former Slack roadmap console — the App Home was a **destination, not a launcher** ([[../specs/slack-home-detail]]). The roadmap board is mirrored onto the ShopCX app's persistent, app-owned Block Kit surface (NOT a message): specs grouped **In progress / Planned / Shipped** with counts + a build-box health header, each a **compact one-line row with a single Details affordance**. Tapping **Details** opens an in-Slack **modal** carrying the spec's full detail — and the build/verify actions live IN the modal, so you review + build a spec end-to-end without leaving Slack. **Pure rendering, no token spend**; rebuilt from `getRoadmap()` / `getSpec()` ([[brain-roadmap]]) on every open, so it never drifts from the brain.
 
 **File:** `src/lib/slack-home.ts`
 
@@ -12,7 +14,7 @@ App **Home tab** for the [[../integrations/slack-roadmap-console|Slack Roadmap C
   - `roadmap_verify:{slug}` — Mark verified & archive (coalesces into a batch fold-build)
   - `roadmap_details:{slug}` — open the spec-detail modal
   - `roadmap_home_open:{slug}` — legacy URL button (no-op ack; older published views may still carry it)
-- `buildHomeView(workspaceId)` → a Block Kit `{ type: "home", blocks }` view. Reads `getRoadmap()` + live [[../tables/agent_jobs]] (`getLatestJobsBySlug`) + `getPendingFolds` + a [[../tables/worker_heartbeats]] health line; reuses [[slack-roadmap]]'s `jobChip` for the status chip. Header carries a **counts line** (`In progress N · Planned N · Shipped N`) + a 🟢/🔴 build-box health summary. Each spec is a **single section row** with a **Details** button accessory; **capped per group (20 / 20 / 16)** with a "full board ↗" link so nothing is silently dropped.
+- `buildHomeView(workspaceId)` → a Block Kit `{ type: "home", blocks }` view. Reads `getRoadmap()` + live [[../tables/agent_jobs]] (`getLatestJobsBySlug`) + `getPendingFolds` + a [[../tables/worker_heartbeats]] health line; reuses a shared `jobChip` for the status chip. Header carries a **counts line** (`In progress N · Planned N · Shipped N`) + a 🟢/🔴 build-box health summary. Each spec is a **single section row** with a **Details** button accessory; **capped per group (20 / 20 / 16)** with a "full board ↗" link so nothing is silently dropped.
 - `buildSpecModal(spec, raw, job, fold, owner)` → the **spec-detail modal** view. Renders `slug` · status · chip, **owner · parent**, summary, **phases** (✅/🚧/⏳, numbered to match Build N), the **`## Verification`** how-to-test steps (`extractSpecSection(raw, "Verification")`), and — **for the owner only** — an actions block: **Build all**, per-phase **Build N** (cap 4), and **Mark verified & archive** (only when the spec is shipped with no active build/fold, mirroring the dashboard's `canVerify` gate). "Open in ShopCX" demotes to a small **footer link**.
 - `buildSpecConfirmModal(title, text)` → a small confirmation view shown **in place** (`views.update`) after a build/verify action fired from the spec modal.
 - `publishHome(token, slackUserId, view)` — thin wrapper over [[slack]] `publishHomeView` (`views.publish`).
@@ -37,7 +39,7 @@ App **Home tab** for the [[../integrations/slack-roadmap-console|Slack Roadmap C
 
 ## Related
 
-[[../integrations/slack-roadmap-console]] · [[slack]] · [[slack-roadmap]] · [[slack-identity]] · [[roadmap-actions]] · [[brain-roadmap]] · [[../tables/agent_jobs]] · [[../tables/worker_heartbeats]] · [[../dashboard/roadmap]]
+[[slack]] · [[slack-identity]] · [[roadmap-actions]] · [[brain-roadmap]] · [[../tables/agent_jobs]] · [[../tables/worker_heartbeats]] · [[../dashboard/roadmap]]
 
 ---
 
