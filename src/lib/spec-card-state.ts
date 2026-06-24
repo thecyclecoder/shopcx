@@ -61,6 +61,22 @@ export function rollupPhaseStatus(phaseStates: SpecCardPhaseState[]): Phase {
   return "planned";
 }
 
+/**
+ * Forward-merge the markdown-parsed phases with the DB mirror's per-phase states: each phase shows whichever
+ * source is MORE advanced (planned < in_progress < shipped), matched by index. So the board reflects per-phase
+ * progress from the DB mirror INSTANTLY on each phase's merge — no waiting for the markdown bundle to redeploy —
+ * and neither stale source ever regresses a phase. The board's overall column already uses resolveBoardStatus;
+ * this is the same DB-first treatment for the per-phase checkmarks (fixes phases reading stale during a build).
+ */
+export function mergePhaseStates<T extends { status: Phase }>(markdownPhases: T[], state: SpecCardState | undefined): T[] {
+  if (!state?.phase_states?.length) return markdownPhases;
+  const byIndex = new Map(state.phase_states.map((p) => [p.index, p.status]));
+  return markdownPhases.map((p, i) => {
+    const dbStatus = byIndex.get(i);
+    return dbStatus !== undefined && PHASE_RANK[dbStatus] > PHASE_RANK[p.status] ? { ...p, status: dbStatus } : p;
+  });
+}
+
 /** Every spec_card_state row for a workspace, keyed by spec slug — the board's DB-first read. */
 export async function getSpecCardStates(workspaceId: string): Promise<Record<string, SpecCardState>> {
   const admin = createAdminClient();
