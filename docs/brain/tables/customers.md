@@ -158,6 +158,7 @@ const { data } = await admin.from("customers")
 - `banned` (storefront ban) vs `portal_banned` (customer portal ban) are different flags.
 - Email is the matching key but **`shopify_customer_id` is the primary lookup** — match by it first, fall back to email. See feedback_shopify_id_primary.
 - **Email matching uses `ILIKE` (case-insensitive)** across checkout/lead/OTP/identity paths. The `(workspace_id, email)` btree CANNOT serve `ILIKE` → seq scans. A **trigram GIN index `idx_customers_email_trgm`** (`pg_trgm` + `btree_gin`, migration `20260614180000`) backs it (~4ms). If you add a new email-match query, keep it `ILIKE` (or the trigram won't help) — don't reintroduce a plain btree expecting it to serve case-insensitive matches.
+- **Account-match branches each ride their own index.** `findUnlinkedMatches` ([[../libraries/account-matching]]) matches duplicates by name, phone, and email as **separate** indexed queries — never a single `.or()`, which forced a full Seq Scan of this 620k-row table and intermittently 500'd PostgREST under concurrent portal-bootstrap load (Control Tower signature `supabase-logs:b5db594131381078`). The supporting indexes: `idx_customers_name_match (workspace_id, first_name, last_name)`, `idx_customers_phone (workspace_id, phone)` partial, and `idx_customers_email_trgm` for the email branch — `idx_customers_name_match` + `idx_customers_phone` added in migration `20260706130000` (`CREATE INDEX CONCURRENTLY`, no lock on the hot table). Add a new match branch → add a matching index and keep it a separate query.
 
 ---
 
