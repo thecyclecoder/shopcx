@@ -227,6 +227,16 @@ export interface MonitoredLoop {
   registeredAt?: string;
   /** agent-kind only: the agent_jobs.kind this loop maps to. */
   agentKind?: string;
+  /**
+   * Roster-linkage (agent-roster-sync spec, Phase 1): the [[../libraries/agent-personas]] persona
+   * key (personas.ts) a NON-`agent-kind` loop maps to a worker on the org view — so a personified
+   * platform cron declares its persona EXPLICITLY rather than by guesswork. `control-tower-monitor`
+   * (no `agentKind`) → "monitor" (Tao); both `db-health-*` crons → "db_health" (Devi). The org-chart
+   * reader ([[../libraries/org-chart]] `getOrgChart`) surfaces every `personaKind` cron as a worker
+   * (deduped by key, so the two db-health crons render as ONE Devi), keeping `agentKind` for the
+   * queue lanes. Unset ⇒ a pure infra cron (a Control Tower tile only, not an org-view worker).
+   */
+  personaKind?: string;
   /** agent-kind only: a queued/building job older than this is "stuck" → alert. */
   stuckThresholdMs?: number;
   /**
@@ -374,6 +384,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "The watchdog itself — so a dead monitor is visible too.",
     expectedCadence: "every 15 min (*/15 * * * *)",
     livenessWindowMs: 45 * MIN,
+    personaKind: "monitor", // Tao — surfaces this cron as a Platform worker on the org view (agent-roster-sync P1)
   },
   {
     id: "supabase-log-poll-cron",
@@ -420,6 +431,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every ~hour (box job)",
     livenessWindowMs: 2 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
+    personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
   },
   {
     // BOX-EMITTED — the DB Health Agent's daily size/growth/index/bloat sweep (db-health-agent P1).
@@ -433,6 +445,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "daily (box job)",
     livenessWindowMs: 26 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
+    personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
   },
 
   // ── Full Inngest cron coverage (control-tower-complete-coverage spec, Phase 1) ──
