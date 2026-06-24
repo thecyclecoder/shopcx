@@ -82,6 +82,18 @@ export async function GET() {
     .select("running_sha, status, active_builds, detail, last_poll_at, started_at, build_lanes, fold_lanes, lanes, accounts")
     .eq("id", "box")
     .maybeSingle();
+  // Queue-restart drain state (worker_controls) — so the box page can show "draining" + toggle it.
+  const { data: ctrl } = await admin
+    .from("worker_controls")
+    .select("drain_for_update, requested_at_sha, requested_by, requested_at")
+    .eq("box_id", "box")
+    .maybeSingle();
+  const drain = {
+    draining: !!ctrl?.drain_for_update,
+    requested_at_sha: (ctrl?.requested_at_sha as string | null) ?? null,
+    requested_by: (ctrl?.requested_by as string | null) ?? null,
+    requested_at: (ctrl?.requested_at as string | null) ?? null,
+  };
   const worker = hb
     ? {
         running_sha: hb.running_sha as string | null,
@@ -179,5 +191,5 @@ export async function GET() {
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
     .slice(0, 20);
 
-  return NextResponse.json({ worker, queue, paused, failed });
+  return NextResponse.json({ worker, queue, paused, failed, drain });
 }

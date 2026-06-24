@@ -314,6 +314,8 @@ export default function BoxPage() {
   const [failed, setFailed] = useState<FailedJob[]>([]);
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
+  const [drain, setDrain] = useState<{ draining: boolean; requested_by: string | null } | null>(null);
+  const [drainBusy, setDrainBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -326,6 +328,7 @@ export default function BoxPage() {
           setQueue(d.queue ?? []);
           setPaused(d.paused ?? []);
           setFailed(d.failed ?? []);
+          setDrain(d.drain ?? null);
         })
         .catch(() => {})
         .finally(() => alive && setLoading(false));
@@ -353,6 +356,22 @@ export default function BoxPage() {
     }
   };
 
+  const toggleDrain = async (next: boolean) => {
+    setDrainBusy(true);
+    setDrain((d) => ({ draining: next, requested_by: d?.requested_by ?? null })); // optimistic
+    try {
+      await fetch("/api/roadmap/box/drain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drain: next }),
+      });
+    } catch {
+      /* next poll reflects real state */
+    } finally {
+      setDrainBusy(false);
+    }
+  };
+
   if (workspace.role !== "owner") {
     return (
       <div className="p-6">
@@ -370,14 +389,37 @@ export default function BoxPage() {
     <div className="mx-auto w-full max-w-screen-xl p-6">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Build box</h1>
-        <Link href="/dashboard/roadmap" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
-          ← Roadmap
-        </Link>
+        <div className="flex items-center gap-3">
+          {drain && (
+            <button
+              onClick={() => void toggleDrain(!drain.draining)}
+              disabled={drainBusy}
+              title={drain.draining ? "Cancel the drain — resume claiming builds now" : "Pause new builds so in-flight lanes finish, the box goes idle and self-updates (SHA advances), then claiming resumes"}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+                drain.draining
+                  ? "bg-amber-500 text-white hover:bg-amber-600"
+                  : "border border-zinc-300 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              }`}
+            >
+              {drain.draining ? "Cancel queue restart" : "Queue restart"}
+            </button>
+          )}
+          <Link href="/dashboard/roadmap" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+            ← Roadmap
+          </Link>
+        </div>
       </div>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
         Live view of the self-hosted build worker — health, lanes, and what each lane is building right now. Read-only;
         pausing or killing lanes is a CLI job. Polls every ~5s.
       </p>
+
+      {drain?.draining && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
+          ⏳ Queue restart staged{drain.requested_by ? ` by ${drain.requested_by}` : ""} — new builds are queuing; the box
+          finishes in-flight lanes, goes idle, self-updates (SHA advances), then resumes. {worker?.active_builds ? `${worker.active_builds} lane(s) still draining.` : "Idle — updating shortly."}
+        </div>
+      )}
 
       {loading && !worker ? (
         <div className="py-12 text-center text-sm text-zinc-400">Loading…</div>
