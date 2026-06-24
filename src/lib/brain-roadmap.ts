@@ -29,6 +29,9 @@ export interface SpecCard {
   slug: string;
   title: string;
   status: SpecStatus;
+  /** **Priority:** critical flag (director-executable-plans-and-priority) — orthogonal to status; the build
+   *  lanes order a critical spec ahead of normal ones, and it can gate the queue until it ships. */
+  critical?: boolean;
   summary: string;
   phases: SpecPhase[];
   counts: Record<Phase, number>;
@@ -246,10 +249,16 @@ function parseSpec(slug: string, raw: string): SpecCard {
     (l) => /^\s*\*\*Deferred:\*\*/i.test(l) || /^\s*\*\*Status:\*\*\s*deferred\b/i.test(l),
   );
 
+  // **Priority:** critical — a first-class priority flag (director-executable-plans-and-priority), ORTHOGONAL
+  // to phase status (a spec can be planned+critical or in-progress+critical). Line-anchored like Deferred so a
+  // prose mention in backticks isn't a false positive. Build lanes order a critical spec first (+ can gate).
+  const critical = lines.some((l) => /^\s*\*\*Priority:\*\*\s*critical\b/i.test(l));
+
   return {
     slug,
     title,
     status: deriveStatus(counts, titleStatus, deferred),
+    critical,
     summary: firstParagraph(lines),
     phases,
     counts,
