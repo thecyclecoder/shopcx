@@ -1449,6 +1449,18 @@ async function runDbHealthSizeJob(): Promise<void> {
   }
 }
 
+// Append the agent's active coaching (agent_instructions for job.kind) to its LLM prompt — the
+// grade→coach→apply loop. Keyed on job.kind so any coachable agent (build/plan/fold/pr-resolve/dev-ask/
+// repair/regression…) automatically gets its learnings injected. Best-effort: never breaks a run.
+async function withCoaching(job: Job, prompt: string): Promise<string> {
+  try {
+    const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
+    return await appendAgentInstructions(db, job.workspace_id, job.kind, prompt);
+  } catch {
+    return prompt;
+  }
+}
+
 // Owner Build on a surfaced db_health proposal (resume on queued_resume). Materialize the pre-authored
 // fix spec to main + queue the build — the owner-gate. (Dismiss resolves directly in the POST route.)
 async function runDbHealthJob(job: Job) {
@@ -2247,7 +2259,7 @@ async function runPlanJob(job: Job) {
         `SELF-SEQUENCING (goal-decomposition-encodes-blockers): every proposed branch MUST declare its prerequisites as \`blocked_by\`: a (possibly empty) list of the slugs it depends on — each slug MUST reference another proposed spec in THIS tree or an already-existing spec under docs/brain/specs/. The graph MUST be acyclic (no spec blocks itself, directly or transitively). Foundation specs that nothing precedes have \`blocked_by: []\`; a spec that needs a framework/memory/metric built first lists those slugs. Do NOT over-serialize independent branches — only list a real build-order dependency. The approved tree becomes self-sequencing: only unblocked specs build immediately, dependents auto-queue as their blockers ship.`,
         `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","summary":"<title>","preview":"<intent>\\n\\nGap: <brain citation>","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…","blocked_by":["<sibling-or-existing-slug>"]}}]} | {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id":"q1","q":"…"}]}.`,
       ].join("\n");
-      const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt, configDir);
+      const { session, resultText, isError, raw } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
       if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
       if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
         await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
@@ -2339,7 +2351,7 @@ async function runPlanJob(job: Job) {
       `Final message = ONLY {"status":"completed","summary":"authored N specs: …"} (or {"status":"needs_input","questions":[…]} only if a spec is genuinely under-specified).`,
     ].join("\n");
 
-    const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt, configDir);
+    const { session, resultText, isError, raw } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
     if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
       await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
@@ -2500,7 +2512,7 @@ async function runFoldJob(job: Job) {
       ? `${(job.answers || []).length ? `Answers to your questions: ${JSON.stringify(job.answers)}. ` : ""}Continue the batch fold-build for specs: ${slugs.join(", ")}. Same rules and the same final JSON output protocol as before.`
       : foldBatchPrompt(slugs);
 
-    const { session, resultText, isError, raw } = await runClaude(prompt, job.claude_session_id, wt);
+    const { session, resultText, isError, raw } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt);
     const logTail = raw.slice(-2000);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText);
@@ -4221,7 +4233,7 @@ async function runDeveloperMessageJob(job: Job) {
       ? `${latest}\n\n${DEV_ASK_OUTPUT}`
       : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
 
-    const { session, resultText, isError, raw } = await runDevAskClaude(prompt, sessionId, wt);
+    const { session, resultText, isError, raw } = await runDevAskClaude(await withCoaching(job, prompt), sessionId, wt);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
@@ -4633,7 +4645,7 @@ async function runPrResolveJob(job: Job) {
       `  {"status":"escalate","reason":"<why it needs a human merge or a rebuild — one line>"}`,
     ].join("\n");
 
-    const { session, resultText, isError, raw } = await runPrResolveClaude(prompt, null, wt);
+    const { session, resultText, isError, raw } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText) as { status?: string; reason?: string; summary?: string } | null;
     const reason = String(parsed?.reason || parsed?.summary || "").slice(0, 500);
