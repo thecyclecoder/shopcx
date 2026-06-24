@@ -25,6 +25,9 @@ interface LaneRow {
   // Which phase a chained/per-phase build is on (e.g. "Phase 2"); null for a whole-spec or non-build
   // lane (box-lane-show-phase). Written by the worker's heartbeat; passed through as-is.
   phase?: string | null;
+  // For a director-coach lane only: the turn's intent (ask|coach), enriched from the job instructions
+  // below so the box shows "Asking Ada" vs "Coaching Ada" by which button the CEO pushed.
+  intent?: string | null;
 }
 
 // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). Written by the worker's
@@ -95,6 +98,25 @@ export async function GET() {
         accounts: (hb.accounts && (hb.accounts as AccountsSnapshot).pool ? (hb.accounts as AccountsSnapshot) : null),
       }
     : null;
+
+  // Enrich director-coach lanes with their turn intent (ask|coach) from the job instructions, so the box
+  // can render "Asking Ada" vs "Coaching Ada" by which button the CEO pushed.
+  if (worker?.lanes?.length) {
+    const coachIds = worker.lanes.filter((l) => l.kind === "director-coach" && l.job_id).map((l) => l.job_id);
+    if (coachIds.length) {
+      const { data: cj } = await admin.from("agent_jobs").select("id, instructions").in("id", coachIds);
+      const intentById = new Map<string, string>();
+      for (const j of (cj || []) as Array<{ id: string; instructions: string | null }>) {
+        try {
+          const i = JSON.parse(j.instructions || "{}");
+          if (i.intent) intentById.set(j.id, String(i.intent));
+        } catch {
+          /* not JSON */
+        }
+      }
+      worker.lanes = worker.lanes.map((l) => (l.kind === "director-coach" && intentById.has(l.job_id) ? { ...l, intent: intentById.get(l.job_id) ?? null } : l));
+    }
+  }
 
   // Open jobs (live, actionable layer) for queue depth + paused callouts.
   const { data: jobsData } = await admin
