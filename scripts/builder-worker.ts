@@ -325,7 +325,14 @@ function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string 
 // build lanes actually overlap. spawnSync freezes the whole event loop and would serialize lanes.
 function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd || REPO_DIR, env: opts.env || process.env });
+    // ada-director-spec-status-cards-fix-tooling-fa6848: redirect stdin from /dev/null. Default `spawn`
+    // leaves stdin as an open pipe never written to — the `claude -p` CLI sees that, waits 3s for input,
+    // emits "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command,
+    // redirect stdin explicitly: < /dev/null to skip, or wait longer." and proceeds. That wasted wait
+    // showed up under multiple parked security-review jobs (fa6848a7, 69594acf — same evidence shape).
+    // Closing stdin is the CLI's own recommended fix; it's strictly additive — no callers write to stdin
+    // (every command is `claude -p prompt …` / git / npx tsc / bash -lc, none of which read from stdin).
+    const child = spawn(cmd, args, { cwd: opts.cwd || REPO_DIR, env: opts.env || process.env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     let killed: "idle" | "hardcap" | undefined;
@@ -968,8 +975,13 @@ function parseStatus(text: string): { status: string; questions?: unknown[]; sum
   return null;
 }
 
-// Generic last-JSON-object extractor for the solver/skeptic passes (they emit a final JSON object that
-// is NOT a {"status":…} envelope). Tries raw → fenced ```json``` → the widest {…} span.
+// Generic last-JSON-object extractor for the solver/skeptic + review-verdict passes (they emit a final
+// JSON object as the closing message). Tries whole-text → every fenced ```json``` block (last-wins) →
+// the LAST balanced {…} that parses (right-to-left close-brace scan, left-to-right open-brace match) —
+// so an envelope with prose-braces BEFORE it (`{like this}` in a quote, a JSON-shaped excerpt in the
+// review text, an example JSON in an earlier fenced block) no longer breaks parsing. Strictly additive
+// vs the prior greedy first-to-last span: it only finds MORE valid JSONs, never fewer.
+// (ada-director-spec-status-cards-fix-tooling-fa6848 P1.)
 function extractJson<T = Record<string, unknown>>(text: string): T | null {
   const tryParse = (s: string): T | null => {
     try {
@@ -981,15 +993,28 @@ function extractJson<T = Record<string, unknown>>(text: string): T | null {
   };
   let o = tryParse(text.trim());
   if (o) return o;
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) {
-    o = tryParse(fence[1].trim());
-    if (o) return o;
+  // Last fenced ```json block that parses — agents commonly emit the final JSON envelope as a fenced
+  // block, sometimes preceded by example JSON in earlier prose/fences. Last-wins picks the envelope.
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (let i = fences.length - 1; i >= 0; i--) {
+    const fenced = tryParse(fences[i][1].trim());
+    if (fenced) return fenced;
   }
-  const first = text.indexOf("{");
-  const last = text.lastIndexOf("}");
-  if (first >= 0 && last > first) o = tryParse(text.slice(first, last + 1));
-  return o;
+  // Scan for the LAST parseable balanced {…}: walk close braces from end → open braces from start.
+  // First hit is the outermost-latest object — skips prose braces wrapping the JSON envelope.
+  const opens: number[] = [];
+  for (let i = text.indexOf("{"); i >= 0; i = text.indexOf("{", i + 1)) opens.push(i);
+  const closes: number[] = [];
+  for (let i = text.indexOf("}"); i >= 0; i = text.indexOf("}", i + 1)) closes.push(i);
+  for (let e = closes.length - 1; e >= 0; e--) {
+    const end = closes[e];
+    for (const start of opens) {
+      if (start >= end) break;
+      const parsed = tryParse(text.slice(start, end + 1));
+      if (parsed) return parsed;
+    }
+  }
+  return null;
 }
 
 // ── needs-attention-triage-and-verdict-robustness Phase 2 — robust verdict resolution ───────────────────
