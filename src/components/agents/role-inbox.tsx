@@ -713,6 +713,29 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
         : [];
   const [busy, setBusy] = useState<string | null>(null); // `${actionId}:${decision}`
   const [error, setError] = useState<string | null>(null);
+  const [dismissing, setDismissing] = useState(false);
+
+  // Clear the item without deciding here — for a standalone escalation (no job to auto-reap) or one the
+  // CEO already decided on the full surface. Hides it from the inbox; the underlying job is untouched.
+  const dismiss = async () => {
+    setDismissing(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/developer/agents/inbox/dismiss", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: item.id }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      onActed();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed");
+      setDismissing(false);
+    }
+  };
 
   const decide = async (actionId: string, decision: "approve" | "decline") => {
     if (!item.jobId) return;
@@ -799,16 +822,28 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
             </div>
           </div>
         ))}
-      {item.deepLink && !canDecideInline && (
-        <div className="mt-2">
+      {/* Footer: deep-link to the full surface (multi-choice / standalone) on the left, Dismiss on the right.
+          Dismiss is always available — clear an escalation you've already decided, or a standalone "your call". */}
+      <div className="mt-2 flex items-center justify-between gap-2">
+        {item.deepLink && !canDecideInline ? (
           <Link
             href={item.deepLink}
             className="text-[12px] font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
           >
             Decide on the full surface →
           </Link>
-        </div>
-      )}
+        ) : (
+          <span />
+        )}
+        <button
+          onClick={dismiss}
+          disabled={dismissing || busy !== null}
+          className="shrink-0 text-[11px] text-zinc-400 hover:text-zinc-700 disabled:opacity-50 dark:hover:text-zinc-200"
+          title="Clear this from your inbox (the underlying job is untouched)"
+        >
+          {dismissing ? "Dismissing…" : "Dismiss"}
+        </button>
+      </div>
       {error && <p className="mt-1 text-[11px] text-rose-500">{error}</p>}
     </li>
   );
