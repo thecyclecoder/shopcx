@@ -36,7 +36,7 @@ One **concluded `agent_jobs` row** (terminal status `completed｜failed｜needs_
 ## Where it's wired
 - **Phase 1 ✅:** the store + grader library + the rollup/coaching trigger.
 - **Phase 2 ✅:** the batched cadence — [[../inngest/platform-director-cron]]'s `grade-and-coach-workers` step runs `workerGradingBatchReady` (gate: ≥5 ungraded OR oldest >~3h) → `gradeConcludedWorkerActions` → `detectGradeDropCoaching` per newly-graded worker, on the same `*/15` beat as the director grade sweep, in the deployed runtime (needs the API key). Best-effort + idempotent.
-- **Phase 3 (planned):** each worker profile (`/dashboard/agents/[role]`) gets the activity feed + a last-10 rollup-grade card.
+- **Phase 3 ✅:** each worker profile (`/dashboard/agents/[role]`) gets a **rollup-grade card** (last-10 avg + trend) + a **graded-actions feed** (recent concluded jobs each with its grade) via `WorkerGradePanel` ← `GET /api/developer/agents/worker-grades?kind=…` (owner-gated: `computeWorkerRollup` + the recent concluded `agent_jobs` joined to their grades).
 
 ## Gotchas
 - **Supervised tool** ([[../operational-rules]] § North star) — scores a bounded proxy (action quality); the Director owns the objective, the CEO overrides. The grade only recommends a coaching pass, never a leash change.
