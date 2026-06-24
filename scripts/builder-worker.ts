@@ -1628,7 +1628,7 @@ async function materializeDbHealthSpec(specSlug: string, specBody: string, signa
     // Final backstop (db-health-spec-body-robust): NEVER putFileMain an empty/phaseless spec. The caller
     // already resolves + re-derives a non-empty body, so this should be unreachable — but a 0-byte commit
     // is exactly the failure this spec exists to stop, so refuse it here too.
-    if (!specBody || !specBody.trim() || !/^##\s+Phase/m.test(specBody)) {
+    if (!specBody || !specBody.trim() || !/^#{2,3}\s+Phase/m.test(specBody)) {
       console.warn(`[db-health] refusing to author empty/phaseless spec ${specSlug} (signature ${signature})`);
       return false;
     }
@@ -8687,8 +8687,8 @@ async function dispatchJob(job: Job) {
     const specPath = join(wt, "docs/brain/specs", `${slug}.md`);
     let specText = "";
     try { specText = readFileSync(specPath, "utf8"); } catch { /* missing → treated as empty below */ }
-    if (!specText.trim() || !/^##\s+Phase/m.test(specText)) {
-      const why = !specText.trim() ? "is empty / 0-byte / missing" : 'has no "## Phase" section';
+    if (!specText.trim() || !/^#{2,3}\s+Phase/m.test(specText)) {
+      const why = !specText.trim() ? "is empty / 0-byte / missing" : 'has no "## Phase" / "### Phase" section';
       await update(job.id, {
         status: "failed",
         error: `spec docs/brain/specs/${slug}.md ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
