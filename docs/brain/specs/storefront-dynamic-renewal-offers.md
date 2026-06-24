@@ -1,5 +1,7 @@
 # Dynamic pricing-rules for persist-to-renewal offers ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/growth]] · **Parent:** M6 — dynamic pricing-rules for persist-to-renewal offers
 **Blocked-by:** [[storefront-optimizer-agent]]
 
