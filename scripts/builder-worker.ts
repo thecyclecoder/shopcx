@@ -6107,7 +6107,13 @@ async function runJob(job: Job) {
           `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}. If you make NO file edits (nothing to build / already implemented), still return {"status":"completed","summary":"…","no_changes_reason":"why nothing changed"} — never claim done with no changes and no reason.`,
         ].join("\n");
 
-    const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt, configDir);
+    // Inject Ada's coaching (agent_instructions for 'build') into Bo's prompt — same as repair/regression,
+    // so a coached learning ("check which phases are already shipped before building") actually reaches the
+    // build agent and changes its behavior, closing the grade→coach→apply loop. Best-effort.
+    const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
+    const coachedPrompt = await appendAgentInstructions(db, job.workspace_id, "build", prompt);
+
+    const { session, resultText, isError, raw } = await runClaude(coachedPrompt, sessionId, wt, configDir);
     const logTail = raw.slice(-2000);
     // Persist the session AND its owning account so a later resume can pin to it (never cross-account).
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
