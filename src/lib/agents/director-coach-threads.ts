@@ -67,12 +67,17 @@ export type DirectorCoachThread = {
   source: CoachThreadSource;
   slack_channel_id: string | null;
   slack_thread_ts: string | null;
+  // ada-slack-routed-approvals Phase 3: a chat-mode invitation thread carries the routed
+  // approval's context here ({chat_mode:true, agent_job_id, notification_id, spec_slug, kind,
+  // investigation}) so the box turn knows which approval the founder is discussing without the
+  // model having to re-derive it. Empty {} on a normal web/Slack ask thread.
+  metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 };
 
 const ROW_COLUMNS =
-  "id, workspace_id, user_id, director_function, title, messages, box_session_id, turn_status, last_error, pending_actions, source, slack_channel_id, slack_thread_ts, created_at, updated_at";
+  "id, workspace_id, user_id, director_function, title, messages, box_session_id, turn_status, last_error, pending_actions, source, slack_channel_id, slack_thread_ts, metadata, created_at, updated_at";
 
 function normalizeMessages(value: unknown): ThreadMsg[] {
   if (!Array.isArray(value)) return [];
@@ -102,6 +107,7 @@ function toRow(row: Record<string, unknown> | null): DirectorCoachThread | null 
     source: (row.source as CoachThreadSource) ?? "web",
     slack_channel_id: (row.slack_channel_id as string | null) ?? null,
     slack_thread_ts: (row.slack_thread_ts as string | null) ?? null,
+    metadata: (row.metadata as Record<string, unknown> | null) ?? {},
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
@@ -190,6 +196,45 @@ export async function setActionDecision(workspaceId: string, id: string, actionI
   const patch: Record<string, unknown> = { pending_actions, updated_at: new Date().toISOString() };
   if (decision === "approve") patch.turn_status = "thinking";
   const { data } = await admin.from("director_coach_threads").update(patch).eq("id", id).eq("workspace_id", workspaceId).select(ROW_COLUMNS).maybeSingle();
+  return toRow(data as Record<string, unknown> | null);
+}
+
+/**
+ * Create a #cto-ada chat-mode invitation thread for a routed CEO approval
+ * ([[../specs/ada-slack-routed-approvals]] Phase 3). Differs from `createThread` in two ways:
+ *   - the opening message is Ada's invitation (assistant), not the founder (user) — when the founder
+ *     replies in the Slack thread the events handler appends a user turn and the box resumes;
+ *   - `metadata` is pre-seeded with the approval's context (chat_mode flag, agent_job_id,
+ *     notification_id, spec_slug, kind, investigation preview) so the box turn knows which routed
+ *     approval the conversation is about without re-deriving it.
+ */
+export async function createChatModeInvitationThread(input: {
+  workspaceId: string;
+  userId: string;
+  directorFunction?: string;
+  invitation: string;
+  slackChannelId: string;
+  slackThreadTs: string;
+  metadata: Record<string, unknown>;
+}): Promise<DirectorCoachThread | null> {
+  const admin = createAdminClient();
+  const now = new Date().toISOString();
+  const { data } = await admin
+    .from("director_coach_threads")
+    .insert({
+      workspace_id: input.workspaceId,
+      user_id: input.userId,
+      director_function: input.directorFunction ?? "platform",
+      title: input.invitation.slice(0, 80),
+      messages: [{ role: "assistant", content: input.invitation }],
+      source: "slack",
+      slack_channel_id: input.slackChannelId,
+      slack_thread_ts: input.slackThreadTs,
+      metadata: input.metadata,
+      updated_at: now,
+    })
+    .select(ROW_COLUMNS)
+    .single();
   return toRow(data as Record<string, unknown> | null);
 }
 

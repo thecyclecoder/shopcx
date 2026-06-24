@@ -34,6 +34,7 @@ import {
 } from "@/lib/agents/approval-router";
 import { getSlackToken, postAsAda } from "@/lib/slack";
 import { buildInboxApprovalCard } from "@/lib/slack-ada";
+import { createChatModeInvitationThread } from "@/lib/agents/director-coach-threads";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -209,6 +210,19 @@ interface ApprovalMeta {
    * `chat.update` the card. Absent ⇒ no Slack card was posted.
    */
   slack_message_ts?: string;
+  /**
+   * Phase 3 (chat-mode): true when the Slack surface for this routed approval is a chat-style
+   * invitation in a fresh thread (NOT an Approve/Reject card). The invitation's post `ts` is still
+   * stored on `slack_message_ts`, so the dismiss-pass thread reply + Phase 4 web→Slack mirror still
+   * key off it; this flag just tells those surfaces "the message they're updating is an invitation,
+   * not a card." Absent ⇒ the surface was a Block Kit card (Phase 1).
+   */
+  slack_chat_mode?: boolean;
+  /**
+   * Phase 3 (chat-mode): the `director_coach_threads.id` created alongside the invitation post —
+   * the same row the Slack events handler resumes when the founder replies in the thread.
+   */
+  coach_thread_id?: string;
 }
 
 /** Resolve + shape the notification fields for one job (pure given the chart + autonomy snapshot). */
@@ -256,14 +270,84 @@ async function loadAdaSurface(admin: Admin, workspaceId: string, cache: AdaSurfa
 }
 
 /**
+ * The investigation-preview length above which a routed approval qualifies for chat-mode — a wall
+ * of diff isn't a card the founder should blind-approve (ada-slack-routed-approvals Phase 3).
+ */
+const CHAT_MODE_PREVIEW_LIMIT = 1200;
+
+/**
+ * Phase 3 (ada-slack-routed-approvals): does this routed CEO approval warrant a chat-style
+ * invitation instead of an Approve/Reject card? True when ANY:
+ *   - `inlineApproveActions` returns null (multi-choice — coverage_register / storefront hero
+ *     reject-with-notes / a multi-branch plan — can't be expressed as binary buttons);
+ *   - the job's kind is brain-touching (`proposed-goal` — a new objective; the CEO never
+ *     greenlights one as a card tap);
+ *   - any pending action is a planner-proposed `spec` (it commits a brain page);
+ *   - the investigation preview exceeds CHAT_MODE_PREVIEW_LIMIT (blind-approving a wall of diff
+ *     is the failure mode this guards against).
+ * False ⇒ the routine card path (Phase 1) — which is the bulk of the queue.
+ */
+function shouldUseChatMode(
+  job: ApprovalJobRow,
+  row: ReturnType<typeof buildApprovalNotification>,
+): boolean {
+  if (!inlineApproveActions(job)) return true;
+  if (job.kind === "proposed-goal") return true;
+  if ((job.pending_actions ?? []).some((a) => a.type === "spec")) return true;
+  if ((row.body?.length ?? 0) > CHAT_MODE_PREVIEW_LIMIT) return true;
+  return false;
+}
+
+/**
+ * The workspace owner's user_id — the founder we attribute the chat-mode thread to. Without one
+ * mapped, the events handler's owner gate would reject any reply the founder typed (channel
+ * membership is not authorization), so the invitation would be a dead end — we skip it. Routine
+ * card-path approvals don't need this lookup (the buttons re-resolve the actor on tap).
+ */
+async function loadWorkspaceOwnerUserId(admin: Admin, workspaceId: string): Promise<string | null> {
+  const { data } = await admin
+    .from("workspace_members")
+    .select("user_id")
+    .eq("workspace_id", workspaceId)
+    .eq("role", "owner")
+    .maybeSingle();
+  return (data?.user_id as string | null) ?? null;
+}
+
+/**
+ * One short Slack-mrkdwn invitation summarizing why the founder shouldn't blind-approve this one —
+ * the conversational opening line of a chat-mode thread (ada-slack-routed-approvals Phase 3). The
+ * spec's example: "PR #521 (spec-status-db-driven Phase 1) paused for your call. It's foundational
+ * — touches every status reader/writer. Reversible, but worth talking through. Want to walk
+ * through it?" We don't have all that context (PR # / reversibility) for an arbitrary job, so we
+ * synthesize the closest we can from the job kind + the trigger that flipped chat-mode on.
+ */
+function buildChatModeInvitationText(
+  job: ApprovalJobRow,
+  row: ReturnType<typeof buildApprovalNotification>,
+): string {
+  const headline = row.title;
+  const reason = (() => {
+    if (job.kind === "proposed-goal") return "It's a new goal — worth talking through before I greenlight.";
+    if ((job.pending_actions ?? []).some((a) => a.type === "spec")) return "It's foundational — commits a spec into the brain.";
+    if (!inlineApproveActions(job)) return "Multiple paths here — better to choose together than blind-pick.";
+    if ((row.body?.length ?? 0) > CHAT_MODE_PREVIEW_LIMIT) return "The investigation runs long — better to talk it through than blind-approve.";
+    return "Worth a quick conversation before I greenlight.";
+  })();
+  return `${headline} paused for your call. ${reason} Want to walk through it?`;
+}
+
+/**
  * Mirror a freshly inserted routed Approval Request into Slack #cto-ada as Ada (ada-slack-routed-
- * approvals Phase 1) — TOP-LEVEL post, never threaded into an active coach thread. Conditions:
+ * approvals Phase 1+3) — TOP-LEVEL post, never threaded into an active coach thread. Conditions:
  * (1) the request routed to the CEO (a director's own queue stays in the dashboard), (2) the
- * workspace has an Ada channel configured + a bot token, (3) the job has plain inline actions
- * (multi-choice falls back to the web inbox until Phase 3's chat-mode invitation ships). On a
- * successful post, the message `ts` is stashed onto the notification's metadata so a later
- * `chat.update` (resolve / web-inbox mirror) can find it. Best-effort — a Slack failure never
- * rolls back the inbox row (the web inbox is still the source of truth).
+ * workspace has an Ada channel configured + a bot token. The surface forks on chat-mode
+ * eligibility (Phase 3): a routine approval gets a Block Kit Approve/Reject card; a complex one
+ * (multi-choice action, brain-touching kind, or wall-of-diff preview) gets a chat-style invitation
+ * opening a director_coach_threads conversation. On a successful post, the message `ts` is stashed
+ * onto the notification's metadata so a later `chat.update` (resolve / web-inbox mirror) can find
+ * it. Best-effort — a Slack failure never rolls back the inbox row (the web inbox is still the
+ * source of truth).
  */
 async function mirrorToAdaSlackInbox(
   admin: Admin,
@@ -273,10 +357,16 @@ async function mirrorToAdaSlackInbox(
   cache: AdaSurfaceCache,
 ): Promise<void> {
   if (row.metadata.routed_to_function !== CEO) return;
-  const actions = inlineApproveActions(job);
-  if (!actions) return; // multi-choice → Phase 3 chat-mode invitation will replace this skip
   const surface = await loadAdaSurface(admin, job.workspace_id, cache);
   if (!surface.channelId || !surface.token) return;
+
+  if (shouldUseChatMode(job, row)) {
+    await postChatModeInvitation(admin, job, row, notificationId, surface);
+    return;
+  }
+
+  const actions = inlineApproveActions(job);
+  if (!actions) return; // shouldUseChatMode covers the multi-choice case; defensive guard.
 
   const card = buildInboxApprovalCard({
     notificationId,
@@ -291,6 +381,69 @@ async function mirrorToAdaSlackInbox(
   // can chat.update the card. The reconciler's job-id-based idempotency already prevents a re-park
   // from double-posting; slack_message_ts is the read-path key for the resolve/update surfaces.
   const nextMeta = { ...row.metadata, slack_message_ts: post.ts };
+  await admin.from("dashboard_notifications").update({ metadata: nextMeta }).eq("id", notificationId);
+}
+
+/**
+ * Phase 3 (ada-slack-routed-approvals): post Ada's chat-style invitation for one complex routed
+ * approval and key a director_coach_threads row off the post's ts so a founder reply in the thread
+ * resumes the same conversation (the existing events handler picks it up via
+ * `findThreadBySlackThreadTs` — no new path). The thread's `metadata` carries the approval's
+ * context (agent_job_id, notification_id, spec_slug, kind, investigation preview) so the box turn
+ * knows what's being discussed without re-deriving it. Idempotency is shared with the card path:
+ * we stash the same `slack_message_ts` (+ a chat_mode flag) on the notification so the dismiss
+ * pass + the Phase 4 web→Slack mirror reuse the same key.
+ *
+ * The chat-mode invitation does NOT replace the web inbox row — the founder can still decide
+ * there if they prefer. The Slack thread is the opt-in conversational surface for items that
+ * shouldn't be one-tap.
+ */
+async function postChatModeInvitation(
+  admin: Admin,
+  job: ApprovalJobRow,
+  row: ReturnType<typeof buildApprovalNotification>,
+  notificationId: string,
+  surface: { channelId: string | null; token: string | null },
+): Promise<void> {
+  if (!surface.channelId || !surface.token) return;
+  // Without a mapped owner, a Slack reply would fail the events handler's owner re-gate — the
+  // invitation would dangle. Skip the chat-mode emit; the web inbox row still exists as fallback.
+  const ownerUserId = await loadWorkspaceOwnerUserId(admin, job.workspace_id);
+  if (!ownerUserId) return;
+
+  const invitation = buildChatModeInvitationText(job, row);
+  const post = await postAsAda(surface.token, surface.channelId, [], invitation);
+  if (!post.ok || !post.ts) return;
+
+  // Pre-seed the thread with the approval's context. The box turn reads this on resume so the
+  // founder's "yeah let's talk" lands with full context already loaded.
+  const threadMetadata: Record<string, unknown> = {
+    chat_mode: true,
+    agent_job_id: job.id,
+    notification_id: notificationId,
+    spec_slug: job.spec_slug ?? null,
+    kind: job.kind,
+    investigation: (row.body ?? "").slice(0, 4000),
+  };
+
+  const created = await createChatModeInvitationThread({
+    workspaceId: job.workspace_id,
+    userId: ownerUserId,
+    invitation,
+    slackChannelId: surface.channelId,
+    slackThreadTs: post.ts,
+    metadata: threadMetadata,
+  });
+
+  // Stash slack_message_ts (+ the chat_mode flag + the coach thread id) on the notification so the
+  // dismiss pass + Phase 4 web→Slack mirror can find the invitation post. Without the thread id
+  // landing, we still record slack_message_ts so the post isn't double-posted on a re-park.
+  const nextMeta: Record<string, unknown> = {
+    ...row.metadata,
+    slack_message_ts: post.ts,
+    slack_chat_mode: true,
+  };
+  if (created?.id) nextMeta.coach_thread_id = created.id;
   await admin.from("dashboard_notifications").update({ metadata: nextMeta }).eq("id", notificationId);
 }
 

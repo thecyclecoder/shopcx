@@ -22,7 +22,7 @@ Extend the `#cto-ada` surface ([[ada-slack-chat]]) so it also mirrors the **rout
 - `chat.update` the card (its stored `ts`) → replace the buttons with "✅ Approved — applying…" / "✕ Declined". When the underlying `agent_jobs` row moves out of `needs_approval`, the reconciler dismisses the `dashboard_notifications` row and posts a one-line confirmation in the same thread ("Done — PR #521 resumed." / "Declined — build returned to me.").
 
 ## Phase 3 — Chat-mode for complex approvals ("can we chat about this?")
-- ⏳ planned
+- ✅ shipped
 - A routed approval qualifies for **chat-mode** when ANY of:
   - `inlineApproveActions(job)` returns `null` (any pending action is multi-choice — `coverage_register`, `storefront_campaign` hero reject-with-notes, or a `plan` with multiple branches).
   - The job's `kind` is in a **brain-touching** set: `spec` (a foundational spec build), `proposed-goal`, anything emitting a `directive` or `goal` action.
