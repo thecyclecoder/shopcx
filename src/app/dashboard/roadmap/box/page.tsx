@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { routedInboxHref } from "@/lib/agents/inbox";
 import { getPersona } from "@/lib/agents/personas";
+import { PersonaAvatar } from "@/components/agents/persona-chip";
 
 // Live build-box view (build-box-status-view): box health + SHA, lane grid (what each lane is building
 // right now), queue depth, and a paused callout. Polls /api/roadmap/box every ~5s — phone-friendly,
@@ -19,6 +20,7 @@ interface LaneRow {
   spec_slug: string;
   since: string;
   phase?: string | null; // "Phase N" for a chained/per-phase build, else null (box-lane-show-phase)
+  intent?: string | null; // director-coach lanes only: "ask" | "coach" (the CEO's button) — for the label
 }
 interface AccountSlot {
   label: string;
@@ -140,6 +142,11 @@ const KIND_ACTION: Record<string, string> = {
   "ticket-improve": "improving ticket",
 };
 
+// The director kinds embody Ada (the Platform director) — her persona + avatar, not a generic label.
+function personaForKind(kind: string) {
+  return kind === "platform-director" || kind === "director-coach" ? getPersona("platform") : getPersona(kind);
+}
+
 function LaneCell({ lane }: { lane: LaneRow | null }) {
   if (!lane) {
     return (
@@ -148,28 +155,37 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
       </div>
     );
   }
-  const persona = getPersona(lane.kind);
-  const action = KIND_ACTION[lane.kind] ?? "working on";
+  // A director-coach lane is the CEO talking to Ada — show the SUBJECT (Ada)'s avatar + an Asking/Coaching
+  // label by the button the CEO pushed (intent), and hide the meaningless thread-id slug.
+  const isCoach = lane.kind === "director-coach";
+  const persona = personaForKind(lane.kind);
+  const title = isCoach ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`) : persona.name;
+  const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{persona.name}</span>
+          <PersonaAvatar persona={persona} size={20} />
+          <span className="truncate text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{title}</span>
           <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
         </span>
         <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
       </div>
-      <Link
-        href={`/dashboard/roadmap/${lane.spec_slug}`}
-        className="group block min-w-0"
-        title={lane.phase ? `${lane.spec_slug} · ${lane.phase}` : lane.spec_slug}
-      >
+      {isCoach ? (
         <span className="block text-[11px] text-zinc-400">{action}</span>
-        <span className="block truncate text-[12px] font-medium text-zinc-700 group-hover:text-indigo-600 dark:text-zinc-200 dark:group-hover:text-indigo-400">
-          {lane.spec_slug}
-          {lane.phase && <span className="text-zinc-400 dark:text-zinc-500"> · {lane.phase}</span>}
-        </span>
-      </Link>
+      ) : (
+        <Link
+          href={`/dashboard/roadmap/${lane.spec_slug}`}
+          className="group block min-w-0"
+          title={lane.phase ? `${lane.spec_slug} · ${lane.phase}` : lane.spec_slug}
+        >
+          <span className="block text-[11px] text-zinc-400">{action}</span>
+          <span className="block truncate text-[12px] font-medium text-zinc-700 group-hover:text-indigo-600 dark:text-zinc-200 dark:group-hover:text-indigo-400">
+            {lane.spec_slug}
+            {lane.phase && <span className="text-zinc-400 dark:text-zinc-500"> · {lane.phase}</span>}
+          </span>
+        </Link>
+      )}
     </div>
   );
 }
