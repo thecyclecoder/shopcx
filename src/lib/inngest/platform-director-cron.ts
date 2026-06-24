@@ -194,12 +194,45 @@ export const platformDirectorCron = inngest.createFunction(
       return { snapshotted, metricsWritten, week_start: weekStart };
     });
 
+    // The Platform Department Scorecard monthly leading curve (platform-scorecard-monthly spec,
+    // Phase 2): on the same standing beat, snapshot the monthly KPI set (human_touch_per_build ·
+    // goals_escorted_unbabysat · time_to_approve_hours · deploy_reliability · director_call_grade)
+    // into platform_scorecard_snapshots over a trailing 30-day window. Guarded to ONCE PER CALENDAR
+    // MONTH per workspace (skip any workspace with a monthly row already taken on/after the first of
+    // the month; the upsert on (metric_key, cadence='monthly', snapshot_date) makes a same-month
+    // re-run a no-op anyway). Best-effort + idempotent.
+    const scorecardMonthly = await step.run("snapshot-platform-scorecard-monthly", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const monthStart = `${today.slice(0, 7)}-01`;
+      const { data: existing } = await admin
+        .from("platform_scorecard_snapshots")
+        .select("workspace_id")
+        .eq("cadence", "monthly")
+        .gte("snapshot_date", monthStart);
+      const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
+      let snapshotted = 0;
+      let metricsWritten = 0;
+      for (const workspaceId of result.workspaceIds || []) {
+        if (done.has(workspaceId)) continue; // already snapshotted this calendar month (spend-saving)
+        try {
+          const rows = await computePlatformScorecard(workspaceId, { cadence: "monthly", windowDays: 30 });
+          if (rows.length) {
+            snapshotted++;
+            metricsWritten += rows.length;
+          }
+        } catch (e) {
+          console.error(`[platform-director-cron] monthly scorecard snapshot failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      return { snapshotted, metricsWritten, month_start: monthStart };
+    });
+
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard, scorecardWeekly } });
+      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly } });
     });
 
-    return { ...result, grading, workerGrading, scorecard, scorecardWeekly };
+    return { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly };
   },
 );

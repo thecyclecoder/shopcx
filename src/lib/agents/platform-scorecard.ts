@@ -28,7 +28,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { reportDbError } from "@/lib/control-tower/error-feed";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
-import { getFunctions, getRoadmap } from "@/lib/brain-roadmap";
+import { getFunctions, getGoals, getRoadmap } from "@/lib/brain-roadmap";
 import { BUILD_POOL_CAPACITY } from "@/lib/agents/platform-director";
 import { computeAgentRollup, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
 
@@ -725,6 +725,273 @@ const regressionsCaught: MetricDef = {
   },
 };
 
+// ── Monthly leading-curve metric derivations (platform-scorecard-monthly spec) ────────────────────
+// The monthly lens: the slow-moving indicators that prove autonomy is compounding. The headline is
+// `human_touch_per_build` (CEO/human approvals ÷ merged builds — the goal's success metric, declining
+// MoM). Each metric reuses the engine's trailing-30-day window + prior-month delta + idempotent
+// upsert; only the derivation is new. Display-only proxy, never a target (North-star).
+
+/**
+ * human_touch_per_build — the goal's headline. `(approval_decisions where decided_by ∈ ceo｜human in
+ * the month) ÷ (agent_jobs kind='build' status='merged' in the month)`. Lower is better; the prior-
+ * month `delta_pct` is the "declining MoM" signal. `value` = the ratio; `detail` carries the
+ * numerator/denominator so the trend point is auditable. Workspace-scoped on both sides.
+ */
+const humanTouchPerBuild: MetricDef = {
+  key: "human_touch_per_build",
+  unit: "ratio",
+  compute: async (ctx) => {
+    const { admin, workspaceId, curr, prev } = ctx;
+    const ratioFor = async (w: MetricWindow["curr"]): Promise<{ ratio: number; touched: number; builds: number }> => {
+      const { count: touchedRaw } = await admin
+        .from("approval_decisions")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspaceId)
+        .in("decided_by", ["ceo", "human"])
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const { count: buildsRaw } = await admin
+        .from("agent_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspaceId)
+        .eq("kind", "build")
+        .eq("status", "merged")
+        .gte("updated_at", w.startIso)
+        .lte("updated_at", w.endIso);
+      const touched = touchedRaw ?? 0;
+      const builds = buildsRaw ?? 0;
+      return { ratio: builds > 0 ? round(touched / builds) : 0, touched, builds };
+    };
+    const cur = await ratioFor(curr);
+    const pri = await ratioFor(prev);
+    return {
+      value: cur.ratio,
+      priorValue: pri.builds > 0 ? pri.ratio : null,
+      detail: { touched: cur.touched, builds: cur.builds },
+    };
+  },
+};
+
+/**
+ * goals_escorted_unbabysat — goals whose milestones advanced WITHOUT CEO touch in the month. Resolve
+ * candidates from director_activity action_kind='escorted_goal' (director_function='platform') rows
+ * in-window → distinct goal_slug; intersect with brain-roadmap `getGoals()` to pick the goals with
+ * at least one shipped milestone; count those whose milestone spec_slugs received NO non-autonomous
+ * approval_decision (decided_by ∈ ceo｜human) in-window. The CEO-touch check joins approval_decisions
+ * to agent_jobs.spec_slug (via agent_job_id) and matches against the goal's shipped-milestone slugs.
+ */
+const goalsEscortedUnbabysat: MetricDef = {
+  key: "goals_escorted_unbabysat",
+  unit: "count",
+  compute: async (ctx) => {
+    const { admin, workspaceId, curr, prev } = ctx;
+    const countFor = async (w: MetricWindow["curr"]): Promise<{ count: number; goals: Array<{ goal: string; milestones: string[] }> }> => {
+      const { data: escorts } = await admin
+        .from("director_activity")
+        .select("metadata")
+        .eq("workspace_id", workspaceId)
+        .eq("director_function", PLATFORM_FUNCTION)
+        .eq("action_kind", "escorted_goal")
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const escortedSlugs = new Set<string>();
+      for (const r of (escorts ?? []) as Array<{ metadata: Record<string, unknown> | null }>) {
+        const slug = typeof r.metadata?.goal_slug === "string" ? (r.metadata.goal_slug as string) : null;
+        if (slug) escortedSlugs.add(slug);
+      }
+      if (!escortedSlugs.size) return { count: 0, goals: [] };
+
+      const allGoals = await getGoals();
+      const candidates: Array<{ slug: string; milestones: string[]; specSlugs: Set<string> }> = [];
+      for (const g of allGoals) {
+        if (!escortedSlugs.has(g.slug)) continue;
+        const shipped = g.milestones.filter((m) => m.status === "shipped");
+        if (!shipped.length) continue;
+        const specSlugs = new Set<string>();
+        for (const m of shipped) for (const s of m.specSlugs) specSlugs.add(s);
+        candidates.push({ slug: g.slug, milestones: shipped.map((m) => m.id || m.name), specSlugs });
+      }
+      if (!candidates.length) return { count: 0, goals: [] };
+
+      const { data: touched } = await admin
+        .from("approval_decisions")
+        .select("agent_job_id")
+        .eq("workspace_id", workspaceId)
+        .in("decided_by", ["ceo", "human"])
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const jobIds = Array.from(
+        new Set(
+          ((touched ?? []) as Array<{ agent_job_id: string | null }>)
+            .map((r) => r.agent_job_id)
+            .filter((x): x is string => !!x),
+        ),
+      );
+      const touchedSpecSlugs = new Set<string>();
+      if (jobIds.length) {
+        const { data: jobs } = await admin.from("agent_jobs").select("spec_slug").in("id", jobIds);
+        for (const j of (jobs ?? []) as Array<{ spec_slug: string | null }>) {
+          if (j.spec_slug) touchedSpecSlugs.add(j.spec_slug);
+        }
+      }
+
+      const goals: Array<{ goal: string; milestones: string[] }> = [];
+      for (const c of candidates) {
+        let babysat = false;
+        for (const s of c.specSlugs) {
+          if (touchedSpecSlugs.has(s)) {
+            babysat = true;
+            break;
+          }
+        }
+        if (!babysat) goals.push({ goal: c.slug, milestones: c.milestones });
+      }
+      return { count: goals.length, goals };
+    };
+    const cur = await countFor(curr);
+    const pri = await countFor(prev);
+    return { value: cur.count, priorValue: pri.count, detail: { goals: cur.goals } };
+  },
+};
+
+/**
+ * time_to_approve_hours — median over the month of `(approval_decisions.created_at − request_raised_at)`
+ * for terminal decisions (decision ∈ approved｜declined). `request_raised_at` is approximated by the
+ * raising agent_job's `created_at` (the floor — the job couldn't request approval before it existed),
+ * since pending_actions carry no timestamp and the job's `updated_at` is post-approval by the time we
+ * read it. `value` = p50; `detail` carries p50/p90 + the sample count.
+ */
+const timeToApproveHours: MetricDef = {
+  key: "time_to_approve_hours",
+  unit: "hours",
+  compute: async (ctx) => {
+    const { admin, workspaceId, curr, prev } = ctx;
+    const hoursFor = async (w: MetricWindow["curr"]): Promise<number[]> => {
+      const { data: decisions } = await admin
+        .from("approval_decisions")
+        .select("created_at, agent_job_id")
+        .eq("workspace_id", workspaceId)
+        .in("decision", ["approved", "declined"])
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const rows = (decisions ?? []) as Array<{ created_at: string; agent_job_id: string | null }>;
+      if (!rows.length) return [];
+      const jobIds = Array.from(new Set(rows.map((r) => r.agent_job_id).filter((x): x is string => !!x)));
+      const raisedAtByJob = new Map<string, string>();
+      if (jobIds.length) {
+        const { data: jobs } = await admin.from("agent_jobs").select("id, created_at").in("id", jobIds);
+        for (const j of (jobs ?? []) as Array<{ id: string; created_at: string }>) {
+          raisedAtByJob.set(j.id, j.created_at);
+        }
+      }
+      const hrs: number[] = [];
+      for (const r of rows) {
+        if (!r.agent_job_id) continue;
+        const raisedAt = raisedAtByJob.get(r.agent_job_id);
+        if (!raisedAt) continue;
+        const dt = (new Date(r.created_at).getTime() - new Date(raisedAt).getTime()) / 3_600_000;
+        if (Number.isFinite(dt) && dt >= 0) hrs.push(dt);
+      }
+      return hrs;
+    };
+    const cur = await hoursFor(curr);
+    const pri = await hoursFor(prev);
+    const p50 = round(median(cur), 2);
+    const p90 = round(percentile(cur, 0.9), 2);
+    return {
+      value: p50,
+      priorValue: pri.length ? round(median(pri), 2) : null,
+      detail: { p50, p90, decided_count: cur.length },
+    };
+  },
+};
+
+/**
+ * deploy_reliability — `deploy_healthy ÷ (deploy_healthy + deploy_rolled_back)` from director_activity
+ * in the month — the deploy-health-rollback-guardian half of the reliability KPI (CI-green is the
+ * weekly `build_success_rate`). When the guardian has written NO verdicts in the window we surface
+ * `detail.no_data=true` so the UI shows "no data yet" rather than a fabricated 100% (or 0% — the spec
+ * is explicit: never imply perfect reliability from absent data).
+ */
+const deployReliability: MetricDef = {
+  key: "deploy_reliability",
+  unit: "ratio",
+  compute: async (ctx) => {
+    const { admin, workspaceId, curr, prev } = ctx;
+    const rateFor = async (w: MetricWindow["curr"]): Promise<{ rate: number; healthy: number; rolledBack: number; total: number }> => {
+      const countKind = async (kind: string): Promise<number> => {
+        const { count } = await admin
+          .from("director_activity")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", workspaceId)
+          .eq("action_kind", kind)
+          .gte("created_at", w.startIso)
+          .lte("created_at", w.endIso);
+        return count ?? 0;
+      };
+      const healthy = await countKind("deploy_healthy");
+      const rolledBack = await countKind("deploy_rolled_back");
+      const total = healthy + rolledBack;
+      return { rate: total > 0 ? round(healthy / total) : 0, healthy, rolledBack, total };
+    };
+    const cur = await rateFor(curr);
+    const pri = await rateFor(prev);
+    return {
+      value: cur.rate,
+      priorValue: pri.total > 0 ? pri.rate : null,
+      detail:
+        cur.total === 0
+          ? { no_data: true, healthy: 0, rolled_back: 0 }
+          : { healthy: cur.healthy, rolled_back: cur.rolledBack, total: cur.total },
+    };
+  },
+};
+
+/**
+ * director_call_grade — the CEO's grade of the Platform director's calls in the month: average
+ * director_decision_grades.grade (1–10) split by `dimension ∈ auto-approval｜goal-escort` — the same
+ * shape `computeDirectorGradeReport` reads. `value` = the blended mean across both dimensions;
+ * `detail.by_dimension` carries each dimension's mean + count. When no grades land in-window we
+ * surface `detail.no_data=true` (value=0) so the UI shows "no data yet".
+ */
+const DIRECTOR_GRADE_DIMENSIONS = ["auto-approval", "goal-escort"] as const;
+const directorCallGrade: MetricDef = {
+  key: "director_call_grade",
+  unit: "ratio",
+  compute: async (ctx) => {
+    const { admin, workspaceId, curr, prev } = ctx;
+    const meanFor = async (w: MetricWindow["curr"]): Promise<{ blended: number | null; byDim: Record<string, { mean: number | null; count: number }>; total: number }> => {
+      const { data } = await admin
+        .from("director_decision_grades")
+        .select("dimension, grade")
+        .eq("workspace_id", workspaceId)
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const rows = (data ?? []) as Array<{ dimension: string; grade: number | null }>;
+      const byDim: Record<string, { mean: number | null; count: number }> = {};
+      const allGrades: number[] = [];
+      for (const dim of DIRECTOR_GRADE_DIMENSIONS) {
+        const grades = rows.filter((r) => r.dimension === dim && typeof r.grade === "number").map((r) => r.grade as number);
+        const m = meanOf(grades);
+        byDim[dim] = { mean: m == null ? null : round(m, 2), count: grades.length };
+        for (const g of grades) allGrades.push(g);
+      }
+      const blended = meanOf(allGrades);
+      return { blended: blended == null ? null : round(blended, 2), byDim, total: allGrades.length };
+    };
+    const cur = await meanFor(curr);
+    const pri = await meanFor(prev);
+    return {
+      value: cur.blended ?? 0,
+      priorValue: pri.blended,
+      detail:
+        cur.total === 0
+          ? { no_data: true, by_dimension: cur.byDim, total: 0 }
+          : { blended_mean: cur.blended, by_dimension: cur.byDim, total: cur.total },
+    };
+  },
+};
+
 /**
  * The per-cadence KPI registry — declarative so a new KPI needs no migration. This spec seeds the
  * DAILY set; platform-scorecard-weekly + platform-scorecard-monthly add their own cadence registries.
@@ -754,10 +1021,24 @@ const WEEKLY_METRICS: MetricDef[] = [
   regressionsCaught,
 ];
 
+/**
+ * Monthly leading-curve set (platform-scorecard-monthly spec): the slow-moving indicators that prove
+ * autonomy is compounding. `human_touch_per_build` is the goal's headline (declining MoM signal);
+ * `deploy_reliability` reads the deploy-health-rollback-guardian verdicts; `director_call_grade`
+ * reads director_decision_grades. Display-only proxy, never a target (North-star).
+ */
+const MONTHLY_METRICS: MetricDef[] = [
+  humanTouchPerBuild,
+  goalsEscortedUnbabysat,
+  timeToApproveHours,
+  deployReliability,
+  directorCallGrade,
+];
+
 const REGISTRY: Record<Cadence, MetricDef[]> = {
   daily: DAILY_METRICS,
   weekly: WEEKLY_METRICS,
-  monthly: [], // platform-scorecard-monthly
+  monthly: MONTHLY_METRICS,
 };
 
 /** Default trailing-window length per cadence. */
