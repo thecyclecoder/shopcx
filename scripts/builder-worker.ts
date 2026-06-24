@@ -1238,6 +1238,48 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
   }
 }
 
+// ── Queue restart / drain-for-update (worker_controls) ───────────────────────
+// "Queue restart": stage a self-update without force-killing in-flight builds. While the drain flag is set
+// the poll loop CLAIMS NO new work — in-flight lanes finish, the box reaches idle, the idle self-update
+// fires (SHA advances), and the fresh worker's boot clears the flag. New builds just queue until then.
+const DRAIN_MAX_AGE_MS = 30 * 60 * 1000; // safety: auto-clear a drain that never advanced (nothing to pull / stuck)
+async function readDrainControl(): Promise<{ draining: boolean; requestedAtSha: string | null; requestedAt: string | null }> {
+  try {
+    const { data } = await db
+      .from("worker_controls")
+      .select("drain_for_update, requested_at_sha, requested_at")
+      .eq("box_id", WORKER_BOX_ID)
+      .maybeSingle();
+    return { draining: !!data?.drain_for_update, requestedAtSha: data?.requested_at_sha ?? null, requestedAt: data?.requested_at ?? null };
+  } catch {
+    return { draining: false, requestedAtSha: null, requestedAt: null }; // a read failure must never strand the box draining
+  }
+}
+async function clearDrain(reason: string): Promise<void> {
+  try {
+    await db.from("worker_controls").update({ drain_for_update: false, updated_at: new Date().toISOString() }).eq("box_id", WORKER_BOX_ID);
+    console.log(`[drain] cleared — ${reason}`);
+  } catch (e) {
+    console.error("[drain] clear failed (continuing):", e instanceof Error ? e.message : e);
+  }
+}
+// Boot: if a drain was requested and our SHA has advanced past it, the self-update happened → clear it so
+// the fresh worker resumes claiming. Also clear a drain that's exceeded its max age without advancing
+// (safety, so a no-op "nothing to pull" drain can't strand the box with all builds queued forever).
+async function reconcileDrainOnBoot(): Promise<void> {
+  const { draining, requestedAtSha, requestedAt } = await readDrainControl();
+  if (!draining) return;
+  if (requestedAtSha && requestedAtSha !== RUNNING_SHA) {
+    await clearDrain(`SHA advanced ${requestedAtSha.slice(0, 8)}→${(RUNNING_SHA || "?").slice(0, 8)} — resuming`);
+    return;
+  }
+  if (requestedAt && Date.now() - new Date(requestedAt).getTime() > DRAIN_MAX_AGE_MS) {
+    await clearDrain("exceeded max age without a SHA advance — resuming (safety)");
+    return;
+  }
+  console.log("[drain] active on boot — claiming paused until SHA advances");
+}
+
 // Control Tower (control-tower spec, Phase 1): one loop_heartbeats row at the END of every
 // agent-kind run (loop_id = `agent:<kind>`). The control-tower-monitor cron reads the latest
 // beat for last-ran/history; the STUCK-JOB alert is driven off agent_jobs, not this beat — so a
@@ -8255,6 +8297,8 @@ async function main() {
   }
   // fold-guard-live-build (Phase 1): cancel any orphaned non-terminal job whose spec was archived.
   await reapArchivedSpecJobs();
+  // queue-restart: if a drain was staged, clear it now that we've (re)started on the advanced SHA.
+  await reconcileDrainOnBoot();
 
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
   let lastApprovalSweep = 0; // approval-routing-engine M2: throttle the routed-inbox reconcile
@@ -8296,6 +8340,11 @@ async function main() {
           console.error("[approval-inbox] reconcile failed (continuing):", e instanceof Error ? e.message : e);
         }
       }
+      // Queue restart (worker_controls): while draining for a self-update, CLAIM NOTHING — let in-flight
+      // lanes finish so the box reaches idle and the self-update below fires. The heartbeat + maybeSelfUpdate
+      // still run; only the claim block is gated. New work piles up `queued` and runs after the SHA advances.
+      const { draining } = await readDrainControl();
+      if (!draining) {
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
       while (countFold() < MAX_FOLD) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold"] });
@@ -8460,6 +8509,12 @@ async function main() {
         if (!job || !job.id) break;
         console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
+      }
+      } // end if (!draining) — queue-restart drain skips all claims above
+      // Drained + idle + nothing to pull (already current) past the safety age → clear so we don't strand.
+      if (draining && active.size === 0) {
+        const { requestedAt } = await readDrainControl();
+        if (requestedAt && Date.now() - new Date(requestedAt).getTime() > DRAIN_MAX_AGE_MS) await clearDrain("idle + current past max age — resuming (safety)");
       }
       // First clean tick → this sha is healthy; zero the crash-loop counter.
       if (!steady) { clearStartupCrashCounter(); steady = true; }
