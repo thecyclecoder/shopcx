@@ -478,7 +478,12 @@ function markAccountCapped(dir: string, now: number) {
 function isUsageCapError(text: string): boolean {
   const t = (text || "").toLowerCase();
   if (/\b529\b|overloaded/.test(t)) return false; // transient — existing retry path
-  return /usage limit reached|usage limit|limit reached|limit will reset|out of usage|quota (?:exceeded|reached)|reached your usage limit|5-? ?hour limit/.test(t);
+  // The Max 5-hour wall surfaces in several phrasings — "usage limit reached", and ALSO
+  // "You've hit your session limit · resets 7pm (UTC)" (the shape that slipped through and FAILED a build
+  // instead of failing over). Match "session limit" + the "(reached|hit) your … limit" phrasing too. The
+  // bare 429/rate_limit is deliberately NOT matched (a transient too-many-requests isn't the wall); the
+  // distinguishing signal is the limit MESSAGE, and 529/overloaded already short-circuits above.
+  return /usage limit reached|usage limit|session limit|limit reached|limit will reset|out of usage|quota (?:exceeded|reached)|(?:reached|hit) your[\w .]*limit|5-? ?hour limit/.test(t);
 }
 
 // The account decision for a job at dispatch time. `run` → use this config dir (and this session, which
