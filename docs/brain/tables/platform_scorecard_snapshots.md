@@ -12,7 +12,7 @@ Written **only** by [[../libraries/platform-scorecard]] `computePlatformScorecar
 |---|---|---|---|
 | `id` | `uuid` | — | PK · default `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id · ON DELETE CASCADE |
-| `metric_key` | `text` | — | the KPI — `loop_health` \| `error_backlog` \| `error_mttr_hours` \| `build_throughput` \| `autonomy_ratio` \| `escalations` (daily set; weekly/monthly add their own). Free text, **no CHECK** — a new KPI needs no migration (declarative registry in [[../libraries/platform-scorecard]]) |
+| `metric_key` | `text` | — | the KPI — `loop_health` \| `error_backlog` \| `error_mttr_hours` \| `build_throughput` \| `lane_utilization` \| `build_enqueue_rate` \| `autonomy_ratio` \| `escalations` (daily set; weekly/monthly add their own). `lane_utilization` (ratio, build-pool saturation NOW) + `build_enqueue_rate` (count, the pool feed-rate) are the build-pool saturation KPIs ([[../specs/director-initiation-throughput]] Phase 4). Free text, **no CHECK** — a new KPI needs no migration (declarative registry in [[../libraries/platform-scorecard]]) |
 | `cadence` | `text` | — | CHECK ∈ `daily` \| `weekly` \| `monthly` — which cadence's registry produced this row |
 | `snapshot_date` | `date` | — | as-of day · the trailing window ends here |
 | `window_days` | `int` | — | trailing-window length (daily=1, weekly=7, monthly≈30) · default 1 |

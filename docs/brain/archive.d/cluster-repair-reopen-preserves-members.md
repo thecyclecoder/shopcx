@@ -1,0 +1,1 @@
+- **Re-opened cluster:repair job loses its batched members (director-bounce empties the cluster)** · verified 2026-06-24 · → [[libraries/repair-agent]]
