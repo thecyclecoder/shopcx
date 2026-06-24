@@ -1,0 +1,1 @@
+- **Triage every needs_attention item + harden review-agent verdicts** · verified 2026-06-24 · → [[libraries/platform-director]]

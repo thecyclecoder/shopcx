@@ -67,9 +67,10 @@ export async function POST(request: Request) {
     if (job.status !== "completed") {
       return NextResponse.json({ error: `Repair job is ${job.status}, not a dismissed item to re-open` }, { status: 409 });
     }
-    // Restore the warning — the inverse of the dismiss (which resolved the row).
+    // Restore the warning — the inverse of the dismiss (which resolved the row). Clear the resolution
+    // marker so the re-opened row carries no stale "resolved" reason (fix-error-reconcile-endless-loop Phase 1).
     if (job.spec_slug) {
-      await admin.from("error_events").update({ status: "open" }).eq("signature", job.spec_slug).eq("status", "resolved");
+      await admin.from("error_events").update({ status: "open", resolved_at: null, resolution_reason: null }).eq("signature", job.spec_slug).eq("status", "resolved");
     }
     // Re-enqueue Rafa for a fresh triage, re-firing the SAME brief (source/title/error refs) from the job.
     let instr: { source?: unknown; title?: unknown; signature?: unknown; error_event_id?: unknown; loop_alert_id?: unknown; members?: unknown } = {};
@@ -130,9 +131,13 @@ export async function POST(request: Request) {
       .update({ status: "completed", pending_actions: next, error: "dismissed by owner", updated_at: new Date().toISOString() })
       .eq("id", jobId);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    // Resolve the originating error_events row (the repair job's spec_slug IS the error signature, e.g. "vercel:…").
+    // Resolve the originating error_events row (the repair job's spec_slug IS the error signature, e.g. "vercel:…")
+    // with a recorded reason — terminal (fix-error-reconcile-endless-loop Phase 1).
     if (job.spec_slug) {
-      await admin.from("error_events").update({ status: "resolved" }).eq("signature", job.spec_slug).eq("status", "open");
+      await admin
+        .from("error_events")
+        .update({ status: "resolved", resolved_at: new Date().toISOString(), resolution_reason: "dismissed by owner" })
+        .eq("signature", job.spec_slug);
     }
     return NextResponse.json({ ok: true, action, resolved: true });
   }

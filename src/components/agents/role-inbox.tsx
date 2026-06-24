@@ -509,14 +509,15 @@ function DirectorGrades() {
 // Director grades. The default tab is therefore "approvals".
 const ROLE_INBOX_TABS = INBOX_TABS.filter((t) => t.id !== "messages");
 
-export function RoleInbox({ role, title, functionSlugs }: { role: string; title: string; functionSlugs: string[] }) {
+export function RoleInbox({ role, title, functionSlugs, hideGrades }: { role: string; title: string; functionSlugs: string[]; hideGrades?: boolean }) {
   const [payload, setPayload] = useState<InboxPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
   const [tab, setTab] = useState<InboxTab | "history" | "grades">("approvals");
   // The director-grading report (Phase 4) is the CEO's report contract for the Platform director —
-  // show it on the CEO (who grades) and the Platform director (who's graded), not on every role.
-  const showGrades = role === "ceo" || role === "platform";
+  // show it on the CEO (who grades). The Platform director profile has a dedicated Grades section now,
+  // so it passes hideGrades to drop the redundant inbox copy (CEO has no standalone section → keeps it).
+  const showGrades = !hideGrades && (role === "ceo" || role === "platform");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [q, setQ] = useState("");
 

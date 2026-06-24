@@ -241,11 +241,20 @@ export const metaIterationRun = inngest.createFunction(
           { incrementalDays: incremental_days },
         );
         const insightRows = r.insights.campaign + r.insights.adset + r.insights.ad;
-        return { ms: Date.now() - t0, drift: r.reconcile.drift.length, insightRows };
+        return { ms: Date.now() - t0, drift: r.reconcile.drift.length, insightRows, asyncBackfill: r.asyncBackfill };
       });
       // insight_rows is the rows-written assertion's observable output: a 0 here on
       // an account with prior spend would already have thrown inside the ingest.
-      stages.push({ name: "ingest", status: "ok", ms: ingest.ms, spend_drift_objects: ingest.drift, insight_rows: ingest.insightRows });
+      // async_backfill flags when the first-run backfill used Meta's async report path
+      // (iteration-ingest-async-reports) instead of chunked synchronous GETs.
+      stages.push({
+        name: "ingest",
+        status: "ok",
+        ms: ingest.ms,
+        spend_drift_objects: ingest.drift,
+        insight_rows: ingest.insightRows,
+        async_backfill: ingest.asyncBackfill,
+      });
 
       // ── Stage 2 — variant attribution refresh (P2/2b) ───────────────────────
       const attribution = await step.run("attribution", async () => {

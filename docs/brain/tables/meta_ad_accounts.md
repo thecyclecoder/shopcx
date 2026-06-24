@@ -16,6 +16,7 @@ Meta Ads accounts connected to the workspace.
 | `currency` | `text` | ✓ | default: `'USD'` |
 | `timezone` | `text` | ✓ | default: `'America/Chicago'` |
 | `is_active` | `bool` | — | default: `true` |
+| `async_insights_backfill_enabled` | `bool` | — | default: `false` · per-account gate: when true, the first-run insights backfill uses Meta's async report path (submit/poll/page) instead of chunked sync GETs. See [[../libraries/meta__performance]] · [[../specs/iteration-ingest-async-reports]]. |
 | `last_sync_at` | `timestamptz` | ✓ |  |
 | `created_at` | `timestamptz` | — | default: `now()` |
 

@@ -176,6 +176,57 @@ export function isTransientInngestTransportError(
   );
 }
 
+/**
+ * Transient Supabase-logs noise — the supabase-logs companion to `isBareLifecycle` /
+ * `isTransientInngestTransportError`, factored here so the poller can reuse it
+ * ([[../specs/error-feed-supabase-logs-transient-5xx-scoping]]).
+ *
+ * `pollSupabaseLogs` records EVERY edge API 5xx row and every Postgres ERROR/FATAL/PANIC.
+ * But a momentary edge 5xx, or a Postgres `statement timeout` / connection-saturation row,
+ * is the collateral of a brief DB-saturation/timeout storm that self-heals by the next
+ * beat — NOT a chronic outage (e.g. this cluster's simultaneous transient 500s on
+ * GET /rest/v1/loop_heartbeats + GET /rest/v1/customers). Minting a fresh OPEN paged
+ * incident + a repair fan-out for it churns Platform owners on a blip that already healed.
+ *
+ * `true` for that transient class — the capture path passes it as the `transient` flag to
+ * `recordError`, which auto-resolves a FIRST sighting (recorded for visibility, NOT paged,
+ * no repair fan-out) and escalates to a real open+page ONLY if the SAME signature recurs
+ * within `TRANSIENT_RECUR_WINDOW_MS` — so a one-off saturation blip is dropped while a
+ * chronic endpoint that 5xxs every poll (recurs well inside the window) still surfaces.
+ *
+ * NOT transient (page on first sighting): a Postgres FATAL/PANIC, a non-timeout Postgres
+ * ERROR (constraint / data-integrity bug), an auth error, and anything below 5xx.
+ */
+export function isTransientSupabaseLogNoise(
+  kind: "postgres" | "auth" | "api",
+  ctx: { statusCode?: unknown; severity?: unknown; message?: unknown },
+): boolean {
+  if (kind === "api") {
+    // Edge/gateway 5xx — saturation collateral; the recur window catches a chronic 5xx.
+    const raw = typeof ctx.statusCode === "string" ? ctx.statusCode.trim() : ctx.statusCode;
+    const status = Number(raw);
+    return Number.isFinite(status) && status >= 500 && status <= 599;
+  }
+  if (kind === "postgres") {
+    // FATAL/PANIC are crashes, never the self-healing transient class.
+    const severity = String(ctx.severity ?? "").toUpperCase();
+    if (severity === "FATAL" || severity === "PANIC") return false;
+    // Only the statement-timeout / saturation noise; a plain ERROR (constraint, etc.) pages.
+    const msg = String(ctx.message ?? "").toLowerCase();
+    if (!msg.trim()) return false;
+    return (
+      msg.includes("statement timeout") ||
+      msg.includes("canceling statement due to") ||
+      msg.includes("connection reset") ||
+      msg.includes("terminating connection") ||
+      msg.includes("too many clients") ||
+      msg.includes("the database system is") ||
+      msg.includes("could not serialize access")
+    );
+  }
+  return false;
+}
+
 export interface RecordErrorInput {
   source: ErrorSource;
   /** the grouping key parts (stable bits — function id / route / error class). */
@@ -309,8 +360,11 @@ export async function recordError(
         detail: input.detail ?? null,
         sample: input.sample ?? null,
         count: (e.count ?? 0) + occurrences,
-        // Don't force-resolve a pre-existing genuine incident — just tag the outage correlation.
-        ...(breakerTripped ? { outage_correlated: true } : { status: "open" }),
+        // Don't force-resolve a pre-existing genuine incident — just tag the outage correlation. A genuine
+        // re-fire re-opens a repair-dispositioned row (status→open) and clears the stale resolution marker,
+        // so the row never shows a "resolved, pending deploy" reason while actively re-firing
+        // (fix-error-reconcile-endless-loop Phase 1).
+        ...(breakerTripped ? { outage_correlated: true } : { status: "open", resolved_at: null, resolution_reason: null }),
         last_seen_at: nowIso,
         ...(paged ? { last_paged_at: nowIso } : {}),
       })

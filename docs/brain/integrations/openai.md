@@ -1,6 +1,6 @@
 # openai
 
-OpenAI — exclusively for embeddings. **Not used for chat/completions** — that's Anthropic ([[anthropic]]). One-purpose integration.
+OpenAI — two narrow uses: **embeddings** (the main one) and **Whisper audio transcription**. **Not used for chat/completions** — that's Anthropic ([[anthropic]]). The transcription side powers ad captions ([[../libraries/ad-transcribe]]) and the creative-finder video pipeline ([[../libraries/video-skeleton]] · [[../specs/creative-finder-video]]).
 
 ## Auth
 
@@ -17,8 +17,9 @@ Uses the official `openai` npm SDK. Initialized in `src/lib/embeddings.ts`.
 | Call | Purpose |
 |---|---|
 | `embeddings.create({ model: "text-embedding-3-small", input })` | Embed a string or string[] → 1536-dim vector |
+| `POST /v1/audio/transcriptions` (`whisper-1`, `verbose_json`) | Word-level transcription — ad captions + creative-finder video transcripts ([[../libraries/ad-transcribe]]) |
 
-That's it. No other OpenAI endpoint is in production use.
+No other OpenAI endpoint is in production use.
 
 ## Where embeddings get stored
 
@@ -61,4 +62,4 @@ The implementation currently uses OpenAI. A "use Voyage instead" flag exists but
 
 ## Related
 
-[[../tables/kb_chunks]] · [[../tables/macros]] · [[../tables/smart_patterns]] · [[../tables/knowledge_base]] · [[anthropic]] · [[../inngest/kb-embed]]
+[[../tables/kb_chunks]] · [[../tables/macros]] · [[../tables/smart_patterns]] · [[../tables/knowledge_base]] · [[anthropic]] · [[../inngest/kb-embed]] · [[../libraries/ad-transcribe]] · [[../libraries/video-skeleton]] · [[../specs/creative-finder-video]]

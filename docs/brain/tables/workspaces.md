@@ -69,6 +69,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `google_drive_sa_json_encrypted` | `text` | ✓ | AES-256-GCM — GCP service-account JSON key for headless Drive API access ([[../specs/box-product-seeding]]) |
 | `slack_team_name` | `text` | ✓ |  |
 | `slack_connected_at` | `timestamptz` | ✓ |  |
+| `slack_ada_channel_id` | `text` | ✓ | the `#cto-ada` channel for two-way chat with Ada — set by the `/ada-here` slash command ([[../lifecycles/ada-slack-chat]]) |
 | `shopify_multipass_secret_encrypted` | `text` | ✓ | AES-256-GCM |
 | `amplifier_api_key_encrypted` | `text` | ✓ | AES-256-GCM |
 | `amplifier_order_source_code` | `text` | ✓ |  |

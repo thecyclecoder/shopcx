@@ -17,7 +17,9 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 | `detail` | `text?` | the fuller / latest message |
 | `sample` | `jsonb?` | latest raw sample (function_id, run_id, path, status, code, …) |
 | `count` | `int` | total occurrences folded into this incident · default 1 |
-| `status` | `text` | `open` (default) ｜ `resolved` · CHECK-constrained (reserved; the dashboard drives panel color off recency, not this) |
+| `status` | `text` | `open` (default) ｜ `resolved` · CHECK-constrained. The dashboard drives panel color off recency, not this — but the [[../libraries/platform-director]] **reconcile** scans `status='open'`, so every [[../libraries/repair-agent\|repair]] disposition MUST flip the row off `open` ([[../specs/fix-error-reconcile-endless-loop]] Phase 1) or the reconcile re-churns it forever |
+| `resolved_at` | `timestamptz?` | **fix-error-reconcile-endless-loop Phase 1** — when a disposition flipped this row off `open` (null while open). Cleared back to null on a genuine re-fire (recordError re-opens) |
+| `resolution_reason` | `text?` | **fix-error-reconcile-endless-loop Phase 1** — the recorded "why it's terminal" the disposition wrote (`fix [[slug]] authored, pending deploy` ｜ `transient: …` ｜ `needs-human: …` ｜ `dismissed by owner` ｜ stale-backlog park). The row's own audit of its disposition (the [[director_activity]] feed records the reconcile MOVE; this records the ROW's terminal reason). Cleared on re-fire |
 | `outage_correlated` | `bool` | **agent-outage-resilience Phase 2** — set when recorded WHILE the Claude-down breaker ([[claude_health]]) was tripped. Such errors are outage symptoms, not new bugs: `recordError` still records them (grouped under the outage) but suppresses paging + the repair fan-out, and a NEW signature is auto-`resolved` as transient. Default `false` |
 | `first_seen_at` | `timestamptz` | when this signature first appeared · default `now()` |
 | `last_seen_at` | `timestamptz` | bumped every occurrence · default `now()` |
@@ -50,6 +52,7 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 `supabase/migrations/20260622150000_error_events.sql` (this table + RLS) · apply: `scripts/apply-error-events-migration.ts`
 `supabase/migrations/20260622160000_supabase_log_poll.sql` (Phase 2: widens the `source` CHECK to admit `'supabase-logs'` + adds [[error_feed_supabase_config]]) · apply: `scripts/apply-supabase-log-poll-migration.ts`
 `supabase/migrations/20260622170000_client_error_source.sql` (client-error-capture: widens the `source` CHECK to admit `'client'`) · apply: `scripts/apply-client-error-source-migration.ts`
+`supabase/migrations/20260707120000_error_events_resolution.sql` ([[../specs/fix-error-reconcile-endless-loop]] Phase 1: adds `resolved_at` + `resolution_reason` so every repair disposition drives the row to a terminal `resolved` state with a recorded reason — the reconcile then never re-churns it) · apply: `scripts/apply-error-events-resolution-migration.ts` · one-shot backlog close: `scripts/_close-stuck-error-backlog.ts`
 
 ## Related
 

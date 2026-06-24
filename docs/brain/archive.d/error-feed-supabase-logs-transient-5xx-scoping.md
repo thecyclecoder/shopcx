@@ -1,0 +1,1 @@
+- **Scope supabase-logs poller: transient-classify one-off edge 5xx / statement-timeout noise** · verified 2026-06-24 · → [[inngest/supabase-log-poll]]

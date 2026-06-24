@@ -1,0 +1,1 @@
+- **Exempt loop from coverage monitoring: slack-roadmap-notify** · verified 2026-06-24 · → [[libraries/control-tower]]

@@ -60,13 +60,13 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 
 ## Gotchas
 
-- **Statics are visioned at ingestion** (`status='analyzed'`); **videos are routed aside** (`status='video_pending'`) for the heavier Phase 6 frame+transcript pipeline (not yet built).
+- **Statics are visioned at ingestion** (`status='analyzed'`); **videos are routed aside** (`status='video_pending'`) and then drained by the **video pipeline** ([[../libraries/video-skeleton]] · [[../specs/creative-finder-video]]) — `creative-finder-video-process` downloads → ffmpeg keyframes + Whisper transcript → the same four-slot skeleton and flips the row to `analyzed` (or `failed`). The status flip is the dedup: a video `ad_key` is processed once.
 - The matrix counts **distinct `advertiser`s** — repetition across independent brands is the signal, never one ad's `heat`/`days_running` (those are tiebreakers only).
 - `image_url` 403s without the AdLibrary Bearer key — display goes through `/api/ads/creative-finder/media`.
 - **Full payload from `ingestAd`, not vision** — `destination_domain`/copy/CTA/spend/engagement/`platform` columns come straight from the AdLibrary row ([[../specs/ad-creative-scout]]); only `format`/`framework`/`hook`/`mechanism_claim`/`proof`/`offer` are vision-extracted. `destination_domain` is null for ads with no store url (`has_store_url=false`).
 
 ## Written by
-[[../libraries/creative-skeleton]] (`ingestAd`) ← [[../inngest/creative-finder]].
+[[../libraries/creative-skeleton]] (`ingestAd`) ← [[../inngest/creative-finder]]; [[../libraries/video-skeleton]] (`processVideoPending` updates `video_pending` → `analyzed`) ← [[../inngest/creative-finder]] (`creative-finder-video-process`).
 
 ## Read by
 [[../libraries/creative-skeleton]] (`buildPatternMatrix`, dedup) · [[../libraries/ad-gap]] (`buildAdGapReport` — angle gaps) · [[../libraries/competitors]] (`promoteFromCategorySweep`) · `/api/ads/creative-finder*` routes · [[../specs/landing-page-scout]] (`destination_domain` per approved competitor).

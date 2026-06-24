@@ -1,0 +1,1 @@
+- **Portal remediation: dismiss `would_remove_last_item` instead of escalating it as unrecognized** · verified 2026-06-24 · → [[lifecycles/customer-portal]]

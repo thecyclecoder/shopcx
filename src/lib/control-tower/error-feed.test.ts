@@ -12,7 +12,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isBareLifecycle, isTransientInngestTransportError } from "./error-feed";
+import { isBareLifecycle, isTransientInngestTransportError, isTransientSupabaseLogNoise } from "./error-feed";
 
 // Regression fixture: the leaked vercel:ebdf493a37c60c34 blob — a bare Lambda lifecycle
 // wrapper around the deliberate /api/portal Appstle 502 (669ms, 343MB/2048MB). The proxy
@@ -102,4 +102,55 @@ test("isTransientInngestTransportError returns false on empty / nullish input", 
   assert.equal(isTransientInngestTransportError(null, null), false);
   assert.equal(isTransientInngestTransportError("", "   "), false);
   assert.equal(isTransientInngestTransportError(undefined, undefined), false);
+});
+
+// ── isTransientSupabaseLogNoise (error-feed-supabase-logs-transient-5xx-scoping) ──
+// The supabase-logs poller recorded EVERY edge 5xx + every Postgres ERROR with no transient
+// flag, so this cluster's simultaneous transient 500s on GET /rest/v1/loop_heartbeats +
+// GET /rest/v1/customers (DB-saturation collateral that self-healed) minted a hard OPEN paged
+// incident. Classifying a momentary edge 5xx / statement-timeout as transient auto-resolves a
+// first sighting; the recur window still surfaces a chronic endpoint that 5xxs every poll.
+
+test("isTransientSupabaseLogNoise treats any edge API 5xx as transient (saturation collateral)", () => {
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: 500 }), true);
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: "502" }), true);
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: " 503 " }), true);
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: 599 }), true);
+});
+
+test("isTransientSupabaseLogNoise KEEPS a non-5xx API status (4xx / nonsense not transient)", () => {
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: 429 }), false);
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: 404 }), false);
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: 600 }), false);
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: "5xx" }), false);
+  assert.equal(isTransientSupabaseLogNoise("api", { statusCode: null }), false);
+});
+
+test("isTransientSupabaseLogNoise treats a Postgres statement-timeout / saturation ERROR as transient", () => {
+  assert.equal(
+    isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "canceling statement due to statement timeout" }),
+    true,
+  );
+  assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "terminating connection due to administrator command" }), true);
+  assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "sorry, too many clients already" }), true);
+  assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "could not serialize access due to concurrent update" }), true);
+});
+
+test("isTransientSupabaseLogNoise KEEPS a real Postgres bug (constraint ERROR / FATAL / PANIC) — pages", () => {
+  assert.equal(
+    isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: 'duplicate key value violates unique constraint "customers_pkey"' }),
+    false,
+  );
+  // FATAL/PANIC are crashes — never the self-healing transient class, even on a timeout phrasing.
+  assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "FATAL", message: "the database system is starting up" }), false);
+  assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "PANIC", message: "could not write to file" }), false);
+});
+
+test("isTransientSupabaseLogNoise never treats auth errors as transient", () => {
+  assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "anything" }), false);
+});
+
+test("isTransientSupabaseLogNoise returns false on empty postgres message", () => {
+  assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "" }), false);
+  assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: null }), false);
 });

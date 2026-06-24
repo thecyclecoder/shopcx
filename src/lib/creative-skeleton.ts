@@ -116,6 +116,85 @@ export async function visionDeconstruct(
   return parseSkeleton(text);
 }
 
+const VIDEO_VISION_SYSTEM = `${VISION_SYSTEM}
+
+This is a VIDEO ad, deconstructed into ordered keyframes (densest in the first ~3 seconds, where the hook lives) plus an audio transcript. Treat the frames as a storyboard, earliest first.
+
+For "hook" specifically: the literal first-2-seconds hook = the OPENING FRAME combined with the FIRST SPOKEN LINE of the transcript. Capture what stops the scroll in those first two seconds, not a later beat.
+
+The transcript carries the spoken copy AdLibrary's text fields lack — use it together with the frames to fill mechanism_claim / proof / offer.`;
+
+/**
+ * Run Claude vision on a VIDEO's keyframes + audio transcript → the same four-slot
+ * skeleton as statics. The hook reflects the opening frame + first spoken line (the
+ * literal first-2s hook). Frames are sent earliest-first as a storyboard; the
+ * transcript supplies the spoken copy AdLibrary's text fields omit.
+ * See docs/brain/specs/creative-finder-video.md.
+ */
+export async function visionDeconstructFrames(
+  workspaceId: string,
+  frames: Array<{ buffer: Buffer; contentType: string }>,
+  transcript: string,
+): Promise<CreativeSkeleton | null> {
+  if (!ANTHROPIC_API_KEY) throw new Error("no_anthropic_key");
+  if (!frames.length) return null;
+
+  const imageBlocks = frames.map((f, i) => [
+    { type: "text", text: `Keyframe ${i + 1}:` },
+    {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: SUPPORTED_VISION_MEDIA.has(f.contentType) ? f.contentType : "image/jpeg",
+        data: f.buffer.toString("base64"),
+      },
+    },
+  ]).flat();
+
+  const transcriptText = transcript.trim()
+    ? `Audio transcript (spoken copy):\n"""${transcript.trim().slice(0, 4000)}"""`
+    : "Audio transcript: (none — silent or untranscribable; rely on the frames).";
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: OPUS_MODEL,
+      max_tokens: 1024,
+      system: VIDEO_VISION_SYSTEM,
+      messages: [
+        {
+          role: "user",
+          content: [
+            ...imageBlocks,
+            { type: "text", text: transcriptText },
+            { type: "text", text: "Extract this video ad's skeleton as JSON." },
+          ],
+        },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`vision_${res.status}`);
+  const json = await res.json();
+  if (json?.usage) {
+    try {
+      await logAiUsage({
+        workspaceId,
+        model: OPUS_MODEL,
+        usage: json.usage,
+        purpose: "creative_skeleton_video_vision",
+        ticketId: null,
+      });
+    } catch {}
+  }
+  const text: string = (json?.content?.[0]?.text || "").trim();
+  return parseSkeleton(text);
+}
+
 function parseSkeleton(text: string): CreativeSkeleton | null {
   // The model is told to return ONLY JSON; defend against a stray fence/prefix.
   const m = text.match(/\{[\s\S]*\}/);

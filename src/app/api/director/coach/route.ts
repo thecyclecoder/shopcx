@@ -17,11 +17,50 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createThread, loadThread, markThreadThinking, setActionDecision, listRecentThreads } from "@/lib/agents/director-coach-threads";
+import { createThread, loadThread, markThreadThinking, setActionDecision, listRecentThreads, type DirectorCoachThread } from "@/lib/agents/director-coach-threads";
+import { getSlackToken, postMessage, updateMessage } from "@/lib/slack";
+import { buildAdaResolvedCard } from "@/lib/slack-ada";
 
 export const dynamic = "force-dynamic";
 
 const DIRECTOR = "platform"; // the only live director today
+
+// ── ada-slack-chat: keep a #cto-ada thread's Slack side in sync with web actions ──
+// A thread that started in Slack (source='slack') stays a single conversation visible on BOTH surfaces.
+// So a web-typed reply is relayed INTO the Slack thread, and a web-side approve/reject resolves the Slack
+// card. (Ada's own replies already mirror to Slack from the box — postCoachTurnToSlack.)
+
+/** Relay a web-typed CEO message into the Slack thread (clearly marked as relayed — Slack forbids posing
+ *  as a real user). No-op for web-only threads. Best-effort: a Slack failure never blocks the web turn. */
+async function relayCeoMessageToSlack(thread: DirectorCoachThread | null, workspaceId: string, userId: string, message: string): Promise<void> {
+  if (!thread || thread.source !== "slack" || !thread.slack_channel_id) return;
+  try {
+    const token = await getSlackToken(workspaceId);
+    if (!token) return;
+    const admin = createAdminClient();
+    const { data: m } = await admin.from("workspace_members").select("display_name").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
+    const name = ((m?.display_name as string | undefined) || "").trim() || "CEO";
+    const quoted = message.replace(/\n/g, "\n> ");
+    await postMessage(token, thread.slack_channel_id, [], `💬 *${name}* replied from ShopCX:\n> ${quoted}`, { thread_ts: thread.slack_thread_ts ?? undefined });
+  } catch (e) {
+    console.error("[director-coach] relayCeoMessageToSlack failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+/** Resolve the Slack approval card in place when the CEO decides it from the web (no stale buttons). */
+async function resolveSlackCardFromWeb(thread: DirectorCoachThread | null, workspaceId: string, actionId: string, decision: "approve" | "decline"): Promise<void> {
+  if (!thread || thread.source !== "slack" || !thread.slack_channel_id) return;
+  const card = thread.pending_actions.find((a) => a.id === actionId);
+  if (!card?.slackTs) return;
+  try {
+    const token = await getSlackToken(workspaceId);
+    if (!token) return;
+    const rebuilt = buildAdaResolvedCard({ id: card.id, type: card.type, summary: card.summary, guidance: card.guidance }, decision);
+    await updateMessage(token, thread.slack_channel_id, card.slackTs, rebuilt.blocks, rebuilt.text);
+  } catch (e) {
+    console.error("[director-coach] resolveSlackCardFromWeb failed:", e instanceof Error ? e.message : e);
+  }
+}
 
 async function gate(): Promise<{ ok: false; res: NextResponse } | { ok: true; workspaceId: string; userId: string }> {
   const supabase = await createClient();
@@ -68,6 +107,7 @@ export async function POST(req: Request) {
     if (!body.id || !body.actionId || !body.decision) return NextResponse.json({ error: "Missing id/actionId/decision" }, { status: 400 });
     const thread = await setActionDecision(g.workspaceId, body.id, body.actionId, body.decision);
     if (!thread) return NextResponse.json({ error: "Thread not found" }, { status: 404 });
+    await resolveSlackCardFromWeb(thread, g.workspaceId, body.actionId, body.decision);
     if (body.decision === "approve") await enqueue({ workspaceId: g.workspaceId, userId: g.userId, threadId: body.id, mode: "approve_action" });
     return NextResponse.json({ thread });
   }
@@ -91,6 +131,9 @@ export async function POST(req: Request) {
   } else {
     const t = await markThreadThinking(g.workspaceId, threadId, message);
     if (!t) return NextResponse.json({ error: "Thread not found" }, { status: 404 });
+    // ada-slack-chat: if this conversation lives in #cto-ada, relay the CEO's web reply into the Slack
+    // thread so the transcript is identical on both surfaces, wherever each message was typed.
+    await relayCeoMessageToSlack(t, g.workspaceId, g.userId, message);
   }
   await enqueue({ workspaceId: g.workspaceId, userId: g.userId, threadId: threadId as string, mode: "turn", intent: body.intent ?? "ask" });
   const thread = await loadThread(g.workspaceId, threadId as string);

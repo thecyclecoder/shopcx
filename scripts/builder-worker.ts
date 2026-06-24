@@ -14,6 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, join, basename } from "path";
 import { spawn, spawnSync } from "child_process";
+import { AsyncLocalStorage } from "async_hooks";
 import { randomUUID } from "crypto";
 // Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
@@ -158,6 +159,12 @@ const AUTO_SETTLE_MAX = 2;
 // resets the main repo to it and exits — systemd Restart=always relaunches the fresh builder-worker.ts.
 const WORKER_BOX_ID = process.env.WORKER_BOX_ID || "box"; // singleton heartbeat key (supports >1 box later)
 const SELF_UPDATE_MIN_INTERVAL_MS = 60 * 1000; // don't thrash: at most one self-update check per minute
+// Max-staleness override: the box normally self-updates only when IDLE (builds are sacrosanct). But a
+// SATURATED box (lanes always full — e.g. under a throughput directive) would otherwise lag main forever,
+// so box-side features never go live. When local is THIS many commits behind origin/main, update anyway —
+// the in-flight builds re-queue on restart (the reaper marks the abandoned 'building' rows). High enough
+// that it only fires when genuinely far behind, so build interruption is rare.
+const FORCE_STALE_COMMITS = 12;
 // Crash-loop guard: if the freshly-pulled worker keeps dying on startup we stop flapping and leave a
 // needs_attention heartbeat for a human instead of churning forever. Counter persists across restarts.
 const CRASH_FILE = resolve(REPO_DIR, "../.worker-startup.json");
@@ -230,7 +237,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -276,13 +283,17 @@ interface PendingAction {
   preview_attempts?: { url: string; notes?: string; at: string }[];
   // The owner's free-text notes set by a Reject-with-notes action; consumed (then cleared) on regen.
   reject_notes?: string;
+  // set when type==='apply_model_tier' (box-agent-model-tiers P3): the agent kind whose model tier this
+  // proposal changes. The worker applies the tier (agent_model_tiers upsert) on approval; `payload` is the
+  // ModelTierProposalPayload (proposed tier + provenance + the supervisor it routed to).
+  target_kind?: string;
 }
 interface Job {
   id: string;
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal" | "security-review";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal" | "security-review" | "proposed-model-tier";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -467,7 +478,12 @@ function markAccountCapped(dir: string, now: number) {
 function isUsageCapError(text: string): boolean {
   const t = (text || "").toLowerCase();
   if (/\b529\b|overloaded/.test(t)) return false; // transient — existing retry path
-  return /usage limit reached|usage limit|limit reached|limit will reset|out of usage|quota (?:exceeded|reached)|reached your usage limit|5-? ?hour limit/.test(t);
+  // The Max 5-hour wall surfaces in several phrasings — "usage limit reached", and ALSO
+  // "You've hit your session limit · resets 7pm (UTC)" (the shape that slipped through and FAILED a build
+  // instead of failing over). Match "session limit" + the "(reached|hit) your … limit" phrasing too. The
+  // bare 429/rate_limit is deliberately NOT matched (a transient too-many-requests isn't the wall); the
+  // distinguishing signal is the limit MESSAGE, and 529/overloaded already short-circuits above.
+  return /usage limit reached|usage limit|session limit|limit reached|limit will reset|out of usage|quota (?:exceeded|reached)|(?:reached|hit) your[\w .]*limit|5-? ?hour limit/.test(t);
 }
 
 // The account decision for a job at dispatch time. `run` → use this config dir (and this session, which
@@ -699,6 +715,19 @@ async function meterAgentJob(
   }
 }
 
+// box-agent-model-tiers (Phase 1): the per-job model tier the box resolves at dispatch (modelForKind
+// keyed by the claimed job's kind + workspace). Carried through the whole job's async call tree via
+// AsyncLocalStorage so EVERY `claude -p` runner — even the deeply-nested director/triage sub-passes —
+// can splice `--model <id>` with NO call-site threading. Per-job isolation (one store per runJob)
+// keeps concurrent lanes from racing. A null store (unset kind, or a kind that runs before the wrapper)
+// ⇒ no flag ⇒ the Max default — today's behavior, so an unset kind never regresses.
+const _modelCtx = new AsyncLocalStorage<{ modelId: string | null }>();
+/** The `--model <id>` arg fragment for the job currently executing, or [] when unset (Max default). */
+function currentModelArgs(): string[] {
+  const id = _modelCtx.getStore()?.modelId ?? null;
+  return id ? ["--model", id] : [];
+}
+
 async function runClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
   const env: NodeJS.ProcessEnv = {};
@@ -718,7 +747,7 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
   // detector can tell "actively building" from "stuck". Plain json buffers the whole run and prints
   // once at the very end — zero liveness signal, so idle detection would kill every long build.
   // --verbose is required by stream-json. The final {type:"result"} event carries the result text.
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
   const r = await shAsync("claude", args, { cwd, env, idleTimeout: BUILD_IDLE_TIMEOUT_MS, timeout: BUILD_HARD_CAP_MS });
   let session = sessionId;
   let resultText = "";
@@ -770,7 +799,7 @@ async function runSeedClaude(prompt: string, sessionId: string | null, cwd: stri
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SEED_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -838,6 +867,50 @@ function extractJson<T = Record<string, unknown>>(text: string): T | null {
   const last = text.lastIndexOf("}");
   if (first >= 0 && last > first) o = tryParse(text.slice(first, last + 1));
   return o;
+}
+
+// ── needs-attention-triage-and-verdict-robustness Phase 2 — robust verdict resolution ───────────────────
+// The security-review, repair, and regression agents all share the same tail: run `claude -p` → extractJson
+// → read `status`. When that produced an empty/unparseable/unrecognized result, each used to fall straight
+// to a bare, reasonless `needs_attention` ("<agent> ended without a recognizable verdict") that NOTHING
+// triaged. This shared helper hardens that path for all three: it parses the verdict robustly and, on an
+// unparseable/unrecognized result, RE-RUNS the investigation ONCE (a fresh, independent attempt), then —
+// if still inconclusive — hands the caller an ACTIONABLE fail-safe reason ("<agent> produced no parseable
+// verdict after 2 attempts — re-run or review manually: <excerpt>"). It NEVER auto-passes/auto-approves on
+// an inconclusive result (conservative default — the caller still parks it, just with a usable reason).
+type ReviewClaudeRun = { session: string | null; resultText: string; isError: boolean; raw: string; usage?: RunUsage; model?: string | null };
+
+const REVIEW_VERDICT_MAX_ATTEMPTS = 2;
+
+async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
+  /** human label for the fail-safe reason — "security review" | "repair" | "regression review". */
+  agent: string;
+  /** the recognized status vocabulary (a parsed status outside it counts as inconclusive → retry). */
+  recognized: ReadonlySet<string>;
+  /** (re-)invoke the claude investigation; called up to REVIEW_VERDICT_MAX_ATTEMPTS times. */
+  run: (attempt: number) => Promise<T>;
+  /** per-attempt side effects (metering + session persist) — runs after EACH attempt, not just the last. */
+  onRun?: (r: T, attempt: number) => Promise<void>;
+}): Promise<{ run: T; parsed: Record<string, unknown> | null; verdict: string; fallbackReason: string | null }> {
+  let last: T | null = null;
+  let parsed: Record<string, unknown> | null = null;
+  let verdict = "";
+  for (let attempt = 1; attempt <= REVIEW_VERDICT_MAX_ATTEMPTS; attempt++) {
+    const r = await opts.run(attempt);
+    last = r;
+    if (opts.onRun) await opts.onRun(r, attempt);
+    parsed = extractJson<Record<string, unknown>>(r.resultText);
+    verdict = String(parsed?.status || "");
+    if (parsed && verdict && opts.recognized.has(verdict)) {
+      return { run: r, parsed, verdict, fallbackReason: null };
+    }
+    // unparseable / empty / unrecognized verdict → retry once more (fresh investigation), then fail safe.
+  }
+  // Exhausted: still no recognizable verdict. A genuine process crash with no parse stays the caller's
+  // `failed` path (the job machinery retries it); otherwise the caller fail-safes to this actionable reason.
+  const excerpt = (last?.raw || "").trim().slice(-400) || "(no output)";
+  const fallbackReason = `${opts.agent} produced no parseable verdict after ${REVIEW_VERDICT_MAX_ATTEMPTS} attempts — re-run or review manually: ${excerpt}`;
+  return { run: last as T, parsed, verdict, fallbackReason };
 }
 
 async function gh(method: string, path: string, body?: unknown) {
@@ -1709,6 +1782,59 @@ async function runCoverageRegisterJob(job: Job) {
   console.log(`${tag} no owner decision yet — parked as needs_approval`);
 }
 
+// box-agent-model-tiers (P3): a governed model-tier change. proposeModelTierChange
+// (src/lib/model-tier-proposals.ts) either auto-applies an in-rail change (a live+autonomous director,
+// logged autonomous) or surfaces a `proposed-model-tier` agent_jobs row parked needs_approval with ONE
+// apply_model_tier action, routed to the target agent's supervisor (worker→director, director→CEO). On
+// the supervisor's one-tap Approve the inbox flips the action approved + the job to queued_resume and
+// this runner lands here: APPLY the tier (agent_model_tiers upsert) — instant, reversible, no deploy.
+// On decline the registry is untouched. The approve path already logged the decision to approval_decisions.
+async function runProposedModelTierJob(job: Job) {
+  const tag = `[model-tier:${job.id.slice(0, 8)}]`;
+  const action = (job.pending_actions || []).find((a) => a.type === "apply_model_tier");
+  if (!action) {
+    await update(job.id, { status: "needs_attention", error: "proposed-model-tier job has no apply_model_tier action" });
+    console.warn(`${tag} no apply_model_tier action — parked needs_attention`);
+    return;
+  }
+  if (action.status === "declined") {
+    action.result = "declined by supervisor — registry unchanged";
+    await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `${tag} declined — no change`.slice(-2000) });
+    console.log(`${tag} declined — registry unchanged`);
+    return;
+  }
+  if (action.status !== "approved") {
+    // Not yet decided — shouldn't be claimed. Re-park so the inbox keeps surfacing it.
+    await update(job.id, { status: "needs_approval", log_tail: `${tag} awaiting supervisor decision`.slice(-2000) });
+    console.log(`${tag} no decision yet — parked needs_approval`);
+    return;
+  }
+  const targetKind = action.target_kind;
+  const payload = action.payload as import("../src/lib/model-tier-proposals").ModelTierProposalPayload | undefined;
+  if (!targetKind || !payload) {
+    await update(job.id, { status: "needs_attention", error: "apply_model_tier action missing target_kind/payload", pending_actions: job.pending_actions });
+    console.warn(`${tag} missing target_kind/payload`);
+    return;
+  }
+  const { applyModelTierChange } = await import("../src/lib/agent-model-tiers");
+  const r = await applyModelTierChange(db, {
+    workspaceId: job.workspace_id,
+    kind: targetKind,
+    tier: payload.proposedTier,
+    proposedBy: payload.proposerFunction,
+    approvedBy: payload.routedTo || "ceo",
+  });
+  action.status = r.ok ? "done" : "failed";
+  action.result = r.ok ? `set ${targetKind} → ${payload.proposedTier ?? "Max default"}` : `apply failed: ${r.error}`;
+  await update(job.id, {
+    status: r.ok ? "completed" : "needs_attention",
+    error: r.ok ? null : r.error,
+    pending_actions: job.pending_actions,
+    log_tail: `${tag} ${action.result}`.slice(-2000),
+  });
+  console.log(`${tag} ${action.result}`);
+}
+
 // director-proposed-goals (Phase 1): a director-proposed goal artifact + its CEO greenlight. A director
 // proposes a goal for its OWN function via proposeGoal (src/lib/agents/goal-proposals.ts) → a `proposed-goal`
 // agent_jobs row lands here. FRESH: commit docs/brain/goals/{slug}.md (Status: proposed — an inert artifact;
@@ -1808,7 +1934,7 @@ async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: PLATFORM_DIRECTOR_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -1868,6 +1994,56 @@ function isMaxOverloaded(text: string): boolean {
 // (a `platform-director` job with NO target_job_id). It runs the proactive, non-approval director work on a
 // reliable beat — escort each approved goal it owns + post the daily Control-Tower watch update to the board
 // — both no-ops unless Platform is live+autonomous. Best-effort: a failure in one half never blocks the other.
+// #10 (spec-drift-supervision): Ada reviews the AMBIGUOUS drift rows the reconciler surfaced (code on main but
+// no build record, so it couldn't auto-flip). She investigates each READ-ONLY — if she confirms the code
+// implements the phase, she flips it ✅ + resolves the row; an unconfirmable one stays surfaced. Never escalates
+// to the CEO. Capped per pass. This is what the CEO asked for: Ada handles spec-drift's recommendations.
+async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
+  const sd = await import("../src/lib/spec-drift");
+  const rows = await sd.getOpenSpecDrift(job.workspace_id);
+  if (!rows.length) return "drift: none open";
+  const CAP = 5;
+  const flipped: string[] = [];
+  let reviewed = 0;
+  for (const row of rows.slice(0, CAP)) {
+    reviewed++;
+    try {
+      const prompt = [
+        "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only main checkout + the brain, no API key).",
+        `The spec-drift reconciler flagged ${row.spec_slug} phase ${row.phase_index} ("${row.phase_title}"): its board emoji is still ${row.current_emoji}, but the code may already be on main (it couldn't auto-confirm). Detail: ${row.detail}`,
+        "Investigate READ-ONLY: read the spec phase + the implicated code on main. Decide whether this phase is ACTUALLY shipped — its code is on main and implements what the phase describes.",
+        "Final message = ONLY one JSON object:",
+        '{"verdict":"shipped","reasoning":"<the code on main implements this phase — cite the file/function>"}',
+        '{"verdict":"not-shipped","reasoning":"<the code is NOT there / only partial>"}',
+        '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
+      ].join("\n");
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR);
+      const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
+      if (String(parsed?.verdict) === "shipped") {
+        const path = join(REPO_DIR, `docs/brain/specs/${row.spec_slug}.md`);
+        if (!existsSync(path)) { await sd.resolveDriftRow(db, row.id); continue; } // spec gone (folded) → resolve
+        const raw = readFileSync(path, "utf8");
+        const flippedRaw = sd.flipPhaseToShipped(raw, row.phase_index);
+        if (flippedRaw === raw) { await sd.resolveDriftRow(db, row.id); continue; } // already ✅ on main → just resolve
+        const put = await putFileMain(`docs/brain/specs/${row.spec_slug}.md`, flippedRaw, `spec-drift: ${row.spec_slug} phase ${row.phase_index} → ✅ (Ada confirmed shipped)`);
+        if (put.ok) {
+          await sd.resolveDriftRow(db, row.id);
+          flipped.push(`${row.spec_slug} P${row.phase_index + 1}`);
+        }
+      }
+    } catch (e) {
+      console.error(`${tag} drift-supervise ${row.spec_slug} failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+  if (flipped.length) {
+    try {
+      const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "platform", authorFunction: "platform", body: `🔄 Reviewed Reese's spec-drift findings — confirmed + flipped ${flipped.length} phase(s) to ✅: ${flipped.join(", ")}.`, kind: "update", metadata: { spec_drift_supervise: true } });
+    } catch { /* best-effort */ }
+  }
+  return `drift-supervise: reviewed ${reviewed}, flipped ${flipped.length}${flipped.length ? ": " + flipped.join(", ") : ""}`;
+}
+
 async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   const lib = await import("../src/lib/agents/platform-director");
   const notes: string[] = [];
@@ -1960,6 +2136,19 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing regression backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // needs-attention-triage-and-verdict-robustness (Phase 1) — triage every NON-build needs_attention item
+    // (security-review / spec-test / regression / proposed-goal / greenlight) the build loop-guard + the
+    // repair-dismissal lane don't own: re-run a recoverable inconclusive QC result ONCE, or surface a genuine
+    // blocker to the CEO with a clear reason + excerpt. Loop-guarded (a re-run that parks again escalates).
+    const triage = await lib.reconcileNeedsAttention(db);
+    if (triage.rerun.length) notes.push(`needs-attention → re-ran ${triage.rerun.length}: ${triage.rerun.join(", ")}`);
+    if (triage.escalated.length) notes.push(`needs-attention → escalated ${triage.escalated.length} to you: ${triage.escalated.join(", ")}`);
+    if (triage.scanned && !triage.rerun.length && !triage.escalated.length) notes.push(`needs-attention: ${triage.scanned} parked, all triaged`);
+  } catch (e) {
+    notes.push(`needs-attention triage failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing needs-attention triage failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
     const fixes = await lib.escortFixSpecs(db);
     if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);
@@ -1996,6 +2185,13 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing groom failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // #10 — supervise Reese's open spec-drift findings: confirm + flip ✅ the genuinely-shipped phases.
+    notes.push(await runSpecDriftSupervision(job, tag));
+  } catch (e) {
+    notes.push(`drift-supervise failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing drift-supervise failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const watch = await lib.postPlatformWatchUpdate(db);
     notes.push(watch.posted ? "posted board watch update" : `no board post (${watch.reason})`);
   } catch (e) {
@@ -2007,7 +2203,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   // to advance / all healthy) is skipped so the board isn't flooded every ~15m; the daily watch + activity feed
   // cover the all-quiet heartbeat.
   try {
-    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh/i;
+    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|drift: none|flipped 0/i;
     const meaningful = notes.filter((n) => n && !QUIET.test(n));
     if (meaningful.length) {
       const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));
@@ -2690,11 +2886,11 @@ async function runPlatformDirectorJob(job: Job) {
 // Restart=always relaunches the worker on the fresh builder-worker.ts. A clean exit + restart is the
 // safe re-exec; never hot-reload in-process. Returns true when it has triggered an exit path.
 async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
-  if (activeBuilds !== 0) return; // never self-update mid-build/fold
   const now = Date.now();
   if (now - lastSelfUpdateCheck < SELF_UPDATE_MIN_INTERVAL_MS) return; // don't thrash
   lastSelfUpdateCheck = now;
 
+  // Fetch + measure staleness EVEN while building, so a saturated box can still tell how far behind it is.
   const fetched = sh("git", ["fetch", "origin", "main"]);
   if (fetched.code !== 0) {
     console.error(`[self-update] git fetch failed: ${fetched.err.slice(0, 200)}`);
@@ -2704,8 +2900,16 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
   if (!local || !remote || local === remote) return; // current → no-op (no thrash)
 
+  // Idle → update on any drift. Busy → only when FAR behind (max-staleness override); a small lag waits for
+  // the next idle window so in-flight builds aren't interrupted for one or two commits.
+  const behind = parseInt(sh("git", ["rev-list", "--count", `${local}..${remote}`]).out.trim() || "0", 10);
+  if (activeBuilds !== 0 && behind < FORCE_STALE_COMMITS) return; // busy + small lag → wait for idle
+
   const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
-  console.log(`[self-update] behind origin/main (${fromTo}) — updating worker code`);
+  if (activeBuilds !== 0) {
+    console.warn(`[self-update] FORCING update — ${behind} commits behind origin/main despite ${activeBuilds} active build(s); they will re-queue on restart`);
+  }
+  console.log(`[self-update] behind origin/main by ${behind} (${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
   const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
 
@@ -2719,7 +2923,7 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
     const ci = sh("npm", ["ci"], { timeout: 10 * 60 * 1000 });
     if (ci.code !== 0) console.error(`[self-update] npm ci failed (continuing): ${ci.err.slice(-300)}`);
   }
-  await writeHeartbeat(0, "updating", `self-update ${fromTo}`);
+  await writeHeartbeat(0, "updating", `self-update ${fromTo}${activeBuilds ? ` (forced — ${behind} behind, ${activeBuilds} build(s) re-queue)` : ""}`);
   console.log(`[self-update] reset to ${remote.slice(0, 8)} → exiting for systemd restart`);
   process.exit(0);
 }
@@ -3631,7 +3835,7 @@ async function runImproveClaude(prompt: string, sessionId: string | null, cwd: s
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: IMPROVE_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -3858,7 +4062,7 @@ async function runTriageClaude(prompt: string, sessionId: string | null, cwd: st
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: TRIAGE_PASS_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -4051,7 +4255,7 @@ async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SPEC_TEST_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -4309,7 +4513,7 @@ async function runMigrationFixClaude(prompt: string, sessionId: string | null, c
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: MIGRATION_FIX_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -4712,7 +4916,7 @@ async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: st
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: DEV_ASK_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -4982,11 +5186,15 @@ interface CoachThreadRow {
   messages: { role: "user" | "assistant"; content: string }[];
   box_session_id: string | null;
   pending_actions: Record<string, unknown>[];
+  // ada-slack-chat: a 'slack'-sourced thread posts Ada's reply + cards back to #cto-ada.
+  source: string;
+  slack_channel_id: string | null;
+  slack_thread_ts: string | null;
 }
 async function loadCoachThread(threadId: string): Promise<CoachThreadRow | null> {
   const { data } = await db
     .from("director_coach_threads")
-    .select("id, director_function, messages, box_session_id, pending_actions")
+    .select("id, director_function, messages, box_session_id, pending_actions, source, slack_channel_id, slack_thread_ts")
     .eq("id", threadId)
     .maybeSingle();
   if (!data) return null;
@@ -4997,7 +5205,46 @@ async function loadCoachThread(threadId: string): Promise<CoachThreadRow | null>
     messages: Array.isArray(row.messages) ? (row.messages as { role: "user" | "assistant"; content: string }[]) : [],
     box_session_id: (row.box_session_id as string | null) ?? null,
     pending_actions: Array.isArray(row.pending_actions) ? (row.pending_actions as Record<string, unknown>[]) : [],
+    source: (row.source as string) ?? "web",
+    slack_channel_id: (row.slack_channel_id as string | null) ?? null,
+    slack_thread_ts: (row.slack_thread_ts as string | null) ?? null,
   };
+}
+
+/**
+ * ada-slack-chat: post Ada's turn output back to #cto-ada (her reply + an approval card per NEW pending
+ * action), threaded under the founder's message. Mutates each posted action with its Slack message `ts`
+ * (so a later approve/reject can chat.update it in place). Best-effort: a Slack failure never fails the turn.
+ */
+async function postCoachTurnToSlack(
+  thread: CoachThreadRow,
+  workspaceId: string,
+  reply: string,
+  actions: Record<string, unknown>[],
+): Promise<void> {
+  if (thread.source !== "slack" || !thread.slack_channel_id) return;
+  try {
+    const { getSlackToken, postAsAda } = await import("../src/lib/slack");
+    const { buildAdaApprovalCard } = await import("../src/lib/slack-ada");
+    const token = await getSlackToken(workspaceId);
+    if (!token) return;
+    const channel = thread.slack_channel_id;
+    const thread_ts = thread.slack_thread_ts ?? undefined;
+    if (reply) await postAsAda(token, channel, [], reply, { thread_ts });
+    for (const a of actions) {
+      if (a.status !== "pending") continue;
+      const card = buildAdaApprovalCard(thread.id, {
+        id: String(a.id),
+        type: String(a.type),
+        summary: String(a.summary || ""),
+        guidance: typeof a.guidance === "string" ? a.guidance : undefined,
+      });
+      const res = await postAsAda(token, channel, card.blocks, card.text, { thread_ts });
+      if (res.ts) a.slackTs = res.ts; // so the interactions/web approve can resolve THIS card
+    }
+  } catch (e) {
+    console.error("[director-coach] postCoachTurnToSlack failed:", e instanceof Error ? e.message : e);
+  }
 }
 
 function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown>[] {
@@ -5088,6 +5335,23 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         holdBuilds,
         status: "pending",
       });
+    } else if (a.type === "model_tier") {
+      // A governed MODEL-TIER change for one agent kind (box-agent-model-tiers P3). On approval the worker
+      // routes it to the target agent's supervisor via proposeModelTierChange (worker→director, director→CEO).
+      const targetKind = typeof a.targetKind === "string" ? a.targetKind.replace(/[^a-z0-9_-]/gi, "") : "";
+      const tierRaw = typeof a.tier === "string" ? a.tier.toLowerCase() : "";
+      const tier = tierRaw === "haiku" || tierRaw === "sonnet" || tierRaw === "opus" ? tierRaw : tierRaw === "null" || tierRaw === "" ? null : "invalid";
+      if (!targetKind || tier === "invalid") continue; // need a target kind + a valid tier (or null to clear)
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "model_tier",
+        summary: String(a.summary || `Model: ${targetKind} → ${tier ?? "Max default"}`),
+        targetKind,
+        tier,
+        rollup: typeof a.rollup === "number" ? a.rollup : null,
+        evidence: typeof a.evidence === "string" ? a.evidence : "",
+        status: "pending",
+      });
     }
   }
   return out;
@@ -5107,6 +5371,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when the CEO asks you to MODIFY an EXISTING spec (e.g. "add the right **Blocked-by:** lines to Pia's milestone specs"). READ the spec, edit it, emit the WHOLE revised markdown (not a diff). The worker commits it on approval (the spec must already exist — spec-edit never creates a new one). Emit ONE card per spec to revise several in one turn. This is a real edit, not just a recommendation.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"directive","summary":"<the plan in one line>","steps":["<ordered step>","<step>"],"gateBuildsUntil":"<spec-slug or omit>","criticalSpecs":["<slug>"],"holdBuilds":["<slug to cancel>"]}]}`,
   `  — for the INTENT: PLAN case (the CEO hands you a plan to execute). On approval it becomes your ONE active directive (runs FIRST, before routine) AND the worker acts immediately: it QUEUES the gate spec + every \`criticalSpecs\` build right now (no waiting for the init cadence), marks them \`**Priority:** critical\`, and CANCELS any parked \`holdBuilds\` (out-of-order builds to clear). \`gateBuildsUntil\` pauses ROUTINE builds until that spec ships (priority/critical builds still run; auto-lifts on ship). A directive re-prioritizes, never authorizes destructive work or a new goal.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"model_tier","summary":"<agent + tier change in one line>","targetKind":"<agent kind, e.g. fold>","tier":"<haiku|sonnet|opus, or null to clear to the Max default>","rollup":<the cited grade rollup 0-10, or omit>,"evidence":"<why — the grade slip / speed + 5-hr-window pressure>"}]}`,
+  `  — when an agent's MODEL should change (box-agent-model-tiers): its grade rollup slipped on a small model, or a mechanical high-volume agent is burning the 5-hour usage window. You PROPOSE the tier; on the CEO's approval the worker routes it to the agent's SUPERVISOR (a worker's change → its director, a director's → the CEO), and on that approval the registry updates instantly (reversible — flip it back). A live+autonomous director may auto-apply a one-tier bump for a worker whose rollup is <7. Cite the rollup as the evidence.`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -5135,7 +5401,7 @@ async function runDirectorCoachJob(job: Job) {
     /* not JSON */
   }
   const mode = (params.mode as "turn" | "approve_action") || "turn";
-  const intent = (params.intent as "ask" | "coach" | "plan") || "ask";
+  const intent = (params.intent as "ask" | "coach" | "plan" | "auto") || "ask";
   const threadId = params.thread_id || job.spec_slug;
   if (!threadId) {
     await update(job.id, { status: "failed", error: "director-coach job missing thread_id" });
@@ -5281,6 +5547,23 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "done";
             a.result = `directive active${gate ? ` · builds gated until ${gate} ships` : ""}${marked.length ? ` · critical: ${marked.join(", ")}` : ""}${queued.length ? ` · queued: ${queued.join(", ")}` : ""}${held.length ? ` · held: ${held.join(", ")}` : ""}`;
             notes.push(`Directive accepted: ${a.summary}`);
+          } else if (a.type === "model_tier" && a.targetKind) {
+            // box-agent-model-tiers P3: Ada proposes a model-tier change → route it to the target agent's
+            // supervisor (proposeModelTierChange auto-applies an in-rail change for a live+autonomous director,
+            // else surfaces a needs_approval proposal). She proposes; the supervisor (or the rail) decides.
+            const { proposeModelTierChange } = await import("../src/lib/model-tier-proposals");
+            const tier = a.tier === "haiku" || a.tier === "sonnet" || a.tier === "opus" ? a.tier : null;
+            const r = await proposeModelTierChange(db, job.workspace_id, {
+              targetKind: String(a.targetKind),
+              proposedTier: tier,
+              proposerFunction: thread.director_function,
+              rollup: typeof a.rollup === "number" ? (a.rollup as number) : null,
+              evidence: typeof a.evidence === "string" ? (a.evidence as string) : String(a.summary || ""),
+            });
+            if (!r.ok) { a.status = "failed"; a.result = r.error; notes.push(`${a.summary} → ${r.error}`); continue; }
+            a.status = "done";
+            a.result = r.applied ? `auto-applied within rail → ${tier ?? "Max default"}` : `proposed → routed to ${r.routedTo} for approval`;
+            notes.push(`Model tier: ${a.result}`);
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
@@ -5295,6 +5578,16 @@ async function runDirectorCoachJob(job: Job) {
       const summary = notes.length ? notes.join("; ") : "No approved actions to execute.";
       const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: `Done: ${summary}` }];
       await db.from("director_coach_threads").update({ messages, pending_actions: actions, turn_status: "idle", last_error: null, updated_at: new Date().toISOString() }).eq("id", threadId);
+      // ada-slack-chat: confirm the execution back in the #cto-ada thread, as Ada.
+      if (thread.source === "slack" && thread.slack_channel_id && notes.length) {
+        try {
+          const { getSlackToken, postAsAda } = await import("../src/lib/slack");
+          const token = await getSlackToken(job.workspace_id);
+          if (token) await postAsAda(token, thread.slack_channel_id, [], `Done: ${summary}`, { thread_ts: thread.slack_thread_ts ?? undefined });
+        } catch (e) {
+          console.error(`${tag} slack confirm failed:`, e instanceof Error ? e.message : e);
+        }
+      }
       await update(job.id, { status: "completed", log_tail: `approve_action — ${summary}`.slice(-2000) });
       console.log(`${tag} ✓ executed approved actions: ${summary}`);
       return;
@@ -5309,7 +5602,9 @@ async function runDirectorCoachJob(job: Job) {
         ? `INTENT: COACH. The CEO is coaching you — distill their directive (from this whole conversation) into ONE durable coaching rule and emit a 'coaching' pending_action for their confirmation. Acknowledge briefly in reply, but the rule is what matters. Stay within your leash.`
         : intent === "plan"
           ? `INTENT: PLAN. The CEO is handing you a PLAN to EXECUTE — it should trump your day-to-day work until done. Investigate read-only, then emit a 'directive' pending_action: {summary, steps[<ordered plain steps>], gateBuildsUntil?:"<spec-slug>", criticalSpecs?:["<slug>"], holdBuilds?:["<slug to cancel>"]}. On approval the worker acts THIS pass: it QUEUES the gate spec + every criticalSpecs build immediately (no waiting), marks them critical, and CANCELS any parked holdBuilds (out-of-order builds to clear). gateBuildsUntil pauses ROUTINE builds until that spec ships — but the gate spec + criticalSpecs (the priority builds) STILL run, so the plan can actually unjam. holdBuilds is for clearing wedged out-of-order builds. Stay within the leash — a directive re-prioritizes WHAT you do, never authorizes something destructive/irreversible or a new goal.`
-          : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
+          : intent === "auto"
+            ? `INTENT: AUTO. This message came from Slack (#cto-ada) as one natural message — there is no explicit Ask/Coach/Plan button. DEFAULT to answering read-only + honestly, exactly like ASK. But if your answer IMPLIES a durable change, ALSO emit the one matching pending_action, exactly as if the CEO had pressed that button: a 'coaching' card when they're telling you to do something differently going forward; a 'directive' card when they hand you a plan to execute; a 'spec' card for a real code/capability gap; a 'spec-edit' card when they ask you to modify an existing spec; a 'goal' card for a strategic multi-spec initiative; a 'model_tier' card when an agent's model should change. Emit AT MOST one card, and only when it's clearly warranted — when in doubt, just answer. Your reply is plain text (no markdown). Stay within your leash: a card never auto-does something destructive/irreversible or starts a goal — it always stops at the CEO's approval.`
+            : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
     const prompt = isResume
       ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
@@ -5327,11 +5622,14 @@ async function runDirectorCoachJob(job: Job) {
     }
     const ts = Date.now().toString(36);
     const newActions = normalizeCoachActions(parsed?.pending_actions, ts);
+    // ada-slack-chat: mirror the turn to #cto-ada (Ada's reply + a card per new action). This stamps each
+    // posted action with its Slack message ts BEFORE we persist, so a later approve/reject can resolve it.
+    await postCoachTurnToSlack(thread, job.workspace_id, reply, newActions);
     const fresh = await loadCoachThread(threadId);
     const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: reply }];
     await db.from("director_coach_threads").update({ messages, box_session_id: newSession, turn_status: "idle", last_error: null, pending_actions: newActions, updated_at: new Date().toISOString() }).eq("id", threadId);
     await update(job.id, { status: "completed", log_tail: logTail });
-    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} card[s])` : ""}`);
+    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} card[s])` : ""}${thread.source === "slack" ? " → #cto-ada" : ""}`);
   } finally {
     sh("git", ["worktree", "remove", "--force", wt]);
   }
@@ -5350,7 +5648,7 @@ async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd:
     env[k] = v;
   }
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: PR_RESOLVE_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -5615,7 +5913,7 @@ async function runRepairClaude(prompt: string, sessionId: string | null, cwd: st
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: REPAIR_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -5907,11 +6205,20 @@ async function findAlreadyAddressing(signature: string, selfJobId: string): Prom
   return null;
 }
 
-// Resolve the originating error_events row (transient no-op / owner Dismiss) so the panel clears.
-async function resolveRepairErrorRow(instr: { source?: string; signature?: string; error_event_id?: string | null }): Promise<void> {
+// Drive the originating error_events row to a TERMINAL `resolved` state with a recorded reason
+// (fix-error-reconcile-endless-loop Phase 1). EVERY repair disposition calls this so a dispositioned
+// error leaves the `open` feed exactly once — the reconcile then never re-scans / re-churns it. The
+// reason is recorded on the row (`resolution_reason` + `resolved_at`) so the disposition is auditable;
+// a genuine re-fire re-opens the row via recordError's existing update path, so this is reversible.
+// (`error_events` has no `updated_at` column — only `resolved_at`/`resolution_reason`; writing the
+// non-existent column previously made this update fail, leaving the row stuck `open`.)
+async function resolveRepairErrorRow(
+  instr: { source?: string; signature?: string; error_event_id?: string | null },
+  reason: string,
+): Promise<void> {
   if (instr.source === "loop-alert") return; // loop_alerts auto-resolve on recovery in the monitor.
   try {
-    const patch = { status: "resolved", updated_at: new Date().toISOString() } as Record<string, unknown>;
+    const patch = { status: "resolved", resolved_at: new Date().toISOString(), resolution_reason: reason.slice(0, 2000) };
     if (instr.error_event_id) await db.from("error_events").update(patch).eq("id", instr.error_event_id);
     else if (instr.signature) await db.from("error_events").update(patch).eq("signature", instr.signature);
   } catch (e) {
@@ -5940,6 +6247,8 @@ async function runRepairJob(job: Job) {
       if (dupe.active) {
         buildAction.status = "done";
         buildAction.result = `build already live for ${buildAction.spec_slug} (${dupe.reason}) — not re-queued`;
+        // Terminal: the fix is in-flight — close the error row so the reconcile stops re-scanning it.
+        await resolveRepairErrorRow(instr, `owner approved build [[${buildAction.spec_slug}]] — already live (${dupe.reason}), pending deploy`);
         await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
         console.log(`${tag} owner Build → dedup: ${buildAction.result}`);
         return;
@@ -5955,11 +6264,14 @@ async function runRepairJob(job: Job) {
       });
       buildAction.status = error ? "failed" : "done";
       buildAction.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${buildAction.spec_slug}`;
+      // Terminal: a queued fix build is in-flight (pending deploy) — close the error row so the reconcile
+      // stops re-scanning it. On a failed enqueue leave it open so the backlog re-drives it next pass.
+      if (!error) await resolveRepairErrorRow(instr, `owner approved build [[${buildAction.spec_slug}]] — queued, pending deploy`);
       await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
       console.log(`${tag} owner Build → ${buildAction.result}`);
     } else {
       // Dismiss — clear the surfaced item; resolve the originating error row.
-      await resolveRepairErrorRow(instr);
+      await resolveRepairErrorRow(instr, "dismissed by owner");
       buildAction.result = "dismissed by owner";
       await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Dismiss → resolved signature ${signature}`.slice(-2000) });
       console.log(`${tag} owner Dismiss → resolved`);
@@ -5975,7 +6287,7 @@ async function runRepairJob(job: Job) {
   if (instr.source !== "cluster") {
     const addressed = await findAlreadyAddressing(signature, job.id);
     if (addressed) {
-      await resolveRepairErrorRow(instr);
+      await resolveRepairErrorRow(instr, `fixed by [[${addressed.slug}]], pending deploy`);
       await update(job.id, {
         status: "completed",
         error: null,
@@ -5998,16 +6310,24 @@ async function runRepairJob(job: Job) {
       ? `\n\n⚠️ YOUR DIRECTOR (Ada) REVIEWED YOUR PRIOR FIX FOR THIS SIGNATURE AND FOUND IT UNSOUND. Her explanation:\n${(instr as { director_feedback?: string }).director_feedback}\nRe-author a CORRECT fix that directly addresses her point — do NOT repeat the same mistake. If her finding means there is no real bug (she may have shown the premise is false), say so (monitor-false-positive / transient) instead of authoring a fix.`
       : "";
     const repairBrief = await appendAgentInstructions(db, job.workspace_id, "repair", repairPrompt(brief) + bounceNote);
-    const { session, resultText, isError, raw, usage, model } = await runRepairClaude(repairBrief, null, REPO_DIR);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = String(parsed?.status || "");
+    // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
+    // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
+    const REPAIR_VERDICTS = new Set(["transient", "needs-human", "real-bug", "monitor-false-positive", "foreign-app-noise"]);
+    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
+      agent: "repair",
+      recognized: REPAIR_VERDICTS,
+      run: () => runRepairClaude(repairBrief, null, REPO_DIR),
+      onRun: async (r) => {
+        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
+        if (r.session) await update(job.id, { claude_session_id: r.session });
+      },
+    });
+    const { isError, raw } = run;
     console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
 
     if (verdict === "transient") {
       const reason = String(parsed?.reason || "transient / genuine wait — no code fix");
-      await resolveRepairErrorRow(instr);
+      await resolveRepairErrorRow(instr, `transient: ${reason}`);
       await update(job.id, { status: "completed", error: null, log_tail: `transient → resolved: ${reason}`.slice(-2000) });
       console.log(`${tag} transient → resolved the error row, no spec`);
       return;
@@ -6016,6 +6336,11 @@ async function runRepairJob(job: Job) {
     if (verdict === "needs-human") {
       const diagnosis = String(parsed?.diagnosis || "needs a human — couldn't confidently diagnose");
       // Surface for a human (no spec, no loop): needs_attention is read by the Control Tower repair feed.
+      // Phase 1 terminal disposition: the human-review item lives on THIS job's `needs_attention` status
+      // (the repair feed + director supervision read it independently of error_events.status), so close the
+      // error row off `open` with the reason — the reconcile no longer re-scans it. The director's Dismiss /
+      // owner Re-open paths flip the row again as needed.
+      await resolveRepairErrorRow(instr, `needs-human: ${diagnosis.slice(0, 300)} (parked for human review on the repair feed)`);
       await update(job.id, { status: "needs_attention", error: "needs-human", log_tail: diagnosis.slice(-2000) });
       console.log(`${tag} needs-human → surfaced, no spec`);
       return;
@@ -6028,6 +6353,8 @@ async function runRepairJob(job: Job) {
       const authored = await groupOrAuthorRepairSpec(parsed?.spec, signature, verdict);
       if (!authored) {
         // Verdict reached but no valid spec landed → surface for a human rather than silently dropping it.
+        // Terminal disposition: close the error row (the human-review item lives on this needs_attention job).
+        await resolveRepairErrorRow(instr, `${verdict} but no valid fix spec proposed — parked for human review on the repair feed`);
         await update(job.id, { status: "needs_attention", error: "no valid fix spec proposed", log_tail: diagnosis.slice(-2000) || "no valid fix spec" });
         console.log(`${tag} ${verdict} but no valid spec → surfaced needs-human`);
         return;
@@ -6060,6 +6387,12 @@ async function runRepairJob(job: Job) {
           });
           buildResult = error ? `auto-queue FAILED: ${error.message}` : "auto-queued build";
         }
+        // Terminal disposition: a fix spec is authored + its build is in-flight (pending deploy) — close the
+        // error row so the reconcile stops re-scanning it. (The build is tracked by the spec/agent_jobs, not
+        // this row; a genuine re-fire pre-deploy re-opens it and the reconcile confirms it's covered.) On a
+        // failed auto-queue leave it open so the backlog re-drives it next pass.
+        const autoQueued = !dupe.active && !buildResult.includes("FAILED");
+        if (dupe.active || autoQueued) await resolveRepairErrorRow(instr, `fix [[${authored.slug}]] authored (${verdict}) — ${buildResult}, pending deploy`);
         await update(job.id, {
           status: "completed",
           error: null,
@@ -6079,6 +6412,11 @@ async function runRepairJob(job: Job) {
         status: "pending",
         spec_slug: authored.slug,
       };
+      // Terminal disposition: the fix spec is authored (it carries this Repair-signature, so the reconcile
+      // recognizes it as covered) and surfaced for one-tap owner Build — close the error row so the reconcile
+      // stops re-scanning it. The proposed-fix item lives on this needs_approval job (the repair feed reads it);
+      // owner Build/Dismiss and a genuine re-fire flip the row again as needed.
+      await resolveRepairErrorRow(instr, `fix [[${authored.slug}]] authored (${verdict}) — surfaced for owner Build, pending deploy`);
       await update(job.id, {
         status: "needs_approval",
         pending_actions: [action],
@@ -6090,11 +6428,16 @@ async function runRepairJob(job: Job) {
     }
 
     if (isError && !parsed) {
+      // A hard run error (not a verdict) — leave the error row OPEN so the backlog reconcile re-drives a
+      // fresh diagnosis next pass (a `failed` job is not "live" for the enqueue dedup; this is a retry, not a loop).
       await update(job.id, { status: "failed", error: "repair run errored", log_tail: raw.slice(-2000) });
       return;
     }
-    // No recognizable verdict — surface rather than assume resolved.
-    await update(job.id, { status: "needs_attention", error: "repair ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+    // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never assume resolved.
+    // Terminal disposition: the human-review item lives on this needs_attention job (the repair feed reads it),
+    // so close the error row off `open` with the reason — the reconcile no longer re-scans it.
+    await resolveRepairErrorRow(instr, `no parseable repair verdict after 2 attempts — parked for human review on the repair feed`);
+    await update(job.id, { status: "needs_attention", error: fallbackReason ?? "repair produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -6118,7 +6461,7 @@ async function runRegressionClaude(prompt: string, sessionId: string | null, cwd
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: REGRESSION_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -6382,11 +6725,19 @@ async function runRegressionJob(job: Job) {
     // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const coachedRegressionPrompt = await appendAgentInstructions(db, job.workspace_id, "regression", regressionPrompt(regressionBrief(instr)));
-    const { session, resultText, isError, raw, usage, model } = await runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = String(parsed?.status || "");
+    // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
+    // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
+    const REGRESSION_VERDICTS = new Set<string>([...REGRESSION_DISMISS_VERDICTS, "needs-human", "real-regression"]);
+    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
+      agent: "regression review",
+      recognized: REGRESSION_VERDICTS,
+      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR),
+      onRun: async (r) => {
+        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
+        if (r.session) await update(job.id, { claude_session_id: r.session });
+      },
+    });
+    const { isError, raw } = run;
     console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
 
     // DISMISS — transient / foreign / false-positive / already-fixed: recorded reasoning, no spec, no
@@ -6503,7 +6854,8 @@ async function runRegressionJob(job: Job) {
       await update(job.id, { status: "failed", error: "regression review errored", log_tail: raw.slice(-2000) });
       return;
     }
-    await update(job.id, { status: "needs_attention", error: "regression review ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+    // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never assume resolved.
+    await update(job.id, { status: "needs_attention", error: fallbackReason ?? "regression review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -6523,7 +6875,7 @@ async function runSecurityClaude(prompt: string, sessionId: string | null, cwd: 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SECURITY_REVIEW_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -6885,10 +7237,18 @@ async function runSecurityReviewJob(job: Job) {
     console.log(`${tag} reviewing merged diff ${mergeSha.slice(0, 12)} (spec ${mergedSlug})`);
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const prompt = await appendAgentInstructions(db, job.workspace_id, "security-review", securityDiffPrompt(mergeSha, mergedSlug, instr.pr_number ?? null));
-    const { session, resultText, isError, raw } = await runSecurityClaude(prompt, null, REPO_DIR);
-    if (session) await update(job.id, { claude_session_id: session });
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = String(parsed?.status || "");
+    // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
+    // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
+    const SECURITY_VERDICTS = new Set(["clean", "false-positive", "needs-human", "real-vuln"]);
+    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
+      agent: "security review",
+      recognized: SECURITY_VERDICTS,
+      run: () => runSecurityClaude(prompt, null, REPO_DIR),
+      onRun: async (r) => {
+        if (r.session) await update(job.id, { claude_session_id: r.session });
+      },
+    });
+    const { isError, raw } = run;
     console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
 
     if (verdict === "clean" || verdict === "false-positive") {
@@ -6931,7 +7291,8 @@ async function runSecurityReviewJob(job: Job) {
       await update(job.id, { status: "failed", error: "security review errored", log_tail: raw.slice(-2000) });
       return;
     }
-    await update(job.id, { status: "needs_attention", error: "security review ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+    // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never auto-pass.
+    await update(job.id, { status: "needs_attention", error: fallbackReason ?? "security review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -6959,7 +7320,7 @@ async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: STOREFRONT_OPTIMIZER_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -7386,7 +7747,23 @@ async function materializeOptimizerCampaign(
   return { ok: r.ok, detail: r.detail };
 }
 
+// box-agent-model-tiers (Phase 1): resolve the claimed job's model tier ONCE at dispatch (keyed by
+// kind + workspace) and run the whole job inside an AsyncLocalStorage context carrying that id, so
+// every nested `claude -p` runner splices `--model <id>` with no threading. Unset kind / any read
+// error ⇒ null ⇒ no flag ⇒ the Max default (no regression). modelForKind is dynamic-imported (matches
+// the file's lazy-import style and tolerates the table being absent pre-migration).
 async function runJob(job: Job) {
+  let modelId: string | null = null;
+  try {
+    const { modelForKind } = await import("../src/lib/agent-model-tiers");
+    modelId = await modelForKind(await admin(), job.workspace_id, job.kind);
+  } catch {
+    modelId = null; // never let a registry hiccup block a job — fall back to the Max default
+  }
+  return _modelCtx.run({ modelId }, () => dispatchJob(job));
+}
+
+async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
   if (job.kind === "product-seed") return runProductSeedJob(job);
@@ -7406,6 +7783,7 @@ async function runJob(job: Job) {
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
   if (job.kind === "platform-director") return runPlatformDirectorJob(job);
   if (job.kind === "proposed-goal") return runProposedGoalJob(job);
+  if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;

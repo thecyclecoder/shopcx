@@ -1,0 +1,1 @@
+- **Register monitored loop: creative-finder-video-process** · verified 2026-06-24 · → [[libraries/control-tower]]

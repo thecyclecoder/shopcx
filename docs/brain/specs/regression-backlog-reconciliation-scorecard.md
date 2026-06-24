@@ -1,7 +1,6 @@
 # Surface regression coverage on the scorecard ⏳
 
 **Owner:** [[../functions/platform]] · **Parent:** [[regression-agent]] — the standing-coverage complement to Remi; the regression-side sibling of [[director-zero-backlog-error-autonomy]] under [[../goals/devops-director]]
-**Deferred:** split from [[regression-backlog-reconciliation]] — not needed now: the parent's promise (guarantee coverage + drain the backlog) is delivered and runs autonomously by its shipped Phases 1 & 2; surfacing the counts on a scorecard is observability/KPI polish, not load-bearing for the reconciliation to work. It also overlaps an already-owned lane — the [[../goals/platform-department-scorecard]] goal's weekly milestone already lists 'regressions caught' — so this should align with (or fold into) [[../specs/platform-scorecard-weekly]] / [[../specs/platform-scorecard-surface]] rather than duplicate it.
 
 ## North star — coverage is the supervisor's job
 

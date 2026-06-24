@@ -15,7 +15,7 @@ The **department-level KPI aggregation engine** behind the [[../goals/platform-d
 
 ## The daily KPI registry
 
-A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible (weekly/monthly cadences seed empty registries here — [[../specs/platform-scorecard-weekly]] + [[../specs/platform-scorecard-monthly]] fill them). The **daily** set:
+A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible ([[../specs/platform-scorecard-weekly]] adds the **weekly** set below; [[../specs/platform-scorecard-monthly]] adds the **monthly** leading curve). The **daily** set:
 
 | `metric_key` | unit | Derivation |
 |---|---|---|
@@ -27,12 +27,38 @@ A declarative registry keyed by `metric_key` keeps the per-cadence metric set ex
 | `build_enqueue_rate` | count | The pool FEED-rate ([[../specs/director-initiation-throughput]] Phase 4): [[../tables/agent_jobs]] `kind='build'` with `created_at` (the enqueue) in-window — paired with `lane_utilization` it shows whether the director keeps the pool topped up. |
 | `autonomy_ratio` | ratio | [[../tables/approval_decisions]] `autonomous=true` ÷ all terminal decisions (`decision ∈ approved｜declined`) in-window (escalated rows excluded from the denominator). |
 | `escalations` | count | [[../tables/approval_decisions]] `decision='escalated'` + [[../tables/director_activity]] `action_kind='escalated'`, **attributed to the platform function** (`raised_by_function` / `director_function = 'platform'`) in-window. Only a real `functions/*.md` slug counts (a stray slug is ignored — [[director-xp]]'s guard). |
+| `needs_attention` | count | **Open parked work the director triages** ([[../specs/needs-attention-triage-and-verdict-robustness]] Phase 3): [[../tables/agent_jobs]] `status='needs_attention'` EXCLUDING the kinds another lane owns (`build` → the build loop-guard; `repair` → the repair-dismissal lane; `platform-director` → the director's own jobs). The count is the headline value; `detail` carries the **OLDEST** open item's age (`oldest_hours`) + a `by_kind` breakdown — so a rotting parked item is a tracked, trending KPI, not just a transient board line. Current-state metric → prior from the prior snapshot. Same scope `reconcileNeedsAttention` ([[platform-director]] Phase 1) triages + the daily board-watch reports ("N items need attention, oldest Xh"). |
 
 **Window model** (mirrors [[meta__scorecards]]): `curr = [snapshotDate − (windowDays−1), snapshotDate]`, `prev = [snapshotDate − (2·windowDays−1), snapshotDate − windowDays]`. `loop_health` is current-state, so its prior is read from the snapshot `windowDays` ago rather than recomputed.
 
+## The weekly KPI registry
+
+The **weekly** lens ([[../specs/platform-scorecard-weekly]]) — how much the build org shipped this week and how good it was, over a **trailing 7-day** window with a **prior-week delta**. Reuses the same engine machinery (window/delta/upsert); only the derivations are new:
+
+| `metric_key` | unit | Derivation |
+|---|---|---|
+| `specs_per_week` | count | [[../tables/agent_jobs]] `kind='build'` + `status='merged'` with `updated_at` (the merge flip) in-window, **`spec_slug` mapped to the `platform` owner** via the live spec→owner map ([[brain-roadmap]] `getRoadmap().specs[].owner` — the exact rule [[director-xp]] uses). Only platform-owned merged builds count; `detail.slugs` lists them. |
+| `build_success_rate` | ratio | `merged ÷ (merged + failed)` over the window from [[../tables/agent_jobs]] `kind='build'` (success = `status='merged'`, failure = `status ∈ failed｜needs_attention`), terminal flip by `updated_at`. `detail` carries the raw `merged`/`failed`/`total` counts; prior is null when the prior week had no terminal builds. |
+| `idea_to_merge_hours` | hours | Median over merged builds in-window of `(updated_at − created_at)` — the queued→merged "idea→merged-PR" north-star cycle time. `value` = p50; `detail` carries `p50`/`p90` + `merged_count`. |
+| `approvals_untouched_pct` | pct | [[../tables/approval_decisions]] `autonomous=true` ÷ all terminal decisions (`decision ∈ approved｜declined`) in-window, **as a percentage** — "% of platform approvals you never have to touch". A `decided_by ∈ ceo｜human` decision is a TOUCHED approval (surfaced in `detail`); escalated rows are excluded from the denominator. |
+| `worker_grade_rollup` | ratio | Per `agent_kind` average from [[../tables/agent_action_grades]] via [[agent-grader]] `computeAgentRollup` (the **same** last-`ROLLUP_WINDOW` rollup the coaching loop reads — not a second source of truth). `value` = the fleet mean; `detail.by_worker` carries each graded kind's `average`/`prior`/`drop`/`count`, so a slipping worker is visible. Prior = the mean of the per-worker prior-window averages. |
+| `regressions_caught` | count | [[../tables/agent_jobs]] `kind='regression'` **concluded** in-window (terminal status, `updated_at`) **+** [[../tables/director_activity]] rows the [[../specs/regression-agent|Regression Agent]] emits (`action_kind ∈ detected_regression｜authored_fix`). `detail` splits `detected` / `dismissed` / `fix_authored` / `regression_jobs_concluded` (a `dismissed_regression` is tracked but not counted toward the headline). |
+
+## The monthly KPI registry
+
+The **monthly** leading curve ([[../specs/platform-scorecard-monthly]]) — the slow-moving indicators that prove autonomy is compounding, over a **trailing 30-day** window with a **prior-month delta**. Reuses the same engine machinery (window/delta/upsert); only the derivations are new:
+
+| `metric_key` | unit | Derivation |
+|---|---|---|
+| `human_touch_per_build` | ratio | **The goal's headline.** `(approval_decisions where decided_by ∈ ceo｜human in-window) ÷ (agent_jobs kind='build' status='merged' in-window)`. Lower is better; the prior-month `delta_pct` is the "declining MoM" signal. `detail` carries `touched` (numerator) + `builds` (denominator). |
+| `goals_escorted_unbabysat` | count | Goals whose milestones advanced WITHOUT CEO touch: [[../tables/director_activity]] `action_kind='escorted_goal'` (`director_function='platform'`) in-window → distinct `goal_slug`, intersected with [[brain-roadmap]] `getGoals()` shipped milestones; counted only when NO non-autonomous [[../tables/approval_decisions]] (`decided_by ∈ ceo｜human`) in-window touched a spec belonging to that goal's milestones (the touch-check joins `agent_job_id` → `agent_jobs.spec_slug`). `detail.goals` lists the escorted-without-touch goals + their milestones. |
+| `time_to_approve_hours` | hours | Median over terminal [[../tables/approval_decisions]] in-window of `(decision.created_at − raisedAt)`, where `raisedAt` is approximated by the raising [[../tables/agent_jobs]] row's `created_at` (the floor — the job couldn't request approval before it existed; `pending_actions` carry no timestamp and `agent_jobs.updated_at` is post-approval by the time we read it). `value` = p50; `detail` carries `p50`/`p90` + `decided_count`. |
+| `deploy_reliability` | ratio | The [[../specs/deploy-health-rollback-guardian|Deploy-Health & Auto-Rollback guardian]] half of the reliability KPI (CI-green is the weekly `build_success_rate`): [[../tables/director_activity]] `action_kind='deploy_healthy'` ÷ (`deploy_healthy` + `deploy_rolled_back`) in-window. When the guardian has written NO verdicts in the window we surface `detail.no_data=true` (value=0) so the UI shows "no data yet" rather than a fabricated 100%. |
+| `director_call_grade` | ratio | The CEO's grade of the Platform director's calls in-window: average [[../tables/director_decision_grades]] `grade` (1–10) split by `dimension ∈ auto-approval｜goal-escort` — the same shape [[director-leash-recommendations]] `computeDirectorGradeReport` reads. `value` = the blended mean across both dimensions; `detail.by_dimension` carries each dimension's mean + count. Populated by [[../specs/director-loop-grading]] (✅). |
+
 ## Caller
 
-The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. Runs in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
+The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. The **weekly** beat is the `snapshot-platform-scorecard-weekly` step on the same cron — **once per ISO week** per workspace (guarded on any weekly row already taken on/after the ISO-week Monday), `computePlatformScorecard(ws, { cadence:'weekly', windowDays:7 })`. The **monthly** beat is the `snapshot-platform-scorecard-monthly` step on the same cron — **once per calendar month** per workspace (guarded on any monthly row already taken on/after the 1st of the UTC month), `computePlatformScorecard(ws, { cadence:'monthly', windowDays:30 })`. All three run in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
 
 ## Related
 

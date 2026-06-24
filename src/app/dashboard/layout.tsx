@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getActiveWorkspaceId, getUserWorkspaces } from "@/lib/workspace";
 import { WorkspaceProvider } from "@/lib/workspace-context";
+import { SectionNavProvider } from "@/lib/section-nav-context";
 import Sidebar from "./sidebar";
 import ImportProgressBar from "@/components/import-progress-bar";
 import PatternReviewBanner from "@/components/pattern-review-banner";
@@ -27,6 +28,7 @@ export default async function DashboardLayout({
 
   return (
     <WorkspaceProvider value={{ id: current.id, name: current.name, role: current.role }}>
+      <SectionNavProvider>
       <div className="flex h-screen bg-zinc-50 dark:bg-zinc-950">
         <Sidebar
           workspace={current}
@@ -40,6 +42,7 @@ export default async function DashboardLayout({
           </PullToRefresh>
         </main>
       </div>
+      </SectionNavProvider>
     </WorkspaceProvider>
   );
 }

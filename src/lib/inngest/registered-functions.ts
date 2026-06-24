@@ -117,7 +117,7 @@ import { specTestCron } from "@/lib/inngest/spec-test-cron";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
 import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
-import { creativeFinderDailyCron, creativeFinderManualSweep } from "@/lib/inngest/creative-finder";
+import { creativeFinderDailyCron, creativeFinderManualSweep, creativeFinderVideoProcess } from "@/lib/inngest/creative-finder";
 import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
 import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
@@ -257,6 +257,7 @@ export const registeredInngestFunctions = [
   brainIndexRefresh,
   creativeFinderDailyCron,
   creativeFinderManualSweep,
+  creativeFinderVideoProcess,
   competitorScoutDiscover,
   landingPageScoutAnalyze,
   acquisitionResearchCadenceCron,

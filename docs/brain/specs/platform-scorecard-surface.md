@@ -1,5 +1,7 @@
 # Scorecard page + #directors board-watch line ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/platform-department-scorecard]] — (d) Surfacing
 **Blocked-by:** [[platform-scorecard-engine]], [[platform-scorecard-weekly]], [[platform-scorecard-monthly]]
 

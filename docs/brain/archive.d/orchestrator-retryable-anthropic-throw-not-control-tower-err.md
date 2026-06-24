@@ -1,0 +1,1 @@
+- **Don't open a Control Tower incident when the orchestrator throws a retryable Anthropic error for Inngest to retry** · verified 2026-06-24 · → [[libraries/sonnet-orchestrator-v2]]
