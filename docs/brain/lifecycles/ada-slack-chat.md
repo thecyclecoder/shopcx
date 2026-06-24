@@ -19,7 +19,8 @@ Spec: [[../specs/ada-slack-chat]] (until folded). Owner: [[../functions/platform
 
 ## Setup (one-time)
 
-1. **Slack app config** (manual): add scopes `chat:write.customize` (post as Ada) + `reactions:write` (the 👀 ack); subscribe the bot to the `message.channels` event; register the `/ada-here` slash command. Re-auth so the workspace's encrypted bot token carries the new scopes.
+1. **Slack app config** (manual): add scopes `chat:write.customize` (post as Ada) + `reactions:write` (the 👀 ack) **+ the history scope for the channel type you'll use** — `channels:history` for a public `#cto-ada`, **`groups:history` for a private one**. Subscribe the bot to the matching message event — **`message.channels` (public) or `message.groups` (private)**. Register the `/ada-here` slash command. Re-auth so the workspace's encrypted bot token carries the new scopes.
+   - ⚠️ **Receiving ≠ posting.** Being a member + `chat:write` lets the bot *post* to a private channel (that's all `#alerts-critical`/`#daily-digest` ever needed) but does **not** let it *read* messages — that requires the channel-type `*:history` scope + the matching `message.*` subscription. See the gotcha in [[../libraries/slack]]. A private channel needs `groups:history` + `message.groups`; the bot's `groups:read/write` are not enough.
 2. Create `#cto-ada`, `/invite` the bot, then run **`/ada-here`** inside it → writes `workspaces.slack_ada_channel_id`. Ada confirms in-channel: "👋 This is now my channel."
 
 ## Happy path — founder asks, Ada answers
