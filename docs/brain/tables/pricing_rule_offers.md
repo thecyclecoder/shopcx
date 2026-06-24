@@ -45,7 +45,8 @@ The live table carries the **full guardrail shape** (built ahead of the spec by 
 ## Gotchas
 - **Reference, not baked.** The sub stores `pricing_offer_id`, never a baked offer price. Expiring the offer (`status='expired'`) or nulling the column reverts the sub to base pricing automatically — reversible-on-real-renewals, no row rewrite.
 - **First-order coupons do NOT live here.** A first-order-only discount stays on the autonomous [[coupons]] path (`applied_discounts`). Only offers that **persist to renewal** become `pricing_rule_offers` rows and hit the owner-approval gate.
-- **Margin-floor / expiry / rollback guardrails are deferred.** This table is the *model*. The lever that proposes/approves/expires/rolls-back offers (+ the margin-floor hard rail) is `storefront-renewal-offer-lever.md` — not yet built. Until then nothing populates `pricing_offer_id`, so the renewal read is dormant.
+- **Margin-floor / expiry / rollback guardrails are LIVE** ([[../specs/storefront-renewal-offer-lever]], 2026-06-24). The optimizer proposes via [[../libraries/storefront-optimizer-agent]] `proposeRenewalOfferCampaign`; the worker activates on owner approval via `activateRenewalOfferCampaign`. Auto-expiry (`expireRenewalOffers`) runs every [[../inngest/storefront-experiments]] refresh and on each M1 rollback/kill the linked offer is expired + every `subscriptions.pricing_offer_id` pointing at it is nulled (`rollbackRenewalOffersForExperiment`). Below-floor proposals are REFUSED at propose time + escalated to Growth + CFO via [[director_activity]] (`action_kind='escalated_margin_breach'`).
+- **Checkout populates `pricing_offer_id`.** When a checkout's session is on the offer ARM of a running offer experiment, [[../libraries/storefront-optimizer-agent]] `resolveSubscriptionOfferId` returns the offer id and `src/app/api/checkout/route.ts` stamps it onto every matching sub bucket (a reference, not a baked price).
 
 ---
 

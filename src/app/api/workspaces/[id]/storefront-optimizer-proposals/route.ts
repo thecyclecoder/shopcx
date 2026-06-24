@@ -26,11 +26,19 @@ interface ProposalCard {
   lander_type: string;
   audience: string;
   lever: string;
+  /** The action kind — 'storefront_campaign' (reversible/hero) or 'storefront_offer' (persist-to-renewal). */
+  card_kind: "campaign" | "offer";
   hypothesis: string;
   reasoning: string;
   /** Combined hypothesis + reasoning the worker stored on the pending_action. */
   preview: string;
-  variant: { kind: string; label: string; hero_prompt?: string; patch?: unknown };
+  variant: { kind: string; label: string; hero_prompt?: string; patch?: unknown; offer?: unknown };
+  /** For storefront_offer cards: the pricing_rule_offers row id the worker created at propose time
+   *  (the row flips proposed→active on owner approval — storefront-renewal-offer-lever). */
+  offer_id?: string;
+  /** For storefront_offer cards: the modeled-margin diagnostic the agent passed the floor with (or
+   *  the cogs_source_missing soft-pass flag) — surfaced so the approver sees the audit. */
+  margin?: { modeled_renewal_margin_pct: number | null; floor_pct: number; cogs_source_missing: boolean; reason: string };
   created_at: string | null;
   // ── optimizer-hero-preview-gate ──
   // 'concept' = the owner is approving the idea (a hero candidate is generated on approve); 'preview' =
@@ -47,7 +55,13 @@ interface PendingActionRow {
   summary?: string;
   preview?: string;
   status?: string;
-  campaign_plan?: OptimizerProposal;
+  campaign_plan?: OptimizerProposal & {
+    offer_id?: string;
+    experiment_id?: string;
+    variant_id?: string;
+    margin?: { modeled_renewal_margin_pct: number | null; floor_pct: number; cogs_source_missing: boolean; reason: string };
+  };
+  offer_id?: string;
   stage?: "concept" | "preview";
   preview_image_url?: string;
   preview_attempts?: { url: string; notes?: string; at: string }[];
@@ -90,8 +104,11 @@ export async function GET(
   for (const job of jobs ?? []) {
     const actions = (Array.isArray(job.pending_actions) ? job.pending_actions : []) as PendingActionRow[];
     for (const act of actions) {
-      // Only the live campaign proposals — skip anything already declined/done.
-      if (act.type !== "storefront_campaign") continue;
+      // Live optimizer cards: reversible campaign + persist-to-renewal offer; skip anything else
+      // (e.g. storefront_build) and anything already declined/done.
+      const isCampaign = act.type === "storefront_campaign";
+      const isOffer = act.type === "storefront_offer";
+      if (!isCampaign && !isOffer) continue;
       if (act.status && !["pending", "approved"].includes(act.status)) continue;
 
       const plan = act.campaign_plan;
@@ -108,6 +125,7 @@ export async function GET(
         lander_type: String(plan?.lander_type ?? slugLander ?? ""),
         audience: String(plan?.audience ?? slugAudience.join(":") ?? ""),
         lever: String(plan?.lever_key ?? ""),
+        card_kind: isOffer ? "offer" : "campaign",
         hypothesis: String(plan?.hypothesis ?? ""),
         reasoning: String(plan?.reasoning ?? ""),
         preview: String(act.preview ?? ""),
@@ -116,7 +134,10 @@ export async function GET(
           label: String(plan?.variant?.label ?? ""),
           hero_prompt: plan?.variant?.hero_prompt,
           patch: plan?.variant?.patch,
+          offer: (plan?.variant as { offer?: unknown } | undefined)?.offer,
         },
+        offer_id: act.offer_id ?? plan?.offer_id,
+        margin: plan?.margin,
         created_at: job.created_at ?? null,
         stage: act.stage,
         preview_image_url: act.preview_image_url,

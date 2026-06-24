@@ -237,7 +237,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -287,6 +287,10 @@ interface PendingAction {
   // proposal changes. The worker applies the tier (agent_model_tiers upsert) on approval; `payload` is the
   // ModelTierProposalPayload (proposed tier + provenance + the supervisor it routed to).
   target_kind?: string;
+  // set when type==='storefront_offer' (storefront-renewal-offer-lever): the pricing_rule_offers row id
+  // the worker created in `proposed` state at propose-time. On approval, the worker flips it 'proposed'
+  // → 'active' (+ stamps approved_by/at + activated_at) and the linked experiment 'draft' → 'running'.
+  offer_id?: string;
 }
 interface Job {
   id: string;
@@ -7589,9 +7593,11 @@ function storefrontOptimizerPrompt(brief: string, surface: OptimizerSurfaceLite)
     ``,
     `Classify the lever:`,
     `  • REVERSIBLE (copy / hero / chapter add-remove-reorder) → propose a "campaign". The variant is a reversible content patch, OR a generated hero (the worker generates it from your prompt). This is the ONLY auto-run-eligible class.`,
-    `  • OFFER (pricing / discount / renewal-offer change) or STRUCTURAL (a NEW component, a new chapter TYPE, a video hero, a comparison-table widget — anything a reversible content patch can't express) → do NOT fake it as a content patch. Emit "needs_build": author a scoped single-phase spec (Owner: [[../functions/growth]] + a parent) so the worker commits it to main and surfaces a Build card for the owner. These are ALWAYS approval-gated.`,
+    `  • OFFER (persist-to-renewal pricing change — a 'persist_to_renewal_offer' lever: 'renewal_discount_pct' or 'renewal_fixed_price') → propose a "campaign" with lever_class:"offer" + variant.kind:"offer" carrying the persist-to-renewal offer terms. ALWAYS approval-gated (bleeds margin on every renewal) and runs behind the workspace margin floor. First-order-only discounts stay on the autonomous coupons path — do NOT propose them here.`,
+    `  • STRUCTURAL (a NEW component, a new chapter TYPE, a video hero, a comparison-table widget — anything a reversible content patch can't express) → do NOT fake it as a content patch. Emit "needs_build": author a scoped single-phase spec (Owner: [[../functions/growth]] + a parent) so the worker commits it to main and surfaces a Build card for the owner.`,
     ``,
     `Variant patch shape (reversible content — applyVariantPatch in src/lib/storefront/experiments.ts): {headline?, dek?, publication?, sponsorLabel?, heroCaption?, heroImageUrl?, chapterHeading?, chapterParagraphs?:string[], chapterOrder?:number[], reasonsOrder?:number[]}. For a generated hero use kind:"hero" + hero_prompt (the worker calls Nano-Banana + uploads, then sets heroImageUrl).`,
+    `Offer variant shape (persist-to-renewal — storefront-renewal-offer-lever): kind:"offer" + offer:{offer_type:"subscribe_discount_pct"|"fixed_renewal_price", subscribe_discount_pct?:int_0to100, renewal_price_cents?:int, ends_at:ISO, rationale?:string}. Time-box every offer; the worker auto-expires at ends_at and rolls back the offer + nulls subs.pricing_offer_id on M1 LTV/refund-spike regression.`,
     ``,
     `If the BRIEF says CONSERVATIVE (M3 uncalibrated): make a SMALLER bet — one modest, high-confidence change; the worker reserves a bigger holdout automatically.`,
     `If the activation GATE is idle/refused_scope: emit "idle" (do not propose). If there's no worthwhile lever to test: "idle". If a genuine product decision the brief doesn't cover blocks you: "needs_input" with ONE plain question.`,
@@ -7599,6 +7605,7 @@ function storefrontOptimizerPrompt(brief: string, surface: OptimizerSurfaceLite)
     `Final message = ONLY one JSON object:`,
     `  {"status":"propose","hypothesis":"<one testable sentence>","reasoning":"<cites the funnel signal + the lever posterior>","lever_key":"<one of the ranked candidate lever_keys>","lever_class":"reversible","lander_type":"${surface.lander_type}","audience":"${surface.audience}","holdout_pct":0.1,"variant":{"label":"<short>","kind":"content","patch":{...}}}`,
     `  {"status":"propose",...,"variant":{"label":"<short>","kind":"hero","hero_prompt":"<photoreal hero brief; composites the product pouch>"}}`,
+    `  {"status":"propose","hypothesis":"<one testable sentence>","reasoning":"<cites the funnel signal + the lever posterior>","lever_key":"renewal_discount_pct","lever_class":"offer","lander_type":"${surface.lander_type}","audience":"${surface.audience}","holdout_pct":0.15,"variant":{"label":"renewal-offer","kind":"offer","offer":{"offer_type":"subscribe_discount_pct","subscribe_discount_pct":<int 0-100>,"ends_at":"<ISO future>","rationale":"<why this offer / margin trade-off>"}}}`,
     `  {"status":"needs_build","hypothesis":"<what you'd test if it existed>","spec":{"slug":"<stable kebab slug>","title":"...","owner":"[[../functions/growth]]","parent":"<a Growth mandate or goal milestone>","intent":"<one paragraph>","problem":"<concrete, grounded in the funnel + lever>","target":"src/lib/<the file/area>"}}`,
     `  {"status":"idle","reason":"<why nothing worthwhile to test now>"}`,
     `  {"status":"needs_input","questions":[{"id":"q1","q":"<ONE plain product question>"}]}`,
@@ -7761,6 +7768,62 @@ async function runStorefrontOptimizerJob(job: Job) {
           act.status = "failed"; act.result = e instanceof Error ? e.message : String(e);
           results.push(`campaign → failed: ${act.result}`);
         }
+      } else if (act.type === "storefront_offer") {
+        // ── storefront-renewal-offer-lever: the persist-to-renewal offer approval. ──
+        if (act.status === "declined") {
+          // Owner declined — expire the proposed offer + clean up the draft experiment so nothing
+          // dangles. The offer never activated so no subs reference it; just mark + tear down.
+          if (act.offer_id) {
+            try {
+              await db.from("pricing_rule_offers")
+                .update({ status: "expired", expired_at: new Date().toISOString(), deactivation_reason: "declined by owner" })
+                .eq("id", act.offer_id)
+                .eq("workspace_id", surface.workspace_id);
+              const plan = (act.campaign_plan || {}) as Record<string, unknown>;
+              if (plan.experiment_id) {
+                await db.from("storefront_experiments")
+                  .delete()
+                  .eq("id", String(plan.experiment_id))
+                  .eq("status", "draft");
+              }
+            } catch (e) {
+              console.warn(`${tag} offer-decline cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+          act.result = "declined by owner — offer expired, draft experiment removed";
+          results.push("offer → declined");
+          continue;
+        }
+        if (act.status !== "approved") continue;
+        if (!act.offer_id) { act.status = "failed"; act.result = "approval missing offer_id"; results.push("offer → failed (no offer_id)"); continue; }
+        // Re-gate on approval (TOCTOU). If the policy turned off or scope shrank, refuse.
+        try {
+          const reAdmin = (await import("../src/lib/supabase/admin")).createAdminClient();
+          const livePolicy = await policyLib.loadOptimizerPolicy(reAdmin, surface.workspace_id);
+          if (!policyLib.isOptimizerActive(livePolicy)) {
+            act.status = "failed";
+            act.result = "refused on approval — optimizer is no longer active for this workspace; offer NOT activated";
+            results.push(`offer → refused (inactive)`);
+            continue;
+          }
+          if (!policyLib.isProductInScope(livePolicy, surface.product_id)) {
+            act.status = "failed";
+            act.result = `refused on approval — product ${surface.product_id} is no longer in the optimizer product_scope; offer NOT activated`;
+            results.push(`offer → refused (out of scope)`);
+            continue;
+          }
+          const r = await opt.activateRenewalOfferCampaign({
+            workspaceId: surface.workspace_id,
+            offerId: act.offer_id,
+            approvedBy: job.created_by,
+          });
+          act.status = r.ok ? "done" : "failed";
+          act.result = r.detail;
+          results.push(`offer → ${act.status}: ${r.detail}`);
+        } catch (e) {
+          act.status = "failed"; act.result = e instanceof Error ? e.message : String(e);
+          results.push(`offer → failed: ${act.result}`);
+        }
       } else if (act.type === "storefront_build") {
         if (act.status === "declined") { act.result = "dismissed by owner"; results.push("build → dismissed"); continue; }
         if (act.status !== "approved" || !act.spec_slug) continue;
@@ -7859,6 +7922,106 @@ async function runStorefrontOptimizerJob(job: Job) {
         await update(job.id, { status: "needs_attention", error: `proposed unknown lever_key '${leverKey}'`, log_tail: `lever not in the ranked candidates — not standing up`.slice(-2000) });
         return;
       }
+      if (leverClass === "offer") {
+        // ── storefront-renewal-offer-lever: the approval-gated persist-to-renewal offer lever. ──
+        // The agent emits an OFFER variant (subscribe_discount_pct override OR fixed renewal price)
+        // scoped to the experiment arm; we propose the pricing_rule_offers row + the experiment
+        // shell (draft until approval), gate on the workspace margin floor, and surface a
+        // 'storefront_offer' approval card. NEVER autonomous — bleeds margin on every renewal.
+        const variant = (parsed.variant || {}) as Record<string, unknown>;
+        const offerRaw = (variant.offer || {}) as Record<string, unknown>;
+        const offerType = String(offerRaw.offer_type || "");
+        if (offerType !== "subscribe_discount_pct" && offerType !== "fixed_renewal_price") {
+          await update(job.id, { status: "needs_attention", error: `offer variant missing/unknown offer_type '${offerType}'`, log_tail: `offer.offer_type must be subscribe_discount_pct or fixed_renewal_price`.slice(-2000) });
+          return;
+        }
+        const endsAt = String(offerRaw.ends_at || "");
+        if (!endsAt) {
+          await update(job.id, { status: "needs_attention", error: "offer variant missing ends_at", log_tail: "every persist-to-renewal offer must be explicitly time-boxed".slice(-2000) });
+          return;
+        }
+        const floorPct = brief.policy?.min_renewal_margin_pct ?? 0.4;
+        const proposal = {
+          hypothesis: String(parsed.hypothesis || ""),
+          reasoning: String(parsed.reasoning || ""),
+          lever_key: leverKey,
+          lever_class: "offer" as const,
+          lander_type: surface.lander_type as never,
+          audience: surface.audience,
+          holdout_pct: typeof parsed.holdout_pct === "number" ? (parsed.holdout_pct as number) : undefined,
+          variant: {
+            label: String(variant.label || "renewal-offer"),
+            kind: "offer" as const,
+            offer: {
+              offer_type: offerType as "subscribe_discount_pct" | "fixed_renewal_price",
+              subscribe_discount_pct:
+                offerType === "subscribe_discount_pct" && typeof offerRaw.subscribe_discount_pct === "number"
+                  ? (offerRaw.subscribe_discount_pct as number)
+                  : undefined,
+              renewal_price_cents:
+                offerType === "fixed_renewal_price" && typeof offerRaw.renewal_price_cents === "number"
+                  ? (offerRaw.renewal_price_cents as number)
+                  : undefined,
+              ends_at: endsAt,
+              rationale: typeof offerRaw.rationale === "string" ? (offerRaw.rationale as string) : undefined,
+            },
+          },
+        };
+        const r = await opt.proposeRenewalOfferCampaign({
+          workspaceId: surface.workspace_id,
+          productId: surface.product_id,
+          proposal,
+          conservative: brief.conservative,
+          floorPct,
+          createdBy: job.created_by,
+        });
+        if (!r.ok) {
+          // Margin-floor breach: escalate to Growth + CFO via director_activity (operational-rules
+          // § North star — hitting a hard rail = escalate, not execute). Per the spec, the agent
+          // never SURFACES a below-floor offer as a normal proposal.
+          if (r.margin && !r.margin.ok) {
+            try {
+              await db.from("director_activity").insert({
+                workspace_id: surface.workspace_id,
+                director_function: "growth",
+                action_kind: "escalated_margin_breach",
+                spec_slug: "storefront-renewal-offer-lever",
+                reason: r.margin.reason,
+                metadata: {
+                  job_id: job.id,
+                  surface: `${surface.product_id}:${surface.lander_type}:${surface.audience}`,
+                  lever_key: leverKey,
+                  offer_type: offerType,
+                  modeled_renewal_margin_pct: r.margin.modeled_renewal_margin_pct,
+                  floor_pct: r.margin.floor_pct,
+                  cogs_source_missing: r.margin.cogs_source_missing,
+                  hypothesis: proposal.hypothesis,
+                },
+              });
+            } catch (e) {
+              console.warn(`${tag} margin-breach escalation insert failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+            await update(job.id, { status: "needs_attention", error: "margin floor breach — escalated to Growth + CFO", log_tail: r.detail.slice(-2000) });
+            console.warn(`${tag} ESCALATION margin breach — ${r.detail}`);
+            return;
+          }
+          await update(job.id, { status: "needs_attention", error: "offer proposal failed", log_tail: r.detail.slice(-2000) });
+          return;
+        }
+        const action: PendingAction = {
+          id: `so${job.id.slice(0, 6)}`,
+          type: "storefront_offer",
+          summary: `Approve persist-to-renewal offer on ${opt.surfaceKey(surface)} — lever ${leverKey}`,
+          preview: `${proposal.hypothesis}\n\n${proposal.reasoning}${r.margin && r.margin.cogs_source_missing ? "\n\n⚠️ COGS source missing — modeled renewal margin not verifiable." : ""}`.slice(0, 400),
+          status: "pending",
+          campaign_plan: { ...proposal, offer_id: r.offer_id, experiment_id: r.experiment_id, variant_id: r.variant_id, margin: r.margin },
+          offer_id: r.offer_id,
+        };
+        await update(job.id, { status: "needs_approval", pending_actions: [action], log_tail: `proposed offer (lever ${leverKey}) → awaiting owner Approve.\n\n${proposal.hypothesis}`.slice(-2000) });
+        console.log(`${tag} proposed persist-to-renewal offer on ${opt.surfaceKey(surface)} → awaiting approval`);
+        return;
+      }
+
       if (leverClass !== "reversible") {
         await update(job.id, { status: "needs_attention", error: `proposed a ${leverClass} lever as a campaign`, log_tail: `offer/structural levers must be routed via needs_build, not a content campaign`.slice(-2000) });
         return;

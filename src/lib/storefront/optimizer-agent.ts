@@ -166,15 +166,39 @@ export function surfaceKey(s: { product_id: string; lander_type: string; audienc
   return `${s.product_id}:${s.lander_type}:${s.audience}`;
 }
 
-/** The variant the box session proposes — a reversible content patch, or a hero the
- *  worker generates from a prompt (the box never calls the image API itself). */
+/** The variant the box session proposes — a reversible content patch, a hero the
+ *  worker generates from a prompt (the box never calls the image API itself), or a
+ *  persist-to-renewal pricing OFFER (storefront-renewal-offer-lever). The offer kind
+ *  is always approval-gated and materializes as a pricing_rule_offers row scoped to
+ *  the experiment arm. */
 export interface OptimizerVariantPlan {
   label: string;
-  kind: "content" | "hero";
+  kind: "content" | "hero" | "offer";
   /** Reversible content patch (copy / chapter add-remove-reorder). Used when kind='content'. */
   patch?: VariantPatch;
   /** Nano-Banana hero prompt. Used when kind='hero' — the WORKER generates + uploads it. */
   hero_prompt?: string;
+  /** Persist-to-renewal offer terms. Used when kind='offer' (storefront-renewal-offer-lever).
+   *  The variant arm carries the offer; the control arm gets base pricing. */
+  offer?: OfferPlan;
+}
+
+/** The persist-to-renewal offer the agent proposes (storefront-renewal-offer-lever P1).
+ *  Mirrors the pricing_rule_offers shape (the live schema is the spec) but as a typed
+ *  plan the agent emits; the worker writes the actual row + applies the margin-floor + window
+ *  guardrails. Offer is ALWAYS owner-approved before it activates (bleeds margin on every renewal). */
+export interface OfferPlan {
+  /** Discriminator: which delta this offer carries. */
+  offer_type: "subscribe_discount_pct" | "fixed_renewal_price";
+  /** When offer_type='subscribe_discount_pct': the override % (0–100). */
+  subscribe_discount_pct?: number;
+  /** When offer_type='fixed_renewal_price': the pinned per-unit cents. */
+  renewal_price_cents?: number;
+  /** End of the offer window (ISO timestamp). starts_at defaults to now() in the DB. Every offer is
+   *  explicitly time-boxed — auto-expire at ends_at is the Phase 2 safety net. */
+  ends_at: string;
+  /** Optional rationale the agent supplies on the row (audit trail for the approval card). */
+  rationale?: string;
 }
 
 /** The typed campaign plan the box session emits (status='propose'). */
@@ -657,4 +681,537 @@ export async function materializeCampaign(opts: {
     lever_key: p.lever_key,
     detail: `stood up experiment ${experimentId} on ${surfaceKey(surface)} — lever ${p.lever_key}, holdout ${holdout}${opts.conservative ? " (conservative)" : ""}`,
   };
+}
+
+// ── Persist-to-renewal offer lever (storefront-renewal-offer-lever) ─────────────
+// The OFFER lever is the highest-stakes one — it bleeds margin on every renewal — so it is ALWAYS
+// approval-gated AND runs behind a workspace margin floor. This file owns the deterministic write
+// side (propose / activate / expire / rollback) of the lever; the box session proposes the offer
+// terms, the worker calls these helpers on the gate's verdict.
+//
+// Lifecycle:
+//   propose  →  proposeRenewalOfferCampaign   inserts pricing_rule_offers (status='proposed') +
+//                                              the experiment shell (storefront_experiments + arms,
+//                                              status='draft' until owner approval), linking the
+//                                              variant arm's id back onto the offer row.
+//   approve  →  activateRenewalOfferCampaign  flips the offer 'proposed'→'active' (+ stamps
+//                                              approved_by/at + activated_at) and the experiment
+//                                              'draft'→'running'. Now in-window renewals see the
+//                                              offer (resolveSubscriptionPricing) and the M1 refresh
+//                                              attributes outcomes on the LTV proxy.
+//   expire   →  expireRenewalOffers           sweeps active rows past ends_at → 'expired' (+
+//                                              deactivation_reason='auto_expire') and NULLs every
+//                                              subscriptions.pricing_offer_id referencing them.
+//   rollback →  rollbackRenewalOffersForExperiment   on M1 LTV/refund-spike auto-rollback (or a kill),
+//                                              expires the linked offer + NULLs sub references so the
+//                                              renewal-margin bleed STOPS within the next refresh cycle.
+
+/** A modeled-margin check result attached to a proposed offer (storefront-renewal-offer-lever P2).
+ *  `cogs_source_missing=true` means the product had no COGS source available — the floor SOFT-passes
+ *  but the audit honestly records the unknown so the approving owner can see it.  */
+export interface RenewalOfferMarginCheck {
+  ok: boolean;
+  modeled_renewal_margin_pct: number | null;
+  floor_pct: number;
+  cogs_source_missing: boolean;
+  reason: string;
+}
+
+/** A best-effort modeled renewal margin for an offer (storefront-renewal-offer-lever P2 guardrail).
+ *  Today the product/variants tables carry no COGS column (cogs_source_missing reads true on this
+ *  workspace), so this returns null/soft-pass and the audit trail records the gap — the floor will
+ *  bite once COGS lands. When COGS becomes available the implementation slots in here without a
+ *  caller change. */
+export async function computeModeledRenewalMargin(opts: {
+  workspaceId: string;
+  productId: string;
+  offer: OfferPlan;
+  admin?: Admin;
+  /** The floor the worker compares against (storefront_optimizer_policy.min_renewal_margin_pct). */
+  floorPct: number;
+}): Promise<RenewalOfferMarginCheck> {
+  const admin = opts.admin ?? createAdminClient();
+  // Best-effort COGS lookup. The shipped product/variants tables have no cogs column today, so this
+  // pattern degrades cleanly: any future COGS column lights up the floor automatically.
+  let cogsCents: number | null = null;
+  try {
+    const { data: variantRow } = await admin
+      .from("product_variants")
+      .select("price_cents")
+      .eq("product_id", opts.productId)
+      .limit(1)
+      .maybeSingle();
+    void variantRow;
+    // No COGS source on this row — placeholder for the future column. Until then the floor soft-passes.
+  } catch {
+    /* fall through to cogs_source_missing */
+  }
+  if (cogsCents == null) {
+    return {
+      ok: true,
+      modeled_renewal_margin_pct: null,
+      floor_pct: opts.floorPct,
+      cogs_source_missing: true,
+      reason: "COGS source missing — modeled renewal margin not verifiable; the audit records this honestly. The floor will bite once COGS lands.",
+    };
+  }
+  // Future path (cogs available): compute the per-unit renewal price under the offer and the resulting margin.
+  // For now this branch is unreachable; left as a known-pure stub for clarity.
+  const margin = 1; // placeholder
+  return {
+    ok: margin >= opts.floorPct,
+    modeled_renewal_margin_pct: margin,
+    floor_pct: opts.floorPct,
+    cogs_source_missing: false,
+    reason: margin >= opts.floorPct
+      ? `modeled renewal margin ${(margin * 100).toFixed(1)}% ≥ floor ${(opts.floorPct * 100).toFixed(0)}%`
+      : `modeled renewal margin ${(margin * 100).toFixed(1)}% BELOW floor ${(opts.floorPct * 100).toFixed(0)}% — escalating to Growth + CFO, NOT surfacing as a normal proposal`,
+  };
+}
+
+export interface RenewalOfferProposalResult {
+  ok: boolean;
+  offer_id?: string;
+  experiment_id?: string;
+  variant_id?: string;
+  margin: RenewalOfferMarginCheck | null;
+  detail: string;
+}
+
+/**
+ * Stand up a persist-to-renewal offer campaign in `proposed`/`draft` shape (no live serving yet).
+ * Two rows + the linkage:
+ *   1. pricing_rule_offers (status='proposed', experiment_id + variant_id wired)
+ *   2. storefront_experiments (status='draft' — the campaign record M5 grades) + control arm + offer arm
+ * The offer arm carries an empty content patch (the offer is the lever, not a content change). On
+ * `approve`, the worker calls `activateRenewalOfferCampaign` which flips the offer → active and the
+ * experiment → running, so the offer arm starts serving the in-window delta to renewals.
+ *
+ * Margin floor: when the modeled margin is below the policy's `min_renewal_margin_pct`, this REFUSES
+ * the proposal (returns {ok:false}) — the caller is expected to escalate to Growth + CFO (a
+ * director_activity 'escalated_margin_breach' row) instead of surfacing a normal proposal. A missing
+ * COGS source soft-passes (cogs_source_missing=true on the row); the audit records that the floor
+ * wasn't verifiable. Operational-rules § North star: a hard rail = escalate, not execute.
+ */
+export async function proposeRenewalOfferCampaign(opts: {
+  workspaceId: string;
+  productId: string;
+  proposal: OptimizerProposal;
+  conservative: boolean;
+  floorPct: number;
+  createdBy?: string | null;
+  now?: Date;
+  admin?: Admin;
+}): Promise<RenewalOfferProposalResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const now = opts.now ?? new Date();
+  const p = opts.proposal;
+  const offer = p.variant.offer;
+  if (!offer) {
+    return { ok: false, margin: null, detail: "offer variant missing offer terms" };
+  }
+  if (offer.offer_type === "subscribe_discount_pct" && offer.subscribe_discount_pct == null) {
+    return { ok: false, margin: null, detail: "subscribe_discount_pct offer missing the % value" };
+  }
+  if (offer.offer_type === "fixed_renewal_price" && offer.renewal_price_cents == null) {
+    return { ok: false, margin: null, detail: "fixed_renewal_price offer missing the price (cents)" };
+  }
+  const endsAt = new Date(offer.ends_at);
+  if (Number.isNaN(endsAt.getTime()) || endsAt.getTime() <= now.getTime()) {
+    return { ok: false, margin: null, detail: "offer.ends_at must be a future ISO timestamp" };
+  }
+
+  const surface: OptimizerSurface = {
+    workspace_id: opts.workspaceId,
+    product_id: opts.productId,
+    lander_type: p.lander_type,
+    audience: p.audience,
+  };
+  if (await hasActiveCampaignForSurface(admin, surface)) {
+    return { ok: false, margin: null, detail: `a campaign is already active on ${surfaceKey(surface)} — not standing up a second` };
+  }
+
+  // ── Margin-floor hard rail ─────────────────────────────────────────────────
+  const margin = await computeModeledRenewalMargin({
+    workspaceId: opts.workspaceId,
+    productId: opts.productId,
+    offer,
+    floorPct: opts.floorPct,
+    admin,
+  });
+  if (!margin.ok) {
+    // Below the floor: the caller escalates instead of surfacing.
+    return { ok: false, margin, detail: margin.reason };
+  }
+
+  let holdout = typeof p.holdout_pct === "number" ? p.holdout_pct : 0.1;
+  holdout = Math.min(0.9, Math.max(0.05, holdout));
+  if (opts.conservative) holdout = Math.max(holdout, CONSERVATIVE_MIN_HOLDOUT);
+
+  // 1. The experiment shell (draft until owner approves the offer — nothing serves yet).
+  const { data: expRow, error: expErr } = await admin
+    .from("storefront_experiments")
+    .insert({
+      workspace_id: opts.workspaceId,
+      product_id: opts.productId,
+      lander_type: p.lander_type,
+      audience: p.audience,
+      lever: p.lever_key,
+      hypothesis: p.hypothesis,
+      status: "draft",
+      holdout_pct: holdout,
+      created_by: opts.createdBy ?? null,
+      last_decision: {
+        action: "proposed_offer",
+        by: "storefront-optimizer",
+        lever_class: "offer",
+        reasoning: p.reasoning,
+        conservative: opts.conservative,
+        offer_type: offer.offer_type,
+        at: now.toISOString(),
+      },
+    })
+    .select("id")
+    .single();
+  if (expErr || !expRow) {
+    return { ok: false, margin, detail: `experiment insert failed: ${expErr?.message ?? "no row"}` };
+  }
+  const experimentId = expRow.id as string;
+
+  // 2. Control arm (base pricing) + the offer arm (the offer carries the lever — empty content patch).
+  const { data: variantRows, error: varErr } = await admin
+    .from("storefront_experiment_variants")
+    .insert([
+      { experiment_id: experimentId, workspace_id: opts.workspaceId, label: "control", is_control: true, patch: {} },
+      {
+        experiment_id: experimentId,
+        workspace_id: opts.workspaceId,
+        label: p.variant.label || "renewal-offer",
+        is_control: false,
+        patch: {},
+      },
+    ])
+    .select("id, is_control");
+  if (varErr || !variantRows) {
+    await admin.from("storefront_experiments").delete().eq("id", experimentId);
+    return { ok: false, margin, detail: `variant insert failed (experiment rolled back): ${varErr?.message ?? "no rows"}` };
+  }
+  const variantId =
+    (variantRows as Array<{ id: string; is_control: boolean }>).find((v) => !v.is_control)?.id ?? "";
+  if (!variantId) {
+    await admin.from("storefront_experiments").delete().eq("id", experimentId);
+    return { ok: false, margin, detail: "could not resolve the offer arm variant id" };
+  }
+
+  // 3. The pricing_rule_offers row (status='proposed' — inactive until owner approval).
+  const offerInsert: Record<string, unknown> = {
+    workspace_id: opts.workspaceId,
+    product_id: opts.productId,
+    experiment_id: experimentId,
+    variant_id: variantId,
+    lander_type: p.lander_type,
+    audience: p.audience,
+    offer_type: offer.offer_type,
+    subscribe_discount_pct: offer.offer_type === "subscribe_discount_pct" ? offer.subscribe_discount_pct : null,
+    renewal_price_cents: offer.offer_type === "fixed_renewal_price" ? offer.renewal_price_cents : null,
+    ends_at: endsAt.toISOString(),
+    status: "proposed",
+    modeled_renewal_margin_pct: margin.modeled_renewal_margin_pct,
+    margin_floor_pct: margin.floor_pct,
+    margin_floor_ok: margin.ok && !margin.cogs_source_missing ? true : null,
+    cogs_source_missing: margin.cogs_source_missing,
+    hypothesis: p.hypothesis,
+    rationale: offer.rationale ?? p.reasoning,
+    created_by: opts.createdBy ?? null,
+  };
+  const { data: offerRow, error: offerErr } = await admin
+    .from("pricing_rule_offers")
+    .insert(offerInsert)
+    .select("id")
+    .single();
+  if (offerErr || !offerRow) {
+    // Roll the rest back so the surface isn't left half-stood-up.
+    await admin.from("storefront_experiments").delete().eq("id", experimentId);
+    return { ok: false, margin, detail: `pricing_rule_offers insert failed (experiment + arms rolled back): ${offerErr?.message ?? "no row"}` };
+  }
+  const offerId = offerRow.id as string;
+
+  return {
+    ok: true,
+    offer_id: offerId,
+    experiment_id: experimentId,
+    variant_id: variantId,
+    margin,
+    detail: `proposed offer ${offerId} on ${surfaceKey(surface)} — lever ${p.lever_key}, holdout ${holdout}${opts.conservative ? " (conservative)" : ""} (awaiting owner approval)`,
+  };
+}
+
+export interface RenewalOfferActivationResult {
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * On owner approval, flip the proposed offer + draft experiment LIVE:
+ *  - pricing_rule_offers.status: 'proposed' → 'active', activated_at = now(), approved_by/_at set
+ *  - storefront_experiments.status: 'draft' → 'running', started_at = now()
+ *
+ * Idempotent at the offer grain: re-running on an already-active row is a no-op (the worker can
+ * safely retry an approval handler). Best-effort republish of the edge manifest for PDP arms so
+ * the offer arm starts serving immediately (the offer's persistent effect is at RENEWAL — first-
+ * order pricing is unchanged unless the offer is also a first-order discount, which the
+ * coupons path handles separately).
+ */
+export async function activateRenewalOfferCampaign(opts: {
+  workspaceId: string;
+  offerId: string;
+  approvedBy?: string | null;
+  now?: Date;
+  admin?: Admin;
+}): Promise<RenewalOfferActivationResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const now = opts.now ?? new Date();
+
+  const { data: offer, error: loadErr } = await admin
+    .from("pricing_rule_offers")
+    .select("id, status, experiment_id, product_id, lander_type, ends_at")
+    .eq("id", opts.offerId)
+    .eq("workspace_id", opts.workspaceId)
+    .maybeSingle();
+  if (loadErr || !offer) {
+    return { ok: false, detail: `offer ${opts.offerId} not found: ${loadErr?.message ?? "no row"}` };
+  }
+  if (offer.status === "active") {
+    return { ok: true, detail: `offer ${opts.offerId} already active — idempotent no-op` };
+  }
+  if (offer.status === "expired") {
+    return { ok: false, detail: `offer ${opts.offerId} is expired — cannot activate; propose a fresh offer` };
+  }
+  if (Date.parse(offer.ends_at as string) <= now.getTime()) {
+    return { ok: false, detail: `offer ${opts.offerId} ends_at is already in the past — cannot activate` };
+  }
+
+  const { error: offerErr } = await admin
+    .from("pricing_rule_offers")
+    .update({
+      status: "active",
+      approved_by: opts.approvedBy ?? null,
+      approved_at: now.toISOString(),
+      activated_at: now.toISOString(),
+      updated_at: now.toISOString(),
+    })
+    .eq("id", opts.offerId);
+  if (offerErr) {
+    return { ok: false, detail: `offer activation failed: ${offerErr.message}` };
+  }
+
+  if (offer.experiment_id) {
+    const { error: expErr } = await admin
+      .from("storefront_experiments")
+      .update({ status: "running", started_at: now.toISOString(), updated_at: now.toISOString() })
+      .eq("id", offer.experiment_id as string)
+      .eq("status", "draft");
+    if (expErr) {
+      return { ok: false, detail: `experiment activation failed: ${expErr.message}` };
+    }
+  }
+
+  if (offer.lander_type === "pdp") {
+    await republishExperimentManifest(admin, [offer.product_id as string]);
+  }
+
+  return {
+    ok: true,
+    detail: `activated offer ${opts.offerId} — experiment ${offer.experiment_id ?? "(none)"} now running; renewals in [now, ends_at] apply the offer`,
+  };
+}
+
+export interface RenewalOfferSweepResult {
+  expired: number;
+  subscriptions_unlinked: number;
+}
+
+/**
+ * Auto-expire every active persist-to-renewal offer whose `ends_at` has passed (the Phase 2
+ * safety net — every offer is explicitly time-boxed and never silently becomes the default price).
+ *  - pricing_rule_offers: status='expired', expired_at=now(), deactivation_reason='auto_expire'
+ *  - subscriptions.pricing_offer_id → NULL for every sub referencing the expired offer (a reference,
+ *    not a baked price → the sub reverts to base pricing on its next renewal automatically).
+ *
+ * Idempotent: only acts on `active` rows past their ends_at; subsequent runs find none. Best-effort
+ * (an offer-row failure logs + continues; one bad row doesn't strand the sweep).
+ */
+export async function expireRenewalOffers(opts: {
+  workspaceId: string;
+  now?: Date;
+  admin?: Admin;
+}): Promise<RenewalOfferSweepResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const now = opts.now ?? new Date();
+
+  const { data: dueRows } = await admin
+    .from("pricing_rule_offers")
+    .select("id")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("status", "active")
+    .lte("ends_at", now.toISOString());
+  const ids = ((dueRows as Array<{ id: string }>) || []).map((r) => r.id);
+  let expired = 0;
+  let unlinked = 0;
+  for (const offerId of ids) {
+    const { error: upErr } = await admin
+      .from("pricing_rule_offers")
+      .update({
+        status: "expired",
+        expired_at: now.toISOString(),
+        deactivation_reason: "auto_expire",
+        updated_at: now.toISOString(),
+      })
+      .eq("id", offerId)
+      .eq("status", "active"); // belt-and-suspenders: don't flip a concurrently-mutated row
+    if (upErr) {
+      console.warn(`[storefront-optimizer] auto-expire offer ${offerId} failed: ${upErr.message}`);
+      continue;
+    }
+    expired++;
+    // Clear the reference on every sub that pointed at this offer — they revert to base pricing.
+    const { data: unlinkRows, error: subErr } = await admin
+      .from("subscriptions")
+      .update({ pricing_offer_id: null })
+      .eq("workspace_id", opts.workspaceId)
+      .eq("pricing_offer_id", offerId)
+      .select("id");
+    if (subErr) {
+      console.warn(`[storefront-optimizer] auto-expire offer ${offerId} sub-unlink failed: ${subErr.message}`);
+      continue;
+    }
+    unlinked += (unlinkRows?.length ?? 0);
+  }
+  return { expired, subscriptions_unlinked: unlinked };
+}
+
+/**
+ * Roll back every persist-to-renewal offer linked to an experiment that just got auto-rolled-back
+ * (LTV regression / refund spike — experiment-refresh Phase 5) OR killed. Expires the offer
+ * (`deactivation_reason='experiment_rollback'`) and clears `subscriptions.pricing_offer_id` for
+ * affected subs so the renewal-margin bleed STOPS within the next refresh cycle. A persist-to-renewal
+ * offer touched real renewals — rollback must un-touch them.
+ */
+/**
+ * Resolve the persist-to-renewal offer this checkout's subscriber qualifies for, if any
+ * (storefront-renewal-offer-lever — the checkout-side wiring of subscriptions.pricing_offer_id).
+ *
+ * A sub gets stamped with `pricing_offer_id` only when:
+ *   1. The visitor's storefront_sessions row carries an experiment assignment on the OFFER ARM
+ *      (arm === 'variant') of a RUNNING offer experiment,
+ *   2. AND the offer experiment's product matches one of the products on this sub,
+ *   3. AND there is an `active`, in-window pricing_rule_offers row scoped to that experiment+variant.
+ *
+ * Returns the offer_id (the first match — at most one offer per sub; checkout never bundles two
+ * persist-to-renewal offers into one sub). Returns null if no qualifying offer is found, the
+ * anonymous_id is missing, or anything errors (the path is best-effort: a failure here means the
+ * sub renews at base pricing, never a wrong price).
+ */
+export async function resolveSubscriptionOfferId(opts: {
+  workspaceId: string;
+  anonymousId: string | null;
+  customerId?: string | null;
+  productIds: string[];
+  now?: Date;
+  admin?: Admin;
+}): Promise<string | null> {
+  if (!opts.anonymousId && !opts.customerId) return null;
+  if (!opts.productIds.length) return null;
+  try {
+    const admin = opts.admin ?? createAdminClient();
+    const now = opts.now ?? new Date();
+    // Find the converting session's experiment assignments. Prefer anonymous_id (the stable
+    // pre-purchase identity); fall back to customer_id if it's not available.
+    let sessQuery = admin
+      .from("storefront_sessions")
+      .select("experiment_assignments")
+      .eq("workspace_id", opts.workspaceId)
+      .order("last_seen_at", { ascending: false })
+      .limit(1);
+    if (opts.anonymousId) {
+      sessQuery = sessQuery.eq("anonymous_id", opts.anonymousId);
+    } else if (opts.customerId) {
+      sessQuery = sessQuery.eq("customer_id", opts.customerId);
+    }
+    const { data: sess } = await sessQuery.maybeSingle();
+    const assignments = (sess as { experiment_assignments?: Array<{ experiment_id: string; variant_id: string; arm: string }> } | null)?.experiment_assignments;
+    if (!assignments?.length) return null;
+    // Offer arms only: arm === 'variant' (holdout + control never carry the offer).
+    const variantArms = assignments.filter((a) => a.arm === "variant" && a.experiment_id && a.variant_id);
+    if (!variantArms.length) return null;
+    const experimentIds = variantArms.map((a) => a.experiment_id);
+    const variantIds = new Set(variantArms.map((a) => a.variant_id));
+    const { data: offers } = await admin
+      .from("pricing_rule_offers")
+      .select("id, experiment_id, variant_id, product_id, starts_at, ends_at, status")
+      .eq("workspace_id", opts.workspaceId)
+      .eq("status", "active")
+      .in("experiment_id", experimentIds)
+      .in("product_id", opts.productIds);
+    const nowMs = now.getTime();
+    for (const o of (offers as Array<{ id: string; experiment_id: string; variant_id: string; product_id: string; starts_at: string | null; ends_at: string | null; status: string }> | null) ?? []) {
+      if (!variantIds.has(o.variant_id)) continue;
+      const startsOk = !o.starts_at || Date.parse(o.starts_at) <= nowMs;
+      const endsOk = !o.ends_at || Date.parse(o.ends_at) > nowMs;
+      if (startsOk && endsOk) return o.id;
+    }
+    return null;
+  } catch (e) {
+    console.warn(`[storefront-optimizer] resolveSubscriptionOfferId failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+export async function rollbackRenewalOffersForExperiment(opts: {
+  workspaceId: string;
+  experimentId: string;
+  reason: string;
+  now?: Date;
+  admin?: Admin;
+}): Promise<RenewalOfferSweepResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const now = opts.now ?? new Date();
+
+  const { data: rows } = await admin
+    .from("pricing_rule_offers")
+    .select("id")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("experiment_id", opts.experimentId)
+    .in("status", ["proposed", "approved", "active"]);
+  const ids = ((rows as Array<{ id: string }>) || []).map((r) => r.id);
+  let expired = 0;
+  let unlinked = 0;
+  for (const offerId of ids) {
+    const { error: upErr } = await admin
+      .from("pricing_rule_offers")
+      .update({
+        status: "expired",
+        expired_at: now.toISOString(),
+        deactivation_reason: `experiment_rollback: ${opts.reason}`.slice(0, 240),
+        updated_at: now.toISOString(),
+      })
+      .eq("id", offerId);
+    if (upErr) {
+      console.warn(`[storefront-optimizer] rollback offer ${offerId} failed: ${upErr.message}`);
+      continue;
+    }
+    expired++;
+    const { data: unlinkRows, error: subErr } = await admin
+      .from("subscriptions")
+      .update({ pricing_offer_id: null })
+      .eq("workspace_id", opts.workspaceId)
+      .eq("pricing_offer_id", offerId)
+      .select("id");
+    if (subErr) {
+      console.warn(`[storefront-optimizer] rollback offer ${offerId} sub-unlink failed: ${subErr.message}`);
+      continue;
+    }
+    unlinked += (unlinkRows?.length ?? 0);
+  }
+  return { expired, subscriptions_unlinked: unlinked };
 }
