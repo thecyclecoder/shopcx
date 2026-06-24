@@ -1,6 +1,4 @@
-# Surface regression coverage on the scorecard ✅
-
-**Priority:** critical
+# Surface regression coverage on the scorecard
 
 **Owner:** [[../functions/platform]] · **Parent:** [[regression-agent]] — the standing-coverage complement to Remi; the regression-side sibling of [[director-zero-backlog-error-autonomy]] under [[../goals/devops-director]]
 
