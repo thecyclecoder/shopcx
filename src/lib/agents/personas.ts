@@ -65,7 +65,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   platform: {
     key: "platform", name: "Ada", role: "Platform", emoji: "🛠️",
     personality: "Steady, blunt, ships fast — squashes 500s and escorts builds to green.",
-    mascotId: "ada", avatarUrl: `${AV}ada-platform.jpg`,
+    mascotId: "ada", avatarUrl: `${AV}ada-platform.jpg?v=2`,
     chip: "bg-indigo-100 text-indigo-800 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-900/40",
     dot: "bg-indigo-500", ring: "bg-indigo-50 dark:bg-indigo-900/20", accent: "text-indigo-600 dark:text-indigo-400",
   },

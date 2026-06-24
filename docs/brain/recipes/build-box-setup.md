@@ -72,6 +72,10 @@ systemctl restart shopcx-builder         # restart
 sudo -u builder git -C /home/builder/shopcx fetch origin && sudo -u builder git -C /home/builder/shopcx reset --hard origin/main && systemctl restart shopcx-builder
 ```
 
+## Queue restart (drain-for-update, shipped 2026-06-24)
+
+Devops constantly queues builds, so the box rarely idles — and the idle self-update only fires when no lane is running, so a merged worker fix can sit unloaded for a long time. The **Queue restart** button on `/dashboard/roadmap/box` stages a clean restart without force-killing in-flight builds: it sets `worker_controls.drain_for_update` (POST `/api/roadmap/box/drain`, owner-only). While draining the worker **claims no new work** — in-flight lanes finish, the box reaches idle, the idle self-update fires (SHA advances), and the fresh worker's **boot clears the flag** (`requested_at_sha != HEAD`), with a 30-min max-age safety clear so a no-op drain (nothing to pull) can't strand the box. New builds just pile up `queued` and run once the box is current. Toggle it off to cancel. The button + an amber "draining" banner show the state; the worker logic is `readDrainControl` / `reconcileDrainOnBoot` in `scripts/builder-worker.ts`.
+
 ## Worker self-update (worker-self-update, shipped 2026-06-19)
 
 The worker keeps **its own code** current — a merged worker fix goes live within one idle cycle, **zero manual redeploy** (closes the gap that left #77's `markReady` fix inert until a human ran the command above, so PRs kept coming out draft).
