@@ -24,6 +24,7 @@ type Action = {
   steps?: string[];
   gateBuildsUntil?: string;
   criticalSpecs?: string[];
+  holdBuilds?: string[];
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
 };
@@ -209,8 +210,9 @@ export function DirectorCoachChat() {
                     ))}
                   </ol>
                 )}
-                {a.gateBuildsUntil && <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">⏸ gates ALL builds until <span className="font-mono">{a.gateBuildsUntil}</span> ships</p>}
-                {a.criticalSpecs && a.criticalSpecs.length > 0 && <p className="mt-0.5 text-[11px] text-zinc-500">marks critical: {a.criticalSpecs.join(", ")}</p>}
+                {a.gateBuildsUntil && <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">⏸ gates routine builds until <span className="font-mono">{a.gateBuildsUntil}</span> ships (priority builds still run)</p>}
+                {a.criticalSpecs && a.criticalSpecs.length > 0 && <p className="mt-0.5 text-[11px] text-zinc-500">queues + marks critical: {a.criticalSpecs.join(", ")}</p>}
+                {a.holdBuilds && a.holdBuilds.length > 0 && <p className="mt-0.5 text-[11px] text-rose-600 dark:text-rose-400">cancels (out-of-order): {a.holdBuilds.join(", ")}</p>}
               </div>
             )}
             {a.type === "coaching" && a.guidance && <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">“{a.guidance}”{a.reasoning ? ` — ${a.reasoning}` : ""}</p>}

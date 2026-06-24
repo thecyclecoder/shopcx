@@ -525,7 +525,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
     for (const card of goalSpecs(goal, specBySlug)) {
       if (card.status === "shipped") continue; // already landed
       if (card.status === "deferred") continue; // parked — every auto-build lane skips a deferred spec until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
-      if (gate && card.slug !== gate.gatedUntil) continue; // build-gate: a directive paused all builds except the gate spec
+      if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
       if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
 
@@ -652,7 +652,7 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
   for (const card of specs) {
     if (card.status === "shipped") continue; // already landed
     if (card.status === "deferred") continue; // parked — a deferred fix spec is skipped until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
-    if (gate && card.slug !== gate.gatedUntil) continue; // build-gate: a directive paused all builds except the gate spec
+    if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
@@ -1706,7 +1706,7 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
   // spec (so a fix lands before new feature work compiles). The gate spec is usually a fix (escortFixSpecs owns
   // it), so this typically yields an empty init list while gated — intended.
   const gate = await buildGate(admin, workspaceId, PLATFORM);
-  const candidates = gate ? unstarted.filter((s) => s.slug === gate.gatedUntil) : unstarted;
+  const candidates = gate ? unstarted.filter((s) => s.slug === gate.gatedUntil || s.critical) : unstarted; // gate lets the gate spec + critical priority builds through
 
   const out: InitCandidate[] = [];
   for (const s of candidates) {
