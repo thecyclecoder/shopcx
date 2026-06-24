@@ -7,7 +7,7 @@ The goal's success metric requires "fleet spend is budgeted + visible" and "per-
 ## North star — meter the proxy honestly
 A budget governor can only supervise spend it can measure. On the Max subscription there is **no per-token dollar bill** for the box lanes, so the honest proxy is **token usage** (the `claude -p` stream reports it) plus **Max-account usage-window consumption** (the 5-hour wall the box already tracks). Dollar cost (`usageCostCents`) applies only to the API-keyed paths. This spec records all three, labeled for what they are — never a fake "$" on subscription work.
 
-## Phase 1 — capture per-job token usage from the `claude -p` stream 🚧
+## Phase 1 — capture per-job token usage from the `claude -p` stream ✅�
 - 🚧 built — pending migration apply + on-box verification
 - The box worker (`scripts/builder-worker.ts`) already parses the `claude -p` stream for `claude_session_id` ([[../tables/agent_jobs]]`.claude_session_id`). Extend the stream parse to also read the **usage/result** events (`input_tokens`, `output_tokens`, `cache_creation`, `cache_read`) and record them per job. → `extractClaudeUsage()` reads the result event's `usage` / `modelUsage` in `runClaude`, returned alongside the session id.
 - Persist per-job cost in a new `agent_job_costs` table (`job_id` → `agent_jobs.id`, `spec_slug`, `kind`, `owner_function`, the token counts, `model`, `created_at`) rather than widening `agent_jobs` (one job can span resumes / multiple turns → multiple cost rows that aggregate). Brain: new `tables/agent_job_costs` + `libraries/fleet-cost`. → migration `20260705170000_agent_job_costs.sql`; written by `meterAgentJob()` → [[../libraries/fleet-cost]] `recordAgentJobCost()` at every `runClaude` call site (build / plan / fold / spec-chat).
