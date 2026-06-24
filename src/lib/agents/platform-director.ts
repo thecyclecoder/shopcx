@@ -2748,9 +2748,13 @@ export async function applyDirectorDismissal(
     .eq("id", job.id);
   if (error) return { ok: false, error: error.message };
 
-  // Resolve the originating error_events row (the repair job's spec_slug IS the error signature, e.g. "vercel:…").
+  // Resolve the originating error_events row (the repair job's spec_slug IS the error signature, e.g. "vercel:…")
+  // with a recorded reason — terminal (fix-error-reconcile-endless-loop Phase 1).
   if (job.spec_slug) {
-    await admin.from("error_events").update({ status: "resolved" }).eq("signature", job.spec_slug).eq("status", "open");
+    await admin
+      .from("error_events")
+      .update({ status: "resolved", resolved_at: new Date().toISOString(), resolution_reason: `dismissed by Ada (Platform/DevOps Director): ${reasoning}`.slice(0, 2000) })
+      .eq("signature", job.spec_slug);
   }
 
   await recordDirectorActivity(admin, {

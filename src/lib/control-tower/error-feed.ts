@@ -360,8 +360,11 @@ export async function recordError(
         detail: input.detail ?? null,
         sample: input.sample ?? null,
         count: (e.count ?? 0) + occurrences,
-        // Don't force-resolve a pre-existing genuine incident — just tag the outage correlation.
-        ...(breakerTripped ? { outage_correlated: true } : { status: "open" }),
+        // Don't force-resolve a pre-existing genuine incident — just tag the outage correlation. A genuine
+        // re-fire re-opens a repair-dispositioned row (status→open) and clears the stale resolution marker,
+        // so the row never shows a "resolved, pending deploy" reason while actively re-firing
+        // (fix-error-reconcile-endless-loop Phase 1).
+        ...(breakerTripped ? { outage_correlated: true } : { status: "open", resolved_at: null, resolution_reason: null }),
         last_seen_at: nowIso,
         ...(paged ? { last_paged_at: nowIso } : {}),
       })

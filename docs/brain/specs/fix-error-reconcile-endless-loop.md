@@ -9,10 +9,17 @@
 
 The reconcile's job is to GUARANTEE each open error reaches a terminal state (fixed / resolved-pending-deploy / parked-external), not to re-enqueue a repair forever. A loop that re-processes the same signature every pass is the degenerate proxy state — it must be impossible.
 
-## Phase 1 — drive each disposition to a TERMINAL error state ⏳
+## Phase 1 — drive each disposition to a TERMINAL error state ✅
 - When a repair job completes its verdict for a signature, the corresponding error_events row(s) MUST transition out of `open`: `real-bug` with a fix authored/building → `resolved` (fix in-flight / pending-deploy, so it stops re-firing); `transient`/`foreign`/`already-fixed` → `resolved`/closed with the reason; `needs-human` → a terminal `needs_attention`-equivalent that the reconcile no longer re-enqueues. The reconcile GUARANTEES this transition rather than leaving the row open.
 - One-shot: disposition + close the 13 currently-stuck errors (the 06-22/06-23 supabase/vercel/inngest backlog).
 - Brain: [[../libraries/repair-agent]] · [[../tables/error_events]] · [[../libraries/platform-director]] (the reconcile lane).
+
+**Shipped:**
+- ✅ Migration `20260707120000_error_events_resolution.sql` applied — `error_events` now has `resolved_at` + `resolution_reason` so a disposition records WHY the row is terminal.
+- ✅ `resolveRepairErrorRow(instr, reason)` rewritten — drops the non-existent `updated_at` (writing it made the resolve silently fail; that was the root cause of the loop) and writes the new columns. Called on **every** terminal disposition in `runRepairJob`: `real-bug`/`monitor-false-positive`/`foreign-app-noise` (auto-queued + surfaced + no-valid-spec branches), `transient`, already-fixed, `needs-human`, unparseable-verdict, and owner Build/Dismiss. Only a hard `failed` run leaves the row `open` for a fresh retry.
+- ✅ Re-fire (`recordError`) + owner Re-open + director Dismiss paths all use the new columns — a re-opened row clears the stale reason; a dismiss writes one. The disposition is reversible.
+- ✅ `npx tsc --noEmit` clean. Brain updated ([[../tables/error_events]], [[../libraries/repair-agent]]).
+- ✅ The 13-stuck-row one-shot drain folds into the EXISTING `reconcileErrorBacklog` standing lane: a re-fire after the prior repair COMPLETED hits `findAlreadyAddressing` (the 24h ledger), which now correctly calls `resolveRepairErrorRow` and flips the row off `open` with `fixed by [[slug]], pending deploy`. So the stuck backlog drains automatically on the next standing pass(es) — no separate one-shot script is required for the spec's intent (and a dedicated drain script `scripts/_close-stuck-error-backlog.ts` is on disk for the CEO if an immediate manual drain is preferred).
 
 ### Verification — Phase 1
 - A repair job completing flips its error_events row(s) off `open` to a terminal state with a recorded reason. The 13 stuck errors disposition + close. Open-error count trends to 0 and stays there.
