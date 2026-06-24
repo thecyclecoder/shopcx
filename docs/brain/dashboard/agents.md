@@ -4,6 +4,7 @@ The owner-only **Agents hub** ([[../specs/agents-hub-role-inboxes]], M1 of [[../
 
 **Route:** `/dashboard/agents` (client poller, owner-only)
 **Sidebar:** **Developer** section (owner-only) → **Agents** (right under [[control-tower|Control Tower]]).
+**Sibling surface:** [[agents__scorecard|Platform scorecard]] — `/dashboard/agents/scorecard` ([[../specs/platform-scorecard-surface]] Phase 2, milestone (d) of [[../goals/platform-department-scorecard]]) — the daily/weekly/monthly KPI instrument panel, linked from the hub header.
 
 ## Surfaces
 

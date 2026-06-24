@@ -18,6 +18,15 @@ import { getRoadmap, getFunctions } from "@/lib/brain-roadmap";
 import { getPersona } from "@/lib/agents/personas";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { DAILY_SUMMARY_TYPE } from "@/lib/agents/inbox";
+import {
+  composeScorecardWatchLine,
+  type Cadence as ScorecardCadence,
+  type ScorecardSnapshotLite,
+} from "@/lib/agents/platform-scorecard-display";
+
+/** The Platform director's function slug — the one whose recap deep-links to the scorecard surface
+ *  ([[../specs/platform-scorecard-surface]] Phase 3). */
+const PLATFORM_FUNCTION = "platform";
 
 /** The job kinds whose approved request is a "bug fixed" (mirrors director-xp FIX_JOB_KINDS). */
 const FIX_JOB_KINDS = new Set(["repair", "regression"]);
@@ -371,28 +380,48 @@ export async function generateDirectorRecap(workspaceId: string, date: string): 
     else if (e.author === "director" && e.author_function) postedDirectors.add(e.author_function);
   }
 
+  // Phase 3 (platform-scorecard-surface) — the scorecard one-liner the Platform director's recap row
+  // carries. Read once (the trended store, never the raw tables); null when no KPI is persisted yet.
+  const scorecardLine = activeSlugs.includes(PLATFORM_FUNCTION)
+    ? composeScorecardWatchLine(await loadLatestScorecardSnapshots(admin, workspaceId))
+    : null;
+
   // Per-director recap → board `recap` post + Daily Summaries notification.
   let directorsPosted = 0;
   for (const slug of activeSlugs) {
     if (postedDirectors.has(slug)) continue;
     const stats = byFn[slug];
     const persona = getPersona(slug);
-    const body = composeDirectorRecap(slug, stats);
+    const recapBody = composeDirectorRecap(slug, stats);
+    // The Platform recap row also carries the scorecard headline + deep-links the Daily Summaries
+    // row to /dashboard/agents/scorecard (platform-scorecard-surface Phase 3). Other directors still
+    // deep-link to the day narrative (director-loop-grading Phase 5).
+    const isPlatform = slug === PLATFORM_FUNCTION;
+    const summaryBody = isPlatform && scorecardLine ? `${recapBody} ${scorecardLine}.` : recapBody;
+    const summaryLink = isPlatform
+      ? `/dashboard/agents/scorecard`
+      : `/dashboard/agents/recap/${date}?function=${encodeURIComponent(slug)}`;
     await postDirectorMessage({
       workspaceId,
       author: "director",
       authorFunction: slug,
-      body,
+      body: summaryBody,
       kind: "recap",
-      metadata: { recap_date: date, source: "eod-recap", stats },
+      metadata: { recap_date: date, source: "eod-recap", stats, ...(isPlatform && scorecardLine ? { scorecard_line: scorecardLine } : {}) },
     });
     await insertDailySummary(admin, {
       workspaceId,
       title: `${persona.name} · ${persona.role} — daily recap`,
-      body,
-      // Deep-link to the human-readable day narrative (Phase 5) — that director's day, read from the log.
-      link: `/dashboard/agents/recap/${date}?function=${encodeURIComponent(slug)}`,
-      metadata: { recap_date: date, source: "eod-recap", author_function: slug, stats },
+      body: summaryBody,
+      link: summaryLink,
+      metadata: {
+        recap_date: date,
+        source: "eod-recap",
+        author_function: slug,
+        stats,
+        ...(isPlatform ? { scorecard_link: "/dashboard/agents/scorecard" } : {}),
+        ...(isPlatform && scorecardLine ? { scorecard_line: scorecardLine } : {}),
+      },
     });
     directorsPosted++;
   }
@@ -432,6 +461,54 @@ export async function generateDirectorRecap(workspaceId: string, date: string): 
 }
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * Read the latest snapshot per (metric_key, cadence) from `platform_scorecard_snapshots` for the
+ * Platform director's recap one-liner ([[../specs/platform-scorecard-surface]] Phase 3). Best-effort;
+ * on read error returns empty groups so the recap simply omits the scorecard line — never a fake number.
+ */
+async function loadLatestScorecardSnapshots(
+  admin: Admin,
+  workspaceId: string,
+): Promise<Record<ScorecardCadence, ScorecardSnapshotLite[]>> {
+  const empty: Record<ScorecardCadence, ScorecardSnapshotLite[]> = { daily: [], weekly: [], monthly: [] };
+  try {
+    const { data } = await admin
+      .from("platform_scorecard_snapshots")
+      .select("metric_key, cadence, snapshot_date, value, delta_pct, unit")
+      .eq("workspace_id", workspaceId)
+      .order("snapshot_date", { ascending: false })
+      .limit(2000);
+    const rows = (data ?? []) as Array<{
+      metric_key: string;
+      cadence: string;
+      snapshot_date: string;
+      value: number | string;
+      delta_pct: number | string | null;
+      unit: string;
+    }>;
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const cadence = r.cadence as ScorecardCadence;
+      if (cadence !== "daily" && cadence !== "weekly" && cadence !== "monthly") continue;
+      const key = `${cadence}::${r.metric_key}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const value = typeof r.value === "number" ? r.value : Number(r.value);
+      const deltaRaw = r.delta_pct;
+      const deltaPct = deltaRaw == null ? null : typeof deltaRaw === "number" ? deltaRaw : Number(deltaRaw);
+      empty[cadence].push({
+        metric_key: r.metric_key,
+        value: Number.isFinite(value) ? value : 0,
+        delta_pct: deltaPct != null && Number.isFinite(deltaPct) ? deltaPct : null,
+        unit: r.unit,
+      });
+    }
+  } catch {
+    /* best-effort — empty groups → no scorecard line */
+  }
+  return empty;
+}
 
 /** Surface a recap in the M1 Daily Summaries tab — a reserved `agent_daily_summary` notification. */
 async function insertDailySummary(

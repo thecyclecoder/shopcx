@@ -162,6 +162,12 @@ export default function AgentsPage() {
             ))}
           </div>
           <Link
+            href="/dashboard/agents/scorecard"
+            className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+          >
+            Scorecard →
+          </Link>
+          <Link
             href="/dashboard/developer/control-tower"
             className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
           >
