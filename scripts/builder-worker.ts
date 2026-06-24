@@ -98,6 +98,7 @@ const MIGRATION_FIX_TIMEOUT_MS = 15 * 60 * 1000;
 // build-sized ceiling so a heavy join + a few read probes never get cut short.
 const MAX_DEV_ASK = 1;
 const DEV_ASK_TIMEOUT_MS = 20 * 60 * 1000;
+const MAX_DIRECTOR_COACH = 1; // CEO↔Director coaching chat (worker-grading P7) — concurrency-1 interactive lane.
 // PR-resolve jobs (dirty-pr-resolver-agent) run in their OWN concurrency-1 lane: event-fired by the
 // GitHub webhook the moment a push to main dirties an open claude/* build PR. A top-level `claude -p`
 // on Max (git available, prod secrets stripped — NO prod creds) merges origin/main into the PR branch
@@ -272,7 +273,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -1681,7 +1682,10 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   let escalated = 0;
   for (const c of candidates) {
     try {
-      const { resultText } = await runDirectorClaude(lib.groomInvestigationPrompt(c), null, REPO_DIR);
+      // P7: inject the CEO's coaching into her grooming decisions too (e.g. "continue these spec types").
+      const diGroom = await import("../src/lib/agents/director-instructions");
+      const groomPrompt = await diGroom.appendDirectorInstructions(db, job.workspace_id, "platform", lib.groomInvestigationPrompt(c));
+      const { resultText } = await runDirectorClaude(groomPrompt, null, REPO_DIR);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -1899,7 +1903,11 @@ async function runPlatformDirectorJob(job: Job) {
   console.log(`${tag} investigating ${t.kind} (${bundleLabel}) for target ${targetId.slice(0, 8)}`);
   try {
     const brief = lib.buildDirectorBrief(t, leashActions);
-    const { session, resultText, isError } = await runDirectorClaude(lib.directorInvestigationPrompt(brief), null, REPO_DIR);
+    // P7: inject the CEO's coaching (director_instructions) into her decision prompt — so a coached rule
+    // ("auto-approve these going forward") actually steers this call.
+    const di = await import("../src/lib/agents/director-instructions");
+    const investPrompt = await di.appendDirectorInstructions(db, t.workspace_id, "platform", lib.directorInvestigationPrompt(brief));
+    const { session, resultText, isError } = await runDirectorClaude(investPrompt, null, REPO_DIR);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
     const verdict = String(parsed?.verdict || "");
@@ -4125,6 +4133,234 @@ async function runDeveloperMessageJob(job: Job) {
   }
 }
 
+// ── CEO↔Director coaching chat (worker-grading-and-director-management Phase 7) ──────────────
+// A kind='director-coach' job is ONE turn of the CEO↔Director coaching thread. The box runs a resumable
+// `claude -p` on Max AS the Platform/DevOps Director (Ada): read-only over the brain + her leash + the
+// roadmap + her director_activity + agent_jobs, so she EXPLAINS her own decisions ("why haven't you built
+// spec X?"). When the CEO coaches her, she proposes a `coaching` card; on approval the worker writes a
+// director_instruction (coachDirector) that's injected into her future decisions — so coaching actually
+// changes what she does next. Mirrors runDeveloperMessageJob; reuses runDevAskClaude (the Max runner).
+interface CoachThreadRow {
+  id: string;
+  director_function: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+  box_session_id: string | null;
+  pending_actions: Record<string, unknown>[];
+}
+async function loadCoachThread(threadId: string): Promise<CoachThreadRow | null> {
+  const { data } = await db
+    .from("director_coach_threads")
+    .select("id, director_function, messages, box_session_id, pending_actions")
+    .eq("id", threadId)
+    .maybeSingle();
+  if (!data) return null;
+  const row = data as Record<string, unknown>;
+  return {
+    id: row.id as string,
+    director_function: (row.director_function as string) ?? "platform",
+    messages: Array.isArray(row.messages) ? (row.messages as { role: "user" | "assistant"; content: string }[]) : [],
+    box_session_id: (row.box_session_id as string | null) ?? null,
+    pending_actions: Array.isArray(row.pending_actions) ? (row.pending_actions as Record<string, unknown>[]) : [],
+  };
+}
+
+function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown>[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Record<string, unknown>[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[i] as Record<string, unknown>;
+    if (!a || typeof a !== "object") continue;
+    if (a.type === "coaching") {
+      const guidance = typeof a.guidance === "string" ? a.guidance : "";
+      const errorClass = typeof a.errorClass === "string" ? a.errorClass.replace(/[^a-z0-9-]/gi, "").slice(0, 60) : "";
+      if (!guidance || !errorClass) continue; // a coaching amendment needs a class + the learning
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "coaching",
+        summary: String(a.summary || "Coaching amendment"),
+        errorClass,
+        guidance,
+        triggeringPattern: String(a.triggeringPattern || ""),
+        reasoning: String(a.reasoning || ""),
+        status: "pending",
+      });
+    } else if (a.type === "spec") {
+      const slug = typeof a.slug === "string" ? a.slug.replace(/[^a-z0-9-]/gi, "") : "";
+      const content = typeof a.content === "string" ? a.content : "";
+      if (!slug || !content) continue;
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "spec",
+        summary: String(a.summary || `Spec: ${slug}`),
+        slug,
+        title: String(a.title || slug),
+        owner: String(a.owner || "[[../functions/platform]]"),
+        parent: String(a.parent || ""),
+        content,
+        queueBuild: a.queueBuild === true,
+        status: "pending",
+      });
+    }
+  }
+  return out;
+}
+
+const DIRECTOR_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS Ada — grounded in what you actually read: the spec's phases/blockers/owner, your leash, the roadmap, your director_activity, the agent_jobs queue>"}`,
+  `  — for an explanation ("why haven't you built X?"): investigate read-only and explain (X is blocked by Y · X is a 0-phase feature needing the CEO's greenlight · X isn't goal-linked so my goal-walk didn't catch it · its build failed N× and hit my loop-guard · it's outside my leash).`,
+  `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. auto-build-unblocked-fix-specs>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
+  `  — when the CEO COACHES you ("build these types automatically going forward"). Distill it into ONE durable rule. On approval it's injected into your future decisions. Stay within the leash — never propose a rule that auto-does something destructive/irreversible or starts a new goal.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec","summary":"<the gap>","slug":"<kebab-slug>","title":"<Title>","owner":"[[../functions/platform]]","parent":"<a mandate or goal milestone>","content":"<the FULL docs/brain/specs/{slug}.md markdown>","queueBuild":false}]}`,
+  `  — when the fix needs CODE (an automation/infra capability). The worker commits the spec on approval.`,
+].join("\n");
+
+function directorCoachFraming(dirFn: string): string {
+  return [
+    `You are Ada — the ${dirFn === "platform" ? "Platform/DevOps" : dirFn} Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior and taking coaching on it.`,
+    `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your own definition is docs/brain/libraries/platform-director.md (your leash, escort, grooming) + docs/brain/specs/worker-grading-and-director-management.md. Your leash is LEASH_CATEGORIES in src/lib/agents/platform-director.ts.`,
+    `To explain "why haven't you built/done X": investigate read-only — read the spec (its phases ⏳/✅, its **Blocked-by:** line, its **Owner:**, whether it's goal-linked), check the agent_jobs queue for its build state, and your director_activity. A throwaway scripts/_*.ts that bootstraps createAdminClient can query the DB read-only (SELECT-only; never commit it). Then explain plainly + honestly.`,
+    `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
+    DIRECTOR_COACH_OUTPUT,
+  ].join("\n\n");
+}
+
+function renderCoachTranscript(messages: CoachThreadRow["messages"]): string {
+  return messages.map((m) => `${m.role === "user" ? "[CEO]" : "[Ada]"}: ${m.content}`).join("\n\n");
+}
+
+async function runDirectorCoachJob(job: Job) {
+  const tag = `[director-coach:${job.id.slice(0, 8)}]`;
+  let params: { thread_id?: string; mode?: string; intent?: string } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON */
+  }
+  const mode = (params.mode as "turn" | "approve_action") || "turn";
+  const intent = (params.intent as "ask" | "coach") || "ask";
+  const threadId = params.thread_id || job.spec_slug;
+  if (!threadId) {
+    await update(job.id, { status: "failed", error: "director-coach job missing thread_id" });
+    return;
+  }
+
+  const failTurn = async (reason: string, logTail?: string) => {
+    await db.from("director_coach_threads").update({ turn_status: "error", last_error: reason.slice(0, 500), updated_at: new Date().toISOString() }).eq("id", threadId);
+    await update(job.id, { status: "failed", error: reason, log_tail: logTail ?? null });
+  };
+
+  const thread = await loadCoachThread(threadId);
+  if (!thread) {
+    await failTurn("director-coach thread not found");
+    return;
+  }
+  const sessionId = thread.box_session_id;
+  const isResume = !!sessionId;
+  console.log(`${tag} ${mode} ${isResume ? "(resume)" : "(fresh)"} thread=${threadId}`);
+
+  const key = threadId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const wt = join(BUILDS_DIR, `director-coach-${key}`);
+  sh("git", ["fetch", "origin", "main"]);
+  sh("git", ["worktree", "remove", "--force", wt]);
+  const branch = `claude/director-coach-${key}`;
+  const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
+  if (add.code !== 0) {
+    await failTurn(`worktree add failed: ${add.err.slice(0, 200)}`);
+    return;
+  }
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  try {
+    // ── mode:'approve_action' — the CEO approved/declined cards; the WORKER executes them. ──
+    if (mode === "approve_action") {
+      const di = await import("../src/lib/agents/director-instructions");
+      const actions = (thread.pending_actions || []).map((a) => ({ ...a }));
+      const notes: string[] = [];
+      for (const a of actions) {
+        if (a.status === "declined") { a.result = a.result || "declined by CEO"; continue; }
+        if (a.status !== "approved") continue;
+        try {
+          if (a.type === "coaching") {
+            // The whole point: write the durable rule that's injected into her future decisions.
+            await di.coachDirector(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: thread.director_function,
+              coachedBy: "ceo",
+              errorClass: String(a.errorClass || "general"),
+              guidance: String(a.guidance || ""),
+              triggeringPattern: String(a.triggeringPattern || ""),
+              reasoning: String(a.reasoning || ""),
+              sourceThreadId: threadId,
+            });
+            a.status = "done";
+            a.result = "coaching applied — injected into her future decisions";
+            notes.push(`Coached: ${a.summary}`);
+          } else if (a.type === "spec" && a.slug && a.content) {
+            const slug = String(a.slug);
+            const put = await putFileMain(`docs/brain/specs/${slug}.md`, String(a.content), `spec: create ${slug} (director coaching)`);
+            if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
+            let queued = false;
+            if (a.queueBuild === true) {
+              const { error } = await db.from("agent_jobs").insert({ workspace_id: job.workspace_id, spec_slug: slug, kind: "build", status: "queued", instructions: "Created via director coaching", created_by: job.created_by });
+              queued = !error;
+            }
+            a.status = "done";
+            a.result = `committed specs/${slug}.md${queued ? " + queued build" : ""}`;
+            notes.push(`Spec ${slug} → committed${queued ? " + build queued" : ""}`);
+          } else {
+            a.status = "failed";
+            a.result = "nothing executable on this card";
+          }
+        } catch (e) {
+          a.status = "failed";
+          a.result = e instanceof Error ? e.message : String(e);
+          notes.push(`${a.summary} → failed: ${a.result}`);
+        }
+      }
+      const fresh = await loadCoachThread(threadId);
+      const summary = notes.length ? notes.join("; ") : "No approved actions to execute.";
+      const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: `Done: ${summary}` }];
+      await db.from("director_coach_threads").update({ messages, pending_actions: actions, turn_status: "idle", last_error: null, updated_at: new Date().toISOString() }).eq("id", threadId);
+      await update(job.id, { status: "completed", log_tail: `approve_action — ${summary}`.slice(-2000) });
+      console.log(`${tag} ✓ executed approved actions: ${summary}`);
+      return;
+    }
+
+    // ── mode:'turn' — run the box session AS Ada (read-only explanation + coaching). ──
+    // The CEO's explicit button sets intent: 'coach' = turn this into a durable rule (emit a coaching card);
+    // 'ask' = just explain (NO coaching card — only the CEO's explicit Coach action writes a rule). This is
+    // how a multi-turn convo stays conversation until the CEO presses Coach (worker-grading P7 refinement).
+    const intentDirective =
+      intent === "coach"
+        ? `INTENT: COACH. The CEO is coaching you — distill their directive (from this whole conversation) into ONE durable coaching rule and emit a 'coaching' pending_action for their confirmation. Acknowledge briefly in reply, but the rule is what matters. Stay within your leash.`
+        : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one.`;
+    const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
+    const prompt = isResume
+      ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
+      : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
+
+    const { session, resultText, isError, raw } = await runDevAskClaude(prompt, sessionId, wt);
+    const logTail = raw.slice(-2000);
+    const newSession = session || sessionId;
+    const parsed = parseStatus(resultText) as Record<string, unknown> | null;
+    const reply = typeof parsed?.reply === "string" ? (parsed.reply as string) : "";
+    if (!reply) {
+      await failTurn(isError ? "director-coach run errored" : "box turn returned no reply", logTail);
+      return;
+    }
+    const ts = Date.now().toString(36);
+    const newActions = normalizeCoachActions(parsed?.pending_actions, ts);
+    const fresh = await loadCoachThread(threadId);
+    const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: reply }];
+    await db.from("director_coach_threads").update({ messages, box_session_id: newSession, turn_status: "idle", last_error: null, pending_actions: newActions, updated_at: new Date().toISOString() }).eq("id", threadId);
+    await update(job.id, { status: "completed", log_tail: logTail });
+    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} card[s])` : ""}`);
+  } finally {
+    sh("git", ["worktree", "remove", "--force", wt]);
+  }
+}
+
 // ── Dirty-PR resolver (dirty-pr-resolver-agent) ─────────────────────────────
 // A Max `claude -p` that merges origin/main into a dirty claude/* PR + resolves the conflicts. Same
 // sandbox as a feature build (no ANTHROPIC_API_KEY, prod secrets stripped — NO prod creds), but it only
@@ -5727,6 +5963,7 @@ async function runJob(job: Job) {
   if (job.kind === "spec-test") return runSpecTestJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
+  if (job.kind === "director-coach") return runDirectorCoachJob(job);
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
   if (job.kind === "repair") return runRepairJob(job);
   if (job.kind === "regression") return runRegressionJob(job);
@@ -6098,6 +6335,7 @@ async function main() {
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
+  const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
   const countRegression = () => [...active.values()].filter((v) => v.kind === "regression").length;
@@ -6252,6 +6490,14 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed dev-ask ${job.id.slice(0, 8)} → ${countDevAsk() + 1}/${MAX_DEV_ASK} dev-ask lane`);
+        launch(job);
+      }
+      // Fill the director-coach lane (worker-grading P7): CEO↔Director coaching chat turns, concurrency-1.
+      while (countDirectorCoach() < MAX_DIRECTOR_COACH) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["director-coach"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed director-coach ${job.id.slice(0, 8)} → ${countDirectorCoach() + 1}/${MAX_DIRECTOR_COACH} director-coach lane`);
         launch(job);
       }
       // Fill the pr-resolve lane (dirty-pr-resolver-agent): webhook-fired dirty claude/* PR resolve, concurrency-1.
