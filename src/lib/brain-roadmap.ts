@@ -46,6 +46,13 @@ export interface SpecCard {
   // True when the spec body carries a **Repair-signature:** line (authored by the box Repair Agent).
   // The "🔧 Repair" source on the roadmap board's source filter is derived from this — see getRoadmapFilters.
   repairSignature: boolean;
+  // True when the spec carries a line-anchored **Priority:** critical marker (director-executable-plans-and-priority
+  // Phase 1). A critical spec is queued ahead of normal Planned specs by the director's build picker (Phase 2)
+  // and a directive's gate_builds_until can gate the assembly line on it. Rendered as a pip on the board;
+  // settable from the board (POST /api/roadmap/priority) or via a directive's criticalSpecs[]. Mirrors the
+  // `deferred` derive — a metadata LINE under the H1, not a phase emoji. Orthogonal to status (a critical spec
+  // is still planned/in_progress/shipped; this just marks its lane priority).
+  critical: boolean;
 }
 
 export interface ProjectTrack {
@@ -91,6 +98,40 @@ function stripEmoji(s: string): string {
 /** The phase's status emoji — the inverse of statusFromText. Used by the blocker chip + the gate error. */
 export function phaseEmoji(p: Phase): string {
   return p === "shipped" ? SHIPPED : p === "in_progress" ? IN_PROGRESS : p === "rejected" ? REJECTED : PLANNED;
+}
+
+/**
+ * Add / remove the line-anchored `**Priority:** critical` marker on a spec's markdown
+ * (director-executable-plans-and-priority Phase 1) — the one source of truth shared by the board control
+ * (POST /api/roadmap/priority) and the directive executor (a directive's criticalSpecs[]). Idempotent:
+ * setting an already-critical spec or clearing a non-critical one returns the input unchanged. The marker
+ * is a metadata LINE placed under the H1 after the Owner/Parent block (like `**Deferred:**`).
+ */
+export function setCriticalMarker(md: string, critical: boolean): string {
+  const lines = md.split("\n");
+  const has = lines.findIndex((l) => /^\s*\*\*Priority:\*\*\s*critical\b/i.test(l));
+  if (critical) {
+    if (has >= 0) return md; // already marked
+    const h1 = lines.findIndex((l) => l.startsWith("# "));
+    if (h1 < 0) return md;
+    // Insert after the contiguous metadata block under the H1 (Owner/Parent/Blocked-by/Deferred lines),
+    // else immediately after the H1.
+    let insertAt = h1 + 1;
+    for (let i = h1 + 1; i < lines.length; i++) {
+      if (/^\s*\*\*(Owner|Parent|Blocked-by|Auto-build|Deferred|Status|Repair-signature):\*\*/i.test(lines[i])) {
+        insertAt = i + 1;
+      } else if (lines[i].trim() === "") {
+        break;
+      } else {
+        break;
+      }
+    }
+    lines.splice(insertAt, 0, "**Priority:** critical");
+    return lines.join("\n");
+  }
+  if (has < 0) return md; // not marked
+  lines.splice(has, 1);
+  return lines.join("\n");
 }
 
 /** Strip bold markers + collapse [[wikilink|alias]] / [[wikilink]] to plain text for display. */
@@ -246,6 +287,12 @@ function parseSpec(slug: string, raw: string): SpecCard {
     (l) => /^\s*\*\*Deferred:\*\*/i.test(l) || /^\s*\*\*Status:\*\*\s*deferred\b/i.test(l),
   );
 
+  // **Priority:** critical — the critical-spec lane (director-executable-plans-and-priority Phase 1).
+  // Authored as a metadata LINE under the H1 (like Owner/Parent/Deferred), set by a directive's
+  // criticalSpecs[] or from the board (POST /api/roadmap/priority). Line-anchored so a prose mention inside
+  // backticks (e.g. this spec discussing `**Priority:** critical`) is NOT a false positive.
+  const critical = lines.some((l) => /^\s*\*\*Priority:\*\*\s*critical\b/i.test(l));
+
   return {
     slug,
     title,
@@ -258,6 +305,7 @@ function parseSpec(slug: string, raw: string): SpecCard {
     blockedBy: [...new Set(blockerSlugs)].map((s) => ({ slug: s, title: s, status: "planned" as Phase, cleared: false })),
     autoBuild,
     repairSignature,
+    critical,
   };
 }
 

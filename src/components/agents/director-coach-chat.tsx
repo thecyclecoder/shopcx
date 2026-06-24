@@ -12,7 +12,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 type Msg = { role: "user" | "assistant"; content: string };
 type Action = {
   id: string;
-  type: "coaching" | "spec" | "goal" | "spec-edit";
+  type: "coaching" | "spec" | "goal" | "spec-edit" | "directive";
   summary: string;
   errorClass?: string;
   guidance?: string;
@@ -21,6 +21,10 @@ type Action = {
   title?: string;
   outcome?: string;
   content?: string;
+  // directive card (director-executable-plans-and-priority Phase 1)
+  steps?: string[];
+  gateBuildsUntil?: string;
+  criticalSpecs?: string[];
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
 };
@@ -100,7 +104,7 @@ export function DirectorCoachChat() {
   }, [threadId, thinking]);
 
   const send = useCallback(
-    async (intent: "ask" | "coach") => {
+    async (intent: "ask" | "coach" | "plan") => {
       const text = input.trim();
       if (!text || thinking) return;
       setInput("");
@@ -193,13 +197,36 @@ export function DirectorCoachChat() {
           <div key={a.id} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-[12px] dark:border-amber-800 dark:bg-amber-950/30">
             <div className="flex items-center gap-2">
               <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-medium text-amber-900 dark:bg-amber-800 dark:text-amber-100">
-                {a.type === "coaching" ? "new coaching rule" : a.type === "goal" ? "new goal · for your greenlight" : a.type === "spec-edit" ? "spec edit" : "spec handoff"}
+                {a.type === "coaching" ? "new coaching rule" : a.type === "goal" ? "new goal · for your greenlight" : a.type === "spec-edit" ? "spec edit" : a.type === "directive" ? "directive · execute this plan" : "spec handoff"}
               </span>
               <span className="font-medium text-zinc-800 dark:text-zinc-100">{a.summary}</span>
             </div>
             {a.type === "coaching" && a.guidance && <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">“{a.guidance}”{a.reasoning ? ` — ${a.reasoning}` : ""}</p>}
             {a.type === "spec" && a.slug && <p className="mt-1.5 font-mono text-[11px] text-zinc-500">specs/{a.slug}.md</p>}
             {a.type === "spec-edit" && a.slug && <p className="mt-1.5 font-mono text-[11px] text-zinc-500">✎ specs/{a.slug}.md · edit existing</p>}
+            {a.type === "directive" && (
+              <div className="mt-1.5 text-zinc-700 dark:text-zinc-300">
+                {a.steps && a.steps.length > 0 && (
+                  <ol className="ml-4 list-decimal space-y-0.5">
+                    {a.steps.map((s, j) => (
+                      <li key={j}>{s}</li>
+                    ))}
+                  </ol>
+                )}
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {a.gateBuildsUntil && (
+                    <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+                      ⛔ gate builds until <span className="font-mono">{a.gateBuildsUntil}</span> ships
+                    </span>
+                  )}
+                  {a.criticalSpecs && a.criticalSpecs.length > 0 && (
+                    <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+                      🔴 critical: <span className="font-mono">{a.criticalSpecs.join(", ")}</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
             {a.type === "goal" && (
               <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">
                 {a.outcome ? `“${a.outcome}” ` : ""}
@@ -209,7 +236,7 @@ export function DirectorCoachChat() {
             {a.status === "pending" ? (
               <div className="mt-2 flex gap-2">
                 <button onClick={() => decide(a.id, "approve")} className="rounded bg-green-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-green-700">
-                  {a.type === "coaching" ? "Apply rule" : a.type === "goal" ? "Approve & propose" : "Approve"}
+                  {a.type === "coaching" ? "Apply rule" : a.type === "goal" ? "Approve & propose" : a.type === "directive" ? "Make it my directive" : "Approve"}
                 </button>
                 <button onClick={() => decide(a.id, "decline")} className="rounded border border-zinc-300 px-2.5 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800">
                   Dismiss
@@ -249,6 +276,14 @@ export function DirectorCoachChat() {
             className="rounded-md border border-zinc-300 px-3 py-1.5 text-[12px] font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             Ask
+          </button>
+          <button
+            onClick={() => void send("plan")}
+            disabled={thinking || !input.trim()}
+            title="Hand Ada a plan to execute — it trumps her day-to-day until done (she'll propose a directive you confirm)"
+            className="rounded-md border border-rose-300 px-3 py-1.5 text-[12px] font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-950/30"
+          >
+            Plan
           </button>
           <button
             onClick={() => void send("coach")}

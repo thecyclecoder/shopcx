@@ -5,6 +5,7 @@ import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, ty
 import { getSpecCardStates, resolveBoardStatus, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
 import StatusControl from "./StatusControl";
+import PriorityControl from "./PriorityControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
@@ -96,6 +97,7 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
       <Link href={`/dashboard/roadmap/${spec.slug}`} className="group flex items-start gap-2">
         <span className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${DOT[spec.status]}`} />
         <h3 className="text-sm font-medium leading-snug text-zinc-900 group-hover:text-indigo-600 dark:text-zinc-100 dark:group-hover:text-indigo-400">
+          {spec.critical && <span title="Critical — queued ahead of normal specs" className="mr-1 align-middle text-[11px]">🔴</span>}
           {spec.title}
         </h3>
       </Link>
@@ -130,7 +132,10 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
       )}
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 space-y-2">
-        <StatusControl slug={spec.slug} status={spec.status} />
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusControl slug={spec.slug} status={spec.status} />
+          <PriorityControl slug={spec.slug} critical={spec.critical} />
+        </div>
         <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} blockedBy={spec.blockedBy} />
       </div>
       <div className="mt-1.5 text-[11px] text-zinc-400">

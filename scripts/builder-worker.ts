@@ -4645,6 +4645,28 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         content,
         status: "pending",
       });
+    } else if (a.type === "directive") {
+      // The CEO's executable PLAN (director-executable-plans-and-priority Phase 1). Re-prioritizes WHAT the
+      // director does until done, never loosens HOW. On approval the worker inserts ONE active directive +
+      // marks any criticalSpecs `**Priority:** critical`. steps = the ordered plan; gateBuildsUntil = a spec
+      // slug to gate build-enqueue on; criticalSpecs = slugs to flag critical (queued ahead of normal specs).
+      const summary = typeof a.summary === "string" ? a.summary.trim() : "";
+      const steps = Array.isArray(a.steps) ? a.steps.map((s) => String(s)).filter(Boolean).slice(0, 30) : [];
+      if (!summary || !steps.length) continue; // a directive needs a summary + at least one step
+      const cleanSlug = (s: unknown) => (typeof s === "string" ? s.replace(/[^a-z0-9-]/gi, "") : "");
+      const gateBuildsUntil = cleanSlug(a.gateBuildsUntil);
+      const criticalSpecs = Array.isArray(a.criticalSpecs)
+        ? [...new Set(a.criticalSpecs.map(cleanSlug).filter(Boolean))].slice(0, 20)
+        : [];
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "directive",
+        summary,
+        steps,
+        gateBuildsUntil: gateBuildsUntil || "",
+        criticalSpecs,
+        status: "pending",
+      });
     }
   }
   return out;
@@ -4662,6 +4684,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when you spot a STRATEGIC objective worth a MULTI-SPEC initiative (not one fix). You PROPOSE it for YOUR OWN function; on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate — directors propose, the CEO greenlights). Once greenlit, Pia decomposes it into a milestone→spec tree. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec-edit","summary":"<what you're changing + why>","slug":"<existing-spec-slug>","content":"<the FULL revised docs/brain/specs/{slug}.md markdown>"}]}`,
   `  — when the CEO asks you to MODIFY an EXISTING spec (e.g. "add the right **Blocked-by:** lines to Pia's milestone specs"). READ the spec, edit it, emit the WHOLE revised markdown (not a diff). The worker commits it on approval (the spec must already exist — spec-edit never creates a new one). Emit ONE card per spec to revise several in one turn. This is a real edit, not just a recommendation.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"directive","summary":"<the plan in one line>","steps":["<ordered step 1>","<step 2>"],"gateBuildsUntil":"<spec-slug or omit>","criticalSpecs":["<spec-slug>"]}]}`,
+  `  — when the CEO hands you a PLAN to EXECUTE (INTENT: PLAN — "execute this plan: …" / "build X first" / "gate all builds until Y ships"). Investigate read-only first (which specs exist, what's planned/blocked), then emit ONE 'directive' card: \`steps\` is the ordered plan; \`gateBuildsUntil\` (optional) is a spec slug to PAUSE all build-enqueue on until it ships; \`criticalSpecs\` (optional) are slugs to mark **Priority:** critical (queued ahead of normal specs). On approval the directive becomes your one ACTIVE plan — you run it FIRST every standing pass until it's done. A directive re-prioritizes WHAT you do, never loosens HOW (your leash/loop-guard/soundness gate are unchanged — never propose a directive that blind-merges or auto-does something destructive). One active directive at a time — a new one supersedes the old.`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -4672,6 +4696,7 @@ function directorCoachFraming(dirFn: string): string {
     `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
     `You MAY PROPOSE a new GOAL (for YOUR OWN function only). If the conversation surfaces a strategic, multi-spec objective (an initiative, not a single fix), emit a 'goal' pending_action with structured fields (slug, title, outcome, successMetric, body). You never START a goal yourself — on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate); once greenlit, Pia decomposes it. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
     `You can EDIT an existing spec, not just author a new one. If the CEO asks you to MODIFY specs (e.g. "update the milestone specs Pia made to add the right Blocked-by lines"), READ each spec and emit a 'spec-edit' card per spec carrying the FULL revised markdown — a real edit the worker commits on approval, NOT just a recommendation to make a new spec.`,
+    `The CEO can hand you a PLAN to EXECUTE (the 'plan' intent: "execute this plan…", "build X first", "gate builds until Y ships"). Investigate read-only, then emit a 'directive' card (summary + ordered steps + optional gateBuildsUntil spec + optional criticalSpecs). On approval it's your ONE active directive — you run it FIRST every standing pass until it's done; gateBuildsUntil PAUSES build-enqueue until that spec ships; criticalSpecs get marked **Priority:** critical (queued ahead of normal specs). A directive re-prioritizes WHAT you do, never loosens HOW — your leash, loop-guard, soundness gate, and escalation rails are unchanged; never propose a directive that would blind-merge or auto-do anything destructive/irreversible.`,
     DIRECTOR_COACH_OUTPUT,
   ].join("\n\n");
 }
@@ -4689,7 +4714,7 @@ async function runDirectorCoachJob(job: Job) {
     /* not JSON */
   }
   const mode = (params.mode as "turn" | "approve_action") || "turn";
-  const intent = (params.intent as "ask" | "coach") || "ask";
+  const intent = (params.intent as "ask" | "coach" | "plan") || "ask";
   const threadId = params.thread_id || job.spec_slug;
   if (!threadId) {
     await update(job.id, { status: "failed", error: "director-coach job missing thread_id" });
@@ -4792,6 +4817,56 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "done";
             a.result = `updated specs/${slug}.md`;
             notes.push(`Spec ${slug} → updated`);
+          } else if (a.type === "directive" && a.summary && Array.isArray(a.steps) && a.steps.length) {
+            // The CEO's executable PLAN (director-executable-plans-and-priority Phase 1). Insert ONE active
+            // directive (superseding any prior active one — one active per director) + mark each criticalSpecs
+            // slug `**Priority:** critical`. The standing pass (Phase 2) runs it first; the gate pauses builds.
+            const steps = (a.steps as unknown[]).map((s) => String(s));
+            const gate = typeof a.gateBuildsUntil === "string" && a.gateBuildsUntil ? String(a.gateBuildsUntil) : null;
+            const criticalSpecs = Array.isArray(a.criticalSpecs) ? (a.criticalSpecs as unknown[]).map((s) => String(s)).filter(Boolean) : [];
+            // One active directive per director: clear any existing active one (it's superseded).
+            await db
+              .from("director_directives")
+              .update({ status: "cleared", completed_at: new Date().toISOString() })
+              .eq("workspace_id", job.workspace_id)
+              .eq("director_function", thread.director_function)
+              .eq("status", "active");
+            const { error: insErr } = await db.from("director_directives").insert({
+              workspace_id: job.workspace_id,
+              director_function: thread.director_function,
+              summary: String(a.summary),
+              steps,
+              gate_builds_until: gate,
+              status: "active",
+              created_by: job.created_by,
+            });
+            if (insErr) { a.status = "failed"; a.result = `directive insert failed: ${insErr.message}`; notes.push(`${a.summary} → ${a.result}`); continue; }
+            // Mark each criticalSpecs slug `**Priority:** critical` (the board lever shares this marker).
+            const { setCriticalMarker } = await import("../src/lib/brain-roadmap");
+            const marked: string[] = [];
+            for (const cs of criticalSpecs) {
+              const rel = `docs/brain/specs/${cs}.md`;
+              const abs = join(wt, rel);
+              if (!existsSync(abs)) { notes.push(`critical ${cs} → no such spec`); continue; }
+              const md = readFileSync(abs, "utf8");
+              const updated = setCriticalMarker(md, true);
+              if (updated === md) { marked.push(cs); continue; } // already critical
+              const put = await putFileMain(rel, updated, `roadmap: mark ${cs} → priority critical (directive)`);
+              if (put.ok) marked.push(cs);
+              else notes.push(`critical ${cs} → commit failed ${put.status}`);
+            }
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: thread.director_function,
+              actionKind: "directive_accepted",
+              specSlug: gate,
+              reason: String(a.summary),
+              metadata: { steps: steps.length, gate_builds_until: gate, critical_specs: marked, source_thread_id: threadId },
+            });
+            a.status = "done";
+            a.result = `directive active${gate ? ` · gate on ${gate}` : ""}${marked.length ? ` · critical: ${marked.join(", ")}` : ""}`;
+            notes.push(`Directive accepted: ${a.summary}`);
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
@@ -4818,7 +4893,9 @@ async function runDirectorCoachJob(job: Job) {
     const intentDirective =
       intent === "coach"
         ? `INTENT: COACH. The CEO is coaching you — distill their directive (from this whole conversation) into ONE durable coaching rule and emit a 'coaching' pending_action for their confirmation. Acknowledge briefly in reply, but the rule is what matters. Stay within your leash.`
-        : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
+        : intent === "plan"
+          ? `INTENT: PLAN. The CEO is handing you a PLAN to EXECUTE (it trumps your day-to-day until done). Investigate read-only first (which specs exist, what's planned/blocked/in-flight), then emit ONE 'directive' pending_action: a one-line summary, ordered steps, optionally gateBuildsUntil (a spec slug to PAUSE all build-enqueue on until it ships) and criticalSpecs (slugs to mark **Priority:** critical, queued ahead of normal specs). On approval it becomes your ONE active directive you run FIRST every standing pass. Acknowledge in reply, but the directive card is what matters. A directive re-prioritizes WHAT you do, never loosens HOW — never propose one that blind-merges or auto-does something destructive.`
+          : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
     const prompt = isResume
       ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`

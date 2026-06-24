@@ -20,12 +20,12 @@ The **CEO↔Director coaching chat** thread — a resumable Max conversation whe
 | `pending_actions` | `jsonb` | — | gated cards: a `coaching` amendment or a `spec` handoff · default `[]` |
 | `created_at` / `updated_at` | `timestamptz` | — | default `now()` |
 
-**Pending-action shapes:** `{type:'coaching', summary, errorClass, guidance, triggeringPattern, reasoning, status}` (on approval the worker writes a [[director_instructions]] row via `coachDirector`); `{type:'spec', summary, slug, title, owner, parent, content, queueBuild, status}` (committed on approval). The model NEVER executes — `runDirectorCoachJob` mode `approve_action` does, on the CEO's click.
+**Pending-action shapes:** `{type:'coaching', summary, errorClass, guidance, triggeringPattern, reasoning, status}` (on approval the worker writes a [[director_instructions]] row via `coachDirector`); `{type:'spec', summary, slug, title, owner, parent, content, queueBuild, status}` (committed on approval); `{type:'spec-edit', summary, slug, content, status}` (the FULL revised markdown of an EXISTING spec — guarded so it never creates); `{type:'goal', summary, slug, title, outcome, successMetric, body, status}` (routed through `proposeGoal` → the CEO's greenlight); `{type:'directive', summary, steps[], gateBuildsUntil?, criticalSpecs[], status}` ([[../specs/director-executable-plans-and-priority]] Phase 1 — on approval the worker inserts ONE active [[director_directives]] row + marks each `criticalSpecs` slug `**Priority:** critical` + writes a `directive_accepted` [[director_activity]] row). The model NEVER executes — `runDirectorCoachJob` mode `approve_action` does, on the CEO's click.
 
 **Index:** `(workspace_id, user_id, updated_at desc)` (the resume list).
 
 ## The turn/intent model
-The CEO's two buttons set `intent` on a turn (in the job `instructions`): **Ask** (`intent='ask'` — she explains, never emits a coaching card) vs **Coach her** (`intent='coach'` — she distills the directive into a `coaching` card for confirmation). The approval card is the explicit confirmation, so a multi-turn convo stays conversation until the CEO presses Coach.
+The CEO's buttons set `intent` on a turn (in the job `instructions`): **Ask** (`intent='ask'` — she explains, never emits a coaching card) · **Coach her** (`intent='coach'` — she distills the directive into a `coaching` card for confirmation) · **Plan** (`intent='plan'` — [[../specs/director-executable-plans-and-priority]] Phase 1: she investigates read-only then emits a `directive` card to EXECUTE a CEO plan that trumps her day-to-day until done). The approval card is the explicit confirmation, so a multi-turn convo stays conversation until the CEO presses one.
 
 ## RLS
 Authenticated SELECT (owner-gated at the route/UI), service-role write — mirror [[dev_message_threads]].
@@ -35,4 +35,4 @@ Authenticated SELECT (owner-gated at the route/UI), service-role write — mirro
 
 ---
 
-[[../README]] · [[director_instructions]] · [[director_coaching_log]] · [[dev_message_threads]] · [[agent_jobs]] · [[../libraries/director-coach-threads]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]
+[[../README]] · [[director_instructions]] · [[director_coaching_log]] · [[director_directives]] · [[director_activity]] · [[dev_message_threads]] · [[agent_jobs]] · [[../libraries/director-coach-threads]] · [[../specs/worker-grading-and-director-management]] · [[../specs/director-executable-plans-and-priority]] · [[../../CLAUDE]]

@@ -10,7 +10,7 @@ Per [[../project-management]], planning + tracking live in the brain, not a sepa
 
 ## Core types
 
-- **`SpecCard`** — one spec: `slug`, `title`, `status` (derived `SpecStatus`), `summary`, `phases[]`, `counts`, `owner?` (function slug from `**Owner:** [[../functions/x]]`), `parent?` (mandate/goal-milestone from `**Parent:**`), **`blockedBy[]`** (prerequisite specs — see below), and **`autoBuild?`** (`false` ⇒ opted out of spec-blockers auto-queue via `**Auto-build:** off`).
+- **`SpecCard`** — one spec: `slug`, `title`, `status` (derived `SpecStatus`), `summary`, `phases[]`, `counts`, `owner?` (function slug from `**Owner:** [[../functions/x]]`), `parent?` (mandate/goal-milestone from `**Parent:**`), **`blockedBy[]`** (prerequisite specs — see below), and **`autoBuild?`** (`false` ⇒ opted out of spec-blockers auto-queue via `**Auto-build:** off`), **`critical`** (`true` ⇒ carries a `**Priority:** critical` marker — queued ahead of normal specs; see [Spec metadata lines](#spec-metadata-lines-parsed-in-parsespec)).
 - **`Phase`** = `"planned" | "in_progress" | "shipped" | "rejected"` — a **phase-level** status (`SpecPhase.status`, `counts`).
 - **`SpecStatus`** = `Phase | "deferred"` — the **whole-spec** board status ([[../specs/director-drives-all-specs-and-deferred-status]] Phase 1). `deferred` is orthogonal to phase progress: `parseSpec` flags it from a leading `**Deferred:**` metadata line (already authored by [[board-grooming]] split cards) **or** `**Status:** deferred`, and `deriveStatus` returns `"deferred"` over any ⏳ phases. A deferred spec gets its **own board column** and is **excluded by every auto-build lane** ([[platform-director]]) until the CEO removes the marker (un-defers → Planned). Detection is **anchored to line-start** so a prose/backtick mention of the marker is not a false positive. Phases are never `deferred` (no emoji maps to it).
 - `ProjectTrack`, `RoadmapData`, `FunctionMap`/`FunctionGroup`/`ParentGroup`, `FunctionCard`/`Mandate`, `GoalCard`/`Milestone`, `ArchiveEntry`.
@@ -44,6 +44,7 @@ Under a spec's H1, one-per-concept bold metadata lines, each resolving `[[wikili
 - `**Owner:** [[../functions/{slug}]]` → `owner` (the DRI function).
 - `**Parent:** {mandate or goal milestone}` → `parent`.
 - `**Repair-signature:** \`…\`` → `repairSignature` (boolean; box-Repair-Agent-authored specs only). Drives the board's "🔧 Repair" source chip via [[#Key exports|getRoadmapFilters]].
+- `**Priority:** critical` → `critical` (boolean; [[../specs/director-executable-plans-and-priority]] Phase 1). Line-anchored (a prose/backtick mention isn't a false positive), orthogonal to `status` (a critical spec is still planned/in_progress/shipped). A critical spec is queued **ahead of normal Planned specs** by the director's build picker and can be a directive's build-gate target. Set/cleared by **`setCriticalMarker(md, critical)`** (the one source of truth) from two levers: the **board** (`POST /api/roadmap/priority` → [[../dashboard/roadmap|PriorityControl]]) or a **directive's `criticalSpecs[]`** (the chat). Rendered as a 🔴 pip on the board card.
 - **`**Blocked-by:** [[spec-a]], [[spec-b]]`** → `blockedBy` (spec-blockers). Each `[[…]]` resolves to a spec slug (last path segment, alias/`.md` stripped, de-duped). Parsed exactly like Owner/Parent.
 
 ## `blockedBy` — build prerequisites ([[../specs/spec-blockers]])
