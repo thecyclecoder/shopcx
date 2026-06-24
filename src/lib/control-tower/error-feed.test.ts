@@ -12,7 +12,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isBareLifecycle } from "./error-feed";
+import { isBareLifecycle, isTransientInngestTransportError } from "./error-feed";
 
 // Regression fixture: the leaked vercel:ebdf493a37c60c34 blob — a bare Lambda lifecycle
 // wrapper around the deliberate /api/portal Appstle 502 (669ms, 343MB/2048MB). The proxy
@@ -65,4 +65,41 @@ END RequestId: abc`;
 test("isBareLifecycle returns false on empty / whitespace-only input", () => {
   assert.equal(isBareLifecycle(""), false);
   assert.equal(isBareLifecycle("   \n  \n"), false);
+});
+
+// ── isTransientInngestTransportError (error-feed-drop-inngest-transport-http-unreachable) ──
+// Regression fixture: the exact http_unreachable transport blob that opened Control Tower
+// signature `inngest:06e8cf82e141fbaa` — Inngest couldn't get a clean reply from our Vercel
+// SDK URL on the shopcx-platform-director-cron every-15-min beat (a deploy-boundary reap), the cron
+// body itself never threw, and the next beat recovered. Classifying it `transient` keeps a
+// first sighting from minting a fresh OPEN incident that pages Platform owners.
+const HTTP_UNREACHABLE_BLOB =
+  "http_unreachable: Error performing request to SDK URL: Your server reset the connection while we were reading the reply: Unexpected ending response";
+
+test("isTransientInngestTransportError matches the inngest:06e8cf82e141fbaa http_unreachable blob", () => {
+  assert.equal(isTransientInngestTransportError("Error", HTTP_UNREACHABLE_BLOB), true);
+});
+
+test("isTransientInngestTransportError matches on the error NAME too (errName carries the class)", () => {
+  assert.equal(isTransientInngestTransportError("http_unreachable", "some downstream detail"), true);
+});
+
+test("isTransientInngestTransportError matches each transport-family phrase", () => {
+  assert.equal(isTransientInngestTransportError("Error", "Error performing request to SDK URL"), true);
+  assert.equal(isTransientInngestTransportError("Error", "Your server reset the connection mid-reply"), true);
+  assert.equal(isTransientInngestTransportError("Error", "Unexpected ending response"), true);
+});
+
+test("isTransientInngestTransportError KEEPS a real application throw (not transport noise)", () => {
+  assert.equal(
+    isTransientInngestTransportError("TypeError", "Cannot read properties of undefined (reading 'id')"),
+    false,
+  );
+  assert.equal(isTransientInngestTransportError("Error", "Avalara tax calc returned 422"), false);
+});
+
+test("isTransientInngestTransportError returns false on empty / nullish input", () => {
+  assert.equal(isTransientInngestTransportError(null, null), false);
+  assert.equal(isTransientInngestTransportError("", "   "), false);
+  assert.equal(isTransientInngestTransportError(undefined, undefined), false);
 });

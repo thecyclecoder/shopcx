@@ -33,6 +33,8 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 
 `recordError` is **best-effort and never throws** — an error-reporter that can crash the path it reports on is worse than the gap it closes. A racing insert (`23505`) falls back to the update path.
 
+**Transient class** (`recordError({ transient: true })` — [[../specs/error-feed-drop-inngest-transport-http-unreachable]]): a noise class non-actionable on a single sighting (an Inngest `http_unreachable` transport reset). A **first sighting** inserts `status='resolved'`, `last_paged_at=null` (recorded + grouped for visibility, **no page, no repair fan-out**); it escalates to a real **open+page** only if the same signature **recurs within 1 h** of the prior sighting (chronic). A prior sighting older than the window is re-resolved as another isolated blip. Sits alongside the outage-window auto-resolve (`outage_correlated`), but keyed on recurrence rather than the Claude breaker.
+
 ## Panel color (dashboard)
 
 `buildErrorFeedSnapshot` reads the last 7 days of rows per source and colors each panel by **recency** of the newest occurrence: **red** if any error in the last hour, **amber** if any in the last 24 h, else **green** (healthy → no alert noise). Not driven by `status`.
