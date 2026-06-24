@@ -69,7 +69,7 @@ export default function WorkersRosterPage() {
   if (workspace.role !== "owner") {
     return (
       <div className="p-6">
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Workers</h1>
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Agents</h1>
         <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">This view is owner-only.</p>
       </div>
     );
@@ -80,17 +80,17 @@ export default function WorkersRosterPage() {
   return (
     <div className="mx-auto w-full max-w-screen-lg p-6">
       <div className="mb-1 flex items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Workers</h1>
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Agents</h1>
         <Link href="/dashboard/agents" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
           Agents hub →
         </Link>
       </div>
       <p className="mb-5 text-sm text-zinc-500 dark:text-zinc-400">
-        Every box agent lane, grouped under its director. Click a worker for its profile + precise responsibilities.
+        Every box agent lane, grouped under its director. Click an agent for its profile + precise responsibilities.
       </p>
 
       {loading && !org ? (
-        <div className="py-12 text-center text-sm text-zinc-400">Loading workers…</div>
+        <div className="py-12 text-center text-sm text-zinc-400">Loading agents…</div>
       ) : err && !org ? (
         <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
           Couldn&apos;t load the roster.

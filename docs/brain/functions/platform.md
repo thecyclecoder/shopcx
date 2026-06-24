@@ -1,6 +1,6 @@
 # Platform / Engineering (function)
 
-The permanent owner of **the build system and the product engineering itself** — the autonomous build pipeline, the AI-agent platform, dev tooling/skills, the spec process, and store-tech integrations. The CTO-equivalent seat: not one of the CEO-mode *business* directors (Growth/CMO/Retention/CFO/Logistics/CS), but a first-class function that owns all the specs which build and operate ShopCX as software.
+The permanent owner of **the build system and the product engineering itself** — the autonomous build pipeline, the AI-agent platform, dev tooling/skills, the spec process, and store-tech integrations. The **CTO/Engineering seat on the [[../goals/ceo-mode|CEO-mode]] executive team** — a peer of the business directors (Growth/CMO/Retention/CFO/Logistics/CS), all reporting to the CEO. It's distinguished not by *rank* but by *kind of work*: the business directors **run** the Superfoods business; Platform **builds** ShopCX-as-software (the engine every other director's specs ship through). Peer in rank, keystone in sequence — automating the builder first compounds across every function, which is why Platform was the first function to go fully autonomous (Ada).
 
 ## Scope + owned metrics
 
