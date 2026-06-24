@@ -15,7 +15,7 @@ The **department-level KPI aggregation engine** behind the [[../goals/platform-d
 
 ## The daily KPI registry
 
-A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible ([[../specs/platform-scorecard-weekly]] adds the **weekly** set below; [[../specs/platform-scorecard-monthly]] seeds the monthly registry empty here until filled). The **daily** set:
+A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible ([[../specs/platform-scorecard-weekly]] adds the **weekly** set below; [[../specs/platform-scorecard-monthly]] adds the **monthly** leading curve). The **daily** set:
 
 | `metric_key` | unit | Derivation |
 |---|---|---|
@@ -44,9 +44,21 @@ The **weekly** lens ([[../specs/platform-scorecard-weekly]]) — how much the bu
 | `worker_grade_rollup` | ratio | Per `agent_kind` average from [[../tables/agent_action_grades]] via [[agent-grader]] `computeAgentRollup` (the **same** last-`ROLLUP_WINDOW` rollup the coaching loop reads — not a second source of truth). `value` = the fleet mean; `detail.by_worker` carries each graded kind's `average`/`prior`/`drop`/`count`, so a slipping worker is visible. Prior = the mean of the per-worker prior-window averages. |
 | `regressions_caught` | count | [[../tables/agent_jobs]] `kind='regression'` **concluded** in-window (terminal status, `updated_at`) **+** [[../tables/director_activity]] rows the [[../specs/regression-agent|Regression Agent]] emits (`action_kind ∈ detected_regression｜authored_fix`). `detail` splits `detected` / `dismissed` / `fix_authored` / `regression_jobs_concluded` (a `dismissed_regression` is tracked but not counted toward the headline). |
 
+## The monthly KPI registry
+
+The **monthly** leading curve ([[../specs/platform-scorecard-monthly]]) — the slow-moving indicators that prove autonomy is compounding, over a **trailing 30-day** window with a **prior-month delta**. Reuses the same engine machinery (window/delta/upsert); only the derivations are new:
+
+| `metric_key` | unit | Derivation |
+|---|---|---|
+| `human_touch_per_build` | ratio | **The goal's headline.** `(approval_decisions where decided_by ∈ ceo｜human in-window) ÷ (agent_jobs kind='build' status='merged' in-window)`. Lower is better; the prior-month `delta_pct` is the "declining MoM" signal. `detail` carries `touched` (numerator) + `builds` (denominator). |
+| `goals_escorted_unbabysat` | count | Goals whose milestones advanced WITHOUT CEO touch: [[../tables/director_activity]] `action_kind='escorted_goal'` (`director_function='platform'`) in-window → distinct `goal_slug`, intersected with [[brain-roadmap]] `getGoals()` shipped milestones; counted only when NO non-autonomous [[../tables/approval_decisions]] (`decided_by ∈ ceo｜human`) in-window touched a spec belonging to that goal's milestones (the touch-check joins `agent_job_id` → `agent_jobs.spec_slug`). `detail.goals` lists the escorted-without-touch goals + their milestones. |
+| `time_to_approve_hours` | hours | Median over terminal [[../tables/approval_decisions]] in-window of `(decision.created_at − raisedAt)`, where `raisedAt` is approximated by the raising [[../tables/agent_jobs]] row's `created_at` (the floor — the job couldn't request approval before it existed; `pending_actions` carry no timestamp and `agent_jobs.updated_at` is post-approval by the time we read it). `value` = p50; `detail` carries `p50`/`p90` + `decided_count`. |
+| `deploy_reliability` | ratio | The [[../specs/deploy-health-rollback-guardian|Deploy-Health & Auto-Rollback guardian]] half of the reliability KPI (CI-green is the weekly `build_success_rate`): [[../tables/director_activity]] `action_kind='deploy_healthy'` ÷ (`deploy_healthy` + `deploy_rolled_back`) in-window. When the guardian has written NO verdicts in the window we surface `detail.no_data=true` (value=0) so the UI shows "no data yet" rather than a fabricated 100%. |
+| `director_call_grade` | ratio | The CEO's grade of the Platform director's calls in-window: average [[../tables/director_decision_grades]] `grade` (1–10) split by `dimension ∈ auto-approval｜goal-escort` — the same shape [[director-leash-recommendations]] `computeDirectorGradeReport` reads. `value` = the blended mean across both dimensions; `detail.by_dimension` carries each dimension's mean + count. Populated by [[../specs/director-loop-grading]] (✅). |
+
 ## Caller
 
-The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. The **weekly** beat is the `snapshot-platform-scorecard-weekly` step on the same cron — **once per ISO week** per workspace (guarded on any weekly row already taken on/after the ISO-week Monday), `computePlatformScorecard(ws, { cadence:'weekly', windowDays:7 })`. Both run in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
+The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. The **weekly** beat is the `snapshot-platform-scorecard-weekly` step on the same cron — **once per ISO week** per workspace (guarded on any weekly row already taken on/after the ISO-week Monday), `computePlatformScorecard(ws, { cadence:'weekly', windowDays:7 })`. The **monthly** beat is the `snapshot-platform-scorecard-monthly` step on the same cron — **once per calendar month** per workspace (guarded on any monthly row already taken on/after the 1st of the UTC month), `computePlatformScorecard(ws, { cadence:'monthly', windowDays:30 })`. All three run in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
 
 ## Related
 
