@@ -71,6 +71,10 @@ Slack-tap callers pass `source: 'slack-inbox'` to skip the mirror (their own `up
 - `scripts/builder-worker.ts` (poll loop) — runs `reconcileApprovalInbox(db)` ~every 20s.
 - `src/app/api/developer/agents/inbox/route.ts` — consumes the `metadata.routed_to_function` / `approve_action_id` / `deep_link` the emitter stamps.
 
+## CEO bounce-back affordance — `POST /api/developer/agents/inbox/bounce-back`
+
+When a director escalates a sound diagnosis the CEO inbox can render only **Dismiss** for, a **Send back to {Director}** button re-queues the same escalation to the director with the richer [[../specs/director-judgment-lanes-fold-author-dismiss|judgment-lanes verdict surface]] — letting the director land an action this time without manual CEO work. Implemented by [[director-bounce-back]] + the inbox row's `ApprovalRow` component. The endpoint is owner-gated and depth-capped at one round-trip ([[../specs/bounce-escalation-back-to-director]]).
+
 ## Related
 
-[[../specs/approval-routing-engine]] · [[approval-router]] · [[../tables/function_autonomy]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../dashboard/agents]] · [[roadmap-actions]] · [[control-tower]] · [[../goals/devops-director]] · [[../operational-rules]]
+[[../specs/approval-routing-engine]] · [[approval-router]] · [[director-bounce-back]] · [[../tables/function_autonomy]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../tables/director_activity]] · [[../dashboard/agents]] · [[roadmap-actions]] · [[control-tower]] · [[../goals/devops-director]] · [[../operational-rules]]
