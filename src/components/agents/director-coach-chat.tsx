@@ -43,6 +43,30 @@ export function DirectorCoachChat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, actions, thinking]);
 
+  // Resume on mount: the conversation lives in the DB (director_coach_threads), so load the most recent
+  // thread instead of showing a blank box on every re-render/refresh. If a turn is still mid-flight, resume
+  // polling for it. (Without this the chat appeared not to "persist" even though the box had answered.)
+  const loadLatest = useCallback(async () => {
+    try {
+      const res = await fetch("/api/director/coach");
+      const d = await res.json();
+      const threads = (d.threads as Thread[]) || [];
+      const latest = threads.find((t) => t.messages?.length);
+      if (latest) {
+        setThreadId(latest.id);
+        setMessages(latest.messages);
+        setActions(latest.pending_actions || []);
+        if (latest.turn_status === "thinking") setThinking(true);
+      }
+    } catch {
+      /* nothing to resume */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLatest();
+  }, [loadLatest]);
+
   // Poll while a turn is on the box.
   useEffect(() => {
     if (!threadId || !thinking) return;
@@ -130,8 +154,24 @@ export function DirectorCoachChat() {
     [threadId],
   );
 
+  const startNew = () => {
+    setThreadId(null);
+    setMessages([]);
+    setActions([]);
+    setError(null);
+    setInput("");
+  };
+
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-800">
+      {messages.length > 0 && (
+        <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
+          <span className="text-[10px] uppercase tracking-wide text-zinc-400">Conversation</span>
+          <button onClick={startNew} disabled={thinking} className="text-[11px] text-zinc-500 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:text-zinc-200">
+            + New thread
+          </button>
+        </div>
+      )}
       <div ref={scrollRef} className="max-h-96 space-y-3 overflow-y-auto p-3">
         {!messages.length && (
           <p className="px-1 py-6 text-center text-[12px] text-zinc-400">
