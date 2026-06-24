@@ -1,0 +1,1 @@
+- **Session-stamped experiment attribution + order journey** · verified 2026-06-24 · → [[lifecycles/storefront-session-attribution]]
