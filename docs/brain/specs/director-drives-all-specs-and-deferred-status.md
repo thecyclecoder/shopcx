@@ -16,7 +16,7 @@ Widening WHICH specs the director drives does not loosen the leash. A spec is on
 ### Verification — Phase 1
 - A spec with a `**Deferred:**` marker renders in the Deferred column and is skipped by every auto-build lane. Promoting it to Planned (removing the marker) makes it a normal initiation candidate. Planned / In-progress / Shipped columns are unchanged.
 
-## Phase 2 — owner-agnostic drive, routed 'first live boss else up' ⏳
+## Phase 2 — owner-agnostic drive, routed 'first live boss else up' ✅
 - Remove the `owner === platform` gate from the initiation lane and `escortFixSpecs`, so ANY unblocked, non-deferred, unstarted (0 ✅) spec is a drive candidate regardless of owner. Grooming is already owner-agnostic (keep). Net: Planned → I initiate (after the soundness check), In-progress-with-⏳ → I progress its phases, Deferred → I leave it.
 - Route the drive via the existing keystone ([[../libraries/approval-router]] `resolveApprover` / `resolveApproverLive`): a spec is driven by its OWNING function's director if that director is live+autonomous, ELSE it flows up to the platform director (me). Today only platform is live, so I drive everything non-deferred; as Growth/CS/CMO directors go live, their specs auto-rebalance to them — no re-spec needed.
 - Keep the per-spec soundness investigation for non-fix FEATURE specs (especially cross-domain); repair/regression-signed FIXES build straight through (already-greenlit mandate). Loop-guard + escalation rails unchanged.

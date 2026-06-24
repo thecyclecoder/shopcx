@@ -45,7 +45,7 @@ interface DirectorNode {
   autonomous: boolean;
 }
 interface OrgChart {
-  ceo: { goals: { slug: string; title: string; pct: number }[] };
+  ceo: { goals: { slug: string; title: string; pct: number; status: "proposed" | "greenlit" | "complete"; proposedBy?: string; proposedByLabel?: string }[] };
   directors: DirectorNode[];
 }
 
@@ -130,8 +130,16 @@ function ProfileCard({
   if (resolved.kind === "ceo") {
     personaKey = "ceo";
     tierLabel = "Company objectives";
-    // The CEO's responsibilities ARE the finite goals (goals/*.md) — company-objective level.
-    responsibilities = org.ceo.goals.map((g) => ({ primary: g.title, secondary: `${g.pct}% complete` }));
+    // The CEO's responsibilities ARE the finite goals (goals/*.md) — company-objective level. A
+    // director-proposed goal (director-proposed-goals Phase 2) shows its proposer + that it AWAITS the CEO's
+    // greenlight, so the CEO sees what a director is proposing vs what's already activated.
+    responsibilities = org.ceo.goals.map((g) => ({
+      primary: g.title,
+      secondary:
+        g.status === "proposed"
+          ? `⏳ Proposed${g.proposedByLabel ? ` by ${g.proposedByLabel}` : ""} · awaiting your greenlight`
+          : `${g.status === "complete" ? "Complete" : "Greenlit"} · ${g.pct}% complete`,
+    }));
     // The per-role inbox (IA refactor) now lives on the profile — Approval Requests · Daily
     // Summaries · Decision history · Director grades. The shared board lives on the hub.
     extra = (
