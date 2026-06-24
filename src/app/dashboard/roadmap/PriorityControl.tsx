@@ -16,9 +16,11 @@ function currentPriority(status: SpecStatus, critical?: boolean): Priority {
   return "planned";
 }
 
+// A spec is Prioritized (runs first), Active (runs as Ada sees fit — no marker), or Deferred (parked). The
+// middle is "Active" not "Planned" to avoid colliding with the board's Planned column (which is a phase status).
 const SEGMENTS: { key: Priority; label: string; active: string }[] = [
   { key: "critical", label: "Prioritize", active: "bg-rose-600 text-white" },
-  { key: "planned", label: "Planned", active: "bg-zinc-700 text-white dark:bg-zinc-200 dark:text-zinc-900" },
+  { key: "planned", label: "Active", active: "bg-zinc-700 text-white dark:bg-zinc-200 dark:text-zinc-900" },
   { key: "deferred", label: "Defer", active: "bg-amber-500 text-white" },
 ];
 
