@@ -1,6 +1,6 @@
 /**
  * worker-coaching — the DevOps Director's coaching brain (worker-coaching-loop spec, Phase 1). See
- * docs/brain/libraries/worker-coaching.md + docs/brain/specs/worker-coaching-loop.md.
+ * docs/brain/libraries/agent-coaching.md + docs/brain/specs/worker-coaching-loop.md.
  *
  * This is the supervisory pass that closes the loop: detect a worker's repeated mistake →
  * route (guidance gap vs code bug) → coach (amend the worker's instructions, log + post the message)
@@ -13,7 +13,7 @@
  *     makes a problem stop. (Grades from director-loop-grading become an extra input once it ships.)
  *   • `classifyCoachingRoute` — guidance gap (coach) vs code bug (→ Repair/Regression). A genuine code
  *     defect is NOT a guidance gap — coaching ≠ patching bugs.
- *   • `runWorkerCoachingPass` — the standing pass. dry-run by default; `apply:true` writes.
+ *   • `runAgentCoachingPass` — the standing pass. dry-run by default; `apply:true` writes.
  *
  * north-star: the director optimizes a bounded proxy (worker decision quality) and answers to the CEO.
  * Coaching is reversible guidance done within the leash; a class that won't fix after N coachings
@@ -25,12 +25,12 @@ import { postDirectorMessage } from "@/lib/agents/director-board";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob } from "@/lib/repair-agent";
 import {
-  coachWorker,
+  coachAgent,
   linkCoachingBoardPost,
-  getWorkerCoachingHistory,
+  getAgentCoachingHistory,
   recordRecheck,
-  type WorkerCoachingEntry,
-} from "@/lib/agents/worker-instructions";
+  type AgentCoachingEntry,
+} from "@/lib/agents/agent-instructions";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -58,7 +58,7 @@ const CODE_BUG_VERDICTS = new Set(["real-bug"]);
 
 /** A repeated-error candidate: a worker applied one disposition class N times in the window. */
 export interface RepeatedErrorCandidate {
-  workerKind: string;
+  agentKind: string;
   /** the disposition/verdict that is the class (e.g. 'foreign'). */
   errorClass: string;
   occurrences: number;
@@ -94,7 +94,7 @@ function workerKindFromAction(actionKind: string): string | null {
 
 /**
  * Detect each worker's repeated disposition classes from director_activity. Resolves the worker kind via
- * metadata.worker_kind → metadata.job_id (agent_jobs.kind) → action_kind. A candidate is returned for
+ * metadata.agent_kind → metadata.job_id (agent_jobs.kind) → action_kind. A candidate is returned for
  * every (worker, disposition) the worker applied ≥ REPEAT_ERROR_THRESHOLD times in the window; the
  * caller decides which to coach (those with a recurred signature, or a grade saying it was wrong).
  */
@@ -120,11 +120,11 @@ export async function detectRepeatedErrors(
   }
   const rows = (data ?? []) as ActivityRow[];
 
-  // Resolve worker kinds for rows that carry a job_id but no explicit worker_kind.
+  // Resolve worker kinds for rows that carry a job_id but no explicit agent_kind.
   const jobIds = new Set<string>();
   for (const r of rows) {
     const m = r.metadata ?? {};
-    if (!m.worker_kind && typeof m.job_id === "string") jobIds.add(m.job_id);
+    if (!m.agent_kind && typeof m.job_id === "string") jobIds.add(m.job_id);
   }
   const jobKind = new Map<string, string>();
   if (jobIds.size) {
@@ -132,10 +132,10 @@ export async function detectRepeatedErrors(
     for (const j of (jobs ?? []) as { id: string; kind: string }[]) jobKind.set(j.id, j.kind);
   }
 
-  // Group by (workerKind, disposition class). A "disposition" is the verdict in metadata; fall back to
+  // Group by (agentKind, disposition class). A "disposition" is the verdict in metadata; fall back to
   // the action_kind (e.g. 'dismissed_regression') so a worker that records no verdict still groups.
   interface Group {
-    workerKind: string;
+    agentKind: string;
     errorClass: string;
     activityIds: string[];
     signatures: string[];
@@ -146,17 +146,17 @@ export async function detectRepeatedErrors(
   const groups = new Map<string, Group>();
   for (const r of rows) {
     const m = r.metadata ?? {};
-    const workerKind =
-      (typeof m.worker_kind === "string" && m.worker_kind) ||
+    const agentKind =
+      (typeof m.agent_kind === "string" && m.agent_kind) ||
       (typeof m.job_id === "string" && jobKind.get(m.job_id)) ||
       workerKindFromAction(r.action_kind);
-    if (!workerKind) continue;
+    if (!agentKind) continue;
     const verdict = typeof m.verdict === "string" && m.verdict ? m.verdict : r.action_kind;
     const signature = typeof m.signature === "string" ? m.signature : "";
-    const key = `${workerKind}|${verdict}`;
+    const key = `${agentKind}|${verdict}`;
     let g = groups.get(key);
     if (!g) {
-      g = { workerKind, errorClass: verdict, activityIds: [], signatures: [], sigCounts: new Map(), reasons: [], specSlug: r.spec_slug };
+      g = { agentKind, errorClass: verdict, activityIds: [], signatures: [], sigCounts: new Map(), reasons: [], specSlug: r.spec_slug };
       groups.set(key, g);
     }
     g.activityIds.push(r.id);
@@ -172,7 +172,7 @@ export async function detectRepeatedErrors(
     if (g.activityIds.length < threshold) continue;
     const recurred = Array.from(g.sigCounts.entries()).filter(([, n]) => n > 1).map(([s]) => s);
     candidates.push({
-      workerKind: g.workerKind,
+      agentKind: g.agentKind,
       errorClass: g.errorClass,
       occurrences: g.activityIds.length,
       signatures: g.signatures,
@@ -207,14 +207,14 @@ function composeGuidance(c: RepeatedErrorCandidate): { guidance: string; trigger
 }
 
 /** One human-readable board line: "🛠️ Ada coached 🔴 Remi: <message>". */
-function boardLine(directorFn: string, workerKind: string, verb: string, message: string): string {
+function boardLine(directorFn: string, agentKind: string, verb: string, message: string): string {
   const dp = getPersona(directorFn);
-  const wp = getPersona(workerKind);
+  const wp = getPersona(agentKind);
   return `${dp.emoji} ${dp.name} ${verb} ${wp.emoji} ${wp.name}: ${message}`;
 }
 
 export interface CoachingPassOutcome {
-  workerKind: string;
+  agentKind: string;
   errorClass: string;
   action: "coached" | "routed-to-repair" | "escalated" | "surfaced";
   detail: string;
@@ -240,7 +240,7 @@ export interface CoachingPassResult {
  *
  * dry-run by default — pass `apply:true` to write. Returns a structured plan/result either way.
  */
-export async function runWorkerCoachingPass(
+export async function runAgentCoachingPass(
   admin: Admin,
   workspaceId: string,
   opts: { apply?: boolean; coachAll?: boolean; directorFunction?: string } = {},
@@ -259,7 +259,7 @@ export async function runWorkerCoachingPass(
     const coachable = opts.coachAll === true || c.recurredSignatures.length > 0;
     if (!coachable) {
       outcomes.push({
-        workerKind: c.workerKind,
+        agentKind: c.agentKind,
         errorClass: c.errorClass,
         action: "surfaced",
         detail: `applied "${c.errorClass}" ${c.occurrences}× with no recurrence — surfaced for director review, not auto-coached.`,
@@ -271,28 +271,28 @@ export async function runWorkerCoachingPass(
 
     // Code bug → route to Repair, never an instruction tweak.
     if (route === "code-bug") {
-      const sig = c.signatures[0] || `${c.workerKind}-${c.errorClass}`;
-      const line = boardLine(directorFn, c.workerKind, "flagged a code bug behind", `repeated "${c.errorClass}" on "${sig}" is a real defect — routing to Repair, not coaching.`);
+      const sig = c.signatures[0] || `${c.agentKind}-${c.errorClass}`;
+      const line = boardLine(directorFn, c.agentKind, "flagged a code bug behind", `repeated "${c.errorClass}" on "${sig}" is a real defect — routing to Repair, not coaching.`);
       if (apply) {
-        await enqueueRepairJob(admin, { source: "coaching-router", signature: sig, title: `Coaching router: repeated ${c.errorClass} from ${c.workerKind} (${sig})` });
+        await enqueueRepairJob(admin, { source: "coaching-router", signature: sig, title: `Coaching router: repeated ${c.errorClass} from ${c.agentKind} (${sig})` });
         await recordDirectorActivity(admin, {
           workspaceId,
           directorFunction: directorFn,
           actionKind: "coaching_routed_to_repair",
           specSlug: c.specSlug,
           reason: line,
-          metadata: { worker_kind: c.workerKind, error_class: c.errorClass, signature: sig, source_activity_ids: c.activityIds },
+          metadata: { agent_kind: c.agentKind, error_class: c.errorClass, signature: sig, source_activity_ids: c.activityIds },
         });
-        await postDirectorMessage({ workspaceId, author: "director", authorFunction: directorFn, body: line, kind: "update", metadata: { worker_kind: c.workerKind, error_class: c.errorClass, kind: "code-bug-route" } });
+        await postDirectorMessage({ workspaceId, author: "director", authorFunction: directorFn, body: line, kind: "update", metadata: { agent_kind: c.agentKind, error_class: c.errorClass, kind: "code-bug-route" } });
       }
-      outcomes.push({ workerKind: c.workerKind, errorClass: c.errorClass, action: "routed-to-repair", detail: line });
+      outcomes.push({ agentKind: c.agentKind, errorClass: c.errorClass, action: "routed-to-repair", detail: line });
       continue;
     }
 
     // Guidance gap → escalate if already coached N times and still recurring, else coach.
-    const priorAttempts = await countCoachings(admin, workspaceId, c.workerKind, c.errorClass);
+    const priorAttempts = await countCoachings(admin, workspaceId, c.agentKind, c.errorClass);
     if (priorAttempts >= COACHING_ATTEMPTS_BEFORE_ESCALATE) {
-      const line = boardLine(directorFn, c.workerKind, "escalated to the CEO about", `"${c.errorClass}" has recurred after ${priorAttempts} coaching attempts — the instruction approach isn't working; needs a deeper look.`);
+      const line = boardLine(directorFn, c.agentKind, "escalated to the CEO about", `"${c.errorClass}" has recurred after ${priorAttempts} coaching attempts — the instruction approach isn't working; needs a deeper look.`);
       if (apply) {
         await recordDirectorActivity(admin, {
           workspaceId,
@@ -300,21 +300,21 @@ export async function runWorkerCoachingPass(
           actionKind: "escalated_coaching",
           specSlug: c.specSlug,
           reason: line,
-          metadata: { worker_kind: c.workerKind, error_class: c.errorClass, attempts: priorAttempts, source_activity_ids: c.activityIds },
+          metadata: { agent_kind: c.agentKind, error_class: c.errorClass, attempts: priorAttempts, source_activity_ids: c.activityIds },
         });
-        await postDirectorMessage({ workspaceId, author: "director", authorFunction: directorFn, body: line, kind: "update", mentions: ["ceo"], metadata: { worker_kind: c.workerKind, error_class: c.errorClass, kind: "escalation" } });
+        await postDirectorMessage({ workspaceId, author: "director", authorFunction: directorFn, body: line, kind: "update", mentions: ["ceo"], metadata: { agent_kind: c.agentKind, error_class: c.errorClass, kind: "escalation" } });
       }
-      outcomes.push({ workerKind: c.workerKind, errorClass: c.errorClass, action: "escalated", detail: line, attempt: priorAttempts });
+      outcomes.push({ agentKind: c.agentKind, errorClass: c.errorClass, action: "escalated", detail: line, attempt: priorAttempts });
       continue;
     }
 
     // Coach.
     const { guidance, triggeringPattern, reasoning } = composeGuidance(c);
-    const line = boardLine(directorFn, c.workerKind, "coached", `${triggeringPattern} ${guidance}`);
+    const line = boardLine(directorFn, c.agentKind, "coached", `${triggeringPattern} ${guidance}`);
     if (apply) {
-      const res = await coachWorker(admin, {
+      const res = await coachAgent(admin, {
         workspaceId,
-        workerKind: c.workerKind,
+        agentKind: c.agentKind,
         coachedBy: directorFn,
         errorClass: c.errorClass,
         guidance,
@@ -322,7 +322,7 @@ export async function runWorkerCoachingPass(
         reasoning,
         sourceActivityIds: c.activityIds,
       });
-      const post = await postDirectorMessage({ workspaceId, author: "director", authorFunction: directorFn, body: line, kind: "update", mentions: [c.workerKind], metadata: { worker_kind: c.workerKind, error_class: c.errorClass, coaching_id: res.coaching.id, kind: "coaching" } });
+      const post = await postDirectorMessage({ workspaceId, author: "director", authorFunction: directorFn, body: line, kind: "update", mentions: [c.agentKind], metadata: { agent_kind: c.agentKind, error_class: c.errorClass, coaching_id: res.coaching.id, kind: "coaching" } });
       await linkCoachingBoardPost(admin, res.coaching.id, post.id);
       await recordDirectorActivity(admin, {
         workspaceId,
@@ -330,11 +330,11 @@ export async function runWorkerCoachingPass(
         actionKind: "coached_worker",
         specSlug: c.specSlug,
         reason: line,
-        metadata: { worker_kind: c.workerKind, error_class: c.errorClass, attempt: res.attempt, instruction_id: res.instruction.id, source_activity_ids: c.activityIds },
+        metadata: { agent_kind: c.agentKind, error_class: c.errorClass, attempt: res.attempt, instruction_id: res.instruction.id, source_activity_ids: c.activityIds },
       });
-      outcomes.push({ workerKind: c.workerKind, errorClass: c.errorClass, action: "coached", detail: line, attempt: res.attempt, instructionId: res.instruction.id, coachingId: res.coaching.id });
+      outcomes.push({ agentKind: c.agentKind, errorClass: c.errorClass, action: "coached", detail: line, attempt: res.attempt, instructionId: res.instruction.id, coachingId: res.coaching.id });
     } else {
-      outcomes.push({ workerKind: c.workerKind, errorClass: c.errorClass, action: "coached", detail: `[dry-run] ${line}`, attempt: priorAttempts + 1 });
+      outcomes.push({ agentKind: c.agentKind, errorClass: c.errorClass, action: "coached", detail: `[dry-run] ${line}`, attempt: priorAttempts + 1 });
     }
   }
 
@@ -342,12 +342,12 @@ export async function runWorkerCoachingPass(
 }
 
 /** How many coaching messages (kind='coaching') a worker has received for a class. */
-async function countCoachings(admin: Admin, workspaceId: string, workerKind: string, errorClass: string): Promise<number> {
+async function countCoachings(admin: Admin, workspaceId: string, agentKind: string, errorClass: string): Promise<number> {
   const { count } = await admin
-    .from("worker_coaching_log")
+    .from("agent_coaching_log")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspaceId)
-    .eq("worker_kind", workerKind)
+    .eq("agent_kind", agentKind)
     .eq("error_class", errorClass)
     .eq("kind", "coaching");
   return count ?? 0;
@@ -365,14 +365,14 @@ export async function recheckPendingCoachings(
 ): Promise<{ coachingId: string; status: "stuck" | "recurred" }[]> {
   const apply = opts.apply === true;
   const { data } = await admin
-    .from("worker_coaching_log")
-    .select("id, worker_kind, error_class, created_at")
+    .from("agent_coaching_log")
+    .select("id, agent_kind, error_class, created_at")
     .eq("workspace_id", workspaceId)
     .eq("kind", "coaching")
     .eq("recheck_status", "pending")
     .order("created_at", { ascending: false })
     .limit(200);
-  const pending = (data ?? []) as { id: string; worker_kind: string; error_class: string; created_at: string }[];
+  const pending = (data ?? []) as { id: string; agent_kind: string; error_class: string; created_at: string }[];
   const out: { coachingId: string; status: "stuck" | "recurred" }[] = [];
 
   for (const p of pending) {
@@ -388,9 +388,9 @@ export async function recheckPendingCoachings(
     let recurred = false;
     for (const r of (after ?? []) as ActivityRow[]) {
       const m = r.metadata ?? {};
-      const wk = (typeof m.worker_kind === "string" && m.worker_kind) || workerKindFromAction(r.action_kind);
+      const wk = (typeof m.agent_kind === "string" && m.agent_kind) || workerKindFromAction(r.action_kind);
       const verdict = typeof m.verdict === "string" && m.verdict ? m.verdict : r.action_kind;
-      if (wk === p.worker_kind && verdict === p.error_class) { recurred = true; break; }
+      if (wk === p.agent_kind && verdict === p.error_class) { recurred = true; break; }
     }
     // Only conclude 'stuck' once the coaching has had time to take effect (≥1 day old); otherwise leave pending.
     const ageMs = Date.now() - new Date(p.created_at).getTime();
@@ -403,5 +403,5 @@ export async function recheckPendingCoachings(
 }
 
 // Re-export the history reader so callers can pull a worker's coaching history from one module.
-export { getWorkerCoachingHistory };
-export type { WorkerCoachingEntry };
+export { getAgentCoachingHistory };
+export type { AgentCoachingEntry };

@@ -1,6 +1,6 @@
 # director_coaching_log
 
-The **CEO→Director communication log** — one row per coaching act, surfaced as the director's coaching history. Mirrors [[worker_coaching_log]] one level up. Written by [[../libraries/director-instructions]] `coachDirector` alongside the [[director_instructions]] amendment it logs. [[../specs/worker-grading-and-director-management]] Phase 7.
+The **CEO→Director communication log** — one row per coaching act, surfaced as the director's coaching history. Mirrors [[agent_coaching_log]] one level up. Written by [[../libraries/director-instructions]] `coachDirector` alongside the [[director_instructions]] amendment it logs. [[../specs/worker-grading-and-director-management]] Phase 7.
 
 **Primary key:** `id`
 
@@ -25,11 +25,11 @@ The **CEO→Director communication log** — one row per coaching act, surfaced 
 **Indexes:** `(workspace_id, director_function, created_at desc)` (history); `(director_function, error_class, created_at desc)` (attempt counting).
 
 ## RLS
-Authenticated SELECT (owner-gated above the DB), service-role write — mirror [[worker_coaching_log]].
+Authenticated SELECT (owner-gated above the DB), service-role write — mirror [[agent_coaching_log]].
 
 ## Migration
 `supabase/migrations/20260705140000_director_coaching.sql`. Idempotent.
 
 ---
 
-[[../README]] · [[director_instructions]] · [[director_coach_threads]] · [[worker_coaching_log]] · [[../libraries/director-instructions]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]
+[[../README]] · [[director_instructions]] · [[director_coach_threads]] · [[agent_coaching_log]] · [[../libraries/director-instructions]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]

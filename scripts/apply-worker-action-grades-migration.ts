@@ -1,4 +1,4 @@
-// apply-worker-action-grades-migration — create worker_action_grades + worker_grader_prompts
+// apply-worker-action-grades-migration — create agent_action_grades + agent_grader_prompts
 // (docs/brain/specs/worker-grading-and-director-management.md, Phase 1; hardens the devops-director
 // goal "the org learns + self-manages"): the Director's 1–10 grade of each WORKER's concluded action
 // + its calibration store, mirroring director_decision_grades one level DOWN the org chart
@@ -19,7 +19,7 @@ async function main() {
       console.log(`✓ applied ${file}`);
     }
     const { rows } = await c.query(
-      "select table_name from information_schema.tables where table_name in ('worker_action_grades', 'worker_grader_prompts') order by table_name",
+      "select table_name from information_schema.tables where table_name in ('agent_action_grades', 'agent_grader_prompts') order by table_name",
     );
     console.log("✓ tables present:", rows.map((r) => r.table_name));
   } finally {

@@ -8,8 +8,8 @@ import { getPersona } from "@/lib/agents/personas";
 import { DirectorActivity } from "@/components/agents/director-activity";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
-import { WorkerCoachingHistory } from "@/components/agents/worker-coaching-history";
-import { WorkerGradePanel } from "@/components/agents/worker-grade-panel";
+import { AgentCoachingHistory } from "@/components/agents/agent-coaching-history";
+import { AgentGradePanel } from "@/components/agents/agent-grade-panel";
 import { DirectorAutonomy } from "@/components/agents/director-autonomy";
 import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
 
@@ -214,14 +214,14 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
             Grades · from {dp.name} ({dp.role})
           </h3>
-          <WorkerGradePanel kind={worker.kind} />
+          <AgentGradePanel kind={worker.kind} />
         </div>
         {/* worker-coaching-loop: the director's messages to this worker over time (its coaching history). */}
         <div className="mt-6">
           <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
             Coaching history · from {dp.name} ({dp.role})
           </h3>
-          <WorkerCoachingHistory kind={worker.kind} />
+          <AgentCoachingHistory kind={worker.kind} />
         </div>
       </>
     );

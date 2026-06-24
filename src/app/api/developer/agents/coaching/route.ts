@@ -1,18 +1,18 @@
 /**
  * /api/developer/agents/coaching — a worker's coaching history (worker-coaching-loop spec, Phase 1).
  *
- * Owner-gated, read-only. `GET ?kind=<worker_kind>` returns { history: WorkerCoachingEntry[] } — the
+ * Owner-gated, read-only. `GET ?kind=<agent_kind>` returns { history: AgentCoachingEntry[] } — the
  * director→worker messages that worker has received (the old→new instruction diff, the triggering
  * pattern, the attempt count, the post-coaching re-check status), newest-first. Backs the "Coaching
  * history" section on the worker's profile page (/dashboard/agents/[role]).
  *
- * See docs/brain/tables/worker_coaching_log.md.
+ * See docs/brain/tables/agent_coaching_log.md.
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getWorkerCoachingHistory } from "@/lib/agents/worker-instructions";
+import { getAgentCoachingHistory } from "@/lib/agents/agent-instructions";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +41,6 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Only the workspace owner can view coaching history" }, { status: 403 });
   }
 
-  const history = await getWorkerCoachingHistory(admin, workspaceId, kind);
+  const history = await getAgentCoachingHistory(admin, workspaceId, kind);
   return NextResponse.json({ history });
 }

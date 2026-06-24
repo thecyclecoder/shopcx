@@ -9,10 +9,10 @@
 //   npx tsx scripts/run-worker-coaching-pass.ts --apply --coach-all   # coach frequency-only candidates too
 //
 // Until the Platform/DevOps Director box lane runs this on its standing cadence (director-loop-grading
-// M5), an owner/cron runs it. The same library (src/lib/agents/worker-coaching.ts) is what the live
+// M5), an owner/cron runs it. The same library (src/lib/agents/agent-coaching.ts) is what the live
 // director calls.
 import { createAdminClient } from "./_bootstrap";
-import { runWorkerCoachingPass } from "../src/lib/agents/worker-coaching";
+import { runAgentCoachingPass } from "../src/lib/agents/agent-coaching";
 
 async function main() {
   const apply = process.argv.includes("--apply");
@@ -27,10 +27,10 @@ async function main() {
 
   console.log(`worker-coaching pass — ${apply ? "APPLY" : "DRY-RUN"}${coachAll ? " (coach-all)" : ""}\n`);
   for (const ws of workspaces as { id: string; name: string | null }[]) {
-    const res = await runWorkerCoachingPass(admin, ws.id, { apply, coachAll });
+    const res = await runAgentCoachingPass(admin, ws.id, { apply, coachAll });
     if (!res.candidates && !res.rechecked.length) continue;
     console.log(`workspace ${ws.name ?? ws.id} — ${res.candidates} candidate(s):`);
-    for (const o of res.outcomes) console.log(`  • [${o.action}] ${o.workerKind}/${o.errorClass} — ${o.detail}`);
+    for (const o of res.outcomes) console.log(`  • [${o.action}] ${o.agentKind}/${o.errorClass} — ${o.detail}`);
     for (const r of res.rechecked) console.log(`  • [recheck:${r.status}] coaching ${r.coachingId}`);
     console.log("");
   }

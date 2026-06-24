@@ -3,7 +3,7 @@
  * chart from director-grader.ts (worker-grading-and-director-management.md, Phase 1; hardens the
  * devops-director goal "the org learns + self-manages"). There the CEO grades the DIRECTOR's calls
  * (director_decision_grades); here the Director (Ada) grades each WORKER's concluded action — 1–10 +
- * reasoning — and a slip in a worker's rollup triggers a coaching pass (coachWorker).
+ * reasoning — and a slip in a worker's rollup triggers a coaching pass (coachAgent).
  *
  * The cascade (north star): CEO grades+coaches → Director grades+coaches → Workers. Each layer judges
  * the layer below against an explicit rubric and coaches when the grade slips. This module mirrors
@@ -18,25 +18,25 @@
  * was right; a careless action that happened to land grades low. The grader is a SUPERVISED TOOL
  * (operational-rules § North star): it scores a bounded proxy (action quality); the Director owns the
  * objective and the CEO overrides it. Every grade is human-overridable and the override is recorded
- * (graded_by='human'/overridden_by), never silently re-written. Only APPROVED worker_grader_prompts
+ * (graded_by='human'/overridden_by), never silently re-written. Only APPROVED agent_grader_prompts
  * rules (the CEO-calibrated per-worker rubric corrections) reach the grader's prompt.
  *
  * Idempotent per concluded job (UNIQUE on agent_job_id): a re-run UPDATEs in place, never duplicates,
  * and never clobbers a human override.
  *
  * Phase 1 builds the STORE + GRADER LIBRARY; the batched box cadence (≥5 ungraded / ~3h) that wires
- * gradeConcludedWorkerActions + detectGradeDropCoaching into platform-director-cron + the box runner
+ * gradeConcludedAgentActions + detectGradeDropCoaching into platform-director-cron + the box runner
  * is Phase 2. The grader reads the job-row context (kind / spec / status / error / log tail / PR) it
  * has at runtime; the Max box session that reads the real diff is the Phase-2 cadence.
  *
- * See docs/brain/tables/worker_action_grades.md · docs/brain/tables/worker_grader_prompts.md ·
- * docs/brain/libraries/worker-grader.md.
+ * See docs/brain/tables/agent_action_grades.md · docs/brain/tables/agent_grader_prompts.md ·
+ * docs/brain/libraries/agent-grader.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { PLATFORM, PLATFORM_DIRECTOR_LOOP_GUARD_MAX } from "@/lib/agents/platform-director";
-import { coachWorker } from "@/lib/agents/worker-instructions";
+import { coachAgent } from "@/lib/agents/agent-instructions";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -73,7 +73,7 @@ const COACH_MIN_SAMPLE = 3;
  * config table. The grader scores a concluded job against its worker's rubric; a kind absent here is
  * not graded (keeps the Director's own calls + non-worker kinds out of the worker store).
  */
-export const WORKER_RUBRICS: Record<string, { name: string; criteria: string }> = {
+export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> = {
   build: { name: "Bo", criteria: "spec phases satisfied · `tsc` clean · PR merged clean (no conflict markers) · no rebuild churn" },
   repair: { name: "Rafa", criteria: "real root-cause (not symptom) · fix held (the error didn't recur) · correctly dismissed noise · scoped" },
   regression: { name: "Remi", criteria: "caught a real regression · correctly dismissed flaky ones · the authored fix spec is sound" },
@@ -91,14 +91,14 @@ export const WORKER_RUBRICS: Record<string, { name: string; criteria: string }> 
 };
 
 /** The agent_jobs `kind`s the worker grader scores (rubric-backed). */
-export const GRADEABLE_KINDS = Object.keys(WORKER_RUBRICS);
+export const GRADEABLE_KINDS = Object.keys(AGENT_RUBRICS);
 
-export interface WorkerGradeResult {
+export interface AgentGradeResult {
   ok: boolean;
   reason?: string;
   grade_id?: string;
   agent_job_id?: string;
-  worker_kind?: string;
+  agent_kind?: string;
   grade?: number;
   idempotent_update?: boolean;
 }
@@ -131,16 +131,16 @@ interface ExistingGradeRow {
 
 /**
  * Build the worker-grader system prompt: the worker's static rubric (for `kind`) + any APPROVED
- * worker_grader_prompts calibration rules that apply to this worker (worker_kind = kind) or to every
- * worker (worker_kind IS NULL). Mirrors buildDirectorGraderSystemPrompt.
+ * agent_grader_prompts calibration rules that apply to this worker (agent_kind = kind) or to every
+ * worker (agent_kind IS NULL). Mirrors buildDirectorGraderSystemPrompt.
  */
-export async function buildWorkerGraderSystemPrompt(admin: Admin, workspaceId: string, workerKind: string): Promise<string> {
+export async function buildAgentGraderSystemPrompt(admin: Admin, workspaceId: string, agentKind: string): Promise<string> {
   const { data: rules } = await admin
-    .from("worker_grader_prompts")
-    .select("title, content, worker_kind")
+    .from("agent_grader_prompts")
+    .select("title, content, agent_kind")
     .eq("workspace_id", workspaceId)
     .eq("status", "approved")
-    .or(`worker_kind.eq.${workerKind},worker_kind.is.null`)
+    .or(`agent_kind.eq.${agentKind},agent_kind.is.null`)
     .order("sort_order", { ascending: true });
 
   const rulesBlock = (rules || []).length
@@ -148,8 +148,8 @@ export async function buildWorkerGraderSystemPrompt(admin: Admin, workspaceId: s
       (rules || []).map((r) => `• ${r.title}\n  ${r.content}`).join("\n\n")
     : "";
 
-  const rubric = WORKER_RUBRICS[workerKind];
-  const worker = rubric ? `${rubric.name} (the \`${workerKind}\` worker)` : `the \`${workerKind}\` worker`;
+  const rubric = AGENT_RUBRICS[agentKind];
+  const worker = rubric ? `${rubric.name} (the \`${agentKind}\` worker)` : `the \`${agentKind}\` worker`;
   const criteria = rubric?.criteria ?? "did the action achieve its purpose, scoped and clean, with no rework or collateral damage";
 
   return `You are the autonomous DevOps Director of ShopCX (the CEO → Director → worker chain, operational-rules § supervisable autonomy) grading ONE concluded action by ${worker} — one of your workers. Score how WELL the worker did this job, 1–10.
@@ -198,7 +198,7 @@ async function runGrader(
         cache_read_tokens: usage.cache_read_input_tokens || 0,
       })
     : 0;
-  await logAiUsage({ workspaceId, model: GRADER_MODEL, usage, purpose: "worker_action_grading" });
+  await logAiUsage({ workspaceId, model: GRADER_MODEL, usage, purpose: "agent_action_grading" });
 
   let parsed: GraderJson | null = null;
   try {
@@ -219,7 +219,7 @@ function clampGrade(n: number): number {
 /** Compact, gradeable description of one concluded worker action. */
 function formatJobForGrading(job: JobRow): string {
   const approvedAction = (job.pending_actions || []).find((a) => a.status === "approved") || (job.pending_actions || [])[0] || {};
-  const rubric = WORKER_RUBRICS[job.kind];
+  const rubric = AGENT_RUBRICS[job.kind];
   return [
     `WORKER ACTION — agent_job ${job.id}`,
     `  worker: ${rubric?.name ?? "?"} · kind=${job.kind}`,
@@ -241,17 +241,17 @@ async function upsertGrade(
   existing: ExistingGradeRow | null,
   job: JobRow,
   graded: { json: GraderJson; costCents: number; usage: { input_tokens?: number; output_tokens?: number } },
-): Promise<WorkerGradeResult> {
+): Promise<AgentGradeResult> {
   if (existing && existing.graded_by === "human") {
     // The CEO/Director owns this grade — the agent never re-writes a human override.
-    return { ok: true, grade_id: existing.id, agent_job_id: job.id, worker_kind: job.kind, grade: existing.grade ?? undefined, idempotent_update: true };
+    return { ok: true, grade_id: existing.id, agent_job_id: job.id, agent_kind: job.kind, grade: existing.grade ?? undefined, idempotent_update: true };
   }
   const grade = clampGrade(graded.json.grade);
   const now = new Date().toISOString();
   const payload = {
     workspace_id: job.workspace_id,
     agent_job_id: job.id,
-    worker_kind: job.kind,
+    agent_kind: job.kind,
     spec_slug: job.spec_slug,
     grade,
     reasoning: graded.json.reasoning,
@@ -263,18 +263,18 @@ async function upsertGrade(
     updated_at: now,
   };
   if (existing) {
-    await admin.from("worker_action_grades").update(payload).eq("id", existing.id);
-    return { ok: true, grade_id: existing.id, agent_job_id: job.id, worker_kind: job.kind, grade, idempotent_update: true };
+    await admin.from("agent_action_grades").update(payload).eq("id", existing.id);
+    return { ok: true, grade_id: existing.id, agent_job_id: job.id, agent_kind: job.kind, grade, idempotent_update: true };
   }
-  const { data: ins, error } = await admin.from("worker_action_grades").insert(payload).select("id").single();
+  const { data: ins, error } = await admin.from("agent_action_grades").insert(payload).select("id").single();
   if (error) return { ok: false, reason: error.message };
-  return { ok: true, grade_id: ins?.id, agent_job_id: job.id, worker_kind: job.kind, grade };
+  return { ok: true, grade_id: ins?.id, agent_job_id: job.id, agent_kind: job.kind, grade };
 }
 
 // ── grade one concluded worker action ───────────────────────────────────────────────────────────────
 
 /** Grade ONE concluded agent_jobs row. Concluded-only + rubric-backed + idempotent + human-safe. */
-export async function gradeWorkerAction(opts: { agentJobId: string; admin?: Admin }): Promise<WorkerGradeResult> {
+export async function gradeAgentAction(opts: { agentJobId: string; admin?: Admin }): Promise<AgentGradeResult> {
   if (!ANTHROPIC_API_KEY) return { ok: false, reason: "no_api_key" };
   const admin = opts.admin ?? createAdminClient();
 
@@ -287,21 +287,21 @@ export async function gradeWorkerAction(opts: { agentJobId: string; admin?: Admi
   const job = data as JobRow;
 
   // Only a rubric-backed worker kind is graded (keeps the Director's own + non-worker kinds out).
-  if (!WORKER_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
+  if (!AGENT_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
   // Not gradeable until the action has actually concluded.
   if (!TERMINAL_JOB_STATUSES.has(job.status)) return { ok: false, reason: "not_concluded" };
 
   const { data: existing } = await admin
-    .from("worker_action_grades")
+    .from("agent_action_grades")
     .select("id, grade, graded_by")
     .eq("agent_job_id", job.id)
     .maybeSingle();
   const existingRow = (existing as ExistingGradeRow) ?? null;
   if (existingRow && existingRow.graded_by === "human") {
-    return { ok: true, grade_id: existingRow.id, agent_job_id: job.id, worker_kind: job.kind, grade: existingRow.grade ?? undefined, idempotent_update: true };
+    return { ok: true, grade_id: existingRow.id, agent_job_id: job.id, agent_kind: job.kind, grade: existingRow.grade ?? undefined, idempotent_update: true };
   }
 
-  const system = await buildWorkerGraderSystemPrompt(admin, job.workspace_id, job.kind);
+  const system = await buildAgentGraderSystemPrompt(admin, job.workspace_id, job.kind);
   const userMsg = `Grade this concluded worker action against its rubric. Return the JSON only.\n\n${formatJobForGrading(job)}`;
 
   const graded = await runGrader(system, userMsg, job.workspace_id);
@@ -321,7 +321,7 @@ interface UngradedJob {
 /** The concluded, ungraded worker actions for a workspace (oldest first) — the pool the cadence grades. */
 async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 1000): Promise<UngradedJob[]> {
   const { data: gradeRows } = await admin
-    .from("worker_action_grades")
+    .from("agent_action_grades")
     .select("agent_job_id")
     .eq("workspace_id", workspaceId)
     .limit(10000);
@@ -383,7 +383,7 @@ function selectGradingBatch(pool: UngradedJob[], cap: number): UngradedJob[] {
  * trickle still gets graded). False when nothing is ungraded. Keeps the LLM spend to one session per
  * batch (the spec's locked cadence). Best-effort.
  */
-export async function workerGradingBatchReady(
+export async function agentGradingBatchReady(
   admin: Admin,
   workspaceId: string,
   now: number = Date.now(),
@@ -407,11 +407,11 @@ export async function workerGradingBatchReady(
  * CONCLUDED, ungraded worker actions across the rubric-backed kinds, in one session — failures first, then
  * a fair round-robin sample of the successes (selectGradingBatch), so a chatty worker can't jam the run and
  * un-selected jobs ride a later beat. Best-effort + idempotent (an already-graded job is skipped;
- * gradeWorkerAction upserts if re-run, and never re-writes a human grade). A no-op while no worker has
+ * gradeAgentAction upserts if re-run, and never re-writes a human grade). A no-op while no worker has
  * concluded an ungraded action. Returns the distinct worker kinds it newly graded so the caller can run
  * detectGradeDropCoaching on exactly those. Mirror director-grader.gradeConcludedDirectorCalls.
  */
-export async function gradeConcludedWorkerActions(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
+export async function gradeConcludedAgentActions(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
   const admin = opts.admin ?? createAdminClient();
   let considered = 0;
   let graded = 0;
@@ -425,10 +425,10 @@ export async function gradeConcludedWorkerActions(opts: { workspaceId: string; a
     const batch = selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP);
     for (const j of batch) {
       considered++;
-      const r = await gradeWorkerAction({ agentJobId: j.id, admin });
+      const r = await gradeAgentAction({ agentJobId: j.id, admin });
       if (r.ok && !r.idempotent_update) {
         graded++;
-        if (r.worker_kind) gradedKinds.add(r.worker_kind);
+        if (r.agent_kind) gradedKinds.add(r.agent_kind);
       }
     }
   } catch (e) {
@@ -439,8 +439,8 @@ export async function gradeConcludedWorkerActions(opts: { workspaceId: string; a
 
 // ── the standing rollup + the coaching trigger ───────────────────────────────────────────────────────
 
-export interface WorkerRollup {
-  workerKind: string;
+export interface AgentRollup {
+  agentKind: string;
   /** number of graded jobs in the current window (≤ ROLLUP_WINDOW). */
   count: number;
   /** mean grade over the last ROLLUP_WINDOW graded jobs. null when none graded yet. */
@@ -456,12 +456,12 @@ function mean(ns: number[]): number | null {
 }
 
 /** Compute a worker's standing performance: last-ROLLUP_WINDOW average + the drop vs the prior window. */
-export async function computeWorkerRollup(admin: Admin, workspaceId: string, workerKind: string): Promise<WorkerRollup> {
+export async function computeAgentRollup(admin: Admin, workspaceId: string, agentKind: string): Promise<AgentRollup> {
   const { data } = await admin
-    .from("worker_action_grades")
+    .from("agent_action_grades")
     .select("grade")
     .eq("workspace_id", workspaceId)
-    .eq("worker_kind", workerKind)
+    .eq("agent_kind", agentKind)
     .not("grade", "is", null)
     .order("created_at", { ascending: false })
     .limit(ROLLUP_WINDOW * 2);
@@ -471,12 +471,12 @@ export async function computeWorkerRollup(admin: Admin, workspaceId: string, wor
   const average = mean(current);
   const priorAverage = prior.length === ROLLUP_WINDOW ? mean(prior) : null;
   const drop = average !== null && priorAverage !== null ? priorAverage - average : null;
-  return { workerKind, count: current.length, average, priorAverage, drop };
+  return { agentKind, count: current.length, average, priorAverage, drop };
 }
 
 export interface CoachingTriggerResult {
-  workerKind: string;
-  rollup: WorkerRollup;
+  agentKind: string;
+  rollup: AgentRollup;
   slipped: boolean;
   coached: boolean;
   needsEscalation?: boolean;
@@ -495,12 +495,12 @@ interface CoachingJson {
 /** Ask the LLM to turn the worker's recent low grades into one durable coaching learning. */
 async function synthesizeCoaching(
   workspaceId: string,
-  workerKind: string,
-  rollup: WorkerRollup,
+  agentKind: string,
+  rollup: AgentRollup,
   lowGrades: Array<{ grade: number; reasoning: string | null; spec_slug: string | null }>,
 ): Promise<CoachingJson | { error: string }> {
-  const rubric = WORKER_RUBRICS[workerKind];
-  const worker = rubric ? `${rubric.name} (the \`${workerKind}\` worker)` : `the \`${workerKind}\` worker`;
+  const rubric = AGENT_RUBRICS[agentKind];
+  const worker = rubric ? `${rubric.name} (the \`${agentKind}\` worker)` : `the \`${agentKind}\` worker`;
   const system = `You are the autonomous DevOps Director of ShopCX coaching ${worker} after its rolling grade slipped (avg ${rollup.average?.toFixed(1) ?? "?"}/10${rollup.drop !== null ? `, down ${rollup.drop.toFixed(1)} pts` : ""}). Read its recent low-graded actions and distill ONE durable learning the worker should apply before every future job — "when you see X, do Y instead, because Z". Make it specific and actionable, never generic encouragement.
 
 ${rubric ? `The worker's rubric (what good = 10 means):\n  ${rubric.criteria}\n\n` : ""}OUTPUT (JSON only):
@@ -521,7 +521,7 @@ ${rubric ? `The worker's rubric (what good = 10 means):\n  ${rubric.criteria}\n\
   });
   if (!res.ok) return { error: `coach_http_${res.status}` };
   const data = await res.json();
-  await logAiUsage({ workspaceId, model: GRADER_MODEL, usage: data.usage, purpose: "worker_coaching_synthesis" });
+  await logAiUsage({ workspaceId, model: GRADER_MODEL, usage: data.usage, purpose: "agent_coaching_synthesis" });
   const text = (data.content?.[0] as { text?: string })?.text?.trim() || "";
   try {
     const m = text.match(/\{[\s\S]*\}/);
@@ -535,54 +535,54 @@ ${rubric ? `The worker's rubric (what good = 10 means):\n  ${rubric.criteria}\n\
 }
 
 /**
- * Detect a worker's grade slip and, when it has slipped, run a coaching pass (coachWorker). Slip =
+ * Detect a worker's grade slip and, when it has slipped, run a coaching pass (coachAgent). Slip =
  * the rolling average fell below COACH_LOW_ROLLUP (≥ COACH_MIN_SAMPLE grades in the window) OR dropped
  * more than DROP_THRESHOLD vs the prior window. The Director (PLATFORM) is the coachedBy gate. After
  * PLATFORM_DIRECTOR_LOOP_GUARD_MAX coaching attempts that never stuck the slip stops re-coaching and is
  * flagged for CEO escalation (the existing loop-guard) rather than spamming the worker.
  */
-export async function detectGradeDropCoaching(opts: { workspaceId: string; workerKind: string; admin?: Admin }): Promise<CoachingTriggerResult> {
+export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin }): Promise<CoachingTriggerResult> {
   const admin = opts.admin ?? createAdminClient();
-  const rollup = await computeWorkerRollup(admin, opts.workspaceId, opts.workerKind);
+  const rollup = await computeAgentRollup(admin, opts.workspaceId, opts.agentKind);
 
   const lowByAvg = rollup.average !== null && rollup.count >= COACH_MIN_SAMPLE && rollup.average < COACH_LOW_ROLLUP;
   const lowByDrop = rollup.drop !== null && rollup.drop > DROP_THRESHOLD;
   const slipped = lowByAvg || lowByDrop;
-  if (!slipped) return { workerKind: opts.workerKind, rollup, slipped: false, coached: false, reason: "no_slip" };
-  if (!ANTHROPIC_API_KEY) return { workerKind: opts.workerKind, rollup, slipped, coached: false, reason: "no_api_key" };
+  if (!slipped) return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "no_slip" };
+  if (!ANTHROPIC_API_KEY) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: "no_api_key" };
 
   // Loop-guard: too many coaching attempts that never STUCK for this worker → escalate, don't re-coach
   // (recheck_status ∈ pending｜stuck｜recurred — a 'stuck' learning is resolved; pending/recurred is open).
   const { count: openCoachings } = await admin
-    .from("worker_coaching_log")
+    .from("agent_coaching_log")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", opts.workspaceId)
-    .eq("worker_kind", opts.workerKind)
+    .eq("agent_kind", opts.agentKind)
     .eq("kind", "coaching")
     .neq("recheck_status", "stuck");
   if ((openCoachings ?? 0) >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
-    return { workerKind: opts.workerKind, rollup, slipped, coached: false, needsEscalation: true, reason: "loop_guard" };
+    return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: true, reason: "loop_guard" };
   }
 
   // The low-graded recent actions that prompted the slip — the coaching material.
   const { data: lows } = await admin
-    .from("worker_action_grades")
+    .from("agent_action_grades")
     .select("id, grade, reasoning, spec_slug")
     .eq("workspace_id", opts.workspaceId)
-    .eq("worker_kind", opts.workerKind)
+    .eq("agent_kind", opts.agentKind)
     .lt("grade", COACH_LOW_ROLLUP)
     .order("created_at", { ascending: false })
     .limit(ROLLUP_WINDOW);
   const lowRows = (lows as Array<{ id: string; grade: number; reasoning: string | null; spec_slug: string | null }>) ?? [];
-  if (!lowRows.length) return { workerKind: opts.workerKind, rollup, slipped, coached: false, reason: "no_low_grades" };
+  if (!lowRows.length) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: "no_low_grades" };
 
-  const coaching = await synthesizeCoaching(opts.workspaceId, opts.workerKind, rollup, lowRows);
-  if ("error" in coaching) return { workerKind: opts.workerKind, rollup, slipped, coached: false, reason: coaching.error };
+  const coaching = await synthesizeCoaching(opts.workspaceId, opts.agentKind, rollup, lowRows);
+  if ("error" in coaching) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: coaching.error };
 
   try {
-    const result = await coachWorker(admin, {
+    const result = await coachAgent(admin, {
       workspaceId: opts.workspaceId,
-      workerKind: opts.workerKind,
+      agentKind: opts.agentKind,
       coachedBy: PLATFORM,
       errorClass: coaching.errorClass,
       guidance: coaching.guidance,
@@ -590,8 +590,8 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; worke
       reasoning: coaching.reasoning,
       sourceGradeId: lowRows[0]?.id ?? null,
     });
-    return { workerKind: opts.workerKind, rollup, slipped, coached: true, attempt: result.attempt, instructionId: result.instruction.id };
+    return { agentKind: opts.agentKind, rollup, slipped, coached: true, attempt: result.attempt, instructionId: result.instruction.id };
   } catch (e) {
-    return { workerKind: opts.workerKind, rollup, slipped, coached: false, reason: e instanceof Error ? e.message : String(e) };
+    return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: e instanceof Error ? e.message : String(e) };
   }
 }

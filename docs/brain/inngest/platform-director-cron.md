@@ -2,7 +2,7 @@
 
 The **standing cadence** for the box-hosted **Platform/DevOps Director** ([[../specs/platform-director-agent]], M5 [[../specs/director-loop-grading]] Phase 1 + 3). The director already runs **event-driven** — a `platform-director` [[../tables/agent_jobs]] row is enqueued when a Platform approval is routed to it ([[../specs/approval-routing-engine]]). What this adds: a **reliable beat** so escorting approved goals through their milestones + watching the platform happen even when no approval happens to arrive. The box has no internal ticker, so (exactly like [[triage-escalations]] / [[spec-test-cron]]) an Inngest cron is the trigger. Mirrors [[daily-analysis-report-cron]]'s daily cron shape.
 
-Three halves: (1) the **enqueue** — purely the box-job insert, no reasoning. (2) the **director grading loop** ([[../specs/director-loop-grading]] Phase 3, `grade-concluded-director-calls` step) — on the same beat it grades every recently-CONCLUDED director call (each autonomous auto-approval + each escorted milestone that landed) 1–10 into [[../tables/director_decision_grades]] via [[../libraries/director-grader]] `gradeConcludedDirectorCalls`. (3) the **worker grading + coaching loop** ([[../specs/worker-grading-and-director-management]] Phase 2, `grade-and-coach-workers` step) — one level DOWN the cascade: it grades every recently-CONCLUDED worker action into [[../tables/worker_action_grades]] via [[../libraries/worker-grader]] `gradeConcludedWorkerActions`, then coaches any worker whose rollup slipped (`detectGradeDropCoaching` → `coachWorker`). **Batched** — a workspace is graded only when `workerGradingBatchReady` (≥5 ungraded concluded jobs OR the oldest >~3h) so the LLM spend stays one session per batch. Both grade sweeps run HERE (the deployed runtime has `ANTHROPIC_API_KEY`), not on the box; they mirror [[acquisition-research-cadence]]'s grade sweep. Best-effort + idempotent; a no-op while no call/action is ungraded.
+Three halves: (1) the **enqueue** — purely the box-job insert, no reasoning. (2) the **director grading loop** ([[../specs/director-loop-grading]] Phase 3, `grade-concluded-director-calls` step) — on the same beat it grades every recently-CONCLUDED director call (each autonomous auto-approval + each escorted milestone that landed) 1–10 into [[../tables/director_decision_grades]] via [[../libraries/director-grader]] `gradeConcludedDirectorCalls`. (3) the **worker grading + coaching loop** ([[../specs/worker-grading-and-director-management]] Phase 2, `grade-and-coach-workers` step) — one level DOWN the cascade: it grades every recently-CONCLUDED worker action into [[../tables/agent_action_grades]] via [[../libraries/agent-grader]] `gradeConcludedAgentActions`, then coaches any worker whose rollup slipped (`detectGradeDropCoaching` → `coachAgent`). **Batched** — a workspace is graded only when `agentGradingBatchReady` (≥5 ungraded concluded jobs OR the oldest >~3h) so the LLM spend stays one session per batch. Both grade sweeps run HERE (the deployed runtime has `ANTHROPIC_API_KEY`), not on the box; they mirror [[acquisition-research-cadence]]'s grade sweep. Best-effort + idempotent; a no-op while no call/action is ungraded.
 
 **File:** `src/lib/inngest/platform-director-cron.ts` (registered in `src/lib/inngest/registered-functions.ts` → served by `src/app/api/inngest/route.ts`)
 
@@ -33,8 +33,8 @@ _None._ The box polls [[../tables/agent_jobs]] and claims the row; there is no H
 
 - [[../tables/agent_jobs]] (inserts the `platform-director` job)
 - [[../tables/director_decision_grades]] (the director grading loop — one grade per concluded director call, via [[../libraries/director-grader]])
-- [[../tables/worker_action_grades]] (the worker grading loop — one grade per concluded worker action, via [[../libraries/worker-grader]])
-- [[../tables/worker_instructions]] · [[../tables/worker_coaching_log]] (a grade-drop coaching amendment via `coachWorker`)
+- [[../tables/agent_action_grades]] (the worker grading loop — one grade per concluded worker action, via [[../libraries/agent-grader]])
+- [[../tables/agent_instructions]] · [[../tables/agent_coaching_log]] (a grade-drop coaching amendment via `coachAgent`)
 - [[../tables/loop_heartbeats]] (end-of-run heartbeat)
 
 ## Tables read (not written)
@@ -42,7 +42,7 @@ _None._ The box polls [[../tables/agent_jobs]] and claims the row; there is no H
 - [[../tables/agent_jobs]] (build-console workspace scan + in-flight dedupe; target-build conclusion for the auto-approval grade; the concluded worker actions to grade)
 - [[../tables/approval_decisions]] (the autonomous director approvals to grade)
 - [[../tables/director_activity]] (the `escorted_goal` rows that flag a goal the director escorted)
-- [[../tables/director_grader_prompts]] · [[../tables/worker_grader_prompts]] (approved calibration rules injected into the grader prompts)
+- [[../tables/director_grader_prompts]] · [[../tables/agent_grader_prompts]] (approved calibration rules injected into the grader prompts)
 
 ---
 

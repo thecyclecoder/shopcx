@@ -1,6 +1,6 @@
 # director_instructions
 
-Per-director, versioned **guidance the CEO teaches the Director** — appended to her decision prompts at runtime so coaching changes what she does autonomously with **no deploy**. The top rung of the cascade: mirrors [[worker_instructions]] one level up (there a director coaches a worker; here the CEO coaches the director). Written by [[../libraries/director-instructions]] `coachDirector` (CEO-gated, from the [[director_coach_threads]] chat on approval); loaded into her prompts by `appendDirectorInstructions`. [[../specs/worker-grading-and-director-management]] Phase 7.
+Per-director, versioned **guidance the CEO teaches the Director** — appended to her decision prompts at runtime so coaching changes what she does autonomously with **no deploy**. The top rung of the cascade: mirrors [[agent_instructions]] one level up (there a director coaches a worker; here the CEO coaches the director). Written by [[../libraries/director-instructions]] `coachDirector` (CEO-gated, from the [[director_coach_threads]] chat on approval); loaded into her prompts by `appendDirectorInstructions`. [[../specs/worker-grading-and-director-management]] Phase 7.
 
 **Primary key:** `id`
 
@@ -30,11 +30,11 @@ Per-director, versioned **guidance the CEO teaches the Director** — appended t
 - **Injected, not deployed.** `appendDirectorInstructions` appends active guidance to her approval-investigation + board-grooming prompts every run, so a coached rule steers her next decision with no code change.
 
 ## RLS
-Authenticated SELECT, service-role write — mirror [[worker_instructions]].
+Authenticated SELECT, service-role write — mirror [[agent_instructions]].
 
 ## Migration
 `supabase/migrations/20260705140000_director_coaching.sql`. Idempotent.
 
 ---
 
-[[../README]] · [[director_coach_threads]] · [[director_coaching_log]] · [[worker_instructions]] · [[../libraries/director-instructions]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]
+[[../README]] · [[director_coach_threads]] · [[director_coaching_log]] · [[agent_instructions]] · [[../libraries/director-instructions]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]

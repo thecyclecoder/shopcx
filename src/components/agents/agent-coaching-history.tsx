@@ -10,7 +10,7 @@ import { getPersona } from "@/lib/agents/personas";
 
 interface CoachingEntry {
   id: string;
-  workerKind: string;
+  agentKind: string;
   coachedBy: string;
   errorClass: string;
   triggeringPattern: string;
@@ -35,7 +35,7 @@ function kindLabel(kind: string): string {
   return "coached";
 }
 
-export function WorkerCoachingHistory({ kind }: { kind: string }) {
+export function AgentCoachingHistory({ kind }: { kind: string }) {
   const [entries, setEntries] = useState<CoachingEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
