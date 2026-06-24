@@ -20,7 +20,7 @@ const AUTONOMOUS: Behavior[] = [
   { title: "Auto-approves a migration + its backfill bundle", detail: "a multi-action request where an additive migration ships with its idempotent, re-runnable backfill — approved atomically (additive_backfill, P8)." },
   { title: "Escorts approved goals", detail: "drives each greenlit goal's unblocked specs through build → merge → fold, on a */15 beat." },
   { title: "Drives stalled work", detail: "board-grooming continues/splits in-flight specs; she queues 0-phase authored fix specs the goal-walk misses." },
-  { title: "Grades + coaches workers", detail: "grades every worker's concluded action 1–10 and coaches one whose rollup slips below 7 or drops >1.5." },
+  { title: "Grades + coaches agents", detail: "grades every agent's concluded action 1–10 and coaches one whose rollup slips below 7 or drops >1.5." },
 ];
 
 /** Up — what ALWAYS routes to the CEO (the rail she never crosses). */

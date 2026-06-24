@@ -151,7 +151,7 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
       d.workers.length > 0 ? (
         <div className="mt-6">
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-            Team · {d.workers.length} worker{d.workers.length === 1 ? "" : "s"}
+            Team · {d.workers.length} agent{d.workers.length === 1 ? "" : "s"}
           </h3>
           <div className="flex flex-wrap gap-2">
             {d.workers.map((w) => {

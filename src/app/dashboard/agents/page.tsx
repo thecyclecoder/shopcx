@@ -1178,8 +1178,8 @@ export default function AgentsPage() {
         </div>
       </div>
       <p className="mb-5 text-sm text-zinc-500 dark:text-zinc-400">
-        The org chart — CEO · Directors · Workers — read live from the brain, each role with the same three-tab
-        inbox. No director is automated yet, so every approval routes to one CEO inbox.
+        The org chart — CEO · Directors · Agents — read live from the brain, each role with the same three-tab
+        inbox. Platform (Ada) is live + autonomous; the other directors&apos; approvals still route to the CEO inbox.
       </p>
 
       {loading && !org ? (

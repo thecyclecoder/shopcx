@@ -2,6 +2,14 @@
 
 The brain isn't just reference docs — it's also where we plan + track work. This page explains how features move from idea → spec → in-progress → shipped, and where each state lives.
 
+## The org tiers — CEO → Directors → Agents
+
+Three layers, mapping exactly to the supervisable-autonomy north star ([[operational-rules]] § North star) — *CEO sets objectives → role agent holds + supervises → tools execute, each loop slower and wiser than the one below*:
+
+- **CEO** — owns company objectives (goals/BHAGs), prioritizes under constraints, arbitrates across functions, grades + coaches the directors ([[tables/director_decision_grades]]). You today → an autonomous CEO agent. The "CEO mode" ([[goals/ceo-mode]]).
+- **Directors — the executive team (the C-suite).** One per **function** ([[functions/]]), each a permanent domain owner with mandates, supervising its agents and reporting to the CEO. *Director = executive, not middle management.* The **business directors** (Growth/CMO/Retention/CFO/Logistics/CS) **run** the Superfoods business; the **Platform/Engineering director (Ada, the CTO seat)** **builds** ShopCX-as-software. They are **peers** — the build-vs-business split is a lens, not a rank. Platform is the keystone (the build engine every other director ships through) but still a peer; the CEO arbitrates.
+- **Agents** — the bounded autonomous tools each director owns + grades + coaches (the `agent_jobs.kind`s: Bo/build, Rafa/repair … under Platform; the storefront-optimizer … under Growth). An agent optimizes a *bounded proxy*; its director owns the *objective* and supervises it. **(Naming: "agent" is the canonical org-tier term. "Worker" / "tool" are synonyms — and `worker` persists as the internal code/table identifier, e.g. `agent_jobs.kind`, `worker_action_grades`, `coachWorker`. Same thing, one tier.)**
+
 ## The work hierarchy — no orphan specs
 
 Every spec belongs to something bigger; the parent chain terminates at the org chart.

@@ -21,7 +21,7 @@ function actionChip(kind: string): { label: string; cls: string } {
   if (k.includes("approve")) return { label: "auto-approved", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" };
   if (k.includes("escorted_fix") || k.includes("queued_fix")) return { label: "queued fix build", cls: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" };
   if (k.includes("escort")) return { label: "escorted", cls: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" };
-  if (k.includes("coach")) return { label: "coached worker", cls: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300" };
+  if (k.includes("coach")) return { label: "coached agent", cls: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300" };
   return { label: kind.replace(/_/g, " "), cls: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300" };
 }
 

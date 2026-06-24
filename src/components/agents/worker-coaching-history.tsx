@@ -59,7 +59,7 @@ export function WorkerCoachingHistory({ kind }: { kind: string }) {
     return <p className="mt-2 text-[12px] text-zinc-400">Loading coaching history…</p>;
   }
   if (!entries.length) {
-    return <p className="mt-2 text-[12px] text-zinc-400">No coaching yet — the director hasn&apos;t needed to teach this worker.</p>;
+    return <p className="mt-2 text-[12px] text-zinc-400">No coaching yet — the director hasn&apos;t needed to teach this agent.</p>;
   }
 
   return (
