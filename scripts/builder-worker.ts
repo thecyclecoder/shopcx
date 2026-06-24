@@ -6142,11 +6142,20 @@ async function findAlreadyAddressing(signature: string, selfJobId: string): Prom
   return null;
 }
 
-// Resolve the originating error_events row (transient no-op / owner Dismiss) so the panel clears.
-async function resolveRepairErrorRow(instr: { source?: string; signature?: string; error_event_id?: string | null }): Promise<void> {
+// Drive the originating error_events row to a TERMINAL `resolved` state with a recorded reason
+// (fix-error-reconcile-endless-loop Phase 1). EVERY repair disposition calls this so a dispositioned
+// error leaves the `open` feed exactly once — the reconcile then never re-scans / re-churns it. The
+// reason is recorded on the row (`resolution_reason` + `resolved_at`) so the disposition is auditable;
+// a genuine re-fire re-opens the row via recordError's existing update path, so this is reversible.
+// (`error_events` has no `updated_at` column — only `resolved_at`/`resolution_reason`; writing the
+// non-existent column previously made this update fail, leaving the row stuck `open`.)
+async function resolveRepairErrorRow(
+  instr: { source?: string; signature?: string; error_event_id?: string | null },
+  reason: string,
+): Promise<void> {
   if (instr.source === "loop-alert") return; // loop_alerts auto-resolve on recovery in the monitor.
   try {
-    const patch = { status: "resolved", updated_at: new Date().toISOString() } as Record<string, unknown>;
+    const patch = { status: "resolved", resolved_at: new Date().toISOString(), resolution_reason: reason.slice(0, 2000) };
     if (instr.error_event_id) await db.from("error_events").update(patch).eq("id", instr.error_event_id);
     else if (instr.signature) await db.from("error_events").update(patch).eq("signature", instr.signature);
   } catch (e) {
@@ -6175,6 +6184,8 @@ async function runRepairJob(job: Job) {
       if (dupe.active) {
         buildAction.status = "done";
         buildAction.result = `build already live for ${buildAction.spec_slug} (${dupe.reason}) — not re-queued`;
+        // Terminal: the fix is in-flight — close the error row so the reconcile stops re-scanning it.
+        await resolveRepairErrorRow(instr, `owner approved build [[${buildAction.spec_slug}]] — already live (${dupe.reason}), pending deploy`);
         await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
         console.log(`${tag} owner Build → dedup: ${buildAction.result}`);
         return;
@@ -6190,11 +6201,14 @@ async function runRepairJob(job: Job) {
       });
       buildAction.status = error ? "failed" : "done";
       buildAction.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${buildAction.spec_slug}`;
+      // Terminal: a queued fix build is in-flight (pending deploy) — close the error row so the reconcile
+      // stops re-scanning it. On a failed enqueue leave it open so the backlog re-drives it next pass.
+      if (!error) await resolveRepairErrorRow(instr, `owner approved build [[${buildAction.spec_slug}]] — queued, pending deploy`);
       await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Build → ${buildAction.result}`.slice(-2000) });
       console.log(`${tag} owner Build → ${buildAction.result}`);
     } else {
       // Dismiss — clear the surfaced item; resolve the originating error row.
-      await resolveRepairErrorRow(instr);
+      await resolveRepairErrorRow(instr, "dismissed by owner");
       buildAction.result = "dismissed by owner";
       await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner Dismiss → resolved signature ${signature}`.slice(-2000) });
       console.log(`${tag} owner Dismiss → resolved`);
@@ -6210,7 +6224,7 @@ async function runRepairJob(job: Job) {
   if (instr.source !== "cluster") {
     const addressed = await findAlreadyAddressing(signature, job.id);
     if (addressed) {
-      await resolveRepairErrorRow(instr);
+      await resolveRepairErrorRow(instr, `fixed by [[${addressed.slug}]], pending deploy`);
       await update(job.id, {
         status: "completed",
         error: null,
@@ -6250,7 +6264,7 @@ async function runRepairJob(job: Job) {
 
     if (verdict === "transient") {
       const reason = String(parsed?.reason || "transient / genuine wait — no code fix");
-      await resolveRepairErrorRow(instr);
+      await resolveRepairErrorRow(instr, `transient: ${reason}`);
       await update(job.id, { status: "completed", error: null, log_tail: `transient → resolved: ${reason}`.slice(-2000) });
       console.log(`${tag} transient → resolved the error row, no spec`);
       return;
@@ -6259,6 +6273,11 @@ async function runRepairJob(job: Job) {
     if (verdict === "needs-human") {
       const diagnosis = String(parsed?.diagnosis || "needs a human — couldn't confidently diagnose");
       // Surface for a human (no spec, no loop): needs_attention is read by the Control Tower repair feed.
+      // Phase 1 terminal disposition: the human-review item lives on THIS job's `needs_attention` status
+      // (the repair feed + director supervision read it independently of error_events.status), so close the
+      // error row off `open` with the reason — the reconcile no longer re-scans it. The director's Dismiss /
+      // owner Re-open paths flip the row again as needed.
+      await resolveRepairErrorRow(instr, `needs-human: ${diagnosis.slice(0, 300)} (parked for human review on the repair feed)`);
       await update(job.id, { status: "needs_attention", error: "needs-human", log_tail: diagnosis.slice(-2000) });
       console.log(`${tag} needs-human → surfaced, no spec`);
       return;
@@ -6271,6 +6290,8 @@ async function runRepairJob(job: Job) {
       const authored = await groupOrAuthorRepairSpec(parsed?.spec, signature, verdict);
       if (!authored) {
         // Verdict reached but no valid spec landed → surface for a human rather than silently dropping it.
+        // Terminal disposition: close the error row (the human-review item lives on this needs_attention job).
+        await resolveRepairErrorRow(instr, `${verdict} but no valid fix spec proposed — parked for human review on the repair feed`);
         await update(job.id, { status: "needs_attention", error: "no valid fix spec proposed", log_tail: diagnosis.slice(-2000) || "no valid fix spec" });
         console.log(`${tag} ${verdict} but no valid spec → surfaced needs-human`);
         return;
@@ -6303,6 +6324,12 @@ async function runRepairJob(job: Job) {
           });
           buildResult = error ? `auto-queue FAILED: ${error.message}` : "auto-queued build";
         }
+        // Terminal disposition: a fix spec is authored + its build is in-flight (pending deploy) — close the
+        // error row so the reconcile stops re-scanning it. (The build is tracked by the spec/agent_jobs, not
+        // this row; a genuine re-fire pre-deploy re-opens it and the reconcile confirms it's covered.) On a
+        // failed auto-queue leave it open so the backlog re-drives it next pass.
+        const autoQueued = !dupe.active && !buildResult.includes("FAILED");
+        if (dupe.active || autoQueued) await resolveRepairErrorRow(instr, `fix [[${authored.slug}]] authored (${verdict}) — ${buildResult}, pending deploy`);
         await update(job.id, {
           status: "completed",
           error: null,
@@ -6322,6 +6349,11 @@ async function runRepairJob(job: Job) {
         status: "pending",
         spec_slug: authored.slug,
       };
+      // Terminal disposition: the fix spec is authored (it carries this Repair-signature, so the reconcile
+      // recognizes it as covered) and surfaced for one-tap owner Build — close the error row so the reconcile
+      // stops re-scanning it. The proposed-fix item lives on this needs_approval job (the repair feed reads it);
+      // owner Build/Dismiss and a genuine re-fire flip the row again as needed.
+      await resolveRepairErrorRow(instr, `fix [[${authored.slug}]] authored (${verdict}) — surfaced for owner Build, pending deploy`);
       await update(job.id, {
         status: "needs_approval",
         pending_actions: [action],
@@ -6333,10 +6365,15 @@ async function runRepairJob(job: Job) {
     }
 
     if (isError && !parsed) {
+      // A hard run error (not a verdict) — leave the error row OPEN so the backlog reconcile re-drives a
+      // fresh diagnosis next pass (a `failed` job is not "live" for the enqueue dedup; this is a retry, not a loop).
       await update(job.id, { status: "failed", error: "repair run errored", log_tail: raw.slice(-2000) });
       return;
     }
     // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never assume resolved.
+    // Terminal disposition: the human-review item lives on this needs_attention job (the repair feed reads it),
+    // so close the error row off `open` with the reason — the reconcile no longer re-scans it.
+    await resolveRepairErrorRow(instr, `no parseable repair verdict after 2 attempts — parked for human review on the repair feed`);
     await update(job.id, { status: "needs_attention", error: fallbackReason ?? "repair produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
