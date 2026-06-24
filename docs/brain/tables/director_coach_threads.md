@@ -21,11 +21,14 @@ The **CEO↔Director coaching chat** thread — a resumable Max conversation whe
 | `source` | `text` | — | `web` (default) ｜ `slack` — a `slack` thread is a [[../lifecycles/ada-slack-chat\|#cto-ada]] conversation, mirrored into this same web profile |
 | `slack_channel_id` | `text` | ✓ | the `#cto-ada` channel a `slack` thread posts Ada's reply + cards back to |
 | `slack_thread_ts` | `text` | ✓ | the Slack thread root ts — the conversation key; a founder reply carrying this `thread_ts` continues the same thread |
+| `metadata` | `jsonb` | — | per-thread structured context · default `{}` — a chat-mode invitation thread ([[../specs/ada-slack-routed-approvals]] Phase 3) carries `{chat_mode:true, agent_job_id, notification_id, spec_slug, kind, investigation}` so the box turn knows which routed approval the conversation is about without re-deriving it |
 | `created_at` / `updated_at` | `timestamptz` | — | default `now()` |
 
 **Pending-action shapes:** `{type:'coaching', summary, errorClass, guidance, triggeringPattern, reasoning, status}` (on approval the worker writes a [[director_instructions]] row via `coachDirector`); `{type:'spec', summary, slug, title, owner, parent, content, queueBuild, status}` (committed on approval). Slack-posted cards also carry `slackTs` (the card's Slack message ts) so a web-side OR Slack-side decision can `chat.update` it in place. The model NEVER executes — `runDirectorCoachJob` mode `approve_action` does, on the CEO's click.
 
 **Index:** `(workspace_id, user_id, updated_at desc)` (the resume list) · `(workspace_id, slack_thread_ts) WHERE slack_thread_ts IS NOT NULL` (continue a #cto-ada thread).
+
+**Chat-mode invitation threads** ([[../specs/ada-slack-routed-approvals]] Phase 3): a complex routed CEO approval (multi-choice action, brain-touching kind like `proposed-goal`/spec, or a >1200-char investigation preview) opens a Slack thread instead of a Block Kit Approve/Reject card. The thread is created from the box reconciler via `createChatModeInvitationThread` with `source='slack'`, the post's ts as `slack_thread_ts`, the workspace owner as `user_id`, and `metadata` pre-seeded with the approval's context. The opening assistant message is Ada's invitation ("…paused for your call. …Want to walk through it?"); a founder reply in the Slack thread becomes a regular `intent='auto'` coach turn via the existing events handler.
 
 ## The turn/intent model
 The CEO's two buttons set `intent` on a turn (in the job `instructions`): **Ask** (`intent='ask'` — she explains, never emits a coaching card) vs **Coach her** (`intent='coach'` — she distills the directive into a `coaching` card for confirmation). A **Plan** turn (`intent='plan'`) hands her a directive. The approval card is the explicit confirmation, so a multi-turn convo stays conversation until the CEO presses Coach.
