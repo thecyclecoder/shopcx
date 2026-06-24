@@ -86,15 +86,33 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
   const lines = raw.split("\n");
   const phases: DriftPhase[] = [];
 
-  // Primary: a phase heading at H2 (`## Phase …`) OR H3 (`### Phase …` under a `## Phases` wrapper). Matching
-  // only H2 left H3-phase specs with zero phases → stuck at `planned`. `Phase\b` skips the `## Phases` wrapper.
-  const isPhaseHeading = (l: string) => /^#{2,3}\s+Phase\b/.test(l);
+  // Primary: a phase heading at H2 (`## Phase …`) OR H3 (`### Phase …` under a `## Phases` wrapper).
+  // Matching only H2 left H3-phase specs with zero phases → stuck at `planned`. `Phase\b` skips
+  // `## Phases`. Boundary rule (skip-verification-subsections): the canonical spec shape includes
+  // a `## Verification` section with `### Phase N — …` subheaders mirroring each real phase — an
+  // unguarded H3 match double-counted them, stranding shipped specs with phantom ⏳ phases. So an
+  // H3 phase heading is counted ONLY when its nearest preceding H2 is `## Phases` (PR #557's
+  // wrapper case); under `## Verification`, `## Completion criteria`, `## Safety / invariants`,
+  // `## Background`, an H2 `## Phase N — …`, or any other section, an H3 `### Phase` is skipped.
+  // H2 `## Phase N — …` lines remain unconditionally counted.
+  const isPhaseLine = (l: string) => /^#{2,3}\s+Phase\b/.test(l);
+  const inPhasesWrapper = (currentH2: string | null) => /^Phases$/i.test(currentH2 ?? "");
+  const isPhaseHeading = (l: string, currentH2: string | null): boolean => {
+    if (!isPhaseLine(l)) return false;
+    if (l.startsWith("## ")) return true; // H2 — always a real phase heading
+    return inPhasesWrapper(currentH2); // H3 — only inside the `## Phases` wrapper
+  };
+
+  let currentH2: string | null = null;
   for (let i = 0; i < lines.length; i++) {
-    if (!isPhaseHeading(lines[i])) continue;
+    if (/^##\s+/.test(lines[i])) {
+      currentH2 = lines[i].replace(/^##\s+/, "").trim();
+    }
+    if (!isPhaseHeading(lines[i], currentH2)) continue;
     let emojiLine = i;
     let st = statusFromText(lines[i]);
     if (!st) {
-      for (let j = i + 1; j < lines.length && !lines[j].startsWith("## ") && !isPhaseHeading(lines[j]); j++) {
+      for (let j = i + 1; j < lines.length && !lines[j].startsWith("## ") && !isPhaseHeading(lines[j], currentH2); j++) {
         const s = statusFromText(lines[j]);
         if (s) {
           st = s;
@@ -105,7 +123,7 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
     }
     // Body = heading line → the next phase heading (H2/H3) or the next top-level "## " section.
     let end = i + 1;
-    while (end < lines.length && !lines[end].startsWith("## ") && !isPhaseHeading(lines[end])) end++;
+    while (end < lines.length && !lines[end].startsWith("## ") && !isPhaseHeading(lines[end], currentH2)) end++;
     phases.push({
       index: phases.length,
       title: cleanTitle(lines[i].replace(/^#{2,3}\s+/, "")),
