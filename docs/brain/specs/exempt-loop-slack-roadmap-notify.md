@@ -14,6 +14,6 @@ In `src/lib/control-tower/registry.ts`, add to `INTENTIONALLY_UNMONITORED_CRONS`
 No other change. After merge + deploy the audit no longer flags `slack-roadmap-notify` as an unregistered loop.
 
 ## Verification
-- On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: slack-roadmap-notify".
+- ✅ On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: slack-roadmap-notify".
 
 <!-- coverage-register exemption: exempt-loop-slack-roadmap-notify for loop slack-roadmap-notify -->
