@@ -107,7 +107,7 @@ export async function selectEscalatedForTriage(
   admin: Admin,
   workspaceId: string,
   cap: number,
-  maxNoQuorumAttempts = 3,
+  maxNoQuorumAttempts = 1, // CEO directive: one triage attempt, then leave the ticket for a human (was 3)
 ): Promise<TriageSelection> {
   const { data: tickets } = await admin
     .from("tickets")
