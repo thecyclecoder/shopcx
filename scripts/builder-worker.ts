@@ -1634,6 +1634,15 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing escort failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
+    const fixes = await lib.escortFixSpecs(db);
+    if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);
+    if (fixes.escalated.length) notes.push(`fix loop-guard → escalated ${fixes.escalated.length}: ${fixes.escalated.join(", ")}`);
+  } catch (e) {
+    notes.push(`fix-escort failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing fix-escort failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const groom = await groomBoard(job, tag);
     notes.push(groom);
   } catch (e) {
