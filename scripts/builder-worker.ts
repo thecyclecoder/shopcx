@@ -1123,6 +1123,42 @@ let db: Awaited<ReturnType<typeof admin>>;
 
 async function update(id: string, patch: Record<string, unknown>) {
   await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+  // no-parked-specs-auto-route-needs-attention Phase 0 — classify every park at the single chokepoint.
+  // Every needs_attention write goes through this helper, so stamping here covers every caller (build,
+  // repair, regression, security, spec-test, …) with no per-callsite plumbing. Best-effort + async:
+  // the classifier reads the row back fresh so it sees the just-written `error`/`log_tail`, never
+  // throws into the caller, and silently no-ops if the column doesn't exist yet (migration pending).
+  if (patch.status === "needs_attention" && patch.needs_attention_class === undefined) {
+    void stampNeedsAttentionClass(id).catch((e) =>
+      console.warn(`[needs-attention-classify] background classify failed for ${id}:`, e instanceof Error ? e.message : e),
+    );
+  }
+}
+
+/**
+ * Read the just-parked row, classify it, and stamp `needs_attention_class` (+ mirror onto
+ * spec_card_state.flags.last_park_class). Called from `update` only on the needs_attention
+ * transition; the standing backstop sweep re-runs it against any row that landed unclassified
+ * (legacy/pre-migration rows + transient classifier failures).
+ */
+async function stampNeedsAttentionClass(jobId: string): Promise<void> {
+  const { classifyAndStamp } = await import("../src/lib/agents/needs-attention-classify");
+  const { data } = await db
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, error, log_tail, needs_attention_class, status")
+    .eq("id", jobId)
+    .maybeSingle();
+  const row = data as { id: string; workspace_id: string; kind: string; spec_slug: string | null; error: string | null; log_tail: string | null; needs_attention_class: string | null; status: string } | null;
+  if (!row) return;
+  if (row.status !== "needs_attention") return; // raced past — another caller already moved it
+  if (row.needs_attention_class) return; // already classified (a prior caller or the backstop)
+  await classifyAndStamp(db, jobId, {
+    workspaceId: row.workspace_id,
+    jobKind: String(row.kind),
+    specSlug: row.spec_slug,
+    error: row.error,
+    logTail: row.log_tail,
+  });
 }
 
 // Re-runnable / idempotent kinds (worker-orphan-reaper + self-update): a restart loses nothing — they
@@ -2331,6 +2367,25 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   } catch (e) {
     notes.push(`needs-attention triage failed: ${e instanceof Error ? e.message : String(e)}`);
     console.error(`${tag} standing needs-attention triage failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // no-parked-specs-auto-route-needs-attention (Phases 1-4) — class-based router: read each parked
+    // job's needs_attention_class (stamped by `update` at park time) and dispatch:
+    //   already_shipped → enqueue_fold + flip card-state shipped
+    //   real_blocker / tooling_failure → author child spec, blocked-by the origin
+    //   design_change → invite CEO to chat (#cto-ada chat-mode invitation)
+    //   stale (>60 min unknown) → re-classify + surface to CEO; (>70 min) post invariant alarm
+    // Sibling of reconcileNeedsAttention (which only re-runs recoverable inconclusive QC verdicts);
+    // this router covers every OTHER park class so no needs_attention row sits as ghost work.
+    const route = await import("../src/lib/agents/needs-attention-route").then((m) => m.routeNeedsAttention(db));
+    if (route.folded.length) notes.push(`park route → folded ${route.folded.length} already-shipped: ${route.folded.join(", ")}`);
+    if (route.spawned.length) notes.push(`park route → spawned ${route.spawned.length} child spec(s): ${route.spawned.join(", ")}`);
+    if (route.chatted.length) notes.push(`park route → invited CEO to chat on ${route.chatted.length}: ${route.chatted.join(", ")}`);
+    if (route.backstopped.length) notes.push(`park route → backstop escalated ${route.backstopped.length}: ${route.backstopped.join(", ")}`);
+    if (route.alarmed.length) notes.push(`park route → ALARM (>70 min) on ${route.alarmed.length}: ${route.alarmed.join(", ")}`);
+  } catch (e) {
+    notes.push(`park route failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing park route failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
