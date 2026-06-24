@@ -12,6 +12,7 @@ import { AgentCoachingHistory } from "@/components/agents/agent-coaching-history
 import { AgentGradePanel } from "@/components/agents/agent-grade-panel";
 import { DirectorAutonomy } from "@/components/agents/director-autonomy";
 import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
+import { DirectorGradePanel } from "@/components/agents/director-grade-panel";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
 // `/dashboard/agents/[role]` — one page for every seat (CEO · a director slug · a
@@ -178,6 +179,12 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
     // not just the functions/*.md charter mandates above.
     extra = (
       <>
+        {d.slug === "platform" && (
+          <div className="mt-6">
+            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Grades · from the CEO</h3>
+            <DirectorGradePanel />
+          </div>
+        )}
         {d.slug === "platform" && <DirectorAutonomy autonomous={d.autonomous} />}
         {d.slug === "platform" && (
           <div className="mt-6">

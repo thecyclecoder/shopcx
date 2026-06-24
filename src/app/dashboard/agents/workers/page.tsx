@@ -22,7 +22,32 @@ interface OrgChart {
   directors: DirectorNode[];
 }
 
-function AgentChip({ kind, label, description }: { kind: string; label: string; description: string }) {
+type Rollup = { average: number | null; count: number; drop: number | null };
+
+/** The standing rollup score badge (last-10 avg) — color-coded, with a slip flag. */
+function ScoreBadge({ score }: { score?: Rollup }) {
+  if (!score || score.average == null || score.count === 0) {
+    return <span className="shrink-0 rounded-md bg-zinc-100 px-1.5 py-1 text-[11px] font-medium text-zinc-400 dark:bg-zinc-800">— ungraded</span>;
+  }
+  const a = score.average;
+  const cls =
+    a >= 8
+      ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300"
+      : a >= 7
+        ? "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+        : a >= 5
+          ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+          : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300";
+  const slipping = score.drop != null && score.drop > 1.5;
+  return (
+    <span className={`shrink-0 rounded-md px-2 py-1 text-center ${cls}`} title={`last-${score.count} average${slipping ? " · slipping" : ""}`}>
+      <span className="block text-[13px] font-bold leading-none">{a.toFixed(1)}</span>
+      <span className="block text-[9px] leading-tight opacity-70">/10{slipping ? " ▼" : ""}</span>
+    </span>
+  );
+}
+
+function AgentChip({ kind, label, description, score }: { kind: string; label: string; description: string; score?: Rollup }) {
   const persona = getPersona(kind, label);
   return (
     <Link
@@ -38,6 +63,7 @@ function AgentChip({ kind, label, description }: { kind: string; label: string; 
         </span>
         <span className="mt-0.5 block truncate font-mono text-[10px] text-zinc-400">{kind}</span>
       </span>
+      <ScoreBadge score={score} />
     </Link>
   );
 }
@@ -47,6 +73,7 @@ export default function WorkersRosterPage() {
   const [org, setOrg] = useState<OrgChart | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
+  const [rollups, setRollups] = useState<Record<string, Rollup>>({});
 
   const loadOrg = useCallback(
     () =>
@@ -61,10 +88,20 @@ export default function WorkersRosterPage() {
     [],
   );
 
+  const loadRollups = useCallback(
+    () =>
+      fetch("/api/developer/agents/rollups")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: { rollups?: Record<string, Rollup> } | null) => d?.rollups && setRollups(d.rollups))
+        .catch(() => {}),
+    [],
+  );
+
   useEffect(() => {
     if (workspace.role !== "owner") return;
     loadOrg();
-  }, [workspace.role, loadOrg]);
+    loadRollups();
+  }, [workspace.role, loadOrg, loadRollups]);
 
   if (workspace.role !== "owner") {
     return (
@@ -114,7 +151,7 @@ export default function WorkersRosterPage() {
                 </h2>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {d.workers.map((w) => (
-                    <AgentChip key={w.kind} kind={w.kind} label={w.label} description={w.description} />
+                    <AgentChip key={w.kind} kind={w.kind} label={w.label} description={w.description} score={rollups[w.kind]} />
                   ))}
                 </div>
               </section>
