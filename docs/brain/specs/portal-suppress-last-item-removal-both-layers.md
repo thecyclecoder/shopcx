@@ -1,4 +1,4 @@
-# Suppress normalized 'would_remove_last_item' at both portal layers (ticket-create + triage), like insufficient_points ⏳
+# Suppress normalized 'would_remove_last_item' at both portal layers (ticket-create + triage), like insufficient_points 🚧
 
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `43742bcc-089c-4a55-a73e-ad29bf84fe29`
 
@@ -10,7 +10,12 @@ src/lib/portal/handlers/remove-line-item.ts (lines 51, 97) and src/lib/subscript
 **Likely target:** `src/app/api/portal/route.ts (add 'would_remove_last_item' to VALIDATION_ERRORS at line 139 — PRIMARY) AND src/lib/portal/remediation.ts (add 'would_remove_last_item' to the classifyPortalFailure dismiss branch at line 134 — BACKSTOP). Audit both layers for other normalized error codes against what each portal handler in src/lib/portal/handlers/* actually returns, and close the body.message-vs-body.detail capture gap in route.ts.`
 
 ## Phases
-- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — implement the fix** — Done.
+  - **PRIMARY** ([[../libraries/portal__route]] / `src/app/api/portal/route.ts`): added `would_remove_last_item` **and** its replace-variants sibling `would_remove_all_regular_products` to `VALIDATION_ERRORS` (line ~144) — these benign UI-gating guardrails no longer log a `portal.error` or spawn a `portal-action-failed` ticket, same as `insufficient_points`.
+  - **BACKSTOP** ([[../libraries/portal__remediation]] / `src/lib/portal/remediation.ts`): `classifyPortalFailure`'s dismiss branch now matches both normalized codes (not only the raw Appstle strings, which never reach a portal-created ticket since route.ts records `body.error`).
+  - **Capture gap**: route.ts now persists `body.detail` (handlers' friendly text lives there, not `body.message`) onto the `portal.error` event properties **and** the ticket note; `getFailureContext` joins `[error, message, detail]` so any text-keyed dismiss rule is matchable.
+  - **Audit result**: swept all `src/lib/portal/handlers/*` `jsonErr` codes; the only sibling in the "self-evidently benign empties-a-subscription guardrail" class was `would_remove_all_regular_products` (replace-variants.ts:126) — added. All other codes are genuine failures or missing-param bugs, correctly left to escalate.
+  - Brain page [[../libraries/portal__remediation]] updated; `npx tsc --noEmit` clean.
 
 ## Verification
 - Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).

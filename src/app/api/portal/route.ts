@@ -136,7 +136,11 @@ async function handle(req: NextRequest) {
 
     // Log error responses for portal analytics visibility
     // Skip validation errors (expected user input issues, not real errors)
-    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points"]);
+    // would_remove_last_item / would_remove_all_regular_products are benign
+    // UI-gating guardrails (the portal should never offer the action that empties
+    // a subscription) — same class as insufficient_points. Suppress here so a
+    // legitimate last-item removal never spawns a portal-action-failed ticket.
+    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points", "would_remove_last_item", "would_remove_all_regular_products"]);
     // Some validation errors carry a dynamic message instead of a stable code
     // (e.g. loyalty redeem returns "Insufficient points. Need 1500, have 297").
     // These are UI-gating issues — the portal should never offer the action —
@@ -160,7 +164,11 @@ async function handle(req: NextRequest) {
               route,
               status: response.status,
               error: body?.error || null,
+              // Handlers carry the friendly text in `detail` (not `message`),
+              // so capture both — the remediation layer keys off this text to
+              // dismiss UI-gating validation errors. See [[portal-remediation]].
               message: body?.message || null,
+              detail: body?.detail || null,
               appstle_details: body?.appstle_details || null,
               request_payload: requestPayload,
             },
@@ -186,7 +194,8 @@ async function handle(req: NextRequest) {
               .order("created_at", { ascending: false })
               .limit(1)
               .maybeSingle();
-            const note = `[System] Customer's portal action failed and could not self-serve.\nAction: ${route}\nError: ${body?.error || response.status}${body?.message ? ` — ${body.message}` : ""}\nDetails: ${JSON.stringify(requestPayload || {})}`;
+            const errText = body?.message || body?.detail;
+            const note = `[System] Customer's portal action failed and could not self-serve.\nAction: ${route}\nError: ${body?.error || response.status}${errText ? ` — ${errText}` : ""}\nDetails: ${JSON.stringify(requestPayload || {})}`;
             let ticketId = existing?.id as string | undefined;
             if (!ticketId) {
               const { data: ticket } = await adminDb

@@ -89,7 +89,9 @@ export async function getFailureContext(
       const p = match.properties || {};
       return {
         route: (p.route as string) || route,
-        error: [p.error, p.message].filter(Boolean).join(" — ") || "",
+        // Include `detail` — handlers carry their friendly text there, not in
+        // `message`. Folding it in lets the text-matching dismiss branches fire.
+        error: [p.error, p.message, p.detail].filter(Boolean).join(" — ") || "",
         status: typeof p.status === "number" ? (p.status as number) : null,
         payload: (p.request_payload as Record<string, unknown>) || {},
       };
@@ -131,7 +133,16 @@ export function classifyPortalFailure(
         "Customer selected a reward they didn't have enough points for. The portal should never offer an unaffordable tier — UI gating issue, nothing to complete.",
     };
   }
-  if (e.includes("at least one subscription product") || e.includes("atleast one subscription product") || e.includes("cannot remove line item")) {
+  // Match the normalized codes too — route.ts records body.error (the stable
+  // code), so the raw Appstle strings below never appear on a portal-created
+  // ticket. would_remove_all_regular_products is the replace-variants sibling.
+  if (
+    e.includes("would_remove_last_item") ||
+    e.includes("would_remove_all_regular_products") ||
+    e.includes("at least one subscription product") ||
+    e.includes("atleast one subscription product") ||
+    e.includes("cannot remove line item")
+  ) {
     return {
       disposition: "dismiss",
       reason:
