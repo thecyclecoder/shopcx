@@ -469,13 +469,33 @@ function pickNewSessionAccount(now: number): AccountState | null {
   healthy.sort((a, b) => a.inFlight - b.inFlight || a.lastAssignedAt - b.lastAssignedAt);
   return healthy[0];
 }
-function markAccountCapped(dir: string, now: number) {
+// The Claude usage-wall message carries the actual reset clock time — the CLI localizes it to the running
+// env's timezone, and the BOX runs in UTC, so it always reads "resets 7pm (UTC)" / "resets 2am (UTC)".
+// Parse that hour as UTC → the next future occurrence → the account rejoins at its REAL reset, not a flat
+// now+5h guess (which wasted a session account's earlier reset). Trust the time the message gives — even
+// for a weekly wall it's the real reset; if a weekly is genuinely a day out and we under-guess, the rejoin
+// just re-caps and re-reads the (now later) reset. Only parse when the message says UTC (the box's tz) so a
+// localized non-UTC string can't be misread as UTC. Returns null otherwise → caller falls back to ~5h.
+function parseResetTime(text: string, now: number): number | null {
+  const t = (text || "").toLowerCase();
+  if (!t.includes("utc")) return null; // box emits UTC; a non-UTC localization would mis-parse
+  const m = t.match(/resets?\s+(\d{1,2})\s*(am|pm)/);
+  if (!m) return null;
+  let hour = parseInt(m[1], 10) % 12;
+  if (m[2] === "pm") hour += 12;
+  const d = new Date(now);
+  d.setUTCHours(hour, 0, 0, 0);
+  let resetAt = d.getTime();
+  while (resetAt <= now) resetAt += 24 * 60 * 60 * 1000; // next future occurrence of that UTC hour
+  return resetAt;
+}
+function markAccountCapped(dir: string, now: number, errorText?: string) {
   const a = accountByDir.get(dir);
   if (!a) return;
-  a.cappedUntil = now + USAGE_CAP_COOLDOWN_MS;
+  a.cappedUntil = (errorText && parseResetTime(errorText, now)) || now + USAGE_CAP_COOLDOWN_MS;
   if (!a.capEventLogged) {
     a.capEventLogged = true; // record the `cap` once per window; noteAccountRecoveries logs the matching `recovered`
-    recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ~${new Date(a.cappedUntil).toISOString()}`);
+    recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ${new Date(a.cappedUntil).toISOString()}`);
   }
 }
 // Distinguish a Max usage-WALL (pull the account from rotation) from a transient 529/overloaded (which
@@ -621,7 +641,7 @@ async function requeueBlockedOnDependency() {
 // exists so the branch/PR is reused, else queued) or park blocked_on_usage when ALL accounts are capped.
 // Returns true once it has set the job's status — the caller should then return.
 async function handlePoolUsageCap(jobId: string, tag: string, configDir: string, hadSession: boolean, logTail: string): Promise<boolean> {
-  markAccountCapped(configDir, Date.now());
+  markAccountCapped(configDir, Date.now(), logTail); // parse the real reset time from the wall message
   if (allAccountsCapped(Date.now())) {
     recordAccountEvent("all_capped", configDir, "all Max accounts capped — job parked blocked_on_usage, auto-resumes at reset");
     await update(jobId, { status: "blocked_on_usage", error: "Max usage wall hit on all accounts — auto-resumes at reset", log_tail: logTail });
