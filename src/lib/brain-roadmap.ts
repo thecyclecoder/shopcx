@@ -287,16 +287,18 @@ function parseSpec(slug: string, raw: string): SpecCard {
     (l) => /^\s*\*\*Deferred:\*\*/i.test(l) || /^\s*\*\*Status:\*\*\s*deferred\b/i.test(l),
   );
 
-  // **Priority:** critical — the critical-spec lane (director-executable-plans-and-priority Phase 1).
+  // **Priority:** critical — a first-class priority flag (director-executable-plans-and-priority), ORTHOGONAL
+  // to phase status (a spec can be planned+critical or in-progress+critical). Line-anchored like Deferred so a
+  // prose mention in backticks isn't a false positive. Build lanes order a critical spec first (+ can gate).
   // Authored as a metadata LINE under the H1 (like Owner/Parent/Deferred), set by a directive's
-  // criticalSpecs[] or from the board (POST /api/roadmap/priority). Line-anchored so a prose mention inside
-  // backticks (e.g. this spec discussing `**Priority:** critical`) is NOT a false positive.
+  // criticalSpecs[] or from the board (POST /api/roadmap/priority).
   const critical = lines.some((l) => /^\s*\*\*Priority:\*\*\s*critical\b/i.test(l));
 
   return {
     slug,
     title,
     status: deriveStatus(counts, titleStatus, deferred),
+    critical,
     summary: firstParagraph(lines),
     phases,
     counts,
@@ -305,7 +307,6 @@ function parseSpec(slug: string, raw: string): SpecCard {
     blockedBy: [...new Set(blockerSlugs)].map((s) => ({ slug: s, title: s, status: "planned" as Phase, cleared: false })),
     autoBuild,
     repairSignature,
-    critical,
   };
 }
 

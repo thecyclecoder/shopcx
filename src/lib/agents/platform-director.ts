@@ -1690,6 +1690,10 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
       (filters.goalsBySpec[s.slug] ?? []).length === 0, // goal-linked → the goal-walk / new-goal escalation owns it
   );
 
+  // Critical-first (director-executable-plans-and-priority): a `**Priority:** critical` spec is investigated +
+  // queued ahead of normal Planned specs, within the per-pass cap. Stable for non-critical (preserves order).
+  unstarted.sort((a, b) => (b.critical ? 1 : 0) - (a.critical ? 1 : 0));
+
   const out: InitCandidate[] = [];
   for (const s of unstarted) {
     if (out.length >= PLATFORM_DIRECTOR_INIT_CAP) break;
