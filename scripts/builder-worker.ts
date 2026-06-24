@@ -2593,6 +2593,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   let continued = 0;
   let split = 0;
   let escalated = 0;
+  let folded = 0;
+  let authoredFollowup = 0;
+  let dismissed = 0;
   for (const c of candidates) {
     try {
       // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
@@ -2724,6 +2727,167 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
         continue;
       }
 
+      // ── FOLD_NOW — leftover ⏳ phase(s) are phantom (parser miscount / work already landed) →
+      //    flip every remaining phase to ✅ in spec_card_state + queue a fold via the existing fold chain. ──
+      if (verdict === "fold_now") {
+        const valid = lib.validateFoldNow(c, parsed);
+        if (!valid.ok) {
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Grooming needs a look: ${c.slug}`,
+            diagnosis: `I assessed ${c.slug} as phantom-leftover (fold_now), but couldn't apply it cleanly (${valid.error}). Holding off — please take a look.`,
+            dedupeKey: `groom-unsure:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "groom_fold_now_invalid",
+            metadata: { groom_key: lib.groomKey(c.slug), error: valid.error },
+          });
+          if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} groom ${c.slug} → fold_now-invalid escalation FAILED to surface to CEO: ${r.error.message}`);
+          console.warn(`${tag} groom ${c.slug} → fold_now INVALID (${valid.error}) → escalated to CEO`);
+          continue;
+        }
+        const r = await lib.applyDirectorFoldNow(db, job.workspace_id, c, reasoning || `Remaining ⏳ phase(s) are phantom — flipped them to ✅ and queued the fold.`);
+        if (!r.ok) {
+          console.warn(`${tag} groom ${c.slug} → fold_now apply failed: ${r.error}`);
+          continue;
+        }
+        folded++;
+        console.log(`${tag} groom ${c.slug} → fold_now → flipped ${r.flippedPhases.length} phase(s) ✅ + queued fold`);
+        continue;
+      }
+
+      // ── AUTHOR_FOLLOWUP_SPEC — investigation surfaced a real code-level root cause → commit the
+      //    followup as its own planned card AND apply the immediate candidate's primary disposition
+      //    (fold_now or split) so it doesn't re-fire next pass. ──
+      if (verdict === "author_followup_spec") {
+        const validFollowup = lib.validateFollowupSpec(c.slug, c.owner, parsed.followup);
+        const primary = String(parsed.primary || "");
+        const validPrimary = primary === "fold_now"
+          ? lib.validateFoldNow(c, parsed)
+          : primary === "split"
+            ? lib.validateGroomSplit(c, parsed, deriveSpecStatus)
+            : ({ ok: false as const, error: `author_followup_spec missing/invalid primary (must be "fold_now" or "split"; got "${primary || "—"}")` });
+        if (!validFollowup.ok || !validPrimary.ok) {
+          const err = !validFollowup.ok ? validFollowup.error : !validPrimary.ok ? validPrimary.error : "unknown";
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Grooming needs a look: ${c.slug}`,
+            diagnosis: `I assessed ${c.slug} as needing a followup spec (root-cause fix), but couldn't author it cleanly (${err}). Holding off — please take a look.`,
+            dedupeKey: `groom-unsure:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "groom_author_followup_invalid",
+            metadata: { groom_key: lib.groomKey(c.slug), error: err },
+          });
+          if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} groom ${c.slug} → author_followup_invalid escalation FAILED to surface to CEO: ${r.error.message}`);
+          console.warn(`${tag} groom ${c.slug} → author_followup_spec INVALID (${err}) → escalated to CEO`);
+          continue;
+        }
+        // 1) Author the followup card (create-only; an existing slug is treated as already authored).
+        const authored = await lib.applyDirectorAuthorFollowup(
+          db,
+          job.workspace_id,
+          "groom",
+          { slug: c.slug },
+          parsed.followup ?? {},
+          reasoning || `Investigation surfaced a code-level root cause — authored a followup spec.`,
+          followupCommit,
+        );
+        if (!authored.ok) {
+          console.warn(`${tag} groom ${c.slug} → author_followup_spec commit failed: ${authored.error}`);
+          continue;
+        }
+        // 2) Apply the primary disposition on the candidate so it doesn't re-fire next pass.
+        if (primary === "fold_now") {
+          const f = await lib.applyDirectorFoldNow(db, job.workspace_id, c, reasoning || `Followup spec authored — folding the candidate (its leftover phases are phantom relative to the new spec).`);
+          if (!f.ok) {
+            console.warn(`${tag} groom ${c.slug} → author_followup_spec fold_now apply failed: ${f.error}`);
+            continue;
+          }
+          folded++;
+          authoredFollowup++;
+          console.log(`${tag} groom ${c.slug} → author_followup_spec → authored ${authored.authoredSlug} + fold_now ${f.flippedPhases.length} phase(s)`);
+          continue;
+        }
+        // primary === "split"
+        const splits = parsed.splits ?? [];
+        const authoredSplits: string[] = [];
+        let splitFailed = false;
+        for (const s of splits) {
+          const slug = String(s.slug);
+          const path = `docs/brain/specs/${slug}.md`;
+          const exists = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+          if (exists.ok) {
+            authoredSplits.push(slug);
+            continue;
+          }
+          const put = await putFileMain(path, String(s.markdown), `spec: ${slug} — split future phase from ${c.slug} (board-grooming, via author_followup_spec)`);
+          if (!put.ok) {
+            splitFailed = true;
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
+            break;
+          }
+          authoredSplits.push(slug);
+        }
+        if (splitFailed) {
+          console.warn(`${tag} groom ${c.slug} → author_followup_spec/split aborted (a card commit failed) — followup ${authored.authoredSlug} authored, parent left intact`);
+          continue;
+        }
+        const parentPut = await putFileMain(
+          `docs/brain/specs/${c.slug}.md`,
+          String(parsed.parent_markdown),
+          `spec: close out ${c.slug} — split ${authoredSplits.length} future phase(s) (board-grooming, via author_followup_spec)`,
+        );
+        if (!parentPut.ok) {
+          console.warn(`${tag} groom ${c.slug} → author_followup_spec/split parent close-out commit failed (status ${parentPut.status}) — splits authored: ${authoredSplits.join(", ")}`);
+          continue;
+        }
+        split++;
+        authoredFollowup++;
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "groomed_split",
+          specSlug: c.slug,
+          reason: reasoning || `Followup spec authored — and the leftover phases are future (split into their own cards) so the parent folds.`,
+          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authoredSplits, followup_slug: authored.authoredSlug, autonomous: true },
+        });
+        console.log(`${tag} groom ${c.slug} → author_followup_spec → authored ${authored.authoredSlug} + split ${authoredSplits.join(", ")} + closed out parent`);
+        continue;
+      }
+
+      // ── DISMISS_CANDIDATE — false-alarm candidacy (not actionable today / malformed / superseded) →
+      //    write a dedup ledger row so the candidate is skipped next pass; no spec mutation. ──
+      if (verdict === "dismiss_candidate") {
+        const valid = lib.validateDismissCandidate(parsed);
+        if (!valid.ok) {
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Grooming needs a look: ${c.slug}`,
+            diagnosis: `I assessed ${c.slug} as a false-alarm candidate (dismiss_candidate), but the verdict was malformed (${valid.error}). Holding off — please take a look.`,
+            dedupeKey: `groom-unsure:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "groom_dismiss_invalid",
+            metadata: { groom_key: lib.groomKey(c.slug), error: valid.error },
+          });
+          if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} groom ${c.slug} → dismiss-invalid escalation FAILED to surface to CEO: ${r.error.message}`);
+          console.warn(`${tag} groom ${c.slug} → dismiss_candidate INVALID (${valid.error}) → escalated to CEO`);
+          continue;
+        }
+        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "groom", { slug: c.slug }, reasoning);
+        if (r.ok) {
+          dismissed++;
+          console.log(`${tag} groom ${c.slug} → dismiss_candidate → ledger row written; will skip next pass`);
+        } else {
+          console.warn(`${tag} groom ${c.slug} → dismiss_candidate ledger write failed: ${r.error}`);
+        }
+        continue;
+      }
+
       // ── ESCALATE — genuinely unsure / load-bearing → route the diagnosis to the CEO, move nothing. ──
       const diagnosis = reasoning || `${c.slug} is partially shipped with leftover phase(s) I can't confidently classify (possibly load-bearing). Holding off — your call.`;
       const r = await lib.escalateDiagnosisToCeo(db, {
@@ -2747,6 +2911,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   const parts: string[] = [];
   if (continued) parts.push(`continued ${continued}`);
   if (split) parts.push(`split ${split}`);
+  if (folded) parts.push(`folded ${folded}`);
+  if (authoredFollowup) parts.push(`authored ${authoredFollowup}`);
+  if (dismissed) parts.push(`dismissed ${dismissed}`);
   if (escalated) parts.push(`escalated ${escalated}`);
   return `groom: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
@@ -2770,6 +2937,8 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
 
   let initiated = 0;
   let escalated = 0;
+  let authoredFollowup = 0;
+  let dismissed = 0;
   // director-initiation-throughput Phase 4: a Max 529 / overloaded mid-batch backs off the REST of the pass
   // (the real ceiling is Max rate limits, not the lane count). Set once, checked by every not-yet-started task.
   let overloaded = false;
@@ -2849,6 +3018,74 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
         return;
       }
 
+      // ── AUTHOR_FOLLOWUP_SPEC — the right scope is a different spec → commit the followup + dismiss
+      //    the current candidate so it doesn't re-fire (the init_authored_spec row carries init_key). ──
+      if (verdict === "author_followup_spec") {
+        const valid = lib.validateFollowupSpec(c.slug, c.owner, parsed.followup);
+        if (!valid.ok) {
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Initiation needs a look: ${c.slug}`,
+            diagnosis: `I assessed ${c.slug} as needing a re-scoped followup spec, but couldn't author it cleanly (${valid.error}). Holding off — please take a look.`,
+            dedupeKey: `init-unsure:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "init_author_followup_invalid",
+            metadata: { init_key: lib.initKey(c.slug), error: valid.error },
+          });
+          if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} init ${c.slug} → author_followup_invalid escalation FAILED to surface to CEO: ${r.error.message}`);
+          console.warn(`${tag} init ${c.slug} → author_followup_spec INVALID (${valid.error}) → escalated to CEO`);
+          return;
+        }
+        const authored = await lib.applyDirectorAuthorFollowup(
+          db,
+          job.workspace_id,
+          "init",
+          { slug: c.slug },
+          parsed.followup ?? {},
+          reasoning || `Right scope is a different spec — authored the followup and dismissed this candidate.`,
+          followupCommit,
+        );
+        if (!authored.ok) {
+          console.warn(`${tag} init ${c.slug} → author_followup_spec commit failed: ${authored.error}`);
+          return;
+        }
+        authoredFollowup++;
+        console.log(`${tag} init ${c.slug} → author_followup_spec → authored ${authored.authoredSlug} (init_key dedup'd this candidate)`);
+        return;
+      }
+
+      // ── DISMISS_CANDIDATE — malformed / duplicate / superseded / not actionable today → write a
+      //    dedup ledger row so the candidate is skipped next pass; no spec mutation, no build queued. ──
+      if (verdict === "dismiss_candidate") {
+        const valid = lib.validateDismissCandidate(parsed);
+        if (!valid.ok) {
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: c.slug,
+            title: `Initiation needs a look: ${c.slug}`,
+            diagnosis: `I assessed ${c.slug} as a candidate to dismiss, but the verdict was malformed (${valid.error}). Holding off — please take a look.`,
+            dedupeKey: `init-unsure:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "init_dismiss_invalid",
+            metadata: { init_key: lib.initKey(c.slug), error: valid.error },
+          });
+          if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} init ${c.slug} → dismiss-invalid escalation FAILED to surface to CEO: ${r.error.message}`);
+          console.warn(`${tag} init ${c.slug} → dismiss_candidate INVALID (${valid.error}) → escalated to CEO`);
+          return;
+        }
+        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug }, reasoning);
+        if (r.ok) {
+          dismissed++;
+          console.log(`${tag} init ${c.slug} → dismiss_candidate → ledger row written; will skip next pass`);
+        } else {
+          console.warn(`${tag} init ${c.slug} → dismiss_candidate ledger write failed: ${r.error}`);
+        }
+        return;
+      }
+
       // ── ESCALATE — ambiguous / out of scope / a new goal / destructive → route to the CEO, queue nothing. ──
       const diagnosis = reasoning || `${c.slug} is an unstarted platform spec I can't confidently confirm sound + in-scope to initiate (possibly out of scope, a new goal, or destructive). Holding off — your call.`;
       const r = await lib.escalateDiagnosisToCeo(db, {
@@ -2871,6 +3108,8 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
 
   const parts: string[] = [];
   if (initiated) parts.push(`initiated ${initiated}`);
+  if (authoredFollowup) parts.push(`authored ${authoredFollowup}`);
+  if (dismissed) parts.push(`dismissed ${dismissed}`);
   if (escalated) parts.push(`escalated ${escalated}`);
   if (overloaded) parts.push("backed off on Max 529");
   return `init: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
@@ -2901,6 +3140,7 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
   let escalated = 0;
   let external = 0;
   let kept = 0;
+  let authoredFollowup = 0;
   for (const c of candidates) {
     try {
       // Phase 2 live-state + P7 coaching: her supervision decision carries the authoritative function_autonomy
@@ -2993,6 +3233,58 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
         continue;
       }
 
+      // ── AUTHOR_FOLLOWUP_SPEC — Rafa miscategorized a REAL bug as needs-human → commit the fix as
+      //    its own planned spec and KEEP the item open on Control Tower (its build retires it). ──
+      if (verdict === "author_followup_spec") {
+        const valid = lib.validateFollowupSpec("", "platform", parsed.followup); // repair-dismissal: no parent slug; same owner gate (platform-only)
+        if (!valid.ok) {
+          // Same shape as `escalate`-already-surfaced: surface the contrary diagnosis + record review.
+          const diagnosis = `Tried to author a fix spec for ${c.signature} (Rafa cleared it as needs-human, but my read says it's a real bug), but the followup card was malformed (${valid.error}). I did NOT dismiss it — please take a look.`;
+          const r = await lib.escalateDiagnosisToCeo(db, {
+            workspaceId: job.workspace_id,
+            specSlug: null,
+            title: `Possible real bug cleared as benign: ${c.signature}`,
+            diagnosis,
+            dedupeKey: lib.dismissKey(c.signature),
+            deepLink: "/dashboard/developer/control-tower",
+            escalationKind: "repair_dismissal_suspect",
+            metadata: { repair_job_id: c.jobId, signature: c.signature, verdict: "author_followup_invalid", error: valid.error },
+          });
+          if (r.emitted) {
+            escalated++;
+            console.log(`${tag} repair-supervise ${c.signature} → author_followup_spec INVALID (${valid.error}) → escalated contrary diagnosis to CEO`);
+          } else {
+            if (r.error) console.error(`${tag} repair-supervise ${c.signature} → author_followup_invalid escalation FAILED to surface to CEO: ${r.error.message}`);
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: "platform",
+              actionKind: "kept_repair",
+              specSlug: null,
+              reason: diagnosis,
+              metadata: { dismiss_key: lib.dismissKey(c.signature), repair_job_id: c.jobId, signature: c.signature, verdict: "author_followup_invalid-already-surfaced", autonomous: true },
+            });
+            console.log(`${tag} repair-supervise ${c.signature} → author_followup_invalid but already surfaced — recorded review`);
+          }
+          continue;
+        }
+        const authored = await lib.applyDirectorAuthorFollowup(
+          db,
+          job.workspace_id,
+          "repair-dismissal",
+          { slug: null, signature: c.signature, jobId: c.jobId },
+          parsed.followup ?? {},
+          reasoning || `Independent root-cause: ${c.signature} is a real bug in our code. Authored a fix spec; left the Control Tower item open for the fix build to retire.`,
+          followupCommit,
+        );
+        if (!authored.ok) {
+          console.warn(`${tag} repair-supervise ${c.signature} → author_followup_spec commit failed: ${authored.error}`);
+        } else {
+          authoredFollowup++;
+          console.log(`${tag} repair-supervise ${c.signature} → author_followup_spec → authored ${authored.authoredSlug} (kept item open; dedup'd via repair_job_id)`);
+        }
+        continue;
+      }
+
       // ── KEEP (or no verdict) — a genuine needs-human call → leave it on the Control Tower untouched for the human. ──
       kept++;
       await recordDirectorActivity(db, {
@@ -3011,6 +3303,7 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
 
   const parts: string[] = [];
   if (dismissed) parts.push(`dismissed ${dismissed}`);
+  if (authoredFollowup) parts.push(`authored ${authoredFollowup}`);
   if (escalated) parts.push(`escalated ${escalated}`);
   if (external) parts.push(`external→CEO ${external}`);
   if (kept) parts.push(`kept ${kept}`);
@@ -3271,6 +3564,17 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
     done.push(`${a.summary} → ${a.status}`);
   }
   return { actions, summary: done.join("; ") };
+}
+
+// FollowupSpecCommitter adapter wrapping putFileMain — the director-judgment-lanes lib helper
+// (applyDirectorAuthorFollowup) calls this to commit the new followup spec without reaching into
+// the worker's gh helpers. Treats "file already on main" as `existed: true` (a convergent re-author,
+// not a failure), so the activity row still lands and the lane records the action.
+async function followupCommit(filePath: string, content: string, message: string): Promise<{ ok: boolean; existed?: boolean; status?: number }> {
+  const exists = await gh("GET", `/repos/${REPO}/contents/${filePath}?ref=main`);
+  if (exists.ok) return { ok: true, existed: true };
+  const put = await putFileMain(filePath, content, message);
+  return { ok: put.ok, status: put.status };
 }
 
 // Commit a single file straight to main via the GitHub Contents API — the chat/finalize authoring
