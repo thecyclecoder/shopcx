@@ -61,14 +61,14 @@ This spec closes that gap: one new `spec-status` action type that the director *
 
 ## Verification
 
-- A director chat turn that emits a `spec-status` action with `status: "shipped"` for an existing spec they own flips `spec_card_state.status` **immediately** (within the same worker turn that processes the chat reply) and appends one `spec_status_history` row with `actor=director:platform` and the action's `reason`.
-- An action with a `phases[]` entry flips just that phase's `phase_states[i].status` and recomputes `status` via `rollupPhaseStatus` (unless the action also supplies `status` explicitly).
-- An action with `critical: true` flips `flags.critical` without touching `status` / `phase_states`.
-- An action with `deferred: true` flips `flags.deferred`, and the board reads it as Deferred (via `effectiveStatusFromState`).
-- An action whose slug doesn't match any spec_card_state row OR docs/brain/specs/{slug}.md returns a validation error, the row is unchanged, and the director_activity entry records `outcome=invalid_spec_status_action`.
-- An action emitted by a director against a spec they don't own is rejected as out-of-leash and logged — the row is unchanged.
-- **No `pending_actions` row is created for a `spec-status` action**, and the CEO inbox / Slack-approval surface does NOT render an Approve/Reject card for it. The flip is visible in chat history (the director's reply text), in `spec_status_history`, and on the board — not as a pending approval anywhere.
-- A wrongly-flipped action is auto-corrected by the daily drift reconciler within 24h, with a `spec_status_history` correction row stamped `actor=drift-reconciler` — proven by an explicit test.
+- On Ada's chat surface (/dashboard, web or #cto-ada), send a CEO message that prompts Ada to emit a `spec-status` action with `status:"shipped"` for an existing spec **she owns** (`Owner: [[../functions/platform]]`) → expect the same worker turn (a) writes one `spec_status_history` row (`field='status'`, `actor='director:platform'`, `to_value='"shipped"'`, `reason` = the action's reason), (b) writes one `director_activity` row (`action_kind='spec_status_flipped'`, `metadata.auto_applied=true`), (c) updates `spec_card_state.status` to `shipped`, (d) Ada's reply text in the chat mentions the flip — and (e) **no `pending_actions` row appears on the thread**, the CEO inbox does NOT render an Approve/Reject card, and #cto-ada does NOT post an Approve/Reject card for it.
+- Emit an action with `phases:[{index:0,status:"shipped"}]` (no `status`) → expect `spec_card_state.phase_states[0].status = 'shipped'`, the rollup recomputed via `rollupPhaseStatus`, and one `spec_status_history` row stamped `actor='director:platform'`.
+- Emit an action with `critical:true` → expect `spec_card_state.flags.critical = true`, `status` / `phase_states` untouched, and one `spec_status_history` row (`field='critical'`).
+- Emit an action with `deferred:true` → expect `spec_card_state.flags.deferred = true` and the board column reads `deferred` via `effectiveStatusFromState`.
+- Emit an action whose `slug` doesn't resolve to any `spec_card_state` row OR `docs/brain/specs/{slug}.md` file → expect zero writes to `spec_card_state` / `spec_status_history`, and one `director_activity` row (`action_kind='invalid_spec_status_action'`, `reason` names the validation failure). Same for an empty payload (no status/phases/critical/deferred) and an out-of-range `phases[].index`.
+- Emit an action against a spec whose `**Owner:** [[../functions/{fn}]]` is NOT `platform` (Ada's function) → expect rejection as out-of-leash, `spec_card_state` unchanged, and a `director_activity` row (`action_kind='invalid_spec_status_action'`, reason names "out-of-leash"). Same when the spec's markdown declares no `Owner:` at all.
+- Run `npx tsx --test src/lib/spec-drift.test.ts` → expect 7 passing tests proving `decideDirectorRevertFromRows` reverts a director-stamped `shipped` row to its `from_value` (or `in_progress` on null) while leaving `merge:<sha>` / `owner:<uuid>` flips alone (the reversibility backstop).
+- After a wrong director flip in prod, wait for the next `spec-drift-reconcile` cron pass → expect a fresh `spec_status_history` row stamped `actor='drift-reconciler'`, `reason='director:platform flip not backed by merged code'`, and one `director_activity` row (`action_kind='reverted_director_flip'`, `metadata.director_actor='director:platform'`) so the recurring mis-flip pattern surfaces on the daily watch.
 
 ## Related
 

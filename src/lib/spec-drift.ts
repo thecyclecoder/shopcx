@@ -484,8 +484,116 @@ export async function runSpecDriftReconciler(workspaceId: string): Promise<Drift
       if (!checks.every(Boolean)) suspects.push({ slug, index: sp.index, title: sp.title }); // shipped in DB, code missing on main
     }
   }
-  await syncReverseDriftRows(workspaceId, suspects);
-  return { specsScanned: scanned, flipped: 0, surfaced: suspects.length };
+  // ada-director-spec-status-cards Phase 3: any suspect whose most recent status flip was a director
+  // auto-apply (`actor=director:*`) is REVERTED — the leash's reversibility backstop. Build-merge-applied
+  // shipped phases that lost their code go through the surface path (the existing behavior); the operator
+  // confirms. Reverting a director flip writes one correction row to `spec_status_history` (actor=drift-
+  // reconciler) and one `director_activity` row (`reverted_director_flip`) so a recurring mis-flip pattern
+  // surfaces on the daily watch.
+  const reverted = await revertDirectorFlippedSuspects(workspaceId, states, suspects);
+  // Suspects we reverted no longer need surfacing — they're DB-corrected; only the rest get a drift row.
+  const surfaceList = suspects.filter((s) => !reverted.has(`${s.slug}#${s.index}`));
+  await syncReverseDriftRows(workspaceId, surfaceList);
+  return { specsScanned: scanned, flipped: 0, surfaced: surfaceList.length };
+}
+
+/**
+ * Per suspect, look up the most recent `spec_status_history` `field='status'` row whose `actor` is
+ * `director:*` — that's the flip we're catching. If one is found, revert the spec_card_state row's
+ * status to its `from_value` and stamp a correction history row (actor=`drift-reconciler`, reason
+ * names the original director). Returns the set of `slug#index` keys that were reverted so the caller
+ * can skip surfacing them as drift. Best-effort throughout — a DB read/write failure on one suspect
+ * never blocks the next; the sweep runs again next beat.
+ */
+async function revertDirectorFlippedSuspects(
+  workspaceId: string,
+  states: Record<string, import("@/lib/spec-card-state").SpecCardState>,
+  suspects: { slug: string; index: number; title: string }[],
+): Promise<Set<string>> {
+  const reverted = new Set<string>();
+  if (!suspects.length) return reverted;
+  const admin = createAdminClient();
+  const { markSpecCardStatus } = await import("@/lib/spec-card-state");
+  // De-dup by slug — one revert per spec is enough; the rollup recomputes from all phases.
+  const slugs = Array.from(new Set(suspects.map((s) => s.slug)));
+  for (const slug of slugs) {
+    const decision = await decideDirectorRevert(admin, workspaceId, slug);
+    if (!decision) continue;
+    const state = states[slug];
+    if (!state) continue;
+    const phaseStates = (state.phase_states ?? []).map((p) => ({ ...p }));
+    try {
+      await markSpecCardStatus(workspaceId, slug, decision.revertTo, phaseStates, {
+        actor: "drift-reconciler",
+        reason: `${decision.directorActor} flip not backed by merged code`,
+      });
+    } catch {
+      continue; // a write failure leaves the suspect on the surface path next beat
+    }
+    try {
+      const { recordDirectorActivity } = await import("@/lib/director-activity");
+      const directorFunction = decision.directorActor.replace(/^director:/, "") || "platform";
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction,
+        actionKind: "reverted_director_flip",
+        specSlug: slug,
+        reason: `drift-reconciler reverted ${decision.directorActor} status flip — phase code missing on main`,
+        metadata: { from: "shipped", revert_to: decision.revertTo, director_actor: decision.directorActor },
+      });
+    } catch { /* audit is best-effort */ }
+    for (const s of suspects) if (s.slug === slug) reverted.add(`${s.slug}#${s.index}`);
+  }
+  return reverted;
+}
+
+/**
+ * Pure-ish helper: read the most recent `field='status'` history rows for one slug and decide whether to
+ * revert. Returns `{ revertTo, directorActor }` when the most recent status flip was a director auto-apply
+ * AND has a parseable `from_value`; null otherwise (build-merge flip · owner flip · no history · stale).
+ * Exported so the test suite can exercise the decision against a synthetic row set without hitting Supabase.
+ */
+export async function decideDirectorRevert(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  slug: string,
+): Promise<{ revertTo: SpecStatus; directorActor: string } | null> {
+  const { data } = await admin
+    .from("spec_status_history")
+    .select("actor, from_value, to_value")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("field", "status")
+    .order("at", { ascending: false })
+    .limit(1);
+  const rows = (data ?? []) as { actor: string; from_value: string | null; to_value: string }[];
+  return decideDirectorRevertFromRows(rows);
+}
+
+/** Pure logic: given the most-recent-first status history rows for one slug, decide a revert. */
+export function decideDirectorRevertFromRows(
+  rows: { actor: string; from_value: string | null; to_value: string }[],
+): { revertTo: SpecStatus; directorActor: string } | null {
+  if (!rows.length) return null;
+  const most = rows[0];
+  if (!most.actor.startsWith("director:")) return null;
+  // The director flip we want to revert must have moved status TO shipped (a director-stamped row that's
+  // already non-shipped is either already corrected or wasn't the cause of the missing-code drift).
+  const parsedTo = safeParseStatus(most.to_value);
+  if (parsedTo !== "shipped") return null;
+  const revertTo = safeParseStatus(most.from_value) ?? "in_progress";
+  return { revertTo, directorActor: most.actor };
+}
+
+function safeParseStatus(json: string | null): SpecStatus | null {
+  if (!json) return null;
+  try {
+    const v = JSON.parse(json);
+    if (v === "planned" || v === "in_progress" || v === "shipped" || v === "rejected" || v === "deferred") return v;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Upsert an open `spec_drift` row per DB-shipped-but-code-missing phase; resolve rows that recovered. */

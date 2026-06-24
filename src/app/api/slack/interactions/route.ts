@@ -232,35 +232,7 @@ async function handleAdaDecision(
   // Resolve the card in place (drop the buttons → "✅ Approved — applying…" / "✕ Declined").
   const card = thread.pending_actions.find((a) => a.id === cardId);
   if (card && channel && messageTs) {
-    // ada-director-spec-status-cards Phase 3: keep the diff visible on the resolved render too.
-    let current: Parameters<typeof buildAdaResolvedCard>[2] | undefined;
-    if (card.type === "spec-status" && card.slug) {
-      const { getSpecCardStates, effectiveStatusFromState } = await import("@/lib/spec-card-state");
-      const states = await getSpecCardStates(workspaceId);
-      const s = states[card.slug];
-      current = {
-        status: effectiveStatusFromState(s),
-        phaseStates: s?.phase_states ?? [],
-        critical: !!s?.flags?.critical,
-        deferred: !!s?.flags?.deferred,
-      };
-    }
-    const rebuilt = buildAdaResolvedCard(
-      {
-        id: card.id,
-        type: card.type,
-        summary: card.summary,
-        guidance: card.guidance,
-        slug: card.slug,
-        proposedStatus: card.proposedStatus,
-        phases: card.phases,
-        critical: card.critical,
-        deferred: card.deferred,
-        reason: card.reason,
-      },
-      decision,
-      current,
-    );
+    const rebuilt = buildAdaResolvedCard({ id: card.id, type: card.type, summary: card.summary, guidance: card.guidance }, decision);
     await updateMessage(token, channel, messageTs, rebuilt.blocks, rebuilt.text);
   }
 

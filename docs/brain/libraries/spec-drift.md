@@ -39,6 +39,14 @@ The spec's column then follows from `deriveStatus` over the corrected phases —
 - **Root fix (Part A)** — [[agent-jobs]] `reconcileMergedJobs` calls `reconcileSpecDrift` the moment a build PR merges (replaces the old `fetchSpecFromMain` shipped-check), then enqueues a spec-test + auto-queues unblocked dependents if the corrected phases now read shipped. This is where drift originates; closing it here means the cron rarely has work.
 - **Backstop (Part B)** — the [[../inngest/spec-drift-reconcile]] cron (~every 30 min) sweeps for residual drift the event missed (box down, PR merged on GitHub directly, spec shipped pre-agent).
 
+## Director-flip auto-revert ([[../specs/ada-director-spec-status-cards]] Phase 3)
+
+The reverse-drift reconciler (`runSpecDriftReconciler`) already detects "DB says shipped, code missing on main." For these suspects, before surfacing as a [[../tables/spec_drift]] row, it now also asks: *was the most recent status flip a director auto-apply?* (`spec_status_history.actor LIKE 'director:%'`, `field='status'`, `to_value='shipped'`).
+
+If yes, it **reverts** the row to the flip's `from_value` (or `in_progress` when null) via `markSpecCardStatus(..., { actor:"drift-reconciler", reason:"director:{fn} flip not backed by merged code" })`, writes one `director_activity` row (`action_kind="reverted_director_flip"`), and does **not** surface a drift row — the row is DB-corrected within ~24h. This is the reversibility backstop the leash relies on for [[../specs/ada-director-spec-status-cards|spec-status]] auto-apply: a recurring mis-flip pattern shows up on the daily watch via the activity rows.
+
+Build-merge-stamped (`merge:<sha>`) and owner-stamped (`owner:<uuid>`) suspects keep the existing **surface-don't-auto-correct** behavior — those signals are trusted, and a missing-code drift there is a genuine "revert / bad merge" the operator must confirm. Tested by `src/lib/spec-drift.test.ts → decideDirectorRevertFromRows`.
+
 ## Gotchas
 
 - **Auto-flip needs BOTH signals.** Code-on-main alone only **surfaces** (the owner confirms); a merged build alone never flips a phase whose code isn't there.
