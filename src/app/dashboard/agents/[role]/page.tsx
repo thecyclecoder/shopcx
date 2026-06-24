@@ -13,6 +13,7 @@ import { AgentGradePanel } from "@/components/agents/agent-grade-panel";
 import { DirectorAutonomy } from "@/components/agents/director-autonomy";
 import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
 import { DirectorGradePanel } from "@/components/agents/director-grade-panel";
+import { RoleInbox, AutonomyToggle } from "@/components/agents/role-inbox";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
 // `/dashboard/agents/[role]` — one page for every seat (CEO · a director slug · a
@@ -87,8 +88,19 @@ function ResponsibilityList({ items }: { items: { primary: string; secondary?: s
   );
 }
 
-function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Record<string, DirectorXp> }) {
+function ProfileCard({
+  org,
+  role,
+  xp,
+  onAutonomyChange,
+}: {
+  org: OrgChart;
+  role: string;
+  xp: Record<string, DirectorXp>;
+  onAutonomyChange: () => void;
+}) {
   const resolved = resolveRole(org, role);
+  const functionSlugs = org.directors.map((d) => d.slug);
 
   if (resolved.kind === "unknown") {
     return (
@@ -112,16 +124,22 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
   let responsibilities: { primary: string; secondary?: string }[] = [];
   let badge: React.ReactNode = null;
   let reportsTo: { name: string; role: string; href: string } | null = null;
-  let inboxHref: string | null = null;
   let extra: React.ReactNode = null;
   let xpCard: React.ReactNode = null;
 
   if (resolved.kind === "ceo") {
     personaKey = "ceo";
     tierLabel = "Company objectives";
-    inboxHref = "/dashboard/agents?view=inbox&role=ceo";
     // The CEO's responsibilities ARE the finite goals (goals/*.md) — company-objective level.
     responsibilities = org.ceo.goals.map((g) => ({ primary: g.title, secondary: `${g.pct}% complete` }));
+    // The per-role inbox (IA refactor) now lives on the profile — Approval Requests · Daily
+    // Summaries · Decision history · Director grades. The shared board lives on the hub.
+    extra = (
+      <div className="mt-8 border-t border-zinc-200 pt-6 dark:border-zinc-800">
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Inbox</h2>
+        <RoleInbox role="ceo" title="CEO" functionSlugs={functionSlugs} />
+      </div>
+    );
   } else if (resolved.kind === "director") {
     const d = resolved.director;
     personaKey = d.slug;
@@ -130,7 +148,6 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
     scopeLine = d.summary;
     badge = <StatusBadge status={d.status} />;
     reportsTo = { name: getPersona("ceo").name, role: "CEO", href: "/dashboard/agents/ceo" };
-    inboxHref = `/dashboard/agents?view=inbox&role=${encodeURIComponent(d.slug)}`;
     // A director's responsibilities are its higher-level mandates (functions/*.md).
     responsibilities = d.mandates.map((m) => ({
       primary: m.name,
@@ -197,6 +214,15 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent activity</h3>
           <DirectorActivity fn={d.slug} />
         </div>
+        {/* Owner-only autonomy toggle (was on the hub's role header) — flips this director live/autonomous. */}
+        <div className="mt-6">
+          <AutonomyToggle director={d} onChange={onAutonomyChange} />
+        </div>
+        {/* The per-role inbox (IA refactor) — Approval Requests · Daily Summaries · Decision history · Director grades. */}
+        <div className="mt-8 border-t border-zinc-200 pt-6 dark:border-zinc-800">
+          <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Inbox</h2>
+          <RoleInbox role={d.slug} title={getPersona(d.slug, d.title).name} functionSlugs={functionSlugs} />
+        </div>
       </>
     );
   } else {
@@ -252,11 +278,6 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
           {reportsTo && (
             <Link href={reportsTo.href} className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200">
               reports to {reportsTo.name} · {reportsTo.role} →
-            </Link>
-          )}
-          {inboxHref && (
-            <Link href={inboxHref} className="font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
-              Open inbox →
             </Link>
           )}
         </div>
@@ -340,7 +361,7 @@ export default function AgentProfilePage() {
           Couldn&apos;t load the profile.
         </div>
       ) : org ? (
-        <ProfileCard org={org} role={role} xp={xp} />
+        <ProfileCard org={org} role={role} xp={xp} onAutonomyChange={loadOrg} />
       ) : null}
     </div>
   );
