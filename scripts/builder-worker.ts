@@ -2082,7 +2082,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   if (flipped.length) {
     try {
       const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-      await postDirectorMessage({ workspaceId: job.workspace_id, author: "platform", authorFunction: "platform", body: `🔄 Reviewed Reese's spec-drift findings — confirmed + flipped ${flipped.length} phase(s) to ✅: ${flipped.join(", ")}.`, kind: "update", metadata: { spec_drift_supervise: true } });
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `🔄 Reviewed Reese's spec-drift findings — confirmed + flipped ${flipped.length} phase(s) to ✅: ${flipped.join(", ")}.`, kind: "update", metadata: { spec_drift_supervise: true } });
     } catch { /* best-effort */ }
   }
   return `drift-supervise: reviewed ${reviewed}, flipped ${flipped.length}${flipped.length ? ": " + flipped.join(", ") : ""}`;
@@ -2253,7 +2253,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));
       const body = [`🛠️ Standing pass — here's what I just set up:`, ...(directiveLine ? [directiveLine] : []), ...meaningful.map((n) => `• ${n}`)].join("\n").slice(0, 3500);
       const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-      await postDirectorMessage({ workspaceId: job.workspace_id, author: "platform", authorFunction: "platform", body, kind: "update", metadata: { standing_pass: true } });
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body, kind: "update", metadata: { standing_pass: true } });
     }
   } catch (e) {
     console.error(`${tag} standing-pass board recap failed (continuing):`, e instanceof Error ? e.message : e);
@@ -2903,7 +2903,7 @@ async function runPlatformDirectorJob(job: Job) {
       await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "repair_bounced", specSlug: t.spec_slug, reason: reasoning, metadata: { job_id: t.id, signature: t.spec_slug, re_enqueued: r.ok, autonomous: true } });
       try {
         const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-        await postDirectorMessage({ workspaceId: t.workspace_id, author: "platform", authorFunction: "platform", body: `🔁 Sent the ${t.spec_slug} fix back to the Repair agent — the bug's real but the authored fix was unsound:\n${reasoning.slice(0, 400)}`, kind: "update", metadata: { repair_bounced: true } });
+        await postDirectorMessage({ workspaceId: t.workspace_id, author: "director", authorFunction: "platform", body: `🔁 Sent the ${t.spec_slug} fix back to the Repair agent — the bug's real but the authored fix was unsound:\n${reasoning.slice(0, 400)}`, kind: "update", metadata: { repair_bounced: true } });
       } catch { /* board best-effort */ }
       await update(job.id, { status: "completed", log_tail: `bounce → re-authoring ${t.spec_slug} (Repair agent), NOT escalated. ${r.ok ? "re-queued" : `re-queue: ${r.reason}`}`.slice(-2000) });
       console.log(`${tag} bounce → ${t.spec_slug} sent back to Repair (re-queued=${r.ok})`);
