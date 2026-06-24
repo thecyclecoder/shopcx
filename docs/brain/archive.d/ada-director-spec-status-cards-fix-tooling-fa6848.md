@@ -1,0 +1,1 @@
+- **Ada director spec status cards — tooling robustness fix (shAsync stdin, extractJson scanning)** · verified 2026-06-24 · → [[../specs/ada-director-spec-status-cards]]

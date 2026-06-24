@@ -1,0 +1,1 @@
+- **Regression backlog reconciliation — standing coverage sweep + loop-guard (reconcileRegressionCoverage)** · verified 2026-06-24 · → [[../libraries/platform-director]]
