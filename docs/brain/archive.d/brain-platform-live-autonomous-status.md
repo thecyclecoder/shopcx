@@ -1,0 +1,1 @@
+- **Brain accuracy: Platform is live+autonomous — correct stale 'dormant/not-live' claims** · verified 2026-06-24 · → [[libraries/platform-director]]
