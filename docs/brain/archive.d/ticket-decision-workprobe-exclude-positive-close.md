@@ -1,0 +1,1 @@
+- **Control Tower: scope tickets-awaiting-decision work probe past positive-close/fraud short-circuits** · verified 2026-06-24 · → [[libraries/control-tower]]
