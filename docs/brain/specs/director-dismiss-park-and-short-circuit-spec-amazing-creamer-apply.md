@@ -19,7 +19,7 @@ With the `dismiss-park` action and the `spec-status` `shortCircuit` flag live in
 
 ## Verification
 
-End-to-end checklist for the owner after `npx tsx scripts/_apply-amazing-creamer-dismiss-park-and-short-circuit.ts` runs in prod.
+End-to-end checklist for the owner after `npx tsx scripts/apply-amazing-creamer-dismiss-park-and-short-circuit.ts` runs in prod.
 
 - Run the script → expect exit 0, with two `✓` lines for the two actions (each either landed or moot).
 - Query `agent_jobs` for the Amazing Creamer park (the row that was `kind='product-seed'` + `spec_slug=<amazing-creamer product_id>` + `status='needs_attention'`) → expect either (a) `status='dismissed'` + `needs_attention_class='dismissed_by_director'` (the dismiss landed) OR (b) no `needs_attention` row exists (the park had already cleared — the script logged a `dismiss_park_noop`).
