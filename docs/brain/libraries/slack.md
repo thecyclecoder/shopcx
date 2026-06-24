@@ -80,6 +80,19 @@ async function listChannels(token: string) : Promise<{ id; name; is_private }[]>
 
 Merges **`conversations.list`** (`public_channel`) **+ `users.conversations`** (`public_channel,private_channel` — the bot's own memberships), deduped by id. The `users.conversations` half is required because **`conversations.list` does not return a bot's PRIVATE channels** even with `groups:read` + the bot invited (verified 2026-06-19) — without it a name-based lookup never finds a private channel. Used by the Slack settings channel dropdown, ticket-share, and `findChannelByName`.
 
+> **Gotcha — POSTING to a private channel ≠ RECEIVING messages from it (different scopes + events).** (verified 2026-06-24, [[ada-slack-chat]] inbound debug.) Slack splits these:
+> - **Posting (outbound)** — `postMessage`/`postAsAda` to a private channel needs only **`chat:write`** + the bot being a **member**. This is why `#alerts-critical` + `#daily-digest` (both private, post-only) have always worked with no history scope.
+> - **Receiving message events (inbound)** — to get a member's messages from a channel via the Events API you need the **channel-type-specific `*:history` scope AND the matching `message.*` event subscription**, even if the bot is already a member:
+>
+> | Channel type | Event to subscribe | Scope required |
+> |---|---|---|
+> | Public | `message.channels` | `channels:history` |
+> | **Private** | **`message.groups`** | **`groups:history`** |
+> | DM | `message.im` | `im:history` |
+> | Group DM | `message.mpim` | `mpim:history` |
+>
+> `message.channels` does **not** fire for a private channel — Slack delivers private-channel messages only as `message.groups`. So a private `#cto-ada` needs **both** `groups:history` (the bot has `groups:read/write` but those are NOT enough) **and** the `message.groups` subscription, then a **reinstall + reconnect** (the new scope mints a fresh bot token our DB must re-store). The route handler is channel-type-agnostic — it gates on `event.channel === slack_ada_channel_id` and reads `event.type === "message"`, which both `message.channels` and `message.groups` carry — so only the Slack-app config differs, never the code. This bit Ada because she's the **first** feature that *reads* a channel; every prior Slack use was post-only or slash-commands/App-Home (no history scope needed).
+
 > **Gotcha — Slack webhook endpoints must be in middleware `PUBLIC_ROUTES`.** Slack POSTs to `/api/slack/interactions` (Block Kit buttons / modals) and `/api/slack/events` (e.g. `app_home_opened`) **server-to-server with no session cookie**. The auth is the **signing-secret verification inside each route**, not a web session — so they must be listed in `PUBLIC_ROUTES` (`src/lib/supabase/middleware.ts`). Omitting them makes the middleware **307-redirect to `/login`**, which Slack surfaces as **"This app responded with Status Code 405"** (verified 2026-06-19 on the Squash & merge button). The OAuth `/api/slack/callback` does *not* need it — the browser carries the session there.
 
 ### View helpers — `openModal` · `updateModal` · `publishHomeView`

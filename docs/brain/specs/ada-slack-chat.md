@@ -21,7 +21,7 @@ Turn the existing CEO↔Director coaching flow into a **two-way Slack conversati
 
 ## Phase 3 — Inbound: a #cto-ada message becomes a coach turn
 - ✅ shipped
-- `src/app/api/slack/events/route.ts`: add an `event.type === "message"` branch (requires subscribing the app to the `message.channels` bot event — manual Slack app step).
+- `src/app/api/slack/events/route.ts`: add an `event.type === "message"` branch (requires subscribing the app to the message event for the channel type + the matching history scope — `message.channels`/`channels:history` for public, **`message.groups`/`groups:history` for a private channel** — a manual Slack app step. Posting-as-Ada only needs `chat:write` + membership; *reading* the channel needs the history scope. See [[../libraries/slack]] gotcha.).
 - **Loop guard (non-negotiable):** ignore the event if `event.bot_id` is set, if `event.subtype` exists (`bot_message`, `message_changed`, `message_deleted`, …), or if the author is the bot's own user id. Ada's own posts must never re-trigger her — else infinite loop.
 - **Gate:** only act when `event.channel === workspace.slack_ada_channel_id` **and** the Slack user maps (email via `/api/slack/sync-members`) to an `owner` `workspace_member`. Non-owners in the channel are ignored.
 - **Threading mirrors the web "new thread" model — keyed on Slack's `thread_ts`:**
@@ -66,8 +66,8 @@ Turn the existing CEO↔Director coaching flow into a **two-way Slack conversati
 ## Phase 8 — Brain pages (CLAUDE.md hard rule)
 - ✅ shipped
 - `lifecycles/ada-slack-chat.md` — end-to-end trace (message → events route → coach turn → postAsAda → approve card → interactions → approve_action), with the Status/open-work block.
-- Update `integrations/slack.md` — `chat:write.customize` + `reactions:write` scopes, `message.channels` subscription, the persona override, the `/ada-here` command.
-- Update `libraries/slack.md` — `postAsAda`, `addReaction`.
+- Update `integrations/slack.md` — `chat:write.customize` + `reactions:write` scopes, the `message.channels`/`message.groups` subscription (+ `channels:history`/`groups:history`), the persona override, the `/ada-here` command.
+- Update `libraries/slack.md` — `postAsAda`, `addReaction`, the post-vs-receive private-channel gotcha.
 - Update `tables/director_coach_threads.md` — `source`, `slack_channel_id`, `slack_thread_ts`.
 - Update `tables/workspaces.md` — `slack_ada_channel_id`.
 - Cross-link all + run `brain:index`.
