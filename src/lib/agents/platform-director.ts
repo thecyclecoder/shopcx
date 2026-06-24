@@ -55,6 +55,7 @@ import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, getSpec, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { getPersona } from "@/lib/agents/personas";
@@ -425,6 +426,9 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
       if (!error) {
         queued.push(card.slug);
         queuedAll.push(card.slug);
+        // P6 — reflect the start on the live PM board instantly (the spec_card_state mirror), so the
+        // board shows the director moving this spec without waiting on a markdown deploy. Best-effort.
+        await markSpecCardStatus(workspaceId, card.slug, "in_progress", phaseStatesOf(card));
       }
     }
 
@@ -446,6 +450,102 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   }
 
   return { goals: results, queued: queuedAll, escalated: escalatedAll };
+}
+
+/** A SpecCard's phases mapped to the spec_card_state per-phase snapshot shape (the P6 PM-companion write). */
+function phaseStatesOf(card: SpecCard): { index: number; title: string; status: SpecCard["status"] }[] {
+  return card.phases.map((p, i) => ({ index: i, title: p.title, status: p.status }));
+}
+
+export interface FixEscortResult {
+  /** 0-phase authored fix specs (Repair-signature) whose build we queued. */
+  fixQueued: string[];
+  /** fix specs whose build repeatedly failed (≥ loop-guard cap) → escalated to the CEO. */
+  escalated: string[];
+}
+
+/**
+ * Escort the work both other lanes miss — **0-phase authored fix specs** (worker-grading-and-director-
+ * management Phase 4, folding director-escort-inflight-specs). The two existing lanes between them already
+ * drive *started* work: escortApprovedGoals walks goal→milestone→spec trees, and board-grooming
+ * (findGroomCandidates) drives every in-flight spec (≥1 ✅ + ≥1 ⏳) via a careful Max continue/split/escalate
+ * investigation, regardless of goal linkage. The remaining gap is a spec authored by the box Repair /
+ * Regression agent for a REAL bug that has **0 phases** (so grooming, which needs ≥1 ✅, can't see it) and
+ * **no goal** (so the goal-walk can't see it). Building it IS the director's `error_fix` mandate the CEO
+ * already greenlit, so it's inside the leash — we don't blind-queue a 0-phase FEATURE spec (a new product
+ * capability, which has no Repair-signature and still escalates).
+ *
+ * The gate is the **Repair-signature** (`SpecCard.repairSignature`) + platform ownership. Same guards as the
+ * other escorts: dormant until live+autonomous, skips blocked / opted-out / in-flight specs, and a build that
+ * failed ≥ the loop-guard cap escalates to the CEO instead of re-queuing forever. On each queue it writes the
+ * P6 PM-companion mirror + an `escorted_fix` activity row.
+ */
+export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return { fixQueued: [], escalated: [] };
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return { fixQueued: [], escalated: [] };
+
+  const { specs } = await getRoadmap();
+  const fixQueued: string[] = [];
+  const escalated: string[] = [];
+
+  for (const card of specs) {
+    if (card.status === "shipped") continue; // already landed
+    if (card.autoBuild === false) continue; // owner opted out of auto-build
+    if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
+
+    // The gap: a 0-phase, platform-owned spec carrying a Repair-signature (an authored fix for a real bug).
+    // A 0-phase spec with NO repair signature is a new feature — never auto-built (it still escalates).
+    const isFixSpec = card.phases.length === 0 && card.repairSignature && (card.owner ?? PLATFORM) === PLATFORM;
+    if (!isFixSpec) continue;
+
+    const state = await specBuildState(admin, workspaceId, card.slug);
+    if (state.inFlight) continue; // a manual / prior-escort build is already carrying it
+
+    // Loop-guard — repeated failures, nothing in-flight: stop re-queuing, escalate to the CEO (deduped).
+    if (state.failedCount >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+      const diagnosis = `Build of authored fix spec "${card.slug}" failed ${state.failedCount}× and didn't land — likely a deeper issue, not a flaky retry${state.lastError ? ` (latest error: ${state.lastError.slice(0, 400)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach and I'll carry it from there.`;
+      const r = await escalateDiagnosisToCeo(admin, {
+        workspaceId,
+        specSlug: card.slug,
+        title: `Build stuck: ${card.slug}`,
+        diagnosis,
+        dedupeKey: `loopguard:${card.slug}`,
+        deepLink: `/dashboard/roadmap/${card.slug}`,
+        escalationKind: "loop_guard",
+        metadata: { kind: "fix", failed_attempts: state.failedCount, last_error: state.lastError ?? undefined },
+      });
+      if (r.emitted) escalated.push(card.slug);
+      continue;
+    }
+
+    const retry = state.failedCount > 0;
+    const { error } = await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: card.slug,
+      kind: "build",
+      status: "queued",
+      created_by: null,
+      instructions: `Escorted by the Platform/DevOps Director: authored fix spec ${card.slug} is unblocked; ${retry ? `re-attempt #${state.failedCount + 1} (prior build failed) — ` : ""}building the bug fix.`,
+    });
+    if (error) continue;
+
+    fixQueued.push(card.slug);
+    // P6 — instant PM-companion mirror so the board shows the fix moving (0 phases → status only).
+    await markSpecCardStatus(workspaceId, card.slug, "in_progress", phaseStatesOf(card));
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: PLATFORM,
+      actionKind: "escorted_fix",
+      specSlug: card.slug,
+      reason: `Escorting authored fix spec: queued ${card.slug}${retry ? ` (re-attempt #${state.failedCount + 1})` : ""} — building the bug fix.`,
+      metadata: { spec_slug: card.slug, kind: "fix", retry, autonomous: true },
+    });
+  }
+
+  return { fixQueued, escalated };
 }
 
 // ── Phase 3 — loop-guard + CEO escalation (the high-stakes calls) ─────────────────────────────────
