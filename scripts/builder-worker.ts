@@ -298,7 +298,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal" | "security-review" | "proposed-model-tier";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -1209,7 +1209,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "proposed-goal"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "proposed-goal"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -3453,6 +3453,440 @@ async function runPlatformDirectorJob(job: Job) {
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   } finally {
     if (investWt) sh("git", ["worktree", "remove", "--force", investWt]); // clean up the branch-review worktree
+  }
+}
+
+// bounce-escalation-back-to-director (Phase 3) — handle a CEO-initiated `director-bounce-back` job.
+// The endpoint enqueued one of these on a Send-back tap: it carries the original lane (groom / init /
+// repair-dismissal / approval), the candidate, the CEO's optional note, the original diagnosis, and a
+// depth counter. We re-build the candidate, run the lane's investigation prompt with a one-line
+// preamble explaining the bounce, and dispatch the verdict using the same helpers the standing pass
+// uses. If the verdict re-escalates, we write `re_escalated_after_bounce` + emit a fresh CEO card
+// carrying BOTH diagnoses + `bounced_back_depth=2` so the UI hides Send-back (depth cap = 1).
+async function runDirectorBounceBackJob(job: Job) {
+  const tag = `[director-bounce-back:${job.id.slice(0, 8)}]`;
+  const lib = await import("../src/lib/agents/platform-director");
+  const { deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  const { bounceBackPreamble, reEscalateAfterBounceBody } = await import("../src/lib/agents/director-bounce-back");
+  const { APPROVAL_REQUEST_TYPE } = await import("../src/lib/agents/inbox");
+  type BounceBackInstructions = import("../src/lib/agents/director-bounce-back").BounceBackInstructions;
+
+  let ctx: BounceBackInstructions | null = null;
+  try {
+    ctx = job.instructions ? (JSON.parse(job.instructions) as BounceBackInstructions) : null;
+  } catch {
+    /* not JSON */
+  }
+  if (!ctx || !ctx.lane) {
+    await update(job.id, { status: "failed", error: "bounce-back: missing/invalid instructions" });
+    console.error(`${tag} missing/invalid instructions — failed`);
+    return;
+  }
+  const lane = ctx.lane;
+  console.log(`${tag} bounce-back lane=${lane} slug=${ctx.candidate_slug ?? ctx.candidate_signature ?? "—"} depth=${ctx.depth}`);
+
+  // The post-bounce CEO escalation card the depth-cap branches share. Stamps both diagnoses + the
+  // counter (=2) so the UI hides Send-back and the endpoint refuses any further bounce.
+  const emitDepthCapEscalation = async (postBounceDiagnosis: string) => {
+    const title = ctx!.candidate_slug
+      ? `Re-escalated after bounce: ${ctx!.candidate_slug}`
+      : ctx!.candidate_signature
+        ? `Re-escalated after bounce: ${ctx!.candidate_signature}`
+        : `Re-escalated after bounce`;
+    const body = reEscalateAfterBounceBody({
+      originalDiagnosis: ctx!.original_escalation_reason,
+      postBounceDiagnosis,
+      ceoNote: ctx!.ceo_note,
+    });
+    const meta: Record<string, unknown> = {
+      routed_to_function: "ceo",
+      escalated_by_director: ctx!.director_slug,
+      escalation_kind: ctx!.original_escalation_kind ?? "re_escalated_after_bounce",
+      escalation_reason: postBounceDiagnosis.slice(0, 2000),
+      bounced_back_depth: 2,
+      diagnoses: [
+        { stage: "original", reason: ctx!.original_escalation_reason.slice(0, 2000) },
+        { stage: "post_bounce", reason: postBounceDiagnosis.slice(0, 2000) },
+      ],
+      spec_slug: ctx!.candidate_slug ?? null,
+      signature: ctx!.candidate_signature ?? null,
+      original_notification_id: ctx!.notification_id,
+      bounce_job_id: job.id,
+      approve_action_id: null,
+      // intentionally NO dedupe_key — the post-bounce card is a fresh ask, not a retry of the original.
+    };
+    if (ctx!.candidate_job_id) meta["agent_job_id"] = ctx!.candidate_job_id;
+    const deepLink = ctx!.candidate_slug ? `/dashboard/roadmap/${ctx!.candidate_slug}` : "/dashboard/developer/control-tower";
+    await db.from("dashboard_notifications").insert({
+      workspace_id: job.workspace_id,
+      type: APPROVAL_REQUEST_TYPE,
+      title: title.slice(0, 200),
+      body,
+      link: deepLink,
+      metadata: meta,
+      read: false,
+      dismissed: false,
+    });
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: ctx!.director_slug,
+      actionKind: "re_escalated_after_bounce",
+      specSlug: ctx!.candidate_slug,
+      reason: postBounceDiagnosis,
+      metadata: {
+        lane,
+        original_notification_id: ctx!.notification_id,
+        original_escalation_reason: ctx!.original_escalation_reason.slice(0, 2000),
+        ceo_note: ctx!.ceo_note,
+        bounce_job_id: job.id,
+        depth: 2,
+        autonomous: true,
+      },
+    });
+  };
+
+  try {
+    if (lane === "groom") {
+      const slug = ctx.candidate_slug;
+      if (!slug) {
+        await update(job.id, { status: "failed", error: "bounce-back: groom lane requires candidate_slug" });
+        return;
+      }
+      const got = await getSpec(slug);
+      if (!got) {
+        await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} — spec gone, no-op`.slice(-2000) });
+        return;
+      }
+      const phases = got.card.phases;
+      const remaining = phases.filter((p) => p.status === "planned").map((p) => p.title);
+      const shipped = phases.filter((p) => p.status === "shipped").map((p) => p.title);
+      const state = await lib.specBuildState(db, job.workspace_id, slug);
+      const candidate = {
+        slug,
+        title: got.card.title,
+        owner: got.card.owner,
+        parent: got.card.parent,
+        shippedPhases: shipped,
+        remainingPhases: remaining,
+        raw: got.raw,
+        failedBuilds: state.failedCount,
+        lastError: state.lastError,
+      } satisfies import("../src/lib/agents/platform-director").GroomCandidate;
+
+      const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.groomInvestigationPrompt(candidate));
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
+      const verdict = String(parsed.verdict || "");
+      const reasoning = String(parsed.reasoning || "").slice(0, 4000);
+
+      if (verdict === "fold_now") {
+        const valid = lib.validateFoldNow(candidate, parsed);
+        if (!valid.ok) {
+          await emitDepthCapEscalation(`Tried fold_now on bounce-back; invalid: ${valid.error}`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → fold_now INVALID → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        const r = await lib.applyDirectorFoldNow(db, job.workspace_id, candidate, reasoning || `Bounced back by CEO — fold_now landed.`);
+        await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → fold_now → flipped ${r.flippedPhases.length} phase(s)`.slice(-2000) });
+        return;
+      }
+      if (verdict === "author_followup_spec") {
+        const validF = lib.validateFollowupSpec(slug, candidate.owner, parsed.followup);
+        if (!validF.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; invalid followup: ${validF.error}`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → followup INVALID → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        const primary = String(parsed.primary || "");
+        if (primary === "fold_now") {
+          const validP = lib.validateFoldNow(candidate, parsed);
+          if (!validP.ok) {
+            await emitDepthCapEscalation(`Tried author_followup_spec/fold_now on bounce-back; invalid primary: ${validP.error}`);
+            await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → primary INVALID → depth-cap escalation`.slice(-2000) });
+            return;
+          }
+          const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "groom", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`, followupCommit);
+          if (!auth.ok) {
+            await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
+            await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → followup commit failed → depth-cap escalation`.slice(-2000) });
+            return;
+          }
+          const f = await lib.applyDirectorFoldNow(db, job.workspace_id, candidate, reasoning || `Followup authored — folding candidate.`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → author_followup_spec(fold_now) → authored ${auth.authoredSlug} + folded ${f.flippedPhases.length}`.slice(-2000) });
+          return;
+        }
+        // primary === 'split' OR missing — bounce-back keeps things simple: treat unknown primary as a
+        // depth-cap escalation rather than trying to author + split + close-out the parent.
+        if (primary !== "split") {
+          await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; missing/invalid primary "${primary || "—"}" (must be fold_now or split)`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → followup w/o valid primary → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        const validS = lib.validateGroomSplit(candidate, parsed, deriveSpecStatus);
+        if (!validS.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec/split on bounce-back; invalid split: ${validS.error}`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → split INVALID → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "groom", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`, followupCommit);
+        if (!auth.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → followup commit failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        const splits = parsed.splits ?? [];
+        const authoredSplits: string[] = [];
+        for (const s of splits) {
+          const sslug = String(s.slug);
+          const path = `docs/brain/specs/${sslug}.md`;
+          const exists = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+          if (exists.ok) {
+            authoredSplits.push(sslug);
+            continue;
+          }
+          const put = await putFileMain(path, String(s.markdown), `spec: ${sslug} — split future phase from ${slug} (bounce-back)`);
+          if (put.ok) authoredSplits.push(sslug);
+        }
+        const parentPut = await putFileMain(`docs/brain/specs/${slug}.md`, String(parsed.parent_markdown), `spec: close out ${slug} — split ${authoredSplits.length} future phase(s) (bounce-back)`);
+        if (!parentPut.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec/split on bounce-back; parent close-out failed (HTTP ${parentPut.status})`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → split parent commit failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await recordDirectorActivity(db, { workspaceId: job.workspace_id, directorFunction: "platform", actionKind: "groomed_split", specSlug: slug, reason: reasoning, metadata: { groom_key: lib.groomKey(slug), split_slugs: authoredSplits, followup_slug: auth.authoredSlug, bounce_job_id: job.id, autonomous: true } });
+        await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → author_followup_spec(split) → authored ${auth.authoredSlug} + ${authoredSplits.length} splits`.slice(-2000) });
+        return;
+      }
+      if (verdict === "dismiss_candidate") {
+        const valid = lib.validateDismissCandidate(parsed);
+        if (!valid.ok) {
+          await emitDepthCapEscalation(`Tried dismiss_candidate on bounce-back; invalid: ${valid.error}`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → dismiss INVALID → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await lib.applyDirectorDismissCandidate(db, job.workspace_id, "groom", { slug }, reasoning || `Bounce-back dismissed candidate.`);
+        await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → dismiss_candidate`.slice(-2000) });
+        return;
+      }
+      if (verdict === "continue") {
+        const { error } = await db.from("agent_jobs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          kind: "build",
+          status: "queued",
+          created_by: null,
+          instructions: `Bounced back by CEO and re-investigated as continue: ${slug} — next phase needed now; sequencing its build to completion. ${reasoning.slice(0, 300)}`,
+        });
+        if (error) {
+          await emitDepthCapEscalation(`Tried continue on bounce-back; build enqueue failed: ${error.message}`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → continue enqueue failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await recordDirectorActivity(db, { workspaceId: job.workspace_id, directorFunction: "platform", actionKind: "groomed_continue", specSlug: slug, reason: reasoning || `Bounce-back continue — queued next phase.`, metadata: { bounce_job_id: job.id, autonomous: true } });
+        await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → continue → queued build`.slice(-2000) });
+        return;
+      }
+      // verdict === 'escalate' OR anything unrecognized → depth-cap escalation.
+      await emitDepthCapEscalation(reasoning || `Re-investigated on bounce-back and could not land an action — re-escalating.`);
+      await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → ${verdict || "no verdict"} → depth-cap escalation`.slice(-2000) });
+      return;
+    }
+
+    if (lane === "init") {
+      const slug = ctx.candidate_slug;
+      if (!slug) {
+        await update(job.id, { status: "failed", error: "bounce-back: init lane requires candidate_slug" });
+        return;
+      }
+      const got = await getSpec(slug);
+      if (!got) {
+        await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} — spec gone, no-op`.slice(-2000) });
+        return;
+      }
+      const state = await lib.specBuildState(db, job.workspace_id, slug);
+      const candidate = {
+        slug,
+        title: got.card.title,
+        owner: got.card.owner,
+        parent: got.card.parent,
+        summary: got.card.summary,
+        plannedPhases: got.card.phases.filter((p) => p.status === "planned").map((p) => p.title),
+        raw: got.raw,
+        failedBuilds: state.failedCount,
+        lastError: state.lastError,
+      } satisfies import("../src/lib/agents/platform-director").InitCandidate;
+
+      const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.initInvestigationPrompt(candidate));
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
+      const verdict = String(parsed.verdict || "");
+      const reasoning = String(parsed.reasoning || "").slice(0, 4000);
+
+      if (verdict === "author_followup_spec") {
+        const valid = lib.validateFollowupSpec(slug, candidate.owner, parsed.followup);
+        if (!valid.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; invalid: ${valid.error}`);
+          await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → followup INVALID → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "init", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`, followupCommit);
+        if (!auth.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
+          await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → followup commit failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → author_followup_spec → authored ${auth.authoredSlug}`.slice(-2000) });
+        return;
+      }
+      if (verdict === "dismiss_candidate") {
+        const valid = lib.validateDismissCandidate(parsed);
+        if (!valid.ok) {
+          await emitDepthCapEscalation(`Tried dismiss_candidate on bounce-back; invalid: ${valid.error}`);
+          await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → dismiss INVALID → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug }, reasoning || `Bounce-back dismissed candidate.`);
+        await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → dismiss_candidate`.slice(-2000) });
+        return;
+      }
+      if (verdict === "initiate") {
+        const { error } = await db.from("agent_jobs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          kind: "build",
+          status: "queued",
+          created_by: null,
+          instructions: `Bounced back by CEO and re-investigated as initiate: ${slug} — sound + in-scope; sequencing its build to completion. ${reasoning.slice(0, 300)}`,
+        });
+        if (error) {
+          await emitDepthCapEscalation(`Tried initiate on bounce-back; build enqueue failed: ${error.message}`);
+          await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → initiate enqueue failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await recordDirectorActivity(db, { workspaceId: job.workspace_id, directorFunction: "platform", actionKind: "escorted_init", specSlug: slug, reason: reasoning || `Bounce-back initiate — queued build.`, metadata: { bounce_job_id: job.id, autonomous: true } });
+        await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → initiate → queued build`.slice(-2000) });
+        return;
+      }
+      await emitDepthCapEscalation(reasoning || `Re-investigated on bounce-back and could not land an action — re-escalating.`);
+      await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → ${verdict || "no verdict"} → depth-cap escalation`.slice(-2000) });
+      return;
+    }
+
+    if (lane === "repair-dismissal") {
+      const signature = ctx.candidate_signature ?? (ctx.candidate_slug ?? "");
+      const repairJobId = ctx.candidate_job_id;
+      if (!signature || !repairJobId) {
+        await update(job.id, { status: "failed", error: "bounce-back: repair-dismissal lane requires candidate_signature + candidate_job_id" });
+        return;
+      }
+      // Re-load the repair job to make sure it's still open + carry its log_tail as Rafa's reasoning.
+      const { data: repairJob } = await db.from("agent_jobs").select("id, status, log_tail, workspace_id").eq("id", repairJobId).maybeSingle();
+      if (!repairJob || (repairJob as { status?: string }).status !== "needs_attention") {
+        await update(job.id, { status: "completed", log_tail: `repair-dismissal bounce-back ${signature} — job already decided, no-op`.slice(-2000) });
+        return;
+      }
+      const candidate = {
+        jobId: repairJobId,
+        signature,
+        title: signature,
+        rafaReasoning: String((repairJob as { log_tail?: string | null }).log_tail || "").slice(0, 4000),
+        createdAt: new Date(0).toISOString(),
+      } satisfies import("../src/lib/agents/platform-director").RepairDismissalCandidate;
+
+      const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.repairDismissalInvestigationPrompt(candidate));
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
+      const verdict = String(parsed.verdict || "");
+      const reasoning = String(parsed.reasoning || "").slice(0, 4000);
+
+      if (verdict === "author_followup_spec") {
+        const valid = lib.validateFollowupSpec("", "platform", parsed.followup);
+        if (!valid.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; invalid: ${valid.error}`);
+          await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → followup INVALID → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "repair-dismissal", { slug: null, signature, jobId: repairJobId }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup fix.`, followupCommit);
+        if (!auth.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
+          await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → followup commit failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → author_followup_spec → authored ${auth.authoredSlug}`.slice(-2000) });
+        return;
+      }
+      if (verdict === "dismiss") {
+        const r = await lib.applyDirectorDismissal(db, candidate, reasoning || `Bounced back by CEO — re-confirmed benign, cleared.`);
+        if (!r.ok) {
+          await emitDepthCapEscalation(`Tried dismiss on bounce-back; failed: ${r.error}`);
+          await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → dismiss failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → dismiss`.slice(-2000) });
+        return;
+      }
+      if (verdict === "keep") {
+        await recordDirectorActivity(db, { workspaceId: job.workspace_id, directorFunction: "platform", actionKind: "kept_repair", specSlug: null, reason: reasoning || `Bounce-back kept — left for the human.`, metadata: { dismiss_key: lib.dismissKey(signature), repair_job_id: repairJobId, signature, verdict: "keep", bounce_job_id: job.id, autonomous: true } });
+        await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → keep`.slice(-2000) });
+        return;
+      }
+      // verdict === 'escalate' / 'external' / unknown → depth-cap escalation.
+      await emitDepthCapEscalation(reasoning || `Re-investigated on bounce-back and could not land an action — re-escalating.`);
+      await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → ${verdict || "no verdict"} → depth-cap escalation`.slice(-2000) });
+      return;
+    }
+
+    if (lane === "approval") {
+      const targetId = ctx.candidate_job_id;
+      if (!targetId) {
+        await update(job.id, { status: "failed", error: "bounce-back: approval lane requires candidate_job_id" });
+        return;
+      }
+      const { data: target } = await db
+        .from("agent_jobs")
+        .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail, spec_branch")
+        .eq("id", targetId)
+        .maybeSingle();
+      if (!target || (target as { status?: string }).status !== "needs_approval") {
+        await update(job.id, { status: "completed", log_tail: `approval bounce-back ${targetId.slice(0, 8)} — target already decided, no-op`.slice(-2000) });
+        return;
+      }
+      const t = target as unknown as import("../src/lib/agents/platform-director").DirectorTargetJob;
+      const { actions: leashActions, verdict: leashVerdict } = lib.directorLeashCandidates(t);
+      if (leashVerdict === "none") {
+        await emitDepthCapEscalation(`Bounce-back: still outside the auto-approve leash (multi-choice / non-leash / destructive).`);
+        await update(job.id, { status: "completed", log_tail: `approval bounce-back ${targetId.slice(0, 8)} → outside leash → depth-cap escalation`.slice(-2000) });
+        return;
+      }
+      const brief = lib.buildDirectorBrief(t, leashActions);
+      const prompt = await directorDecisionPrompt(t.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.directorInvestigationPrompt(brief));
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
+      const verdict = String(parsed?.verdict || "");
+      const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
+
+      if (verdict === "auto-approve") {
+        const res = await lib.applyDirectorApproval(db, t, leashActions.map((a) => a.actionId), reasoning || `Bounce-back auto-approved within the leash.`);
+        if (!res.ok) {
+          await emitDepthCapEscalation(`Tried auto-approve on bounce-back; failed: ${res.error}`);
+          await update(job.id, { status: "completed", log_tail: `approval bounce-back ${targetId.slice(0, 8)} → approve failed → depth-cap escalation`.slice(-2000) });
+          return;
+        }
+        await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `Bounce-back auto-approved.`, metadata: { job_id: t.id, target_kind: t.kind, bounce_job_id: job.id, autonomous: true } });
+        await update(job.id, { status: "completed", log_tail: `approval bounce-back ${targetId.slice(0, 8)} → auto-approve`.slice(-2000) });
+        return;
+      }
+      // escalate / bounce / unknown — surface as depth-cap escalation.
+      await emitDepthCapEscalation(reasoning || `Re-investigated on bounce-back and could not auto-approve — re-escalating.`);
+      await update(job.id, { status: "completed", log_tail: `approval bounce-back ${targetId.slice(0, 8)} → ${verdict || "no verdict"} → depth-cap escalation`.slice(-2000) });
+      return;
+    }
+
+    await update(job.id, { status: "failed", error: `bounce-back: unknown lane "${lane}"` });
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
 
@@ -8900,6 +9334,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "db_health") return runDbHealthJob(job);
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
   if (job.kind === "platform-director") return runPlatformDirectorJob(job);
+  if (job.kind === "director-bounce-back") return runDirectorBounceBackJob(job);
   if (job.kind === "proposed-goal") return runProposedGoalJob(job);
   if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
   const slug = job.spec_slug;
@@ -9300,9 +9735,11 @@ async function main() {
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
-  const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director").length;
+  // platform-director shares its concurrency-1 lane with director-bounce-back so a bounce never
+  // races the standing pass on the same workspace (bounce-escalation-back-to-director).
+  const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "proposed-goal").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -9526,11 +9963,13 @@ async function main() {
       }
       // Fill the platform-director lane (platform-director-agent): investigate a Platform-routed Approval
       // Request read-only on Max → auto-approve within the leash (logging the decision), else escalate.
+      // bounce-escalation-back-to-director: `director-bounce-back` shares this concurrency-1 lane so a
+      // bounce re-investigation never races the standing pass.
       while (countPlatformDirector() < MAX_PLATFORM_DIRECTOR) {
-        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["platform-director"] });
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["platform-director", "director-bounce-back"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
-        console.log(`claimed platform-director ${job.id.slice(0, 8)} → ${countPlatformDirector() + 1}/${MAX_PLATFORM_DIRECTOR} platform-director lane`);
+        console.log(`claimed ${job.kind} ${job.id.slice(0, 8)} → ${countPlatformDirector() + 1}/${MAX_PLATFORM_DIRECTOR} platform-director lane`);
         launch(job);
       }
       // Fill the proposed-goal lane (director-proposed-goals): a director-proposed goal artifact + its CEO

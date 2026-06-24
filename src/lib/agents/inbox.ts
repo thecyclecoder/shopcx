@@ -128,6 +128,13 @@ export interface InboxItem {
   deepLink?: string | null;
   /** the org-chart function this request routed to (eyeball/audit; CEO by default). */
   routedTo?: string;
+  // ── bounce-escalation-back-to-director — only set on a director-escalation in the CEO inbox ──
+  /** the director (function slug) that escalated this card to the CEO inbox — drives "Send back to {Director}". */
+  escalatedBy?: string | null;
+  /** the originating judgment lane (groom / init / repair-dismissal / approval) — null when not bounceable. */
+  bounceLane?: "groom" | "init" | "repair-dismissal" | "approval" | null;
+  /** the round-trip counter stamped by the worker on a re-escalation card. ≥1 hides Send-back (cap=1). */
+  bouncedBackDepth?: number;
 }
 
 export interface InboxPayload {

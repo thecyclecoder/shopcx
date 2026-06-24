@@ -21,6 +21,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { AGENT_INBOX_TYPES, APPROVAL_REQUEST_TYPE, tabForType, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
 import { loadAutonomyMap, isAutoApprover, CEO } from "@/lib/agents/approval-router";
 import { inlineApproveActions, type ApprovalJobRow } from "@/lib/agents/approval-inbox";
+import { laneForBounceBack } from "@/lib/agents/director-bounce-back";
 
 export const dynamic = "force-dynamic";
 
@@ -103,6 +104,11 @@ export async function GET(req: Request) {
       const approveActionId = typeof meta["approve_action_id"] === "string" ? (meta["approve_action_id"] as string) : null;
       const jobId = typeof meta["agent_job_id"] === "string" ? (meta["agent_job_id"] as string) : undefined;
       const actions = (jobId && jobActions.get(jobId)) || undefined;
+      // bounce-escalation-back-to-director — surface the metadata the CEO inbox needs to render
+      // "Send back to {Director}" next to Dismiss on a director-escalation card.
+      const escalatedBy = typeof meta["escalated_by_director"] === "string" ? (meta["escalated_by_director"] as string) : null;
+      const bounceLane = laneForBounceBack(meta);
+      const bouncedBackDepth = typeof meta["bounced_back_depth"] === "number" ? (meta["bounced_back_depth"] as number) : 0;
       return [
         {
           id: r.id as string,
@@ -118,6 +124,9 @@ export async function GET(req: Request) {
           actions: actions ?? undefined,
           deepLink: typeof meta["deep_link"] === "string" ? (meta["deep_link"] as string) : (r.link as string | null) ?? null,
           routedTo,
+          escalatedBy,
+          bounceLane,
+          bouncedBackDepth,
         },
       ];
     }

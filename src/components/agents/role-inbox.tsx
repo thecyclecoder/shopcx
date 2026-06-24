@@ -715,6 +715,15 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
   const [busy, setBusy] = useState<string | null>(null); // `${actionId}:${decision}`
   const [error, setError] = useState<string | null>(null);
   const [dismissing, setDismissing] = useState(false);
+  // bounce-escalation-back-to-director — Send back to {Director} composer state.
+  const [bouncing, setBouncing] = useState(false);
+  const [bounceOpen, setBounceOpen] = useState(false);
+  const [bounceNote, setBounceNote] = useState("");
+  // Show "Send back to {Director}" when (a) a director escalated this card, (b) we know the lane to
+  // re-invoke, and (c) the bounce-back depth cap (one round-trip) hasn't been hit. Genuine CEO-only
+  // escalations (no escalated_by_director) get Dismiss only.
+  const canBounce = Boolean(item.escalatedBy && item.bounceLane && (item.bouncedBackDepth ?? 0) < 1);
+  const directorName = item.escalatedBy ? item.escalatedBy.charAt(0).toUpperCase() + item.escalatedBy.slice(1) : "Director";
 
   // Clear the item without deciding here — for a standalone escalation (no job to auto-reap) or one the
   // CEO already decided on the full surface. Hides it from the inbox; the underlying job is untouched.
@@ -735,6 +744,26 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed");
       setDismissing(false);
+    }
+  };
+
+  const confirmBounce = async () => {
+    setBouncing(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/developer/agents/inbox/bounce-back", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notificationId: item.id, note: bounceNote.trim() || undefined }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      onActed();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed");
+      setBouncing(false);
     }
   };
 
@@ -823,8 +852,44 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
             </div>
           </div>
         ))}
-      {/* Footer: deep-link to the full surface (multi-choice / standalone) on the left, Dismiss on the right.
-          Dismiss is always available — clear an escalation you've already decided, or a standalone "your call". */}
+      {/* bounce-escalation-back-to-director — inline composer for the Send-back note (CEO's one-liner). */}
+      {bounceOpen && canBounce && (
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/60 p-2 dark:border-amber-900/40 dark:bg-amber-950/20">
+          <p className="text-[11px] text-amber-800 dark:text-amber-200">
+            Sending this back to <span className="font-medium">{directorName}</span> with the richer judgment-lanes verdict
+            surface (fold_now / author_followup_spec / dismiss_candidate, plus the lane&apos;s native ones). One round-trip
+            only — if it still can&apos;t land, it comes back with both diagnoses.
+          </p>
+          <textarea
+            value={bounceNote}
+            onChange={(e) => setBounceNote(e.target.value.slice(0, 500))}
+            placeholder="Optional one-line note for the director (e.g. &quot;your fold_now read looks right — go ahead&quot;)"
+            rows={2}
+            className="mt-1.5 w-full resize-none rounded-md border border-amber-300 bg-white px-2 py-1 text-[12px] text-zinc-700 placeholder:text-zinc-400 focus:border-amber-500 focus:outline-none dark:border-amber-800 dark:bg-zinc-900 dark:text-zinc-200"
+          />
+          <div className="mt-1.5 flex items-center gap-2">
+            <button
+              onClick={confirmBounce}
+              disabled={bouncing}
+              className="rounded-md bg-amber-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+            >
+              {bouncing ? "Sending…" : "Confirm send-back"}
+            </button>
+            <button
+              onClick={() => {
+                setBounceOpen(false);
+                setBounceNote("");
+              }}
+              disabled={bouncing}
+              className="text-[11px] text-zinc-500 hover:text-zinc-800 disabled:opacity-50 dark:text-zinc-400 dark:hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Footer: deep-link to the full surface (multi-choice / standalone) on the left; Send back +
+          Dismiss on the right. Send-back is only shown for a director-escalation card under the depth cap. */}
       <div className="mt-2 flex items-center justify-between gap-2">
         {item.deepLink && !canDecideInline ? (
           <Link
@@ -836,14 +901,26 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
         ) : (
           <span />
         )}
-        <button
-          onClick={dismiss}
-          disabled={dismissing || busy !== null}
-          className="shrink-0 text-[11px] text-zinc-400 hover:text-zinc-700 disabled:opacity-50 dark:hover:text-zinc-200"
-          title="Clear this from your inbox (the underlying job is untouched)"
-        >
-          {dismissing ? "Dismissing…" : "Dismiss"}
-        </button>
+        <span className="flex shrink-0 items-center gap-3">
+          {canBounce && !bounceOpen && (
+            <button
+              onClick={() => setBounceOpen(true)}
+              disabled={dismissing || bouncing || busy !== null}
+              className="text-[11px] font-medium text-amber-600 hover:text-amber-700 disabled:opacity-50 dark:text-amber-400"
+              title={`Send back to ${directorName} to re-investigate with the richer verdict surface`}
+            >
+              Send back to {directorName}
+            </button>
+          )}
+          <button
+            onClick={dismiss}
+            disabled={dismissing || bouncing || busy !== null}
+            className="text-[11px] text-zinc-400 hover:text-zinc-700 disabled:opacity-50 dark:hover:text-zinc-200"
+            title="Clear this from your inbox (the underlying job is untouched)"
+          >
+            {dismissing ? "Dismissing…" : "Dismiss"}
+          </button>
+        </span>
       </div>
       {error && <p className="mt-1 text-[11px] text-rose-500">{error}</p>}
     </li>
