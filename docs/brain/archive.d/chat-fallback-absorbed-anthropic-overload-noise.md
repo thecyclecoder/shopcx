@@ -1,0 +1,1 @@
+- **Don't open a Control Tower incident when the chat Haiku fallback absorbs a Sonnet overload** · verified 2026-06-24 · → [[lifecycles/cancel-flow]]
