@@ -53,6 +53,7 @@ So CEO mode **runs the company AND emits the specs to build the tools it needs t
 
 _Planner fills/refines this (Plan → propose tree → approve branches). Current target shape:_
 
+- **M-CTO — Platform/Engineering director (the CTO seat). ✅ DONE.** The autonomous build-platform director — **Ada** — shipped via the [[devops-director]] goal: **live + autonomous**, grades + coaches her agents ([[../specs/worker-grading-and-director-management]]), escorts goals + in-flight + authored-fix specs, leash-gated **multi-action** auto-approval, and a CEO↔director **coaching chat**. The *first* director live and the build engine every other director ships through — so it's foundational and was built first (out-of-band via its own goal). The remaining (business) directors below are still ⏳.
 - **M0 — CEO constitution + report contract.** The decision doc + the director output schema. Cheap, foundational, first. ⏳
 - **M1 — Metrics spine + COGS.** Unified store the analysts read instead of 8 live APIs; COGS/landed-cost so margin is computable (CFO + Logistics depend on it). ⏳
 - **M2 — Growth Director (first director prototype).** Ads + landing-page CRO over Meta + Google (data we have) → ROAS/CAC moves, measurable week-over-week. Proves the director→CEO contract. ⏳
@@ -75,4 +76,4 @@ Grounding so the planner starts from truth (it should verify + extend):
 
 ## Status
 
-Planned — awaiting first plan pass. Rollup computes from linked specs once the [[../specs/goal-decomposition-engine|engine]] ships and the tree is approved. First director to build: **Growth**.
+In progress. **The Platform/Engineering director (CTO, Ada) is LIVE** (M-CTO ✅, shipped via the [[devops-director]] goal) — the first director and the build engine the rest ship through. The **business** directors are still planned; first business director to build: **Growth** (M2). Rollup computes from linked specs once the [[../specs/goal-decomposition-engine|engine]] ships and the tree is approved.
