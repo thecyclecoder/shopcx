@@ -1,10 +1,12 @@
-# PDP Refinement Pass (repeatable per-product polish) ⏳
+# PDP Refinement Pass (repeatable per-product polish) ✅
 
 **Owner:** [[../functions/cmo]] · **Parent:** CMO mandate — owned product/website content (extends [[box-product-seeding]]; runs on the same box/Max substrate). Derived from the Superfood Tabs refinement session (2026-06-20) — codified so it runs on **every** product without re-specifying.
 
 A **repeatable refinement pass** the box runs on an already-published PDP to bring it to the "looks fantastic" bar we hand-tuned on Superfood Tabs. The founder should **never re-type these fixes per product** — this spec is the workflow; running it per product is the fan-out. It splits into **(A) one-time global code/pipeline upgrades** (build once, every product benefits) and **(B) a per-product pass** the box executes (mostly auto-harvested from each product's own live Shopify PDP + Drive + reviews), plus **(C) per-product creative** the pass proposes for one-tap approval.
 
 **Outcome:** run the pass on any product → its PDP gets individual trust pills, a centered timeline, full-corpus review analysis, per-variant Supplement Facts (HTML, AI- + KB-readable), real harvested nutritionist endorsements (photos re-hosted), up to 2 before/after stories (photos re-hosted), a 4-slide hero gallery (bag + Drive lifestyle + Nano-Banana static-ad + facts), and a punchier headline — identical quality to Tabs, zero re-typing.
+
+> **Fan-out deferred:** running the pass on the remaining products (Creamer, Guru, Zen, Creatine, K-Cups, Amazing Coffee) is split out to [[pdp-refinement-pass-fan-out]] — operational application of this now-shipped workflow, founder-verification-gated, no deadline.
 
 ## A. Global upgrades (build once — code / skill / pipeline)
 Each benefits every product; ship in one build (PR), then the per-product pass applies the data.
@@ -64,7 +66,7 @@ The concrete B + C inputs captured 2026-06-20.
 - Ticket/Improve: ask a nutrition question (e.g. "how much sodium is in Peach Mango Tabs?") → the orchestrator calls `get_product_nutrition`; with no populated `supplement_facts` it returns the "no facts on file — don't guess" message (nothing fabricated). After facts are populated + a republish, the KB article contains a "## Supplement Facts (per variant)" section and the tool quotes the exact number.
 - `npx tsc --noEmit` → clean.
 
-### Per-product pass (prod-facing, P2/P3)
+### Per-product pass (prod-facing, P2 — Tabs)
 - Run the pass on a product → trust pills are individual; timeline centered on desktop; review filter counts are realistic (hundreds, not single digits); each variant has a Supplement Facts panel (HTML) + the AI can quote it on a ticket + it's in the KB; endorsements show real people with **Supabase-hosted** photos; up to 2 before/after stories render with re-hosted photos; hero gallery = 4 slides; headline reads punchy. API console flat (Max).
 - Negative: no fabricated endorsements/avatars remain; no Shopify-CDN hotlinks in `product_media`; no nutrition panel ships without verification.
 
@@ -72,7 +74,8 @@ The concrete B + C inputs captured 2026-06-20.
 - ✅ **P1 — global build:** section A landed, tsc-clean. Migrations applied (`20260620130000_before_after_stories.sql`, `20260620140000_split_trust_pills.sql` via `scripts/apply-pdp-refinement-migrations.ts`).
   - **Built:** `WhatToExpectTimeline` centering (cols = min(steps,5)) · `UGCSection`/`BeforeAfterPair` + `before_after_stories` 2-story model (legacy `before`/`after` still works) · `HeroSection` `ResearchCredibility` "N superfoods" badge excludes caffeine-style duplicates · `seed-tools.saveTrustPills` (individual pills) + skill guidance + one-time split migration · `seed-tools.getReviews` range-pagination (no 1000 cap) · `get_product_nutrition` orchestrator tool (improve delegates) + per-variant Supplement-Facts KB mirror in `publishProductContent` · PDP harvest (`getPdpImages` + `rehostImage` — re-host, never hotlink) · gallery slides (`resolveLifestyleSlide` Drive UGC + `generateStaticAdSlide` Nano-Banana w/ caption overlays) + `save-media` displayOrder for gallery rows. All wired into `scripts/seed-product-tools.ts` + the `seed-product` skill.
 - ✅ **P2 — Tabs run:** execute the pass on Superfood Tabs with its C specifics; verify live. **Trigger built:** `npx tsx scripts/queue-product-refinement.ts` (defaults to Superfood Tabs) enqueues the `product-seed` job in `refinement` mode (no UI/CLI path produced one before — the seed API route carries no `mode`). The box then runs the pass on Max, reading the founder-LOCKED Run-#1 inputs above. **Awaiting:** the prod-mutating box run + live verification (prod creds required).
-- ⏳ **P3 — fan-out:** run the pass on Creamer, Guru, Zen, Creatine, K-Cups, Amazing Coffee (each harvests its own PDP/Drive/reviews).
+
+> **Fan-out (P3) split out → [[pdp-refinement-pass-fan-out]]:** run the pass on Creamer, Guru, Zen, Creatine, K-Cups, Amazing Coffee — operational application of this shipped workflow, founder-verification-gated.
 
 ## Brain updates (same PR set)
 [[box-product-seeding]] (folds in this pass as the refinement mode) · [[../lifecycles/product-intelligence]] · [[../tables/product_media]] (before_2/after_2, endorsement slots, gallery) · [[../tables/sonnet_prompts]]/[[../orchestrator-tools]] (nutrition tool) · [[../lifecycles/help-center]] (KB nutrition mirror) · the seed-product skill page. On ship, fold into those + delete.
