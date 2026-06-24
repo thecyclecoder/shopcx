@@ -1,0 +1,1 @@
+- **Groom-continue: a merged phase advances the next phase, not a cooldown** · verified 2026-06-24 · → [[libraries/platform-director]]
