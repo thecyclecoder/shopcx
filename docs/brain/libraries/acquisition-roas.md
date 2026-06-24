@@ -47,7 +47,9 @@ async function computeAcqROAS(params: {
 
 ## Callers
 
-- (Phase 4 consumer) the CEO-mode Growth **report contract** — wires `computeAcqROAS` per product line.
+- [[growth-report-contract]] `buildGrowthReportContract` — the CEO-mode Growth **report contract** wires
+  `computeAcqROAS` per product line into the director [[director-report-contract]] (the Phase 4 consumer,
+  now shipped).
 
 ## Gotchas
 
