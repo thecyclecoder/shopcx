@@ -1,4 +1,4 @@
-# Atomic per-minute throttle for feed:<source> liveness beats (kill the Vercel-drain write storm) ⏳
+# Atomic per-minute throttle for feed:<source> liveness beats (kill the Vercel-drain write storm) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/control-tower/error-feed.ts (recordfeeddelivery) + a supabase/migrations/*.sql adding a unique partial index on loop_heartbeats(loop_id, date_trunc(minute, ran_at)) where kind=feed, with the insert switched to on conflict do nothing::real-bug`
@@ -15,10 +15,20 @@ recordFeedDelivery() (src/lib/control-tower/error-feed.ts:268) guards feed beats
 
 **Likely target:** `src/lib/control-tower/error-feed.ts (recordFeedDelivery) + a supabase/migrations/*.sql adding a UNIQUE partial index on loop_heartbeats(loop_id, date_trunc('minute', ran_at)) where kind='feed', with the insert switched to ON CONFLICT DO NOTHING`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
+**Shipped:**
+- `supabase/migrations/20260706130000_feed_beat_atomic_throttle.sql` — dedups existing same-minute `feed` beats, then creates the UNIQUE partial index `loop_heartbeats_feed_minute_uidx on (loop_id, (date_trunc('minute', ran_at at time zone 'UTC'))) where kind='feed'`, plus the `record_feed_beat(p_loop_id text)` RPC (`INSERT … ON CONFLICT DO NOTHING`). Index expression uses `AT TIME ZONE 'UTC'` so `date_trunc` is IMMUTABLE (indexable); the RPC's `ON CONFLICT` target matches it exactly so the index is the inferred arbiter. Apply: `scripts/apply-feed-beat-throttle-migration.ts`.
+- `src/lib/control-tower/error-feed.ts` (`recordFeedDelivery`) — dropped the non-atomic `SELECT`-recency-then-`INSERT` guard; now marks the in-memory fast-path map *before* the call and inserts via `admin.rpc("record_feed_beat", …)`. Same-minute racers across cold instances collapse to one row at the DB.
+- Brain pages updated: [[../tables/loop_heartbeats]] (gotcha + Migration), [[../libraries/control-tower]] (`recordFeedDelivery` entry).
+
+> **Gated:** the migration must be applied to prod by the owner — `npx tsx scripts/apply-feed-beat-throttle-migration.ts` (the apply-script self-smoke-tests that 2 same-minute calls → 1 row).
+
 ## Verification
-- Re-trigger the originating condition (signature `supabase-logs:6f16957ed72e1f38`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- After applying the migration, run `npx tsx scripts/apply-feed-beat-throttle-migration.ts` → expect `✓ applied …` and `✓ record_feed_beat: 2 same-minute calls → 1 row (atomic ON CONFLICT DO NOTHING)`.
+- In the DB, confirm the index exists: `select indexname from pg_indexes where tablename='loop_heartbeats' and indexname='loop_heartbeats_feed_minute_uidx'` → expect one row.
+- Probe the live feed volume after deploy: `select date_trunc('hour', ran_at) h, count(*) from loop_heartbeats where loop_id='feed:vercel' group by 1 order by 1 desc limit 3` → expect ≤60 beats/hour (was 15,508/hr at the storm), and at most one row per `date_trunc('minute', ran_at at time zone 'UTC')`.
+- On the [[../dashboard/control-tower]] error panels, the `vercel` / `supabase-logs` / `client` tiles stay **green "connected"** through a drain burst — and no new `error_events` row / `loop_alert` opens for signature `supabase-logs:6f16957ed72e1f38` (no `POST /rest/v1/loop_heartbeats` 500s).
 
 > Authored by the box Repair Agent from Control Tower signature `supabase-logs:6f16957ed72e1f38` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.
