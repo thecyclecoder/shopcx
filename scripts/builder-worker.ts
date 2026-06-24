@@ -8729,6 +8729,7 @@ async function dispatchJob(job: Job) {
       ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
       : [
           `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
+          `⭐ PRE-FLIGHT STATE CHECK (mandate — do this FIRST, before writing any code or running any build tool): inspect the actual REPO STATE (git log, grep, file contents, existing migrations, open PRs) and determine, per phase, what is ALREADY BUILT on main. Mark satisfied phases DONE and SKIP them — build ONLY the unbuilt delta. If EVERY phase is already on main, make NO edits and return {"status":"completed","no_changes_reason":"already built — <which phases/files are on main>"} (the worker reconciles the board status from that). Judge "built" by the CODE ON MAIN — NOT by any ⏳/✅ in the markdown: spec status is DB-driven now, the .md carries no status. Never rebuild work that's already shipped.`,
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
           `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}. If you make NO file edits (nothing to build / already implemented), still return {"status":"completed","summary":"…","no_changes_reason":"why nothing changed"} — never claim done with no changes and no reason.`,
@@ -8870,15 +8871,32 @@ async function dispatchJob(job: Job) {
         }
         await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR" });
       } else {
-        // No PR AND no changes → the build made zero edits and there's nothing to merge. Don't let it
-        // masquerade as `completed` with no PR (3 such builds slipped through silently): surface
-        // needs_attention carrying the agent's reason so the card shows a Retry. (fix-report-issue-dropped Phase 3)
+        // No PR AND no changes → Bo made zero edits ("already built / nothing to build"). His pre-flight
+        // state-check (his mandate) found the phase's code already on main. spec-status-db-driven: that's
+        // exactly the evidence reconcileSpecDrift needs, so RECONCILE THE DB from his finding — the worker
+        // holds the creds (Bo is sandboxed), flips the already-shipped phases in spec_card_state, and the
+        // spec advances on the board with no PR/deploy. Only if the code genuinely ISN'T on main (nothing
+        // reconciles) is it a real problem → needs_attention with his reason (fix-report-issue-dropped P3).
         const noChangeReason =
           (typeof parsed?.no_changes_reason === "string" && parsed.no_changes_reason.trim()) ||
           (typeof parsed?.summary === "string" && parsed.summary.trim()) ||
           "build finished with no file changes — nothing committed and no PR";
-        await update(job.id, { status: "needs_attention", error: noChangeReason, log_tail: logTail });
-        console.error(`${tag} no changes + no PR → needs_attention: ${noChangeReason}`);
+        let reconciled = false;
+        try {
+          const { reconcileSpecDrift } = await import("../src/lib/spec-drift");
+          const r = await reconcileSpecDrift(job.workspace_id, slug);
+          if (r.flipped.length || r.status === "shipped" || r.status === "in_progress") {
+            reconciled = true;
+            await update(job.id, { status: "completed", log_tail: `already built — Bo found no delta; DB reconciled to ${r.status}${r.flipped.length ? ` (flipped ${r.flipped.map((f) => "P" + (f.index + 1)).join(",")})` : ""}. ${noChangeReason}`.slice(-2000) });
+            console.log(`${tag} no changes → already built; DB reconciled → ${r.status}`);
+          }
+        } catch (e) {
+          console.error(`${tag} no-change DB reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+        }
+        if (!reconciled) {
+          await update(job.id, { status: "needs_attention", error: noChangeReason, log_tail: logTail });
+          console.error(`${tag} no changes + code NOT on main → needs_attention: ${noChangeReason}`);
+        }
       }
       return;
     }
