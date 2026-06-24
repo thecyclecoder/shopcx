@@ -141,6 +141,52 @@ export function platformDrivesSpec(owner: string | null | undefined, chart: OrgC
   return specDriver(owner, chart, autonomy) === PLATFORM;
 }
 
+/**
+ * The director's AUTHORITATIVE live-state, rendered as a prompt block — sourced from `public.function_autonomy`
+ * (the SAME DB row the lanes' runtime guards gate on), NOT brain prose (brain-platform-live-autonomous-status
+ * Phase 2 — the recurrence guard). Every read-only `claude -p` investigation (approval / groom / init /
+ * repair-dismissal) carries this so a decision is premised on the LIVE flag, never on a stale 'not yet live /
+ * dormant / inert' line that a brain page or spec may still narrate. Includes the dated provenance
+ * (`updated_at` / `updated_by`) so the fact is self-evidently DB-keyed. Best-effort + fail-safe: a missing row
+ * or read error renders 'UNKNOWN — treat as NOT live+autonomous'.
+ */
+export async function directorLiveStateFact(admin: Admin, directorFunction: string = PLATFORM): Promise<string> {
+  let live = false;
+  let autonomous = false;
+  let updatedAt: string | null = null;
+  let updatedBy: string | null = null;
+  let read = false;
+  try {
+    const { data, error } = await admin
+      .from("function_autonomy")
+      .select("live, autonomous, updated_at, updated_by")
+      .eq("function_slug", directorFunction)
+      .maybeSingle();
+    if (!error && data) {
+      live = !!data.live;
+      autonomous = !!data.autonomous;
+      updatedAt = (data.updated_at as string | null) ?? null;
+      updatedBy = (data.updated_by as string | null) ?? null;
+      read = true;
+    }
+  } catch {
+    // best-effort — fall through to the fail-safe 'unknown' state below.
+  }
+  const provenance = updatedAt ? ` (set ${updatedAt}${updatedBy ? ` by ${updatedBy}` : ""})` : "";
+  const state = !read
+    ? "UNKNOWN — could not read function_autonomy; treat yourself as NOT live+autonomous (fail-safe)"
+    : live && autonomous
+      ? `LIVE + AUTONOMOUS${provenance}`
+      : `NOT live+autonomous (live=${live}, autonomous=${autonomous})${provenance} — dormant`;
+  return [
+    "## Your authoritative live-state (from function_autonomy — the runtime guard, NOT brain prose)",
+    `The ${directorFunction} director is ${state}.`,
+    "This DB row is the SINGLE source of truth for whether you are running autonomously. Decide on THIS fact —",
+    "do NOT infer your activation state from any brain page or spec prose (which may lag and say 'dormant',",
+    "'not yet live', or 'inert'); if such prose conflicts with this line, this line wins.",
+  ].join("\n");
+}
+
 /** One in-leash pending action the director may consider — its id + the leash class it falls into. */
 export interface LeashAction {
   actionId: string;
@@ -906,7 +952,11 @@ function reconcileDeepLink(specSlug: string | null, meta: Record<string, unknown
 
 /** A human title for a reconciled escalation, reconstructed per escalation_kind (the original wasn't stored). */
 function reconcileTitle(escalationKind: string, specSlug: string | null, meta: Record<string, unknown>): string {
-  const target = specSlug ?? (typeof meta["goal_slug"] === "string" ? (meta["goal_slug"] as string) : "") ?? "";
+  const target =
+    specSlug ??
+    (typeof meta["goal_slug"] === "string" ? (meta["goal_slug"] as string) : null) ??
+    (typeof meta["signature"] === "string" ? (meta["signature"] as string) : "") ??
+    "";
   switch (escalationKind) {
     case "loop_guard":
       return `Build stuck: ${target}`;
@@ -917,6 +967,8 @@ function reconcileTitle(escalationKind: string, specSlug: string | null, meta: R
       return `Initiation needs a call: ${target}`;
     case "new_goal":
       return `Greenlight needed: ${target}`;
+    case "external_blocker":
+      return `External blocker — your call: ${target}`;
     default:
       return target ? `Escalation needs your call: ${target}` : "Escalation needs your call";
   }
@@ -1738,6 +1790,16 @@ export function dismissKey(signature: string): string {
   return `dismiss:${signature}`;
 }
 
+/**
+ * The stable dedup key for the EXTERNAL-BLOCKER CEO escalation of one signature — `external:{signature}`
+ * (director-zero-backlog-error-autonomy Phase 2). Distinct from `dismiss:{signature}` (a suspected-real-bug
+ * contrary diagnosis) so the two CEO touches never collide on one notification: an external break is a
+ * BUSINESS call (wait/swap/degrade), not a code defect. Deduped per signature so the CEO pings once.
+ */
+export function externalBlockerKey(signature: string): string {
+  return `external:${signature}`;
+}
+
 /** One of Rafa's open no-fix items the director may review — its job, signature, and his logged reasoning. */
 export interface RepairDismissalCandidate {
   jobId: string;
@@ -1754,6 +1816,8 @@ export interface RepairDismissalCandidate {
 export interface RepairDismissalVerdict {
   verdict?: string;
   reasoning?: string;
+  /** For the `external` verdict (Phase 2): 2–3 concrete alternative options the CEO can choose (wait/retry, swap provider, degrade gracefully). */
+  alternatives?: string[];
 }
 
 /**
@@ -1810,18 +1874,23 @@ export function repairDismissalInvestigationPrompt(c: RepairDismissalCandidate):
     "REAL bug benign. So adversarially RE-CHECK his no-fix call: independently re-derive the root cause and decide.",
     "",
     "DEFAULT TO NOT DISMISSING. Emit `dismiss` ONLY if you can INDEPENDENTLY confirm the error is genuinely",
-    "transient (a flake / one-off / already-recovered), foreign (a third-party app or external dependency, not OUR",
-    "code), or otherwise benign — AND is NOT a masked real bug. If you cannot confirm that, do NOT dismiss.",
+    "transient (a flake / one-off / already-recovered), foreign (a third-party app's OWN noise that does not break",
+    "OUR functionality), or otherwise benign — AND is NOT a masked real bug. If you cannot confirm that, do NOT dismiss.",
     "",
-    "1. DISMISS — you independently confirmed it is genuinely transient / foreign-app / benign (not a masked real",
-    "   bug). → I clear the warning via the existing Dismiss path (resolve the error + complete the item). This is",
-    "   low-risk + reversible: a dismissed item un-blocks re-enqueue, so if it really was real it re-fires and Rafa",
-    "   re-triages it.",
+    "1. DISMISS — you independently confirmed it is genuinely transient / foreign-app-noise / benign (not a masked",
+    "   real bug, NOT an external dependency WE rely on breaking). → I clear the warning via the existing Dismiss path",
+    "   (resolve the error + complete the item). This is low-risk + reversible: a dismissed item un-blocks re-enqueue,",
+    "   so if it really was real it re-fires and Rafa re-triages it.",
     "2. ESCALATE — you SUSPECT Rafa mislabeled a REAL bug as benign (your independent root-cause says it's a genuine",
-    "   defect in OUR code). → I do NOT dismiss; I escalate to the CEO with your contrary diagnosis.",
-    "3. KEEP — it is a genuine needs-human call you can neither confirm benign NOR confidently call a real bug. → I",
-    "   leave it on the Control Tower untouched for the human to decide. Prefer this over a wrong dismiss (north-star:",
-    "   hit a rail → escalate, never execute).",
+    "   defect in OUR code that we can fix). → I do NOT dismiss; I escalate to the CEO with your contrary diagnosis.",
+    "3. EXTERNAL — your verified root cause is OUTSIDE our system: a third-party API contract change, a vendor outage",
+    "   BEYOND our retry/breaker, or a credential/permission change on THEIR side. It is NOT fixable in our code — it",
+    "   needs a BUSINESS call. → I do NOT author a code fix; I escalate it to the CEO with your diagnosis + 2–3 concrete",
+    "   ALTERNATIVE options (e.g. wait/retry the vendor, swap to another provider, degrade that path gracefully). This",
+    "   is the ONLY routine error escalation that reaches the CEO — everything internally-fixable I handle without them.",
+    "4. KEEP — it is a genuine needs-human call you can neither confirm benign, NOR confidently call a real bug in OUR",
+    "   code, NOR confirm is an external break. → I leave it on the Control Tower untouched for the human to decide.",
+    "   Prefer this over a wrong dismiss (north-star: hit a rail → escalate, never execute).",
     "",
     `Error signature: ${c.signature}`,
     `Label: ${c.title}`,
@@ -1837,9 +1906,10 @@ export function repairDismissalInvestigationPrompt(c: RepairDismissalCandidate):
     "OWN independent diagnosis, not a restatement of Rafa's.",
     "",
     "Final message = ONLY one JSON object (no markdown):",
-    '{"verdict":"dismiss","reasoning":"<your INDEPENDENT confirmation it is genuinely transient/foreign/benign and not a masked real bug>"}',
-    '{"verdict":"escalate","reasoning":"<your contrary diagnosis — why this looks like a real bug Rafa mislabeled benign>"}',
-    '{"verdict":"keep","reasoning":"<why this is a genuine needs-human call you can neither confirm benign nor call a real bug>"}',
+    '{"verdict":"dismiss","reasoning":"<your INDEPENDENT confirmation it is genuinely transient/foreign-noise/benign and not a masked real bug>"}',
+    '{"verdict":"escalate","reasoning":"<your contrary diagnosis — why this looks like a real bug in OUR code Rafa mislabeled benign>"}',
+    '{"verdict":"external","reasoning":"<your verified diagnosis that the root cause is an external dependency break, not OUR code>","alternatives":["wait/retry …","swap provider …","degrade gracefully …"]}',
+    '{"verdict":"keep","reasoning":"<why this is a genuine needs-human call you can neither confirm benign, call a real bug, nor confirm external>"}',
   ]
     .filter(Boolean)
     .join("\n");
