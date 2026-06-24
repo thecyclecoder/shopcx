@@ -1765,6 +1765,16 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing init failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // director-supervised-repair-dismissal (Phase 1) — SUPERVISE + clear Rafa's no-fix Control Tower items:
+    // adversarially re-check each `needs-human` repair item and dismiss ONLY what she independently confirms
+    // benign; a suspected masked real bug escalates to the CEO, a genuine needs-human call is left for the human.
+    const supervise = await superviseRepairDismissals(job, tag);
+    notes.push(supervise);
+  } catch (e) {
+    notes.push(`repair-supervise failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing repair-supervise failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const groom = await groomBoard(job, tag);
     notes.push(groom);
   } catch (e) {
@@ -2067,6 +2077,104 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
   if (initiated) parts.push(`initiated ${initiated}`);
   if (escalated) parts.push(`escalated ${escalated}`);
   return `init: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
+}
+
+// director-supervised-repair-dismissal (Phase 1): SUPERVISE + clear Rafa's no-fix Control Tower items. For each
+// of Rafa's open `needs-human` repair items (a `needs_attention` job, surfaced Dismiss-only) it runs a read-only
+// Max investigation that adversarially RE-CHECKS his no-fix call and decides:
+//   - dismiss  → independently confirmed transient/foreign/benign → clear it via the EXISTING owner Dismiss path
+//                (resolve the error_events row + complete the job) + a `dismissed_repair` activity row (Ada's OWN reasoning).
+//   - escalate → suspects Rafa mislabeled a REAL bug → do NOT dismiss; escalate the contrary diagnosis to the CEO.
+//   - keep     → a genuine needs-human call → leave it on the Control Tower untouched for the human; record the review.
+// DEFAULT is not-dismissing; unsure ⇒ escalate, never dismiss (north-star: hit a rail → escalate). Idempotent via
+// the repair_job_id ledger (each item reviewed once; a re-fire is a new job → fresh review). No-op unless Platform
+// is live+autonomous (findRepairDismissalCandidates returns []). Bounded per pass (PLATFORM_DIRECTOR_DISMISS_CAP).
+// Best-effort per item. Returns a one-line summary for the standing-pass log.
+async function superviseRepairDismissals(job: Job, tag: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  const candidates = await lib.findRepairDismissalCandidates(db);
+  if (!candidates.length) return "repair-supervise: nothing to review";
+
+  let dismissed = 0;
+  let escalated = 0;
+  let kept = 0;
+  for (const c of candidates) {
+    try {
+      // P7: inject the CEO's coaching into her supervision decision too (same as grooming/initiation/approval).
+      const di = await import("../src/lib/agents/director-instructions");
+      const investPrompt = await di.appendDirectorInstructions(db, job.workspace_id, "platform", lib.repairDismissalInvestigationPrompt(c));
+      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
+      const verdict = String(parsed.verdict || "");
+      const reasoning = String(parsed.reasoning || "").slice(0, 4000);
+
+      // ── DISMISS — independently confirmed benign → clear it via the existing owner Dismiss path. ──
+      if (verdict === "dismiss") {
+        const r = await lib.applyDirectorDismissal(db, c, reasoning || `Independently confirmed ${c.signature} is genuinely transient/foreign/benign, not a masked real bug — cleared the warning.`);
+        if (r.ok) {
+          dismissed++;
+          console.log(`${tag} repair-supervise ${c.signature} → dismiss → cleared via owner Dismiss path`);
+        } else {
+          console.warn(`${tag} repair-supervise ${c.signature} → dismiss failed: ${r.error}`);
+        }
+        continue;
+      }
+
+      // ── ESCALATE — suspects a real bug Rafa mislabeled benign → do NOT dismiss; escalate the contrary diagnosis. ──
+      if (verdict === "escalate") {
+        const diagnosis = reasoning || `Rafa cleared ${c.signature} as needs-human/benign, but my independent root-cause read suspects a REAL bug mislabeled benign. I did NOT dismiss it — please take a look.`;
+        const r = await lib.escalateDiagnosisToCeo(db, {
+          workspaceId: job.workspace_id,
+          specSlug: null,
+          title: `Possible real bug cleared as benign: ${c.signature}`,
+          diagnosis,
+          dedupeKey: lib.dismissKey(c.signature),
+          deepLink: "/dashboard/developer/control-tower",
+          escalationKind: "repair_dismissal_suspect",
+          metadata: { repair_job_id: c.jobId, signature: c.signature, verdict: "escalate" },
+        });
+        if (r.emitted) {
+          escalated++;
+          console.log(`${tag} repair-supervise ${c.signature} → escalate → surfaced contrary diagnosis to CEO`);
+        } else {
+          if (r.error) console.error(`${tag} repair-supervise ${c.signature} → escalation FAILED to surface to CEO: ${r.error.message}`);
+          // Already surfaced (or a surface error) — record the review so this same job isn't re-investigated each pass.
+          await recordDirectorActivity(db, {
+            workspaceId: job.workspace_id,
+            directorFunction: "platform",
+            actionKind: "kept_repair",
+            specSlug: null,
+            reason: diagnosis,
+            metadata: { dismiss_key: lib.dismissKey(c.signature), repair_job_id: c.jobId, signature: c.signature, verdict: "escalate-already-surfaced", autonomous: true },
+          });
+          console.log(`${tag} repair-supervise ${c.signature} → escalate but already surfaced — recorded review`);
+        }
+        continue;
+      }
+
+      // ── KEEP (or no verdict) — a genuine needs-human call → leave it on the Control Tower untouched for the human. ──
+      kept++;
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "platform",
+        actionKind: "kept_repair",
+        specSlug: null,
+        reason: reasoning || `${c.signature} is a genuine needs-human call I can neither confirm benign nor confidently call a real bug — left it on the Control Tower for you.`,
+        metadata: { dismiss_key: lib.dismissKey(c.signature), repair_job_id: c.jobId, signature: c.signature, verdict: verdict || "keep", autonomous: true },
+      });
+      console.log(`${tag} repair-supervise ${c.signature} → ${verdict || "no verdict"} → left for the human`);
+    } catch (e) {
+      console.error(`${tag} repair-supervise ${c.signature} failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  const parts: string[] = [];
+  if (dismissed) parts.push(`dismissed ${dismissed}`);
+  if (escalated) parts.push(`escalated ${escalated}`);
+  if (kept) parts.push(`kept ${kept}`);
+  return `repair-supervise: reviewed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
 
 async function runPlatformDirectorJob(job: Job) {

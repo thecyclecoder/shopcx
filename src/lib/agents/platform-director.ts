@@ -52,6 +52,7 @@ import {
   type ApprovalJobRow,
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
+import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -1459,4 +1460,185 @@ export function initInvestigationPrompt(c: InitCandidate): string {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+// ── Phase 1 (director-supervised-repair-dismissal) — supervise + dismiss Rafa's no-fix items ───────
+// The CEO used to manually Dismiss every Control Tower warning where the Repair Agent (Rafa) declined to
+// propose a fix (a `needs-human` verdict — a `repair` agent_jobs row parked in `needs_attention`, surfaced
+// Dismiss-only by getOpenRepairs). This lane is the director SUPERVISING that no-fix call: she does NOT
+// auto-dismiss noise — she adversarially RE-CHECKS Rafa's verdict and dismisses ONLY what she can
+// independently confirm is benign. Anything she can't confirm stays up; a suspected masked real bug escalates.
+//
+// It reuses the EXISTING Dismiss plumbing (the owner path POST /api/developer/control-tower/repair, the
+// `repair_build` action `declined` → resolve the error_events row + complete the job) — no new dismiss
+// machinery, no migration. Like grooming/initiation, the JUDGMENT is a read-only Max `claude -p` in the box
+// lane (builder-worker `superviseRepairDismissals`); this module is the mechanical half — find the candidates,
+// build the prompt, dispatch the verdict, and the dedup ledger so each item is reviewed once.
+//
+// Leash: dismissing a confirmed-benign monitoring warning is the `monitoring_fix` class — low-risk and
+// reversible (dismissing UN-blocks re-enqueue, so a wrongly-dismissed real problem re-fires and Rafa
+// re-triages it). Unsure ⇒ escalate, never dismiss. NEVER dismisses a `real-bug` / fix-proposed item:
+// findRepairDismissalCandidates only takes `needs-human` items and applyDirectorDismissal re-asserts the
+// job is still `needs_attention` before clearing it.
+
+/** Cap how many of Rafa's open no-fix items one supervision pass reviews (bound the per-pass `claude -p` cost). */
+export const PLATFORM_DIRECTOR_DISMISS_CAP = 6;
+
+/** The stable dedup key for a director review of one repair item — `dismiss:{signature}` (per the spec ledger). */
+export function dismissKey(signature: string): string {
+  return `dismiss:${signature}`;
+}
+
+/** One of Rafa's open no-fix items the director may review — its job, signature, and his logged reasoning. */
+export interface RepairDismissalCandidate {
+  jobId: string;
+  /** the error_events signature / `loop:<id>` (the repair job's spec_slug) — the dismiss-key anchor. */
+  signature: string;
+  /** short label of the originating error/alert. */
+  title: string;
+  /** Rafa's plain-text no-fix verdict + root-cause diagnosis (the job's log_tail) — what Ada re-checks. */
+  rafaReasoning: string;
+  createdAt: string;
+}
+
+/** The parsed supervision verdict (the box lane's `claude -p` JSON). */
+export interface RepairDismissalVerdict {
+  verdict?: string;
+  reasoning?: string;
+}
+
+/**
+ * Has the director ALREADY reviewed THIS repair job? Keyed on the job id (carried in every review row's
+ * metadata.repair_job_id) so "reviewed once" holds for the SAME item — a `dismiss` completes the job (it
+ * leaves getOpenRepairs), but a `keep`/`escalate` leaves it `needs_attention`, so without this dedup it would
+ * be re-investigated every pass. A re-fire is a NEW job (new id) → a fresh review, exactly as the spec wants.
+ * Matches the three review action_kinds (`dismissed_repair` / `kept_repair` / `escalated`). Best-effort.
+ */
+export async function alreadyReviewedDismissal(admin: Admin, jobId: string): Promise<boolean> {
+  const { data } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("director_function", PLATFORM)
+    .in("action_kind", ["dismissed_repair", "kept_repair", "escalated"])
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  return (data ?? []).some((r) => (r.metadata as Record<string, unknown> | null)?.["repair_job_id"] === jobId);
+}
+
+/**
+ * Find Rafa's open no-fix items the director may review this pass — the `needs-human` bucket from
+ * getOpenRepairs (a `repair` job in `needs_attention`, Dismiss-only). NEVER a `needs_approval` fix-proposed
+ * item and NEVER a `real-bug` (those carry a proposed spec → `state === "proposed"`, excluded here). Skips
+ * an item this director already reviewed. A NO-OP until Platform is live+autonomous (dormant until activation,
+ * like the escort/groom/init lanes). Capped at DISMISS_CAP per pass. Each candidate is still adversarially
+ * re-checked by the box lane's `claude -p` before any dismissal — this only assembles the bucket; it never clears.
+ */
+export async function findRepairDismissalCandidates(admin: Admin): Promise<RepairDismissalCandidate[]> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return []; // dormant until activation flips the flag
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return [];
+
+  const open = await getOpenRepairs(admin, workspaceId);
+  const needsHuman = open.filter((r) => r.state === "needs-human"); // never a proposed-fix / real-bug item
+
+  const out: RepairDismissalCandidate[] = [];
+  for (const r of needsHuman) {
+    if (out.length >= PLATFORM_DIRECTOR_DISMISS_CAP) break;
+    if (await alreadyReviewedDismissal(admin, r.jobId)) continue; // reviewed once (a re-fire is a new job)
+    out.push({ jobId: r.jobId, signature: r.signature, title: r.title, rafaReasoning: r.diagnosis, createdAt: r.createdAt });
+  }
+  return out;
+}
+
+/** The Max `claude -p` supervision prompt — read-only re-derive the root cause + adversarially test Rafa's no-fix call. */
+export function repairDismissalInvestigationPrompt(c: RepairDismissalCandidate): string {
+  return [
+    "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
+    "Rafa (the Repair Agent — a tool you supervise) looked at this Control Tower error and declined to propose a fix:",
+    "he classified it `needs-human` (no fix spec, parked for a manual Dismiss). Your job is NOT to rubber-stamp him.",
+    "Rafa optimizes the bounded proxy 'clear the error'; the degenerate state is clearing a warning by declaring a",
+    "REAL bug benign. So adversarially RE-CHECK his no-fix call: independently re-derive the root cause and decide.",
+    "",
+    "DEFAULT TO NOT DISMISSING. Emit `dismiss` ONLY if you can INDEPENDENTLY confirm the error is genuinely",
+    "transient (a flake / one-off / already-recovered), foreign (a third-party app or external dependency, not OUR",
+    "code), or otherwise benign — AND is NOT a masked real bug. If you cannot confirm that, do NOT dismiss.",
+    "",
+    "1. DISMISS — you independently confirmed it is genuinely transient / foreign-app / benign (not a masked real",
+    "   bug). → I clear the warning via the existing Dismiss path (resolve the error + complete the item). This is",
+    "   low-risk + reversible: a dismissed item un-blocks re-enqueue, so if it really was real it re-fires and Rafa",
+    "   re-triages it.",
+    "2. ESCALATE — you SUSPECT Rafa mislabeled a REAL bug as benign (your independent root-cause says it's a genuine",
+    "   defect in OUR code). → I do NOT dismiss; I escalate to the CEO with your contrary diagnosis.",
+    "3. KEEP — it is a genuine needs-human call you can neither confirm benign NOR confidently call a real bug. → I",
+    "   leave it on the Control Tower untouched for the human to decide. Prefer this over a wrong dismiss (north-star:",
+    "   hit a rail → escalate, never execute).",
+    "",
+    `Error signature: ${c.signature}`,
+    `Label: ${c.title}`,
+    "",
+    "Rafa's logged no-fix reasoning:",
+    "----------------------------------------",
+    c.rafaReasoning || "(no diagnosis logged)",
+    "----------------------------------------",
+    "",
+    "Investigate read-only: load the originating error_events / loop_alerts sample for this signature, read the",
+    "implicated code/library/integration in the brain, and INDEPENDENTLY re-derive the root cause. Test Rafa's call",
+    "adversarially — could a real bug be hiding behind a 'transient'/'foreign' label? Your reasoning must be YOUR",
+    "OWN independent diagnosis, not a restatement of Rafa's.",
+    "",
+    "Final message = ONLY one JSON object (no markdown):",
+    '{"verdict":"dismiss","reasoning":"<your INDEPENDENT confirmation it is genuinely transient/foreign/benign and not a masked real bug>"}',
+    '{"verdict":"escalate","reasoning":"<your contrary diagnosis — why this looks like a real bug Rafa mislabeled benign>"}',
+    '{"verdict":"keep","reasoning":"<why this is a genuine needs-human call you can neither confirm benign nor call a real bug>"}',
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Dismiss ONE of Rafa's no-fix items — the autonomous director path through the EXISTING owner Dismiss
+ * plumbing (mirrors POST /api/developer/control-tower/repair `dismiss`, minus the owner auth gate): decline
+ * the `repair_build` action (if any), complete the job, and resolve the originating error_events row. Then
+ * write a `dismissed_repair` director_activity row carrying ADA'S OWN independent reasoning (not a copy of
+ * Rafa's) + the dedup key. HARD GUARD: re-asserts the job is still `needs_attention` before clearing it, so a
+ * real-bug / fix-proposed item that flipped to `needs_approval` is never dismissed. Best-effort; returns {ok}.
+ */
+export async function applyDirectorDismissal(
+  admin: Admin,
+  candidate: RepairDismissalCandidate,
+  reasoning: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const { data: job } = await admin
+    .from("agent_jobs")
+    .select("id, workspace_id, spec_slug, status, pending_actions")
+    .eq("id", candidate.jobId)
+    .eq("kind", "repair")
+    .maybeSingle();
+  if (!job) return { ok: false, error: "repair job not found" };
+  // Never dismiss a real-bug / fix-proposed item: only a still-open needs-human item (needs_attention) clears.
+  if (job.status !== "needs_attention") return { ok: false, error: `repair job is ${job.status}, not a needs-human item` };
+
+  const actions = Array.isArray(job.pending_actions) ? (job.pending_actions as Array<Record<string, unknown>>) : [];
+  const next = actions.map((a) => (a.type === "repair_build" ? { ...a, status: "declined" } : a));
+  const { error } = await admin
+    .from("agent_jobs")
+    .update({ status: "completed", pending_actions: next, error: "dismissed by Ada (Platform/DevOps Director)", updated_at: new Date().toISOString() })
+    .eq("id", job.id);
+  if (error) return { ok: false, error: error.message };
+
+  // Resolve the originating error_events row (the repair job's spec_slug IS the error signature, e.g. "vercel:…").
+  if (job.spec_slug) {
+    await admin.from("error_events").update({ status: "resolved" }).eq("signature", job.spec_slug).eq("status", "open");
+  }
+
+  await recordDirectorActivity(admin, {
+    workspaceId: job.workspace_id as string,
+    directorFunction: PLATFORM,
+    actionKind: "dismissed_repair",
+    specSlug: null,
+    reason: reasoning,
+    metadata: { dismiss_key: dismissKey(candidate.signature), repair_job_id: job.id, signature: candidate.signature, verdict: "dismiss", autonomous: true },
+  });
+  return { ok: true };
 }
