@@ -4,6 +4,7 @@ import { marked } from "marked";
 import { getSpec, listSpecSlugs, extractSpecSection, stripSpecSection, type SpecStatus } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
+import { getSpecCardStates, mergePhaseStates } from "@/lib/spec-card-state";
 import {
   getLatestSpecTestRuns,
   getHumanCheckResolutions,
@@ -44,14 +45,18 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const [spec, specSlugs, workspaceId] = await Promise.all([getSpec(slug), listSpecSlugs(), getActiveWorkspaceId()]);
   if (!spec) notFound();
 
-  const [jobsBySlug, folds, testRuns, resolutions] = workspaceId
+  const [jobsBySlug, folds, testRuns, resolutions, cardStates] = workspaceId
     ? await Promise.all([
         getLatestJobsBySlug(workspaceId),
         getPendingFolds(workspaceId),
         getLatestSpecTestRuns(workspaceId),
         getHumanCheckResolutions(workspaceId),
+        getSpecCardStates(workspaceId),
       ])
-    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, new Map()];
+    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, new Map(), {}];
+  // Overlay the DB mirror's per-phase states onto the markdown phases so the detail page reflects per-phase
+  // progress instantly (the board's overall status already does this via resolveBoardStatus).
+  const phases = mergePhaseStates(spec.card.phases, (cardStates as Record<string, import("@/lib/spec-card-state").SpecCardState>)[slug]);
   const job = jobsBySlug[slug] ?? null;
   const fold = folds[slug] ?? null;
   const testRun = testRuns[slug] ?? null;
@@ -139,7 +144,7 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
             {spec.card.phases.length > 0 && (
               <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
                 <div className="mb-1 text-xs font-medium text-zinc-500 dark:text-zinc-400">Phases</div>
-                <PhaseList slug={slug} phases={spec.card.phases} />
+                <PhaseList slug={slug} phases={phases} />
               </div>
             )}
 

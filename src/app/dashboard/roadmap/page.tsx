@@ -2,7 +2,7 @@ import Link from "next/link";
 import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecStatus, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
-import { getSpecCardStates, resolveBoardStatus, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
+import { getSpecCardStates, resolveBoardStatus, mergePhaseStates, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
 import StatusControl from "./StatusControl";
 import PriorityControl from "./PriorityControl";
@@ -223,7 +223,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} deploy={deploymentState(cardStates[spec.slug], spec.status, deployedSha)} />)
+                    items.map((spec) => <Card key={spec.slug} spec={{ ...spec, phases: mergePhaseStates(spec.phases, cardStates[spec.slug]) }} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} deploy={deploymentState(cardStates[spec.slug], spec.status, deployedSha)} />)
                   )}
                 </div>
               </div>
