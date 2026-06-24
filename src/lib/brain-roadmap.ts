@@ -389,11 +389,33 @@ function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/
  * default for boardable surfaces); call with no arg to get markdown-only (legacy, used by agents/scripts
  * with no workspace context). Tracks parse the README + are stable across both modes.
  */
+/**
+ * The (effectively single-tenant) build-console workspace to overlay spec_card_state from when a caller
+ * doesn't pass one — the same "ride the latest agent_jobs row, fall back to the oldest workspace" rule the
+ * director/repair/security agents use. spec-status-db-driven: status is DB-driven, so EVERY getRoadmap()
+ * caller (the director's grooming/escort, scorecards, recaps, XP) must overlay the DB — not just the board.
+ * Without this, no-arg callers read markdown-only phase status, which Phase 3's strip degraded to all-planned.
+ */
+async function resolveDefaultWorkspaceId(): Promise<string | null> {
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data: job } = await admin.from("agent_jobs").select("workspace_id").order("created_at", { ascending: false }).limit(1).maybeSingle();
+    const fromJob = (job as { workspace_id?: string } | null)?.workspace_id;
+    if (fromJob) return fromJob;
+    const { data: ws } = await admin.from("workspaces").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
+    return (ws as { id?: string } | null)?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
   const [specs, tracks] = await Promise.all([readSpecs(), readTracks()]);
-  if (!workspaceId) return { specs, tracks };
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return { specs, tracks }; // no workspace at all → markdown-only fallback
   const { getSpecCardStates } = await import("@/lib/spec-card-state");
-  const cardStates = await getSpecCardStates(workspaceId);
+  const cardStates = await getSpecCardStates(wsId);
   const overlaid = specs.map((s) => overlayDbStateOnSpec(s, cardStates[s.slug]));
   // Re-sort because overlay can change a spec's status (e.g. a deferred-by-DB card moves columns).
   const rank: Record<SpecStatus, number> = { in_progress: 0, planned: 1, shipped: 2, deferred: 3, rejected: 4 };
