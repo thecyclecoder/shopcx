@@ -52,6 +52,8 @@ export interface WorkerLane {
    * by the Phase 3 drift audit. A fully-rostered lane is `false`.
    */
   flagged: boolean;
+  /** the loop type for the card chip: "agent-kind" | "cron" | "reactive" | "inline-agent" | "" (orphan). */
+  loopKind: string;
 }
 
 export interface DirectorMandate {
@@ -108,6 +110,10 @@ const NEVER_FIRED_GRACE_MS = 2 * DAY;
 /** Default owner for an unioned orphan lane: the Platform director (Ada) owns the agent fleet. */
 const ORPHAN_OWNER = "platform";
 
+/** A director's OWN job kinds — how it "turns on" (its standing pass, its coaching chat, its goal proposals),
+ *  NOT agents it supervises. Never rostered as worker cards (the CEO finds them confusing under the director). */
+const DIRECTOR_INFRA_KINDS = new Set(["platform-director", "director-coach", "proposed-goal"]);
+
 /** Internal pre-liveness roster entry — one rostered worker, before its status is computed. */
 export interface RosterEntry {
   owner: string;
@@ -124,6 +130,8 @@ export interface RosterEntry {
   registeredAt?: string;
   /** unioned from live agent_jobs with no registry row (or no persona) — flagged for registration. */
   flagged: boolean;
+  /** the MONITORED_LOOPS loop kind for the type chip: "agent-kind" | "cron" | "reactive" | "inline-agent" | "" (orphan). */
+  loopKind: string;
 }
 
 /**
@@ -152,6 +160,7 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
       cronBacked: false,
       registeredAt: l.registeredAt,
       flagged: false, // a registered lane — a missing persona is caught by the audit, not a UI chip
+      loopKind: "agent-kind",
     });
   }
 
@@ -185,6 +194,7 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
       cronBacked: true,
       registeredAt,
       flagged: false, // a registered cron — drift is the audit's job, not a UI chip
+      loopKind: loops[0].kind, // "cron" | "reactive" | "inline-agent" — the type chip
     });
   }
 
@@ -197,6 +207,7 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
   for (const kind of liveKinds) {
     if (seen.has(kind)) continue;
     if (registeredAgentKinds.has(kind)) continue; // an agent-kind lane (rostered in step 1)
+    if (DIRECTOR_INFRA_KINDS.has(kind)) continue; // the director's own "turn on" mechanisms — not worker cards
     seen.add(kind);
     const persona = getPersona(kind);
     entries.push({
@@ -208,6 +219,7 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
       jobKind: kind,
       cronBacked: false,
       flagged: true, // a live lane with no MONITORED_LOOPS row is drift — always flag it
+      loopKind: "",
     });
   }
 
@@ -315,6 +327,7 @@ export async function getOrgChart(): Promise<OrgChart> {
       status: statuses[i].status,
       statusReason: statuses[i].reason,
       flagged: e.flagged,
+      loopKind: e.loopKind,
     });
     workersByFn.set(e.owner, arr);
   });
