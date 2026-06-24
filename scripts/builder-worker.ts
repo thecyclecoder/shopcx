@@ -997,10 +997,19 @@ function extractJson<T = Record<string, unknown>>(text: string): T | null {
 // → read `status`. When that produced an empty/unparseable/unrecognized result, each used to fall straight
 // to a bare, reasonless `needs_attention` ("<agent> ended without a recognizable verdict") that NOTHING
 // triaged. This shared helper hardens that path for all three: it parses the verdict robustly and, on an
-// unparseable/unrecognized result, RE-RUNS the investigation ONCE (a fresh, independent attempt), then —
-// if still inconclusive — hands the caller an ACTIONABLE fail-safe reason ("<agent> produced no parseable
-// verdict after 2 attempts — re-run or review manually: <excerpt>"). It NEVER auto-passes/auto-approves on
-// an inconclusive result (conservative default — the caller still parks it, just with a usable reason).
+// unparseable/unrecognized result, retries before failing safe to an ACTIONABLE reason
+// ("<agent> produced no parseable verdict after N attempts — re-run or review manually: <excerpt>").
+// It NEVER auto-passes/auto-approves on an inconclusive result (conservative default — the caller still
+// parks it, just with a usable reason).
+//
+// Iteration (iteration-ingest-async-reports-fix-tooling-69594a): when the first attempt completed real
+// investigative work (cost spent, session emitted) but the model flubbed the final JSON envelope shape,
+// re-running the WHOLE investigation from scratch wastes the spend AND often produces the same shape (the
+// model's tendency, not the input's). The spec-test agent (builder-worker.ts:4649) already proves the
+// cheaper fix: re-prompt on the SAME session for ONLY the JSON envelope. The model has all its findings in
+// memory; it only needs to emit them in the recognized shape. Callers that pass `repair` get this
+// recovery step in place of a wasted fresh re-run (same attempt cap, higher success rate). Callers that
+// don't pass `repair` keep the original 2-fresh-attempt semantics.
 type ReviewClaudeRun = { session: string | null; resultText: string; isError: boolean; raw: string; usage?: RunUsage; model?: string | null };
 
 const REVIEW_VERDICT_MAX_ATTEMPTS = 2;
@@ -1010,8 +1019,15 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   agent: string;
   /** the recognized status vocabulary (a parsed status outside it counts as inconclusive → retry). */
   recognized: ReadonlySet<string>;
-  /** (re-)invoke the claude investigation; called up to REVIEW_VERDICT_MAX_ATTEMPTS times. */
+  /** (re-)invoke the claude investigation; called for attempt 1 and (if no `repair`) attempt 2. */
   run: (attempt: number) => Promise<T>;
+  /**
+   * Optional JSON parse-repair re-prompt. When set and attempt 1 emitted a session id, attempt 2 becomes
+   * a cheap same-session re-prompt asking for ONLY the JSON envelope — the model already has the findings
+   * in context. Falls back to a fresh re-run when no prior session exists. This mirrors the spec-test
+   * agent's parse-repair pattern (cheap recovery before declaring failure).
+   */
+  repair?: (priorSession: string) => Promise<T>;
   /** per-attempt side effects (metering + session persist) — runs after EACH attempt, not just the last. */
   onRun?: (r: T, attempt: number) => Promise<void>;
 }): Promise<{ run: T; parsed: Record<string, unknown> | null; verdict: string; fallbackReason: string | null }> {
@@ -1019,7 +1035,10 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   let parsed: Record<string, unknown> | null = null;
   let verdict = "";
   for (let attempt = 1; attempt <= REVIEW_VERDICT_MAX_ATTEMPTS; attempt++) {
-    const r = await opts.run(attempt);
+    // Attempt 2 (when `repair` is configured AND we have a prior session): use the cheap same-session
+    // re-prompt instead of a fresh re-investigation. Attempt 1 + any other path is the fresh `run`.
+    const useRepair = attempt > 1 && opts.repair && last?.session;
+    const r = useRepair ? await opts.repair!(last!.session!) : await opts.run(attempt);
     last = r;
     if (opts.onRun) await opts.onRun(r, attempt);
     parsed = extractJson<Record<string, unknown>>(r.resultText);
@@ -1027,7 +1046,7 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
     if (parsed && verdict && opts.recognized.has(verdict)) {
       return { run: r, parsed, verdict, fallbackReason: null };
     }
-    // unparseable / empty / unrecognized verdict → retry once more (fresh investigation), then fail safe.
+    // unparseable / empty / unrecognized verdict → retry once more, then fail safe.
   }
   // Exhausted: still no recognizable verdict. A genuine process crash with no parse stays the caller's
   // `failed` path (the job machinery retries it); otherwise the caller fail-safes to this actionable reason.
@@ -7370,6 +7389,26 @@ function securityDiffPrompt(mergeSha: string, specSlug: string, prNumber?: numbe
   ].join("\n");
 }
 
+// iteration-ingest-async-reports-fix-tooling-69594a: same-session JSON parse-repair re-prompt. When the
+// first attempt finished its review but flubbed the final envelope shape, this asks the model — on the
+// SAME session, with all its findings still in context — to re-emit ONLY the JSON verdict envelope in
+// one of the four recognized shapes. Mirrors the spec-test agent's parse-repair re-prompt at line 4649.
+// Re-investigation is explicitly forbidden (the model already did the work).
+function securityReviewRepairPrompt(): string {
+  return [
+    `Your previous message could not be parsed as the security-review JSON verdict envelope.`,
+    `Return ONLY one valid JSON object — no prose before or after, no markdown, no commentary. If you must use a code fence the JSON must be the last thing in the message. Reuse the findings + reasoning you ALREADY produced; do NOT re-investigate, do NOT re-read files, do NOT re-run any tool.`,
+    ``,
+    `Pick exactly ONE shape that matches your prior verdict:`,
+    `  {"status":"clean","review":"<what you checked + why it's safe>"}`,
+    `  {"status":"false-positive","review":"<what looked risky + why it isn't>"}`,
+    `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
+    `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet>","..."]}}`,
+    ``,
+    `If you genuinely could not complete the review (timed out, blocked, etc.), return ONLY {"status":"needs-human","review":"<one line on why you couldn't complete the review>"}.`,
+  ].join("\n");
+}
+
 function securityFixSpecMarkdown(spec: SecurityFixProposal, mergedSlug: string, mergeSha: string): string {
   const verification = (Array.isArray(spec.verification) ? spec.verification : []).filter((b) => typeof b === "string" && b.trim());
   const vBullets = verification.length
@@ -7676,11 +7715,19 @@ async function runSecurityReviewJob(job: Job) {
     const prompt = await appendAgentInstructions(db, job.workspace_id, "security-review", securityDiffPrompt(mergeSha, mergedSlug, instr.pr_number ?? null));
     // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
     // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
+    // iteration-ingest-async-reports-fix-tooling-69594a: the prior `iteration-ingest-async-reports` build
+    // parked because the security review's first attempt completed the investigation (~$0.47 spent) but
+    // emitted no parseable `{"status":...}` envelope, then the fresh re-run produced the same outcome.
+    // The cheaper fix — pioneered by the spec-test agent (builder-worker.ts:4649) — is to re-prompt on
+    // the SAME session for ONLY the JSON envelope. The model already has the findings in memory; it just
+    // needs to re-emit them in the recognized shape. Wired via `repair` so attempt 2 is a same-session
+    // parse-repair instead of a wasted fresh re-investigation.
     const SECURITY_VERDICTS = new Set(["clean", "false-positive", "needs-human", "real-vuln"]);
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "security review",
       recognized: SECURITY_VERDICTS,
       run: () => runSecurityClaude(prompt, null, REPO_DIR, pickHealthyConfigDir()),
+      repair: (priorSession) => runSecurityClaude(securityReviewRepairPrompt(), priorSession, REPO_DIR, pickHealthyConfigDir()),
       onRun: async (r) => {
         if (r.session) await update(job.id, { claude_session_id: r.session });
       },
