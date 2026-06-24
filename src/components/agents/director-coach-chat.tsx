@@ -12,7 +12,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 type Msg = { role: "user" | "assistant"; content: string };
 type Action = {
   id: string;
-  type: "coaching" | "spec" | "goal";
+  type: "coaching" | "spec" | "goal" | "spec-edit";
   summary: string;
   errorClass?: string;
   guidance?: string;
@@ -193,12 +193,13 @@ export function DirectorCoachChat() {
           <div key={a.id} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-[12px] dark:border-amber-800 dark:bg-amber-950/30">
             <div className="flex items-center gap-2">
               <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-medium text-amber-900 dark:bg-amber-800 dark:text-amber-100">
-                {a.type === "coaching" ? "new coaching rule" : a.type === "goal" ? "new goal · for your greenlight" : "spec handoff"}
+                {a.type === "coaching" ? "new coaching rule" : a.type === "goal" ? "new goal · for your greenlight" : a.type === "spec-edit" ? "spec edit" : "spec handoff"}
               </span>
               <span className="font-medium text-zinc-800 dark:text-zinc-100">{a.summary}</span>
             </div>
             {a.type === "coaching" && a.guidance && <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">“{a.guidance}”{a.reasoning ? ` — ${a.reasoning}` : ""}</p>}
             {a.type === "spec" && a.slug && <p className="mt-1.5 font-mono text-[11px] text-zinc-500">specs/{a.slug}.md</p>}
+            {a.type === "spec-edit" && a.slug && <p className="mt-1.5 font-mono text-[11px] text-zinc-500">✎ specs/{a.slug}.md · edit existing</p>}
             {a.type === "goal" && (
               <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">
                 {a.outcome ? `“${a.outcome}” ` : ""}
