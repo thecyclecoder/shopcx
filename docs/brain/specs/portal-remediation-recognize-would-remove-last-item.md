@@ -1,5 +1,7 @@
 # Portal remediation: dismiss `would_remove_last_item` instead of escalating it as unrecognized ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `055e807d-7122-415f-8b45-82a88f57cc42`
 
 Ticket 055e807d escalated as 'Unrecognized portal error' when a customer (Pam Chadwick) tried to remove the only product from a single-line subscription. The portal handled it correctly inline ('At least one recurring item must remain... Cancel the subscription instead.'), but the remediation classifier failed to recognize the outcome and escalated it to a human. This spec makes the classifier recognize the handler's actual friendly error code so this benign, expected case auto-dismisses (closes) like the system already intends.
