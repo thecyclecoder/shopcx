@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useSectionNav, type SectionNavItem } from "@/lib/section-nav-context";
 import { getPersona } from "@/lib/agents/personas";
 import { DirectorActivity } from "@/components/agents/director-activity";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
@@ -102,6 +103,30 @@ function ProfileCard({
 }) {
   const resolved = resolveRole(org, role);
   const functionSlugs = org.directors.map((d) => d.slug);
+  // Contextual sidebar takeover (#16): a director profile registers its section nav, which replaces the main
+  // app sidebar; the active section is the `?s=` query (default overview). Hooks before any early return.
+  const searchParams = useSearchParams();
+  const activeSection = searchParams.get("s") || "overview";
+  const { setNav } = useSectionNav();
+  const isDirector = resolved.kind === "director";
+  const directorSlug = isDirector ? resolved.director.slug : "";
+  const directorTitle = isDirector ? resolved.director.title : "";
+  useEffect(() => {
+    if (!isDirector) {
+      setNav(null);
+      return;
+    }
+    const isPlatform = directorSlug === "platform";
+    const sections: SectionNavItem[] = [
+      { key: "overview", label: "Overview" },
+      ...(isPlatform ? [{ key: "grades", label: "Grades" } as SectionNavItem, { key: "coach", label: "Coach" } as SectionNavItem] : []),
+      { key: "activity", label: "Activity" },
+      { key: "autonomy", label: "Autonomy" },
+      { key: "inbox", label: "Inbox" },
+    ];
+    setNav({ title: getPersona(directorSlug, directorTitle).name, basePath: `/dashboard/agents/${encodeURIComponent(role)}`, backHref: "/dashboard/agents", backLabel: "Agents", sections });
+    return () => setNav(null);
+  }, [isDirector, directorSlug, directorTitle, role, setNav]);
 
   if (resolved.kind === "unknown") {
     return (
@@ -153,30 +178,17 @@ function ProfileCard({
     const d = resolved.director;
     personaKey = d.slug;
     personaLabel = d.title;
-    tierLabel = "Mandates";
     scopeLine = d.summary;
     badge = <StatusBadge status={d.status} />;
     reportsTo = { name: getPersona("ceo").name, role: "CEO", href: "/dashboard/agents/ceo" };
-    // A director's responsibilities are its higher-level mandates (functions/*.md).
-    responsibilities = d.mandates.map((m) => ({
+    const isPlatform = d.slug === "platform";
+    const mandates = d.mandates.map((m) => ({
       primary: m.name,
-      secondary: [m.metric, m.specCount > 0 ? `${m.specCount} spec${m.specCount === 1 ? "" : "s"}` : ""]
-        .filter(Boolean)
-        .join(" · "),
+      secondary: [m.metric, m.specCount > 0 ? `${m.specCount} spec${m.specCount === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · "),
     }));
-    // Gamified XP card (directors-board-gamified, M3 Phase 3) — derived, display-only counts.
-    if (xp[d.slug]) {
-      xpCard = (
-        <div className="mt-6">
-          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">XP</h2>
-          <XpCard xp={xp[d.slug]} />
-        </div>
-      );
-    }
-    // The director's own team — its box agent_jobs lanes, each linking to its profile.
     const teamBlock =
       d.workers.length > 0 ? (
-        <div className="mt-6">
+        <div>
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
             Team · {d.workers.length} agent{d.workers.length === 1 ? "" : "s"}
           </h3>
@@ -200,42 +212,39 @@ function ProfileCard({
           </div>
         </div>
       ) : null;
-    // Live activity feed — the director's own director_activity rows (is she alive + what she's doing).
-    // P5: for the leash-bearing Platform director, show what she ACTUALLY does autonomously (leash-derived),
-    // not just the functions/*.md charter mandates above.
-    extra = (
-      <>
-        {d.slug === "platform" && (
-          <div className="mt-6">
-            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Grades · from the CEO</h3>
-            <DirectorGradePanel />
-          </div>
-        )}
-        {d.slug === "platform" && <DirectorAutonomy autonomous={d.autonomous} />}
-        {/* box-agent-model-tiers Phase 4: the director's own model tier — her change routes to the CEO. */}
-        {d.slug === "platform" && <ModelTierCard kind="platform-director" />}
-        {d.slug === "platform" && (
-          <div className="mt-6">
-            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Coach Ada</h3>
-            <DirectorCoachChat />
-          </div>
-        )}
-        {teamBlock}
-        <div className="mt-6">
-          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent activity</h3>
-          <DirectorActivity fn={d.slug} />
-        </div>
-        {/* Owner-only autonomy toggle (was on the hub's role header) — flips this director live/autonomous. */}
-        <div className="mt-6">
+    // Sidebar-takeover IA (#16): render ONE section at a time (the active `?s=` from the contextual nav).
+    const section =
+      activeSection === "grades" && isPlatform ? (
+        <DirectorGradePanel />
+      ) : activeSection === "coach" && isPlatform ? (
+        <DirectorCoachChat />
+      ) : activeSection === "activity" ? (
+        <DirectorActivity fn={d.slug} />
+      ) : activeSection === "autonomy" ? (
+        <div className="space-y-6">
+          {isPlatform && <DirectorAutonomy autonomous={d.autonomous} />}
+          {/* box-agent-model-tiers Phase 4: the director's own model tier — her change routes to the CEO. */}
+          {isPlatform && <ModelTierCard kind="platform-director" />}
           <AutonomyToggle director={d} onChange={onAutonomyChange} />
         </div>
-        {/* The per-role inbox (IA refactor) — Approval Requests · Daily Summaries · Decision history · Director grades. */}
-        <div className="mt-8 border-t border-zinc-200 pt-6 dark:border-zinc-800">
-          <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Inbox</h2>
-          <RoleInbox role={d.slug} title={getPersona(d.slug, d.title).name} functionSlugs={functionSlugs} />
+      ) : activeSection === "inbox" ? (
+        <RoleInbox role={d.slug} title={getPersona(d.slug, d.title).name} functionSlugs={functionSlugs} />
+      ) : (
+        <div className="space-y-8">
+          <div>
+            <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Mandates</h2>
+            <ResponsibilityList items={mandates} />
+          </div>
+          {xp[d.slug] && (
+            <div>
+              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">XP</h2>
+              <XpCard xp={xp[d.slug]} />
+            </div>
+          )}
+          {teamBlock}
         </div>
-      </>
-    );
+      );
+    extra = <div className="mt-6">{section}</div>;
   } else {
     // Worker — the most precise responsibility list (from the personas config).
     const { worker, director } = resolved;
@@ -300,10 +309,13 @@ function ProfileCard({
         <p className="mt-3 max-w-2xl text-sm text-zinc-600 dark:text-zinc-300">{scopeLine}</p>
       )}
 
-      <div className="mt-6">
-        <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{tierLabel}</h2>
-        <ResponsibilityList items={responsibilities} />
-      </div>
+      {/* Directors render their content via section-gated `extra` (sidebar takeover); CEO/agents use this block. */}
+      {tierLabel && (
+        <div className="mt-6">
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{tierLabel}</h2>
+          <ResponsibilityList items={responsibilities} />
+        </div>
+      )}
 
       {xpCard}
       {extra}
