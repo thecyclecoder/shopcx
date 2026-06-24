@@ -59,6 +59,15 @@ import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
 import { buildGate } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
+import {
+  enqueueRegressionJob,
+  regressionSignature,
+  LIVE_REGRESSION_STATUSES,
+  REGRESSION_LOOP_GUARD_MAX,
+  REGRESSION_RECENT_WINDOW_MS,
+  type RegressionInstructions,
+} from "@/lib/regression-agent";
+import { getHumanTestQueue } from "@/lib/spec-test-runs";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
@@ -1386,6 +1395,196 @@ export async function reconcileRegressionCoverage(admin: Admin): Promise<Regress
   }
 
   return { queued, skippedFresh, scanned: shipped.length };
+}
+
+// ── regression-backlog-reconciliation Phase 2 — drive every regression to a terminal state ──────────────
+// The standing-coverage sweep (Phase 1) GUARANTEES a silent regression is DETECTED (a shipped spec gets re-
+// verified on a cadence, an `issues` result flows to Remi). This is the other half — the mirror of
+// reconcileErrorBacklog for the regression surface: GUARANTEE every detected regression reaches a TERMINAL
+// state (reviewed → dismissed / authored-and-built / escalated). The gap: a shipped spec with an UNRESOLVED
+// evidence-backed spec-test `fail` (the getHumanTestQueue regression definition) but NO live `regression` job
+// — a break that was detected but never dispositioned (a regression job that slipped its enqueue, a fix that
+// didn't hold and the re-fire never re-queued, or a fail recorded while Platform was dormant). Each pass it
+// classifies every unresolved regression against the live regression-job + authored-fix state:
+//   (a) a live regression review OR an authored fix that's in-flight / merged-pending-deploy → CONFIRM, leave it;
+//   (b) no live review AND under the loop-guard → enqueueRegressionJob so Remi reviews it (the routine new action);
+//   (c) Remi authored fixes that repeatedly DIDN'T hold (≥ REGRESSION_LOOP_GUARD_MAX) with nothing in-flight →
+//       escalate the deeper issue to the CEO (deduped) instead of re-authoring forever (Remi's loop-guard).
+// REUSES the existing chokepoints: enqueueRegressionJob is the dedup (no-op on a live job / a no-resurface
+// dismissal), and the loop-guard count mirrors regressionAuthoredAttempts. Bounded per pass, idempotent, and
+// DORMANT until Platform is live+autonomous — exactly like the error-backlog reconcile. A `reconciled_regression`
+// director_activity row is written per ACTION (enqueue / escalate), never per idle confirm. Best-effort.
+
+/** Cap how many NEW reconcile ACTIONS (regression enqueues + stuck-fix escalations) one pass takes. */
+export const PLATFORM_DIRECTOR_REGRESSION_RECONCILE_CAP = 8;
+
+/** The outcome of one regression-backlog-reconcile pass — what it drove off the unresolved-regression feed. */
+export interface RegressionBacklogReconcileResult {
+  /** specs with an unresolved fail + no live review → a regression review we enqueued for Remi (case b). */
+  enqueued: string[];
+  /** specs whose authored fix repeatedly failed past the loop-guard → escalated to the CEO (case c). */
+  escalated: string[];
+  /** unresolved regressions already covered by a live review / an in-flight-or-landed fix — left alone (case a). */
+  confirmed: number;
+  /** total shipped specs with an unresolved evidence-backed spec-test fail examined this pass. */
+  scanned: number;
+}
+
+/**
+ * The live regression-disposition state for ONE shipped spec: is a review live (or a fix in-flight / landed),
+ * how many authored fix attempts didn't hold (the loop-guard count), and the latest fix-build failure. Reads
+ * the recent `regression` jobs for the spec (matched on `instructions.spec_slug`, since the row's spec_slug
+ * column holds the SIGNATURE) + the build state of every fix slug Remi authored. The reconciler uses this to
+ * pick confirm (in-flight) · enqueue (no review, under the cap) · escalate (stuck past the loop-guard).
+ */
+async function regressionDispositionState(
+  admin: Admin,
+  workspaceId: string,
+  specSlug: string,
+): Promise<{ liveReview: boolean; fixInFlight: boolean; authoredAttempts: number; lastError: string | null }> {
+  const sinceIso = new Date(Date.now() - REGRESSION_RECENT_WINDOW_MS).toISOString();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("status, instructions")
+    .eq("kind", "regression")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(500);
+  let liveReview = false;
+  let authoredAttempts = 0;
+  const authoredSlugs = new Set<string>();
+  for (const r of (data ?? []) as Array<{ status?: string; instructions?: string }>) {
+    let instr: RegressionInstructions;
+    try {
+      instr = JSON.parse(String(r.instructions || "{}")) as RegressionInstructions;
+    } catch {
+      continue;
+    }
+    if (instr.spec_slug !== specSlug) continue;
+    if (LIVE_REGRESSION_STATUSES.includes(String(r.status ?? ""))) liveReview = true;
+    if (instr.authored_slug) {
+      authoredAttempts++;
+      authoredSlugs.add(instr.authored_slug);
+    }
+  }
+  // Is any authored fix spec actively building or already landed (merged-pending-deploy)? A landed fix still
+  // shows the unresolved fail until the re-deploy + the next spec-test re-run clears it (Phase 1) — so an
+  // in-flight OR landed fix suppresses both a re-enqueue and the loop-guard escalation (it IS progressing).
+  let fixInFlight = false;
+  let lastError: string | null = null;
+  for (const slug of authoredSlugs) {
+    const state = await specBuildState(admin, workspaceId, slug);
+    if (state.inFlight) fixInFlight = true;
+    if (lastError === null && state.lastError) lastError = state.lastError;
+  }
+  return { liveReview, fixInFlight, authoredAttempts, lastError };
+}
+
+/**
+ * Reconcile the unresolved-regression backlog: classify every shipped spec carrying an unresolved evidence-
+ * backed spec-test `fail` (the getHumanTestQueue regression definition) against the live regression-job +
+ * authored-fix state and drive each toward terminal — enqueue a review where none exists, confirm one that's
+ * covered, or escalate a fix stuck past the loop-guard. Idempotent + bounded
+ * (PLATFORM_DIRECTOR_REGRESSION_RECONCILE_CAP new actions/pass), reuses the regression dedup, and a NO-OP until
+ * Platform is live+autonomous. Best-effort; the caller logs the result.
+ */
+export async function reconcileRegressionBacklog(admin: Admin): Promise<RegressionBacklogReconcileResult> {
+  const empty: RegressionBacklogReconcileResult = { enqueued: [], escalated: [], confirmed: 0, scanned: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+
+  // The unresolved-regression feed — shipped specs whose latest spec-test run has ≥1 evidence-backed `fail`
+  // the owner hasn't dismissed/resolved (the SAME definition the human-test queue + the regression banner read).
+  const { regressions } = await getHumanTestQueue(workspaceId);
+  if (!regressions.length) return empty;
+
+  const enqueued: string[] = [];
+  const escalated: string[] = [];
+  let confirmed = 0;
+
+  // Dedup specs within this pass (a spec surfaces once per run, but guard anyway); the cap bounds NEW actions
+  // (enqueues + escalations) — idle confirms are cheap and always counted.
+  const handled = new Set<string>();
+  for (const reg of regressions) {
+    if (handled.has(reg.slug)) continue;
+    handled.add(reg.slug);
+    const failing = (reg.failing || []).filter((f) => f && f.check_key);
+    if (!failing.length) continue; // no evidence-backed failing check → nothing Remi can dedup on
+    const atCap = enqueued.length + escalated.length >= PLATFORM_DIRECTOR_REGRESSION_RECONCILE_CAP;
+
+    const state = await regressionDispositionState(admin, workspaceId, reg.slug);
+
+    // (a) a live review OR an authored fix that's in-flight / merged-pending-deploy → it's being dispositioned.
+    // Confirm and leave it — don't re-enqueue a review for a break that's already moving toward terminal.
+    if (state.liveReview || state.fixInFlight) {
+      confirmed++;
+      continue;
+    }
+
+    // (c) Remi authored fixes that repeatedly DIDN'T hold (the break keeps re-firing) and nothing is in-flight →
+    // a deeper issue, not a flaky retry. Escalate to the CEO (deduped on `regression-loopguard:<slug>`) instead
+    // of re-enqueuing a review forever — Remi's loop-guard, applied at the reconcile layer.
+    if (state.authoredAttempts >= REGRESSION_LOOP_GUARD_MAX) {
+      if (atCap) continue; // bounded — pick it up next pass
+      const diagnosis = `Regression on shipped spec "${reg.slug}" keeps re-firing — Remi authored ${state.authoredAttempts} fix(es) that didn't hold, and nothing is in-flight${state.lastError ? ` (latest fix-build error: ${state.lastError.slice(0, 300)})` : ""}. The failing checks: ${failing.map((f) => f.text).join("; ")}. I've stopped re-authoring; approve a deeper change to the spec/approach and I'll carry it from there.`;
+      const r = await escalateDiagnosisToCeo(admin, {
+        workspaceId,
+        specSlug: reg.slug,
+        title: `Regression stuck: ${reg.slug}`,
+        diagnosis,
+        dedupeKey: `regression-loopguard:${reg.slug}`,
+        deepLink: `/dashboard/roadmap/${reg.slug}`,
+        escalationKind: "loop_guard",
+        metadata: { kind: "regression", failed_attempts: state.authoredAttempts, last_error: state.lastError ?? undefined },
+      });
+      if (r.emitted) {
+        escalated.push(reg.slug);
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: PLATFORM,
+          actionKind: "reconciled_regression",
+          specSlug: reg.slug,
+          reason: diagnosis,
+          metadata: { signature: regressionSignature(reg.slug, failing.map((f) => f.check_key)), action: "escalated_stuck", failed_attempts: state.authoredAttempts, last_error: state.lastError ?? undefined, autonomous: true },
+        });
+      } else if (r.error) {
+        console.error(`[platform-director] regression reconcile CEO escalation FAILED to surface (regression-loopguard:${reg.slug}): ${r.error.message}`);
+      }
+      continue;
+    }
+
+    // (b) the gap: an unresolved regression with no live review, under the loop-guard → enqueue Remi. The shared
+    // enqueueRegressionJob is the chokepoint: it no-ops on a live job / a no-resurface dismissal (then we confirm),
+    // and writes its own `detected_regression` row + dedups on the signature, so we never double-review a break.
+    if (atCap) continue; // bounded — the backlog re-drives next pass; nothing is lost
+    const r = await enqueueRegressionJob(admin, {
+      workspaceId,
+      specSlug: reg.slug,
+      title: reg.title,
+      failing,
+      runAt: reg.run_at,
+    });
+    if (r.enqueued) {
+      enqueued.push(reg.slug);
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "reconciled_regression",
+        specSlug: reg.slug,
+        reason: `Unresolved regression on shipped spec ${reg.slug} (${failing.length} failing check(s)) had no live regression review — enqueued Remi to disposition it (review → dismiss / author a fix).`,
+        metadata: { signature: r.reason, action: "enqueued_regression", failing: failing.map((f) => ({ text: f.text, check_key: f.check_key })), run_at: reg.run_at, autonomous: true },
+      });
+    } else {
+      // a live review formed since the state read, or this exact break was already dismissed (no re-surface) →
+      // it's covered. Confirm.
+      confirmed++;
+    }
+  }
+
+  return { enqueued, escalated, confirmed, scanned: handled.size };
 }
 
 // ── Phase 3 (goal-milestone-build-sequencing) — re-sequence an out-of-order milestone fan-out ──────

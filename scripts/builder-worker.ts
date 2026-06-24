@@ -1947,6 +1947,19 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing re-verify sweep failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // regression-backlog-reconciliation (Phase 2) — drive every DETECTED regression to terminal: a shipped spec
+    // with an unresolved evidence-backed spec-test `fail` but NO live regression job gets Remi enqueued; a fix
+    // that repeatedly didn't hold (≥ loop-guard) with nothing in-flight escalates to the CEO. The disposition
+    // sibling of the error-backlog reconcile, so no regression sits undetected OR un-dispositioned.
+    const rgn = await lib.reconcileRegressionBacklog(db);
+    if (rgn.enqueued.length) notes.push(`regression backlog → enqueued ${rgn.enqueued.length} review(s): ${rgn.enqueued.join(", ")}`);
+    if (rgn.escalated.length) notes.push(`regression loop-guard → escalated ${rgn.escalated.length}: ${rgn.escalated.join(", ")}`);
+    if (rgn.scanned && !rgn.enqueued.length && !rgn.escalated.length) notes.push(`regression backlog: ${rgn.scanned} unresolved, all covered`);
+  } catch (e) {
+    notes.push(`regression backlog reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing regression backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
     const fixes = await lib.escortFixSpecs(db);
     if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);
