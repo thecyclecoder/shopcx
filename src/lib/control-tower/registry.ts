@@ -270,7 +270,9 @@ export interface MonitoredLoop {
  * never the default: each MUST carry a reason. Keep this list short — the right answer for a
  * real loop is a MONITORED_LOOPS entry, not an exemption. Keyed by the cron's inngest fn id.
  */
-export const INTENTIONALLY_UNMONITORED_CRONS: Record<string, string> = {};
+export const INTENTIONALLY_UNMONITORED_CRONS: Record<string, string> = {
+  "slack-roadmap-notify": "intentionally unmonitored — owner-confirmed via the coverage-register agent",
+};
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
