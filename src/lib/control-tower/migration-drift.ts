@@ -77,6 +77,11 @@ const CREATE_TABLE_RE =
   /\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?/gi;
 const DROP_TABLE_RE =
   /\bdrop\s+table\s+(?:if\s+exists\s+)?(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?/gi;
+// `alter table [if exists] [public.]["]old["] rename to [public.]["]new["]` — a TABLE rename.
+// The `rename to` keyword is what distinguishes it from a `rename column … to …` (whose `rename`
+// is followed by `column`, not `to`), so a column rename never matches.
+const RENAME_TABLE_RE =
+  /\balter\s+table\s+(?:if\s+exists\s+)?(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?\s+rename\s+to\s+(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?/gi;
 const TEMP_CREATE_RE = /\bcreate\s+(?:temp(?:orary)?|unlogged)\s+table\b/i;
 
 /** Strip `--` line comments and `/* *​/` block comments so a commented-out DDL line never counts. */
@@ -111,11 +116,60 @@ export function extractDroppedTables(sql: string): string[] {
   return out;
 }
 
+/** `ALTER TABLE … RENAME TO …` table renames this SQL performs, in source order (`from` → `to`). */
+export function extractRenamedTables(sql: string): Array<{ from: string; to: string }> {
+  const clean = stripSqlComments(sql);
+  const out: Array<{ from: string; to: string }> = [];
+  let m: RegExpExecArray | null;
+  RENAME_TABLE_RE.lastIndex = 0;
+  while ((m = RENAME_TABLE_RE.exec(clean))) out.push({ from: m[1], to: m[2] });
+  return out;
+}
+
+/**
+ * Pure core of {@link parseExpectedTables}: fold an ordered list of `{ file, sql }` migrations (apply
+ * order) into the net expected-table set. Exported so the parse logic is unit-testable without fs.
+ *
+ * Per file, in source order of categories: CREATE (record first-creating migration, revive from a
+ * prior drop) → RENAME (`old → new`: drop `old` from the expected set, carry `new` forward mapped to
+ * the migration that first created the *original* — fallback: the rename migration — and clear any
+ * stale dropped-set membership) → DROP (mark net-absent). RENAME-awareness is what keeps a table
+ * renamed by a later migration from lingering in the expected set as a bogus "silently-skipped
+ * CREATE" once the live schema only has the new name.
+ */
+export function foldMigrations(files: Array<{ file: string; sql: string }>): {
+  expected: Map<string, string>;
+  dropped: Set<string>;
+} {
+  const expected = new Map<string, string>();
+  const dropped = new Set<string>();
+  for (const { file, sql } of files) {
+    for (const t of extractCreatedTables(sql)) {
+      if (!expected.has(t)) expected.set(t, file);
+      // A re-create after a drop revives it: clear the drop so it's expected again.
+      dropped.delete(t);
+    }
+    for (const { from, to } of extractRenamedTables(sql)) {
+      // The new name inherits the original's first-creating migration (fallback: this rename file).
+      const origin = expected.get(from) ?? file;
+      expected.delete(from);
+      if (!expected.has(to)) expected.set(to, origin);
+      // The rename retires the old name and revives the new: neither should linger as "dropped".
+      dropped.delete(from);
+      dropped.delete(to);
+    }
+    for (const t of extractDroppedTables(sql)) dropped.add(t);
+  }
+  for (const t of dropped) expected.delete(t);
+  return { expected, dropped };
+}
+
 /**
  * Parse every `*.sql` under `migrationsDir` (ascending filename = apply order) into the set of
- * tables the migrations should have created, NET of any later DROP. Returns each table mapped to the
- * FIRST migration that creates it (the one to re-apply on drift). Drop-aware: a table created then
- * dropped by a LATER migration is correctly net-absent (not expected → never flagged).
+ * tables the migrations should have created, NET of any later DROP or RENAME. Returns each table
+ * mapped to the FIRST migration that creates it (the one to re-apply on drift). Drop-aware (a table
+ * created then dropped by a LATER migration is net-absent) and rename-aware (a table renamed by a
+ * later migration is tracked under its new name, never falsely expected under the old).
  */
 export function parseExpectedTables(migrationsDir: string): {
   expected: Map<string, string>;
@@ -125,18 +179,9 @@ export function parseExpectedTables(migrationsDir: string): {
   const files = readdirSync(migrationsDir)
     .filter((f) => f.endsWith(".sql"))
     .sort(); // lexical sort = chronological (YYYYMMDDNNNNNN_… naming) = apply order.
-  const expected = new Map<string, string>();
-  const dropped = new Set<string>();
-  for (const file of files) {
-    const sql = readFileSync(join(migrationsDir, file), "utf8");
-    for (const t of extractCreatedTables(sql)) {
-      if (!expected.has(t)) expected.set(t, file);
-      // A re-create after a drop revives it: clear the drop so it's expected again.
-      dropped.delete(t);
-    }
-    for (const t of extractDroppedTables(sql)) dropped.add(t);
-  }
-  for (const t of dropped) expected.delete(t);
+  const { expected, dropped } = foldMigrations(
+    files.map((file) => ({ file, sql: readFileSync(join(migrationsDir, file), "utf8") })),
+  );
   return { expected, dropped, parsedFiles: files.length };
 }
 
