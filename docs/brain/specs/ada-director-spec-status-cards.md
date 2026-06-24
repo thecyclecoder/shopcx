@@ -1,5 +1,7 @@
 # ada-director-spec-status-cards
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]]
 **Parent:** Autonomous build platform mandate — keeps the director's control surface aligned with [[../specs/spec-status-db-driven]] (status moved from markdown to [[../tables/spec_card_state]]).
 **Blocked-by:** none — [[../specs/spec-status-db-driven]] is shipped.
