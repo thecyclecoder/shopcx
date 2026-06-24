@@ -42,4 +42,4 @@ The unique index is the belt-and-suspenders against a racing double-open (the cr
 
 ## Related
 
-[[../specs/control-tower]] · [[loop_heartbeats]] · [[worker_heartbeats]] · [[../inngest/control-tower-monitor]] · [[../libraries/control-tower]] · [[../libraries/notify-ops-alert]] · [[../dashboard/control-tower]]
+[[../specs/control-tower]] · [[loop_heartbeats]] · [[worker_heartbeats]] · [[../inngest/control-tower-monitor]] · [[../libraries/control-tower]] · [[../libraries/notify-ops-alert]] · [[../dashboard/control-tower]] · [[../libraries/deploy-guardian]] · [[deploy_watches]]
