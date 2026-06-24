@@ -43,9 +43,21 @@ export interface OptimizerPolicy {
   auto_rollback_ltv_tolerance: number;
   auto_rollback_windows: number;
   auto_rollback_refund_spike_delta: number;
+  /** The persist-to-renewal-offer margin floor (storefront-renewal-offer-lever P2). An offer
+   *  whose MODELED renewal margin (after the offer's delta) falls below this is REFUSED at
+   *  propose time and escalated to Growth + CFO via director_activity — it never reaches a
+   *  normal Build/Approve card. Fraction in [0,1]; column default 0.40 (40%). When the product's
+   *  COGS source is missing, the floor SOFT-passes (cogs_source_missing=true on the offer row);
+   *  the audit trail records that the floor wasn't verifiable, not that it was met. */
+  min_renewal_margin_pct: number;
   created_by: "agent" | "human";
   rationale: string | null;
 }
+
+/** Floor returned by loadOptimizerPolicy when the column doesn't exist yet (pre-migration) — keeps
+ *  the offer-lever code defensive against a partial deploy by treating "no floor known" as the
+ *  default. Mirrors the migration default. */
+export const DEFAULT_MIN_RENEWAL_MARGIN_PCT = 0.4;
 
 /**
  * The lever class a proposed campaign tests. Drives whether it can ever auto-run:
@@ -86,12 +98,19 @@ export async function loadOptimizerPolicy(
     const { data } = await admin
       .from("storefront_optimizer_policy")
       .select(
-        "id, workspace_id, active, product_scope, auto_run_reversible, max_concurrent_experiments, min_sample, holdout_pct, auto_rollback_ltv_tolerance, auto_rollback_windows, auto_rollback_refund_spike_delta, created_by, rationale",
+        "id, workspace_id, active, product_scope, auto_run_reversible, max_concurrent_experiments, min_sample, holdout_pct, auto_rollback_ltv_tolerance, auto_rollback_windows, auto_rollback_refund_spike_delta, min_renewal_margin_pct, created_by, rationale",
       )
       .eq("workspace_id", workspaceId)
       .maybeSingle();
     if (!data) return null;
-    return data as OptimizerPolicy;
+    const row = data as Partial<OptimizerPolicy> & { min_renewal_margin_pct?: number | null };
+    // Pre-migration: the column may be absent; coerce to the default so the offer-lever code
+    // always sees a finite floor (the live column has a NOT NULL default once the migration lands).
+    return {
+      ...(row as OptimizerPolicy),
+      min_renewal_margin_pct:
+        typeof row.min_renewal_margin_pct === "number" ? row.min_renewal_margin_pct : DEFAULT_MIN_RENEWAL_MARGIN_PCT,
+    };
   } catch {
     return null; // table not present yet — degrade to OFF
   }

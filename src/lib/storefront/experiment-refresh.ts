@@ -23,6 +23,7 @@ import { updatePosterior } from "@/lib/storefront/lever-memory";
 import { gradeCampaign } from "@/lib/storefront/campaign-grader";
 import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
 import { isEdgeConfigWriteConfigured } from "@/lib/storefront/experiment-manifest";
+import { expireRenewalOffers, rollbackRenewalOffersForExperiment } from "@/lib/storefront/optimizer-agent";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -138,6 +139,17 @@ export async function refreshStorefrontExperiments(opts: {
   };
 
   try {
+    // 0. Auto-expire persist-to-renewal offers whose ends_at has passed (storefront-renewal-offer-lever
+    //    P2). Idempotent + best-effort — an expiry failure never breaks the supervisable refresh.
+    try {
+      const swept = await expireRenewalOffers({ workspaceId: opts.workspaceId, now });
+      if (swept.expired) {
+        console.log(`[storefront-experiments] auto-expired ${swept.expired} renewal offer(s); unlinked ${swept.subscriptions_unlinked} sub(s)`);
+      }
+    } catch (e) {
+      console.warn(`[storefront-experiments] renewal-offer auto-expire sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     // 1. Attribution (idempotent recompute).
     const attribution = await refreshExperimentAttribution({
       workspaceId: opts.workspaceId,
@@ -218,6 +230,27 @@ export async function refreshStorefrontExperiments(opts: {
         await commitLearning(exp, rollups);
         // Grade the concluded campaign at significance (a rollback is a conclusion too).
         await gradeInitialBestEffort(experimentId);
+        // storefront-renewal-offer-lever P2: roll back any persist-to-renewal offer linked to this
+        // experiment too — a margin-bleeding offer touched real renewals, so rollback must un-touch
+        // them. Expires the offer + nulls subscriptions.pricing_offer_id so the bleed stops within
+        // this refresh cycle. Best-effort (a failure logs + continues).
+        try {
+          const swept = await rollbackRenewalOffersForExperiment({
+            workspaceId: opts.workspaceId,
+            experimentId,
+            reason,
+            now,
+          });
+          if (swept.expired) {
+            console.warn(
+              `[storefront-experiments] rolled back ${swept.expired} renewal offer(s) tied to experiment=${experimentId}; unlinked ${swept.subscriptions_unlinked} sub(s)`,
+            );
+          }
+        } catch (e) {
+          console.warn(
+            `[storefront-experiments] renewal-offer rollback sweep failed for exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
         // Re-publish the edge manifest + purge the PDP render so a rolled-back PDP
         // experiment reverts every visitor to the real cached hero immediately
         // (pdp-edge-served-experiments).
@@ -248,6 +281,26 @@ export async function refreshStorefrontExperiments(opts: {
         update.stopped_at = now.toISOString();
         counts.killed++;
         terminal = true;
+        // storefront-renewal-offer-lever P2: a killed offer experiment must un-touch its renewals
+        // too (mirror of the rolled_back path) — a kill is a deliberate stop, not a regression, but
+        // the offer still touched real subs and must stop bleeding. Best-effort.
+        try {
+          const swept = await rollbackRenewalOffersForExperiment({
+            workspaceId: opts.workspaceId,
+            experimentId,
+            reason: `bandit kill: ${decision.rule}`,
+            now,
+          });
+          if (swept.expired) {
+            console.warn(
+              `[storefront-experiments] killed experiment=${experimentId} → expired ${swept.expired} renewal offer(s); unlinked ${swept.subscriptions_unlinked} sub(s)`,
+            );
+          }
+        } catch (e) {
+          console.warn(
+            `[storefront-experiments] renewal-offer kill sweep failed for exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
       } else {
         counts.held++;
       }

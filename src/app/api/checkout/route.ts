@@ -683,6 +683,32 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // storefront-renewal-offer-lever: resolve the persist-to-renewal offer this visitor qualifies
+  // for (active, in-window, scoped to their offer-arm experiment assignment on one of this cart's
+  // products). Stamped onto every sub bucket whose product matches the offer — a REFERENCE, never
+  // a baked price → resolveSubscriptionPricing reads it at renewal and applies the delta.
+  const cartAnonId = (cart.anonymous_id as string | null) || null;
+  const productIdsForOffer = [...new Set(lines.map((l) => l.product_id).filter((p): p is string => !!p))];
+  const offerIdByProduct = new Map<string, string>();
+  if (productIdsForOffer.length && subMode === "new_sub") {
+    try {
+      const { resolveSubscriptionOfferId } = await import("@/lib/storefront/optimizer-agent");
+      // Resolve per product: the offer is scoped to product_id, so a multi-product cart only
+      // tags subs whose product matches the offer. Best-effort — a lookup miss means base pricing.
+      for (const productId of productIdsForOffer) {
+        const offerId = await resolveSubscriptionOfferId({
+          workspaceId: cart.workspace_id,
+          anonymousId: cartAnonId,
+          customerId: customer.id,
+          productIds: [productId],
+        });
+        if (offerId) offerIdByProduct.set(productId, offerId);
+      }
+    } catch (e) {
+      console.warn(`[checkout] persist-to-renewal offer lookup failed for cart ${cart.token}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   for (const bucket of buckets.values()) {
     const nextBillingDate = new Date();
     nextBillingDate.setDate(nextBillingDate.getDate() + bucket.frequency_days);
@@ -693,6 +719,11 @@ export async function POST(request: NextRequest) {
     // recurring renewal too. The subscription's recurring total is the
     // implicit sum of items[].price_cents * quantity + delivery_price_cents.
     const subDeliveryCents = bucket.items.some((i) => i.mode === "subscribe") ? 0 : shippingCents;
+    // The bucket's offer: the first product in this bucket whose lookup produced an offer id
+    // (subs carry one offer; never bundle two persist-to-renewal offers into one sub).
+    const bucketOfferId =
+      bucket.items.map((i) => i.product_id).find((pid) => pid && offerIdByProduct.has(pid as string)) || null;
+    const pricingOfferId = bucketOfferId ? offerIdByProduct.get(bucketOfferId as string) ?? null : null;
     const { data: sub, error: subErr } = await admin
       .from("subscriptions")
       .insert({
@@ -731,6 +762,10 @@ export async function POST(request: NextRequest) {
         // Source of truth for where renewals ship + tax — the renewal scheduler,
         // pricing engine, and portal all read subscriptions.shipping_address.
         shipping_address: ship,
+        // storefront-renewal-offer-lever: the persist-to-renewal offer this sub was acquired
+        // under (null = base pricing). A reference, NOT a baked price — resolveSubscriptionPricing
+        // reads it at renewal, and expiry / rollback / null-out reverts to base automatically.
+        pricing_offer_id: pricingOfferId,
       })
       .select("id")
       .single();
