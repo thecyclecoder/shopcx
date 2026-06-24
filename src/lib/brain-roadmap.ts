@@ -160,13 +160,17 @@ function parseSpec(slug: string, raw: string): SpecCard {
   }
 
   const phases: SpecPhase[] = [];
+  // Accept a phase heading at H2 (`## Phase 1 — …`) OR H3 (`### Phase 1 — …` under a `## Phases` wrapper) —
+  // both shapes are authored in the wild; matching only H2 left H3-phase specs with ZERO phases (so they
+  // rolled up to `planned` forever, even after every build merged). `Phase\b` excludes the `## Phases` wrapper.
+  const isPhaseHeading = (l: string) => /^#{2,3}\s+Phase\b/.test(l);
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^##\s+(Phase\b.*)/);
+    const m = lines[i].match(/^#{2,3}\s+(Phase\b.*)/);
     if (!m) continue;
     let st = statusFromText(lines[i]);
     if (!st) {
-      // emoji may live on the first bullet under the heading
-      for (let j = i + 1; j < lines.length && !lines[j].startsWith("## "); j++) {
+      // emoji may live on the first bullet under the heading — scan until the next phase heading / H2 section
+      for (let j = i + 1; j < lines.length && !lines[j].startsWith("## ") && !isPhaseHeading(lines[j]); j++) {
         st = statusFromText(lines[j]);
         if (st) break;
       }
