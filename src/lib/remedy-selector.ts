@@ -412,7 +412,13 @@ IMPORTANT: You CANNOT perform cancellations or any subscription actions yourself
 
   if (!aiRes.ok) {
     const errText = await aiRes.text().catch(() => "");
-    console.error(`Anthropic API error in generateOpenEndedResponse (Sonnet): ${aiRes.status}`, errText);
+    // INTERMEDIATE diagnostic, NOT a terminal failure: the Haiku fallback below absorbs a
+    // transient Sonnet overload (e.g. 529 overloaded_error) and typically returns a valid
+    // reply. Log at warn (not error) so the Vercel log drain (isError() captures level==='error')
+    // doesn't mint a false Control Tower incident on healthy self-healing (signature
+    // vercel:43e4b03698fb1c38). The breaker still records the failure below; only a terminal
+    // both-legs-down failure (Haiku also fails → escalationReply) stays console.error and pages.
+    console.warn(`Anthropic API error in generateOpenEndedResponse (Sonnet, absorbed by Haiku fallback): ${aiRes.status}`, errText);
     // Feed the breaker's local signal so a retryable Sonnet failure counts (Phase 3).
     if (isRetryableAnthropicStatus(aiRes.status)) await recordClaudeFailure(admin, `chat sonnet → ${aiRes.status}`);
 
