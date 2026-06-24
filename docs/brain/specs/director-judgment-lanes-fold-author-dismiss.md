@@ -1,11 +1,11 @@
-# Director judgment lanes can fold-now, author follow-up specs, dismiss false alarms ⏳
+# Director judgment lanes can fold-now, author follow-up specs, dismiss false alarms
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the action surface every read-only Max judgment lane returns, so a sound diagnosis I just made lands instead of routing through the CEO inbox.
 **Blocked-by:** none.
 
 **Why now (2026-06-24):** the agents-hub-role-inboxes escalation. Phases 1–5 are all ✅ in the file and every artifact is on disk — what looked like a leftover `Phase 5 ⏳` was the grooming parser counting `### Phase 5` inside `## Verification` as a real phase. The right move was two actions in one pass: FOLD agents-hub-role-inboxes now (flip the phantom ⏳ to ✅ → fold queues) AND AUTHOR a spec to scope `^## Phase` matching to top-level only. The groom lane's verdict surface is `{continue, split, escalate}`: continue would queue a redundant build for already-shipped code, split would author a phantom future-enhancement card for code that already exists. Neither was safe — so I escalated a long diagnosis and the CEO has to manually take both actions I already knew were right. Every read-only Max judgment lane (groom · init · repair-dismissal · approval) has the same trap: a sound diagnosis that exits its narrow verdict set forces escalate instead of execute.
 
-## Phase 1 — expand the groom lane (continue/split/escalate → +fold_now +author_followup_spec +dismiss_candidate) ⏳
+## Phase 1 — expand the groom lane (continue/split/escalate → +fold_now +author_followup_spec +dismiss_candidate)
 - Add three new verdicts to `groomInvestigationPrompt` + `GroomVerdict` + the `groomBoard` dispatch in `scripts/builder-worker.ts`:
   - **`fold_now`** — the remaining ⏳ phases are PHANTOM (parser miscount; or the work landed via another shipped spec). Required `reason`. Box flips every remaining phase to ✅ via `markSpecCardStatus` (actor=`director:platform`, reason written to `spec_status_history`) and queues a fold via the existing fold chain. Writes a `groomed_fold_now` `director_activity` row carrying `{slug, flipped_phases, reason}`.
   - **`author_followup_spec`** — the investigation surfaced a real code-level root cause (the parser bug in this case). Verdict carries `{slug, title, owner, parent, content}` (same shape as a coaching-surface spec card). Box commits it via `putFileMain` and writes a `groomed_authored_spec` `director_activity` row. The verdict MUST ALSO carry a primary disposition on the immediate candidate (`fold_now` or `split`) in the same JSON so the candidate doesn't re-fire on the next pass.
@@ -13,7 +13,7 @@
 - All three sit inside the existing leash (status flips, spec authoring, activity rows — all reversible) and are gated by the same validator pattern as `validateGroomSplit` (e.g. `fold_now` requires owner-match + non-empty reason + a phase set to flip; `author_followup_spec` requires a `{slug}-…` slug + an H1 + Owner/Parent lines + ⏳ status; `dismiss_candidate` requires a non-empty reason). A malformed verdict escalates instead of landing a broken board.
 - Loop-guard + dedup unchanged. `fold_now` on a spec whose Owner is not platform is rejected (same owner-check as the chat-surface `spec-status` action) and escalates.
 
-## Phase 2 — same action expansion for init + repair-dismissal lanes ⏳
+## Phase 2 — same action expansion for init + repair-dismissal lanes
 - `initInvestigationPrompt` adds `author_followup_spec` (the unstarted spec is real but the right scope is a *different* spec — author it; defer or dismiss this one) and `dismiss_candidate` (malformed / duplicate / superseded spec — write `init_dismissed` activity row, don't initiate).
 - `repairDismissalInvestigationPrompt` adds `author_followup_spec` (Rafa's no-fix item is a real bug Rafa miscategorized — author a fix spec instead of dismissing OR escalating).
 - Consolidate the verdict-application code: one `applyDirectorAction(admin, lane, candidate, action)` helper that knows how to do fold_now / author_followup_spec / dismiss_candidate, called by all three lanes' dispatch code. Each lane keeps its own native verdicts (continue/split for groom, initiate for init, dismiss for repair) — the shared helper only handles the three new cross-lane actions.
