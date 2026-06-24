@@ -1,4 +1,4 @@
-# Every spec is the director's to drive + a first-class Deferred status ⏳
+# Every spec is the director's to drive + a first-class Deferred status 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] + [[board-grooming]] — generalizes the auto-build lanes to all owners under [[../goals/devops-director]]
 **Found in use 2026-06-24:** the CEO established the operating principle — 'the existence of a spec means it's the director's to drive; CS/Growth won't queue their own builds.' Today the initiation lane ([[director-initialize-platform-specs-no-wait]] P2) and `escortFixSpecs` are gated to `owner === platform`, so other departments' Planned specs (e.g. [[portal-remediation-recognize-would-remove-last-item]] (CS), three Growth specs) never start — and those directors aren't live to start them. The exception is DEFERRED work, which has no first-class status today (only a `**Deferred:**` marker line) — the CEO wants a dedicated board column so Planned (start it) is cleanly separated from Deferred (leave it).
