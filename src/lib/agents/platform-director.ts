@@ -55,6 +55,7 @@ import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
+import { buildGate } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
@@ -508,6 +509,10 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   const owned = mine.filter((g) => isApprovedInProgress(g));
   if (!owned.length) return { goals: [], queued: [], escalated: [] };
 
+  // Build-gate (director-executable-plans-and-priority): if an active directive gates builds until a spec
+  // ships, this lane queues NOTHING but the gate spec itself until then. Computed once per pass.
+  const gate = await buildGate(admin, workspaceId, PLATFORM);
+
   const specBySlug = new Map(specs.map((s) => [s.slug, s]));
   const results: GoalEscortResult[] = [];
   const queuedAll: string[] = [];
@@ -520,6 +525,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
     for (const card of goalSpecs(goal, specBySlug)) {
       if (card.status === "shipped") continue; // already landed
       if (card.status === "deferred") continue; // parked — every auto-build lane skips a deferred spec until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
+      if (gate && card.slug !== gate.gatedUntil) continue; // build-gate: a directive paused all builds except the gate spec
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
       if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
 
@@ -639,12 +645,14 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
   if (!workspaceId) return { fixQueued: [], escalated: [] };
 
   const { specs } = await getRoadmap();
+  const gate = await buildGate(admin, workspaceId, PLATFORM); // build-gate (director-executable-plans-and-priority): the gate spec is itself often a fix, so it's allowed; others wait
   const fixQueued: string[] = [];
   const escalated: string[] = [];
 
   for (const card of specs) {
     if (card.status === "shipped") continue; // already landed
     if (card.status === "deferred") continue; // parked — a deferred fix spec is skipped until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
+    if (gate && card.slug !== gate.gatedUntil) continue; // build-gate: a directive paused all builds except the gate spec
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
@@ -1694,8 +1702,14 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
   // queued ahead of normal Planned specs, within the per-pass cap. Stable for non-critical (preserves order).
   unstarted.sort((a, b) => (b.critical ? 1 : 0) - (a.critical ? 1 : 0));
 
+  // Build-gate: while a directive gates builds until a spec ships, the init lane starts NOTHING but the gate
+  // spec (so a fix lands before new feature work compiles). The gate spec is usually a fix (escortFixSpecs owns
+  // it), so this typically yields an empty init list while gated — intended.
+  const gate = await buildGate(admin, workspaceId, PLATFORM);
+  const candidates = gate ? unstarted.filter((s) => s.slug === gate.gatedUntil) : unstarted;
+
   const out: InitCandidate[] = [];
-  for (const s of unstarted) {
+  for (const s of candidates) {
     if (out.length >= PLATFORM_DIRECTOR_INIT_CAP) break;
     const state = await specBuildState(admin, workspaceId, s.slug);
     if (state.inFlight) continue; // a build is already carrying it — not "unstarted with no build"
