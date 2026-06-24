@@ -99,13 +99,26 @@ function workerStale(w: Worker): boolean {
   return Date.now() - new Date(w.last_poll_at).getTime() > STALE_MS;
 }
 
-// Compact elapsed ("Ns/Nm/Nh/Nd") from an ISO timestamp to now.
-function elapsed(iso: string): string {
-  const sec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+// Compact duration ("Ns/Nm/Nh/Nd") from a second count.
+function fmtDur(sec: number): string {
+  sec = Math.max(0, Math.floor(sec));
   if (sec < 60) return `${sec}s`;
   if (sec < 3600) return `${Math.floor(sec / 60)}m`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
   return `${Math.floor(sec / 86400)}d`;
+}
+// Elapsed since a PAST timestamp (e.g. an event time).
+function elapsed(iso: string): string {
+  return fmtDur((Date.now() - new Date(iso).getTime()) / 1000);
+}
+// Time UNTIL a FUTURE timestamp (e.g. a cap reset). Using elapsed() here was the "resets ~0s away" bug —
+// a future time minus now is negative, which clamps to 0; this is the correctly-signed direction.
+function until(iso: string): string {
+  return fmtDur((new Date(iso).getTime() - Date.now()) / 1000);
+}
+// Reset times are shown in AST (America/Puerto_Rico, UTC-4, no DST) — the CEO's local time — not UTC.
+function astTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-US", { timeZone: "America/Puerto_Rico", hour: "numeric", minute: "2-digit" }) + " AST";
 }
 
 const KIND_CHIP: Record<string, string> = {
@@ -221,7 +234,7 @@ function AccountsPanel({ accounts }: { accounts: AccountsSnapshot }) {
       {accounts.all_capped && (
         <div className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-900/40 dark:bg-rose-900/20 dark:text-rose-300">
           ⚠ All Max accounts capped — builds parked (<code>blocked_on_usage</code>) and auto-resume
-          {accounts.soonest_reset ? ` ~${elapsed(accounts.soonest_reset)} from cap` : ""}. No manual rebuild needed.
+          {accounts.soonest_reset ? ` at ${astTime(accounts.soonest_reset)} (~${until(accounts.soonest_reset)})` : ""}. No manual rebuild needed.
         </div>
       )}
 
@@ -249,7 +262,7 @@ function AccountsPanel({ accounts }: { accounts: AccountsSnapshot }) {
             </div>
             <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
               {a.in_flight} in flight
-              {a.capped && a.capped_until ? ` · resets ~${elapsed(a.capped_until)} away` : ""}
+              {a.capped && a.capped_until ? ` · resets ${astTime(a.capped_until)} (~${until(a.capped_until)})` : ""}
             </span>
           </div>
         ))}
