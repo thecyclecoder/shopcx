@@ -1,8 +1,8 @@
 # libraries/storefront-experiment-attribution
 
-Phase 3 of the storefront experiment framework, **rewritten by [[../specs/experiment-session-stamped-attribution]]**: attributes off the **session stamp** (not the flaky client `experiment_exposure` event) and persists idempotent rollups + the Thompson posterior onto [[../tables/storefront_experiment_variants]].
+Phase 3 of the storefront experiment framework, **rewritten for [[../lifecycles/storefront-session-attribution]]**: attributes off the **session stamp** (not the flaky client `experiment_exposure` event) and persists idempotent rollups + the Thompson posterior onto [[../tables/storefront_experiment_variants]].
 
-**File:** `src/lib/storefront/experiment-attribution.ts` · Reads [[../tables/storefront_sessions]] (`experiment_assignments`) + [[../tables/orders]] (`session_id`) · See spec.
+**File:** `src/lib/storefront/experiment-attribution.ts` · Reads [[../tables/storefront_sessions]] (`experiment_assignments`) + [[../tables/orders]] (`session_id`) · Trace: [[../lifecycles/storefront-session-attribution]].
 
 ## Exports
 
