@@ -10,7 +10,7 @@
  * See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md (Phases 3–5).
  */
 import type { AgentJob, JobQuestion, PendingAction, PendingFold } from "@/lib/agent-jobs";
-import type { SpecCard, Phase } from "@/lib/brain-roadmap";
+import type { SpecCard, Phase, SpecStatus } from "@/lib/brain-roadmap";
 
 // Interaction action_ids (also the callback_id for the answer modal).
 export const ACTIONS = {
@@ -26,7 +26,7 @@ export const ACTIONS = {
 const DASH = "https://shopcx.ai/dashboard/roadmap";
 const BOARD_CARD_CAP = 16; // keep the board well under Slack's 50-block message ceiling
 
-const PHASE_EMOJI: Record<Phase, string> = { planned: "⏳", in_progress: "🚧", shipped: "✅", rejected: "❌" };
+const PHASE_EMOJI: Record<SpecStatus, string> = { planned: "⏳", in_progress: "🚧", shipped: "✅", deferred: "⏸️", rejected: "❌" };
 
 const SECTIONS: { status: Phase; label: string }[] = [
   { status: "in_progress", label: "🚧 In progress" },

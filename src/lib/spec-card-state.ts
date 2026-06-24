@@ -18,7 +18,7 @@
  * build path, so every writer swallows its error (the daily spec-drift reconcile is the backstop).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { Phase } from "@/lib/brain-roadmap";
+import type { Phase, SpecStatus } from "@/lib/brain-roadmap";
 
 export interface SpecCardPhaseState {
   index: number; // 0-based, matches the board parser order
@@ -36,7 +36,7 @@ export interface SpecCardFlags {
 export interface SpecCardState {
   workspace_id: string;
   spec_slug: string;
-  status: Phase;
+  status: SpecStatus;
   phase_states: SpecCardPhaseState[];
   flags: SpecCardFlags;
   last_merge_sha: string | null;
@@ -79,8 +79,12 @@ export async function getSpecCardStates(workspaceId: string): Promise<Record<str
  * shipped before the redeploy); but a markdown that's already ahead — a fresh deploy or an owner edit —
  * wins (markdown stays canonical). `rejected` is a phase-level state, never a whole-spec board column.
  */
-export function resolveBoardStatus(markdownStatus: Phase, state: SpecCardState | undefined): Phase {
+export function resolveBoardStatus(markdownStatus: SpecStatus, state: SpecCardState | undefined): SpecStatus {
   if (!state || markdownStatus === "rejected") return markdownStatus;
+  // A deferral is owned by the markdown (the `**Deferred:**` marker), not the phase-progress DB mirror:
+  // a deferred markdown status stays deferred, and a once-deferred mirror never overrides an un-deferred
+  // (now Planned) markdown. Only the CEO removing the marker un-defers it (director-drives-all-specs Phase 1).
+  if (markdownStatus === "deferred" || state.status === "deferred") return markdownStatus;
   return PHASE_RANK[state.status] > PHASE_RANK[markdownStatus] ? state.status : markdownStatus;
 }
 
@@ -97,7 +101,7 @@ export type DeployState = "deploying" | "live";
  */
 export function deploymentState(
   state: SpecCardState | undefined,
-  markdownStatus: Phase,
+  markdownStatus: SpecStatus,
   deployedSha: string,
 ): DeployState | null {
   if (!state || state.status !== "shipped" || !state.last_merge_sha) return null;
@@ -111,7 +115,7 @@ export function deploymentState(
 async function upsertCardState(
   workspaceId: string,
   slug: string,
-  patch: { status?: Phase; phase_states?: SpecCardPhaseState[]; last_merge_sha?: string | null; flags?: SpecCardFlags },
+  patch: { status?: SpecStatus; phase_states?: SpecCardPhaseState[]; last_merge_sha?: string | null; flags?: SpecCardFlags },
 ): Promise<void> {
   try {
     const admin = createAdminClient();
@@ -144,7 +148,7 @@ async function upsertCardState(
 export async function markSpecCardStatus(
   workspaceId: string,
   slug: string,
-  status: Phase,
+  status: SpecStatus,
   phaseStates?: SpecCardPhaseState[],
 ): Promise<void> {
   await upsertCardState(workspaceId, slug, { status, phase_states: phaseStates });
@@ -165,7 +169,7 @@ export async function markSpecCardStatus(
 export async function markSpecCardMergeShipped(
   workspaceId: string,
   slug: string,
-  opts: { status: Phase; mergeSha: string | null; phaseStates?: SpecCardPhaseState[] },
+  opts: { status: SpecStatus; mergeSha: string | null; phaseStates?: SpecCardPhaseState[] },
 ): Promise<void> {
   const status = opts.phaseStates && opts.phaseStates.length ? rollupPhaseStatus(opts.phaseStates) : opts.status;
   await upsertCardState(workspaceId, slug, {

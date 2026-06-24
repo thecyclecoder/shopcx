@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { marked } from "marked";
-import { getSpec, listSpecSlugs, extractSpecSection, stripSpecSection, type Phase } from "@/lib/brain-roadmap";
+import { getSpec, listSpecSlugs, extractSpecSection, stripSpecSection, type SpecStatus } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import {
@@ -19,11 +19,12 @@ import VerificationCard from "../VerificationCard";
 
 export const dynamic = "force-dynamic";
 
-const STATUS_LABEL: Record<Phase, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", rejected: "Cut" };
-const STATUS_BADGE: Record<Phase, string> = {
+const STATUS_LABEL: Record<SpecStatus, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", deferred: "Deferred", rejected: "Cut" };
+const STATUS_BADGE: Record<SpecStatus, string> = {
   planned: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
   in_progress: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   shipped: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  deferred: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
   rejected: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 

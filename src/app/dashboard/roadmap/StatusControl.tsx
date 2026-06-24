@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
-import type { Phase } from "@/lib/brain-roadmap";
+import type { Phase, SpecStatus } from "@/lib/brain-roadmap";
 
 const OPTS: { key: Phase; label: string; active: string }[] = [
   { key: "planned", label: "Planned", active: "bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-100" },
@@ -15,9 +15,11 @@ const OPTS: { key: Phase; label: string; active: string }[] = [
  * POSTs to /api/roadmap/status (which commits the emoji to the brain on main), reverts on error.
  * Renders nothing for non-owners.
  */
-export default function StatusControl({ slug, status }: { slug: string; status: Phase }) {
+// `status` may be `deferred` (the Deferred column) — no segment is then active; flipping to a phase status
+// posts normally. Un-deferring (removing the marker) stays a markdown/CEO action, not this control.
+export default function StatusControl({ slug, status }: { slug: string; status: SpecStatus }) {
   const workspace = useWorkspace();
-  const [current, setCurrent] = useState<Phase>(status);
+  const [current, setCurrent] = useState<SpecStatus>(status);
   const [saving, setSaving] = useState<Phase | null>(null);
   const [error, setError] = useState(false);
 

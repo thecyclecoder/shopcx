@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
+import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecStatus, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import { getSpecCardStates, resolveBoardStatus, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
@@ -15,25 +15,30 @@ import { AgentTestedStamp, TestChip } from "../developer/spec-tests/SpecTestView
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 export const dynamic = "force-dynamic";
 
-const COLUMNS: { key: Phase; label: string }[] = [
+const COLUMNS: { key: SpecStatus; label: string }[] = [
   { key: "planned", label: "Planned" },
   { key: "in_progress", label: "In progress" },
   // "Shipped" = built + deployed but NOT yet owner-verified in prod. Verifying folds + archives the
   // spec, so this column stays a short, real to-do list. See docs/brain/project-management.md.
   { key: "shipped", label: "Shipped — awaiting verification" },
+  // "Deferred" = parked work (a `**Deferred:**` marker / `**Status:** deferred`) — excluded by every
+  // auto-build lane until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1).
+  { key: "deferred", label: "Deferred" },
 ];
 
-const DOT: Record<Phase, string> = {
+const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
   shipped: "bg-emerald-500",
+  deferred: "bg-slate-400",
   rejected: "bg-rose-400",
 };
 
-const HEADER_ACCENT: Record<Phase, string> = {
+const HEADER_ACCENT: Record<SpecStatus, string> = {
   planned: "text-zinc-500",
   in_progress: "text-amber-600",
   shipped: "text-emerald-600",
+  deferred: "text-slate-500",
   rejected: "text-rose-600",
 };
 
@@ -79,7 +84,7 @@ function DeployChip({ state }: { state: DeployState }) {
   );
 }
 
-function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source, deploy }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: Phase; goalSlugs: string[]; source: SpecSource; deploy: DeployState | null }) {
+function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source, deploy }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: SpecStatus; goalSlugs: string[]; source: SpecSource; deploy: DeployState | null }) {
   return (
     <div
       data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}
@@ -152,13 +157,13 @@ export default async function RoadmapPage() {
   // Status the board shows = the DB mirror forward-merged with the markdown bundle (resolveBoardStatus:
   // whichever is further along — DB-first for the deploy-lag, markdown wins when it's ahead), then the
   // live-build overlay promotes a still-Planned card with an active job to In progress (never demotes).
-  const effectiveStatus = (sp: SpecCard): Phase => {
+  const effectiveStatus = (sp: SpecCard): SpecStatus => {
     const base = resolveBoardStatus(sp.status, cardStates[sp.slug]);
     const job = jobsBySlug[sp.slug];
     if (base === "planned" && job && isActive(job.status)) return "in_progress";
     return base;
   };
-  const byStatus = (s: Phase) => specs.filter((sp) => effectiveStatus(sp) === s);
+  const byStatus = (s: SpecStatus) => specs.filter((sp) => effectiveStatus(sp) === s);
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl p-6">
@@ -188,7 +193,7 @@ export default async function RoadmapPage() {
           No specs found in <code>docs/brain/specs/</code>.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           {COLUMNS.map((col) => {
             const items = byStatus(col.key);
             return (

@@ -12,7 +12,7 @@ The board parses a card's status from the spec markdown's `⏳/🚧/✅` phase e
 
 ## Types
 
-- **`SpecCardState`** — `{ workspace_id, spec_slug, status: Phase, phase_states: SpecCardPhaseState[], flags: SpecCardFlags, last_merge_sha, updated_at }`.
+- **`SpecCardState`** — `{ workspace_id, spec_slug, status: SpecStatus, phase_states: SpecCardPhaseState[], flags: SpecCardFlags, last_merge_sha, updated_at }`. `status` is the whole-spec `SpecStatus` (`Phase | "deferred"`); per-phase `status` stays `Phase`.
 - **`SpecCardPhaseState`** — `{ index, title, status: Phase }` (per-phase snapshot; board future-use).
 - **`SpecCardFlags`** — `{ deploy_pending?, blocked?, [k]: boolean }` (transient).
 - **`DeployState`** — `"deploying" ｜ "live"`.
@@ -20,7 +20,7 @@ The board parses a card's status from the spec markdown's `⏳/🚧/✅` phase e
 ## Exports
 
 - **`getSpecCardStates(workspaceId)`** → `Record<slug, SpecCardState>` — the board's one DB read.
-- **`resolveBoardStatus(markdownStatus, state?)`** → `Phase` — forward-merge of the markdown parse and the mirror (DB-first for the deploy-lag; markdown wins when it's already ahead). `rejected` (phase-level) passes through as the markdown value.
+- **`resolveBoardStatus(markdownStatus, state?)`** → `SpecStatus` — forward-merge of the markdown parse and the mirror (DB-first for the deploy-lag; markdown wins when it's already ahead). `rejected` (phase-level) passes through as the markdown value. A **`deferred`** markdown status is markdown-owned ([[../specs/director-drives-all-specs-and-deferred-status]] Phase 1): a deferred spec stays deferred and a once-deferred mirror never overrides an un-deferred (now Planned) markdown — only the CEO removing the marker un-defers it.
 - **`deploymentState(state?, markdownStatus, deployedSha)`** → `DeployState | null` — the `shipped · deploying` → `shipped · live` signal. `live` when the deployed `VERCEL_GIT_COMMIT_SHA` **is** the card's `last_merge_sha`, or a later deploy already carries the flipped emoji (`markdownStatus === "shipped"`); else `deploying`. `null` for a card that isn't shipped / has no row / no merge SHA.
 - **`markSpecCardStatus(workspaceId, slug, status, phaseStates?)`** — mirror a derived status + per-phase snapshot (drift reconciler, owner flips). No deploy flag.
 - **`rollupPhaseStatus(phaseStates)`** → `Phase` — roll the per-phase states up to one board status, driven purely by the phases (never the H1 emoji): all ✅ → `shipped`; any ✅/🚧 but not all → `in_progress`; else `planned`. `rejected` (cut) phases are ignored; an empty set → `planned`. Used by the merge-write (Bug A fix below).
@@ -38,7 +38,7 @@ All writers are **best-effort** — `upsertCardState` swallows its own error so 
 ## Gotchas
 
 - **`deploy_pending` is cleared at READ time, not by a webhook** — `deploymentState` derives `live` from the SHA compare. The stored flag staying `true` is harmless; a merge whose SHA is already live still shows `shipped · live`.
-- **No circular import** — this module imports only `supabase/admin` + the `Phase` *type* from [[brain-roadmap]]; [[spec-drift]] / [[agent-jobs]] / the routes import *it* (one direction).
+- **No circular import** — this module imports only `supabase/admin` + the `Phase`/`SpecStatus` *types* from [[brain-roadmap]]; [[spec-drift]] / [[agent-jobs]] / the routes import *it* (one direction).
 - **`building` stays on the live-job overlay.** A mid-build card shows In progress via the board's existing active-`agent_jobs` overlay (instant + self-clearing on terminal status), which [[../specs/spec-card-db-companion]] generalizes — this mirror persists the *shipped* progression + deploy flag, the parts that actually had deploy-lag.
 
 ## Related

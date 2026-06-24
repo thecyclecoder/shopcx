@@ -7,7 +7,7 @@
 
 Widening WHICH specs the director drives does not loosen the leash. A spec is only auto-initiated after the read-only soundness investigation confirms it's sound (critical now that the director touches unfamiliar domains — storefront, portal); the loop-guard still stops a repeatedly-failing build; and the hard rails are unchanged — destructive/irreversible escalates, a NEW goal still needs the CEO's greenlight, anything unconfirmable escalates. 'Every spec is mine' = I own driving it to a terminal state (built / deferred / escalated), not blind-merging it.
 
-## Phase 1 — the Deferred status + board column (the exclusion signal, lands FIRST) ⏳
+## Phase 1 — the Deferred status + board column (the exclusion signal, lands FIRST) ✅
 - Add a first-class `deferred` spec status to [[../libraries/brain-roadmap]] `deriveSpecStatus`: a spec is `deferred` when it carries a `**Deferred:**` marker (already authored by [[board-grooming]] splits) or an explicit `**Status:** deferred`. Render it as its OWN board column on the [[../dashboard/roadmap|roadmap board]], distinct from Planned / In-progress / Shipped.
 - ALL auto-build lanes (initiation, fix-escort, grooming, goal-escort) EXCLUDE `deferred` specs. Only the CEO un-defers (promotes back to Planned) to make one startable. This lands first so widening the drive (Phase 2) can never accidentally start deferred work.
 - The existing board-grooming split cards (carrying `**Deferred:**`) become the natural population of the column — no migration, no conflict.
