@@ -1874,6 +1874,56 @@ function isMaxOverloaded(text: string): boolean {
 // (a `platform-director` job with NO target_job_id). It runs the proactive, non-approval director work on a
 // reliable beat — escort each approved goal it owns + post the daily Control-Tower watch update to the board
 // — both no-ops unless Platform is live+autonomous. Best-effort: a failure in one half never blocks the other.
+// #10 (spec-drift-supervision): Ada reviews the AMBIGUOUS drift rows the reconciler surfaced (code on main but
+// no build record, so it couldn't auto-flip). She investigates each READ-ONLY — if she confirms the code
+// implements the phase, she flips it ✅ + resolves the row; an unconfirmable one stays surfaced. Never escalates
+// to the CEO. Capped per pass. This is what the CEO asked for: Ada handles spec-drift's recommendations.
+async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
+  const sd = await import("../src/lib/spec-drift");
+  const rows = await sd.getOpenSpecDrift(job.workspace_id);
+  if (!rows.length) return "drift: none open";
+  const CAP = 5;
+  const flipped: string[] = [];
+  let reviewed = 0;
+  for (const row of rows.slice(0, CAP)) {
+    reviewed++;
+    try {
+      const prompt = [
+        "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only main checkout + the brain, no API key).",
+        `The spec-drift reconciler flagged ${row.spec_slug} phase ${row.phase_index} ("${row.phase_title}"): its board emoji is still ${row.current_emoji}, but the code may already be on main (it couldn't auto-confirm). Detail: ${row.detail}`,
+        "Investigate READ-ONLY: read the spec phase + the implicated code on main. Decide whether this phase is ACTUALLY shipped — its code is on main and implements what the phase describes.",
+        "Final message = ONLY one JSON object:",
+        '{"verdict":"shipped","reasoning":"<the code on main implements this phase — cite the file/function>"}',
+        '{"verdict":"not-shipped","reasoning":"<the code is NOT there / only partial>"}',
+        '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
+      ].join("\n");
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR);
+      const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
+      if (String(parsed?.verdict) === "shipped") {
+        const path = join(REPO_DIR, `docs/brain/specs/${row.spec_slug}.md`);
+        if (!existsSync(path)) { await sd.resolveDriftRow(db, row.id); continue; } // spec gone (folded) → resolve
+        const raw = readFileSync(path, "utf8");
+        const flippedRaw = sd.flipPhaseToShipped(raw, row.phase_index);
+        if (flippedRaw === raw) { await sd.resolveDriftRow(db, row.id); continue; } // already ✅ on main → just resolve
+        const put = await putFileMain(`docs/brain/specs/${row.spec_slug}.md`, flippedRaw, `spec-drift: ${row.spec_slug} phase ${row.phase_index} → ✅ (Ada confirmed shipped)`);
+        if (put.ok) {
+          await sd.resolveDriftRow(db, row.id);
+          flipped.push(`${row.spec_slug} P${row.phase_index + 1}`);
+        }
+      }
+    } catch (e) {
+      console.error(`${tag} drift-supervise ${row.spec_slug} failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+  if (flipped.length) {
+    try {
+      const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "platform", authorFunction: "platform", body: `🔄 Reviewed Reese's spec-drift findings — confirmed + flipped ${flipped.length} phase(s) to ✅: ${flipped.join(", ")}.`, kind: "update", metadata: { spec_drift_supervise: true } });
+    } catch { /* best-effort */ }
+  }
+  return `drift-supervise: reviewed ${reviewed}, flipped ${flipped.length}${flipped.length ? ": " + flipped.join(", ") : ""}`;
+}
+
 async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   const lib = await import("../src/lib/agents/platform-director");
   const notes: string[] = [];
@@ -2002,6 +2052,13 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing groom failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // #10 — supervise Reese's open spec-drift findings: confirm + flip ✅ the genuinely-shipped phases.
+    notes.push(await runSpecDriftSupervision(job, tag));
+  } catch (e) {
+    notes.push(`drift-supervise failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing drift-supervise failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const watch = await lib.postPlatformWatchUpdate(db);
     notes.push(watch.posted ? "posted board watch update" : `no board post (${watch.reason})`);
   } catch (e) {
@@ -2013,7 +2070,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   // to advance / all healthy) is skipped so the board isn't flooded every ~15m; the daily watch + activity feed
   // cover the all-quiet heartbeat.
   try {
-    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh/i;
+    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|drift: none|flipped 0/i;
     const meaningful = notes.filter((n) => n && !QUIET.test(n));
     if (meaningful.length) {
       const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));
