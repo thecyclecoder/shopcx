@@ -37,6 +37,31 @@ import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { PLATFORM, PLATFORM_DIRECTOR_LOOP_GUARD_MAX } from "@/lib/agents/platform-director";
 import { coachAgent } from "@/lib/agents/agent-instructions";
+import { postDirectorMessage } from "@/lib/agents/director-board";
+import { recordDirectorActivity } from "@/lib/director-activity";
+import { getPersona } from "@/lib/agents/personas";
+
+/** The director (Ada) + an agent's persona name for board lines. */
+function nm(kind: string): string {
+  return getPersona(kind).name;
+}
+
+/**
+ * Announce a director action on the #directors board + the activity feed (best-effort) — so coaching,
+ * grade-slip escalations, and recoveries are VISIBLE, not just silent DB writes.
+ */
+async function announceOnBoard(admin: Admin, workspaceId: string, body: string, actionKind: string, metadata: Record<string, unknown>): Promise<void> {
+  try {
+    await postDirectorMessage({ workspaceId, author: "director", authorFunction: PLATFORM, body, kind: "update", metadata });
+  } catch (e) {
+    console.warn(`[agent-grader] board post failed: ${e instanceof Error ? e.message : e}`);
+  }
+  try {
+    await recordDirectorActivity(admin, { workspaceId, directorFunction: PLATFORM, actionKind, specSlug: null, reason: body, metadata });
+  } catch {
+    /* best-effort */
+  }
+}
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -479,6 +504,7 @@ export interface CoachingTriggerResult {
   rollup: AgentRollup;
   slipped: boolean;
   coached: boolean;
+  recovered?: boolean;
   needsEscalation?: boolean;
   attempt?: number;
   instructionId?: string;
@@ -548,7 +574,33 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
   const lowByAvg = rollup.average !== null && rollup.count >= COACH_MIN_SAMPLE && rollup.average < COACH_LOW_ROLLUP;
   const lowByDrop = rollup.drop !== null && rollup.drop > DROP_THRESHOLD;
   const slipped = lowByAvg || lowByDrop;
-  if (!slipped) return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "no_slip" };
+  if (!slipped) {
+    // RECOVERY: the agent was below the bar in the prior window and has climbed back above it — the
+    // coaching took. Announce it once (deduped vs a recent agent_recovered activity row).
+    const recovered = rollup.priorAverage != null && rollup.priorAverage < COACH_LOW_ROLLUP && rollup.average != null && rollup.average >= COACH_LOW_ROLLUP;
+    if (recovered) {
+      const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { count: recent } = await admin
+        .from("director_activity")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", opts.workspaceId)
+        .eq("action_kind", "agent_recovered")
+        .eq("director_function", PLATFORM)
+        .gte("created_at", sinceIso)
+        .filter("metadata->>agent_kind", "eq", opts.agentKind);
+      if (!recent) {
+        await announceOnBoard(
+          admin,
+          opts.workspaceId,
+          `📈 ${nm(PLATFORM)}'s coaching took — ${nm(opts.agentKind)} (\`${opts.agentKind}\`) recovered to ${rollup.average?.toFixed(1)}/10 (was ${rollup.priorAverage?.toFixed(1)}).`,
+          "agent_recovered",
+          { agent_kind: opts.agentKind, average: rollup.average, prior: rollup.priorAverage },
+        );
+      }
+      return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, recovered: true };
+    }
+    return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "no_slip" };
+  }
   if (!ANTHROPIC_API_KEY) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: "no_api_key" };
 
   // Loop-guard: too many coaching attempts that never STUCK for this worker → escalate, don't re-coach
@@ -561,6 +613,13 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
     .eq("kind", "coaching")
     .neq("recheck_status", "stuck");
   if ((openCoachings ?? 0) >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+    await announceOnBoard(
+      admin,
+      opts.workspaceId,
+      `⚠️ ${nm(PLATFORM)} escalated ${nm(opts.agentKind)} (\`${opts.agentKind}\`) to the CEO — coached ${openCoachings}× without it sticking; the rollup is still ${rollup.average?.toFixed(1)}/10.`,
+      "escalated",
+      { agent_kind: opts.agentKind, average: rollup.average, attempts: openCoachings },
+    );
     return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: true, reason: "loop_guard" };
   }
 
@@ -590,6 +649,13 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
       reasoning: coaching.reasoning,
       sourceGradeId: lowRows[0]?.id ?? null,
     });
+    await announceOnBoard(
+      admin,
+      opts.workspaceId,
+      `🛠️ ${nm(PLATFORM)} coached ${nm(opts.agentKind)}: ${coaching.guidance}`,
+      "coached_agent",
+      { agent_kind: opts.agentKind, error_class: coaching.errorClass, kind: "coaching", rollup_avg: rollup.average },
+    );
     return { agentKind: opts.agentKind, rollup, slipped, coached: true, attempt: result.attempt, instructionId: result.instruction.id };
   } catch (e) {
     return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: e instanceof Error ? e.message : String(e) };
