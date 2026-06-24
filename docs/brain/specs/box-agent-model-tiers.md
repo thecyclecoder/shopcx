@@ -1,5 +1,7 @@
 # Per-agent model tiers + director-proposed model changes ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (the org learns + self-manages) · extends [[worker-grading-and-director-management]] (the grades become the evidence for a model change).
 
 **Found in use 2026-06-23** (CEO review of the agent fleet): every box `claude -p` agent — the org-chart workers (Bo/build, Rafa/repair, Fenn/fold …) **and** the director (Ada) — runs with **no `--model` flag**, so they all inherit the **one Max-plan default model**. They are not tiered by task: Fenn folding brain pages (mechanical) runs on the same model as Bo doing a multi-file build (the hardest reasoning). Two problems: (1) no way to put a routine, high-volume worker on a cheaper/faster model; (2) no governed way to *change* an agent's model as we learn (e.g. its grades slip on a small model).
