@@ -4435,6 +4435,25 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         queueBuild: a.queueBuild === true,
         status: "pending",
       });
+    } else if (a.type === "goal") {
+      // A director-PROPOSED goal (a strategic multi-spec objective). Structured fields → proposeGoal renders
+      // the proposed artifact on approval. She never starts a goal herself; proposing one for the CEO's
+      // greenlight is the sanctioned path (director-proposed-goals Phase 3).
+      const slug = typeof a.slug === "string" ? a.slug.replace(/[^a-z0-9-]/gi, "") : "";
+      const title = typeof a.title === "string" ? a.title : "";
+      const outcome = typeof a.outcome === "string" ? a.outcome : "";
+      if (!slug || !title || !outcome) continue; // a goal needs a slug + title + outcome (proposeGoal requires them)
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "goal",
+        summary: String(a.summary || `Goal: ${slug}`),
+        slug,
+        title,
+        outcome,
+        successMetric: typeof a.successMetric === "string" ? a.successMetric : "",
+        body: typeof a.body === "string" ? a.body : "",
+        status: "pending",
+      });
     }
   }
   return out;
@@ -4448,6 +4467,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when the CEO COACHES you ("build these types automatically going forward"). Distill it into ONE durable rule. On approval it's injected into your future decisions. Stay within the leash — never propose a rule that auto-does something destructive/irreversible or starts a new goal.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec","summary":"<the gap>","slug":"<kebab-slug>","title":"<Title>","owner":"[[../functions/platform]]","parent":"<a mandate or goal milestone>","content":"<the FULL docs/brain/specs/{slug}.md markdown>","queueBuild":false}]}`,
   `  — when the fix needs CODE (an automation/infra capability). The worker commits the spec on approval.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"goal","summary":"<the objective in one line>","slug":"<kebab-slug>","title":"<Title>","outcome":"<one-line outcome>","successMetric":"<how we'll measure it>","body":"<markdown body: a 'Why now' paragraph + a 'Milestone seeds for Pia' bullet list>"}]}`,
+  `  — when you spot a STRATEGIC objective worth a MULTI-SPEC initiative (not one fix). You PROPOSE it for YOUR OWN function; on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate — directors propose, the CEO greenlights). Once greenlit, Pia decomposes it into a milestone→spec tree. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -4456,6 +4477,7 @@ function directorCoachFraming(dirFn: string): string {
     `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your own definition is docs/brain/libraries/platform-director.md (your leash, escort, grooming) + docs/brain/specs/worker-grading-and-director-management.md. Your leash is LEASH_CATEGORIES in src/lib/agents/platform-director.ts.`,
     `To explain "why haven't you built/done X": investigate read-only — read the spec (its phases ⏳/✅, its **Blocked-by:** line, its **Owner:**, whether it's goal-linked), check the agent_jobs queue for its build state, and your director_activity. A throwaway scripts/_*.ts that bootstraps createAdminClient can query the DB read-only (SELECT-only; never commit it). Then explain plainly + honestly.`,
     `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
+    `You MAY PROPOSE a new GOAL (for YOUR OWN function only). If the conversation surfaces a strategic, multi-spec objective (an initiative, not a single fix), emit a 'goal' pending_action with structured fields (slug, title, outcome, successMetric, body). You never START a goal yourself — on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate); once greenlit, Pia decomposes it. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
     DIRECTOR_COACH_OUTPUT,
   ].join("\n\n");
 }
@@ -4543,6 +4565,25 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "done";
             a.result = `committed specs/${slug}.md${queued ? " + queued build" : ""}`;
             notes.push(`Spec ${slug} → committed${queued ? " + build queued" : ""}`);
+          } else if (a.type === "goal" && a.slug && a.title && a.outcome) {
+            // Route through the sanctioned Phase-1 lifecycle (director-proposed-goals): proposeGoal renders the
+            // proposed artifact + enqueues a proposed-goal job → the worker commits it + parks needs_approval →
+            // routes to the CEO for the greenlight (the activation gate). A chat-proposed goal is then identical
+            // to any director-proposed goal — never a direct/ungated commit.
+            const { proposeGoal } = await import("../src/lib/agents/goal-proposals");
+            const r = await proposeGoal(db, job.workspace_id, {
+              proposerFunction: thread.director_function,
+              ownerFunction: thread.director_function,
+              slug: String(a.slug),
+              title: String(a.title),
+              outcome: String(a.outcome),
+              successMetric: a.successMetric ? String(a.successMetric) : undefined,
+              body: a.body ? String(a.body) : undefined,
+            });
+            if (!r.ok) { a.status = "failed"; a.result = r.error || "proposeGoal failed"; notes.push(`${a.summary} → ${a.result}`); continue; }
+            a.status = "done";
+            a.result = `proposed goal ${a.slug} → committed + surfaced for your greenlight`;
+            notes.push(`Goal ${a.slug} → proposed (awaiting your greenlight)`);
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
@@ -4569,7 +4610,7 @@ async function runDirectorCoachJob(job: Job) {
     const intentDirective =
       intent === "coach"
         ? `INTENT: COACH. The CEO is coaching you — distill their directive (from this whole conversation) into ONE durable coaching rule and emit a 'coaching' pending_action for their confirmation. Acknowledge briefly in reply, but the rule is what matters. Stay within your leash.`
-        : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one.`;
+        : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight.`;
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
     const prompt = isResume
       ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`

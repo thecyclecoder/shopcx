@@ -32,11 +32,12 @@ What landed: the explicit goal-state model ([[../libraries/brain-roadmap]] `Goal
 ### Verification — Phase 2
 - A greenlit goal can be decomposed by Pia and, once its first approved spec builds, is escorted to completion by its owning director. The hub shows proposer + status.
 
-## Phase 3 — the director's coaching/proposal seat gets a `goal` action type ⏳
+## Phase 3 — the director's coaching/proposal seat gets a `goal` action type ✅
 - Give the director output (coaching chats + the standing surfaces) a first-class `goal` proposal action alongside `spec` — so a director hands the CEO a ready-to-greenlight goal card instead of plain-text drafts. Closes the asymmetry that today only `spec`/`coaching` exist.
+- Shipped: the director coaching seat (`scripts/builder-worker.ts` `runDirectorCoachJob`) now emits + executes a `goal` card. `DIRECTOR_COACH_OUTPUT` + `directorCoachFraming` advertise the `goal` action (structured fields: slug/title/outcome/successMetric/body, own-function only); `normalizeCoachActions` validates it; on CEO approval the executor calls Phase-1 [[../libraries/goal-proposals]] `proposeGoal` (NOT a direct commit) — so a chat-proposed goal goes through the identical proposed→greenlight lifecycle (artifact committed `Status: proposed`, routed to the CEO for the greenlight). UI: `director-coach-chat.tsx` renders the `goal` card (outcome + "approve to surface for your greenlight"). Two deliberate gates: approve the card (accept the draft) → greenlight in the inbox (activate). Decomposition follows greenlight (Phase 2).
 
-### Verification — Phase 3
-- In a director chat, proposing a goal emits a `goal` card the CEO can greenlight in one tap; on approval the worker commits the `proposed` goal artifact from Phase 1.
+### Verification — Phase 3 (shipped)
+- In a director chat (`/dashboard/agents/platform` → Coach Ada), Ada proposing a goal emits a `goal` card. Approve it → `proposeGoal` enqueues a `proposed-goal` job → `docs/brain/goals/{slug}.md` committed `Status: proposed` + ONE CEO greenlight Approval Request (per Phase 1). Greenlight it → flips to `greenlit`. `npx tsc --noEmit` clean.
 
 ## Open decision (for the CEO) — propose vs. self-activate
 This spec deliberately keeps YOUR greenlight as the activation gate (directors propose, you activate) — preserving the north-star boundary that the CEO owns objectives. The alternative — a director auto-creates AND auto-activates its own goals with no CEO gate — inverts that boundary and is the one thing the architecture says not to automate; I've scoped it OUT by default and recommend against it. If you want a bounded version later (e.g. a live director may auto-activate a goal that is purely internal/reversible and under an already-approved parent goal), that's a separate eyes-open decision, not this spec.
