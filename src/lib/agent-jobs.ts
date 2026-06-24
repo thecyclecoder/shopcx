@@ -43,7 +43,16 @@ export type GatedActionType =
   | "migration_fix"
   | "repair_build"
   | "storefront_campaign"
-  | "storefront_build";
+  | "storefront_build"
+  // box-agent-model-tiers P3: a governed model-tier change for one agent kind. The worker applies it
+  // (agent_model_tiers upsert) on approval. Routing is by the TARGET agent kind (see target_kind), not
+  // the proposal job kind, so a worker's change routes to its director and a director's to the CEO.
+  | "apply_model_tier";
+
+/** The agent_jobs.kind for a governed model-tier change awaiting supervisor approval (box-agent-model-tiers P3). */
+export const MODEL_TIER_PROPOSAL_KIND = "proposed-model-tier";
+/** The single pending-action type a `proposed-model-tier` job carries — the supervisor's plain approve/decline. */
+export const APPLY_MODEL_TIER_ACTION_TYPE = "apply_model_tier";
 
 /** A planner-proposed spec branch — carried on a `type:'spec'` PendingAction so the worker can author it on approval. */
 export interface ProposedSpec {
@@ -78,6 +87,10 @@ export interface PendingAction {
   preview_image_url?: string;
   preview_attempts?: { url: string; notes?: string; at: string }[];
   reject_notes?: string;
+  // set when type==='apply_model_tier' (box-agent-model-tiers P3) — the agent kind whose tier this
+  // proposal changes. Drives target-aware approval routing (worker→director, director→CEO) and the
+  // worker's apply on approval. The proposed tier + evidence ride on `payload`.
+  target_kind?: string;
 }
 
 /** 'build' (default — build a spec to a PR) | 'plan' (run plan-goal against a goal → propose specs)
@@ -89,7 +102,7 @@ export interface PendingAction {
  *   conflicts, tsc-gate + push, or rebuild-on-main / surface to the owner)
  * | 'platform-director' (platform-director-agent — the first live director: investigate a Platform-routed
  *   Approval Request → auto-approve within the leash, else escalate to the CEO). */
-export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review";
+export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review" | "proposed-model-tier";
 
 export interface AgentJob {
   id: string;
