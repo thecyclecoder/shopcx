@@ -457,7 +457,6 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
-  { id: "slack-roadmap-notify", kind: "cron", owner: "platform", label: "Slack roadmap notify", description: "Pushes pending roadmap/build notifications to Slack.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   // ─ Every-5-min crons (window ~20 min) ─
   { id: "today-sync", kind: "cron", owner: "growth", label: "Today sync (Amazon + Meta)", description: "Keeps today's Amazon + Meta spend/order snapshots fresh.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
   { id: "ticket-unsnooze", kind: "cron", owner: "cs", label: "Ticket unsnooze", description: "Wakes snoozed tickets whose snooze window has passed.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
