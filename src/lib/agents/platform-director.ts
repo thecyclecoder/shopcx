@@ -59,6 +59,7 @@ import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { getPersona } from "@/lib/agents/personas";
+import type { PostgrestError } from "@supabase/supabase-js";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -428,7 +429,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   // Starting a NEW goal is never the director's call (only the CEO greenlights goals — devops-director
   // § leash). A zero-progress owned goal is unstarted: surface it to the CEO ONCE (deduped), never auto-start.
   for (const goal of mine.filter((g) => g.pct === 0)) {
-    await escalateDiagnosisToCeo(admin, {
+    const r = await escalateDiagnosisToCeo(admin, {
       workspaceId,
       specSlug: null,
       title: `Greenlight needed: ${goal.title}`,
@@ -438,6 +439,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
       escalationKind: "new_goal",
       metadata: { goal_slug: goal.slug, pct: goal.pct },
     });
+    if (!r.emitted && r.error) console.error(`[platform-director] CEO escalation FAILED to surface (newgoal:${goal.slug}): ${r.error.message}`);
   }
 
   const owned = mine.filter((g) => isApprovedInProgress(g));
@@ -484,6 +486,8 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
         if (r.emitted) {
           escalated.push(card.slug);
           escalatedAll.push(card.slug);
+        } else if (r.error) {
+          console.error(`[platform-director] CEO escalation FAILED to surface (loopguard:${card.slug}): ${r.error.message}`);
         }
         continue;
       }
@@ -599,6 +603,7 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
         metadata: { kind: "fix", failed_attempts: state.failedCount, last_error: state.lastError ?? undefined },
       });
       if (r.emitted) escalated.push(card.slug);
+      else if (r.error) console.error(`[platform-director] CEO escalation FAILED to surface (loopguard:${card.slug}): ${r.error.message}`);
       continue;
     }
 
@@ -772,27 +777,35 @@ export async function escalateApprovalRequestToCeo(
  * Surface a director DIAGNOSIS to the CEO inbox — a high-stakes call with NO approvable target job (a
  * loop-guard "deeper issue," or a zero-progress owned goal only the CEO can greenlight). Emits a CEO-routed
  * Approval Request notification (no inline approve — it deep-links the CEO to the spec/goal to decide) AND
- * an `escalated` director_activity row. DEDUPED on `dedupeKey` via the director_activity ledger (so it pings
- * the CEO once, even after a dismissed notification). Carries NO `agent_job_id` so the inbox reconciler —
+ * an `escalated` director_activity row. RELIABLE-SURFACE order (notification-first, error-checked, activity-
+ * second): a failed notification insert returns `{ emitted:false, error }` and writes NO `escalated` row, so
+ * the ledger never claims an escalation the inbox never showed. DEDUPED on `dedupeKey` against an EXISTING
+ * `dashboard_notifications` row (NOT the activity ledger) so a logged-but-unsurfaced escalation retries;
+ * once surfaced it pings once (survives a dismissed/read one). Carries NO `agent_job_id` so the reconciler —
  * which dismisses any request whose job left needs_approval — never reaps this standalone escalation.
  */
 export async function escalateDiagnosisToCeo(
   admin: Admin,
   args: { workspaceId: string; specSlug: string | null; title: string; diagnosis: string; dedupeKey: string; deepLink: string; escalationKind: string; metadata?: Record<string, unknown> },
-): Promise<{ emitted: boolean }> {
-  // Dedup via the audit ledger — one escalation per dedupeKey, ever (survives a dismissed notification).
+): Promise<{ emitted: boolean; error?: PostgrestError }> {
+  // Dedup on a notification that ACTUALLY EXISTS — one CEO-routed notification per dedupeKey, ever (survives
+  // a dismissed/read one). We key on dashboard_notifications, NOT the director_activity ledger: a
+  // logged-but-unsurfaced escalation (an `escalated` activity row with no matching notification — the exact
+  // bug this spec fixes) must NOT suppress the retry. If the notification is missing, this re-emits it.
   const { data: prior } = await admin
-    .from("director_activity")
-    .select("metadata")
-    .eq("director_function", PLATFORM)
-    .eq("action_kind", "escalated")
-    .order("created_at", { ascending: false })
-    .limit(500);
-  const already = (prior ?? []).some((r) => (r.metadata as Record<string, unknown> | null)?.["dedupe_key"] === args.dedupeKey);
-  if (already) return { emitted: false };
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("type", APPROVAL_REQUEST_TYPE)
+    .eq("metadata->>dedupe_key", args.dedupeKey)
+    .limit(1);
+  if ((prior ?? []).length > 0) return { emitted: false };
 
+  // Notification FIRST, checked — a surface nobody can see is worse than none. If the insert fails (constraint/
+  // RLS/shape), do NOT silently proceed: surface the error and do NOT write a phantom `escalated` activity row
+  // (so the dedupe ledger never marks a never-surfaced escalation as done). The caller logs a hard warning.
   const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
-  await admin.from("dashboard_notifications").insert({
+  const { error: notifError } = await admin.from("dashboard_notifications").insert({
     workspace_id: args.workspaceId,
     type: APPROVAL_REQUEST_TYPE,
     title: args.title.slice(0, 200),
@@ -811,6 +824,9 @@ export async function escalateDiagnosisToCeo(
     read: false,
     dismissed: false,
   });
+  if (notifError) return { emitted: false, error: notifError };
+
+  // Activity SECOND — only once the notification row actually landed. Now the audit ledger and the inbox agree.
   await recordDirectorActivity(admin, {
     workspaceId: args.workspaceId,
     directorFunction: PLATFORM,

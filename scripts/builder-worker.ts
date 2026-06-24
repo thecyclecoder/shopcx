@@ -1729,6 +1729,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
             metadata: { groom_key: lib.groomKey(c.slug), failed_attempts: c.failedBuilds, last_error: c.lastError ?? undefined },
           });
           if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} groom ${c.slug} → continue/loop-guard escalation FAILED to surface to CEO: ${r.error.message}`);
           console.log(`${tag} groom ${c.slug} → continue but loop-guard → escalated to CEO`);
           continue;
         }
@@ -1779,6 +1780,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
             metadata: { groom_key: lib.groomKey(c.slug), error: valid.error },
           });
           if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} groom ${c.slug} → split-invalid escalation FAILED to surface to CEO: ${r.error.message}`);
           console.warn(`${tag} groom ${c.slug} → split INVALID (${valid.error}) → escalated to CEO`);
           continue;
         }
@@ -1843,6 +1845,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
         metadata: { groom_key: lib.groomKey(c.slug), remaining_phases: c.remainingPhases },
       });
       if (r.emitted) escalated++;
+      else if (r.error) console.error(`${tag} groom ${c.slug} → unsure escalation FAILED to surface to CEO: ${r.error.message}`);
       console.log(`${tag} groom ${c.slug} → ${verdict || "no verdict"} → escalated to CEO`);
     } catch (e) {
       console.error(`${tag} groom ${c.slug} failed (continuing):`, e instanceof Error ? e.message : e);
@@ -1902,6 +1905,7 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
             metadata: { failed_attempts: c.failedBuilds, last_error: c.lastError ?? undefined },
           });
           if (r.emitted) escalated++;
+          else if (r.error) console.error(`${tag} init ${c.slug} → initiate/loop-guard escalation FAILED to surface to CEO: ${r.error.message}`);
           console.log(`${tag} init ${c.slug} → initiate but loop-guard → escalated to CEO`);
           continue;
         }
@@ -1953,6 +1957,7 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
         metadata: { planned_phases: c.plannedPhases },
       });
       if (r.emitted) escalated++;
+      else if (r.error) console.error(`${tag} init ${c.slug} → unsure escalation FAILED to surface to CEO: ${r.error.message}`);
       console.log(`${tag} init ${c.slug} → ${verdict || "no verdict"} → escalated to CEO`);
     } catch (e) {
       console.error(`${tag} init ${c.slug} failed (continuing):`, e instanceof Error ? e.message : e);
