@@ -10,9 +10,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // Each turn POSTs /api/director/coach then polls GET ?id= while turn_status='thinking'. Owner-only.
 
 type Msg = { role: "user" | "assistant"; content: string };
+type PhaseFlip = { index: number; status: "planned" | "in_progress" | "shipped" | "rejected" };
 type Action = {
   id: string;
-  type: "coaching" | "spec" | "goal" | "spec-edit" | "directive";
+  type: "coaching" | "spec" | "goal" | "spec-edit" | "directive" | "spec-status";
   summary: string;
   errorClass?: string;
   guidance?: string;
@@ -25,8 +26,20 @@ type Action = {
   gateBuildsUntil?: string;
   criticalSpecs?: string[];
   holdBuilds?: string[];
+  // spec-status only (ada-director-spec-status-cards) — proposed flips on spec_card_state.
+  proposedStatus?: "planned" | "in_progress" | "shipped" | "rejected";
+  phases?: PhaseFlip[];
+  critical?: boolean;
+  deferred?: boolean;
+  reason?: string;
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;
+};
+type SpecStatusCurrent = {
+  status?: "planned" | "in_progress" | "shipped" | "rejected" | "deferred";
+  phaseStates?: { index: number; title: string; status: "planned" | "in_progress" | "shipped" | "rejected" }[];
+  critical?: boolean;
+  deferred?: boolean;
 };
 type Thread = {
   id: string;
@@ -37,6 +50,40 @@ type Thread = {
   source?: "web" | "slack";
 };
 
+/**
+ * ada-director-spec-status-cards Phase 3 — compact current→proposed diff for a `spec-status` card.
+ * Only renders rows the card is actually flipping (a field absent on the card is omitted, not "(none)").
+ */
+function SpecStatusDiff({ action, current }: { action: Action; current: SpecStatusCurrent | undefined }) {
+  const rows: { label: string; from: string; to: string }[] = [];
+  if (action.proposedStatus) {
+    rows.push({ label: "status", from: current?.status ?? "—", to: action.proposedStatus });
+  }
+  for (const p of action.phases ?? []) {
+    const prior = current?.phaseStates?.find((s) => s.index === p.index);
+    rows.push({ label: `phase #${p.index + 1}${prior?.title ? ` — ${prior.title}` : ""}`, from: prior?.status ?? "—", to: p.status });
+  }
+  if (typeof action.critical === "boolean") {
+    rows.push({ label: "critical", from: current ? String(!!current.critical) : "—", to: String(action.critical) });
+  }
+  if (typeof action.deferred === "boolean") {
+    rows.push({ label: "deferred", from: current ? String(!!current.deferred) : "—", to: String(action.deferred) });
+  }
+  if (!rows.length) return null;
+  return (
+    <ul className="mt-1 space-y-0.5 text-[12px]">
+      {rows.map((r, i) => (
+        <li key={i} className="font-mono">
+          <span className="text-zinc-500">{r.label}:</span>{" "}
+          <span className="text-zinc-600 line-through dark:text-zinc-400">{r.from}</span>
+          <span className="mx-1 text-zinc-500">→</span>
+          <span className="font-medium text-emerald-700 dark:text-emerald-400">{r.to}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function DirectorCoachChat() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -45,6 +92,9 @@ export function DirectorCoachChat() {
   const [thinking, setThinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<"web" | "slack">("web");
+  // ada-director-spec-status-cards Phase 3: the GET response carries current spec_card_state for every
+  // slug referenced by a spec-status pending_action, keyed by slug — so the inbox renders current→proposed.
+  const [specStatusCurrents, setSpecStatusCurrents] = useState<Record<string, SpecStatusCurrent>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -66,6 +116,17 @@ export function DirectorCoachChat() {
         setActions(latest.pending_actions || []);
         setSource(latest.source === "slack" ? "slack" : "web");
         if (latest.turn_status === "thinking") setThinking(true);
+        // ada-director-spec-status-cards Phase 3: the list endpoint doesn't enrich; pull current spec_card_state
+        // for any spec-status cards by re-fetching the single thread once on resume.
+        if ((latest.pending_actions || []).some((a) => a.type === "spec-status")) {
+          try {
+            const r = await fetch(`/api/director/coach?id=${encodeURIComponent(latest.id)}`);
+            const dd = await r.json();
+            if (dd.specStatusCurrents) setSpecStatusCurrents(dd.specStatusCurrents as Record<string, SpecStatusCurrent>);
+          } catch {
+            /* best-effort — the polling tick will hydrate it shortly */
+          }
+        }
       }
     } catch {
       /* nothing to resume */
@@ -88,6 +149,7 @@ export function DirectorCoachChat() {
         if (!t || stop) return;
         setMessages(t.messages);
         setActions(t.pending_actions || []);
+        if (d.specStatusCurrents) setSpecStatusCurrents(d.specStatusCurrents as Record<string, SpecStatusCurrent>);
         if (t.source) setSource(t.source);
         if (t.turn_status === "error") {
           setError(t.last_error || "The box turn failed.");
@@ -210,7 +272,7 @@ export function DirectorCoachChat() {
           <div key={a.id} className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-[12px] dark:border-amber-800 dark:bg-amber-950/30">
             <div className="flex items-center gap-2">
               <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-medium text-amber-900 dark:bg-amber-800 dark:text-amber-100">
-                {a.type === "coaching" ? "new coaching rule" : a.type === "goal" ? "new goal · for your greenlight" : a.type === "spec-edit" ? "spec edit" : a.type === "directive" ? "new directive · trumps routine" : "spec handoff"}
+                {a.type === "coaching" ? "new coaching rule" : a.type === "goal" ? "new goal · for your greenlight" : a.type === "spec-edit" ? "spec edit" : a.type === "spec-status" ? "spec status flip" : a.type === "directive" ? "new directive · trumps routine" : "spec handoff"}
               </span>
               <span className="font-medium text-zinc-800 dark:text-zinc-100">{a.summary}</span>
             </div>
@@ -231,6 +293,13 @@ export function DirectorCoachChat() {
             {a.type === "coaching" && a.guidance && <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">“{a.guidance}”{a.reasoning ? ` — ${a.reasoning}` : ""}</p>}
             {a.type === "spec" && a.slug && <p className="mt-1.5 font-mono text-[11px] text-zinc-500">specs/{a.slug}.md</p>}
             {a.type === "spec-edit" && a.slug && <p className="mt-1.5 font-mono text-[11px] text-zinc-500">✎ specs/{a.slug}.md · edit existing</p>}
+            {a.type === "spec-status" && a.slug && (
+              <div className="mt-1.5 text-zinc-700 dark:text-zinc-300">
+                <p className="font-mono text-[11px] text-zinc-500">⇄ spec_card_state[{a.slug}] · DB-only flip (no markdown commit)</p>
+                <SpecStatusDiff action={a} current={specStatusCurrents[a.slug]} />
+                {a.reason && <p className="mt-1 text-[11px] italic text-zinc-500">because — {a.reason}</p>}
+              </div>
+            )}
             {a.type === "goal" && (
               <p className="mt-1.5 text-zinc-700 dark:text-zinc-300">
                 {a.outcome ? `“${a.outcome}” ` : ""}

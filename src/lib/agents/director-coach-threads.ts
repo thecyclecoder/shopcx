@@ -18,7 +18,7 @@ export type TurnStatus = "idle" | "thinking" | "error";
 //    the learning is injected into her future decision prompts (this is the whole point of the chat).
 //  - spec: an infra/automation capability-gap handoff — the worker commits docs/brain/specs/{slug}.md on
 //    approval (+ optionally queues a build).
-export type CoachThreadActionType = "coaching" | "spec";
+export type CoachThreadActionType = "coaching" | "spec" | "spec-edit" | "spec-status" | "goal" | "directive" | "model_tier";
 export type CoachThreadActionStatus = "pending" | "approved" | "declined" | "done" | "failed";
 export type CoachThreadAction = {
   id: string;
@@ -36,6 +36,12 @@ export type CoachThreadAction = {
   parent?: string;
   content?: string;
   queueBuild?: boolean;
+  // spec-status (ada-director-spec-status-cards) — the renamed status field on the card payload + flips:
+  proposedStatus?: "planned" | "in_progress" | "shipped" | "rejected";
+  phases?: { index: number; status: "planned" | "in_progress" | "shipped" | "rejected" }[];
+  critical?: boolean;
+  deferred?: boolean;
+  reason?: string;
   status: CoachThreadActionStatus;
   result?: string;
   // ada-slack-chat: when this card was posted to #cto-ada, the Slack message ts — so a web-side OR
