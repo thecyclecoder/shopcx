@@ -64,14 +64,47 @@ function setPriorityCritical(md: string, critical: boolean): string {
   return out.join("\n");
 }
 
+/** Add or remove the line-anchored `**Deferred:**` marker (mirrors setPriorityCritical for Deferred). */
+function setDeferredMarker(md: string, deferred: boolean): string {
+  const lines = md.split("\n");
+  const isMarker = (l: string) => /^\s*\*\*Deferred:\*\*/i.test(l);
+  const has = lines.some(isMarker);
+  if (deferred) {
+    if (has) return md;
+    const i = lines.findIndex((l) => l.startsWith("# "));
+    if (i < 0) return md;
+    lines.splice(i + 1, 0, "", "**Deferred:** parked by the CEO — every auto-build lane skips it until promoted back to Planned.");
+    return lines.join("\n");
+  }
+  if (!has) return md;
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isMarker(lines[i])) {
+      if (out.length && out[out.length - 1].trim() === "") out.pop();
+      continue;
+    }
+    out.push(lines[i]);
+  }
+  return out.join("\n");
+}
+
+/** The unified 3-state priority (mutually exclusive): critical XOR deferred XOR planned (clears both). */
+function applyPriorityState(md: string, state: "critical" | "deferred" | "planned"): string {
+  if (state === "critical") return setDeferredMarker(setPriorityCritical(md, true), false);
+  if (state === "deferred") return setPriorityCritical(setDeferredMarker(md, true), false);
+  return setDeferredMarker(setPriorityCritical(md, false), false); // planned → clear both
+}
+
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; critical?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { slug?: unknown; critical?: unknown; state?: unknown };
   const { slug, critical } = body;
   if (typeof slug !== "string" || !/^[a-z0-9-]+$/i.test(slug)) {
     return NextResponse.json({ error: "bad slug" }, { status: 400 });
   }
-  if (typeof critical !== "boolean") {
-    return NextResponse.json({ error: "bad critical" }, { status: 400 });
+  // `state` is the unified Defer/Prioritize/Planned control; `critical:boolean` stays for the legacy toggle.
+  const state = body.state === "critical" || body.state === "deferred" || body.state === "planned" ? body.state : null;
+  if (!state && typeof critical !== "boolean") {
+    return NextResponse.json({ error: "bad critical/state" }, { status: 400 });
   }
 
   const supabase = await createClient();
@@ -102,11 +135,11 @@ export async function POST(request: Request) {
 
   const sha = get.json.sha as string;
   const current = Buffer.from(String(get.json.content || "").replace(/\s/g, ""), "base64").toString("utf8");
-  const updated = setPriorityCritical(current, critical);
-  if (updated === current) return NextResponse.json({ ok: true, critical, unchanged: true });
+  const updated = state ? applyPriorityState(current, state) : setPriorityCritical(current, critical as boolean);
+  if (updated === current) return NextResponse.json({ ok: true, state: state ?? undefined, critical, unchanged: true });
 
   const put = await gh("PUT", `/repos/${REPO}/contents/${encodeURIComponent(filePath).replace(/%2F/g, "/")}`, {
-    message: `roadmap: ${critical ? "mark" : "clear"} ${slug} **Priority:** critical`,
+    message: state ? `roadmap: ${slug} → ${state}` : `roadmap: ${critical ? "mark" : "clear"} ${slug} **Priority:** critical`,
     content: Buffer.from(updated, "utf8").toString("base64"),
     sha,
     branch: "main",
@@ -116,5 +149,5 @@ export async function POST(request: Request) {
   }
 
   const commit = put.json.commit as { html_url?: string } | undefined;
-  return NextResponse.json({ ok: true, critical, commit: commit?.html_url });
+  return NextResponse.json({ ok: true, state: state ?? undefined, critical, commit: commit?.html_url });
 }

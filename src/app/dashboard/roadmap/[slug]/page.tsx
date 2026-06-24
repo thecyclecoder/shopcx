@@ -12,6 +12,7 @@ import {
   type SpecTestRun,
 } from "@/lib/spec-test-runs";
 import StatusControl from "../StatusControl";
+import PriorityControl from "../PriorityControl";
 import AuthoringChat from "../AuthoringChat";
 import BuildButton from "../BuildButton";
 import PhaseList from "../PhaseList";
@@ -97,6 +98,7 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
                 {STATUS_LABEL[spec.card.status]}
               </span>
               <StatusControl slug={slug} status={spec.card.status} />
+              <PriorityControl slug={slug} status={spec.card.status} critical={spec.card.critical} />
             </div>
 
             {(spec.card.owner || spec.card.parent) && (
