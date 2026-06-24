@@ -33,27 +33,40 @@ export async function findUnlinkedMatches(
 
   if (!customer) return [];
 
-  // Build match conditions: name, phone, email prefix
-  const conditions: string[] = [];
-  if (customer.first_name && customer.last_name) {
-    conditions.push(`and(first_name.eq.${customer.first_name},last_name.eq.${customer.last_name})`);
-  }
-  if (customer.phone) conditions.push(`phone.eq.${customer.phone}`);
-  const emailLocal = customer.email?.split("@")[0];
-  if (emailLocal) conditions.push(`email.ilike.${emailLocal}@%`);
-
-  if (!conditions.length) return [];
-
-  // Find potential matches
-  const { data: potentialMatches } = await admin.from("customers")
+  // Find potential matches. A single mixed `.or(and(first_name,last_name),phone,email.ilike)`
+  // forced a Seq Scan of the whole customers table (620k rows): the case-insensitive email
+  // ILIKE branch is non-indexable on a plain btree, and the OR defeats the workspace_id index.
+  // Under concurrent portal-bootstrap / sonnet / journey-builder load those scans saturated the
+  // pool → PostgREST 500 (signature supabase-logs:b5db594131381078). Instead run one query per
+  // branch so each is a Bitmap Index Scan on its own index (idx_customers_name_match,
+  // idx_customers_phone, idx_customers_email_trgm), then merge + dedupe in memory.
+  const baseFilter = () => admin.from("customers")
     .select("id, email")
     .eq("workspace_id", workspaceId)
     .neq("id", customerId)
     .neq("email", customer.email)
-    .or(conditions.join(","))
     .limit(10);
 
-  if (!potentialMatches?.length) return [];
+  const branches: PromiseLike<{ data: PotentialMatch[] | null }>[] = [];
+  if (customer.first_name && customer.last_name) {
+    branches.push(baseFilter().eq("first_name", customer.first_name).eq("last_name", customer.last_name));
+  }
+  if (customer.phone) branches.push(baseFilter().eq("phone", customer.phone));
+  const emailLocal = customer.email?.split("@")[0];
+  if (emailLocal) branches.push(baseFilter().ilike("email", `${emailLocal}@%`));
+
+  if (!branches.length) return [];
+
+  // Merge branch results, dedupe by id, cap at 10 to preserve the original limit.
+  const byId = new Map<string, PotentialMatch>();
+  for (const { data } of await Promise.all(branches)) {
+    for (const row of data || []) {
+      if (!byId.has(row.id)) byId.set(row.id, row);
+    }
+  }
+  const potentialMatches = Array.from(byId.values()).slice(0, 10);
+
+  if (!potentialMatches.length) return [];
 
   // Exclude already-linked accounts
   const { data: existingLinks } = await admin.from("customer_links")
