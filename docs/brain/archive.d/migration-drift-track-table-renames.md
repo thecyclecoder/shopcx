@@ -1,0 +1,1 @@
+- **Migration-drift parser: follow ALTER TABLE … RENAME TO** · verified 2026-06-24 · → [[libraries/control-tower]]
