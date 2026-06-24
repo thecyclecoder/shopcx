@@ -22,7 +22,7 @@
  * agent_jobs/loop_heartbeats via the service role). Surfaced by GET /api/developer/agents →
  * /dashboard/agents. See docs/brain/dashboard/agents.md.
  */
-import { getFunctions, getGoals } from "@/lib/brain-roadmap";
+import { getFunctions, getGoals, functionLabel, type GoalStatus } from "@/lib/brain-roadmap";
 import { MONITORED_LOOPS, agentLoopId, type MonitoredLoop } from "@/lib/control-tower/registry";
 import { getPersona } from "@/lib/agents/personas";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -81,7 +81,13 @@ export interface DirectorNode {
 
 export interface OrgChart {
   ceo: {
-    goals: { slug: string; title: string; pct: number }[];
+    /**
+     * The finite company goals (goals/*.md). `status` + `proposedBy` surface the director-proposed-goals
+     * lifecycle (Phase 2): a `proposed` goal a director authored that AWAITS the CEO's greenlight vs a
+     * `greenlit` one the CEO has activated — so the hub shows what each director is proposing vs what's live.
+     * `proposedByLabel` is the proposer function's display name (computed server-side; the hub is a client component).
+     */
+    goals: { slug: string; title: string; pct: number; status: GoalStatus; proposedBy?: string; proposedByLabel?: string }[];
   };
   directors: DirectorNode[];
 }
@@ -327,7 +333,14 @@ export async function getOrgChart(): Promise<OrgChart> {
 
   return {
     ceo: {
-      goals: goals.map((g) => ({ slug: g.slug, title: g.title, pct: g.pct })),
+      goals: goals.map((g) => ({
+        slug: g.slug,
+        title: g.title,
+        pct: g.pct,
+        status: g.status,
+        proposedBy: g.proposedBy,
+        proposedByLabel: g.proposedBy ? functionLabel(g.proposedBy) : undefined,
+      })),
     },
     directors,
   };

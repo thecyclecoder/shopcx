@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getGoals } from "@/lib/brain-roadmap";
+import { GoalStatusBadge } from "./GoalStatusBadge";
 
 // Reads docs/brain/goals + specs at request time — always reflects the live brain.
 export const dynamic = "force-dynamic";
@@ -51,9 +52,12 @@ export default async function GoalsBoardPage() {
               href={`/dashboard/roadmap/goals/${g.slug}`}
               className="group flex flex-col rounded-xl border border-zinc-200 bg-white p-4 shadow-sm hover:border-indigo-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-700"
             >
-              <h2 className="text-sm font-semibold text-zinc-900 group-hover:text-indigo-600 dark:text-zinc-100 dark:group-hover:text-indigo-400">
-                {g.title}
-              </h2>
+              <div className="flex items-start justify-between gap-2">
+                <h2 className="text-sm font-semibold text-zinc-900 group-hover:text-indigo-600 dark:text-zinc-100 dark:group-hover:text-indigo-400">
+                  {g.title}
+                </h2>
+                <GoalStatusBadge status={g.status} proposedBy={g.proposedBy} />
+              </div>
               {g.successMetric && (
                 <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
                   <span className="font-medium text-zinc-600 dark:text-zinc-300">Success:</span> {g.successMetric}

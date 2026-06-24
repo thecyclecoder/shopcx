@@ -35,7 +35,17 @@ const CHIP: Record<JobStatus, string> = {
   needs_attention: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
-export default function PlanButton({ goalSlug, initialJob }: { goalSlug: string; initialJob: AgentJob | null }) {
+export default function PlanButton({
+  goalSlug,
+  initialJob,
+  goalStatus,
+}: {
+  goalSlug: string;
+  initialJob: AgentJob | null;
+  // director-proposed-goals (Phase 2): a `proposed` goal is inert — it can't be decomposed until the CEO
+  // greenlights it, so the Plan control is replaced by an "awaiting greenlight" note (and the API rejects it).
+  goalStatus?: "proposed" | "greenlit" | "complete";
+}) {
   const workspace = useWorkspace();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
   const [busy, setBusy] = useState(false);
@@ -65,6 +75,17 @@ export default function PlanButton({ goalSlug, initialJob }: { goalSlug: string;
   const prLink = job?.pr_url ? (
     <a href={job.pr_url} target="_blank" rel="noreferrer" className="text-[11px] text-teal-600 hover:underline">PR ↗</a>
   ) : null;
+
+  // A proposed goal awaits the CEO's greenlight before it can be decomposed (director-proposed-goals Phase 2).
+  // Surface the inert state instead of a Plan control — greenlight happens in the Agents inbox, not here.
+  if (goalStatus === "proposed") {
+    return (
+      <div className="rounded-md border border-amber-200 bg-amber-50/40 px-2.5 py-2 text-[11px] leading-snug text-amber-800 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-300">
+        <span className="font-medium">⏳ Proposed — awaiting your greenlight.</span> Greenlight this goal in the Agents
+        inbox; Pia can decompose it once it&apos;s activated.
+      </div>
+    );
+  }
 
   if (workspace.role !== "owner") {
     return chip ? <div className="flex items-center gap-2">{chip}{prLink}</div> : null;
