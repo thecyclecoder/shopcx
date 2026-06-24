@@ -3497,7 +3497,7 @@ async function runPlanJob(job: Job) {
       : "";
     const prompt = [
       `Author the owner-APPROVED specs for goal docs/brain/goals/${goalSlug}.md (cwd is the repo root). Do NOT build anything; do NOT run git. Only write files under docs/brain/specs/ and edit docs/brain/goals/${goalSlug}.md.`,
-      `For EACH approved spec below, create docs/brain/specs/{slug}.md as a real, concrete build spec: an H1 "# {Title} ⏳"; directly under it the metadata line \`**Owner:** [[../functions/{owner}]] · **Parent:** {parent}\`; a one-paragraph summary tied to the goal's success metric; concrete "## Phase N — name" sections (each first bullet "- ⏳ planned") grounded in the brain (read pages to cite real table/library names + the gap); a "## Safety / invariants" section; a "## Completion criteria" section. Match the style of existing docs/brain/specs/*.md.`,
+      `For EACH approved spec below, create docs/brain/specs/{slug}.md as a real, concrete build spec: an H1 "# {Title}" (NO status emoji — spec status is DB-driven, the markdown is content-only); directly under it the metadata line \`**Owner:** [[../functions/{owner}]] · **Parent:** {parent}\`; a one-paragraph summary tied to the goal's success metric; concrete "## Phase N — name" sections (NO status emoji/marker on any phase — per-phase status lives in spec_card_state, never the markdown) grounded in the brain (read pages to cite real table/library names + the gap); a "## Safety / invariants" section; a "## Completion criteria" section. Match the style of existing docs/brain/specs/*.md.`,
       `BLOCKED-BY (goal-decomposition-encodes-blockers): when an approved spec below lists \`blocked_by\`, add a metadata header line immediately after the \`**Owner:** … · **Parent:** …\` line, in exactly this format: \`**Blocked-by:** [[<slug>]], [[<slug>]]\` (one [[slug]] wikilink per blocker, comma-separated). This gates the spec's build until its prerequisites ship. If a spec has no \`blocked_by\` line below, do NOT add a Blocked-by header (it is a foundation spec that builds immediately). Use ONLY the slugs listed in that spec's \`blocked_by\` — do not invent prerequisites.`,
       `Then update docs/brain/goals/${goalSlug}.md: under the matching milestone in "## Decomposition", add a wikilink to each new spec, e.g. "[[../specs/{slug}]] ⏳ — {one-line}".${declinedNote}`,
       ``,
@@ -3992,7 +3992,7 @@ async function runSpecChatJob(job: Job) {
     } else if (mode === "finalize") {
       const finalizeAsk = [
         `Now FINALIZE this spec in FINALIZE mode: WRITE the file docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing file unless the conversation said otherwise` : `pick a short kebab-case slug from the title; all new phases start ⏳`}).`,
-        `It MUST have: an H1 "# <Title> <status emoji>"; directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\`; a one-paragraph summary tied to a business outcome; concrete "## Phase N — name" sections (each line tagged ⏳ planned · 🚧 in progress · ✅ shipped); a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
+        `It MUST have: an H1 "# <Title>" (NO status emoji — status is DB-driven); directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\`; a one-paragraph summary tied to a business outcome; concrete "## Phase N — name" sections (NO status markers — spec status + per-phase status live in spec_card_state, the markdown is content-only); a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
         `Write ONLY that one file under docs/brain/specs/; do NOT edit anything else, do NOT run git. Final message = ONLY one JSON object: {"status":"finalized","slug":"<the slug you wrote>"}.`,
       ].join("\n");
       prompt = isResume
@@ -4992,7 +4992,7 @@ interface GapSpec { slug: string; title: string; intent: string; problem: string
 
 function migrationGapSpecMarkdown(spec: GapSpec, auditId: string, subId: string): string {
   return [
-    `# ${spec.title} ⏳`,
+    `# ${spec.title}`,
     ``,
     `**Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" · **Derived-from-migration:** \`${auditId}\``,
     ``,
@@ -5003,7 +5003,7 @@ function migrationGapSpecMarkdown(spec: GapSpec, auditId: string, subId: string)
     spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
     ``,
     `## Phases`,
-    `- ⏳ **P1 — close the gap** — scope from the problem above; land the code/data fix + its brain page; gate on \`npx tsc --noEmit\`.`,
+    `- **P1 — close the gap** — scope from the problem above; land the code/data fix + its brain page; gate on \`npx tsc --noEmit\`.`,
     ``,
     `## Verification`,
     `- Re-run \`verifyMigration\` on a migration that hit this gap → expect it to auto-heal/pass without a hand fix, and confirm the class of failure no longer recurs.`,
@@ -6095,17 +6095,18 @@ async function runDirectorCoachJob(job: Job) {
               createdBy: job.created_by,
             });
             if (!r.ok) { a.status = "failed"; a.result = r.error || "createDirective failed"; notes.push(`${a.summary} → ${a.result}`); continue; }
-            // Mark any named specs **Priority:** critical so they jump the queue (insert the marker under the H1).
+            // Mark any named specs critical so they jump the queue. spec-status-db-driven: critical is a DB
+            // flag (spec_card_state.flags.critical) now, NOT a markdown marker — set it there, instant, no deploy.
             const criticalSpecs = Array.isArray(a.criticalSpecs) ? (a.criticalSpecs as unknown[]).map((s) => String(s).replace(/[^a-z0-9-]/gi, "")).filter(Boolean) : [];
             const marked: string[] = [];
+            const scsCrit = await import("../src/lib/spec-card-state");
             for (const cs of criticalSpecs) {
-              const p = join(wt, `docs/brain/specs/${cs}.md`);
-              if (!existsSync(p)) continue;
-              const md = readFileSync(p, "utf8");
-              if (/^\s*\*\*Priority:\*\*\s*critical\b/im.test(md)) { marked.push(cs); continue; }
-              const updated = md.replace(/^(#\s.*\n)/, `$1\n**Priority:** critical\n`);
-              const put = await putFileMain(`docs/brain/specs/${cs}.md`, updated, `spec: mark ${cs} **Priority:** critical (director directive)`);
-              if (put.ok) marked.push(cs);
+              try {
+                await scsCrit.markSpecCardCritical(job.workspace_id, cs, true, { actor: "director:platform", reason: "directive — priority critical (jump the build queue)" });
+                marked.push(cs);
+              } catch (e) {
+                console.error(`${tag} mark ${cs} critical failed (continuing):`, e instanceof Error ? e.message : e);
+              }
             }
             // #4 — hold/cancel the out-of-order PARKED builds the directive names (the executor it lacked).
             const holdSlugs = Array.isArray(a.holdBuilds) ? (a.holdBuilds as unknown[]).map((s) => String(s)) : [];
@@ -6632,7 +6633,7 @@ function repairPrompt(brief: string): string {
 
 function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; target?: string }, signature: string, verdict: string, rootCause: string): string {
   return [
-    `# ${spec.title} ⏳`,
+    `# ${spec.title}`,
     ``,
     `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"} · **Verdict:** ${verdict}`,
     `**Repair-root-cause:** \`${rootCause}\``,
@@ -6644,7 +6645,7 @@ function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; 
     spec.problem.trim(),
     spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
     ``,
-    `## Phase 1 — close it ⏳`,
+    `## Phase 1 — close it`,
     `Scope from the problem above; land the fix + its brain page; gate on \`npx tsc --noEmit\`.`,
     ``,
     `## Verification`,
@@ -7178,7 +7179,7 @@ function regressionFixSpecMarkdown(spec: RegressionFixProposal, regressedSlug: s
     ? verification.map((b) => `- ${b.trim()}`).join("\n")
     : `- Re-run spec-test on [[${regressedSlug}]] → expect the previously-failing check(s) pass again.`;
   return [
-    `# ${spec.title} ⏳`,
+    `# ${spec.title}`,
     ``,
     `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/regression-agent]]"} · **Regression-of:** [[${regressedSlug}]]`,
     `**Regression-signature:** \`${signature}\``,
@@ -7191,7 +7192,7 @@ function regressionFixSpecMarkdown(spec: RegressionFixProposal, regressedSlug: s
     `## Offending change`,
     (spec.offending_change || "(unknown — bisect the recent ships that touched the implicated code)").trim(),
     ``,
-    `## Phase 1 — restore it ⏳`,
+    `## Phase 1 — restore it`,
     (spec.fix || "Scope from the diagnosis above; land the fix + its brain page.").trim(),
     `Gate on \`npx tsc --noEmit\`.`,
     ``,
@@ -7584,14 +7585,14 @@ function securityFixSpecMarkdown(spec: SecurityFixProposal, mergedSlug: string, 
     ? verification.map((b) => `- ${b.trim()}`).join("\n")
     : `- Re-review the merged diff (\`git show ${mergeSha}\`) → expect the flagged vulnerability is closed.`;
   return [
-    `# ${spec.title} ⏳`,
+    `# ${spec.title}`,
     ``,
     `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/security-dependency-agent]]"} · **Fixes:** [[${mergedSlug}]]`,
     `**Security-of-merge:** \`${mergeSha}\``,
     ``,
     (spec.intent || "Close the vulnerability the merged diff introduced.").trim(),
     ``,
-    `## Phase 1 — close the vulnerability ⏳`,
+    `## Phase 1 — close the vulnerability`,
     (spec.fix || "Scope from the security review above; land the fix + its brain page.").trim(),
     `Gate on \`npx tsc --noEmit\`.`,
     ``,
@@ -7680,14 +7681,14 @@ function depUpgradeSpecMarkdown(findings: DepFinding[], signature: string): stri
     return `- **${f.name}** (${f.severity}) — ${f.title}. Upgrade → ${fix}`;
   });
   return [
-    `# Security dependency upgrades ⏳`,
+    `# Security dependency upgrades`,
     ``,
     `**Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/security-dependency-agent]] · auto-authored by [[../libraries/security-agent]].`,
     `**Dep-advisory-signature:** \`${signature}\``,
     ``,
     `The daily \`npm audit\` dep-watch found ${findings.length} actionable advisory(ies) (≥ moderate). Bump the affected dependencies to their fixed versions. NEVER auto-bumped — this owner-gated build does the bump + the \`tsc\` gate.`,
     ``,
-    `## Phase 1 — upgrade the vulnerable dependencies ⏳`,
+    `## Phase 1 — upgrade the vulnerable dependencies`,
     ...rows,
     ``,
     `Apply the upgrades (e.g. \`npm audit fix\`, or bump each in package.json + \`npm install\`), then gate on \`npx tsc --noEmit\` and a smoke of any affected path. Flag any semver-major bump for human review before merge.`,
@@ -8042,7 +8043,7 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite):
   if (!slug) return null;
   const path = `docs/brain/specs/${slug}.md`;
   const md = [
-    `# ${title} ⏳`,
+    `# ${title}`,
     ``,
     `**Owner:** ${String(s.owner || "[[../functions/growth]]")} · **Parent:** ${String(s.parent || "extends [[../specs/storefront-optimizer-agent]]")} · **Optimizer-surface:** \`${surface.product_id}:${surface.lander_type}:${surface.audience}\``,
     ``,
@@ -8052,7 +8053,7 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite):
     String(s.problem || "(see the optimizer's reasoning below)").trim(),
     typeof s.target === "string" && s.target ? `\n**Likely target:** \`${s.target}\`` : ``,
     ``,
-    `## Phase 1 — build the lever ⏳`,
+    `## Phase 1 — build the lever`,
     `Scope from the problem above; land the new component/lever + register it in [[../specs/storefront-lever-importance-memory|M2]]'s \`storefront_levers\`; add its brain page; gate on \`npx tsc --noEmit\`.`,
     ``,
     `## Verification`,
