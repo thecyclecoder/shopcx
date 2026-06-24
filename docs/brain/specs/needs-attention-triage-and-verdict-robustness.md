@@ -1,5 +1,7 @@
 # Triage every needs_attention item + harden review-agent verdicts ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — the director supervises the build/QC pipeline's parked items under [[../goals/devops-director]]
 **Found in use 2026-06-24:** [[director-executable-plans-and-priority-board-pip]] built + merged + passed spec-test, but its post-merge SECURITY-REVIEW returned `needs_attention` with `security review ended without a recognizable verdict` — and nothing handled it; it just sat. Two confirmed gaps: (1) the director's loop-guard treats `needs_attention` as a failed attempt ONLY for `kind='build'` jobs (`FAILED_BUILD_STATUSES` in [[../libraries/platform-director]] is read by `specBuildState`, which queries `kind='build'`), so a `needs_attention` on a NON-build QC job (security-review / spec-test / repair / regression) is triaged by NOTHING. (2) `ended without a recognizable verdict` is a SYSTEMIC bare fallback — `scripts/builder-worker.ts` sets it for the security-review, repair (`repair ended without a recognizable verdict`), and regression (`regression review ended without a recognizable verdict`) agents alike — giving the human no actionable reason.
 
