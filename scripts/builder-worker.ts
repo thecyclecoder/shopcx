@@ -2107,10 +2107,11 @@ async function runProposedGoalJob(job: Job) {
 // then either AUTO-APPROVES it within the leash (mirroring the human approve path WITHOUT the owner gate,
 // logging an approval_decisions row decided_by='director', autonomous=true) or ESCALATES — never
 // rubber-stamps, never an unconfirmable approve. It NEVER edits product code / opens a PR / runs a migration.
-async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // KEEP the env (read-only DB/crypto creds) — only strip the API key so all LLM is Max-billed.
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run Ada's pass on a healthy account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: PLATFORM_DIRECTOR_TIMEOUT_MS });
@@ -2195,7 +2196,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
         '{"verdict":"not-shipped","reasoning":"<the code is NOT there / only partial>"}',
         '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
       ].join("\n");
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR);
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
       if (String(parsed?.verdict) === "shipped") {
         const path = join(REPO_DIR, `docs/brain/specs/${row.spec_slug}.md`);
@@ -2493,7 +2494,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
       // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
       const groomPrompt = await directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c));
-      const { resultText, usage, model } = await runDirectorClaude(groomPrompt, null, REPO_DIR);
+      const { resultText, usage, model } = await runDirectorClaude(groomPrompt, null, REPO_DIR, pickHealthyConfigDir());
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
@@ -2676,7 +2677,7 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
-      const { resultText, isError, raw, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      const { resultText, isError, raw, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir());
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       // Phase 4: a 529/overloaded is a transient throttle, NOT a spec problem — back off the batch, escalate nothing.
       if (isError && isMaxOverloaded(`${resultText} ${raw}`)) {
@@ -2801,7 +2802,7 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
       // Phase 2 live-state + P7 coaching: her supervision decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/initiation/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.repairDismissalInvestigationPrompt(c));
-      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir());
       const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -3009,7 +3010,7 @@ async function runPlatformDirectorJob(job: Job) {
       ? `\n\nYou are in a read-only worktree of the build's BRANCH (${targetBranch}) — the proposed migration SQL (supabase/migrations/), the apply script, and the new code ARE present here. READ them directly to confirm soundness; do NOT assume a file is missing just because it isn't on main.`
       : "";
     const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief) + branchNote);
-    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, investCwd);
+    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, investCwd, pickHealthyConfigDir());
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
