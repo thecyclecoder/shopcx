@@ -16,12 +16,14 @@
  */
 import Link from "next/link";
 import { getPersona } from "@/lib/agents/personas";
-import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
+import { PersonaAvatar, StatusBadge, WorkerStatusBadge, type WorkerLiveness } from "@/components/agents/persona-chip";
 
 interface WorkerLane {
   kind: string;
   label: string;
   description: string;
+  status: WorkerLiveness;
+  statusReason?: string;
 }
 interface DirectorNode {
   slug: string;
@@ -120,6 +122,11 @@ export function OrgTree({ org }: { org: OrgChart }) {
                         label={w.label}
                         size="worker"
                         subtitle={w.kind}
+                        badge={
+                          <span className="mt-0.5">
+                            <WorkerStatusBadge status={w.status} reason={w.statusReason} />
+                          </span>
+                        }
                       />
                     ))}
                   </div>

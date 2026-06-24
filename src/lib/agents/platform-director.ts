@@ -52,9 +52,11 @@ import {
   type ApprovalJobRow,
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
+import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
@@ -116,6 +118,27 @@ export function platformIsAutoApprover(autonomy: AutonomyMap): boolean {
 /** Does an approval raised by `kind` route to the Platform director, given the live chart + flags? */
 export function routesToPlatform(kind: string, chart: OrgChartGraph, autonomy: AutonomyMap): boolean {
   return resolveApprover(ownerFunctionForKind(kind), chart, autonomy) === PLATFORM;
+}
+
+/**
+ * Which director DRIVES a spec, given its OWNING function — the keystone routing for the auto-build lanes
+ * (director-drives-all-specs-and-deferred-status Phase 2: "first live boss else up"). Reuses the approval-router
+ * keystone: `resolveApprover` walks UP from the owner to the first live+autonomous ancestor (the owner ITSELF if
+ * its director is live+autonomous), else falls through to the CEO. A spec whose own department-director is
+ * live+autonomous is driven by that director; anything that falls through to the CEO is covered by the Platform
+ * director — the keystone covering for not-yet-live departments. An owner-less spec defaults to Platform.
+ *
+ * Today only Platform is live, so Platform drives every non-deferred spec; as a Growth/CS/CMO director goes
+ * live+autonomous, `resolveApprover` starts returning that owner and its specs rebalance OFF Platform — no re-spec.
+ */
+export function specDriver(owner: string | null | undefined, chart: OrgChartGraph, autonomy: AutonomyMap): string {
+  const approver = resolveApprover(owner ?? PLATFORM, chart, autonomy);
+  return approver === CEO ? PLATFORM : approver; // CEO fallthrough ⇒ the Platform keystone drives it
+}
+
+/** True iff the Platform director (this keystone) drives the spec owned by `owner` — its own, or any not-yet-live dept's. */
+export function platformDrivesSpec(owner: string | null | undefined, chart: OrgChartGraph, autonomy: AutonomyMap): boolean {
+  return specDriver(owner, chart, autonomy) === PLATFORM;
 }
 
 /** One in-leash pending action the director may consider — its id + the leash class it falls into. */
@@ -552,14 +575,19 @@ export interface FixEscortResult {
  * greenlit, so it's inside the leash — we don't blind-queue an unstarted FEATURE spec (a new product
  * capability, which has no Repair-signature and still escalates).
  *
- * The gate is the **Repair-signature** (`SpecCard.repairSignature`) + platform ownership. Same guards as the
- * other escorts: dormant until live+autonomous, skips blocked / opted-out / in-flight specs, and a build that
- * failed ≥ the loop-guard cap escalates to the CEO instead of re-queuing forever. On each queue it writes the
- * P6 PM-companion mirror + an `escorted_fix` activity row.
+ * The gate is the **Repair-signature** (`SpecCard.repairSignature`) + **the keystone routing** — the Platform
+ * director drives a fix spec whose owning department-director isn't live yet (director-drives-all-specs-and-
+ * deferred-status Phase 2: owner-agnostic, "first live boss else up" via `platformDrivesSpec`). A repair-signed
+ * fix builds straight through (the already-greenlit mandate) regardless of owner; once a department's director is
+ * live+autonomous, its fix specs route to IT, not here. Same guards as the other escorts: dormant until
+ * live+autonomous, skips blocked / opted-out / in-flight specs, and a build that failed ≥ the loop-guard cap
+ * escalates to the CEO instead of re-queuing forever. On each queue it writes the P6 PM-companion mirror + an
+ * `escorted_fix` activity row.
  */
 export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
   const autonomy = await loadAutonomyMap();
   if (!platformIsAutoApprover(autonomy)) return { fixQueued: [], escalated: [] };
+  const chart = await buildOrgChartGraph();
 
   const workspaceId = await resolveDirectorWorkspace(admin);
   if (!workspaceId) return { fixQueued: [], escalated: [] };
@@ -574,12 +602,13 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
-    // The gap: an UNSTARTED (no ✅ phase), platform-owned spec carrying a Repair-signature (an authored fix
-    // for a real bug). The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section,
-    // so gating on `phases.length === 0` skipped them; gate on `counts.shipped === 0` instead so a fix spec
-    // with 0, 1, or N ⏳ phases (but nothing landed) is escorted, and the build chain carries its phases to
-    // completion. An unstarted spec with NO repair signature is a new feature — never auto-built here.
-    const isFixSpec = card.counts.shipped === 0 && card.repairSignature && (card.owner ?? PLATFORM) === PLATFORM;
+    // The gap: an UNSTARTED (no ✅ phase) spec carrying a Repair-signature (an authored fix for a real bug)
+    // that THIS director drives (its owning department-director isn't live yet — owner-agnostic keystone routing,
+    // Phase 2). The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so gating on
+    // `phases.length === 0` skipped them; gate on `counts.shipped === 0` instead so a fix spec with 0, 1, or N ⏳
+    // phases (but nothing landed) is escorted, and the build chain carries its phases to completion. An unstarted
+    // spec with NO repair signature is a new feature — the init lane handles it (with a soundness check), never here.
+    const isFixSpec = card.counts.shipped === 0 && card.repairSignature && platformDrivesSpec(card.owner, chart, autonomy);
     if (!isFixSpec) continue;
 
     const state = await specBuildState(admin, workspaceId, card.slug);
@@ -968,6 +997,187 @@ export async function reconcileSwallowedEscalations(admin: Admin): Promise<Escal
   return { reEmitted, checked: handled.size };
 }
 
+// ── Phase 1 (director-zero-backlog-error-autonomy) — drain the OPEN error backlog to a terminal state ──
+// Rafa ([[../libraries/repair-agent]]) is EVENT-triggered: it fires the moment the Control Tower records a
+// NEW signature (recordError / a newly-opened loop_alert). But an error that slipped that trigger — recorded
+// during an outage window, before Platform went live, or on a skipped enqueue — just SITS open: nothing
+// re-drives it, so the backlog never drains on its own. This standing reconciler is the backstop that
+// GUARANTEES every OPEN error_events row + OPEN loop_alerts incident reaches a terminal state. Each pass it
+// classifies every open signature against the live agent_jobs + fix-spec state:
+//   (a) a fix already in-flight / merged-pending-deploy → CONFIRM, leave it (no action);
+//   (b) no live repair job AND no authored fix spec → enqueueRepairJob so Rafa diagnoses + authors (then the
+//       fix-escort auto-builds it) — the only routinely-new action;
+//   (c) Rafa already authored a fix spec that's unbuilt → CONFIRM (the fix-escort / groom owns building it);
+//   (d) the fix's build is STUCK (failed ≥ the loop-guard, nothing in-flight) → escalate the deeper issue.
+// It REUSES the repair dedup (enqueueRepairJob is a no-op when a live repair job exists, and folds bursts into
+// the cluster job) and adds its OWN fix-spec-coverage check so an authored-but-unbuilt fix is never
+// re-diagnosed. Bounded per pass, idempotent, and DORMANT until Platform is live+autonomous — exactly like
+// the escort + the enqueuer. A `reconciled_error` director_activity row is written per ACTION (enqueue /
+// escalate), never per idle confirm. Net: the open-error count trends to zero on its own.
+
+/** Cap how many NEW reconcile ACTIONS (repair enqueues + stuck-fix escalations) one pass takes. */
+export const PLATFORM_DIRECTOR_RECONCILE_CAP = 8;
+
+/** One open backlog item the reconciler classifies — an error_events row OR a loop_alerts incident. */
+interface OpenErrorItem {
+  signature: string;
+  source: string;
+  title: string;
+  errorEventId: string | null;
+  loopAlertId: string | null;
+}
+
+/** The outcome of one backlog-reconcile pass — what it drove off the open feed. */
+export interface ErrorBacklogReconcileResult {
+  /** signatures with no coverage → a repair diagnosis we enqueued (case b). */
+  enqueued: string[];
+  /** fix specs whose build is stuck past the loop-guard → escalated to the CEO (case d). */
+  escalated: string[];
+  /** open errors already covered by a live repair job / authored fix spec — left alone (cases a/c). */
+  confirmed: number;
+  /** total open error_events + loop_alerts examined this pass. */
+  scanned: number;
+}
+
+/**
+ * Map every authored fix spec's Repair-signature(s) → its live SpecCard, so an open error already covered by
+ * an authored fix is recognized (case a/c/d) and never re-diagnosed. Reads each repair-signed spec's markdown
+ * and parses its `Repair-signature:` markers (the exact error_events signature / `loop:<id>` key Rafa stamped).
+ */
+async function fixSpecsBySignature(specs: SpecCard[]): Promise<Map<string, SpecCard>> {
+  const bySig = new Map<string, SpecCard>();
+  for (const card of specs) {
+    if (!card.repairSignature) continue;
+    const got = await getSpec(card.slug);
+    if (!got) continue;
+    for (const sig of parseRepairSpecMeta(got.raw).signatures) {
+      if (!bySig.has(sig)) bySig.set(sig, card); // first (newest) wins; siblings group onto one spec anyway
+    }
+  }
+  return bySig;
+}
+
+/**
+ * Reconcile the OPEN error backlog: classify every open error_events row + open loop_alerts incident against
+ * the live repair-job / fix-spec state and drive each toward a terminal state (enqueue a diagnosis where none
+ * exists, confirm one that's covered, or escalate a stuck fix). Idempotent + bounded (PLATFORM_DIRECTOR_RECONCILE_CAP
+ * new actions/pass), reuses the repair dedup, and a NO-OP until Platform is live+autonomous. Best-effort; the
+ * caller logs the result.
+ */
+export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogReconcileResult> {
+  const empty: ErrorBacklogReconcileResult = { enqueued: [], escalated: [], confirmed: 0, scanned: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+
+  // The open backlog — every OPEN error_events row + OPEN loop_alerts incident (global infra, not ws-scoped).
+  const [{ data: errs }, { data: alerts }] = await Promise.all([
+    admin.from("error_events").select("id, source, signature, title, status").eq("status", "open").order("last_seen_at", { ascending: false }).limit(200),
+    admin.from("loop_alerts").select("id, loop_id, detail, status").eq("status", "open").order("last_seen_at", { ascending: false }).limit(200),
+  ]);
+
+  const items: OpenErrorItem[] = [];
+  for (const e of (errs ?? []) as Array<{ id: string; source?: string; signature?: string; title?: string }>) {
+    if (!e.signature) continue; // ungrouped rows can't be deduped — skip rather than misfire
+    items.push({ signature: String(e.signature), source: String(e.source ?? "error"), title: String(e.title ?? e.signature), errorEventId: e.id, loopAlertId: null });
+  }
+  for (const a of (alerts ?? []) as Array<{ id: string; loop_id?: string; detail?: string }>) {
+    if (!a.loop_id) continue;
+    items.push({ signature: `loop:${a.loop_id}`, source: "loop-alert", title: `${a.loop_id}: ${a.detail ?? "loop red"}`.slice(0, 300), errorEventId: null, loopAlertId: a.id });
+  }
+  if (!items.length) return { ...empty, scanned: 0 };
+
+  // Which open signatures already have an authored fix spec (so we confirm / escalate, never re-diagnose).
+  const { specs } = await getRoadmap();
+  const fixBySig = await fixSpecsBySignature(specs);
+
+  const enqueued: string[] = [];
+  const escalated: string[] = [];
+  let confirmed = 0;
+
+  // Dedup repeated signatures within this same pass (an error + its sibling loop alert can collide); the cap
+  // bounds NEW actions (enqueues + escalations) — idle confirms are cheap and always counted.
+  const handled = new Set<string>();
+  for (const item of items) {
+    if (handled.has(item.signature)) continue;
+    handled.add(item.signature);
+    const atCap = enqueued.length + escalated.length >= PLATFORM_DIRECTOR_RECONCILE_CAP;
+
+    const coverSpec = fixBySig.get(item.signature);
+    if (coverSpec) {
+      // (a) merged-pending-deploy — the fix shipped; the error stays open only until the deploy lands. Leave it.
+      if (coverSpec.status === "shipped") {
+        confirmed++;
+        continue;
+      }
+      const state = await specBuildState(admin, workspaceId, coverSpec.slug);
+      // (d) the fix's build is STUCK past the loop-guard with nothing in-flight → a deeper issue, not a flaky
+      // retry. Escalate to the CEO (deduped on the SAME `loopguard:<slug>` key the fix-escort uses, so the two
+      // lanes never double-ping). The fix-escort owns RE-QUEUING; the reconciler just guarantees it's surfaced.
+      if (!state.inFlight && state.failedCount >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+        if (atCap) continue; // bounded — pick it up next pass
+        const diagnosis = `Open error \`${item.signature}\` is covered by fix spec "${coverSpec.slug}", but its build failed ${state.failedCount}× without landing — likely a deeper issue, not a flaky retry${state.lastError ? ` (latest: ${state.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach and I'll carry it from there.`;
+        const r = await escalateDiagnosisToCeo(admin, {
+          workspaceId,
+          specSlug: coverSpec.slug,
+          title: `Build stuck: ${coverSpec.slug}`,
+          diagnosis,
+          dedupeKey: `loopguard:${coverSpec.slug}`,
+          deepLink: `/dashboard/roadmap/${coverSpec.slug}`,
+          escalationKind: "loop_guard",
+          metadata: { kind: "reconcile", signature: item.signature, failed_attempts: state.failedCount, last_error: state.lastError ?? undefined },
+        });
+        if (r.emitted) {
+          escalated.push(coverSpec.slug);
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: PLATFORM,
+            actionKind: "reconciled_error",
+            specSlug: coverSpec.slug,
+            reason: diagnosis,
+            metadata: { signature: item.signature, source: item.source, action: "escalated_stuck", error_event_id: item.errorEventId, loop_alert_id: item.loopAlertId, autonomous: true },
+          });
+        } else if (r.error) {
+          console.error(`[platform-director] reconcile CEO escalation FAILED to surface (loopguard:${coverSpec.slug}): ${r.error.message}`);
+        }
+        continue;
+      }
+      // (c) authored fix spec, in-flight or awaiting its build → the fix-escort / groom owns driving it. Confirm.
+      confirmed++;
+      continue;
+    }
+
+    // (b) no authored fix spec — does a live repair JOB already cover it? enqueueRepairJob is the dedup: it
+    // no-ops (or folds into the cluster job) when one exists, and enqueues a fresh diagnosis when none does.
+    if (atCap) continue; // bounded — the backlog re-drives next pass; nothing is lost
+    const r = await enqueueRepairJob(admin, {
+      source: item.source,
+      signature: item.signature,
+      title: item.title,
+      errorEventId: item.errorEventId,
+      loopAlertId: item.loopAlertId,
+    });
+    if (r.enqueued) {
+      enqueued.push(item.signature);
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "reconciled_error",
+        specSlug: null,
+        reason: `Backlog item \`${item.signature}\` (${item.source}) had no live repair job and no fix spec — enqueued a repair diagnosis so Rafa authors a fix (then the fix-escort builds it).`,
+        metadata: { signature: item.signature, source: item.source, action: "enqueued_repair", error_event_id: item.errorEventId, loop_alert_id: item.loopAlertId, autonomous: true },
+      });
+    } else {
+      // a live repair job already exists / folded into the cluster — already being diagnosed. Confirm.
+      confirmed++;
+    }
+  }
+
+  return { enqueued, escalated, confirmed, scanned: handled.size };
+}
+
 // ── Phase 4 — watch the platform + report to the board ────────────────────────────────────────────
 // The director's TOP, human-legible layer: read Control Tower health (the EXISTING snapshot library —
 // no new monitoring) and post a conversational update as 🛠️ Ada to the M3 #directors board — what it
@@ -1309,26 +1519,31 @@ export function validateGroomSplit(
   return { ok: true };
 }
 
-// ── Phase 2 (director-initialize-platform-specs-no-wait) — initiate non-fix platform specs ─────────
+// ── Phase 2 (director-initialize-platform-specs-no-wait) — initiate unstarted non-fix specs ─────────
 // The other lanes drive every STARTED or fix-shaped spec: escortApprovedGoals walks goal→milestone→spec
 // trees, escortFixSpecs builds unstarted authored fix specs (Repair-signature), and groomBoard moves
-// in-flight (≥1 ✅) specs. The remaining gap is a platform-owned, unblocked, UNSTARTED (0 ✅) spec that is
-// NEITHER goal-linked NOR Repair-signed: fix-escort rejects it (no Repair-signature), the goal-walk can't
-// see it (no goal), and grooming needs a ✅. Per CEO policy the director may INITIATE its OWN department's
-// specs with NO waiting period (initiation has no prior build, so no cooldown applies) — but NEVER blindly.
-// Like grooming, the decision is a read-only Max `claude -p` SOUNDNESS investigation (the spec is sound +
-// in-scope) before any build is queued; a failed/ambiguous verdict ESCALATES to the CEO and queues nothing
-// (CEO decision 2026-06-24: the investigation step is mandatory, same soundness rail as approval/groom).
+// in-flight (≥1 ✅) specs. The remaining gap is an unblocked, UNSTARTED (0 ✅) spec that is NEITHER goal-linked
+// NOR Repair-signed: fix-escort rejects it (no Repair-signature), the goal-walk can't see it (no goal), and
+// grooming needs a ✅. The director may INITIATE any such spec it drives with NO waiting period (initiation has
+// no prior build, so no cooldown applies) — but NEVER blindly. Like grooming, the decision is a read-only Max
+// `claude -p` SOUNDNESS investigation (the spec is sound + in-scope — critical now that the director touches
+// unfamiliar cross-domain specs) before any build is queued; a failed/ambiguous verdict ESCALATES to the CEO and
+// queues nothing (CEO decision 2026-06-24: the investigation step is mandatory, same soundness rail as approval/groom).
 //
-// Hard rails (unchanged): a NON-platform unstarted spec is NEVER initialized here (other departments are only
-// babysat via grooming once they have ≥1 ✅ phase); a spec that is part of an unstarted (0%) GOAL is NOT
-// touched here — escortApprovedGoals already surfaces a zero-progress owned goal to the CEO as a new-goal call;
+// Owner-agnostic drive (director-drives-all-specs-and-deferred-status Phase 2): the lane no longer gates on
+// `owner === platform`. ANY unblocked, non-deferred, unstarted spec is a candidate, ROUTED via the keystone —
+// `platformDrivesSpec` ("first live boss else up"): a department whose own director is live+autonomous keeps its
+// specs (they route to IT); everything else flows up to the Platform director, who covers for the not-yet-live
+// departments. Today only Platform is live, so it drives every non-deferred unstarted spec.
+//
+// Hard rails (unchanged): a spec that is part of an unstarted (0%) GOAL is NOT touched here — escortApprovedGoals
+// already surfaces a zero-progress owned goal to the CEO as a new-goal call; a deferred spec is skipped (Phase 1);
 // destructive/irreversible/multi-choice still escalate (the investigation's job). Dormant until live+autonomous.
 
 /** Cap how many unstarted non-fix specs one initiation pass investigates (bound the per-pass cost). */
 export const PLATFORM_DIRECTOR_INIT_CAP = 4;
 
-/** A platform-owned, unstarted, non-fix, non-goal spec the director may initiate after a soundness check. */
+/** An unblocked, unstarted, non-fix, non-goal spec the director drives — a candidate to initiate after a soundness check. */
 export interface InitCandidate {
   slug: string;
   title: string;
@@ -1366,16 +1581,19 @@ export async function alreadyInitiated(admin: Admin, slug: string): Promise<bool
 }
 
 /**
- * Find the platform-owned, unblocked, UNSTARTED (0 ✅) specs the director may initiate this pass — the gap no
+ * Find the unblocked, UNSTARTED (0 ✅) specs the director DRIVES and may initiate this pass — the gap no
  * other lane covers: NOT Repair-signed (escortFixSpecs owns those), NOT goal-linked (the goal-walk / new-goal
  * escalation owns those), not opted out (`**Auto-build:** off`), no in-flight build, and not already
- * terminally escalated by this lane. A NO-OP until Platform is live+autonomous (like the escort). Capped at
- * INIT_CAP per pass. Each candidate is still SOUNDNESS-investigated by the box lane before any build — this
- * only assembles the unblinded gap; it never queues.
+ * terminally escalated by this lane. Owner-agnostic (Phase 2): any owner's spec qualifies, routed via the
+ * keystone `platformDrivesSpec` — Platform drives a spec whose owning department-director isn't live+autonomous,
+ * else that director drives it (the spec is filtered out here). A NO-OP until Platform is live+autonomous (like
+ * the escort). Capped at INIT_CAP per pass. Each candidate is still SOUNDNESS-investigated by the box lane before
+ * any build — this only assembles the unblinded gap; it never queues.
  */
 export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]> {
   const autonomy = await loadAutonomyMap();
   if (!platformIsAutoApprover(autonomy)) return []; // dormant until activation flips the flag
+  const chart = await buildOrgChartGraph();
   const workspaceId = await resolveDirectorWorkspace(admin);
   if (!workspaceId) return [];
 
@@ -1387,7 +1605,7 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
       s.counts.shipped === 0 && // unstarted — no phase has landed
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
-      (s.owner ?? PLATFORM) === PLATFORM && // ONLY the director's own department (the hard rail)
+      platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it ("first live boss else up")
       !s.blockedBy.some((b) => !b.cleared) && // still blocked → its auto-queue fires when its last blocker ships
       (filters.goalsBySpec[s.slug] ?? []).length === 0, // goal-linked → the goal-walk / new-goal escalation owns it
   );
@@ -1422,19 +1640,23 @@ export interface InitVerdict {
 }
 
 /**
- * The Max `claude -p` SOUNDNESS investigation prompt — read-only assess ONE unstarted platform spec and
- * decide whether to INITIATE its build (it is sound + in-scope) or ESCALATE to the CEO. NEVER a blind build:
- * this is the same soundness rail as the approval / groom lanes (CEO decision 2026-06-24).
+ * The Max `claude -p` SOUNDNESS investigation prompt — read-only assess ONE unstarted spec and decide whether
+ * to INITIATE its build (it is sound + in-scope) or ESCALATE to the CEO. NEVER a blind build: this is the same
+ * soundness rail as the approval / groom lanes (CEO decision 2026-06-24). Owner-agnostic (Phase 2) — the spec may
+ * belong to ANOTHER department whose director isn't live yet, so you (the keystone) drive it; the soundness check
+ * matters MORE for an unfamiliar cross-domain spec, so escalate rather than guess when out of your depth.
  */
 export function initInvestigationPrompt(c: InitCandidate): string {
+  const ownedByOther = (c.owner ?? PLATFORM) !== PLATFORM;
   return [
     "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
-    "This is a PLATFORM-owned spec on the board that is UNSTARTED (0 phases shipped), unblocked, NOT a Repair-",
-    "authored fix, and NOT part of any goal. Per CEO policy you may INITIATE your OWN department's specs with no",
-    "waiting period — but NEVER blindly. Investigate read-only and decide whether to kick off its build now.",
+    "This is a spec on the board that is UNSTARTED (0 phases shipped), unblocked, NOT a Repair-authored fix, and",
+    `NOT part of any goal. It is owned by ${c.owner ?? "platform"}${ownedByOther ? " — another department whose director isn't live yet, so it routes UP to you (the keystone) to drive" : " (your own department)"}.`,
+    "Per CEO policy you may INITIATE any spec you drive with no waiting period — but NEVER blindly. Investigate",
+    "read-only and decide whether to kick off its build now.",
     "",
-    "1. INITIATE — the spec is SOUND and IN-SCOPE for Platform: it is well-formed (a real ## Phase plan), its",
-    "   approach is reasonable, it is additive / reversible, and it is squarely platform work. → I queue its build,",
+    "1. INITIATE — the spec is SOUND and IN-SCOPE: it is well-formed (a real ## Phase plan), its approach is",
+    `   reasonable, it is additive / reversible, and it is genuinely buildable${ownedByOther ? " (and you understand this cross-domain area well enough to drive it soundly)" : ""}. → I queue its build,`,
     "   and the existing chain + auto-ship + fold carry its phases to completion.",
     "2. ESCALATE — anything you cannot confirm sound: it is ambiguous / under-specified / possibly out of scope,",
     "   it implies a destructive or irreversible change, it is really a NEW GOAL (a large new product capability)",
@@ -1452,11 +1674,192 @@ export function initInvestigationPrompt(c: InitCandidate): string {
     c.raw,
     "----------------------------------------",
     "",
-    "Investigate read-only (the spec's promise + phases, the code/tables it touches, whether it's scoped platform work).",
+    "Investigate read-only (the spec's promise + phases, the code/tables it touches, whether it's a sound, scoped, buildable spec).",
     "Final message = ONLY one JSON object (no markdown):",
     '{"verdict":"initiate","reasoning":"<why the spec is sound, in-scope, and safe to build now>"}',
     '{"verdict":"escalate","reasoning":"<why this needs the CEO — ambiguous / out of scope / a new goal / destructive / a choice>"}',
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+// ── Phase 1 (director-supervised-repair-dismissal) — supervise + dismiss Rafa's no-fix items ───────
+// The CEO used to manually Dismiss every Control Tower warning where the Repair Agent (Rafa) declined to
+// propose a fix (a `needs-human` verdict — a `repair` agent_jobs row parked in `needs_attention`, surfaced
+// Dismiss-only by getOpenRepairs). This lane is the director SUPERVISING that no-fix call: she does NOT
+// auto-dismiss noise — she adversarially RE-CHECKS Rafa's verdict and dismisses ONLY what she can
+// independently confirm is benign. Anything she can't confirm stays up; a suspected masked real bug escalates.
+//
+// It reuses the EXISTING Dismiss plumbing (the owner path POST /api/developer/control-tower/repair, the
+// `repair_build` action `declined` → resolve the error_events row + complete the job) — no new dismiss
+// machinery, no migration. Like grooming/initiation, the JUDGMENT is a read-only Max `claude -p` in the box
+// lane (builder-worker `superviseRepairDismissals`); this module is the mechanical half — find the candidates,
+// build the prompt, dispatch the verdict, and the dedup ledger so each item is reviewed once.
+//
+// Leash: dismissing a confirmed-benign monitoring warning is the `monitoring_fix` class — low-risk and
+// reversible (dismissing UN-blocks re-enqueue, so a wrongly-dismissed real problem re-fires and Rafa
+// re-triages it). Unsure ⇒ escalate, never dismiss. NEVER dismisses a `real-bug` / fix-proposed item:
+// findRepairDismissalCandidates only takes `needs-human` items and applyDirectorDismissal re-asserts the
+// job is still `needs_attention` before clearing it.
+
+/** Cap how many of Rafa's open no-fix items one supervision pass reviews (bound the per-pass `claude -p` cost). */
+export const PLATFORM_DIRECTOR_DISMISS_CAP = 6;
+
+/** The stable dedup key for a director review of one repair item — `dismiss:{signature}` (per the spec ledger). */
+export function dismissKey(signature: string): string {
+  return `dismiss:${signature}`;
+}
+
+/** One of Rafa's open no-fix items the director may review — its job, signature, and his logged reasoning. */
+export interface RepairDismissalCandidate {
+  jobId: string;
+  /** the error_events signature / `loop:<id>` (the repair job's spec_slug) — the dismiss-key anchor. */
+  signature: string;
+  /** short label of the originating error/alert. */
+  title: string;
+  /** Rafa's plain-text no-fix verdict + root-cause diagnosis (the job's log_tail) — what Ada re-checks. */
+  rafaReasoning: string;
+  createdAt: string;
+}
+
+/** The parsed supervision verdict (the box lane's `claude -p` JSON). */
+export interface RepairDismissalVerdict {
+  verdict?: string;
+  reasoning?: string;
+}
+
+/**
+ * Has the director ALREADY reviewed THIS repair job? Keyed on the job id (carried in every review row's
+ * metadata.repair_job_id) so "reviewed once" holds for the SAME item — a `dismiss` completes the job (it
+ * leaves getOpenRepairs), but a `keep`/`escalate` leaves it `needs_attention`, so without this dedup it would
+ * be re-investigated every pass. A re-fire is a NEW job (new id) → a fresh review, exactly as the spec wants.
+ * Matches the three review action_kinds (`dismissed_repair` / `kept_repair` / `escalated`). Best-effort.
+ */
+export async function alreadyReviewedDismissal(admin: Admin, jobId: string): Promise<boolean> {
+  const { data } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("director_function", PLATFORM)
+    .in("action_kind", ["dismissed_repair", "kept_repair", "escalated"])
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  return (data ?? []).some((r) => (r.metadata as Record<string, unknown> | null)?.["repair_job_id"] === jobId);
+}
+
+/**
+ * Find Rafa's open no-fix items the director may review this pass — the `needs-human` bucket from
+ * getOpenRepairs (a `repair` job in `needs_attention`, Dismiss-only). NEVER a `needs_approval` fix-proposed
+ * item and NEVER a `real-bug` (those carry a proposed spec → `state === "proposed"`, excluded here). Skips
+ * an item this director already reviewed. A NO-OP until Platform is live+autonomous (dormant until activation,
+ * like the escort/groom/init lanes). Capped at DISMISS_CAP per pass. Each candidate is still adversarially
+ * re-checked by the box lane's `claude -p` before any dismissal — this only assembles the bucket; it never clears.
+ */
+export async function findRepairDismissalCandidates(admin: Admin): Promise<RepairDismissalCandidate[]> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return []; // dormant until activation flips the flag
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return [];
+
+  const open = await getOpenRepairs(admin, workspaceId);
+  const needsHuman = open.filter((r) => r.state === "needs-human"); // never a proposed-fix / real-bug item
+
+  const out: RepairDismissalCandidate[] = [];
+  for (const r of needsHuman) {
+    if (out.length >= PLATFORM_DIRECTOR_DISMISS_CAP) break;
+    if (await alreadyReviewedDismissal(admin, r.jobId)) continue; // reviewed once (a re-fire is a new job)
+    out.push({ jobId: r.jobId, signature: r.signature, title: r.title, rafaReasoning: r.diagnosis, createdAt: r.createdAt });
+  }
+  return out;
+}
+
+/** The Max `claude -p` supervision prompt — read-only re-derive the root cause + adversarially test Rafa's no-fix call. */
+export function repairDismissalInvestigationPrompt(c: RepairDismissalCandidate): string {
+  return [
+    "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
+    "Rafa (the Repair Agent — a tool you supervise) looked at this Control Tower error and declined to propose a fix:",
+    "he classified it `needs-human` (no fix spec, parked for a manual Dismiss). Your job is NOT to rubber-stamp him.",
+    "Rafa optimizes the bounded proxy 'clear the error'; the degenerate state is clearing a warning by declaring a",
+    "REAL bug benign. So adversarially RE-CHECK his no-fix call: independently re-derive the root cause and decide.",
+    "",
+    "DEFAULT TO NOT DISMISSING. Emit `dismiss` ONLY if you can INDEPENDENTLY confirm the error is genuinely",
+    "transient (a flake / one-off / already-recovered), foreign (a third-party app or external dependency, not OUR",
+    "code), or otherwise benign — AND is NOT a masked real bug. If you cannot confirm that, do NOT dismiss.",
+    "",
+    "1. DISMISS — you independently confirmed it is genuinely transient / foreign-app / benign (not a masked real",
+    "   bug). → I clear the warning via the existing Dismiss path (resolve the error + complete the item). This is",
+    "   low-risk + reversible: a dismissed item un-blocks re-enqueue, so if it really was real it re-fires and Rafa",
+    "   re-triages it.",
+    "2. ESCALATE — you SUSPECT Rafa mislabeled a REAL bug as benign (your independent root-cause says it's a genuine",
+    "   defect in OUR code). → I do NOT dismiss; I escalate to the CEO with your contrary diagnosis.",
+    "3. KEEP — it is a genuine needs-human call you can neither confirm benign NOR confidently call a real bug. → I",
+    "   leave it on the Control Tower untouched for the human to decide. Prefer this over a wrong dismiss (north-star:",
+    "   hit a rail → escalate, never execute).",
+    "",
+    `Error signature: ${c.signature}`,
+    `Label: ${c.title}`,
+    "",
+    "Rafa's logged no-fix reasoning:",
+    "----------------------------------------",
+    c.rafaReasoning || "(no diagnosis logged)",
+    "----------------------------------------",
+    "",
+    "Investigate read-only: load the originating error_events / loop_alerts sample for this signature, read the",
+    "implicated code/library/integration in the brain, and INDEPENDENTLY re-derive the root cause. Test Rafa's call",
+    "adversarially — could a real bug be hiding behind a 'transient'/'foreign' label? Your reasoning must be YOUR",
+    "OWN independent diagnosis, not a restatement of Rafa's.",
+    "",
+    "Final message = ONLY one JSON object (no markdown):",
+    '{"verdict":"dismiss","reasoning":"<your INDEPENDENT confirmation it is genuinely transient/foreign/benign and not a masked real bug>"}',
+    '{"verdict":"escalate","reasoning":"<your contrary diagnosis — why this looks like a real bug Rafa mislabeled benign>"}',
+    '{"verdict":"keep","reasoning":"<why this is a genuine needs-human call you can neither confirm benign nor call a real bug>"}',
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Dismiss ONE of Rafa's no-fix items — the autonomous director path through the EXISTING owner Dismiss
+ * plumbing (mirrors POST /api/developer/control-tower/repair `dismiss`, minus the owner auth gate): decline
+ * the `repair_build` action (if any), complete the job, and resolve the originating error_events row. Then
+ * write a `dismissed_repair` director_activity row carrying ADA'S OWN independent reasoning (not a copy of
+ * Rafa's) + the dedup key. HARD GUARD: re-asserts the job is still `needs_attention` before clearing it, so a
+ * real-bug / fix-proposed item that flipped to `needs_approval` is never dismissed. Best-effort; returns {ok}.
+ */
+export async function applyDirectorDismissal(
+  admin: Admin,
+  candidate: RepairDismissalCandidate,
+  reasoning: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const { data: job } = await admin
+    .from("agent_jobs")
+    .select("id, workspace_id, spec_slug, status, pending_actions")
+    .eq("id", candidate.jobId)
+    .eq("kind", "repair")
+    .maybeSingle();
+  if (!job) return { ok: false, error: "repair job not found" };
+  // Never dismiss a real-bug / fix-proposed item: only a still-open needs-human item (needs_attention) clears.
+  if (job.status !== "needs_attention") return { ok: false, error: `repair job is ${job.status}, not a needs-human item` };
+
+  const actions = Array.isArray(job.pending_actions) ? (job.pending_actions as Array<Record<string, unknown>>) : [];
+  const next = actions.map((a) => (a.type === "repair_build" ? { ...a, status: "declined" } : a));
+  const { error } = await admin
+    .from("agent_jobs")
+    .update({ status: "completed", pending_actions: next, error: "dismissed by Ada (Platform/DevOps Director)", updated_at: new Date().toISOString() })
+    .eq("id", job.id);
+  if (error) return { ok: false, error: error.message };
+
+  // Resolve the originating error_events row (the repair job's spec_slug IS the error signature, e.g. "vercel:…").
+  if (job.spec_slug) {
+    await admin.from("error_events").update({ status: "resolved" }).eq("signature", job.spec_slug).eq("status", "open");
+  }
+
+  await recordDirectorActivity(admin, {
+    workspaceId: job.workspace_id as string,
+    directorFunction: PLATFORM,
+    actionKind: "dismissed_repair",
+    specSlug: null,
+    reason: reasoning,
+    metadata: { dismiss_key: dismissKey(candidate.signature), repair_job_id: job.id, signature: candidate.signature, verdict: "dismiss", autonomous: true },
+  });
+  return { ok: true };
 }

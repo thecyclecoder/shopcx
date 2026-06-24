@@ -28,6 +28,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
 import { agentGradingBatchReady, gradeConcludedAgentActions, detectGradeDropCoaching } from "@/lib/agents/agent-grader";
+import { computePlatformScorecard } from "@/lib/agents/platform-scorecard";
 
 export const platformDirectorCron = inngest.createFunction(
   {
@@ -123,12 +124,44 @@ export const platformDirectorCron = inngest.createFunction(
       return { considered, graded, coached };
     });
 
+    // The Platform Department Scorecard daily pulse (platform-scorecard-engine Phase 3): on the same
+    // standing beat, snapshot the daily KPI set (loop health · error backlog + derived MTTR · build
+    // throughput · autonomy ratio · escalations) into platform_scorecard_snapshots so they trend over
+    // time. Runs HERE in the deployed runtime (it needs DB access, like the grade sweeps), not on the
+    // box. Guarded to once per UTC day per workspace (spend-saving — the upsert on (metric_key,
+    // cadence='daily', snapshot_date) already makes a same-day re-run a no-op). Best-effort +
+    // idempotent: a quiet workspace writes zeros, never errors.
+    const scorecard = await step.run("snapshot-platform-scorecard", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data: existing } = await admin
+        .from("platform_scorecard_snapshots")
+        .select("workspace_id")
+        .eq("cadence", "daily")
+        .eq("snapshot_date", today);
+      const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
+      let snapshotted = 0;
+      let metricsWritten = 0;
+      for (const workspaceId of result.workspaceIds || []) {
+        if (done.has(workspaceId)) continue; // already snapshotted today (spend-saving)
+        try {
+          const rows = await computePlatformScorecard(workspaceId, { cadence: "daily", windowDays: 1 });
+          if (rows.length) {
+            snapshotted++;
+            metricsWritten += rows.length;
+          }
+        } catch (e) {
+          console.error(`[platform-director-cron] scorecard snapshot failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      return { snapshotted, metricsWritten, date: today };
+    });
+
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading } });
+      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard } });
     });
 
-    return { ...result, grading, workerGrading };
+    return { ...result, grading, workerGrading, scorecard };
   },
 );
