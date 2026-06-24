@@ -1891,9 +1891,23 @@ async function runOrchestratorDecision(
       } else {
         const errBody = await forceRes.text().catch(() => "");
         console.error(`Orchestrator (${modelKey}) force-decision API error: ${forceRes.status}`, errBody.slice(0, 300));
+        // Same outage-resilience rule as the main round loop above: a
+        // retryable dependency failure (429/5xx/overloaded) on the
+        // force-decision call must THROW so the Inngest run retries across
+        // the outage rather than silently degrading this ticket to a
+        // generic escalation. A terminal 4xx still falls through to the
+        // graceful fallback below. (orchestrator-retry-5xx Phase 1.)
+        if (isRetryableAnthropicStatus(forceRes.status)) {
+          throw new AnthropicDependencyError(`${modelKey} force-decision API error ${forceRes.status}: ${errBody.slice(0, 100)}`, forceRes.status);
+        }
         forceStatus = `http ${forceRes.status}: ${errBody.slice(0, 100)}`;
       }
     } catch (err) {
+      // Re-throw retryable dependency failures (our own AnthropicDependencyError
+      // thrown just above, plus raw network/fetch failures) so the outer catch
+      // propagates them and Inngest retries — don't swallow a transient outage
+      // into the fallback. Genuine logic errors still degrade gracefully.
+      if (isRetryableThrownError(err)) throw err;
       forceStatus = `throw: ${err instanceof Error ? err.message : String(err)}`;
     }
     return fallbackWithCancelRoute(message, `Max ${MAX_ROUNDS} tool rounds exceeded; force-decision retry: ${forceStatus}`);
