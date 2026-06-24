@@ -3,6 +3,7 @@
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/control-tower/error-feed.ts (recordfeeddelivery) + a supabase/migrations/*.sql adding a unique partial index on loop_heartbeats(loop_id, date_trunc(minute, ran_at)) where kind=feed, with the insert switched to on conflict do nothing::real-bug`
 **Repair-signature:** `supabase-logs:6f16957ed72e1f38`
+**Repair-signature:** `cluster:repair`
 
 Make the feed-delivery liveness beat throttle atomic so a Vercel log-drain burst can no longer storm loop_heartbeats and trigger DB-saturation 500s on POST /rest/v1/loop_heartbeats. The beat is pure recency-of-latest liveness, so one row per minute per source is sufficient and should be enforced authoritatively at the DB, not by a leaky best-effort read guard.
 
