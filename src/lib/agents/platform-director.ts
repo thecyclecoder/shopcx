@@ -2301,18 +2301,19 @@ export function groomKey(slug: string): string {
 }
 
 /**
- * Has this spec ALREADY had a terminal groom decision (split into cards, or escalated as unsure)? A split
- * commits the new card(s) + the folded parent to `main`, which the box's bundled `fs` copy won't reflect
- * until its next self-update — so without this ledger dedup the same candidate would re-split every pass.
- * (A `continue` is NOT deduped here: its queued build flips the spec in-flight, which the candidate filter
- * already excludes, and a later FAILED build should be re-groomed under the loop-guard.) Best-effort.
+ * Has this spec ALREADY had a terminal groom decision (split / fold_now / author_followup_spec /
+ * dismiss_candidate / escalated as unsure)? A terminal mutation commits to `main` (or the DB mirror),
+ * which the box's bundled `fs` copy won't reflect until its next self-update — so without this ledger
+ * dedup the same candidate would re-fire every pass. (A `continue` is NOT deduped here: its queued
+ * build flips the spec in-flight, which the candidate filter already excludes, and a later FAILED
+ * build should be re-groomed under the loop-guard.) Best-effort.
  */
 export async function alreadyGroomed(admin: Admin, slug: string): Promise<boolean> {
   const { data } = await admin
     .from("director_activity")
     .select("metadata")
     .eq("director_function", PLATFORM)
-    .in("action_kind", ["groomed_split", "escalated"])
+    .in("action_kind", ["groomed_split", "groomed_fold_now", "groomed_authored_spec", "groomed_dismissed", "escalated"])
     .order("created_at", { ascending: false })
     .limit(1000);
   const key = groomKey(slug);
@@ -2386,6 +2387,19 @@ export function groomInvestigationPrompt(c: GroomCandidate): string {
     "   never dropped.",
     "3. ESCALATE — genuinely unsure / high-stakes (could this be load-bearing?). → I escalate to the CEO and",
     "   move nothing. Prefer this over a wrong guess (north-star: hit a rail → escalate).",
+    "4. FOLD_NOW — the remaining ⏳ phase(s) are PHANTOM: the work already landed (via another shipped spec),",
+    "   OR a parser miscount counted a non-phase as a phase (e.g. a `### Phase N` inside `## Verification`",
+    "   parsed as a real phase). → I flip every remaining phase to ✅ in spec_card_state (actor=director:platform,",
+    "   reason logged to spec_status_history) and queue a fold via the existing fold chain. Reversible via the",
+    "   CEO drift-reconciler. REQUIRES owner=platform (rejected otherwise → I escalate).",
+    "5. AUTHOR_FOLLOWUP_SPEC — the investigation surfaced a real CODE-LEVEL root cause that is a SEPARATE spec",
+    "   (a parser bug, a broken library, a missing tool — NOT just a future phase of THIS spec). → I COMMIT the",
+    "   followup as its own planned spec card (docs/brain/specs/{slug}.md), AND apply the immediate candidate's",
+    "   PRIMARY disposition you choose (`fold_now` or `split`) in the same pass so the candidate doesn't re-fire.",
+    "   The followup is a NEW spec for the root cause; it is NOT a split of THIS spec. REQUIRES owner=platform.",
+    "6. DISMISS_CANDIDATE — the spec shouldn't have been groomed (false-alarm candidacy: not actionable today,",
+    "   malformed, duplicate, or superseded). → I write a `groomed_dismissed` ledger row so the dedup keeps it",
+    "   out of the next pass; no spec mutation.",
     "",
     `Spec: ${c.slug} — ${c.title}`,
     `Owner: ${c.owner ?? "—"} · Parent: ${c.parent ?? "—"}`,
@@ -2409,10 +2423,25 @@ export function groomInvestigationPrompt(c: GroomCandidate): string {
     "- Rewritten parent: REMOVE the split `## Phase` section(s); keep the H1 and EVERY remaining phase ✅; keep",
     "  whatever Verification still applies. After your edit the parent must have NO ⏳ and NO 🚧 left (it folds).",
     "",
+    "If you choose FOLD_NOW: your `reasoning` MUST be ≥20 chars and explain WHY the leftover phases are phantom",
+    "(which other spec shipped the work, or which parser miscount produced them).",
+    "",
+    "If you choose AUTHOR_FOLLOWUP_SPEC, you MUST provide:",
+    "- `followup`: a complete new spec card { slug, title, owner, parent, content } — slug lowercase a-z 0-9 -,",
+    "  must NOT equal " + c.slug + "; content MUST contain an H1 ending in ⏳, **Owner:** and **Parent:** lines,",
+    "  and at least one `## Phase N — … ⏳` section.",
+    "- `primary`: the immediate-candidate disposition — either `fold_now` (then `reasoning` doubles as the fold",
+    "  reason, ≥20 chars) OR `split` (then ALSO provide `splits` and `parent_markdown`, same rules as the SPLIT",
+    "  verdict above).",
+    "",
     "Final message = ONLY one JSON object (no markdown):",
     '{"verdict":"continue","reasoning":"<why the next ⏳ phase is needed now>"}',
     '{"verdict":"split","reasoning":"<why the leftovers are future, not needed now>","splits":[{"phase_title":"<the ⏳ phase>","slug":"' + c.slug + '-<phase>","markdown":"<full new card markdown>","reason":"<not-needed-now reason>"}],"parent_markdown":"<full rewritten parent markdown, every phase ✅>"}',
     '{"verdict":"escalate","reasoning":"<why this is genuinely ambiguous / possibly load-bearing — needs the CEO>"}',
+    '{"verdict":"fold_now","reasoning":"<≥20 chars: why the remaining ⏳ phase(s) are phantom — which other spec shipped them, or which parser miscount produced them>"}',
+    '{"verdict":"author_followup_spec","reasoning":"<why the root cause is a separate spec>","followup":{"slug":"<root-cause-spec-slug>","title":"<title ending with ⏳>","owner":"platform","parent":"<parent wikilink>","content":"<full spec markdown with H1+⏳, Owner, Parent, ## Phase N — … ⏳>"},"primary":"fold_now"}',
+    '{"verdict":"author_followup_spec","reasoning":"...","followup":{...},"primary":"split","splits":[...],"parent_markdown":"..."}',
+    '{"verdict":"dismiss_candidate","reasoning":"<why this shouldn\'t have been a groom candidate — false alarm, not actionable today, malformed, duplicate, superseded>"}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -2426,12 +2455,83 @@ export interface GroomSplit {
   reason?: string;
 }
 
+/**
+ * One followup spec card the investigation proposes — a NEW planned spec for a ROOT CAUSE the
+ * investigation surfaced (e.g. a parser bug, a broken library, a missing tool). Distinct from a
+ * split: a followup is NOT a future phase of the current candidate; it stands on its own. Shared
+ * by the groom / init / repair-dismissal lanes (`author_followup_spec` verdict, Phase 1 & 2).
+ */
+export interface FollowupSpec {
+  slug?: string;
+  title?: string;
+  owner?: string;
+  parent?: string;
+  content?: string;
+}
+
 /** The parsed grooming verdict (the box lane's `claude -p` JSON). */
 export interface GroomVerdict {
   verdict?: string;
   reasoning?: string;
   splits?: GroomSplit[];
   parent_markdown?: string;
+  /** `author_followup_spec` — the NEW root-cause spec to commit. */
+  followup?: FollowupSpec;
+  /** `author_followup_spec` — the immediate-candidate's primary disposition (`fold_now` or `split`). */
+  primary?: string;
+}
+
+/** The minimum length of a `fold_now` / `dismiss_candidate` reason — a one-word "phantom" verdict is
+ *  rejected and escalates instead (validator rail; prevents an unauditable flip / dismiss landing). */
+export const DIRECTOR_VERDICT_MIN_REASON_LEN = 20;
+
+/**
+ * Validate the `fold_now` verdict — the candidate's leftover ⏳ phase(s) are PHANTOM and the box is
+ * about to flip every remaining phase to ✅ + queue a fold. Same-shape leash as `validateGroomSplit`:
+ * owner=platform (the chat-surface `spec-status` action rule), at least one phase set to flip, and a
+ * substantive (≥20 char) reason. A malformed verdict escalates instead of mutating the board.
+ */
+export function validateFoldNow(c: GroomCandidate, v: GroomVerdict): { ok: true } | { ok: false; error: string } {
+  if ((c.owner ?? PLATFORM) !== PLATFORM) return { ok: false, error: `spec owner (${c.owner ?? "—"}) is not platform — can't fold_now` };
+  if (!c.remainingPhases.length) return { ok: false, error: "no remaining ⏳ phases to flip" };
+  const reason = String(v.reasoning ?? "").trim();
+  if (reason.length < DIRECTOR_VERDICT_MIN_REASON_LEN) return { ok: false, error: `fold_now reason is empty or under ${DIRECTOR_VERDICT_MIN_REASON_LEN} chars` };
+  return { ok: true };
+}
+
+/**
+ * Validate an `author_followup_spec` followup — the NEW root-cause spec the box is about to commit.
+ * Rejects: a missing/invalid slug, a slug colliding with the parent, an empty markdown body, a
+ * markdown body missing an H1 / a ⏳ status marker / the **Owner:** / **Parent:** lines, and (when
+ * supplied) a parent whose owner is not platform — the same chat-surface `spec-status` owner gate
+ * as the rest of the leash. A malformed followup escalates instead of authoring a broken card.
+ */
+export function validateFollowupSpec(parentSlug: string, parentOwner: string | undefined, f: FollowupSpec | undefined): { ok: true } | { ok: false; error: string } {
+  if (!f) return { ok: false, error: "author_followup_spec verdict with no followup card" };
+  const slug = String(f.slug ?? "");
+  const md = String(f.content ?? "");
+  if (!slug || !/^[a-z0-9-]+$/.test(slug)) return { ok: false, error: `invalid followup slug "${slug}"` };
+  if (slug === parentSlug) return { ok: false, error: "followup slug collides with the parent" };
+  if (!md.trim()) return { ok: false, error: "followup spec content is empty" };
+  if (!/^#\s+.+/m.test(md)) return { ok: false, error: "followup spec missing an H1" };
+  if (!/[⏳]/.test(md)) return { ok: false, error: "followup spec missing a ⏳ (must be planned)" };
+  if (!/\*\*Owner:\*\*/i.test(md)) return { ok: false, error: "followup spec missing **Owner:**" };
+  if (!/\*\*Parent:\*\*/i.test(md)) return { ok: false, error: "followup spec missing **Parent:**" };
+  if (!/##\s+Phase\s+\d/im.test(md)) return { ok: false, error: "followup spec has no `## Phase N — …` section" };
+  if ((parentOwner ?? PLATFORM) !== PLATFORM) return { ok: false, error: `parent owner (${parentOwner ?? "—"}) is not platform — can't author a followup` };
+  return { ok: true };
+}
+
+/**
+ * Validate the `dismiss_candidate` verdict — the candidate shouldn't have been groomed/init'd and the
+ * box is about to write a dedup ledger row so the next pass skips it. Same-shape leash as the others:
+ * a substantive (≥20 char) reason so the activity row carries audit-grade context (the audit IS the
+ * gate). A malformed verdict escalates instead of writing a no-op ledger row.
+ */
+export function validateDismissCandidate(v: GroomVerdict): { ok: true } | { ok: false; error: string } {
+  const reason = String(v.reasoning ?? "").trim();
+  if (reason.length < DIRECTOR_VERDICT_MIN_REASON_LEN) return { ok: false, error: `dismiss_candidate reason is empty or under ${DIRECTOR_VERDICT_MIN_REASON_LEN} chars` };
+  return { ok: true };
 }
 
 /**
@@ -2520,22 +2620,35 @@ export function initEscalationKeys(slug: string): string[] {
   return [`init-unsure:${slug}`, `initguard:${slug}`];
 }
 
+/** The stable ledger key for a terminal init decision on a spec (dismiss_candidate / author_followup_spec).
+ *  Distinct namespace from `init-unsure:` so a re-fire (CEO drops the dismiss; re-initiation later) is
+ *  one ledger query away — mirrors `groomKey`. */
+export function initKey(slug: string): string {
+  return `init:${slug}`;
+}
+
 /**
- * Has this spec ALREADY had a TERMINAL init escalation (ambiguous soundness, or a loop-guard "deeper issue")?
- * After such an escalation the spec is still unstarted + unblocked, so without this ledger dedup it would be
- * re-investigated (a wasted `claude -p`) and re-escalated every pass. A successful INITIATE doesn't need this —
- * its queued build flips the spec in-flight, which findInitCandidates already excludes. Best-effort.
+ * Has this spec ALREADY had a TERMINAL init decision (ambiguous-soundness / loop-guard escalation, OR a
+ * `dismiss_candidate` / `author_followup_spec` directive that meant "don't initiate")? After any of those
+ * the spec is still unstarted + unblocked, so without this ledger dedup it would be re-investigated (a
+ * wasted `claude -p`) and re-decided every pass. A successful INITIATE doesn't need this — its queued build
+ * flips the spec in-flight, which findInitCandidates already excludes. Best-effort.
  */
 export async function alreadyInitiated(admin: Admin, slug: string): Promise<boolean> {
   const { data } = await admin
     .from("director_activity")
-    .select("metadata")
+    .select("action_kind, metadata")
     .eq("director_function", PLATFORM)
-    .eq("action_kind", "escalated")
+    .in("action_kind", ["escalated", "init_dismissed", "init_authored_spec"])
     .order("created_at", { ascending: false })
     .limit(1000);
-  const keys = new Set(initEscalationKeys(slug));
-  return (data ?? []).some((r) => keys.has(String((r.metadata as Record<string, unknown> | null)?.["dedupe_key"] ?? "")));
+  const escalationKeys = new Set(initEscalationKeys(slug));
+  const ledgerKey = initKey(slug);
+  return (data ?? []).some((r) => {
+    const meta = (r.metadata as Record<string, unknown> | null) ?? {};
+    if (r.action_kind === "escalated") return escalationKeys.has(String(meta["dedupe_key"] ?? ""));
+    return meta["init_key"] === ledgerKey;
+  });
 }
 
 /**
@@ -2610,6 +2723,8 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
 export interface InitVerdict {
   verdict?: string;
   reasoning?: string;
+  /** `author_followup_spec` — the NEW root-cause/correct-scope spec to commit (Phase 2). */
+  followup?: FollowupSpec;
 }
 
 /**
@@ -2635,6 +2750,13 @@ export function initInvestigationPrompt(c: InitCandidate): string {
     "   it implies a destructive or irreversible change, it is really a NEW GOAL (a large new product capability)",
     "   rather than a scoped spec, or it is a non-binary CHOICE. → I escalate to the CEO and queue NOTHING.",
     "   Prefer this over a wrong guess (north-star: hit a rail → escalate).",
+    "3. AUTHOR_FOLLOWUP_SPEC — the spec describes a real need, but the RIGHT SCOPE is a DIFFERENT spec (this",
+    "   one's framing is wrong, or its scope is too broad/narrow). → I COMMIT the correctly-scoped followup as",
+    "   its own planned card AND dismiss THIS candidate so it doesn't re-fire. The followup is a NEW spec; the",
+    `   ${ownedByOther ? "current candidate's owner must be platform for me to author (chat-surface spec-status owner rule)" : "owner gate is satisfied"}.`,
+    "4. DISMISS_CANDIDATE — the spec shouldn't have been initiated (malformed, duplicate, superseded, or not",
+    "   actionable today). → I write a `init_dismissed` ledger row so the dedup keeps it out of the next pass;",
+    "   no spec mutation, no build queued.",
     "",
     `Spec: ${c.slug} — ${c.title}`,
     `Owner: ${c.owner ?? "—"} · Parent: ${c.parent ?? "—"}`,
@@ -2648,9 +2770,19 @@ export function initInvestigationPrompt(c: InitCandidate): string {
     "----------------------------------------",
     "",
     "Investigate read-only (the spec's promise + phases, the code/tables it touches, whether it's a sound, scoped, buildable spec).",
+    "",
+    "If you choose AUTHOR_FOLLOWUP_SPEC, you MUST provide:",
+    "- `followup`: a complete new spec card { slug, title, owner, parent, content } — slug lowercase a-z 0-9 -,",
+    "  must NOT equal " + c.slug + "; content MUST contain an H1 ending in ⏳, **Owner:** and **Parent:** lines,",
+    "  and at least one `## Phase N — … ⏳` section.",
+    "If you choose DISMISS_CANDIDATE: your `reasoning` MUST be ≥20 chars and explain why this candidate",
+    "shouldn't have been initiated (malformed / duplicate / superseded / not actionable today).",
+    "",
     "Final message = ONLY one JSON object (no markdown):",
     '{"verdict":"initiate","reasoning":"<why the spec is sound, in-scope, and safe to build now>"}',
     '{"verdict":"escalate","reasoning":"<why this needs the CEO — ambiguous / out of scope / a new goal / destructive / a choice>"}',
+    '{"verdict":"author_followup_spec","reasoning":"<why the right scope is a different spec>","followup":{"slug":"<correctly-scoped-spec-slug>","title":"<title ending with ⏳>","owner":"platform","parent":"<parent wikilink>","content":"<full spec markdown>"}}',
+    '{"verdict":"dismiss_candidate","reasoning":"<≥20 chars: why this candidate shouldn\'t have been initiated — malformed / duplicate / superseded / not actionable today>"}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -2711,21 +2843,26 @@ export interface RepairDismissalVerdict {
   reasoning?: string;
   /** For the `external` verdict (Phase 2): 2–3 concrete alternative options the CEO can choose (wait/retry, swap provider, degrade gracefully). */
   alternatives?: string[];
+  /** For the `author_followup_spec` verdict (director-judgment-lanes-fold-author-dismiss Phase 2): the
+   *  NEW fix spec to commit when Rafa mislabeled a REAL bug as needs-human. The item is kept (not
+   *  dismissed) — the fix lands as its own card, and the existing build chain takes it from there. */
+  followup?: FollowupSpec;
 }
 
 /**
  * Has the director ALREADY reviewed THIS repair job? Keyed on the job id (carried in every review row's
  * metadata.repair_job_id) so "reviewed once" holds for the SAME item — a `dismiss` completes the job (it
- * leaves getOpenRepairs), but a `keep`/`escalate` leaves it `needs_attention`, so without this dedup it would
- * be re-investigated every pass. A re-fire is a NEW job (new id) → a fresh review, exactly as the spec wants.
- * Matches the three review action_kinds (`dismissed_repair` / `kept_repair` / `escalated`). Best-effort.
+ * leaves getOpenRepairs), but a `keep`/`escalate`/`author_followup_spec` leaves it `needs_attention`, so
+ * without this dedup it would be re-investigated every pass. A re-fire is a NEW job (new id) → a fresh
+ * review, exactly as the spec wants. Matches the four review action_kinds (`dismissed_repair` /
+ * `kept_repair` / `escalated` / `repair_authored_spec`). Best-effort.
  */
 export async function alreadyReviewedDismissal(admin: Admin, jobId: string): Promise<boolean> {
   const { data } = await admin
     .from("director_activity")
     .select("metadata")
     .eq("director_function", PLATFORM)
-    .in("action_kind", ["dismissed_repair", "kept_repair", "escalated"])
+    .in("action_kind", ["dismissed_repair", "kept_repair", "escalated", "repair_authored_spec"])
     .order("created_at", { ascending: false })
     .limit(1000);
   return (data ?? []).some((r) => (r.metadata as Record<string, unknown> | null)?.["repair_job_id"] === jobId);
@@ -2784,6 +2921,11 @@ export function repairDismissalInvestigationPrompt(c: RepairDismissalCandidate):
     "4. KEEP — it is a genuine needs-human call you can neither confirm benign, NOR confidently call a real bug in OUR",
     "   code, NOR confirm is an external break. → I leave it on the Control Tower untouched for the human to decide.",
     "   Prefer this over a wrong dismiss (north-star: hit a rail → escalate, never execute).",
+    "5. AUTHOR_FOLLOWUP_SPEC — Rafa's no-fix item is a REAL bug he miscategorized: your independent root-cause says",
+    "   it IS our code defect AND you can scope the fix as a concrete spec. → I commit the fix as its own planned",
+    "   spec (docs/brain/specs/{slug}.md) and KEEP the item open on the Control Tower so the fix's build retires",
+    "   it. This is the constructive alternative to `escalate` — the spec IS the proposed fix; the build chain",
+    "   takes it from there. Use this ONLY when you can write a real, scoped fix; otherwise prefer `escalate`.",
     "",
     `Error signature: ${c.signature}`,
     `Label: ${c.title}`,
@@ -2798,11 +2940,16 @@ export function repairDismissalInvestigationPrompt(c: RepairDismissalCandidate):
     "adversarially — could a real bug be hiding behind a 'transient'/'foreign' label? Your reasoning must be YOUR",
     "OWN independent diagnosis, not a restatement of Rafa's.",
     "",
+    "If you choose AUTHOR_FOLLOWUP_SPEC, you MUST provide a `followup` card { slug, title, owner, parent,",
+    "content } — slug lowercase a-z 0-9 -; content with H1+⏳, **Owner:** (must be platform), **Parent:**, and",
+    "at least one `## Phase N — … ⏳` section. The spec IS the proposed code fix.",
+    "",
     "Final message = ONLY one JSON object (no markdown):",
     '{"verdict":"dismiss","reasoning":"<your INDEPENDENT confirmation it is genuinely transient/foreign-noise/benign and not a masked real bug>"}',
     '{"verdict":"escalate","reasoning":"<your contrary diagnosis — why this looks like a real bug in OUR code Rafa mislabeled benign>"}',
     '{"verdict":"external","reasoning":"<your verified diagnosis that the root cause is an external dependency break, not OUR code>","alternatives":["wait/retry …","swap provider …","degrade gracefully …"]}',
     '{"verdict":"keep","reasoning":"<why this is a genuine needs-human call you can neither confirm benign, call a real bug, nor confirm external>"}',
+    '{"verdict":"author_followup_spec","reasoning":"<your independent root-cause: this IS a real bug in our code that I can scope as a fix>","followup":{"slug":"<fix-spec-slug>","title":"<title ending with ⏳>","owner":"platform","parent":"<parent wikilink, e.g. [[../functions/platform]]>","content":"<full spec markdown>"}}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -2857,4 +3004,173 @@ export async function applyDirectorDismissal(
     metadata: { dismiss_key: dismissKey(candidate.signature), repair_job_id: job.id, signature: candidate.signature, title: candidate.title, verdict: "dismiss", autonomous: true },
   });
   return { ok: true };
+}
+
+// ── director-judgment-lanes-fold-author-dismiss (Phase 1 + 2) — shared cross-lane action helper ─────
+// Every read-only Max judgment lane (groom · init · repair-dismissal) returns the SAME three new
+// action types when a sound diagnosis exits the lane's native verdict set. This module hosts the
+// reversible DB-only halves (fold_now phase flip + enqueue_fold; dismiss_candidate ledger row) +
+// the followup-spec MARKDOWN-COMMIT callback signature the worker satisfies (the worker owns
+// putFileMain). Each lane keeps its own native verdicts (continue/split for groom, initiate for
+// init, dismiss for repair) — these helpers ONLY handle the three new cross-lane actions.
+
+/** Which read-only judgment lane is dispatching the action — drives the lane-specific dedup key
+ *  (groom_key / init_key / dismiss_key) and the activity-row `action_kind` (groomed_* / init_* /
+ *  repair_*). */
+export type DirectorLane = "groom" | "init" | "repair-dismissal";
+
+/** The lane-specific dedup ledger key for an action on `slug`/`signature` — looked up by each lane's
+ *  `alreadyGroomed`/`alreadyInitiated`/`alreadyReviewedDismissal` to skip the same candidate next pass.
+ *  groom + init are spec-keyed; repair-dismissal is signature-keyed. */
+function laneLedgerKey(lane: DirectorLane, slug: string | null | undefined, signature: string | undefined): { name: string; value: string } {
+  if (lane === "groom") return { name: "groom_key", value: groomKey(slug ?? "") };
+  if (lane === "init") return { name: "init_key", value: initKey(slug ?? "") };
+  return { name: "dismiss_key", value: dismissKey(signature ?? "") };
+}
+
+/** A typed action description handed to the shared dispatch helpers. The worker resolves the verdict's
+ *  JSON shape into one of these (with the followup body, the fold reason, or the dismiss reason). */
+export type DirectorActionInput =
+  | { type: "fold_now"; reason: string }
+  | { type: "author_followup_spec"; followup: FollowupSpec; reason: string }
+  | { type: "dismiss_candidate"; reason: string };
+
+/**
+ * Flip every leftover ⏳ phase of a partially-shipped spec to ✅ (status → `shipped` in spec_card_state,
+ * actor=director:platform, reason → spec_status_history) AND queue a fold via the existing fold chain
+ * (`enqueue_fold` RPC — same path the manual "Mark verified & archive" tap uses), AND write the
+ * `groomed_fold_now` director_activity row carrying `{slug, flipped_phases, reason}`. Same DB-only
+ * surface as `routeAlreadyShipped` in needs-attention-route.ts (the already-shipped park class). Caller
+ * is the GROOM lane's dispatch (Phase 1) — the only lane where fold_now applies (init/repair candidates
+ * have nothing to fold). Idempotent: alreadyGroomed dedups via groom_key on the activity row.
+ *
+ * Pre-condition: `validateFoldNow(c, v)` returned ok. The card flip is best-effort (markSpecCardStatus
+ * swallows errors); a missing card is logged but does not block enqueue_fold + the activity row.
+ */
+export async function applyDirectorFoldNow(
+  admin: Admin,
+  workspaceId: string,
+  c: GroomCandidate,
+  reason: string,
+): Promise<{ ok: boolean; error?: string; flippedPhases: number[] }> {
+  const got = await getSpec(c.slug);
+  const allPhases = got?.card.phases ?? [];
+  const flippedPhases: number[] = [];
+  const phaseStates = allPhases.map((p, i) => {
+    if (p.status === "planned") flippedPhases.push(i);
+    return { index: i, title: p.title, status: "shipped" as const };
+  });
+  try {
+    await markSpecCardStatus(workspaceId, c.slug, "shipped", phaseStates, {
+      actor: "director:platform",
+      reason: `fold_now: ${reason}`.slice(0, 2000),
+    });
+  } catch (e) {
+    console.warn(`[platform-director] applyDirectorFoldNow: markSpecCardStatus failed for ${c.slug}:`, e instanceof Error ? e.message : e);
+  }
+  // Queue the fold via the existing RPC — coalesces into the next batch fold-build automatically.
+  const { error } = await admin.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: c.slug, p_user: null });
+  if (error) return { ok: false, error: error.message, flippedPhases };
+
+  await recordDirectorActivity(admin, {
+    workspaceId,
+    directorFunction: PLATFORM,
+    actionKind: "groomed_fold_now",
+    specSlug: c.slug,
+    reason,
+    metadata: {
+      groom_key: groomKey(c.slug),
+      flipped_phases: flippedPhases,
+      remaining_phase_titles: c.remainingPhases,
+      autonomous: true,
+    },
+  });
+  return { ok: true, flippedPhases };
+}
+
+/** A small interface for the followup-spec markdown commit so the lib helper doesn't reach into the
+ *  worker's gh helpers. The worker passes its own `putFileMain` wrapper. Returns `{ ok }` for the
+ *  commit attempt; `existed: true` means the file was already on main (treat as authored). */
+export type FollowupSpecCommitter = (
+  filePath: string,
+  content: string,
+  message: string,
+) => Promise<{ ok: boolean; existed?: boolean; status?: number }>;
+
+/**
+ * Commit the new followup spec to `docs/brain/specs/{slug}.md` (via the caller's `putFileMain` wrapper)
+ * AND write the lane-appropriate `*_authored_spec` director_activity row carrying the dedup key for the
+ * CANDIDATE that produced it (groom_key / init_key / dismiss_key) + the followup slug. The candidate's
+ * primary disposition (groom: fold_now|split · init: dismiss · repair-dismissal: keep) is NOT applied
+ * here — the lane calls it separately so the same applyDirectorFoldNow / applyDirectorDismiss / split
+ * machinery covers both the standalone-action path and the followup path.
+ *
+ * Pre-condition: `validateFollowupSpec(parentSlug, parentOwner, action.followup)` returned ok.
+ */
+export async function applyDirectorAuthorFollowup(
+  admin: Admin,
+  workspaceId: string,
+  lane: DirectorLane,
+  candidate: { slug: string | null; signature?: string; jobId?: string },
+  followup: FollowupSpec,
+  reason: string,
+  commit: FollowupSpecCommitter,
+): Promise<{ ok: boolean; error?: string; authoredSlug: string; existed: boolean }> {
+  const slug = String(followup.slug ?? "");
+  const path = `docs/brain/specs/${slug}.md`;
+  const message = `spec: ${slug} — follow-up authored by director (${lane}) from ${candidate.slug ?? candidate.signature ?? "candidate"}`;
+  const put = await commit(path, String(followup.content ?? ""), message);
+  if (!put.ok && !put.existed) return { ok: false, error: `followup spec commit failed${put.status ? ` (status ${put.status})` : ""}`, authoredSlug: slug, existed: false };
+
+  const ledger = laneLedgerKey(lane, candidate.slug, candidate.signature);
+  const actionKind = lane === "groom" ? "groomed_authored_spec" : lane === "init" ? "init_authored_spec" : "repair_authored_spec";
+  const metadata: Record<string, unknown> = {
+    [ledger.name]: ledger.value,
+    followup_slug: slug,
+    followup_title: String(followup.title ?? ""),
+    followup_owner: String(followup.owner ?? ""),
+    followup_parent: String(followup.parent ?? ""),
+    existed: put.existed === true,
+    autonomous: true,
+  };
+  // Repair-dismissal lane: also carry repair_job_id so alreadyReviewedDismissal (job-id keyed) dedups it.
+  if (lane === "repair-dismissal" && candidate.jobId) metadata.repair_job_id = candidate.jobId;
+  if (lane === "repair-dismissal" && candidate.signature) metadata.signature = candidate.signature;
+  await recordDirectorActivity(admin, {
+    workspaceId,
+    directorFunction: PLATFORM,
+    actionKind,
+    specSlug: candidate.slug ?? null,
+    reason,
+    metadata,
+  });
+  return { ok: true, authoredSlug: slug, existed: put.existed === true };
+}
+
+/**
+ * Write the lane-appropriate `*_dismissed` director_activity row carrying the dedup key for the
+ * candidate. No spec mutation, no markdown commit, no build queued — the row IS the audit. The dedup
+ * ledger (`alreadyGroomed`/`alreadyInitiated`) reads its key on the next pass and skips the candidate.
+ * Same shape as the existing `kept_repair` ledger row in the repair lane.
+ *
+ * Pre-condition: `validateDismissCandidate(v)` returned ok.
+ */
+export async function applyDirectorDismissCandidate(
+  admin: Admin,
+  workspaceId: string,
+  lane: DirectorLane,
+  candidate: { slug: string | null; signature?: string },
+  reason: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const ledger = laneLedgerKey(lane, candidate.slug, candidate.signature);
+  const actionKind = lane === "groom" ? "groomed_dismissed" : lane === "init" ? "init_dismissed" : "repair_dismissed";
+  const r = await recordDirectorActivity(admin, {
+    workspaceId,
+    directorFunction: PLATFORM,
+    actionKind,
+    specSlug: candidate.slug ?? null,
+    reason,
+    metadata: { [ledger.name]: ledger.value, autonomous: true },
+  });
+  return { ok: r.recorded, error: r.reason };
 }
