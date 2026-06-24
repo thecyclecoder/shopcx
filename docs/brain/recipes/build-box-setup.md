@@ -30,6 +30,20 @@ claude2 -p "say hi"      # runs under account #2
 
 The **alias never reaches the worker** — it `spawn`s `claude` directly (no interactive shell), so the worker selects the config dir in the `env` object it builds for each lane (`runClaude(..., configDir)`). The alias is only for *your* manual runs. As with account #1: **no `ANTHROPIC_API_KEY`** in either login (still Max, never per-token).
 
+**Third+ account (same pattern — added 2026-06-24 after a weekly cap on account #2).** The pool default is now `/home/builder/.claude,/home/builder/.claude-personal,/home/builder/.claude-third` (override via `CLAUDE_CONFIG_DIRS` in `/root/shopcx-worker.env`). Log account #3 into its own dir, one-time:
+
+```bash
+sudo -u builder CLAUDE_CONFIG_DIR=/home/builder/.claude-third claude   # → /login → sign in with account #3
+echo "alias claude3='CLAUDE_CONFIG_DIR=/home/builder/.claude-third claude'" >> /home/builder/.bashrc
+sudo -u builder CLAUDE_CONFIG_DIR=/home/builder/.claude-third claude -p "say hi"   # verify
+```
+
+A config dir that isn't logged in yet just fails its lanes (the failover pulls it / parks `blocked_on_usage`) — it never blocks the healthy accounts, so adding the dir before the login is authorized is safe.
+
+### ⚠️ 2026-06-24 incident — the primary repo got `rm -rf`'d (worktree guard)
+
+The worker once **deleted its own live repo** (`/home/builder/shopcx`): a build resume passed a branch that resolved the **primary** checkout's worktree, `removeWorktreeForBranch` fed that path to `removeWorktreeDir`, and its `rm -rf` nuked the repo out from under the running process (cwd went `…/shopcx (deleted)`; every dynamic `import()` + `git worktree add` then failed with "Cannot find module" / "worktree add failed"). Fix in `scripts/builder-worker.ts`: `removeWorktreeDir` now **refuses any path outside `BUILDS_DIR`** (only `builds/<uuid|spec-chat-*>` worktrees are removable), and `removeWorktreeForBranch` **bails on an empty/falsy branch** (the primary shows as a detached worktree, branch `null` — matching it was the trap). **Recovery** when the live repo is missing: stop the worker, re-clone fresh, restore `node_modules`, restart (below).
+
 **Surfaced (box-multi-account-failover Phase 2):** the worker writes a per-account snapshot onto its [[../tables/worker_heartbeats|heartbeat]] (`accounts` column — per-account in-flight load + capped state, healthy/all-capped flags, soonest-reset, and a recent cap/failover/recovery event ring). [[../dashboard/roadmap]] `/dashboard/roadmap/box` renders a **Max accounts** panel (per-account load + an all-capped banner + recent events) and the [[../dashboard/control-tower]] box tile flips **amber** "all Max accounts capped — builds parked, auto-resume" so a silent everything's-capped state is visible. See [[../libraries/control-tower]] (`evalWorker`).
 
 ## Day-to-day ops (over the tailnet)
