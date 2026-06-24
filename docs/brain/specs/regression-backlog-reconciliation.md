@@ -1,4 +1,4 @@
-# Regression backlog reconciliation — guarantee coverage + drain the backlog ⏳
+# Regression backlog reconciliation — guarantee coverage + drain the backlog
 
 **Owner:** [[../functions/platform]] · **Parent:** [[regression-agent]] — the standing-coverage complement to Remi; the regression-side sibling of [[director-zero-backlog-error-autonomy]] under [[../goals/devops-director]]
 **Found in use 2026-06-24:** the CEO asked who handles regressions — 'we have quite a few.' Remi (the [[regression-agent]]) IS built and owns them, but it has fired ZERO times (0 `regression` jobs, no `detected_regression`/`authored_fix` activity) while Vera's spec-test returned `issues` on several specs. Root cause: Remi is purely event-driven — `enqueueRegressionJob` only fires when `runSpecTestJob` happens to re-test a shipped spec and it fails. Nothing GUARANTEES every shipped spec is periodically re-verified, and nothing reconciles a detected-but-undispositioned regression. Same blind spot Rafa has on errors; [[director-zero-backlog-error-autonomy]] fixes the error side, this fixes the regression side.
@@ -22,11 +22,7 @@ Remi optimizes 'review the regression in front of me.' The degenerate state is a
 ### Verification — Phase 2
 - A shipped spec with an unresolved spec-test `fail` and no live regression job → a `regression` job enqueued on the next pass. A regression whose fix is in-flight is not re-enqueued. A repeatedly-failing regression fix escalates rather than re-authoring forever.
 
-## Phase 3 — surface it on the scorecard ⏳
-- Feed the daily board-watch + the [[Platform Department Scorecard]] goal: 'regressions — D detected, F fixed, R reconciled from backlog, E escalated' + a 'shipped specs re-verified this week / total' coverage number, so regression coverage is a visible KPI, not a hope.
-
-### Verification — Phase 3
-- The board-watch + scorecard show the day's regression detect/fix/reconcile/escalate counts and the re-verification coverage ratio.
-
 ## Open decision (for the CEO)
 This is the regression sibling of director-zero-backlog-error-autonomy. If you'd rather have ONE reconciliation owning ALL open problems (errors + regressions + loop alerts) under a single sweep, say so and I'll merge this into that spec instead of running two — same outcome, one lane. Default here is two focused siblings (errors and regressions have different detectors and data), which is simpler to build and grade independently.
+
+_Scorecard surfacing of regression coverage was split to [[regression-backlog-reconciliation-scorecard]] (planned) — it is observability/KPI work owned alongside the [[../goals/platform-department-scorecard]] lane, not needed for this spec's coverage guarantee._
