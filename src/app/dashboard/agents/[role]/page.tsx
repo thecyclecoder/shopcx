@@ -228,7 +228,7 @@ function ProfileCard({
           <AutonomyToggle director={d} onChange={onAutonomyChange} />
         </div>
       ) : activeSection === "inbox" ? (
-        <RoleInbox role={d.slug} title={getPersona(d.slug, d.title).name} functionSlugs={functionSlugs} />
+        <RoleInbox role={d.slug} title={getPersona(d.slug, d.title).name} functionSlugs={functionSlugs} hideGrades />
       ) : (
         <div className="space-y-8">
           <div>
