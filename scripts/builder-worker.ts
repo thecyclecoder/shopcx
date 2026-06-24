@@ -5579,9 +5579,22 @@ async function applySpecStatusActionInline(
   }
   const critical = typeof raw.critical === "boolean" ? raw.critical : undefined;
   const deferred = typeof raw.deferred === "boolean" ? raw.deferred : undefined;
-  if (status === undefined && phases.length === 0 && critical === undefined && deferred === undefined) {
-    return logInvalid("no fields to flip (need status / phases / critical / deferred)");
+  // director-dismiss-park-and-short-circuit-spec Phase 2: shortCircuit=true marks a spec closed cleanly
+  // without all phases shipped — "no longer needed." Schema validation rejects (a) shortCircuit=true with
+  // no reason, and (b) shortCircuit=true with any status other than 'shipped' (short-circuit is shipped-only).
+  const shortCircuit = typeof raw.shortCircuit === "boolean" ? raw.shortCircuit : undefined;
+  if (shortCircuit === true && !reason) return logInvalid("shortCircuit:true requires a reason (no silent short-circuits)");
+  if (shortCircuit === true && status !== undefined && status !== "shipped") {
+    return logInvalid(`shortCircuit:true requires status:'shipped' (short-circuit is shipped-only), got '${status}'`);
   }
+  if (status === undefined && phases.length === 0 && critical === undefined && deferred === undefined && shortCircuit === undefined) {
+    return logInvalid("no fields to flip (need status / phases / critical / deferred / shortCircuit)");
+  }
+  // When shortCircuit=true is set without an explicit status, force the status flip to 'shipped' — the
+  // semantics of short-circuit ARE "close it shipped without all phases shipping," so a bare
+  // {shortCircuit:true, reason:'…'} payload is a complete closure.
+  const effectiveStatus: "planned" | "in_progress" | "shipped" | "rejected" | undefined =
+    shortCircuit === true ? "shipped" : status;
   // Existence: slug must resolve to a spec_card_state row OR a docs/brain/specs/{slug}.md file.
   const cs = await import("../src/lib/spec-card-state");
   const states = await cs.getSpecCardStates(workspaceId);
@@ -5624,13 +5637,13 @@ async function applySpecStatusActionInline(
         byIndex.set(p.index, { index: p.index, title: prior?.title ?? `Phase ${p.index + 1}`, status: p.status });
       }
       const merged = [...byIndex.values()].sort((x, y) => x.index - y.index);
-      const rollup = status ?? cs.rollupPhaseStatus(merged);
+      const rollup = effectiveStatus ?? cs.rollupPhaseStatus(merged);
       await cs.markSpecCardStatus(workspaceId, slug, rollup, merged, audit);
       did.push(`phases ${phases.map((p) => `#${p.index + 1}=${p.status}`).join(", ")} → ${rollup}`);
-    } else if (status) {
+    } else if (effectiveStatus) {
       const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
-      await cs.markSpecCardStatus(workspaceId, slug, status, priorPhases, audit);
-      did.push(`status → ${status}`);
+      await cs.markSpecCardStatus(workspaceId, slug, effectiveStatus, priorPhases, audit);
+      did.push(`status → ${effectiveStatus}`);
     }
     if (typeof critical === "boolean") {
       await cs.markSpecCardCritical(workspaceId, slug, critical, audit);
@@ -5639,6 +5652,19 @@ async function applySpecStatusActionInline(
     if (typeof deferred === "boolean") {
       await cs.markSpecCardDeferred(workspaceId, slug, deferred, audit);
       did.push(`deferred=${deferred}`);
+    }
+    // director-dismiss-park-and-short-circuit-spec Phase 2: stamp the short-circuit marker on the card's
+    // flags so the board renders the shipped card distinctly ("short-circuited — $reason"). The fold-build
+    // enqueue is SKIPPED — short-circuit means "the brain pages weren't updated by this; the spec/skill stay
+    // intact as reference," so there's nothing to fold. (Today's spec-status writer doesn't enqueue a fold
+    // either; the auto-router's `routeAlreadyShipped` does, but that runs on a needs_attention park, not
+    // a director's chat flip — so no explicit suppression is needed here.)
+    if (shortCircuit === true) {
+      await cs.markSpecCardShortCircuit(workspaceId, slug, true, reason);
+      did.push(`short-circuit=true (reason: ${reason})`);
+    } else if (shortCircuit === false) {
+      await cs.markSpecCardShortCircuit(workspaceId, slug, false);
+      did.push(`short-circuit=false (cleared)`);
     }
   } catch (e) {
     return logInvalid(`write failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -5651,10 +5677,110 @@ async function applySpecStatusActionInline(
       actionKind: "spec_status_flipped",
       specSlug: slug,
       reason,
-      metadata: { applied: did, auto_applied: true },
+      metadata: { applied: did, auto_applied: true, short_circuit: shortCircuit || undefined },
     });
   } catch { /* audit is best-effort */ }
-  return { summary: `Status flipped on ${slug}: ${did.join(" · ")}` };
+  return { summary: shortCircuit ? `Short-circuited ${slug}: ${did.join(" · ")}` : `Status flipped on ${slug}: ${did.join(" · ")}` };
+}
+
+/**
+ * director-dismiss-park-and-short-circuit-spec Phase 1 — AUTO-APPLY a single `dismiss-park` action emitted in
+ * the director's chat reply. Mirrors `applySpecStatusActionInline`: no CEO approval, no inbox/Slack card. The
+ * audit IS the gate (a `dismissed_park` `director_activity` row carrying the reason + the original park's
+ * `needs_attention_class` + the underlying spec slug). Reversible from the director activity feed via
+ * `POST /api/developer/director-activity/reopen-park` (mirrors the repair-dismissal reopen surface).
+ *
+ * Owner-only leash: the parked job's underlying spec slug must resolve to a spec whose
+ * `Owner: [[../functions/{fn}]]` matches the emitting director; out-of-leash rejections are logged.
+ * Schema validation: a missing `jobId` / `reason` is rejected as a schema error. Returns the one-line text
+ * appended to the director's reply so the CEO sees the action land in chat.
+ */
+async function applyDismissParkActionInline(
+  workspaceId: string,
+  directorFunction: string,
+  wt: string,
+  raw: Record<string, unknown>,
+): Promise<{ summary: string }> {
+  const jobId = typeof raw.jobId === "string" ? raw.jobId.trim() : "";
+  const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+  const logInvalid = async (detail: string): Promise<{ summary: string }> => {
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId,
+        directorFunction,
+        actionKind: "invalid_dismiss_park_action",
+        specSlug: null,
+        reason: detail,
+        metadata: { payload: raw, attempted_job_id: jobId || null, attempted_reason: reason || null },
+      });
+    } catch { /* audit is best-effort */ }
+    return { summary: `Dismiss-park rejected (${jobId || "no jobId"}): ${detail}` };
+  };
+  if (!jobId) return logInvalid("jobId is required");
+  if (!reason) return logInvalid("reason is required (no silent dismissals)");
+
+  const { data: job } = await db
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, status, needs_attention_class")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (!job) return logInvalid("agent_jobs row not found");
+  if (job.workspace_id !== workspaceId) return logInvalid("agent_jobs row is in a different workspace");
+  if (job.status !== "needs_attention") {
+    return logInvalid(`agent_jobs row is ${job.status}, not a parked needs_attention row`);
+  }
+
+  // Owner-only leash: the parked job's underlying spec must declare an Owner that matches THIS director.
+  // The spec slug is on the job; the markdown is in the worktree's checkout of origin/main.
+  const specSlug = (job.spec_slug as string | null) ?? null;
+  let owner: string | undefined;
+  if (specSlug) {
+    const specPath = join(wt, `docs/brain/specs/${specSlug}.md`);
+    if (existsSync(specPath)) {
+      try {
+        const md = readFileSync(specPath, "utf8");
+        const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
+        if (m) owner = m[1].replace(/^.*\//, "").trim();
+      } catch { /* fall through to leash rejection */ }
+    }
+  }
+  if (!owner) return logInvalid("parked job has no resolvable spec owner — out-of-leash for a director auto-apply");
+  if (owner !== directorFunction) return logInvalid(`parked job's spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
+
+  const priorClass = (job.needs_attention_class as string | null) ?? null;
+  const { error } = await db
+    .from("agent_jobs")
+    .update({
+      status: "dismissed",
+      needs_attention_class: "dismissed_by_director",
+      error: `dismissed by ${directorFunction} director: ${reason}`.slice(0, 2000),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", jobId)
+    .eq("status", "needs_attention"); // re-assert: never dismiss a row that flipped under us
+  if (error) return logInvalid(`write failed: ${error.message}`);
+
+  try {
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+    await recordDirectorActivity(db, {
+      workspaceId,
+      directorFunction,
+      actionKind: "dismissed_park",
+      specSlug: specSlug,
+      reason,
+      metadata: {
+        job_id: jobId,
+        spec_slug: specSlug,
+        prior_class: priorClass,
+        target_kind: job.kind,
+        auto_applied: true,
+        autonomous: true,
+      },
+    });
+  } catch { /* audit is best-effort */ }
+
+  return { summary: `Dismissed parked ${job.kind} ${jobId.slice(0, 8)}${specSlug ? ` (${specSlug})` : ""}: ${reason}` };
 }
 
 function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown>[] {
@@ -5766,6 +5892,8 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
     // spec-status: NOT normalized into pending_actions — it's auto-applied directly from the raw LLM
     // payload by `applySpecStatusActionInline` ([[../specs/ada-director-spec-status-cards]] Phase 1
     // revised). Validation (slug/reason/phase shape/owner-leash) happens inside that helper.
+    // dismiss-park: same treatment ([[../specs/director-dismiss-park-and-short-circuit-spec]] Phase 1) —
+    // auto-applied by `applyDismissParkActionInline`, never a pending_action / inbox card.
   }
   return out;
 }
@@ -5786,8 +5914,10 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — for the INTENT: PLAN case (the CEO hands you a plan to execute). On approval it becomes your ONE active directive (runs FIRST, before routine) AND the worker acts immediately: it QUEUES the gate spec + every \`criticalSpecs\` build right now (no waiting for the init cadence), marks them \`**Priority:** critical\`, and CANCELS any parked \`holdBuilds\` (out-of-order builds to clear). \`gateBuildsUntil\` pauses ROUTINE builds until that spec ships (priority/critical builds still run; auto-lifts on ship). A directive re-prioritizes, never authorizes destructive work or a new goal.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"model_tier","summary":"<agent + tier change in one line>","targetKind":"<agent kind, e.g. fold>","tier":"<haiku|sonnet|opus, or null to clear to the Max default>","rollup":<the cited grade rollup 0-10, or omit>,"evidence":"<why — the grade slip / speed + 5-hr-window pressure>"}]}`,
   `  — when an agent's MODEL should change (box-agent-model-tiers): its grade rollup slipped on a small model, or a mechanical high-volume agent is burning the 5-hour usage window. You PROPOSE the tier; on the CEO's approval the worker routes it to the agent's SUPERVISOR (a worker's change → its director, a director's → the CEO), and on that approval the registry updates instantly (reversible — flip it back). A live+autonomous director may auto-apply a one-tier bump for a worker whose rollup is <7. Cite the rollup as the evidence.`,
-  `{"status":"replied","reply":"<acknowledge the flip in chat — no approval card is rendered>","pending_actions":[{"type":"spec-status","summary":"<one-line why>","slug":"<existing-spec-slug>","status":"<planned|in_progress|shipped|rejected>","phases":[{"index":0,"status":"shipped"}],"critical":true,"deferred":false,"reason":"<written to spec_status_history>"}]}`,
-  `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:**). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred). \`phases[].index\` is 0-based and validated against the markdown's phase count. The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
+  `{"status":"replied","reply":"<acknowledge the flip in chat — no approval card is rendered>","pending_actions":[{"type":"spec-status","summary":"<one-line why>","slug":"<existing-spec-slug>","status":"<planned|in_progress|shipped|rejected>","phases":[{"index":0,"status":"shipped"}],"critical":true,"deferred":false,"shortCircuit":false,"reason":"<written to spec_status_history>"}]}`,
+  `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:** / shortCircuit). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred/shortCircuit). \`phases[].index\` is 0-based and validated against the markdown's phase count. **shortCircuit:true** closes a spec CLEANLY without all phases shipping ("we changed our mind, this isn't needed anymore") — required \`reason\`, must be paired with \`status:'shipped'\` (or omitted — it auto-forces shipped), SKIPS the fold-build, and the roadmap renders the card as "shipped + short-circuited — <reason>". The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
+  `{"status":"replied","reply":"<acknowledge the dismiss in chat — no approval card is rendered>","pending_actions":[{"type":"dismiss-park","summary":"<one-line why>","jobId":"<agent_jobs.id of the parked row>","reason":"<written to director_activity>"}]}`,
+  `  — when a PARKED \`agent_jobs\` row (status=\`needs_attention\`) you own is genuinely not worth pursuing (the underlying work is being short-circuited, a prereq won't be supplied, the park is stale and not auto-routable). **AUTO-APPLIED — no CEO approval, no inbox card.** Flips \`agent_jobs.status='dismissed'\`, stamps \`needs_attention_class='dismissed_by_director'\`, and writes a \`dismissed_park\` director_activity row carrying your reason + the original park's class + the underlying spec slug. Owner-only: the parked job's underlying spec slug must resolve to a spec whose \`Owner: [[../functions/{fn}]]\` matches your function; a dismiss on someone else's job is rejected as out-of-leash. Reversible: the CEO clicks Re-open from the activity feed and the job flips back to \`needs_attention\` (a wrongly-dismissed park is one tap away from re-routing). Use this for parks the [[no-parked-specs-auto-route-needs-attention]] router can't help with (no shipped target to fold to, no real_blocker to spec around — the blocker is "we changed our mind").`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -5802,7 +5932,8 @@ function directorCoachFraming(dirFn: string): string {
     `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
     `You MAY PROPOSE a new GOAL (for YOUR OWN function only). If the conversation surfaces a strategic, multi-spec objective (an initiative, not a single fix), emit a 'goal' pending_action with structured fields (slug, title, outcome, successMetric, body). You never START a goal yourself — on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate); once greenlit, Pia decomposes it. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
     `You can EDIT an existing spec, not just author a new one. If the CEO asks you to MODIFY specs (e.g. "update the milestone specs Pia made to add the right Blocked-by lines"), READ each spec and emit a 'spec-edit' card per spec carrying the FULL revised markdown — a real edit the worker commits on approval, NOT just a recommendation to make a new spec.`,
-    `To flip a spec YOU OWN on the BOARD (status / a single phase / **Priority:** critical / **Deferred:** parked) emit a 'spec-status' action — NEVER a 'spec-edit' for status, because status is DB-only after spec-status-db-driven (the markdown is content-only). One action per slug; multiple actions if you're flipping N specs. **This action AUTO-APPLIES the moment your reply is persisted — no CEO approval, no inbox/Slack card, no Approve button.** Accountability is the audit trail (spec_status_history row stamped actor=director:{your-function} + a director_activity row), not a per-flip gate, and the daily drift reconciler auto-corrects a wrong flip within 24h. Mention the flip in your reply so the CEO sees it in chat — but do NOT ask for approval. Owner-only: a flip on a spec whose \`Owner: [[../functions/x]]\` isn't your function is rejected as out-of-leash; flipping someone else's spec still goes through the CEO owner UI.`,
+    `To flip a spec YOU OWN on the BOARD (status / a single phase / **Priority:** critical / **Deferred:** parked / shortCircuit) emit a 'spec-status' action — NEVER a 'spec-edit' for status, because status is DB-only after spec-status-db-driven (the markdown is content-only). One action per slug; multiple actions if you're flipping N specs. **This action AUTO-APPLIES the moment your reply is persisted — no CEO approval, no inbox/Slack card, no Approve button.** Accountability is the audit trail (spec_status_history row stamped actor=director:{your-function} + a director_activity row), not a per-flip gate, and the daily drift reconciler auto-corrects a wrong flip within 24h. Mention the flip in your reply so the CEO sees it in chat — but do NOT ask for approval. Owner-only: a flip on a spec whose \`Owner: [[../functions/x]]\` isn't your function is rejected as out-of-leash; flipping someone else's spec still goes through the CEO owner UI.`,
+    `To DISMISS a PARKED \`agent_jobs\` row YOU OWN (status=needs_attention, the underlying work is being short-circuited / a prereq won't be supplied / the park is stale and not auto-routable) emit a 'dismiss-park' action with the jobId + a reason. **AUTO-APPLIES — no CEO approval, no inbox card.** Flips the row to status='dismissed' + writes a 'dismissed_park' director_activity row carrying the reason + the original park's class + the underlying spec slug; the CEO can Re-open it from your activity feed in one tap. Owner-only: the parked job's underlying spec slug must resolve to a spec whose \`Owner:\` matches your function; a dismiss on someone else's job is rejected as out-of-leash. Use this for parks the [[no-parked-specs-auto-route-needs-attention]] router CAN'T help with — a "we changed our mind" call, not a real_blocker.`,
     `The CEO can hand you a PLAN to EXECUTE (the 'Give a plan' button → INTENT: PLAN). You emit a 'directive' card; on approval it becomes your ONE active directive that your standing pass runs FIRST, before routine. A directive can set 'gateBuildsUntil: <spec>' (PAUSE every other build until that spec ships — for "finish the assembly-line fix before more building", auto-lifts on ship) and 'criticalSpecs' (a '**Priority:** critical' marker so they jump the build queue). A spec marked '**Priority:** critical' is investigated + queued ahead of normal Planned specs. A directive re-prioritizes WHAT you do — it never loosens the leash.`,
     DIRECTOR_COACH_OUTPUT,
   ].join("\n\n");
@@ -6062,14 +6193,26 @@ async function runDirectorCoachJob(job: Job) {
     // normalizeCoachActions for the standard pending → approved → done lifecycle.
     const rawActions = Array.isArray(parsed?.pending_actions) ? (parsed!.pending_actions as unknown[]) : [];
     const specStatusRaw: Record<string, unknown>[] = [];
+    const dismissParkRaw: Record<string, unknown>[] = [];
     const nonStatusRaw: unknown[] = [];
     for (const a of rawActions) {
-      if (a && typeof a === "object" && (a as Record<string, unknown>).type === "spec-status") specStatusRaw.push(a as Record<string, unknown>);
-      else nonStatusRaw.push(a);
+      if (a && typeof a === "object") {
+        const t = (a as Record<string, unknown>).type;
+        if (t === "spec-status") { specStatusRaw.push(a as Record<string, unknown>); continue; }
+        // director-dismiss-park-and-short-circuit-spec Phase 1: dismiss-park is auto-applied directly from
+        // the raw LLM payload, like spec-status. It never enters pending_actions / renders an inbox or
+        // Slack card. The audit row (dismissed_park director_activity) IS the gate.
+        if (t === "dismiss-park") { dismissParkRaw.push(a as Record<string, unknown>); continue; }
+      }
+      nonStatusRaw.push(a);
     }
     const flipSummaries: string[] = [];
     for (const raw of specStatusRaw) {
       const r = await applySpecStatusActionInline(job.workspace_id, thread.director_function, wt, raw);
+      flipSummaries.push(r.summary);
+    }
+    for (const raw of dismissParkRaw) {
+      const r = await applyDismissParkActionInline(job.workspace_id, thread.director_function, wt, raw);
       flipSummaries.push(r.summary);
     }
     const newActions = normalizeCoachActions(nonStatusRaw, ts);

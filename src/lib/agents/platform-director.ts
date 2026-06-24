@@ -2007,6 +2007,8 @@ export interface PlatformWatchActivity {
   escorting: number;
   /** calls escalated to the CEO today (escalated rows). */
   escalated: number;
+  /** stale parks the director dismissed today (dismissed_park rows) — director-dismiss-park-and-short-circuit-spec Phase 1. */
+  dismissedParks: number;
   /** Rafa's no-fix calls reviewed today (dismissed + kept + escalated-from-review) — Phase 2 rollup. */
   reviewedRepairs: number;
   /** of those reviews, how many Ada cleared (dismissed_repair rows). */
@@ -2041,6 +2043,9 @@ function platformActivityLine(a: PlatformWatchActivity): string {
   if (a.squashed) parts.push(`squashed ${a.squashed} fix${a.squashed === 1 ? "" : "es"}`);
   if (a.escorting) parts.push(`escorted ${a.escorting} goal${a.escorting === 1 ? "" : "s"}`);
   if (a.escalated) parts.push(`escalated ${a.escalated} to you`);
+  // director-dismiss-park-and-short-circuit-spec Phase 1 — surface the day's dismissed parks alongside the
+  // existing rollup, so the CEO sees what was cleared without inspecting the activity ledger.
+  if (a.dismissedParks) parts.push(`dismissed ${a.dismissedParks} stale park${a.dismissedParks === 1 ? "" : "s"}`);
   return parts.length ? parts.join(" · ") : "nothing needed a decision";
 }
 
@@ -2184,12 +2189,14 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
     .eq("director_function", PLATFORM)
     .gte("created_at", dayStart)
     .lt("created_at", dayEnd);
-  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0, needsAttention: 0, needsAttentionOldestHours: 0, triagedReran: 0 };
+  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, dismissedParks: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0, needsAttention: 0, needsAttentionOldestHours: 0, triagedReran: 0 };
   for (const r of (activityRows ?? []) as { action_kind: string; metadata: Record<string, unknown> | null }[]) {
     const repairEscalation = r.action_kind === "escalated" && r.metadata?.["escalation_kind"] === "repair_dismissal_suspect";
     if (r.action_kind === "approved_approval") activity.squashed++;
     else if (r.action_kind === "escorted_goal") activity.escorting++;
     else if (r.action_kind === "escalated") activity.escalated++;
+    // director-dismiss-park-and-short-circuit-spec Phase 1 — the day's stale-park dismissals.
+    else if (r.action_kind === "dismissed_park") activity.dismissedParks++;
     // Phase 2 rollup — each review of one of Rafa's no-fix calls (a dismiss, a keep, or an escalate-back).
     if (r.action_kind === "dismissed_repair") {
       activity.dismissedRepairs++;

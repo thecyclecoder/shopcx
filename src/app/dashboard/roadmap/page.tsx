@@ -115,6 +115,15 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
           <DeployChip state={deploy} />
         </div>
       )}
+      {/* director-dismiss-park-and-short-circuit-spec Phase 2 — render a shipped card that was closed
+          cleanly without all phases shipping ("we changed our mind") with a distinct sub-line so a
+          reader doesn't think we actually built it. */}
+      {spec.shortCircuited && (
+        <div className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300" title="Short-circuited: closed cleanly without all phases shipping.">
+          <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
+          short-circuited{spec.shortCircuitReason ? ` — ${spec.shortCircuitReason}` : ""}
+        </div>
+      )}
       {spec.summary && (
         <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{spec.summary}</p>
       )}

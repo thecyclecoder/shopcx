@@ -15,7 +15,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
-import { getSpecCardStates, markSpecCardStatus, rollupPhaseStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
+import { getSpecCardStates, markSpecCardStatus, markSpecCardShortCircuit, rollupPhaseStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { slug?: unknown; status?: unknown; phaseIndex?: unknown };
@@ -80,6 +80,15 @@ export async function POST(request: Request) {
   const actor = `owner:${user.id}`;
   const reason = idx !== null ? `phase ${idx} → ${newPhaseStatus} (owner flip)` : `spec → ${newPhaseStatus} (owner flip)`;
   await markSpecCardStatus(workspaceId, slug, nextStatus, phaseStates, { actor, reason });
+
+  // director-dismiss-park-and-short-circuit-spec Phase 2: a short-circuit marker only makes sense for a
+  // shipped card. When the owner flips a short-circuited spec back off `shipped`, clear the marker so the
+  // card stops rendering "short-circuited — …" — restoring normal handling (the audit row records the
+  // status transition; the marker's prior value is in spec_status_history via the standard status row).
+  const wasShortCircuited = existing?.flags?.short_circuit === true;
+  if (wasShortCircuited && nextStatus !== "shipped") {
+    await markSpecCardShortCircuit(workspaceId, slug, false);
+  }
 
   if (nextStatus === "shipped") {
     try {

@@ -1,4 +1,4 @@
-# Ada can dismiss a stale park + short-circuit a no-longer-needed spec
+# Ada can dismiss a stale park + short-circuit a no-longer-needed spec 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the director's action surface so I can clear cleanly instead of leaving stale park rows or part-shipped specs sitting forever.
 
@@ -8,7 +8,7 @@
 
 The CEO's instinct was right: don't train me to suppress with a coaching rule when the real answer is an action you can SEE in `director_activity`. A dismiss/short-circuit row in the ledger is supervisable; a coaching rule that suppresses a class of parks is not.
 
-## Phase 1 — `dismiss-park` director action ⏳
+## Phase 1 — `dismiss-park` director action ✅
 
 A new `pending_action` shape the director emits when a parked `agent_jobs` row is genuinely not worth pursuing (the underlying work is being short-circuited, a prereq won't be supplied, the park is stale and not auto-routable).
 
@@ -27,7 +27,7 @@ A new `pending_action` shape the director emits when a parked `agent_jobs` row i
 - I emit `dismiss-park` with no reason → rejected as a schema error.
 - The board-watch post counts the day's dismissed parks alongside the existing rollup (squashed / escorted / escalated).
 
-## Phase 2 — `spec-status` `shortCircuit` flag ⏳
+## Phase 2 — `spec-status` `shortCircuit` flag ✅
 
 Today `spec-status` flips `planned|in_progress|shipped|rejected`. None fit "we changed our mind, this isn't needed anymore": `rejected` reads as "the spec was wrong" and `shipped` implies the phases actually built. Add a `shortCircuit:true` flag carried alongside `status:'shipped'` that means "closed cleanly without all phases shipped — work is no longer needed."
 
@@ -58,3 +58,18 @@ After Phase 1 + 2 land, run the two actions on the live state:
 - The Amazing Creamer parked job drops out of `routeNeedsAttention`'s candidate list and is no longer surfaced to the CEO.
 - [[box-product-seeding]] flips shipped + short-circuited on the roadmap with the reason visible.
 - The `seed-product` skill, [[box-product-seeding]] spec, and product-seeding brain pages stay intact and grep-able — short-circuit only flips status, it does not delete or unindex.
+
+## Verification
+
+End-to-end checklist for the owner once Phase 1 + 2 are live in prod. Phase 3 (the Amazing-Creamer apply) is a runtime conversation the director runs once deployed.
+
+- In a #cto-ada chat, ask Ada to dismiss a stale park she owns. She emits a `pending_actions:[{type:"dismiss-park", jobId, reason}]` and ACKS the dismiss in her reply → expect `agent_jobs.status='dismissed'` + `needs_attention_class='dismissed_by_director'` for that `jobId`, a `dismissed_park` row in `director_activity` carrying her reason + `metadata.job_id` + `metadata.spec_slug` + `metadata.prior_class`, and NO inbox/Slack approval card rendered for the action.
+- Open `/dashboard/agents/platform` → expect the new `dismissed_park` row to appear in the activity feed with a "Re-open" button. Click Re-open → expect `agent_jobs.status='needs_attention'`, `needs_attention_class=null`, the button hidden on the next 30s tick, and a `reopened_park` row landed under the same `metadata.job_id`.
+- In Slack, ask Ada to `dismiss-park` a parked job whose underlying spec is owned by a DIFFERENT function → expect no DB write to `agent_jobs`, no `dismissed_park` row, and an `invalid_dismiss_park_action` row stamped instead carrying the out-of-leash reason.
+- POST a `dismiss-park` payload with no `reason` (via chat) → expect rejection logged as `invalid_dismiss_park_action` reason "reason is required (no silent dismissals)" and no `agent_jobs` write.
+- Wait for the next daily platform watch post in `#directors` (or call `postPlatformWatchUpdate` ad-hoc) → expect the activity line to include `dismissed N stale parks` alongside the existing `squashed/escorted/escalated` rollup on a day she dismissed at least one.
+- In a chat, ask Ada to `spec-status` flip a spec she owns with `{status:'shipped', shortCircuit:true, reason:'no longer needed — CEO 2026-06-24'}` → expect `spec_card_state.status='shipped'`, `spec_card_state.flags.short_circuit=true` + `flags.short_circuit_reason='no longer needed …'`, a `spec_status_history` row stamped `actor=director:platform`, and a `spec_status_flipped` `director_activity` row carrying `metadata.short_circuit=true`. NO fold-build queued in `agent_jobs` for the slug.
+- Reload the `/dashboard/roadmap` board → expect the short-circuited spec to render in the Shipped column with the `short-circuited — <reason>` chip visible directly below the title.
+- Emit `spec-status` with `{shortCircuit:true}` and no `reason` → expect rejection (`invalid_spec_status_action` row carrying "shortCircuit:true requires a reason"). Emit `{shortCircuit:true, status:'rejected'}` → expect rejection ("shortCircuit:true requires status:'shipped'").
+- From the roadmap UI, flip the short-circuited spec's status back to `planned` → expect `flags.short_circuit` cleared (now false/absent), the chip removed on next render, and the spec returns to normal handling (build/escort/groom).
+- Re-emit a `dismiss-park` on the SAME parked `jobId` after a Re-open → expect the dismiss to land normally (the row is `needs_attention` again, owner-leash passes), so the dismiss/re-open cycle is durable.

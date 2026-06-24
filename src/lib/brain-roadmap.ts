@@ -49,6 +49,14 @@ export interface SpecCard {
   // True when the spec body carries a **Repair-signature:** line (authored by the box Repair Agent).
   // The "🔧 Repair" source on the roadmap board's source filter is derived from this — see getRoadmapFilters.
   repairSignature: boolean;
+  /** director-dismiss-park-and-short-circuit-spec Phase 2 — a shipped card was closed CLEANLY without all
+   *  phases shipping ("we changed our mind"). Surfaced from `spec_card_state.flags.short_circuit` so the
+   *  board renders the card distinctly ("shipped + short-circuited — <reason>"), and so the next reader
+   *  doesn't mistake it for a fully-built spec. Reversible: the owner flipping status back to `planned`
+   *  (or a director short-circuit=false action) clears the flag. */
+  shortCircuited?: boolean;
+  /** The reason captured at the moment of short-circuit (from `flags.short_circuit_reason`). */
+  shortCircuitReason?: string;
 }
 
 export interface ProjectTrack {
@@ -380,7 +388,20 @@ function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/
   }
   const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
   for (const p of phases) counts[p.status]++;
-  return { ...spec, status, critical: !!state.flags?.critical || spec.critical, phases, counts };
+  // director-dismiss-park-and-short-circuit-spec Phase 2 — surface short-circuit state from spec_card_state.flags
+  // so the board renders a "shipped + short-circuited" sub-line with the reason.
+  const rawScReason = state.flags?.short_circuit_reason;
+  const shortCircuited = state.flags?.short_circuit === true ? true : spec.shortCircuited;
+  const shortCircuitReason = typeof rawScReason === "string" && rawScReason ? rawScReason : spec.shortCircuitReason;
+  return {
+    ...spec,
+    status,
+    critical: !!state.flags?.critical || spec.critical,
+    phases,
+    counts,
+    shortCircuited,
+    shortCircuitReason,
+  };
 }
 
 /**
