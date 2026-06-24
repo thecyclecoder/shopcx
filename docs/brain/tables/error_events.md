@@ -51,4 +51,4 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 
 ## Related
 
-[[../specs/error-feed-monitoring]] · [[../libraries/control-tower]] · [[../inngest/inngest-failure-capture]] · [[../integrations/vercel-log-drain]] · [[../integrations/supabase-management-logs]] · [[../inngest/supabase-log-poll]] · [[error_feed_supabase_config]] · [[../dashboard/control-tower]] · [[loop_alerts]] · [[loop_heartbeats]] · [[../libraries/notify-ops-alert]]
+[[../specs/error-feed-monitoring]] · [[../libraries/control-tower]] · [[../inngest/inngest-failure-capture]] · [[../integrations/vercel-log-drain]] · [[../integrations/supabase-management-logs]] · [[../inngest/supabase-log-poll]] · [[error_feed_supabase_config]] · [[../dashboard/control-tower]] · [[loop_alerts]] · [[loop_heartbeats]] · [[../libraries/notify-ops-alert]] · [[../libraries/deploy-guardian]] · [[deploy_watches]]

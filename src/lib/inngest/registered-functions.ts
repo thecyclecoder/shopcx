@@ -127,6 +127,7 @@ import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
 import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 import { loopHeartbeatsPrune } from "@/lib/inngest/loop-heartbeats-prune";
 import { claudeStatusPollCron } from "@/lib/inngest/claude-status-poll-cron";
+import { deployGuardianCron } from "@/lib/inngest/deploy-guardian-cron";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
 import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
@@ -134,6 +135,7 @@ import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
 export const registeredInngestFunctions = [
   claudeStatusPollCron,
+  deployGuardianCron,
   ...adToolFunctions,
   syncCustomers,
   syncOrders,
