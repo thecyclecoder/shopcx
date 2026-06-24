@@ -1,13 +1,13 @@
 /**
- * deploy-guardian-cron — Reva's evaluation tick (docs/brain/specs/deploy-health-rollback-guardian.md,
- * Phase 1).
+ * deploy-guardian-cron — Reva's evaluate + act tick (docs/brain/specs/deploy-health-rollback-guardian.md).
  *
  * Every minute: evaluate every `deploy_watches` row whose canary window has elapsed. Each watch was
  * opened by [[../deploy-guardian]] `openDeployWatch` when the auto-merge gate squash-merged a
  * claude/<slug> build branch. The evaluation samples NEW error_events + NEW open loop_alerts + the live
  * Control-Tower snapshot — attributing only signals that FIRST appear AFTER the deploy timestamp — and
- * stamps a verdict: healthy | regressed | unsure (+ a director_activity row). Phase 1 watches + stamps;
- * Phase 2 acts (auto-rollback) on `regressed`.
+ * stamps a verdict: healthy | regressed | unsure (+ a director_activity row), then ACTS on it (Phase 2):
+ * `regressed` → restore known-good (auto-revert the offending merge) + escalate to the CEO; `unsure` →
+ * escalate, never auto-act; a rollback-then-reland loop trips the loop-guard (STOP + escalate).
  *
  * Runs in the Vercel/Inngest runtime (where the error feed lives), NOT the box — no token burn, reuses
  * Tao's signals. See [[../deploy-guardian]] · [[../../tables/deploy_watches]].
