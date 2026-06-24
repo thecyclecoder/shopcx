@@ -4454,6 +4454,20 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         body: typeof a.body === "string" ? a.body : "",
         status: "pending",
       });
+    } else if (a.type === "spec-edit") {
+      // An EDIT to an existing spec (e.g. add **Blocked-by:** lines to Pia's milestone specs). Carries the
+      // full revised markdown; on approval the worker commits it to the existing file (never creates).
+      const slug = typeof a.slug === "string" ? a.slug.replace(/[^a-z0-9-]/gi, "") : "";
+      const content = typeof a.content === "string" ? a.content : "";
+      if (!slug || !content) continue;
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "spec-edit",
+        summary: String(a.summary || `Edit spec: ${slug}`),
+        slug,
+        content,
+        status: "pending",
+      });
     }
   }
   return out;
@@ -4469,6 +4483,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when the fix needs CODE (an automation/infra capability). The worker commits the spec on approval.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"goal","summary":"<the objective in one line>","slug":"<kebab-slug>","title":"<Title>","outcome":"<one-line outcome>","successMetric":"<how we'll measure it>","body":"<markdown body: a 'Why now' paragraph + a 'Milestone seeds for Pia' bullet list>"}]}`,
   `  — when you spot a STRATEGIC objective worth a MULTI-SPEC initiative (not one fix). You PROPOSE it for YOUR OWN function; on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate — directors propose, the CEO greenlights). Once greenlit, Pia decomposes it into a milestone→spec tree. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec-edit","summary":"<what you're changing + why>","slug":"<existing-spec-slug>","content":"<the FULL revised docs/brain/specs/{slug}.md markdown>"}]}`,
+  `  — when the CEO asks you to MODIFY an EXISTING spec (e.g. "add the right **Blocked-by:** lines to Pia's milestone specs"). READ the spec, edit it, emit the WHOLE revised markdown (not a diff). The worker commits it on approval (the spec must already exist — spec-edit never creates a new one). Emit ONE card per spec to revise several in one turn. This is a real edit, not just a recommendation.`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -4478,6 +4494,7 @@ function directorCoachFraming(dirFn: string): string {
     `To explain "why haven't you built/done X": investigate read-only — read the spec (its phases ⏳/✅, its **Blocked-by:** line, its **Owner:**, whether it's goal-linked), check the agent_jobs queue for its build state, and your director_activity. A throwaway scripts/_*.ts that bootstraps createAdminClient can query the DB read-only (SELECT-only; never commit it). Then explain plainly + honestly.`,
     `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
     `You MAY PROPOSE a new GOAL (for YOUR OWN function only). If the conversation surfaces a strategic, multi-spec objective (an initiative, not a single fix), emit a 'goal' pending_action with structured fields (slug, title, outcome, successMetric, body). You never START a goal yourself — on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate); once greenlit, Pia decomposes it. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
+    `You can EDIT an existing spec, not just author a new one. If the CEO asks you to MODIFY specs (e.g. "update the milestone specs Pia made to add the right Blocked-by lines"), READ each spec and emit a 'spec-edit' card per spec carrying the FULL revised markdown — a real edit the worker commits on approval, NOT just a recommendation to make a new spec.`,
     DIRECTOR_COACH_OUTPUT,
   ].join("\n\n");
 }
@@ -4584,6 +4601,20 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "done";
             a.result = `proposed goal ${a.slug} → committed + surfaced for your greenlight`;
             notes.push(`Goal ${a.slug} → proposed (awaiting your greenlight)`);
+          } else if (a.type === "spec-edit" && a.slug && a.content) {
+            // Modify an EXISTING spec (never create — the worktree is on origin/main, so check it's there).
+            const slug = String(a.slug);
+            if (!existsSync(join(wt, `docs/brain/specs/${slug}.md`))) {
+              a.status = "failed";
+              a.result = `specs/${slug}.md doesn't exist — spec-edit only modifies existing specs`;
+              notes.push(`${a.summary} → no such spec`);
+              continue;
+            }
+            const put = await putFileMain(`docs/brain/specs/${slug}.md`, String(a.content), `spec: update ${slug} (director edit)`);
+            if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
+            a.status = "done";
+            a.result = `updated specs/${slug}.md`;
+            notes.push(`Spec ${slug} → updated`);
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
@@ -4610,7 +4641,7 @@ async function runDirectorCoachJob(job: Job) {
     const intentDirective =
       intent === "coach"
         ? `INTENT: COACH. The CEO is coaching you — distill their directive (from this whole conversation) into ONE durable coaching rule and emit a 'coaching' pending_action for their confirmation. Acknowledge briefly in reply, but the rule is what matters. Stay within your leash.`
-        : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight.`;
+        : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
     const prompt = isResume
       ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
