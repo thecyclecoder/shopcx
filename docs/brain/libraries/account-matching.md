@@ -43,6 +43,10 @@ _No internal callers found via static scan._
   match branch, add a matching index and keep it a separate query** — never fold it back into one
   `.or()`.
 
+## Related
+
+[[../tables/customers]] (the indexes that back each match branch) · [[../lifecycles/customer-link-confirmation]] (where matches become link proposals) · [[../journeys/account-linking]] · [[../dashboard/control-tower]] (signature `supabase-logs:b5db594131381078` that surfaced the Seq Scan)
+
 ---
 
 [[../README]] · [[../../CLAUDE]]
