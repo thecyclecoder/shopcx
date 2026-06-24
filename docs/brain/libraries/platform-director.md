@@ -8,7 +8,7 @@ The **Platform/DevOps Director agent** — the **first live director** ([[../spe
 
 North star ([[../operational-rules]] § supervisable autonomy): **CEO → Director → tool**. Platform's tools already work, but nothing supervised them *as a director* — every platform approval the CEO rubber-stamps landed in the CEO inbox. This module is the supervisor: it reuses the [[../specs/approval-routing-engine|approval-routing]] plumbing rather than adding a parallel approval path, and records every call to the supervisable-autonomy ledger so the CEO can audit **what** it decided and **why** — in history, never in the queue.
 
-**Dormant until activation.** Until Platform's [[../tables/function_autonomy]] flag is flipped `live + autonomous` (owner-confirmed, [[../specs/platform-director-agent]] Phase 4), [[approval-router]] `resolveApprover` routes nothing here, so the enqueuer is a no-op — the machinery is built but inert.
+**Activated 2026-06-23 20:35** (by `ceo`). Platform's [[../tables/function_autonomy]] row is `live + autonomous`, so [[approval-router]] `resolveApprover` now routes platform-owned approvals here and **every surface below is live** — the runtime guards (`platformIsAutoApprover` etc.) currently **pass**. The per-surface "no-op unless live+autonomous" notes below describe the **conditional guard** (what each surface does when the flag is *off*): the code still no-ops if the flag is ever toggled back off ([[../dashboard/agents|Agents hub]]) — it is not a statement that Platform is dormant today.
 
 ## The leash (what it MAY auto-approve)
 
@@ -52,7 +52,7 @@ The director's top layer is **reporting up in human terms** — and it **supervi
 - **"Answers why?"** — no new code: the [[../specs/directors-board-gamified]] Phase-2 board→dev-ask wiring ([[director-board]] `routeBoardReply`) already defaults the answer brain to Platform, so a "why?" reply under Ada's post routes to a `dev-ask` box turn that posts the answer back in-thread.
 - **EOD-recap slice** — no new code: Platform is a director, so [[director-recap]] `generateDirectorRecap` already rolls its day's activity into the standup (`goalsAdvanced` ← `escorted_goal`; `bugsFixed`/`approvalsHandled` ← the director's [[../tables/approval_decisions]]) + the CEO roll-up.
 
-**Activation (owner-confirmed).** `scripts/apply-platform-live-autonomous.ts` upserts the [[../tables/function_autonomy]] `platform` row to `live + autonomous` — the Phase-4 switch that takes every dormant surface above live (the approval router then routes platform-owned approvals to the director instead of the CEO). Idempotent + reversible (toggle off from the [[../dashboard/agents|Agents hub]]).
+**Activation (owner-confirmed) — applied 2026-06-23 20:35 (by `ceo`).** `scripts/apply-platform-live-autonomous.ts` upserted the [[../tables/function_autonomy]] `platform` row to `live + autonomous` — the Phase-4 switch that took every surface above live (the approval router now routes platform-owned approvals to the director instead of the CEO). Idempotent + reversible (toggle off from the [[../dashboard/agents|Agents hub]]), which would re-arm the conditional no-op guards.
 
 ## Board grooming (Phase 5 — the director MOVES the project board, [[../specs/board-grooming]])
 
