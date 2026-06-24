@@ -73,6 +73,7 @@ import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/m
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { getPersona } from "@/lib/agents/personas";
 import {
+  composeRegressionWatchLine,
   composeScorecardWatchLine,
   type Cadence as ScorecardCadence,
   type ScorecardSnapshotLite,
@@ -2066,12 +2067,21 @@ function platformNeedsAttentionLine(a: PlatformWatchActivity): string | null {
 }
 
 /** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
-export function composePlatformWatchBody(health: PlatformHealth, activity: PlatformWatchActivity, scorecardLine?: string | null): string {
+export function composePlatformWatchBody(
+  health: PlatformHealth,
+  activity: PlatformWatchActivity,
+  scorecardLine?: string | null,
+  regressionLine?: string | null,
+): string {
   const persona = getPersona(PLATFORM);
   const repairLine = platformRepairReviewLine(activity);
   const parkedLine = platformNeedsAttentionLine(activity);
   const scorecard = scorecardLine ? ` ${scorecardLine}.` : "";
-  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}${scorecard}`;
+  // regression-backlog-reconciliation-scorecard Phase 1 — the D/F/R/E + coverage line, dedicated so the
+  // regression flow is visible at a glance instead of buried in the Scorecard headline. Reads the snapshot
+  // store via composeRegressionWatchLine ("read from the scorecard, never the raw tables").
+  const regressions = regressionLine ? ` ${regressionLine}.` : "";
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}${scorecard}${regressions}`;
 }
 
 /**
@@ -2089,7 +2099,7 @@ async function loadLatestScorecardSnapshots(
   try {
     const { data } = await admin
       .from("platform_scorecard_snapshots")
-      .select("metric_key, cadence, snapshot_date, value, delta_pct, unit")
+      .select("metric_key, cadence, snapshot_date, value, delta_pct, unit, detail")
       .eq("workspace_id", workspaceId)
       .order("snapshot_date", { ascending: false })
       .limit(2000);
@@ -2100,6 +2110,7 @@ async function loadLatestScorecardSnapshots(
       value: number | string;
       delta_pct: number | string | null;
       unit: string;
+      detail: Record<string, unknown> | null;
     }>;
     const seen = new Set<string>();
     for (const r of rows) {
@@ -2116,6 +2127,7 @@ async function loadLatestScorecardSnapshots(
         value: Number.isFinite(value) ? value : 0,
         delta_pct: deltaPct != null && Number.isFinite(deltaPct) ? deltaPct : null,
         unit: r.unit,
+        detail: r.detail ?? undefined,
       });
     }
   } catch {
@@ -2215,14 +2227,24 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
   // fabricated numbers), same invariant the surface page enforces.
   const snapshots = await loadLatestScorecardSnapshots(admin, workspaceId);
   const scorecardLine = composeScorecardWatchLine(snapshots);
+  // regression-backlog-reconciliation-scorecard Phase 1 — the dedicated regression D/F/R/E + coverage line
+  // (null when no daily activity AND no coverage value yet — keeps a quiet day tidy).
+  const regressionLine = composeRegressionWatchLine(snapshots);
 
   await postDirectorMessage({
     workspaceId,
     author: "director",
     authorFunction: PLATFORM,
-    body: composePlatformWatchBody(health, activity, scorecardLine),
+    body: composePlatformWatchBody(health, activity, scorecardLine, regressionLine),
     kind: "update",
-    metadata: { source: "platform-watch", watch_date: date, health, activity, scorecard_line: scorecardLine ?? null },
+    metadata: {
+      source: "platform-watch",
+      watch_date: date,
+      health,
+      activity,
+      scorecard_line: scorecardLine ?? null,
+      regression_line: regressionLine ?? null,
+    },
   });
   return { posted: true };
 }
