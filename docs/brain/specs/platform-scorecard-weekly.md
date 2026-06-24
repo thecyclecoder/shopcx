@@ -1,5 +1,7 @@
 # Scorecard weekly throughput + quality rollup ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/platform-department-scorecard]] — (b) Weekly throughput + quality
 **Blocked-by:** [[platform-scorecard-engine]]
 
