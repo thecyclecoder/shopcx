@@ -1253,7 +1253,7 @@ export interface PlatformHealth {
   redLabels: string[];
 }
 
-/** What the director did today — the three headline counts the board update reads back. */
+/** What the director did today — the headline counts the board update reads back. */
 export interface PlatformWatchActivity {
   /** auto-approved fixes today (approved_approval rows — "squashed 500s"). */
   squashed: number;
@@ -1261,6 +1261,12 @@ export interface PlatformWatchActivity {
   escorting: number;
   /** calls escalated to the CEO today (escalated rows). */
   escalated: number;
+  /** Rafa's no-fix calls reviewed today (dismissed + kept + escalated-from-review) — Phase 2 rollup. */
+  reviewedRepairs: number;
+  /** of those reviews, how many Ada cleared (dismissed_repair rows). */
+  dismissedRepairs: number;
+  /** of those reviews, how many she escalated back to the CEO (escalated rows, repair_dismissal_suspect). */
+  escalatedRepairs: number;
 }
 
 /** The health half of the watch line — "all N platform loops green" / "K red (…)" / "X/N green, M degraded". */
@@ -1285,10 +1291,21 @@ function platformActivityLine(a: PlatformWatchActivity): string {
   return parts.length ? parts.join(" · ") : "nothing needed a decision";
 }
 
+/**
+ * The supervision-of-the-supervisor half (Phase 2) — "Reviewed N of Rafa's calls — dismissed K, escalated J
+ * back to you." Only rendered on a day she actually reviewed at least one of Rafa's no-fix items.
+ */
+function platformRepairReviewLine(a: PlatformWatchActivity): string | null {
+  if (!a.reviewedRepairs) return null;
+  const calls = `${a.reviewedRepairs} of Rafa's call${a.reviewedRepairs === 1 ? "" : "s"}`;
+  return `Reviewed ${calls} — dismissed ${a.dismissedRepairs}, escalated ${a.escalatedRepairs} back to you.`;
+}
+
 /** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
 export function composePlatformWatchBody(health: PlatformHealth, activity: PlatformWatchActivity): string {
   const persona = getPersona(PLATFORM);
-  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.`;
+  const repairLine = platformRepairReviewLine(activity);
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}`;
 }
 
 /**
@@ -1334,20 +1351,31 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
   const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
   const { data: activityRows } = await admin
     .from("director_activity")
-    .select("action_kind")
+    .select("action_kind, metadata")
     .eq("workspace_id", workspaceId)
     .eq("director_function", PLATFORM)
     .gte("created_at", dayStart)
     .lt("created_at", dayEnd);
-  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0 };
-  for (const r of (activityRows ?? []) as { action_kind: string }[]) {
+  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0 };
+  for (const r of (activityRows ?? []) as { action_kind: string; metadata: Record<string, unknown> | null }[]) {
+    const repairEscalation = r.action_kind === "escalated" && r.metadata?.["escalation_kind"] === "repair_dismissal_suspect";
     if (r.action_kind === "approved_approval") activity.squashed++;
     else if (r.action_kind === "escorted_goal") activity.escorting++;
     else if (r.action_kind === "escalated") activity.escalated++;
+    // Phase 2 rollup — each review of one of Rafa's no-fix calls (a dismiss, a keep, or an escalate-back).
+    if (r.action_kind === "dismissed_repair") {
+      activity.dismissedRepairs++;
+      activity.reviewedRepairs++;
+    } else if (r.action_kind === "kept_repair") {
+      activity.reviewedRepairs++;
+    } else if (repairEscalation) {
+      activity.escalatedRepairs++;
+      activity.reviewedRepairs++;
+    }
   }
 
   // Don't spam a fully-quiet, all-green day — post only when there's health to flag or work to report.
-  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0;
+  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0 || activity.reviewedRepairs > 0;
   if (!hasActivity && health.color === "green") return { posted: false, reason: "quiet" };
 
   await postDirectorMessage({
@@ -1929,7 +1957,7 @@ export async function applyDirectorDismissal(
     actionKind: "dismissed_repair",
     specSlug: null,
     reason: reasoning,
-    metadata: { dismiss_key: dismissKey(candidate.signature), repair_job_id: job.id, signature: candidate.signature, verdict: "dismiss", autonomous: true },
+    metadata: { dismiss_key: dismissKey(candidate.signature), repair_job_id: job.id, signature: candidate.signature, title: candidate.title, verdict: "dismiss", autonomous: true },
   });
   return { ok: true };
 }

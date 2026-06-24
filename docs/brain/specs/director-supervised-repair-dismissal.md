@@ -1,7 +1,8 @@
-# Ada supervises + dismisses Rafa's no-fix Control Tower items ⏳
+# Ada supervises + dismisses Rafa's no-fix Control Tower items ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the director's supervision of [[repair-agent]] under [[../goals/devops-director]]
 **Found in use 2026-06-24:** the CEO has to manually Dismiss Control Tower warnings whenever Rafa (the [[../libraries/repair-agent|Repair Agent]]) declines to propose a fix. Two `repair` jobs are sitting in `needs_attention` awaiting a manual dismiss right now (signatures `vercel:bb28f61b887be822`, `vercel:aef5e5da7ae32431`). The CEO wants the Platform Director to clear these — but to **double-check Rafa's reasoning so a real bug mislabeled 'not a problem' is never silently cleared.**
+**Deferred (split out):** the dashboard surfacing + CEO Re-open override + daily rollup line live in [[director-supervised-repair-dismissal-surface-dismissal-reopen]] — future visibility/undo polish, not needed for this spec's promise.
 
 ## North star — this is the supervision, not a janitor
 
@@ -25,13 +26,6 @@ Rafa classifies each problem with a `RepairVerdict`. `transient` already auto-re
 - On the same pass, a genuine needs-human item Ada can neither confirm benign nor call a real bug → expect the job stays `needs_attention` (untouched, still on the Control Tower for the human) and a `kept_repair` `director_activity` row records the review.
 - On a re-run of the standing pass with no new repair jobs → expect no double-review and no new `claude -p` for an already-reviewed item (the `repair_job_id` ledger dedup); a re-fired error (a NEW repair job, same signature) IS reviewed afresh.
 - With Platform NOT yet live+autonomous → expect `findRepairDismissalCandidates` returns `[]` and the lane is a no-op (dormant). The lane NEVER dismisses a `real-bug` / `needs_approval` fix-proposed item (`applyDirectorDismissal` re-asserts `status === 'needs_attention'` before clearing).
-
-## Phase 2 — surface the dismissal + a CEO re-open override ⏳
-- On the [[../dashboard/control-tower]] tile, render a dismissed item as `🛠️ Dismissed by Ada — <reasoning>` (instead of it silently vanishing) with a one-tap **Re-open** that restores the warning and re-enqueues Rafa. This is YOUR supervision over Ada — full visibility into what she cleared and an instant undo.
-- A daily rollup line in the [[../libraries/platform-director]] board watch: 'reviewed N of Rafa's calls — dismissed K, escalated J back to you.'
-
-### Verification — Phase 2
-- A Director-dismissed item shows `Dismissed by Ada` + reasoning on the Control Tower; tapping Re-open restores the open warning and a fresh `repair` job. The board-watch post counts the day's dismissals + escalations.
 
 ## Open decision (for the CEO)
 When Ada's review finds Rafa actually MISSED a real bug (not just 'unsure'), Phase 1 escalates it to you. Alternatively she could author a fix spec herself (her `error_fix` mandate is already greenlit) and let the fix-escort build it — closing the loop without a CEO round-trip. Default here is escalate-only (conservative); say the word and I'll add 'author the fix' as the action when her diagnosis is high-confidence.
