@@ -1884,17 +1884,10 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     // #1 — self-watch the director's OWN operation: self-heal a gate deadlock (queue the gate spec if nothing's
     // building it, so the gate can lift) + surface long-stuck builds. Catches the 2026-06-24 stall autonomously.
     const watch = await dd.selfWatchOperations(db, job.workspace_id, "platform");
-    notes.push(...watch.notes);
-    if (watch.healed.length || watch.stuck.length) {
-      try {
-        const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-        const parts = [
-          watch.healed.length ? `🔧 self-healed a gate deadlock — queued ${watch.healed.join(", ")}` : "",
-          watch.stuck.length ? `⏳ ${watch.stuck.length} build(s) stuck >90m: ${watch.stuck.slice(0, 6).join(", ")}` : "",
-        ].filter(Boolean);
-        if (parts.length) await postDirectorMessage({ workspaceId: job.workspace_id, author: "platform", authorFunction: "platform", body: parts.join("\n"), kind: "update", metadata: { self_watch: true } });
-      } catch { /* board post best-effort */ }
-    }
+    // Self-heal / stuck-build findings flow into `notes` → the single human-readable standing-pass recap posted
+    // at the end of the pass (no separate per-finding board post, so the board isn't double-posted).
+    if (watch.healed.length) notes.push(`🔧 self-healed a gate deadlock — queued ${watch.healed.join(", ")}`);
+    if (watch.stuck.length) notes.push(`⏳ ${watch.stuck.length} build(s) stuck >90m: ${watch.stuck.slice(0, 6).join(", ")}`);
   } catch (e) {
     console.error(`${tag} directive surface / self-watch failed (continuing):`, e instanceof Error ? e.message : e);
   }
@@ -1983,6 +1976,23 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     notes.push(`watch failed: ${e instanceof Error ? e.message : String(e)}`);
     console.error(`${tag} standing watch failed (continuing):`, e instanceof Error ? e.message : e);
   }
+  // Post a human-readable recap of THIS standing pass to #directors — what Ada set up — so the board reflects
+  // every working pass (not just the daily watch). Only when she actually DID something: a quiet pass (nothing
+  // to advance / all healthy) is skipped so the board isn't flooded every ~15m; the daily watch + activity feed
+  // cover the all-quiet heartbeat.
+  try {
+    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open/i;
+    const meaningful = notes.filter((n) => n && !QUIET.test(n));
+    if (meaningful.length) {
+      const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));
+      const body = [`🛠️ Standing pass — here's what I just set up:`, ...(directiveLine ? [directiveLine] : []), ...meaningful.map((n) => `• ${n}`)].join("\n").slice(0, 3500);
+      const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "platform", authorFunction: "platform", body, kind: "update", metadata: { standing_pass: true } });
+    }
+  } catch (e) {
+    console.error(`${tag} standing-pass board recap failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+
   await update(job.id, { status: "completed", log_tail: `standing pass — ${notes.join(" · ")}`.slice(-2000) });
   console.log(`${tag} standing pass — ${notes.join(" · ")}`);
 }
