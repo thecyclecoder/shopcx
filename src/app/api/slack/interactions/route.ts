@@ -27,7 +27,8 @@ import { getLatestJobsBySlug, getPendingFolds, type AgentJob } from "@/lib/agent
 import { ACTIONS, buildAnswerModal, buildNeedsApprovalMessage } from "@/lib/slack-roadmap";
 import { HOME, buildHomeView, publishHome, noticeModal, buildSpecModal, buildSpecConfirmModal } from "@/lib/slack-home";
 import { setActionDecision } from "@/lib/agents/director-coach-threads";
-import { ADA_ACTIONS, buildAdaResolvedCard } from "@/lib/slack-ada";
+import { ADA_ACTIONS, INBOX_ACTIONS, buildAdaResolvedCard, buildInboxApprovalCard, type InboxCardAction } from "@/lib/slack-ada";
+import type { PendingAction } from "@/lib/agent-jobs";
 
 export const maxDuration = 60;
 
@@ -136,6 +137,13 @@ async function handleBlockActions(p: BlockActionsPayload, workspaceId: string, t
     return handleAdaDecision(action.action_id, value, channel, messageTs, workspaceId, userId, token, ephem);
   }
 
+  // ada-slack-routed-approvals: Approve / Reject on one of Ada's routed CEO-inbox cards (Phase 2).
+  // Dispatches plain approve/decline through `approveRoadmapAction` — the SAME function the web inbox
+  // calls, so the leash, bundle ALL-OR-NOTHING rule, and every safety invariant are inherited unchanged.
+  if (action.action_id === INBOX_ACTIONS.approve || action.action_id === INBOX_ACTIONS.reject) {
+    return handleInboxDecision(action.action_id, value, channel, messageTs, workspaceId, userId, token, ephem);
+  }
+
   switch (action.action_id) {
     case ACTIONS.answerOpen: {
       const jobId = String(value.jobId || "");
@@ -239,6 +247,71 @@ async function handleAdaDecision(
       instructions: JSON.stringify({ thread_id: threadId, mode: "approve_action" }),
       created_by: userId,
     });
+  }
+  return ack();
+}
+
+// ── ada-slack-routed-approvals: resolve a routed CEO-inbox card (Phase 2) ──
+
+/**
+ * Approve / Reject a routed CEO-inbox card posted in #cto-ada. Looks up the
+ * `dashboard_notifications` row by its id (carried in the button value), reads `metadata.agent_job_id`
+ * for the underlying `agent_jobs` row, and dispatches through `approveRoadmapAction` — the SAME
+ * function the web inbox's `/api/roadmap/approve` route calls, so the leash, bundle ALL-OR-NOTHING
+ * rule, escalation, and ledger are inherited (no new mutation path). The card is then `chat.update`d
+ * from the updated job state so a multi-action bundle keeps still-pending rows tappable while the
+ * just-tapped row flips to its resolved label. The one-line outcome confirmation in the thread is
+ * posted later by `reconcileApprovalInbox`'s dismiss pass when the job leaves `needs_approval`.
+ */
+async function handleInboxDecision(
+  actionId: string,
+  value: Record<string, unknown>,
+  channel: string | undefined,
+  messageTs: string | undefined,
+  workspaceId: string,
+  userId: string,
+  token: string,
+  ephem: (msg: string) => Promise<NextResponse>,
+) {
+  const decision = actionId === INBOX_ACTIONS.approve ? "approve" : "decline";
+  const notificationId = String(value.notificationId || "");
+  const actId = String(value.actionId || "");
+  if (!notificationId || !actId) return ack();
+
+  const admin = createAdminClient();
+  const { data: notif } = await admin
+    .from("dashboard_notifications")
+    .select("id, workspace_id, title, body, metadata")
+    .eq("id", notificationId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (!notif) return ephem("That approval is no longer available.");
+  const meta = (notif.metadata || {}) as Record<string, unknown>;
+  const jobId = typeof meta.agent_job_id === "string" ? meta.agent_job_id : "";
+  if (!jobId) return ephem("That approval is missing job context.");
+
+  const result = await approveRoadmapAction(workspaceId, userId, { jobId, actionId: actId, decision });
+  if (!result.ok) return ephem(`Couldn't record decision: ${result.error}`);
+
+  // Rebuild the card from the updated job state so a multi-action bundle keeps tappable rows for the
+  // remaining pending actions while the just-tapped row flips to its resolved label. `chat.update`
+  // keys on the stored ts — Phase 1's idempotent stash (`metadata.slack_message_ts`) makes this match.
+  if (channel && messageTs) {
+    const job = result.job;
+    const cardActions: InboxCardAction[] = (job.pending_actions || [])
+      .filter((a): a is PendingAction => !!a.id)
+      .map((a) => ({
+        id: a.id,
+        summary: a.summary ?? "",
+        status: a.status === "approved" ? "approved" : a.status === "declined" ? "declined" : "pending",
+      }));
+    const rebuilt = buildInboxApprovalCard({
+      notificationId,
+      title: notif.title ?? "",
+      body: notif.body ?? "",
+      actions: cardActions,
+    });
+    await updateMessage(token, channel, messageTs, rebuilt.blocks, rebuilt.text);
   }
   return ack();
 }

@@ -15,7 +15,7 @@ Extend the `#cto-ada` surface ([[ada-slack-chat]]) so it also mirrors the **rout
 - **Multi-choice → no buttons.** When `inlineApproveActions(job)` returns `null` (any action is multi-choice, the Phase 3 case), skip the Block Kit card entirely and emit a Phase 3 chat-mode invitation instead.
 
 ## Phase 2 — Block Kit Approve / Reject wired to the existing path
-- ⏳ planned
+- ✅ shipped
 - `src/app/api/slack/interactions/route.ts`: add `block_actions` handlers for `inbox_approve` / `inbox_reject`.
 - **Re-gate:** the tapping Slack user must map to an `owner` `workspace_member` (reuse `resolveSlackActor` / `isOwner`). Channel membership is not authorization. Same gate the web inbox enforces.
 - **Decision path is unchanged:** Approve → `approveRoadmapAction(workspaceId, jobId, actionId, 'approve')`. Reject → `'decline'`. **No new mutation code.** Same call the `/api/agents/inbox/decide` route makes — the leash, the bundle ALL-OR-NOTHING rule, every safety invariant is inherited unchanged.
