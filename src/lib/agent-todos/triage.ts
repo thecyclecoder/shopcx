@@ -375,7 +375,7 @@ async function gh(method: string, path: string, body?: unknown) {
 /** A ticket-derived analyzer/code fix → a spec committed to main (owner=cs), surfaced on Roadmap. */
 function triageSpecMarkdown(spec: TriageSpec, ticketId: string): string {
   return [
-    `# ${spec.title} ⏳`,
+    `# ${spec.title}`,
     ``,
     `**Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** \`${ticketId}\``,
     ``,
@@ -386,7 +386,7 @@ function triageSpecMarkdown(spec: TriageSpec, ticketId: string): string {
     spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
     ``,
     `## Phases`,
-    `- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on \`npx tsc --noEmit\`.`,
+    `- **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on \`npx tsc --noEmit\`.`,
     ``,
     `## Verification`,
     `- Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).`,
