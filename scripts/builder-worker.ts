@@ -231,7 +231,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -277,13 +277,17 @@ interface PendingAction {
   preview_attempts?: { url: string; notes?: string; at: string }[];
   // The owner's free-text notes set by a Reject-with-notes action; consumed (then cleared) on regen.
   reject_notes?: string;
+  // set when type==='apply_model_tier' (box-agent-model-tiers P3): the agent kind whose model tier this
+  // proposal changes. The worker applies the tier (agent_model_tiers upsert) on approval; `payload` is the
+  // ModelTierProposalPayload (proposed tier + provenance + the supervisor it routed to).
+  target_kind?: string;
 }
 interface Job {
   id: string;
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal" | "security-review";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal" | "security-review" | "proposed-model-tier";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -1721,6 +1725,59 @@ async function runCoverageRegisterJob(job: Job) {
   // No actionable owner decision — shouldn't normally be claimed. Park it.
   await update(job.id, { status: "needs_approval", log_tail: `awaiting owner decision for ${loopId}`.slice(-2000) });
   console.log(`${tag} no owner decision yet — parked as needs_approval`);
+}
+
+// box-agent-model-tiers (P3): a governed model-tier change. proposeModelTierChange
+// (src/lib/model-tier-proposals.ts) either auto-applies an in-rail change (a live+autonomous director,
+// logged autonomous) or surfaces a `proposed-model-tier` agent_jobs row parked needs_approval with ONE
+// apply_model_tier action, routed to the target agent's supervisor (worker→director, director→CEO). On
+// the supervisor's one-tap Approve the inbox flips the action approved + the job to queued_resume and
+// this runner lands here: APPLY the tier (agent_model_tiers upsert) — instant, reversible, no deploy.
+// On decline the registry is untouched. The approve path already logged the decision to approval_decisions.
+async function runProposedModelTierJob(job: Job) {
+  const tag = `[model-tier:${job.id.slice(0, 8)}]`;
+  const action = (job.pending_actions || []).find((a) => a.type === "apply_model_tier");
+  if (!action) {
+    await update(job.id, { status: "needs_attention", error: "proposed-model-tier job has no apply_model_tier action" });
+    console.warn(`${tag} no apply_model_tier action — parked needs_attention`);
+    return;
+  }
+  if (action.status === "declined") {
+    action.result = "declined by supervisor — registry unchanged";
+    await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `${tag} declined — no change`.slice(-2000) });
+    console.log(`${tag} declined — registry unchanged`);
+    return;
+  }
+  if (action.status !== "approved") {
+    // Not yet decided — shouldn't be claimed. Re-park so the inbox keeps surfacing it.
+    await update(job.id, { status: "needs_approval", log_tail: `${tag} awaiting supervisor decision`.slice(-2000) });
+    console.log(`${tag} no decision yet — parked needs_approval`);
+    return;
+  }
+  const targetKind = action.target_kind;
+  const payload = action.payload as import("../src/lib/model-tier-proposals").ModelTierProposalPayload | undefined;
+  if (!targetKind || !payload) {
+    await update(job.id, { status: "needs_attention", error: "apply_model_tier action missing target_kind/payload", pending_actions: job.pending_actions });
+    console.warn(`${tag} missing target_kind/payload`);
+    return;
+  }
+  const { applyModelTierChange } = await import("../src/lib/agent-model-tiers");
+  const r = await applyModelTierChange(db, {
+    workspaceId: job.workspace_id,
+    kind: targetKind,
+    tier: payload.proposedTier,
+    proposedBy: payload.proposerFunction,
+    approvedBy: payload.routedTo || "ceo",
+  });
+  action.status = r.ok ? "done" : "failed";
+  action.result = r.ok ? `set ${targetKind} → ${payload.proposedTier ?? "Max default"}` : `apply failed: ${r.error}`;
+  await update(job.id, {
+    status: r.ok ? "completed" : "needs_attention",
+    error: r.ok ? null : r.error,
+    pending_actions: job.pending_actions,
+    log_tail: `${tag} ${action.result}`.slice(-2000),
+  });
+  console.log(`${tag} ${action.result}`);
 }
 
 // director-proposed-goals (Phase 1): a director-proposed goal artifact + its CEO greenlight. A director
@@ -5102,6 +5159,23 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         holdBuilds,
         status: "pending",
       });
+    } else if (a.type === "model_tier") {
+      // A governed MODEL-TIER change for one agent kind (box-agent-model-tiers P3). On approval the worker
+      // routes it to the target agent's supervisor via proposeModelTierChange (worker→director, director→CEO).
+      const targetKind = typeof a.targetKind === "string" ? a.targetKind.replace(/[^a-z0-9_-]/gi, "") : "";
+      const tierRaw = typeof a.tier === "string" ? a.tier.toLowerCase() : "";
+      const tier = tierRaw === "haiku" || tierRaw === "sonnet" || tierRaw === "opus" ? tierRaw : tierRaw === "null" || tierRaw === "" ? null : "invalid";
+      if (!targetKind || tier === "invalid") continue; // need a target kind + a valid tier (or null to clear)
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "model_tier",
+        summary: String(a.summary || `Model: ${targetKind} → ${tier ?? "Max default"}`),
+        targetKind,
+        tier,
+        rollup: typeof a.rollup === "number" ? a.rollup : null,
+        evidence: typeof a.evidence === "string" ? a.evidence : "",
+        status: "pending",
+      });
     }
   }
   return out;
@@ -5121,6 +5195,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when the CEO asks you to MODIFY an EXISTING spec (e.g. "add the right **Blocked-by:** lines to Pia's milestone specs"). READ the spec, edit it, emit the WHOLE revised markdown (not a diff). The worker commits it on approval (the spec must already exist — spec-edit never creates a new one). Emit ONE card per spec to revise several in one turn. This is a real edit, not just a recommendation.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"directive","summary":"<the plan in one line>","steps":["<ordered step>","<step>"],"gateBuildsUntil":"<spec-slug or omit>","criticalSpecs":["<slug>"],"holdBuilds":["<slug to cancel>"]}]}`,
   `  — for the INTENT: PLAN case (the CEO hands you a plan to execute). On approval it becomes your ONE active directive (runs FIRST, before routine) AND the worker acts immediately: it QUEUES the gate spec + every \`criticalSpecs\` build right now (no waiting for the init cadence), marks them \`**Priority:** critical\`, and CANCELS any parked \`holdBuilds\` (out-of-order builds to clear). \`gateBuildsUntil\` pauses ROUTINE builds until that spec ships (priority/critical builds still run; auto-lifts on ship). A directive re-prioritizes, never authorizes destructive work or a new goal.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"model_tier","summary":"<agent + tier change in one line>","targetKind":"<agent kind, e.g. fold>","tier":"<haiku|sonnet|opus, or null to clear to the Max default>","rollup":<the cited grade rollup 0-10, or omit>,"evidence":"<why — the grade slip / speed + 5-hr-window pressure>"}]}`,
+  `  — when an agent's MODEL should change (box-agent-model-tiers): its grade rollup slipped on a small model, or a mechanical high-volume agent is burning the 5-hour usage window. You PROPOSE the tier; on the CEO's approval the worker routes it to the agent's SUPERVISOR (a worker's change → its director, a director's → the CEO), and on that approval the registry updates instantly (reversible — flip it back). A live+autonomous director may auto-apply a one-tier bump for a worker whose rollup is <7. Cite the rollup as the evidence.`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -5295,6 +5371,23 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "done";
             a.result = `directive active${gate ? ` · builds gated until ${gate} ships` : ""}${marked.length ? ` · critical: ${marked.join(", ")}` : ""}${queued.length ? ` · queued: ${queued.join(", ")}` : ""}${held.length ? ` · held: ${held.join(", ")}` : ""}`;
             notes.push(`Directive accepted: ${a.summary}`);
+          } else if (a.type === "model_tier" && a.targetKind) {
+            // box-agent-model-tiers P3: Ada proposes a model-tier change → route it to the target agent's
+            // supervisor (proposeModelTierChange auto-applies an in-rail change for a live+autonomous director,
+            // else surfaces a needs_approval proposal). She proposes; the supervisor (or the rail) decides.
+            const { proposeModelTierChange } = await import("../src/lib/model-tier-proposals");
+            const tier = a.tier === "haiku" || a.tier === "sonnet" || a.tier === "opus" ? a.tier : null;
+            const r = await proposeModelTierChange(db, job.workspace_id, {
+              targetKind: String(a.targetKind),
+              proposedTier: tier,
+              proposerFunction: thread.director_function,
+              rollup: typeof a.rollup === "number" ? (a.rollup as number) : null,
+              evidence: typeof a.evidence === "string" ? (a.evidence as string) : String(a.summary || ""),
+            });
+            if (!r.ok) { a.status = "failed"; a.result = r.error; notes.push(`${a.summary} → ${r.error}`); continue; }
+            a.status = "done";
+            a.result = r.applied ? `auto-applied within rail → ${tier ?? "Max default"}` : `proposed → routed to ${r.routedTo} for approval`;
+            notes.push(`Model tier: ${a.result}`);
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
@@ -7436,6 +7529,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
   if (job.kind === "platform-director") return runPlatformDirectorJob(job);
   if (job.kind === "proposed-goal") return runProposedGoalJob(job);
+  if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;

@@ -31,4 +31,4 @@ Every box `claude -p` agent inherited the one Max-plan default model (no `--mode
 
 ## Related
 
-[[../tables/agent_model_tiers]] · [[ai-models]] · [[../specs/box-agent-model-tiers]] · [[approval-router]] · [[../tables/approval_decisions]]
+[[../tables/agent_model_tiers]] · [[ai-models]] · [[model-tier-proposals]] (the Phase-3 governed change flow) · [[../specs/box-agent-model-tiers]] · [[approval-router]] · [[../tables/approval_decisions]]

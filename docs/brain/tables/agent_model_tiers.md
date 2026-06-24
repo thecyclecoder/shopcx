@@ -29,7 +29,7 @@ The **per-agent model-tier registry** ([[../specs/box-agent-model-tiers]] Phase 
 
 ## Governance
 
-A tier changes **only** through the director→supervisor proposal flow ([[../specs/box-agent-model-tiers]] Phase 3) — never a silent edit. The proposal cites the agent's [[agent_action_grades|grade rollup]] as evidence, routes to its supervisor via [[../libraries/approval-router]], and on approval is logged in [[approval_decisions]] (auditable, mirrors the leash). Reversible — flip the row back — so it is a low-risk, in-leash config change with **no deploy**. `proposed_by`/`approved_by` record the provenance of the current value.
+A tier changes **only** through the director→supervisor proposal flow ([[../libraries/model-tier-proposals]] `proposeModelTierChange`, [[../specs/box-agent-model-tiers]] Phase 3) — never a silent edit. The proposal cites the agent's [[agent_action_grades|grade rollup]] as evidence, routes to its supervisor via [[../libraries/approval-router]] (worker→director, director→CEO), and on approval is logged in [[approval_decisions]] (auditable, mirrors the leash). A live+autonomous director auto-applies a one-tier/sub-7-rollup change within the rail; else it escalates as a `proposed-model-tier` [[agent_jobs]] row the inbox one-taps. Reversible — flip the row back — so it is a low-risk, in-leash config change with **no deploy**. `proposed_by`/`approved_by` record the provenance of the current value.
 
 ## Readers / writers
 
