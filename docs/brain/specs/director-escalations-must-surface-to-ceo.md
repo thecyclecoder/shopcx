@@ -1,4 +1,4 @@
-# Director escalations must reach the CEO inbox (logged-but-invisible bug) ⏳
+# Director escalations must reach the CEO inbox (logged-but-invisible bug) 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — hardens the Phase-3 CEO-escalation plumbing (`escalateDiagnosisToCeo`) under [[../goals/devops-director]]
 **Found in use 2026-06-24:** board-grooming escalated [[agent-outage-resilience]] P3 to the CEO at 02:03 (escalation_kind `groom_unsure`, dedupe_key `groom-unsure:agent-outage-resilience`, reasoning recorded in [[../tables/director_activity]]) — but there is NO matching [[../tables/dashboard_notifications]] row (verified by `metadata->>spec_slug` and `metadata->>escalation_kind`; zero notifications since 01:55). The escalation was logged and is INVISIBLE to the CEO. An escalation nobody can see is worse than none — it silently strands the decision (here, a partially-shipped spec's next phase) and breaks supervisability.
@@ -7,7 +7,7 @@
 
 `escalateDiagnosisToCeo` ([[../libraries/platform-director]]) inserts the CEO-routed `dashboard_notifications` row and then `recordDirectorActivity`, but it does NOT check the notification insert's error — `await admin.from('dashboard_notifications').insert(...)` is unguarded. If that insert fails (constraint/RLS/shape), the error is swallowed, the function still records the `escalated` activity row, and still returns `{ emitted: true }`. The box logs 'escalated to CEO' and everyone believes it surfaced. Net: the audit ledger says escalated; the inbox shows nothing. (The grooming escalate branch in `scripts/builder-worker.ts` calls only `escalateDiagnosisToCeo`, so the helper is the single point to fix.)
 
-## Phase 1 — make the surface reliable + verified ⏳
+## Phase 1 — make the surface reliable + verified ✅
 - In `escalateDiagnosisToCeo`: capture the notification insert's `{ error }`. If it failed, do NOT silently proceed — surface it: throw/return `{ emitted:false, error }` (and the caller logs a hard warning), and do NOT write the `escalated` activity row as if surfaced (so the dedup ledger doesn't mark a never-surfaced escalation as done). Only record the activity + return `emitted:true` once the notification row actually landed. Order it notification-first, activity-second, both checked.
 - Keep the existing dedupe (one notification per `dedupe_key`), but the dedupe must key on a notification that ACTUALLY EXISTS — a logged-but-unsurfaced escalation must not suppress the retry.
 - Brain: [[../libraries/platform-director]] (`escalateDiagnosisToCeo`) · [[platform-director-agent]] (Phase 3) · [[../tables/dashboard_notifications]] · [[../tables/director_activity]].
