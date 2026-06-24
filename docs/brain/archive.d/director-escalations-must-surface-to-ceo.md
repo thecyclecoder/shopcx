@@ -1,0 +1,1 @@
+- **Director escalations must reach the CEO inbox (logged-but-invisible bug)** · verified 2026-06-24 · → [[libraries/platform-director]]
