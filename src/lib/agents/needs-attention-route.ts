@@ -56,6 +56,15 @@ const ROUTED_MARKER: Record<NeedsAttentionClass, string | null> = {
   unknown: null, // never routed by a class router — the backstop sweep handles it
 };
 
+/**
+ * Classes the auto-router NEVER re-processes — a dismiss-park action ([[../specs/director-dismiss-park-and-short-circuit-spec]] Phase 1)
+ * flips the parked row to status='dismissed' AND stamps this class, so the auto-router can't see it (the
+ * status filter alone excludes it; the class check is belt-and-suspenders in case a future caller leaves
+ * the row needs_attention while the class is dismissed_by_director). A wrongly-dismissed park is one
+ * "Re-open" click from the CEO's activity feed away — that clears the class + flips status back.
+ */
+const TERMINAL_DIRECTOR_CLASSES: ReadonlySet<string> = new Set(["dismissed_by_director"]);
+
 /** Kinds another standing lane already owns — these don't get auto-routed by THIS sweep. */
 const SKIP_KINDS: ReadonlySet<string> = new Set(["platform-director", "fold"]);
 
@@ -500,7 +509,9 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
     .eq("status", "needs_attention")
     .order("created_at", { ascending: false })
     .limit(500);
-  const items = ((parked ?? []) as ParkedRow[]).filter((j) => !SKIP_KINDS.has(j.kind));
+  const items = ((parked ?? []) as ParkedRow[]).filter(
+    (j) => !SKIP_KINDS.has(j.kind) && !(typeof j.needs_attention_class === "string" && TERMINAL_DIRECTOR_CLASSES.has(j.needs_attention_class)),
+  );
   if (!items.length) return empty;
 
   const ledger = await loadLedger(admin);

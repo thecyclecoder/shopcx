@@ -49,12 +49,38 @@ export async function GET(req: Request) {
     .order("created_at", { ascending: false })
     .limit(50);
 
-  const activity = (data || []).map((r) => ({
-    id: r.id as string,
-    actionKind: r.action_kind as string,
-    specSlug: (r.spec_slug as string | null) ?? null,
-    reason: (r.reason as string | null) ?? null,
-    createdAt: r.created_at as string,
-  }));
+  // director-dismiss-park-and-short-circuit-spec Phase 1: a `dismissed_park` row carries the parked
+  // job's id in metadata so the activity feed can render a Re-open button. The button hides once a
+  // `reopened_park` row for the SAME job_id lands (i.e. the CEO already re-opened it).
+  const rows = (data || []) as Array<{
+    id: string;
+    action_kind: string;
+    spec_slug: string | null;
+    reason: string | null;
+    metadata: Record<string, unknown> | null;
+    created_at: string;
+  }>;
+  const reopenedJobIds = new Set<string>();
+  for (const r of rows) {
+    if (r.action_kind === "reopened_park") {
+      const jid = (r.metadata as Record<string, unknown> | null)?.["job_id"];
+      if (typeof jid === "string") reopenedJobIds.add(jid);
+    }
+  }
+
+  const activity = rows.map((r) => {
+    const meta = r.metadata ?? {};
+    const jobId = typeof meta["job_id"] === "string" ? (meta["job_id"] as string) : null;
+    const reopenable = r.action_kind === "dismissed_park" && !!jobId && !reopenedJobIds.has(jobId);
+    return {
+      id: r.id,
+      actionKind: r.action_kind,
+      specSlug: r.spec_slug ?? null,
+      reason: r.reason ?? null,
+      createdAt: r.created_at,
+      jobId,
+      reopenable,
+    };
+  });
   return NextResponse.json({ activity });
 }

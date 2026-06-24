@@ -34,7 +34,18 @@ export interface SpecCardFlags {
   blocked?: boolean;
   critical?: boolean; // **Priority:** critical — orthogonal to status (spec-status-db-driven Phase 1)
   deferred?: boolean; // **Deferred:** parked — wins over phase progress for display (Phase 1)
-  [k: string]: boolean | undefined;
+  /**
+   * director-dismiss-park-and-short-circuit-spec Phase 2 — a shipped card closed CLEANLY without all phases
+   * shipping ("we changed our mind, this isn't needed anymore"). Orthogonal to the rollup `status` (which the
+   * director flips to `shipped` in the same action). The board reads this flag to render the card as
+   * "shipped + short-circuited" with `short_circuit_reason` in a sub-line, so a reader doesn't think we
+   * actually built it. Reversible: an owner flip back to `planned` (or a director short-circuit=false action)
+   * clears both fields.
+   */
+  short_circuit?: boolean;
+  /** The director's reason for the short-circuit — rendered as the card sub-line. Paired with `short_circuit=true`. */
+  short_circuit_reason?: string;
+  [k: string]: boolean | string | undefined;
 }
 
 export interface SpecCardState {
@@ -332,4 +343,27 @@ export async function markSpecCardMergeShipped(
 /** Set/clear the `blocked` transient flag (spec-blockers — a spec gated behind an uncleared prerequisite). */
 export async function markSpecCardBlocked(workspaceId: string, slug: string, blocked: boolean): Promise<void> {
   await upsertCardState(workspaceId, slug, { flags: { blocked } });
+}
+
+/**
+ * director-dismiss-park-and-short-circuit-spec Phase 2: set/clear the **short-circuit** marker on a card.
+ * Pairs with the status flip to `shipped` (which the caller writes via `markSpecCardStatus` in the same
+ * action). The board reads `flags.short_circuit` + `flags.short_circuit_reason` to render the card as
+ * "shipped + short-circuited" with the reason in a sub-line, distinguishing it from a fully-built card.
+ *
+ * `shortCircuit=true` requires `reason` (no silent short-circuits — enforced at the caller / the worker
+ * helper). `shortCircuit=false` clears BOTH fields. Best-effort, audited via the standard history ledger
+ * (the underlying status flip's row in `spec_status_history` records the transition; this writer adds no
+ * extra history row, since `short_circuit` isn't in the CHECK-constrained `field` enum).
+ */
+export async function markSpecCardShortCircuit(
+  workspaceId: string,
+  slug: string,
+  shortCircuit: boolean,
+  reason?: string,
+): Promise<void> {
+  const flags: SpecCardFlags = shortCircuit
+    ? { short_circuit: true, short_circuit_reason: (reason ?? "").slice(0, 1000) }
+    : { short_circuit: false, short_circuit_reason: undefined };
+  await upsertCardState(workspaceId, slug, { flags });
 }

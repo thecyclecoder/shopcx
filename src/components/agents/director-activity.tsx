@@ -13,6 +13,10 @@ interface ActivityEntry {
   specSlug: string | null;
   reason: string | null;
   createdAt: string;
+  // director-dismiss-park-and-short-circuit-spec Phase 1 — present on a `dismissed_park` row so the CEO
+  // can Re-open the parked job in one tap (cleared once a `reopened_park` row for the same job lands).
+  jobId?: string | null;
+  reopenable?: boolean;
 }
 
 function actionChip(kind: string): { label: string; cls: string } {
@@ -22,6 +26,8 @@ function actionChip(kind: string): { label: string; cls: string } {
   if (k.includes("escorted_fix") || k.includes("queued_fix")) return { label: "queued fix build", cls: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" };
   if (k.includes("escort")) return { label: "escorted", cls: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" };
   if (k.includes("coach")) return { label: "coached agent", cls: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300" };
+  if (k === "dismissed_park") return { label: "dismissed park", cls: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300" };
+  if (k === "reopened_park") return { label: "re-opened park", cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" };
   return { label: kind.replace(/_/g, " "), cls: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300" };
 }
 
@@ -39,26 +45,48 @@ function timeAgo(iso: string): string {
 export function DirectorActivity({ fn }: { fn: string }) {
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [busyJobId, setBusyJobId] = useState<string | null>(null);
+
+  const load = (alive = true) =>
+    fetch(`/api/developer/agents/activity?fn=${encodeURIComponent(fn)}`)
+      .then((r) => (r.ok ? r.json() : { activity: [] }))
+      .then((d) => {
+        if (alive) {
+          setEntries(d.activity || []);
+          setLoading(false);
+        }
+      })
+      .catch(() => alive && setLoading(false));
 
   useEffect(() => {
     let alive = true;
-    const load = () =>
-      fetch(`/api/developer/agents/activity?fn=${encodeURIComponent(fn)}`)
-        .then((r) => (r.ok ? r.json() : { activity: [] }))
-        .then((d) => {
-          if (alive) {
-            setEntries(d.activity || []);
-            setLoading(false);
-          }
-        })
-        .catch(() => alive && setLoading(false));
-    load();
-    const t = setInterval(load, 30000); // live: refresh every 30s
+    load(alive);
+    const t = setInterval(() => load(alive), 30000); // live: refresh every 30s
     return () => {
       alive = false;
       clearInterval(t);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fn]);
+
+  const reopenPark = async (jobId: string) => {
+    setBusyJobId(jobId);
+    try {
+      const res = await fetch("/api/developer/director-activity/reopen-park", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(`Re-open failed: ${body.error || res.statusText}`);
+      } else {
+        await load(true);
+      }
+    } finally {
+      setBusyJobId(null);
+    }
+  };
 
   if (loading) return <p className="text-[12px] text-zinc-400">Loading activity…</p>;
   if (!entries.length)
@@ -68,14 +96,26 @@ export function DirectorActivity({ fn }: { fn: string }) {
     <ol className="space-y-1.5">
       {entries.map((e) => {
         const chip = actionChip(e.actionKind);
+        const canReopen = !!e.reopenable && !!e.jobId;
         return (
           <li key={e.id} className="flex items-start gap-2 text-[12px]">
             <span className="mt-0.5 whitespace-nowrap text-zinc-400">{timeAgo(e.createdAt)}</span>
             <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${chip.cls}`}>{chip.label}</span>
-            <span className="min-w-0 text-zinc-700 dark:text-zinc-300">
+            <span className="min-w-0 flex-1 text-zinc-700 dark:text-zinc-300">
               {e.specSlug && <span className="font-mono text-[11px] text-zinc-500">{e.specSlug}</span>}
               {e.reason && <span className="block text-zinc-500 dark:text-zinc-400">{e.reason}</span>}
             </span>
+            {canReopen && (
+              <button
+                type="button"
+                onClick={() => e.jobId && reopenPark(e.jobId)}
+                disabled={busyJobId === e.jobId}
+                className="mt-0.5 shrink-0 rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                title="Re-open this dismissed park — restores it to needs_attention and clears the dismissal marker."
+              >
+                {busyJobId === e.jobId ? "…" : "Re-open"}
+              </button>
+            )}
           </li>
         );
       })}
