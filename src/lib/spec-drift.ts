@@ -245,6 +245,11 @@ export interface SpecDriftRow {
   last_seen_at: string;
 }
 
+/** Mark a spec_drift row resolved (e.g. after the director confirms the phase shipped + flips it ✅). */
+export async function resolveDriftRow(admin: ReturnType<typeof createAdminClient>, id: string): Promise<void> {
+  await admin.from("spec_drift").update({ status: "resolved", last_seen_at: new Date().toISOString() }).eq("id", id);
+}
+
 export interface ReconcileResult {
   slug: string;
   flipped: { index: number; title: string }[]; // phases auto-flipped ✅ this run
