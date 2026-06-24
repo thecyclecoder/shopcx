@@ -1,0 +1,1 @@
+- **Index + split the findUnlinkedMatches OR query to stop full-table scans** · verified 2026-06-24 · → [[libraries/account-matching]]
