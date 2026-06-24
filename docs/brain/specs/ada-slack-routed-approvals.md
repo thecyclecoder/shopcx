@@ -7,7 +7,7 @@ Extend the `#cto-ada` surface ([[ada-slack-chat]]) so it also mirrors the **rout
 **Why:** the founder lives on his phone in Slack. The whole point of `#cto-ada` is to remove the trip to the dashboard for things that should be one-tap. Right now routine approvals (the bulk of the queue) still force a context switch, and complex approvals get dumped as a wall of diff that the founder shouldn't be eyeballing solo anyway — Ada knows the code better than he does. North-star fit: the gate doesn't move (every approval still rides `setActionDecision` → `approveRoadmapAction` → `queued_resume`); only the surface does. Ada is still the supervised tool — the leash is unchanged, the human still decides.
 
 ## Phase 1 — Slack emit from the routed-inbox reconciler
-- ⏳ planned
+- ✅ shipped
 - In `reconcileApprovalInbox(admin)` (`src/lib/agents/approval-inbox.ts`): after inserting the new `dashboard_notifications` row, if `metadata.routed_to_function === 'ceo'` AND the workspace has `slack_ada_channel_id` set, post a Block Kit card in `#cto-ada` as Ada via `postAsAda`.
 - **Idempotency:** stash the posted message `ts` back on the `dashboard_notifications.metadata.slack_message_ts` so the reconciler's dismiss pass + Phase 4 mirror can `chat.update` it. The reconciler only emits a Slack post when `slack_message_ts` is absent (re-parking a job doesn't double-post).
 - **Threading:** **never** thread into an existing #cto-ada chat thread — these are inbox items, not conversation turns. Each approval is its own top-level post, so a routine approval doesn't bury the active coach thread and a coach thread doesn't get hijacked by an unrelated build pause.
