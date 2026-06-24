@@ -19,7 +19,7 @@
 - Enable the flag for an account with an empty `meta_insights_daily` and a long backfill range → ingest submits an async report, polls to completion, pages results, and lands rows across all three levels with no `Service temporarily unavailable`; the daily incremental run still uses the light synchronous path.
 - Idempotency + the existing failure/alerting behavior from [[iteration-engine-ingest-resilience]] are unchanged.
 
-## Phase 1 — async report path behind a flag 🚧 (built — pending migration apply + verification)
+## Phase 1 — async report path behind a flag ✅� (built — pending migration apply + verification)
 The async-report submit/poll/page path for the backfill window, flag-gated per account; synchronous incremental unchanged. Brain: [[../libraries/meta__performance]].
 
 **Built 2026-06-24** (promoted from deferred → critical by director directive):
