@@ -491,6 +491,19 @@ function pickNewSessionAccount(now: number): AccountState | null {
   healthy.sort((a, b) => a.inFlight - b.inFlight || a.lastAssignedAt - b.lastAssignedAt);
   return healthy[0];
 }
+
+// The rollover entry-point for EVERY autonomous box runner (repair/regression/security/seed/improve/
+// spec-test/migration-fix/triage/storefront/pr-resolve): the config dir of a healthy Max account to run
+// this turn on — so a run never lands on the capped default account (RR1) and just errors. Rotates the
+// round-robin cursor so consecutive picks spread across healthy accounts. Returns undefined only when
+// ALL accounts are capped (the run then lands on the default + likely fails, and the re-runnable lane
+// retries after a reset). The interactive dev-ask/coach paths use withAccountFailover for in-call hop;
+// these single-shot lanes just need to START on a healthy account. Fundamental to anything on the box.
+function pickHealthyConfigDir(): string | undefined {
+  const a = pickNewSessionAccount(Date.now());
+  if (a) a.lastAssignedAt = Date.now();
+  return a?.configDir;
+}
 // The Claude usage-wall message carries the actual reset clock time — the CLI localizes it to the running
 // env's timezone, and the BOX runs in UTC, so it always reads "resets 7pm (UTC)" / "resets 2am (UTC)".
 // Parse that hour as UTC → the next future occurrence → the account rejoins at its REAL reset, not a flat
@@ -899,9 +912,10 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
 // workspace DB + storage and decrypt the per-workspace Gemini/Drive keys. This is
 // a trusted, fixed skill driving fixed tools (it never edits repo code), so it
 // runs at the same trust level as the old in-process seed.
-async function runSeedClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runSeedClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SEED_TIMEOUT_MS });
@@ -3704,7 +3718,7 @@ async function runProductSeedJob(job: Job) {
         ].join("\n");
 
   try {
-    const { session, resultText, isError, raw, usage, model } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR, pickHealthyConfigDir());
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText);
@@ -3996,9 +4010,10 @@ async function runSpecChatJob(job: Job) {
 // approval (it holds the prod write creds, exactly like today's Improve tab). No worktree / PR — this
 // mutates a DB session row, not the repo, so it runs read-only in the main checkout (REPO_DIR).
 // Params on the job: instructions = JSON {ticket_id, session_id, mode:'turn', user_message}.
-async function runImproveClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runImproveClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: IMPROVE_TIMEOUT_MS });
@@ -4158,7 +4173,7 @@ async function runTicketImproveJob(job: Job) {
           `See the ticket-improve skill for the exact action shapes (customer_action, sonnet_prompt, grader_rule, rescore, ticket_spec, resolve_sequence).`,
         ].join("\n");
 
-    const { session: boxSession, resultText, isError, raw, usage, model } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR);
+    const { session: boxSession, resultText, isError, raw, usage, model } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR, pickHealthyConfigDir());
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -4223,9 +4238,10 @@ async function runTicketImproveJob(job: Job) {
 // passes investigate read-only via scripts/improve-box-tools.ts) and unsets ANTHROPIC_API_KEY (Max,
 // $0 marginal). No worktree / PR — it mutates the DB + commits specs to main, not a feature branch.
 // See docs/brain/specs/box-escalation-triage.md.
-async function runTriageClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runTriageClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: TRIAGE_PASS_TIMEOUT_MS });
@@ -4317,6 +4333,9 @@ async function runEscalationTriageJob(job: Job) {
   const summaries: string[] = [];
   for (const ticketId of sel.selected) {
     const triageRunId = randomUUID();
+    // Account-pool: pin ONE healthy Max account for this ticket's whole solver→skeptic→revise loop — the
+    // revise RESUMES the solver's session, which can't cross accounts. undefined (all capped) → default.
+    const ticketDir = pickHealthyConfigDir();
     try {
       // Paper trail: the routine is taking a stab at this escalated ticket. Internal-only — a human
       // reading the thread sees the AI is on it and can still step in (escalate to a person).
@@ -4325,7 +4344,7 @@ async function runEscalationTriageJob(job: Job) {
       const brief = await loadTriageBrief(db, wsId, ticketId);
 
       // ── Solver (fresh session) ──
-      let solver = await runTriageClaude(triageSolverPrompt(ticketId, brief), null, REPO_DIR);
+      let solver = await runTriageClaude(triageSolverPrompt(ticketId, brief), null, REPO_DIR, ticketDir);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
       let proposal = extractJson<SolverProposal>(solver.resultText);
       if (!proposal || !proposal.decision) {
@@ -4341,17 +4360,17 @@ async function runEscalationTriageJob(job: Job) {
       const solverSession = solver.session;
 
       // ── Skeptic (fresh eyes — separate session) ──
-      let skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR);
+      let skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
       let verdict = extractJson<SkepticVerdict>(skeptic.resultText);
 
       // ── One bounded re-loop on "revise" (solver incorporates critique; skeptic re-checks fresh) ──
       if (verdict?.verdict === "revise") {
-        solver = await runTriageClaude(triageRevisePrompt(verdict.critique || "", verdict.concerns || []), solverSession, REPO_DIR);
+        solver = await runTriageClaude(triageRevisePrompt(verdict.critique || "", verdict.concerns || []), solverSession, REPO_DIR, ticketDir);
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
         const revised = extractJson<SolverProposal>(solver.resultText);
         if (revised?.decision) proposal = revised;
-        skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR);
+        skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir);
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
         verdict = extractJson<SkepticVerdict>(skeptic.resultText);
       }
@@ -4416,9 +4435,10 @@ async function runEscalationTriageJob(job: Job) {
 // secrets (the agent probes prod read-only via scripts/spec-test-db-probe.ts, gh, vercel, GET hits) and
 // unsets ANTHROPIC_API_KEY (Max, $0 marginal). No worktree / PR — it writes one spec_test_runs row and
 // NEVER mutates prod or flips a spec verified/archived. See docs/brain/specs/spec-test-agent.md.
-async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SPEC_TEST_TIMEOUT_MS });
@@ -4557,7 +4577,7 @@ async function runSpecTestJob(job: Job) {
       await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
     };
 
-    let { session, resultText, isError, raw, usage, model } = await runSpecTestClaude(prompt, null, REPO_DIR);
+    let { session, resultText, isError, raw, usage, model } = await runSpecTestClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     let parsed = extractSpecTestResult(resultText);
@@ -4572,7 +4592,7 @@ async function runSpecTestJob(job: Job) {
         `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>"}`,
         `Reuse the checks you already determined; do not re-run anything. If you genuinely could not proceed, return ONLY {"status":"error","error":"<why>"}.`,
       ].join("\n");
-      const retry = await runSpecTestClaude(repair, session, REPO_DIR);
+      const retry = await runSpecTestClaude(repair, session, REPO_DIR, pickHealthyConfigDir());
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, retry.usage, retry.model);
       if (retry.session) { session = retry.session; await update(job.id, { claude_session_id: session }); }
       resultText = retry.resultText; isError = retry.isError; raw = retry.raw;
@@ -4674,9 +4694,10 @@ async function runSpecTestJob(job: Job) {
 // audit clears. Unfixable (no card anywhere) → surfaced human-needed with the box's written diagnosis,
 // the audit stays failed. spec_slug = the audit id; instructions = JSON {audit_id, subscription_id}.
 // No worktree / PR — it mutates the sub/catalog/Appstle, not the repo. See docs/brain/specs/migration-fix-agent.md.
-async function runMigrationFixClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runMigrationFixClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: MIGRATION_FIX_TIMEOUT_MS });
@@ -5011,7 +5032,7 @@ async function runMigrationFixJob(job: Job) {
       ? migrationFixAnswerPrompt(audit as Record<string, unknown>, brief, job.answers || [])
       : migrationFixPrompt(audit as Record<string, unknown>, brief);
     // On an answer-resume, resume the same Max session (the prior question + brief are in context).
-    const { session, resultText, isError, raw, usage, model } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR, pickHealthyConfigDir());
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
@@ -5831,7 +5852,7 @@ async function runDirectorCoachJob(job: Job) {
 // A Max `claude -p` that merges origin/main into a dirty claude/* PR + resolves the conflicts. Same
 // sandbox as a feature build (no ANTHROPIC_API_KEY, prod secrets stripped — NO prod creds), but it only
 // runs LOCAL git + tsc + file edits: it does NOT push (the worker re-verifies + pushes) and has no gh.
-async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (k === "ANTHROPIC_API_KEY") continue;
@@ -5839,6 +5860,7 @@ async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd:
     if (SECRET_RE.test(k)) continue; // drops GITHUB_TOKEN too → the LLM can't push; the worker does
     env[k] = v;
   }
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: PR_RESOLVE_TIMEOUT_MS });
@@ -5985,7 +6007,7 @@ async function runPrResolveJob(job: Job) {
       `  {"status":"escalate","reason":"<why it needs a human merge or a rebuild — one line>"}`,
     ].join("\n");
 
-    const { session, resultText, isError, raw, usage, model } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt);
+    const { session, resultText, isError, raw, usage, model } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt, pickHealthyConfigDir());
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText) as { status?: string; reason?: string; summary?: string } | null;
@@ -6099,11 +6121,12 @@ async function runPrResolveJob(job: Job) {
 // DEFAULT authors the spec + SURFACES it for one-tap owner Build (it does NOT auto-queue the build);
 // only a narrow mechanical allow-list (REPAIR_AUTOBUILD_KINDS) auto-queues. It NEVER edits product
 // code / opens a PR / applies a migration — the build does that, owner-gated. (repair-agent Phase 1.)
-async function runRepairClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runRepairClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // KEEP the env (read-only DB/crypto creds so the box can load + trace the error) — only strip the
   // API key so ALL LLM is Max-billed (never the Anthropic API). Web search stays on (investigation).
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: REPAIR_TIMEOUT_MS });
@@ -6508,7 +6531,7 @@ async function runRepairJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "repair",
       recognized: REPAIR_VERDICTS,
-      run: () => runRepairClaude(repairBrief, null, REPO_DIR),
+      run: () => runRepairClaude(repairBrief, null, REPO_DIR, pickHealthyConfigDir()),
       onRun: async (r) => {
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
         if (r.session) await update(job.id, { claude_session_id: r.session });
@@ -6647,11 +6670,12 @@ async function runRepairJob(job: Job) {
 // fix routes to the CEO). Loop-guard: a fix that fails to hold after REGRESSION_LOOP_GUARD_MAX authored
 // attempts escalates to CEO. Every detect/dismiss/author/escalate writes a director_activity row.
 
-async function runRegressionClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runRegressionClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // Same env discipline as repair: KEEP read-only prod creds so the box can trace what regressed; strip
   // ONLY the API key so all LLM is Max-billed; web search stays on (investigation).
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: REGRESSION_TIMEOUT_MS });
@@ -6923,7 +6947,7 @@ async function runRegressionJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "regression review",
       recognized: REGRESSION_VERDICTS,
-      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR),
+      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR, pickHealthyConfigDir()),
       onRun: async (r) => {
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
         if (r.session) await update(job.id, { claude_session_id: r.session });
@@ -7061,11 +7085,12 @@ async function runRegressionJob(job: Job) {
 // `npm audit` CVE scan. Both NEVER mutate product code, open a PR, or bump a dep: a real finding AUTHORS a
 // scoped fix/upgrade spec to main + SURFACES a one-tap owner Build card (routed via the approval-router —
 // auto-queued within a live director's leash, else the CEO inbox). Mirrors runRegressionJob / repair.
-async function runSecurityClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runSecurityClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // Same env discipline as regression/repair: KEEP read-only prod creds + GITHUB_TOKEN so the box can
   // `git show` the merged diff; strip ONLY the API key so all LLM is Max-billed; web search stays on.
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SECURITY_REVIEW_TIMEOUT_MS });
@@ -7435,7 +7460,7 @@ async function runSecurityReviewJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "security review",
       recognized: SECURITY_VERDICTS,
-      run: () => runSecurityClaude(prompt, null, REPO_DIR),
+      run: () => runSecurityClaude(prompt, null, REPO_DIR, pickHealthyConfigDir()),
       onRun: async (r) => {
         if (r.session) await update(job.id, { claude_session_id: r.session });
       },
@@ -7508,9 +7533,10 @@ async function runSecurityReviewJob(job: Job) {
 // lander_type, audience, lever_key, lever_reason}. No PR — it mutates the experiment tables, not the
 // repo (except the missing-capability spec, committed to main like repair). See
 // docs/brain/specs/storefront-optimizer-agent.md.
-async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: STOREFRONT_OPTIMIZER_TIMEOUT_MS });
@@ -7773,7 +7799,7 @@ async function runStorefrontOptimizerJob(job: Job) {
       return;
     }
 
-    const { session, resultText, isError, raw, usage, model } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR, pickHealthyConfigDir());
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
