@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import { routedInboxHref } from "@/lib/agents/inbox";
 import type { AgentJob, JobStatus, PendingFold } from "@/lib/agent-jobs";
-import type { Phase } from "@/lib/brain-roadmap";
+import type { Phase, SpecStatus } from "@/lib/brain-roadmap";
 
 const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
@@ -62,7 +62,7 @@ const CHIP: Record<JobStatus, string> = {
   needs_attention: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
 };
 
-export default function BuildButton({ slug, initialJob, specStatus, initialFold, blockedBy }: { slug: string; initialJob: AgentJob | null; specStatus: Phase; initialFold?: PendingFold | null; blockedBy?: Blocker[] }) {
+export default function BuildButton({ slug, initialJob, specStatus, initialFold, blockedBy }: { slug: string; initialJob: AgentJob | null; specStatus: SpecStatus; initialFold?: PendingFold | null; blockedBy?: Blocker[] }) {
   const workspace = useWorkspace();
   const router = useRouter();
   const [job, setJob] = useState<AgentJob | null>(initialJob);

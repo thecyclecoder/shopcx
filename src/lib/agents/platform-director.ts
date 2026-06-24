@@ -53,7 +53,7 @@ import {
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
-import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard } from "@/lib/brain-roadmap";
+import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
@@ -450,6 +450,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
     const escalated: string[] = [];
     for (const card of goalSpecs(goal, specBySlug)) {
       if (card.status === "shipped") continue; // already landed
+      if (card.status === "deferred") continue; // parked — every auto-build lane skips a deferred spec until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
       if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
 
@@ -528,7 +529,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
 }
 
 /** A SpecCard's phases mapped to the spec_card_state per-phase snapshot shape (the P6 PM-companion write). */
-function phaseStatesOf(card: SpecCard): { index: number; title: string; status: SpecCard["status"] }[] {
+function phaseStatesOf(card: SpecCard): { index: number; title: string; status: SpecCard["phases"][number]["status"] }[] {
   return card.phases.map((p, i) => ({ index: i, title: p.title, status: p.status }));
 }
 
@@ -569,6 +570,7 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
 
   for (const card of specs) {
     if (card.status === "shipped") continue; // already landed
+    if (card.status === "deferred") continue; // parked — a deferred fix spec is skipped until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
@@ -1174,6 +1176,7 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
   const partial = specs.filter(
     (s) =>
       s.status !== "shipped" &&
+      s.status !== "deferred" && // parked — grooming skips a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
       s.counts.shipped >= 1 && // at least one phase has landed
       s.counts.planned >= 1 && // at least one ⏳ phase remains
       s.counts.in_progress === 0 && // no 🚧 phase (a phase actively building) — that's an active build
@@ -1276,7 +1279,7 @@ export interface GroomVerdict {
 export function validateGroomSplit(
   c: GroomCandidate,
   v: GroomVerdict,
-  deriveSpecStatus: (raw: string) => "planned" | "in_progress" | "shipped" | "rejected",
+  deriveSpecStatus: (raw: string) => SpecStatus,
 ): { ok: true } | { ok: false; error: string } {
   const splits = v.splits ?? [];
   if (!splits.length) return { ok: false, error: "split verdict with no split cards" };
@@ -1380,6 +1383,7 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
   const unstarted = specs.filter(
     (s) =>
       s.status !== "shipped" &&
+      s.status !== "deferred" && // parked — the initiation lane never starts a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
       s.counts.shipped === 0 && // unstarted — no phase has landed
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
