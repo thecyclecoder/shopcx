@@ -1769,6 +1769,17 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} directive surface / self-watch failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // goal-milestone-build-sequencing (Phase 3) — re-sequence any milestone fan-out that built out of order:
+    // HOLD each premature build (cancel the jammed, unapprovable fan-out), apply the AUTHORED Blocked-by order
+    // from the goal doc onto the spec file, and let the reactive auto-queue + escort re-release it in sequence.
+    // Runs BEFORE the escort so the board is corrected (held + blocked) before any new queuing.
+    const seq = await reconcileMilestoneSequence(job, tag);
+    notes.push(seq);
+  } catch (e) {
+    notes.push(`sequence reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing sequence reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const escort = await lib.escortApprovedGoals(db);
     if (escort.queued.length) notes.push(`escorted → queued ${escort.queued.length} spec(s): ${escort.queued.join(", ")}`);
     if (escort.escalated.length) notes.push(`loop-guard → escalated ${escort.escalated.length}: ${escort.escalated.join(", ")}`);
@@ -1844,6 +1855,78 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   }
   await update(job.id, { status: "completed", log_tail: `standing pass — ${notes.join(" · ")}`.slice(-2000) });
   console.log(`${tag} standing pass — ${notes.join(" · ")}`);
+}
+
+// goal-milestone-build-sequencing (Phase 3): re-sequence a milestone fan-out that built out of order. The lib
+// detects each milestone build that fanned out before its prerequisites (read-only); this box lane recovers it:
+//   1. apply the AUTHORED Blocked-by order — write the `**Blocked-by:**` line (transcribed from the goal doc by
+//      `findMilestoneSequenceViolations`) onto the spec file via the GitHub API (the spec-blockers enforcement
+//      point), skipping the commit when the file on `main` already carries it (fs-lag no-op),
+//   2. HOLD the premature build (cancel the jammed fan-out so it leaves needs_input/needs_approval),
+//   3. write one `reconciled_sequence` director_activity row.
+// The reactive auto-queue + the goal escort re-release each held spec in sequence as its blockers ship.
+// Idempotent (a re-sequenced spec is no longer a candidate: its file has the blocker, its build is held, and a
+// ledger row dedups it) and no-op unless Platform is live+autonomous. Best-effort per spec — one failure never
+// blocks the rest. Returns a one-line summary for the standing-pass log.
+async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  const { violations, scanned } = await lib.findMilestoneSequenceViolations(db);
+  if (!violations.length) return scanned ? `sequence: ${scanned} dependent milestone spec(s), all ordered` : "sequence: nothing to reconcile";
+
+  const resequenced: string[] = [];
+  for (const v of violations) {
+    try {
+      // 1) Apply the authored Blocked-by order — read the spec fresh from main (avoid clobbering a fs-lagged disk).
+      const path = `docs/brain/specs/${v.slug}.md`;
+      const get = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+      if (!get.ok) {
+        console.error(`${tag} sequence: cannot read ${path} (skipping ${v.slug})`);
+        continue;
+      }
+      const sha = (get.json as { sha?: string }).sha;
+      const md = Buffer.from(String((get.json as { content?: string }).content || "").replace(/\s/g, ""), "base64").toString("utf8");
+      const updated = lib.ensureBlockedByLine(md, v.declaredBlockers);
+      if (updated !== md) {
+        const put = await gh("PUT", `/repos/${REPO}/contents/${path}`, {
+          message: `spec: ${v.slug} — apply Blocked-by ${v.missingFromFile.join(", ")} (director sequence-reconcile)`,
+          content: Buffer.from(updated, "utf8").toString("base64"),
+          sha,
+          branch: "main",
+        });
+        if (!put.ok) {
+          console.error(`${tag} sequence: failed to write Blocked-by for ${v.slug} (skipping hold)`);
+          continue;
+        }
+      }
+      // 2) HOLD the premature build (cancel the out-of-order fan-out).
+      const reason = `Re-sequenced ${v.slug}: it fanned out concurrently for "${v.goalTitle}" before its prerequisite(s) ${v.unmetBlockers.join(", ")} were built. Held its premature build (was ${v.jobStatus}) and applied **Blocked-by:** ${v.missingFromFile.join(", ")} — it auto-queues when its last blocker ships.`;
+      const held = await lib.holdPrematureBuild(db, v.jobId, reason);
+      // 3) Audit the re-sequence.
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "platform",
+        actionKind: "reconciled_sequence",
+        specSlug: v.slug,
+        reason,
+        metadata: {
+          goal_slug: v.goalSlug,
+          held_job_id: v.jobId,
+          held_from_status: v.jobStatus,
+          held: held.ok,
+          declared_blockers: v.declaredBlockers,
+          unmet_blockers: v.unmetBlockers,
+          applied_blockers: v.missingFromFile,
+          autonomous: true,
+        },
+      });
+      resequenced.push(v.slug);
+    } catch (e) {
+      console.error(`${tag} sequence reconcile failed for ${v.slug} (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+  return resequenced.length ? `sequence → re-sequenced ${resequenced.length} out-of-order build(s): ${resequenced.join(", ")}` : "sequence: detected violations but none recovered (see logs)";
 }
 
 // board-grooming (Phase 1): the director MOVES the project board. For each PARTIALLY-shipped spec (≥1 ✅,
