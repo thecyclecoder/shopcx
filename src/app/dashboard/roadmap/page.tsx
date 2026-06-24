@@ -5,6 +5,7 @@ import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, ty
 import { getSpecCardStates, resolveBoardStatus, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
 import StatusControl from "./StatusControl";
+import PriorityControl from "./PriorityControl";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
@@ -131,6 +132,7 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 space-y-2">
         <StatusControl slug={spec.slug} status={spec.status} />
+        <PriorityControl slug={spec.slug} status={spec.status} critical={spec.critical} />
         <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} blockedBy={spec.blockedBy} />
       </div>
       <div className="mt-1.5 text-[11px] text-zinc-400">
