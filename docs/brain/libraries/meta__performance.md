@@ -35,6 +35,33 @@ All three levels for the window. The window is **sliced into ≤14-day sub-windo
 (which trips Meta's transient code 2 "Service temporarily unavailable"), and
 partial progress is durable.
 
+### `syncMetaInsightsAsync` / `syncMetaInsightsForLevelAsync` — functions
+
+```ts
+async function syncMetaInsightsAsync(p: SyncParams, startDate: string, endDate: string): Promise<{ campaign: number; adset: number; ad: number }>
+async function syncMetaInsightsForLevelAsync(p: SyncParams, level: "campaign"|"adset"|"ad", startDate: string, endDate: string): Promise<{ rows: number }>
+```
+Meta's **async report** path for the first-run backfill window
+(iteration-ingest-async-reports): `POST /act_{id}/insights` → `report_run_id` →
+poll `GET /{report_run_id}` until `async_status='Job Completed'` → page
+`GET /{report_run_id}/insights`. One server-side job per level over the FULL range
+(no client-side ≤14-day slicing — Meta chunks it), for a years-long first backfill
+that would strain even the chunked synchronous GETs. Output runs through the SAME
+`mapInsightsRecords` + `upsertOrThrow` as the sync path, so idempotency and the
+rows-written assertion are unchanged. Polls every 5s up to a 10-min ceiling per
+level; a `Job Failed`/`Job Skipped`/timeout throws (supervisable, not a silent hang).
+
+### `isAsyncBackfillEnabled` — function
+
+```ts
+async function isAsyncBackfillEnabled(admin, adAccountId: string): Promise<boolean>
+```
+Per-account gate read from `meta_ad_accounts.async_insights_backfill_enabled`
+(default false). Read **defensively** — a missing column (pre-migration) or missing
+row → `false`, so the code is safe to ship dark before/after the migration. Only
+`ingestMetaPerformance` uses it, and only for the first-run backfill window; the
+daily incremental window always keeps the light synchronous GET.
+
 ### `reconcileInsightsVsSpend` — function
 
 ```ts
@@ -47,7 +74,7 @@ Per-day sum of campaign-level insights spend vs [[../tables/daily_meta_ad_spend]
 ```ts
 async function ingestMetaPerformance(p: SyncParams, opts?: { incrementalDays?: number; backfillDays?: number }): Promise<…>
 ```
-Full per-account ingest: structure → insights → **rows-written assertion** → reconcile. Backfills 90 days on first run (no insights rows yet), else incremental (default 3 days). The assertion (meta-insights-ingest-empty-fix) fails the run loud if it persisted **0** ad/adset/campaign insight rows but the independent [[../tables/daily_meta_ad_spend]] rollup proves the account spent in the window — surfaces a `META_INGEST_EMPTY` incident to the Control Tower and throws. An account with no spend → 0 rollup spend → 0 rows is correct + silent.
+Full per-account ingest: structure → insights → **rows-written assertion** → reconcile. Backfills 90 days on first run (no insights rows yet), else incremental (default 3 days). On the **first-run backfill window only**, when the per-account flag `async_insights_backfill_enabled` is on (`isAsyncBackfillEnabled`), insights come via the async-report path (`syncMetaInsightsAsync`) instead of the chunked synchronous `syncMetaInsights`; the daily incremental window always uses the sync GET. The chosen path is returned as `asyncBackfill` (surfaced on the iteration-run `ingest` stage as `async_backfill`). The assertion (meta-insights-ingest-empty-fix) fails the run loud if it persisted **0** ad/adset/campaign insight rows but the independent [[../tables/daily_meta_ad_spend]] rollup proves the account spent in the window — surfaces a `META_INGEST_EMPTY` incident to the Control Tower and throws. An account with no spend → 0 rollup spend → 0 rows is correct + silent.
 
 `SyncParams = { workspaceId, adAccountId (our uuid), metaAccountId (bare), accessToken }`.
 
