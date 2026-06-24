@@ -22,6 +22,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
+import { MODEL_TIER_PROPOSAL_KIND, APPLY_MODEL_TIER_ACTION_TYPE } from "@/lib/agent-jobs";
 import { APPROVAL_REQUEST_TYPE, type InboxApprovalAction } from "@/lib/agents/inbox";
 import {
   resolveApprover,
@@ -44,6 +45,9 @@ interface PendingActionLike {
   cmd?: string;
   spec_title?: string;
   spec?: { title?: string; slug?: string; owner?: string; parent?: string } | null;
+  // box-agent-model-tiers P3: on an apply_model_tier action, the agent kind whose tier changes — the
+  // routing key (a worker's change routes to its director, a director's to the CEO).
+  target_kind?: string;
 }
 
 /** The agent_jobs columns this emitter needs (a row that just entered, or sits in, needs_approval). */
@@ -83,6 +87,21 @@ export function ownerFunctionForKind(kind: string): string | null {
 }
 
 /**
+ * The function whose org-chart seat OWNS this job's raising tool — the input to `resolveApprover`.
+ * For a `proposed-model-tier` job (box-agent-model-tiers P3) the request is ABOUT a target agent, so it
+ * routes by the TARGET kind (read off the apply_model_tier action), not the proposal kind: a worker's
+ * change resolves UP to its director, a director's own change is unmapped ⇒ the CEO. Every other kind
+ * routes by its own kind, unchanged.
+ */
+export function routingOwnerForJob(job: { kind: string; pending_actions?: PendingActionLike[] | null }): string | null {
+  if (job.kind === MODEL_TIER_PROPOSAL_KIND) {
+    const a = (job.pending_actions || []).find((x) => x.type === APPLY_MODEL_TIER_ACTION_TYPE);
+    if (a?.target_kind) return ownerFunctionForKind(a.target_kind);
+  }
+  return ownerFunctionForKind(job.kind);
+}
+
+/**
  * Where to DECIDE a genuinely multi-CHOICE action that the inbox's inline Approve/Decline can't express
  * (coverage register-vs-exempt, hero reject-with-notes). Phase 4 made the inbox the single source for
  * plain approve/decline (incl. multi-action/multi-branch), so this deep-link now only carries multi-choice
@@ -93,6 +112,7 @@ const SPEC_SLUG_KINDS = new Set(["build", "spec-test"]);
 export function approvalDeepLink(kind: string, specSlug: string | null, specMissing?: boolean | null): string {
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug ?? ""}`;
   if (kind === "proposed-goal") return `/dashboard/roadmap/goals/${specSlug ?? ""}`; // director-proposed-goals: greenlight surface
+  if (kind === MODEL_TIER_PROPOSAL_KIND) return `/dashboard/agents/${encodeURIComponent(specSlug ?? "")}`; // box-agent-model-tiers: the target agent's profile
   if (kind === "migration-fix") return "/dashboard/migrations";
   if (kind === "storefront-optimizer") return "/dashboard/storefront/optimizer";
   if (SPEC_SLUG_KINDS.has(kind)) return specMissing || !specSlug ? "/dashboard/roadmap" : `/dashboard/roadmap/${specSlug}`;
@@ -188,7 +208,7 @@ export function buildApprovalNotification(
   chart: OrgChartGraph,
   autonomy: AutonomyMap,
 ): { workspace_id: string; type: string; title: string; body: string | null; link: string; metadata: ApprovalMeta; read: boolean; dismissed: boolean } {
-  const ownerFn = ownerFunctionForKind(job.kind);
+  const ownerFn = routingOwnerForJob(job);
   const routedTo = resolveApprover(ownerFn, chart, autonomy);
   const { title, body } = buildApprovalContent(job);
   const link = approvalDeepLink(job.kind, job.spec_slug, job.spec_missing);

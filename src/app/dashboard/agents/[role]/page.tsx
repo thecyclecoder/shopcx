@@ -11,6 +11,7 @@ import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
 import { AgentCoachingHistory } from "@/components/agents/agent-coaching-history";
 import { AgentGradePanel } from "@/components/agents/agent-grade-panel";
+import { ModelTierCard } from "@/components/agents/model-tier-card";
 import { DirectorAutonomy } from "@/components/agents/director-autonomy";
 import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
 import { DirectorGradePanel } from "@/components/agents/director-grade-panel";
@@ -222,6 +223,8 @@ function ProfileCard({
       ) : activeSection === "autonomy" ? (
         <div className="space-y-6">
           {isPlatform && <DirectorAutonomy autonomous={d.autonomous} />}
+          {/* box-agent-model-tiers Phase 4: the director's own model tier — her change routes to the CEO. */}
+          {isPlatform && <ModelTierCard kind="platform-director" />}
           <AutonomyToggle director={d} onChange={onAutonomyChange} />
         </div>
       ) : activeSection === "inbox" ? (
@@ -259,6 +262,8 @@ function ProfileCard({
           Box lane <span className="font-mono text-zinc-500 dark:text-zinc-400">{worker.kind}</span> — its requests route
           up to the CEO inbox until {dp.name} ({dp.role}) goes live (approval-routing engine, M2).
         </p>
+        {/* box-agent-model-tiers Phase 4: the worker's current model tier + governed change history. */}
+        <ModelTierCard kind={worker.kind} />
         {/* worker-grading Phase 3: the Director's grade rollup + the worker's recent graded actions. */}
         <div className="mt-6">
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">

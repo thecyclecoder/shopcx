@@ -12,7 +12,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { ACTIVE_STATUSES, getLiveJobForSlug, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
 import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
-import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
+import { ownerFunctionForKind, routingOwnerForJob } from "@/lib/agents/approval-inbox";
 import { resolveApproverLive, CEO } from "@/lib/agents/approval-router";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 
@@ -369,8 +369,11 @@ export async function approveRoadmapAction(
   // logged here (the request re-surfaces). Best-effort: never break the approve path on a ledger miss.
   if (opts.decision === "approve" || opts.decision === "decline") {
     try {
-      const raisedBy = ownerFunctionForKind(job.kind) ?? CEO;
-      const routedTo = await resolveApproverLive(ownerFunctionForKind(job.kind));
+      // box-agent-model-tiers P3: a proposed-model-tier job routes by its TARGET agent kind, not the
+      // proposal kind, so the ledger's raised/routed functions match the inbox routing it was decided in.
+      const ownerFn = routingOwnerForJob(job);
+      const raisedBy = ownerFn ?? CEO;
+      const routedTo = await resolveApproverLive(ownerFn);
       await recordApprovalDecision(admin, {
         workspaceId,
         agentJobId: job.id,

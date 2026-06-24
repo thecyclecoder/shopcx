@@ -270,7 +270,9 @@ export interface MonitoredLoop {
  * never the default: each MUST carry a reason. Keep this list short — the right answer for a
  * real loop is a MONITORED_LOOPS entry, not an exemption. Keyed by the cron's inngest fn id.
  */
-export const INTENTIONALLY_UNMONITORED_CRONS: Record<string, string> = {};
+export const INTENTIONALLY_UNMONITORED_CRONS: Record<string, string> = {
+  "slack-roadmap-notify": "intentionally unmonitored — owner-confirmed via the coverage-register agent",
+};
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -487,6 +489,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  {
+    id: "creative-finder-video-process",
+    kind: "cron",
+    owner: "platform",
+    label: "creative-finder-video-process",
+    description: "Auto-proposed monitored loop for the creative-finder-video-process cron (daily (30 9 * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "daily (30 9 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-06-24T15:00:08.171Z",
+  },
   { id: "crisis-daily-campaign", kind: "cron", owner: "cmo", label: "Crisis campaign tick", description: "Advances active crisis-comms campaigns.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "demographics-enrich-batch", kind: "cron", owner: "growth", label: "Demographics enrich batch", description: "Daily customer-demographics enrichment batch.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "daily-analysis-report-cron", kind: "cron", owner: "platform", label: "Daily analysis report", description: "Builds the daily AI ops/analysis report.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
