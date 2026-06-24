@@ -6,6 +6,39 @@ import { encrypt, decrypt } from "@/lib/crypto";
 
 const SLACK_API = "https://slack.com/api";
 
+// ── Fetch hardening ──
+// Per-request hard cap so one slow/hung Slack endpoint can't wedge a caller —
+// notably the per-minute slack-roadmap-notify cron — past Inngest's execution
+// budget. On timeout `fetch` rejects with a TimeoutError, which propagates to
+// the caller's try/catch (a thrown Slack error still lets the cron heartbeat
+// fire). A transient blip costs one slow tick, never an open-ended freeze.
+const SLACK_TIMEOUT_MS = 5000;
+// Bounded retries on HTTP 429, honoring a capped Retry-After. A rate-limit
+// costs at most a few short waits, never an unbounded back-off.
+const SLACK_MAX_RETRIES = 2;
+const SLACK_MAX_RETRY_WAIT_MS = 3000;
+// Pagination guard for conversations.list / users.conversations so a cursor
+// that never empties (or a huge workspace) can't loop fetches unbounded.
+const SLACK_MAX_PAGES = 20;
+
+/**
+ * `fetch` wrapper for every Slack API call: a hard per-request timeout plus a
+ * bounded, Retry-After-honoring retry on HTTP 429. Throws on timeout/network
+ * error so the caller fails fast instead of hanging.
+ */
+async function slackFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(SLACK_TIMEOUT_MS) });
+    if (res.status !== 429 || attempt >= SLACK_MAX_RETRIES) return res;
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const waitMs = Math.min(
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000,
+      SLACK_MAX_RETRY_WAIT_MS,
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+}
+
 // ── Credentials ──
 
 export async function getSlackToken(workspaceId: string): Promise<string | null> {
@@ -32,7 +65,7 @@ export async function isSlackConnected(workspaceId: string): Promise<boolean> {
 // ── Core API calls ──
 
 async function slackApi(token: string, method: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await fetch(`${SLACK_API}/${method}`, {
+  const res = await slackFetch(`${SLACK_API}/${method}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -164,7 +197,7 @@ export async function findChannelByName(token: string, name: string): Promise<st
 
 export async function lookupUserByEmail(token: string, email: string): Promise<string | null> {
   // users.lookupByEmail requires GET with query param, not JSON body
-  const res = await fetch(`${SLACK_API}/users.lookupByEmail?email=${encodeURIComponent(email)}`, {
+  const res = await slackFetch(`${SLACK_API}/users.lookupByEmail?email=${encodeURIComponent(email)}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const result = await res.json() as Record<string, unknown>;
@@ -182,17 +215,20 @@ export async function listChannels(token: string): Promise<{ id: string; name: s
   // users.conversations for everything the bot is a MEMBER of (this is what surfaces #roadmap etc.).
   const collect = async (path: string, types: string) => {
     let cursor: string | undefined;
-    do {
+    // Page cap (SLACK_MAX_PAGES * limit) bounds the loop so a never-emptying
+    // cursor can't keep fetching forever; slackFetch bounds each page's wait.
+    for (let page = 0; page < SLACK_MAX_PAGES; page++) {
       const params = new URLSearchParams({ types, exclude_archived: "true", limit: "200" });
       if (cursor) params.set("cursor", cursor);
-      const res = await fetch(`${SLACK_API}/${path}?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await slackFetch(`${SLACK_API}/${path}?${params}`, { headers: { Authorization: `Bearer ${token}` } });
       const result = (await res.json()) as Record<string, unknown>;
       if (!result.ok) break;
       for (const c of (result.channels as { id: string; name: string; is_private: boolean }[]) || []) {
         byId.set(c.id, { id: c.id, name: c.name, is_private: !!c.is_private });
       }
       cursor = (result.response_metadata as { next_cursor?: string })?.next_cursor || undefined;
-    } while (cursor);
+      if (!cursor) break;
+    }
   };
 
   await collect("conversations.list", "public_channel");
@@ -243,7 +279,7 @@ export async function exchangeCodeForToken(code: string): Promise<{
   team?: { id: string; name: string };
   error?: string;
 }> {
-  const res = await fetch(`${SLACK_API}/oauth.v2.access`, {
+  const res = await slackFetch(`${SLACK_API}/oauth.v2.access`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
