@@ -19,3 +19,20 @@
 - **M4 — Cost / Spend governor** — budgets + per-spec cost (surfaces on [[platform-department-scorecard]]).
 
 Owner: [[../functions/platform]] (the boss, Ada). Reports to: [[ceo-mode]]. Pairs with [[platform-department-scorecard]] (M4 spend surfaces there).
+
+## Decomposition
+
+Specs authored by the [[../specs/goal-decomposition-engine|goal-decomposition engine]] (owner-approved). Each is owner+parent tagged; `Blocked-by` encodes build order so only unblocked specs queue immediately and dependents auto-queue as their blockers ship.
+
+### M1 — Roster sync
+- [[../specs/agent-roster-sync]] ⏳ — reconcile MONITORED_LOOPS (cron + agent-kind) ↔ PERSONAS ↔ live agent_jobs into one roster so the org view surfaces 100% of running agents (incl. Tao/Devi/Cole + control-tower-monitor) and flags inactive ones (Remi).
+
+### M2 — Deploy-Health / Auto-Rollback guardian
+- [[../specs/deploy-health-rollback-guardian]] ⏳ — already greenlit: watch each auto-merged deploy over a canary window and auto-rollback on a correlated regression.
+
+### M3 — Security / Dependency agent
+- [[../specs/security-dependency-agent]] ⏳ — a new agent-kind lane + persona giving every merged `claude/*` diff an autonomous read-only security pass + a scheduled CVE/dependency-upgrade watch (owner-gated fixes, never auto-mutating).
+
+### M4 — Cost / Spend governor
+- [[../specs/fleet-cost-metering]] ⏳ — capture per-job fleet spend nothing meters today (claude -p stream tokens + Max usage-window), keyed spec→kind→function; the metric foundation.
+- [[../specs/fleet-spend-governor]] ⏳ — *(blocked by [[../specs/fleet-cost-metering]])* set per-kind/function budgets, escalate (never silently cap) on overrun, surface a fleet-spend line + feed the [[platform-department-scorecard]] KPI.
