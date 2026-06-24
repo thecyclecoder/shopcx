@@ -132,6 +132,9 @@ export interface EnqueueRepairInput {
   errorEventId?: string | null;
   /** the originating loop_alerts row (for a monitor-opened alert). */
   loopAlertId?: string | null;
+  /** director BOUNCE feedback: when Ada found the prior authored fix UNSOUND, her explanation of WHY — the
+   *  re-authoring repair pass reads this and fixes its work instead of repeating the same mistake. */
+  directorFeedback?: string | null;
 }
 
 /**
@@ -202,6 +205,7 @@ export async function enqueueRepairJob(admin: Admin, input: EnqueueRepairInput):
         title: input.title.slice(0, 300),
         error_event_id: input.errorEventId ?? null,
         loop_alert_id: input.loopAlertId ?? null,
+        director_feedback: input.directorFeedback ? input.directorFeedback.slice(0, 3000) : null,
       }),
     });
     if (error) {
@@ -212,6 +216,43 @@ export async function enqueueRepairJob(admin: Admin, input: EnqueueRepairInput):
   } catch (err) {
     console.warn("[repair-agent] enqueueRepairJob threw:", err instanceof Error ? err.message : err);
     return { enqueued: false, reason: "threw" };
+  }
+}
+
+/**
+ * Director BOUNCE (director-supervises-repair): Ada found the Repair agent's authored fix UNSOUND — the bug is
+ * real but the fix is broken/mis-scoped/contradicted by the code. Instead of escalating to the CEO, send it
+ * BACK to the Repair agent to re-do, carrying her explanation. Resolves the current repair job (so the
+ * per-signature live-dedupe clears) then re-enqueues a fresh repair for the same signature with her feedback,
+ * which the re-authoring pass reads. Best-effort.
+ */
+export async function bounceRepairToAgent(
+  admin: Admin,
+  input: { repairJobId: string; feedback: string },
+): Promise<{ ok: boolean; reason?: string; signature?: string }> {
+  try {
+    // Pull the repair job's context (its signature/source/title live in instructions; spec_slug IS the signature).
+    const { data: job } = await admin.from("agent_jobs").select("spec_slug, instructions").eq("id", input.repairJobId).maybeSingle();
+    if (!job) return { ok: false, reason: "repair job gone" };
+    let parsed: { source?: string; signature?: string; title?: string } = {};
+    try {
+      parsed = job.instructions ? JSON.parse(job.instructions as string) : {};
+    } catch {
+      /* not JSON */
+    }
+    const signature = parsed.signature || (job.spec_slug as string);
+    const source = parsed.source || "director-bounce";
+    const title = parsed.title || signature;
+    // 1) Resolve the current (unsound) repair job — clears the live-dedupe so the re-enqueue isn't blocked.
+    await admin
+      .from("agent_jobs")
+      .update({ status: "completed", log_tail: `bounced by the director — authored fix was unsound; re-authoring with feedback: ${input.feedback}`.slice(-2000) })
+      .eq("id", input.repairJobId);
+    // 2) Re-enqueue a fresh repair for the SAME signature, carrying Ada's why-unsound feedback.
+    const r = await enqueueRepairJob(admin, { source, signature, title: `Re-fix (director bounce): ${title}`.slice(0, 300), directorFeedback: input.feedback });
+    return { ok: r.enqueued, reason: r.reason, signature };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : "threw" };
   }
 }
 

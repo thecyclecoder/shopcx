@@ -2578,6 +2578,21 @@ async function runPlatformDirectorJob(job: Job) {
       return;
     }
 
+    // BOUNCE (repair only) — the bug is real but the AUTHORED FIX is unsound. Send it BACK to the Repair agent
+    // with Ada's explanation to re-do its work, instead of escalating to the CEO (director-supervises-repair).
+    if (verdict === "bounce" && t.kind === "repair") {
+      const { bounceRepairToAgent } = await import("../src/lib/repair-agent");
+      const r = await bounceRepairToAgent(db, { repairJobId: t.id, feedback: reasoning || "the authored fix was unsound — re-author correctly" });
+      await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "repair_bounced", specSlug: t.spec_slug, reason: reasoning, metadata: { job_id: t.id, signature: t.spec_slug, re_enqueued: r.ok, autonomous: true } });
+      try {
+        const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+        await postDirectorMessage({ workspaceId: t.workspace_id, author: "platform", authorFunction: "platform", body: `🔁 Sent the ${t.spec_slug} fix back to the Repair agent — the bug's real but the authored fix was unsound:\n${reasoning.slice(0, 400)}`, kind: "update", metadata: { repair_bounced: true } });
+      } catch { /* board best-effort */ }
+      await update(job.id, { status: "completed", log_tail: `bounce → re-authoring ${t.spec_slug} (Repair agent), NOT escalated. ${r.ok ? "re-queued" : `re-queue: ${r.reason}`}`.slice(-2000) });
+      console.log(`${tag} bounce → ${t.spec_slug} sent back to Repair (re-queued=${r.ok})`);
+      return;
+    }
+
     // escalate — OR no recognizable verdict (fail safe: escalate, NEVER auto-approve on an ambiguous result).
     const reason = reasoning || (isError ? "investigation errored — escalating, not approving" : "could not confirm sound + within the leash");
     await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind, verdict: verdict || "(none)" } });
@@ -5849,7 +5864,12 @@ async function runRepairJob(job: Job) {
     const brief = await loadRepairBrief(instr);
     // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
-    const repairBrief = await appendAgentInstructions(db, job.workspace_id, "repair", repairPrompt(brief));
+    // Director BOUNCE: if Ada sent a prior fix back as unsound, lead with her explanation so this pass FIXES
+    // its work instead of repeating the mistake (director-supervises-repair). The re-fix must address her point.
+    const bounceNote = (instr as { director_feedback?: string | null }).director_feedback
+      ? `\n\n⚠️ YOUR DIRECTOR (Ada) REVIEWED YOUR PRIOR FIX FOR THIS SIGNATURE AND FOUND IT UNSOUND. Her explanation:\n${(instr as { director_feedback?: string }).director_feedback}\nRe-author a CORRECT fix that directly addresses her point — do NOT repeat the same mistake. If her finding means there is no real bug (she may have shown the premise is false), say so (monitor-false-positive / transient) instead of authoring a fix.`
+      : "";
+    const repairBrief = await appendAgentInstructions(db, job.workspace_id, "repair", repairPrompt(brief) + bounceNote);
     const { session, resultText, isError, raw, usage, model } = await runRepairClaude(repairBrief, null, REPO_DIR);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
