@@ -371,8 +371,19 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
 
   // Write the post-reconcile status + per-phase snapshot to the board mirror. spec-status-db-driven Phase 2:
   // zero markdown commits, zero deploys for status; the audit row records the auto-flip.
-  const status = deriveSpecStatus(raw);
-  const phaseStates = phaseStatesFromRaw(raw);
+  let phaseStates = phaseStatesFromRaw(raw);
+  // spec-status-db-driven Phase 4: the markdown no longer carries status emojis (Phase 3 stripped them), so a
+  // phase with no extractable code paths reads `planned` here even after it shipped. FORWARD-MERGE with the
+  // DB's current per-phase status so reconcile can only ever ADVANCE a phase, never regress a shipped one.
+  try {
+    const { getSpecCardStates, mergePhaseStates } = await import("@/lib/spec-card-state");
+    const states = await getSpecCardStates(workspaceId);
+    phaseStates = mergePhaseStates(phaseStates, states[slug]);
+  } catch {
+    /* DB read failed → fall back to the markdown-derived phaseStates (no regression protection this pass) */
+  }
+  const { rollupPhaseStatus } = await import("@/lib/spec-card-state");
+  const status: SpecStatus = phaseStates.length ? rollupPhaseStatus(phaseStates) : deriveSpecStatus(raw);
   const reason = flipped.length
     ? `auto-flip ${flipped.map((f) => `P${f.index + 1}`).join(", ")} → ✅ (code on main + build merged)`
     : "drift reconcile (no flip)";
@@ -444,7 +455,18 @@ export interface DriftSweepResult {
  * open `spec_drift` row (so we can resolve it once the owner flips). Skips archived specs. The
  * merged-build set is fetched once and shared across all per-spec reconciliations.
  */
-export async function runSpecDriftReconciler(workspaceId: string): Promise<DriftSweepResult> {
+export async function runSpecDriftReconciler(_workspaceId: string): Promise<DriftSweepResult> {
+  // spec-status-db-driven Phase 4: RETIRED. This reconciler existed to flip markdown phase emojis a merged
+  // build didn't (markdown WAS the source of truth). Status is now 100% DB-driven — the writers + merge hook
+  // (markSpecCardMergeShipped) keep spec_card_state correct, and the markdown no longer carries status emojis
+  // (Phase 3 stripped them). Running the old markdown reconciler now would be HARMFUL: it reads the emoji-less
+  // markdown as all-`planned`, re-processes every spec, and could regress a shipped DB status it can't
+  // re-confirm from code paths or spam spec_drift rows. No-op. (Dead body below kept for history.)
+  void _workspaceId;
+  return { specsScanned: 0, flipped: 0, surfaced: 0 };
+}
+
+async function runSpecDriftReconciler_RETIRED(workspaceId: string): Promise<DriftSweepResult> {
   if (!ghToken()) return { specsScanned: 0, flipped: 0, surfaced: 0 };
   const admin = createAdminClient();
 
