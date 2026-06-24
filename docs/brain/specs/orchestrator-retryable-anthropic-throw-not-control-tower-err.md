@@ -15,6 +15,6 @@ sonnet-orchestrator-v2.ts:1737 emits console.error('Orchestrator (opus) API erro
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
-- Re-trigger the originating condition (signature `vercel:caec228f9136b469`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- ✅ Re-trigger the originating condition (signature `vercel:caec228f9136b469`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
 
 > Authored by the box Repair Agent from Control Tower signature `vercel:caec228f9136b469` (verdict: monitor-false-positive). Commission the build from the Control Tower / Roadmap board.
