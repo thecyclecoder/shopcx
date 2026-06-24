@@ -1,5 +1,7 @@
 # Goal milestone builds must be dependency-ordered + director-sequenced ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] — hardens the goal→decompose→approve→build pipeline ([[../specs/goal-decomposition-engine|Pia]] + the director escort)
 **Found in use 2026-06-24:** Pia decomposed [[platform-department-scorecard]] + [[grow-surface-platform-agent-team]] at 03:32 with NO `Blocked-by:` deps on the milestone specs. On approval, 5 milestone builds (platform-scorecard-surface/weekly/monthly, fleet-spend-governor, fleet-cost-metering) fanned out CONCURRENTLY at 03:45, out of order → 4 jammed in `needs_input`, fleet-cost-metering in `needs_approval` to the director (unapprovable — prerequisites don't exist). Two root causes: Pia emits no dependency DAG, and the approval path enqueues milestone builds directly instead of through the director's dependency-aware escort.
 
