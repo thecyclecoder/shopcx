@@ -79,18 +79,27 @@ export function buildAdaResolvedCard(a: AdaCardAction, decision: "approve" | "de
  */
 export const INBOX_ACTIONS = { approve: "inbox_approve", reject: "inbox_reject" } as const;
 
-/** One still-pending plain action the inbox card surfaces a row of Approve/Reject buttons for. */
+/** One plain action the inbox card surfaces. Pending → Approve/Reject buttons; approved/declined →
+ * a context line in place of the buttons so the same `chat.update` can resolve one action in a
+ * multi-action card without removing the still-pending rows (Phase 2 — per-action resolution). */
 export interface InboxCardAction {
   id: string;
   summary: string;
+  status?: "pending" | "approved" | "declined";
 }
 
 /**
  * Build the routed-inbox approval card (ada-slack-routed-approvals Phase 1). Title, the agent's
- * investigation body (same content the web inbox shows inline), and ONE row of Approve/Reject buttons
- * per still-pending plain action. Caller passes the `notificationId` (the freshly inserted
- * `dashboard_notifications.id`) so each button's `value` JSON carries `{ notificationId, actionId }`
- * — enough for the interactions route to look up the row + call `approveRoadmapAction` (Phase 2).
+ * investigation body (same content the web inbox shows inline), and ONE row per action — either
+ * Approve/Reject buttons (`status='pending'`, the default) or a resolved context label
+ * ("✅ Approved — applying…" / "✕ Declined") when the action's already been decided. Caller
+ * passes the `notificationId` (the freshly inserted `dashboard_notifications.id`) so each button's
+ * `value` JSON carries `{ notificationId, actionId }` — enough for the interactions route to look
+ * up the row + call `approveRoadmapAction` (Phase 2).
+ *
+ * Phase 2 re-uses this builder to rebuild the card from the updated job state on a button tap,
+ * so a multi-action bundle keeps the still-pending rows tappable while the just-tapped row flips
+ * to its resolved label in place (chat.update keyed on `metadata.slack_message_ts`).
  */
 export function buildInboxApprovalCard(opts: {
   notificationId: string;
@@ -107,15 +116,27 @@ export function buildInboxApprovalCard(opts: {
     blocks.push({ type: "section", text: { type: "mrkdwn", text: body.slice(0, 2900) } });
   }
   for (const a of actions) {
-    const value = JSON.stringify({ notificationId, actionId: a.id });
-    blocks.push({
-      type: "actions",
-      block_id: `inbox_${a.id}`.slice(0, 255),
-      elements: [
-        { type: "button", style: "primary", text: { type: "plain_text", text: "Approve" }, action_id: INBOX_ACTIONS.approve, value },
-        { type: "button", style: "danger", text: { type: "plain_text", text: "Reject" }, action_id: INBOX_ACTIONS.reject, value },
-      ],
-    });
+    const status = a.status ?? "pending";
+    const blockId = `inbox_${a.id}`.slice(0, 255);
+    if (status === "pending") {
+      const value = JSON.stringify({ notificationId, actionId: a.id });
+      blocks.push({
+        type: "actions",
+        block_id: blockId,
+        elements: [
+          { type: "button", style: "primary", text: { type: "plain_text", text: "Approve" }, action_id: INBOX_ACTIONS.approve, value },
+          { type: "button", style: "danger", text: { type: "plain_text", text: "Reject" }, action_id: INBOX_ACTIONS.reject, value },
+        ],
+      });
+    } else {
+      const tail = status === "approved" ? "✅ Approved — applying…" : "✕ Declined";
+      const prefix = a.summary ? `${a.summary} — ` : "";
+      blocks.push({
+        type: "context",
+        block_id: blockId,
+        elements: [{ type: "mrkdwn", text: `${prefix}${tail}` }],
+      });
+    }
   }
   return { blocks, text: `Approval needed: ${title}` };
 }

@@ -322,11 +322,11 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
 
   const { data: notifData } = await admin
     .from("dashboard_notifications")
-    .select("id, metadata")
+    .select("id, workspace_id, metadata")
     .eq("type", APPROVAL_REQUEST_TYPE)
     .eq("dismissed", false)
     .limit(2000);
-  const notifs = (notifData ?? []) as { id: string; metadata: Record<string, unknown> | null }[];
+  const notifs = (notifData ?? []) as { id: string; workspace_id: string; metadata: Record<string, unknown> | null }[];
   const emittedJobIds = new Set<string>();
   for (const n of notifs) {
     const jid = n.metadata?.["agent_job_id"];
@@ -358,9 +358,55 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
     const jid = n.metadata?.["agent_job_id"];
     if (typeof jid === "string" && !openJobIds.has(jid)) {
       const { error } = await admin.from("dashboard_notifications").update({ dismissed: true }).eq("id", n.id);
-      if (!error) dismissed++;
+      if (!error) {
+        dismissed++;
+        // ada-slack-routed-approvals Phase 2: when the dismissed notif had a Slack card posted in
+        // #cto-ada, post a one-line outcome confirmation as a thread reply on that card so the
+        // founder gets a closing signal in the same surface where they tapped (or, if the decision
+        // came from the web inbox, where the card still sits). Best-effort.
+        await postSlackDismissConfirmation(admin, n, jid, slackAdaCache);
+      }
     }
   }
 
   return { created, dismissed };
+}
+
+/**
+ * Post the closing thread reply on a Slack #cto-ada inbox card whose underlying job has left
+ * `needs_approval` (ada-slack-routed-approvals Phase 2). Reads the job's pending_actions to decide
+ * the outcome — "Approved — resuming the build." (with PR # when one already exists) vs
+ * "Declined — build returned to me." (any action declined ⇒ ALL-OR-NOTHING decline). No-op when
+ * the notif never carried a Slack card (`slack_message_ts` absent — the non-CEO routed case, or a
+ * workspace without `slack_ada_channel_id`). Best-effort: a Slack failure must never block the
+ * dismiss sweep, since the notification is already dismissed by the time we post here.
+ */
+async function postSlackDismissConfirmation(
+  admin: Admin,
+  notif: { workspace_id: string; metadata: Record<string, unknown> | null },
+  jobId: string,
+  cache: AdaSurfaceCache,
+): Promise<void> {
+  const meta = notif.metadata || {};
+  const slackTs = typeof meta["slack_message_ts"] === "string" ? (meta["slack_message_ts"] as string) : null;
+  if (!slackTs) return;
+
+  const { data: job } = await admin
+    .from("agent_jobs")
+    .select("pending_actions, pr_number")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (!job) return;
+  const actions = (job.pending_actions as PendingActionLike[] | null) ?? [];
+  const declined = actions.some((a) => a.status === "declined");
+  const prNumber = typeof job.pr_number === "number" ? job.pr_number : null;
+  const text = declined
+    ? "✕ Declined — build returned to me."
+    : prNumber
+      ? `✅ Approved — PR #${prNumber} resumed.`
+      : "✅ Approved — resuming the build.";
+
+  const surface = await loadAdaSurface(admin, notif.workspace_id, cache);
+  if (!surface.channelId || !surface.token) return;
+  await postAsAda(surface.token, surface.channelId, [], text, { thread_ts: slackTs });
 }
