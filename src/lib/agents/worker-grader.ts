@@ -53,6 +53,15 @@ export const ROLLUP_WINDOW = 10;
  *  (one session per batch, not one per job). */
 export const BATCH_MIN = 5;
 export const BATCH_FALLBACK_MS = 3 * 60 * 60 * 1000;
+/**
+ * The most jobs ONE grading session will grade — bounds the LLM cost + the session length so a chatty
+ * worker (fold / pr-resolve conclude many routine jobs) can't jam a grading run. When more than this are
+ * ungraded, the batch PRIORITIZES failures (always graded — a worker mistake to learn from), then fills
+ * the rest with a round-robin-by-worker random sample of the successes (so every worker gets spot-checked,
+ * not just the noisiest). The un-selected jobs stay ungraded and ride a later beat. */
+export const GRADE_BATCH_CAP = 12;
+/** agent_jobs statuses that mean the worker action FAILED — always graded (the high-signal mistakes). */
+const FAILED_JOB_STATUSES = new Set(["failed", "needs_attention"]);
 /** Coaching trigger: rollup below this, OR a drop larger than DROP_THRESHOLD vs the prior window. */
 export const COACH_LOW_ROLLUP = 7;
 export const DROP_THRESHOLD = 1.5;
@@ -302,8 +311,15 @@ export async function gradeWorkerAction(opts: { agentJobId: string; admin?: Admi
 
 // ── the batched grading sweep (the box cadence calls this — Phase 2) ─────────────────────────────────
 
-/** The concluded, ungraded worker actions for a workspace (oldest first) — the batch the cadence grades. */
-async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 1000): Promise<Array<{ id: string; created_at: string }>> {
+interface UngradedJob {
+  id: string;
+  created_at: string;
+  kind: string;
+  status: string;
+}
+
+/** The concluded, ungraded worker actions for a workspace (oldest first) — the pool the cadence grades. */
+async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 1000): Promise<UngradedJob[]> {
   const { data: gradeRows } = await admin
     .from("worker_action_grades")
     .select("agent_job_id")
@@ -313,13 +329,52 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
 
   const { data: jobs } = await admin
     .from("agent_jobs")
-    .select("id, created_at")
+    .select("id, created_at, kind, status")
     .eq("workspace_id", workspaceId)
     .in("kind", GRADEABLE_KINDS)
     .in("status", Array.from(TERMINAL_JOB_STATUSES))
     .order("created_at", { ascending: true })
     .limit(limit);
-  return ((jobs as Array<{ id: string; created_at: string }>) || []).filter((j) => !gradedJobs.has(j.id));
+  return ((jobs as UngradedJob[]) || []).filter((j) => !gradedJobs.has(j.id));
+}
+
+/**
+ * Pick which ≤cap jobs this session grades from the ungraded pool (the spec's bounded cadence): EVERY
+ * failure first (failed/needs_attention — the high-signal mistakes, newest first), then fill the rest with
+ * a round-robin-by-worker random sample of the successes — so a noisy worker (fold/pr-resolve) can't crowd
+ * out a spot-check of a quieter one. Un-selected jobs stay ungraded and ride a later beat. Math.random is
+ * fine here (this is library code, not a workflow script).
+ */
+function selectGradingBatch(pool: UngradedJob[], cap: number): UngradedJob[] {
+  const failures = pool.filter((j) => FAILED_JOB_STATUSES.has(j.status));
+  const successes = pool.filter((j) => !FAILED_JOB_STATUSES.has(j.status));
+  // Failures newest-first (a recent regression matters most), capped.
+  failures.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const chosen = failures.slice(0, cap);
+  let room = cap - chosen.length;
+  if (room <= 0) return chosen;
+
+  // Group the remaining slots across workers: shuffle each kind's successes, then round-robin one per kind.
+  const byKind = new Map<string, UngradedJob[]>();
+  for (const j of successes) {
+    const list = byKind.get(j.kind) ?? [];
+    list.push(j);
+    byKind.set(j.kind, list);
+  }
+  for (const list of byKind.values()) list.sort(() => Math.random() - 0.5);
+  const queues = Array.from(byKind.values());
+  let progressed = true;
+  while (room > 0 && progressed) {
+    progressed = false;
+    for (const q of queues) {
+      if (!q.length) continue;
+      chosen.push(q.shift() as UngradedJob);
+      room--;
+      progressed = true;
+      if (room <= 0) break;
+    }
+  }
+  return chosen;
 }
 
 /**
@@ -337,7 +392,9 @@ export async function workerGradingBatchReady(
     const ungraded = await ungradedConcludedJobs(admin, workspaceId);
     if (!ungraded.length) return { ready: false, ungraded: 0 };
     const oldestAgeMs = now - new Date(ungraded[0].created_at).getTime();
-    const ready = ungraded.length >= BATCH_MIN || oldestAgeMs >= BATCH_FALLBACK_MS;
+    // A failure is high-signal (a worker mistake to coach on) → grade it promptly, don't wait for the batch.
+    const hasFailure = ungraded.some((j) => FAILED_JOB_STATUSES.has(j.status));
+    const ready = hasFailure || ungraded.length >= BATCH_MIN || oldestAgeMs >= BATCH_FALLBACK_MS;
     return { ready, ungraded: ungraded.length };
   } catch (e) {
     console.warn(`[worker-grader] batch-ready check failed ws=${workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
@@ -346,13 +403,15 @@ export async function workerGradingBatchReady(
 }
 
 /**
- * The batched grading pass: grade every recently-CONCLUDED, ungraded worker action across the
- * rubric-backed kinds, in one session. Best-effort + idempotent (an already-graded job is skipped;
+ * The batched grading pass: grade a BOUNDED slice (≤ `cap`, default GRADE_BATCH_CAP) of the recently-
+ * CONCLUDED, ungraded worker actions across the rubric-backed kinds, in one session — failures first, then
+ * a fair round-robin sample of the successes (selectGradingBatch), so a chatty worker can't jam the run and
+ * un-selected jobs ride a later beat. Best-effort + idempotent (an already-graded job is skipped;
  * gradeWorkerAction upserts if re-run, and never re-writes a human grade). A no-op while no worker has
  * concluded an ungraded action. Returns the distinct worker kinds it newly graded so the caller can run
  * detectGradeDropCoaching on exactly those. Mirror director-grader.gradeConcludedDirectorCalls.
  */
-export async function gradeConcludedWorkerActions(opts: { workspaceId: string; admin?: Admin; limit?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
+export async function gradeConcludedWorkerActions(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
   const admin = opts.admin ?? createAdminClient();
   let considered = 0;
   let graded = 0;
@@ -360,8 +419,11 @@ export async function gradeConcludedWorkerActions(opts: { workspaceId: string; a
   if (!ANTHROPIC_API_KEY) return { considered, graded, gradedKinds: [] };
 
   try {
-    const ungraded = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
-    for (const j of ungraded) {
+    const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
+    // Bounded session: ≤ GRADE_BATCH_CAP jobs, failures first then a fair sample (keeps a chatty worker
+    // from jamming the run); the rest stay ungraded for a later beat.
+    const batch = selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP);
+    for (const j of batch) {
       considered++;
       const r = await gradeWorkerAction({ agentJobId: j.id, admin });
       if (r.ok && !r.idempotent_update) {
