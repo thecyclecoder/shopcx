@@ -1723,6 +1723,17 @@ async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: 
   return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
 }
 
+// brain-platform-live-autonomous-status (Phase 2 — the recurrence guard): wrap EVERY read-only director
+// investigation prompt with (a) the AUTHORITATIVE live-state from function_autonomy (the same DB row the lanes
+// guard on — so a decision can never again be premised on a stale 'not live' reading from brain prose) and
+// (b) the CEO's active coaching (P7). One seam for all four lanes (approval / groom / init / repair-dismissal).
+async function directorDecisionPrompt(workspaceId: string, basePrompt: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const di = await import("../src/lib/agents/director-instructions");
+  const liveState = await lib.directorLiveStateFact(db, "platform");
+  return di.appendDirectorInstructions(db, workspaceId, "platform", `${basePrompt}\n\n${liveState}`);
+}
+
 // platform-director-agent (Phase 4): the standing director pass the daily platform-director-cron enqueues
 // (a `platform-director` job with NO target_job_id). It runs the proactive, non-approval director work on a
 // reliable beat — escort each approved goal it owns + post the daily Control-Tower watch update to the board
@@ -1829,9 +1840,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   let escalated = 0;
   for (const c of candidates) {
     try {
-      // P7: inject the CEO's coaching into her grooming decisions too (e.g. "continue these spec types").
-      const diGroom = await import("../src/lib/agents/director-instructions");
-      const groomPrompt = await diGroom.appendDirectorInstructions(db, job.workspace_id, "platform", lib.groomInvestigationPrompt(c));
+      // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
+      // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
+      const groomPrompt = await directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c));
       const { resultText } = await runDirectorClaude(groomPrompt, null, REPO_DIR);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
@@ -2005,9 +2016,9 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
   let escalated = 0;
   for (const c of candidates) {
     try {
-      // P7: inject the CEO's coaching into the soundness decision too (same as grooming/approval).
-      const di = await import("../src/lib/agents/director-instructions");
-      const investPrompt = await di.appendDirectorInstructions(db, job.workspace_id, "platform", lib.initInvestigationPrompt(c));
+      // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
+      // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
+      const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
       const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR);
       const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
@@ -2118,9 +2129,9 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
   let kept = 0;
   for (const c of candidates) {
     try {
-      // P7: inject the CEO's coaching into her supervision decision too (same as grooming/initiation/approval).
-      const di = await import("../src/lib/agents/director-instructions");
-      const investPrompt = await di.appendDirectorInstructions(db, job.workspace_id, "platform", lib.repairDismissalInvestigationPrompt(c));
+      // Phase 2 live-state + P7 coaching: her supervision decision carries the authoritative function_autonomy
+      // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/initiation/approval).
+      const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.repairDismissalInvestigationPrompt(c));
       const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR);
       const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
@@ -2262,10 +2273,9 @@ async function runPlatformDirectorJob(job: Job) {
   console.log(`${tag} investigating ${t.kind} (${bundleLabel}) for target ${targetId.slice(0, 8)}`);
   try {
     const brief = lib.buildDirectorBrief(t, leashActions);
-    // P7: inject the CEO's coaching (director_instructions) into her decision prompt — so a coached rule
-    // ("auto-approve these going forward") actually steers this call.
-    const di = await import("../src/lib/agents/director-instructions");
-    const investPrompt = await di.appendDirectorInstructions(db, t.workspace_id, "platform", lib.directorInvestigationPrompt(brief));
+    // Phase 2 live-state + P7 coaching: she approves on the authoritative function_autonomy flag (never stale
+    // brain prose), and a coached rule ("auto-approve these going forward") still steers this call.
+    const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief));
     const { session, resultText, isError } = await runDirectorClaude(investPrompt, null, REPO_DIR);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);

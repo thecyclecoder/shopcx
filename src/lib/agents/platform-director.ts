@@ -141,6 +141,52 @@ export function platformDrivesSpec(owner: string | null | undefined, chart: OrgC
   return specDriver(owner, chart, autonomy) === PLATFORM;
 }
 
+/**
+ * The director's AUTHORITATIVE live-state, rendered as a prompt block — sourced from `public.function_autonomy`
+ * (the SAME DB row the lanes' runtime guards gate on), NOT brain prose (brain-platform-live-autonomous-status
+ * Phase 2 — the recurrence guard). Every read-only `claude -p` investigation (approval / groom / init /
+ * repair-dismissal) carries this so a decision is premised on the LIVE flag, never on a stale 'not yet live /
+ * dormant / inert' line that a brain page or spec may still narrate. Includes the dated provenance
+ * (`updated_at` / `updated_by`) so the fact is self-evidently DB-keyed. Best-effort + fail-safe: a missing row
+ * or read error renders 'UNKNOWN — treat as NOT live+autonomous'.
+ */
+export async function directorLiveStateFact(admin: Admin, directorFunction: string = PLATFORM): Promise<string> {
+  let live = false;
+  let autonomous = false;
+  let updatedAt: string | null = null;
+  let updatedBy: string | null = null;
+  let read = false;
+  try {
+    const { data, error } = await admin
+      .from("function_autonomy")
+      .select("live, autonomous, updated_at, updated_by")
+      .eq("function_slug", directorFunction)
+      .maybeSingle();
+    if (!error && data) {
+      live = !!data.live;
+      autonomous = !!data.autonomous;
+      updatedAt = (data.updated_at as string | null) ?? null;
+      updatedBy = (data.updated_by as string | null) ?? null;
+      read = true;
+    }
+  } catch {
+    // best-effort — fall through to the fail-safe 'unknown' state below.
+  }
+  const provenance = updatedAt ? ` (set ${updatedAt}${updatedBy ? ` by ${updatedBy}` : ""})` : "";
+  const state = !read
+    ? "UNKNOWN — could not read function_autonomy; treat yourself as NOT live+autonomous (fail-safe)"
+    : live && autonomous
+      ? `LIVE + AUTONOMOUS${provenance}`
+      : `NOT live+autonomous (live=${live}, autonomous=${autonomous})${provenance} — dormant`;
+  return [
+    "## Your authoritative live-state (from function_autonomy — the runtime guard, NOT brain prose)",
+    `The ${directorFunction} director is ${state}.`,
+    "This DB row is the SINGLE source of truth for whether you are running autonomously. Decide on THIS fact —",
+    "do NOT infer your activation state from any brain page or spec prose (which may lag and say 'dormant',",
+    "'not yet live', or 'inert'); if such prose conflicts with this line, this line wins.",
+  ].join("\n");
+}
+
 /** One in-leash pending action the director may consider — its id + the leash class it falls into. */
 export interface LeashAction {
   actionId: string;
