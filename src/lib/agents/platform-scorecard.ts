@@ -460,6 +460,75 @@ const escalations: MetricDef = {
 };
 
 /**
+ * regressions — the day's regression flow split D detected · F fixed · R reconciled from backlog · E
+ * escalated, all from existing director_activity rows (regression-backlog-reconciliation-scorecard Phase 1).
+ * The headline `value` is the sum so the tile/sparkline track regression activity; `detail` carries each
+ * leg so the board-watch line + tile sub-text can render the breakdown without a second read. Counts only
+ * platform-attributed rows (the regression worker / Platform director own this surface), mirroring the
+ * escalations metric's "real-slug guard". Escalated rows are filtered to regression context (signature
+ * starts with `regression:`, or metadata.kind/escalation_kind names regression / loop_guard) so a
+ * stranded loop-guard escalation reads as a regression escalation rather than a generic escalated row.
+ */
+const REGRESSION_ACTION_KINDS = ["detected_regression", "authored_fix", "reconciled_regression", "escalated"];
+const regressions: MetricDef = {
+  key: "regressions",
+  unit: "count",
+  compute: async (ctx) => {
+    const { admin, workspaceId, knownFunctions, curr, prev } = ctx;
+    if (!knownFunctions.has(PLATFORM_FUNCTION)) {
+      return {
+        value: 0,
+        priorValue: null,
+        detail: { detected: 0, fixed: 0, reconciled: 0, escalated: 0, note: "platform slug not found" },
+      };
+    }
+    const countsFor = async (w: MetricWindow["curr"]): Promise<{
+      total: number;
+      detected: number;
+      fixed: number;
+      reconciled: number;
+      escalated: number;
+    }> => {
+      const { data } = await admin
+        .from("director_activity")
+        .select("action_kind, metadata")
+        .eq("workspace_id", workspaceId)
+        .eq("director_function", PLATFORM_FUNCTION)
+        .in("action_kind", REGRESSION_ACTION_KINDS)
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      let detected = 0;
+      let fixed = 0;
+      let reconciled = 0;
+      let escalated = 0;
+      for (const r of (data ?? []) as Array<{ action_kind: string; metadata: Record<string, unknown> | null }>) {
+        if (r.action_kind === "detected_regression") detected++;
+        else if (r.action_kind === "authored_fix") fixed++;
+        else if (r.action_kind === "reconciled_regression") reconciled++;
+        else if (r.action_kind === "escalated") {
+          // Filter the open `escalated` vocabulary to a regression context: the regression-agent loop-guard
+          // (metadata.signature starts `regression:`) and the standing pass's stuck-fix escalation
+          // (metadata.kind='regression' / escalation_kind='loop_guard'). Other escalations belong elsewhere.
+          const m = r.metadata ?? {};
+          const sig = typeof m["signature"] === "string" ? (m["signature"] as string) : "";
+          const kind = typeof m["kind"] === "string" ? (m["kind"] as string) : "";
+          const escalationKind = typeof m["escalation_kind"] === "string" ? (m["escalation_kind"] as string) : "";
+          if (sig.startsWith("regression:") || kind === "regression" || escalationKind === "loop_guard") escalated++;
+        }
+      }
+      return { total: detected + fixed + reconciled + escalated, detected, fixed, reconciled, escalated };
+    };
+    const cur = await countsFor(curr);
+    const pri = await countsFor(prev);
+    return {
+      value: cur.total,
+      priorValue: pri.total,
+      detail: { detected: cur.detected, fixed: cur.fixed, reconciled: cur.reconciled, escalated: cur.escalated },
+    };
+  },
+};
+
+/**
  * needs_attention — open parked work the director triages (needs-attention-triage-and-verdict-robustness
  * Phase 3): agent_jobs in status='needs_attention' EXCLUDING the kinds another lane already owns (build →
  * the build loop-guard; repair → the repair-dismissal lane). The count is the headline value; detail carries
@@ -721,6 +790,63 @@ const regressionsCaught: MetricDef = {
       value: cur.caught,
       priorValue: pri.caught,
       detail: { regression_jobs_concluded: cur.jobsConcluded, detected: cur.detected, dismissed: cur.dismissed, fix_authored: cur.fixAuthored },
+    };
+  },
+};
+
+/**
+ * regression_coverage_pct — the coverage half of regression health
+ * (regression-backlog-reconciliation-scorecard Phase 1): share of SHIPPED specs that received at least one
+ * spec-test run in the week, as a percentage. Numerator = distinct shipped spec_slugs with a spec_test_runs
+ * row in the trailing window; denominator = count of LIVE shipped specs (brain-roadmap getRoadmap() —
+ * archived/folded specs have left the live set, so they're already covered by the brain). detail carries the
+ * raw {verified, shipped} counts + the slugs still missing coverage this week (the names the standing
+ * re-verification sweep should pick up next pass).
+ */
+const regressionCoveragePct: MetricDef = {
+  key: "regression_coverage_pct",
+  unit: "pct",
+  compute: async (ctx) => {
+    const { admin, workspaceId, curr, prev } = ctx;
+
+    // The live shipped set — archived/folded specs are no longer "live" and aren't expected to be re-tested
+    // (the same definition `reconcileRegressionCoverage` uses for its sweep target).
+    const { specs } = await getRoadmap();
+    const shippedSlugs = new Set<string>();
+    for (const s of specs) if (s.status === "shipped") shippedSlugs.add(s.slug);
+    const shippedCount = shippedSlugs.size;
+
+    const pctFor = async (
+      w: MetricWindow["curr"],
+    ): Promise<{ pct: number; verified: number; missing: string[] }> => {
+      if (shippedCount === 0) return { pct: 0, verified: 0, missing: [] };
+      const { data } = await admin
+        .from("spec_test_runs")
+        .select("spec_slug")
+        .eq("workspace_id", workspaceId)
+        .gte("run_at", w.startIso)
+        .lte("run_at", w.endIso);
+      const verifiedSlugs = new Set<string>();
+      for (const r of (data ?? []) as Array<{ spec_slug: string | null }>) {
+        if (r.spec_slug && shippedSlugs.has(r.spec_slug)) verifiedSlugs.add(r.spec_slug);
+      }
+      const missing: string[] = [];
+      for (const s of shippedSlugs) if (!verifiedSlugs.has(s)) missing.push(s);
+      missing.sort();
+      return {
+        pct: round((verifiedSlugs.size / shippedCount) * 100, 2),
+        verified: verifiedSlugs.size,
+        missing,
+      };
+    };
+
+    const cur = await pctFor(curr);
+    const pri = await pctFor(prev);
+    return {
+      value: cur.pct,
+      // prior null when there are no live shipped specs (nothing to verify yet)
+      priorValue: shippedCount > 0 ? pri.pct : null,
+      detail: { verified: cur.verified, shipped: shippedCount, missing: cur.missing.slice(0, 50) },
     };
   },
 };
@@ -1006,6 +1132,7 @@ const DAILY_METRICS: MetricDef[] = [
   autonomyRatio,
   escalations,
   needsAttention,
+  regressions,
 ];
 
 /**
@@ -1019,6 +1146,7 @@ const WEEKLY_METRICS: MetricDef[] = [
   approvalsUntouchedPct,
   workerGradeRollup,
   regressionsCaught,
+  regressionCoveragePct,
 ];
 
 /**

@@ -40,6 +40,11 @@ export const DAILY_DISPLAY: MetricDisplayDef[] = [
   { key: "autonomy_ratio", label: "Autonomy", polarity: "up_is_good", cadence: "daily" },
   { key: "escalations", label: "Escalations to CEO", polarity: "down_is_good", cadence: "daily" },
   { key: "needs_attention", label: "Needs attention", polarity: "down_is_good", cadence: "daily" },
+  // regression-backlog-reconciliation-scorecard Phase 1 — the day's regression flow (D detected · F fixed ·
+  // R reconciled · E escalated). Headline value = total caught; the breakdown lives in snapshot.detail and
+  // is what the board-watch line renders. up_is_good — a higher count = more regressions caught, not more
+  // bugs (regressions detected/fixed/reconciled are all "the system caught it" beats "it sat silently").
+  { key: "regressions", label: "Regressions today", polarity: "up_is_good", cadence: "daily" },
 ];
 
 /** The WEEKLY throughput + quality set ([[platform-scorecard-weekly]] registry). */
@@ -50,6 +55,9 @@ export const WEEKLY_DISPLAY: MetricDisplayDef[] = [
   { key: "approvals_untouched_pct", label: "Approvals untouched", polarity: "up_is_good", cadence: "weekly" },
   { key: "worker_grade_rollup", label: "Worker grade", polarity: "up_is_good", cadence: "weekly" },
   { key: "regressions_caught", label: "Regressions caught", polarity: "up_is_good", cadence: "weekly" },
+  // regression-backlog-reconciliation-scorecard Phase 1 — the COVERAGE half: % of live shipped specs that
+  // got at least one spec-test run this week. up_is_good — more coverage = fewer silent ✅ specs.
+  { key: "regression_coverage_pct", label: "Re-verification coverage", polarity: "up_is_good", cadence: "weekly" },
 ];
 
 /** The MONTHLY leading curve ([[platform-scorecard-monthly]] registry). */
@@ -118,6 +126,8 @@ export interface ScorecardSnapshotLite {
   value: number;
   delta_pct: number | null;
   unit: string;
+  /** the engine's per-metric breakdown (e.g. regressions {detected, fixed, reconciled, escalated}). */
+  detail?: Record<string, unknown>;
 }
 
 const HEADLINE_KEYS: Array<{ key: string; cadence: Cadence; label: string }> = [
@@ -158,4 +168,45 @@ export function composeScorecardWatchLine(byCadence: Record<Cadence, ScorecardSn
   }
   if (!parts.length) return null;
   return `Scorecard: ${parts.join(" · ")}`;
+}
+
+/**
+ * Compose the dedicated regression line for the daily watch post + the EOD recap row
+ * ([[../specs/regression-backlog-reconciliation-scorecard]] Phase 1). Reads the snapshot store, never the
+ * raw director_activity rows (the "read from the scorecard" invariant from [[../libraries/meta__scorecards]]):
+ *   - the daily `regressions` snapshot's `detail.{detected, fixed, reconciled, escalated}`
+ *   - the weekly `regression_coverage_pct` snapshot's `value` (the trailing-week re-verification ratio)
+ *
+ * Example: "Regressions: 2 detected · 1 fixed · 0 reconciled · 0 escalated · 85% coverage"
+ *
+ * Returns null when there's nothing to show today (no daily activity AND no coverage value yet) — keeps
+ * the watch line tidy on a quiet day, same "no fabricated numbers" invariant as `composeScorecardWatchLine`.
+ */
+function readDetailCount(detail: Record<string, unknown> | undefined, key: string): number {
+  if (!detail) return 0;
+  const v = detail[key];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && Number.isFinite(Number(v))) return Number(v);
+  return 0;
+}
+
+export function composeRegressionWatchLine(byCadence: Record<Cadence, ScorecardSnapshotLite[]>): string | null {
+  const daily = (byCadence.daily ?? []).find((r) => r.metric_key === "regressions");
+  const coverage = (byCadence.weekly ?? []).find((r) => r.metric_key === "regression_coverage_pct");
+  const detected = readDetailCount(daily?.detail, "detected");
+  const fixed = readDetailCount(daily?.detail, "fixed");
+  const reconciled = readDetailCount(daily?.detail, "reconciled");
+  const escalated = readDetailCount(daily?.detail, "escalated");
+  const hasDailyActivity = detected + fixed + reconciled + escalated > 0 || (daily?.value ?? 0) > 0;
+  const hasCoverage = coverage != null && Number.isFinite(coverage.value);
+  if (!hasDailyActivity && !hasCoverage) return null;
+  const parts: string[] = [];
+  if (hasDailyActivity) {
+    parts.push(`${detected} detected`, `${fixed} fixed`, `${reconciled} reconciled`, `${escalated} escalated`);
+  }
+  if (hasCoverage) {
+    const arrow = trendArrow(coverage!.delta_pct);
+    parts.push(`${formatHeadlineValue(coverage!.value, coverage!.unit)} coverage${arrow ? ` ${arrow}` : ""}`);
+  }
+  return `Regressions: ${parts.join(" · ")}`;
 }

@@ -9,6 +9,7 @@ The owner-only **Platform Department Scorecard** surface — milestone (d) of th
 - **Three cadence sections — Daily pulse · Weekly throughput + quality · Monthly leading curve.** Each section is a grid of KPI tiles, one per metric in that cadence's display registry ([[../libraries/platform-scorecard-display]]). The registries mirror the engine's three per-cadence metric registries ([[../libraries/platform-scorecard]] DAILY / WEEKLY / MONTHLY).
 - **KPI tile** — label · current `value` (formatted by `unit`: count → integer; ratio/pct → `XX.X%`; hours → `X.Xh`) · **trend arrow** off `delta_pct` tinted by the per-metric polarity (e.g. ↓ on `human_touch_per_build` is **good**; ↓ on `build_success_rate` is **bad**) · a small **sparkline** rendered from the metric's `?metric=&cadence=` history. A tile with no snapshot yet renders muted **"no data yet"**, never a fabricated number (display-only proxy, [[../operational-rules]] § North star).
 - **Reserved Fleet-spend tile** (Cost / budget) — a cross-goal slot at the foot of the daily section, wired to light up when the [[../goals/grow-surface-platform-agent-team]] **cost governor**'s M4 spend metric lands in `platform_scorecard_snapshots`. Renders "no data yet · cost governor" until then; documented here so that build knows the slot exists.
+- **Regression tiles** ([[../specs/regression-backlog-reconciliation-scorecard]] Phase 1) — "Regressions today" sits in the daily section (`regressions` metric — headline `value` is the sum of `detected + fixed + reconciled + escalated`, `detail` carries each leg the board-watch line renders); "Re-verification coverage" sits in the weekly section (`regression_coverage_pct` — share of live shipped specs with a spec-test run in the trailing week, `detail.missing[]` is the queue the standing re-verification sweep should pick up next).
 
 ## Data source
 
@@ -39,6 +40,7 @@ Owner-only — both the page (client `role` guard) and the API (`workspace_membe
 ## See also
 
 - [[../specs/platform-scorecard-surface]] — this spec
+- [[../specs/regression-backlog-reconciliation-scorecard]] — the two regression tiles (daily `regressions` + weekly `regression_coverage_pct`) + the dedicated board-watch line
 - [[../specs/platform-scorecard-engine]] / [[../specs/platform-scorecard-weekly]] / [[../specs/platform-scorecard-monthly]] — the engines that fill the snapshot store
 - [[../tables/platform_scorecard_snapshots]] · [[../libraries/platform-scorecard]] · [[../libraries/platform-scorecard-display]]
 - [[../libraries/platform-director]] `postPlatformWatchUpdate` — the board-watch line consumer
