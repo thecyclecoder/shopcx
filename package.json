@@ -9,6 +9,7 @@
     "lint": "eslint",
     "brain:index": "node scripts/brain-index.mjs",
     "test:approval-router": "tsx --test src/lib/agents/approval-router.test.ts",
+    "test:goal-proposals": "tsx --test src/lib/agents/goal-proposals.test.ts",
     "test:migration-drift": "tsx --test src/lib/control-tower/migration-drift.test.ts"
   },
   "dependencies": {

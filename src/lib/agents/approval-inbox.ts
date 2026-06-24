@@ -72,6 +72,9 @@ const KIND_TO_FUNCTION: Record<string, string> = (() => {
   }
   if (!m["db_health"]) m["db_health"] = "platform";
   if (!m["coverage-register"]) m["coverage-register"] = "platform";
+  // `proposed-goal` (director-proposed-goals) is deliberately ABSENT — a goal NEVER routes to a director for
+  // greenlight, even a live+autonomous one (a director may propose its own goal but never greenlight any).
+  // Unmapped ⇒ ownerFunctionForKind returns null ⇒ resolveApprover falls through to the CEO. Do not add it.
   return m;
 })();
 
@@ -89,6 +92,7 @@ export function ownerFunctionForKind(kind: string): string | null {
 const SPEC_SLUG_KINDS = new Set(["build", "spec-test"]);
 export function approvalDeepLink(kind: string, specSlug: string | null, specMissing?: boolean | null): string {
   if (kind === "plan") return `/dashboard/roadmap/goals/${specSlug ?? ""}`;
+  if (kind === "proposed-goal") return `/dashboard/roadmap/goals/${specSlug ?? ""}`; // director-proposed-goals: greenlight surface
   if (kind === "migration-fix") return "/dashboard/migrations";
   if (kind === "storefront-optimizer") return "/dashboard/storefront/optimizer";
   if (SPEC_SLUG_KINDS.has(kind)) return specMissing || !specSlug ? "/dashboard/roadmap" : `/dashboard/roadmap/${specSlug}`;

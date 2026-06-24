@@ -133,6 +133,7 @@ const REGRESSION_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
+const MAX_PROPOSED_GOAL = Number(process.env.AGENT_TODO_MAX_PROPOSED_GOAL || 1);
 // One Platform/DevOps Director pass (platform-director-agent P1): read-only investigation of a
 // Platform-routed Approval Request (the cause + the proposed fix + the implicated spec/migration) →
 // a verdict (auto-approve within the leash, else escalate). Minutes — same ballpark as a repair/
@@ -221,7 +222,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -273,7 +274,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -827,7 +828,7 @@ async function update(id: string, patch: Record<string, unknown>) {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "proposed-goal"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -1601,6 +1602,94 @@ async function runCoverageRegisterJob(job: Job) {
   // No actionable owner decision — shouldn't normally be claimed. Park it.
   await update(job.id, { status: "needs_approval", log_tail: `awaiting owner decision for ${loopId}`.slice(-2000) });
   console.log(`${tag} no owner decision yet — parked as needs_approval`);
+}
+
+// director-proposed-goals (Phase 1): a director-proposed goal artifact + its CEO greenlight. A director
+// proposes a goal for its OWN function via proposeGoal (src/lib/agents/goal-proposals.ts) → a `proposed-goal`
+// agent_jobs row lands here. FRESH: commit docs/brain/goals/{slug}.md (Status: proposed — an inert artifact;
+// the escort skips it, Pia doesn't decompose it) + park needs_approval with ONE greenlight_goal action. That
+// request routes to the CEO (goals NEVER route to a director — proposed-goal is absent from KIND_TO_FUNCTION).
+// RESUME (the CEO decided): greenlight → flip Status: greenlit on main; decline → delete the inert artifact
+// (git history is the immutable archive). A director never greenlights any goal — the CEO is always the gate.
+async function runProposedGoalJob(job: Job) {
+  const tag = `[proposed-goal:${job.id.slice(0, 8)}]`;
+  let instr: import("../src/lib/agents/goal-proposals").GoalProposalInstructions | null = null;
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : null;
+  } catch {
+    /* not JSON */
+  }
+  if (!instr || !instr.slug || !instr.artifact || !instr.proposerFunction) {
+    await update(job.id, { status: "needs_attention", error: "proposed-goal job missing slug/artifact/proposer instructions", log_tail: "cannot process proposed-goal — malformed instructions" });
+    console.warn(`${tag} malformed instructions`);
+    return;
+  }
+  const goalPath = `docs/brain/goals/${instr.slug}.md`;
+  const action = (job.pending_actions || []).find((a) => a.type === "greenlight_goal");
+
+  // RESUME — the CEO decided on the greenlight action (approveRoadmapAction flipped it + resumed the job).
+  if (action && (action.status === "approved" || action.status === "declined")) {
+    if (action.status === "approved") {
+      const { setGoalStatusLine } = await import("../src/lib/agents/goal-proposals");
+      const get = await gh("GET", `/repos/${REPO}/contents/${goalPath}?ref=main`);
+      if (!get.ok) {
+        await update(job.id, { status: "needs_attention", error: `greenlit goal ${instr.slug} not found on main`, pending_actions: job.pending_actions, log_tail: `greenlight → ${goalPath} missing on main`.slice(-2000) });
+        console.warn(`${tag} greenlight → ${goalPath} missing on main`);
+        return;
+      }
+      const md = Buffer.from(String((get.json as { content?: string }).content || "").replace(/\s/g, ""), "base64").toString("utf8");
+      const put = await putFileMain(goalPath, setGoalStatusLine(md, "greenlit"), `goal: greenlight ${instr.slug} (CEO-approved)`);
+      action.status = put.ok ? "done" : "failed";
+      action.result = put.ok ? `greenlit ${instr.slug}` : "failed to flip Status to greenlit";
+      await update(job.id, { status: put.ok ? "completed" : "needs_attention", error: put.ok ? null : "greenlight commit failed", pending_actions: job.pending_actions, log_tail: `CEO greenlight → ${action.result}`.slice(-2000) });
+      console.log(`${tag} CEO greenlight → ${action.result}`);
+    } else {
+      // Decline → archive: delete the inert proposed artifact (it was never greenlit). git history keeps it.
+      const get = await gh("GET", `/repos/${REPO}/contents/${goalPath}?ref=main`);
+      if (get.ok) {
+        const sha = (get.json as { sha?: string }).sha;
+        await gh("DELETE", `/repos/${REPO}/contents/${goalPath}`, { message: `goal: decline + archive ${instr.slug} (CEO declined)`, sha, branch: "main" });
+      }
+      action.status = "done";
+      action.result = "declined by CEO — proposed goal archived";
+      await update(job.id, { status: "completed", error: "declined by owner", pending_actions: job.pending_actions, log_tail: `CEO decline → archived ${goalPath}`.slice(-2000) });
+      console.log(`${tag} CEO decline → archived ${instr.slug}`);
+    }
+    return;
+  }
+
+  // FRESH — commit the inert proposed artifact, then park needs_approval (the reconciler routes it to the CEO).
+  // Never clobber an existing goal of the same slug.
+  const exists = await gh("GET", `/repos/${REPO}/contents/${goalPath}?ref=main`);
+  if (exists.ok) {
+    await update(job.id, { status: "needs_attention", error: `goal ${instr.slug} already exists — refusing to overwrite`, log_tail: `propose → ${goalPath} already on main; not clobbering`.slice(-2000) });
+    console.warn(`${tag} ${goalPath} already exists — refusing to overwrite`);
+    return;
+  }
+  const put = await putFileMain(goalPath, instr.artifact, `goal: propose ${instr.slug} (by ${instr.proposerFunction})`);
+  if (!put.ok) {
+    await update(job.id, { status: "needs_attention", error: "proposed-goal commit failed", log_tail: `propose → failed to author ${goalPath}`.slice(-2000) });
+    console.warn(`${tag} propose → commit failed`);
+    return;
+  }
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  await recordDirectorActivity(db, {
+    workspaceId: job.workspace_id,
+    directorFunction: instr.proposerFunction,
+    actionKind: "proposed_goal",
+    specSlug: instr.slug,
+    reason: `Proposed a new goal for ${instr.ownerFunction}: "${instr.title}" — awaiting your greenlight.`,
+    metadata: { goal_slug: instr.slug, owner_function: instr.ownerFunction, proposer_function: instr.proposerFunction },
+  });
+  const greenlightAction: PendingAction = {
+    id: randomUUID(),
+    type: "greenlight_goal",
+    summary: `Greenlight the proposed goal "${instr.title}" (proposed by ${instr.proposerFunction})`,
+    preview: instr.outcome || undefined,
+    status: "pending",
+  };
+  await update(job.id, { status: "needs_approval", pending_actions: [greenlightAction], log_tail: `proposed goal ${instr.slug} → awaiting CEO greenlight`.slice(-2000) });
+  console.log(`${tag} proposed ${instr.slug} → needs_approval (routes to CEO)`);
 }
 
 // platform-director-agent (Phase 1): the box session that drives one Platform/DevOps Director decision.
@@ -6107,6 +6196,7 @@ async function runJob(job: Job) {
   if (job.kind === "db_health") return runDbHealthJob(job);
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
   if (job.kind === "platform-director") return runPlatformDirectorJob(job);
+  if (job.kind === "proposed-goal") return runProposedGoalJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -6485,7 +6575,8 @@ async function main() {
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director").length;
+  const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -6694,6 +6785,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed platform-director ${job.id.slice(0, 8)} → ${countPlatformDirector() + 1}/${MAX_PLATFORM_DIRECTOR} platform-director lane`);
+        launch(job);
+      }
+      // Fill the proposed-goal lane (director-proposed-goals): a director-proposed goal artifact + its CEO
+      // greenlight — FRESH commits the inert `Status: proposed` goal + parks needs_approval (routes to CEO);
+      // RESUME greenlight-flips Status: greenlit on main, or archive-deletes on decline. Concurrency-1, fast, no LLM.
+      while (countProposedGoal() < MAX_PROPOSED_GOAL) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["proposed-goal"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed proposed-goal ${job.id.slice(0, 8)} → ${countProposedGoal() + 1}/${MAX_PROPOSED_GOAL} proposed-goal lane`);
         launch(job);
       }
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —
