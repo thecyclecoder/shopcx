@@ -25,12 +25,16 @@ What landed: the explicit goal-state model ([[../libraries/brain-roadmap]] `Goal
 - **Decline.** On a different proposal, click **Decline** → expect `runProposedGoalJob` to **delete** `docs/brain/goals/{slug}.md` from `main` (git history retains it) and mark the job `completed`.
 - **Scope rail.** `proposeGoal({ proposerFunction:'platform', ownerFunction:'growth', … })` → expect `{ ok:false, error:/only for its OWN function/ }` (a director cannot author a goal for another function). No director path ever greenlights a goal — `proposed-goal` is unmapped from `KIND_TO_FUNCTION`, so it always routes to the CEO.
 
-## Phase 2 — wire greenlit goals into decomposition + escort ⏳
+## Phase 2 — wire greenlit goals into decomposition + escort ✅
 - On greenlight, the goal is eligible for [[../specs/goal-decomposition-engine|Pia]]'s `kind='plan'` human-gated pass (proposes a milestone→spec tree; still CEO-approved per leaf), and once its first specs land (`pct > 0`) the director's `escortApprovedGoals` carries it — the existing chain, unchanged.
 - Surface director-proposed goals on the [[../dashboard/agents|Agents hub]] / roadmap with their proposer + `proposed/greenlit` state, so you see what each director is proposing vs what you've activated.
 
-### Verification — Phase 2
-- A greenlit goal can be decomposed by Pia and, once its first approved spec builds, is escorted to completion by its owning director. The hub shows proposer + status.
+### Verification — Phase 2 (shipped)
+What landed: the **decomposition gate** + the **proposer/status surfaces**. The escort half was already wired in Phase 1 (`escortApprovedGoals` gates on `status === "greenlit"` via `isApprovedInProgress`) — left unchanged here.
+- **Decomposition gate.** `POST /api/roadmap/plan` (`src/app/api/roadmap/plan/route.ts`) now reads the goal's lifecycle state ([[../libraries/brain-roadmap]] `getGoal`) and rejects a `proposed` goal with `409 "This goal is still proposed — greenlight it before Pia can decompose it."` — so Pia only ever decomposes a goal the CEO has activated. A `greenlit`/`complete`/legacy goal plans as before.
+- **Roadmap surfaces.** A new server component `GoalStatusBadge` (`src/app/dashboard/roadmap/goals/GoalStatusBadge.tsx`) renders the `proposed｜greenlit｜complete` pill + the proposer (`functionLabel(proposedBy)`) on both the Goals board (`goals/page.tsx`) and the goal detail page (`goals/[slug]/page.tsx`). On the detail page `PlanButton` is handed the goal's `status`: for a `proposed` goal the Plan control is replaced by an "⏳ Proposed — awaiting your greenlight" note (it can't be planned until greenlit), matching the API gate.
+- **Agents hub surface.** `getOrgChart` (`src/lib/agents/org-chart.ts`, [[../libraries/agent-personas]]) now carries `status` + `proposedBy` + `proposedByLabel` on each `ceo.goals` entry; the CEO profile (`/dashboard/agents/ceo`) renders a proposed goal as "⏳ Proposed by {Director} · awaiting your greenlight" vs a greenlit goal's "Greenlit · N% complete".
+- `npx tsc --noEmit` clean.
 
 ## Phase 3 — the director's coaching/proposal seat gets a `goal` action type ✅
 - Give the director output (coaching chats + the standing surfaces) a first-class `goal` proposal action alongside `spec` — so a director hands the CEO a ready-to-greenlight goal card instead of plain-text drafts. Closes the asymmetry that today only `spec`/`coaching` exist.

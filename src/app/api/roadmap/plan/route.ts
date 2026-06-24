@@ -13,6 +13,7 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ACTIVE_STATUSES, getLatestPlanJob, type AgentJob } from "@/lib/agent-jobs";
+import { getGoal } from "@/lib/brain-roadmap";
 
 async function ctx() {
   const supabase = await createClient();
@@ -47,6 +48,17 @@ export async function POST(request: Request) {
   const goalSlug = body.goalSlug;
   if (typeof goalSlug !== "string" || !/^[a-z0-9-]+$/i.test(goalSlug)) {
     return NextResponse.json({ error: "bad goalSlug" }, { status: 400 });
+  }
+
+  // director-proposed-goals (Phase 2): only a GREENLIT goal is eligible for decomposition. A `proposed`
+  // goal a director authored is INERT until the CEO greenlights it (its own Approval Request) — Pia never
+  // decomposes a goal the CEO hasn't activated. (A missing goal doc is left to the box to surface.)
+  const goal = await getGoal(goalSlug);
+  if (goal && goal.card.status === "proposed") {
+    return NextResponse.json(
+      { error: "This goal is still proposed — greenlight it before Pia can decompose it." },
+      { status: 409 },
+    );
   }
 
   // One active plan per goal (mirrors one active build per spec).
