@@ -1,0 +1,1 @@
+- **Apply dismiss-park + short-circuit to the Amazing Creamer park** · verified 2026-06-24 · → [[lifecycles/product-intelligence]]
