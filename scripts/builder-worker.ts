@@ -1647,6 +1647,16 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing escort failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // director-escalations-must-surface-to-ceo (Phase 2) — backstop: re-emit any CEO notification that was
+    // swallowed before the Phase-1 fix (an `escalated` activity row with no live inbox item), so a recorded-
+    // but-invisible escalation is retroactively surfaced. Idempotent (re-emits once, then the dedupe holds).
+    const recon = await lib.reconcileSwallowedEscalations(db);
+    if (recon.reEmitted.length) notes.push(`reconciled → re-emitted ${recon.reEmitted.length} swallowed escalation(s): ${recon.reEmitted.join(", ")}`);
+  } catch (e) {
+    notes.push(`reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing escalation reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
     const fixes = await lib.escortFixSpecs(db);
     if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);

@@ -784,6 +784,43 @@ export async function escalateApprovalRequestToCeo(
  * once surfaced it pings once (survives a dismissed/read one). Carries NO `agent_job_id` so the reconciler —
  * which dismisses any request whose job left needs_approval — never reaps this standalone escalation.
  */
+/**
+ * The CEO-routed Approval Request notification payload for a director DIAGNOSIS escalation. Shared by the live
+ * escalate path (`escalateDiagnosisToCeo`) AND the Phase-2 reconcile backstop (`reconcileSwallowedEscalations`),
+ * so a re-emitted notification is BYTE-FOR-BYTE the shape the inbox already renders — no inline approve (it
+ * deep-links the CEO to the spec/goal to decide), `routed_to_function=CEO`, and the `dedupe_key` the dedupe holds on.
+ */
+function ceoEscalationNotification(args: {
+  workspaceId: string;
+  specSlug: string | null;
+  title: string;
+  diagnosis: string;
+  dedupeKey: string;
+  deepLink: string;
+  escalationKind: string;
+}) {
+  const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
+  return {
+    workspace_id: args.workspaceId,
+    type: APPROVAL_REQUEST_TYPE,
+    title: args.title.slice(0, 200),
+    body: note,
+    link: args.deepLink,
+    metadata: {
+      routed_to_function: CEO,
+      escalated_by_director: PLATFORM,
+      escalation_kind: args.escalationKind,
+      escalation_reason: args.diagnosis.slice(0, 2000),
+      dedupe_key: args.dedupeKey,
+      spec_slug: args.specSlug ?? null,
+      deep_link: args.deepLink,
+      approve_action_id: null,
+    },
+    read: false,
+    dismissed: false,
+  };
+}
+
 export async function escalateDiagnosisToCeo(
   admin: Admin,
   args: { workspaceId: string; specSlug: string | null; title: string; diagnosis: string; dedupeKey: string; deepLink: string; escalationKind: string; metadata?: Record<string, unknown> },
@@ -804,26 +841,7 @@ export async function escalateDiagnosisToCeo(
   // Notification FIRST, checked — a surface nobody can see is worse than none. If the insert fails (constraint/
   // RLS/shape), do NOT silently proceed: surface the error and do NOT write a phantom `escalated` activity row
   // (so the dedupe ledger never marks a never-surfaced escalation as done). The caller logs a hard warning.
-  const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
-  const { error: notifError } = await admin.from("dashboard_notifications").insert({
-    workspace_id: args.workspaceId,
-    type: APPROVAL_REQUEST_TYPE,
-    title: args.title.slice(0, 200),
-    body: note,
-    link: args.deepLink,
-    metadata: {
-      routed_to_function: CEO,
-      escalated_by_director: PLATFORM,
-      escalation_kind: args.escalationKind,
-      escalation_reason: args.diagnosis.slice(0, 2000),
-      dedupe_key: args.dedupeKey,
-      spec_slug: args.specSlug ?? null,
-      deep_link: args.deepLink,
-      approve_action_id: null,
-    },
-    read: false,
-    dismissed: false,
-  });
+  const { error: notifError } = await admin.from("dashboard_notifications").insert(ceoEscalationNotification(args));
   if (notifError) return { emitted: false, error: notifError };
 
   // Activity SECOND — only once the notification row actually landed. Now the audit ledger and the inbox agree.
@@ -836,6 +854,122 @@ export async function escalateDiagnosisToCeo(
     metadata: { ...(args.metadata ?? {}), escalation_kind: args.escalationKind, dedupe_key: args.dedupeKey, autonomous: true },
   });
   return { emitted: true };
+}
+
+// ── Phase 2 (director-escalations-must-surface-to-ceo) — reconcile the already-swallowed escalations ─────
+// Phase 1 stopped NEW escalations from being logged-but-invisible. But escalations swallowed BEFORE the fix
+// (the agent-outage-resilience P3 `groom_unsure` at 02:03, and any sibling) already sit in the ledger as an
+// `escalated` director_activity row with NO matching CEO notification — recorded, yet invisible, silently
+// stranding the decision. This standing backstop in the director pass finds those orphans and re-emits the
+// missing CEO notification ONCE, retroactively surfacing them so the CEO can finally act.
+
+/** A re-emit the backstop performed: the escalation's dedupe key + the spec it stranded (for the pass log). */
+export interface EscalationReconcileResult {
+  /** dedupe keys whose missing CEO notification this pass re-emitted. */
+  reEmitted: string[];
+  /** distinct `escalated` activity dedupe keys checked against the live inbox. */
+  checked: number;
+}
+
+/** The CEO's deep-link target for a logged escalation, reconstructed from the activity row (no link stored). */
+function reconcileDeepLink(specSlug: string | null, meta: Record<string, unknown>): string {
+  if (specSlug) return `/dashboard/roadmap/${specSlug}`;
+  const goalSlug = meta["goal_slug"];
+  if (typeof goalSlug === "string" && goalSlug) return `/dashboard/roadmap/goals/${goalSlug}`;
+  return "/dashboard/roadmap";
+}
+
+/** A human title for a reconciled escalation, reconstructed per escalation_kind (the original wasn't stored). */
+function reconcileTitle(escalationKind: string, specSlug: string | null, meta: Record<string, unknown>): string {
+  const target = specSlug ?? (typeof meta["goal_slug"] === "string" ? (meta["goal_slug"] as string) : "") ?? "";
+  switch (escalationKind) {
+    case "loop_guard":
+      return `Build stuck: ${target}`;
+    case "groom_unsure":
+      return `Grooming needs a call: ${target}`;
+    case "init-unsure":
+    case "initguard":
+      return `Initiation needs a call: ${target}`;
+    case "new_goal":
+      return `Greenlight needed: ${target}`;
+    default:
+      return target ? `Escalation needs your call: ${target}` : "Escalation needs your call";
+  }
+}
+
+/**
+ * The Phase-2 backstop. Find every `escalated` director_activity row (the escalation ledger) whose CEO
+ * notification is MISSING from the live inbox (matched by `dedupe_key`) and re-emit that notification ONCE,
+ * reusing the SAME shape the live path emits. Reconciles the NOTIFICATION ONLY — the `escalated` activity row
+ * already documents the reasoning, so we never write a second one (which would inflate the recap's escalated
+ * count). Idempotent: once re-emitted the dedupe_key is in the inbox, so the next pass (and the live escalate
+ * path) skip it. Best-effort and DORMANT until Platform is live+autonomous (like the escort + the enqueuer).
+ */
+export async function reconcileSwallowedEscalations(admin: Admin): Promise<EscalationReconcileResult> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return { reEmitted: [], checked: 0 }; // dormant until activation flips the flag
+
+  // The escalation ledger — every `escalated` row the director ever logged that carries a dedupe_key.
+  const { data: acts } = await admin
+    .from("director_activity")
+    .select("workspace_id, spec_slug, reason, metadata, created_at")
+    .eq("director_function", PLATFORM)
+    .eq("action_kind", "escalated")
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  const escalations = (acts ?? []).filter((a) => typeof (a.metadata as Record<string, unknown> | null)?.["dedupe_key"] === "string");
+  if (!escalations.length) return { reEmitted: [], checked: 0 };
+
+  // The CEO-routed escalation notifications that ACTUALLY EXIST, keyed by dedupe_key (survives a dismissed/read
+  // one — same "an actually-existing notification" rule Phase 1's dedupe uses). A logged escalation whose key is
+  // absent here is the swallowed bug.
+  const { data: notifs } = await admin
+    .from("dashboard_notifications")
+    .select("metadata")
+    .eq("type", APPROVAL_REQUEST_TYPE)
+    .limit(5000);
+  const surfaced = new Set<string>();
+  for (const n of notifs ?? []) {
+    const k = (n.metadata as Record<string, unknown> | null)?.["dedupe_key"];
+    if (typeof k === "string") surfaced.add(k);
+  }
+
+  // One re-emit per missing dedupe_key. Rows are newest-first, so the FIRST row for a key carries the freshest
+  // reasoning; `handled` collapses repeats so we never insert two notifications for the same escalation.
+  const reEmitted: string[] = [];
+  const handled = new Set<string>();
+  for (const a of escalations) {
+    const meta = (a.metadata as Record<string, unknown> | null) ?? {};
+    const dedupeKey = String(meta["dedupe_key"]);
+    if (handled.has(dedupeKey)) continue;
+    handled.add(dedupeKey);
+    if (surfaced.has(dedupeKey)) continue; // already in the inbox — nothing swallowed
+
+    const workspaceId = a.workspace_id as string;
+    const specSlug = (a.spec_slug as string | null) ?? null;
+    const escalationKind = String(meta["escalation_kind"] ?? "escalated");
+    const diagnosis = String(a.reason ?? "").slice(0, 4000);
+    const deepLink = reconcileDeepLink(specSlug, meta);
+
+    const { error } = await admin.from("dashboard_notifications").insert(
+      ceoEscalationNotification({
+        workspaceId,
+        specSlug,
+        title: reconcileTitle(escalationKind, specSlug, meta),
+        diagnosis,
+        dedupeKey,
+        deepLink,
+        escalationKind,
+      }),
+    );
+    if (error) {
+      console.error(`[platform-director] reconcile FAILED to re-emit swallowed escalation (${dedupeKey}): ${error.message}`);
+      continue;
+    }
+    surfaced.add(dedupeKey); // belt-and-suspenders: don't re-emit again within this same pass
+    reEmitted.push(dedupeKey);
+  }
+  return { reEmitted, checked: handled.size };
 }
 
 // ── Phase 4 — watch the platform + report to the board ────────────────────────────────────────────
