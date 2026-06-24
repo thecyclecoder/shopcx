@@ -7,7 +7,7 @@
 
 Remi optimizes 'review the regression in front of me.' The degenerate state is a real regression nobody re-tested, sitting silently in a shipped feature. The Director's job is to GUARANTEE coverage — every shipped spec gets re-verified on a cadence, and every regression reaches a terminal state — without the CEO chasing it. Supervise the detector; don't rebuild it.
 
-## Phase 1 — standing re-verification sweep (close the coverage gap) ⏳
+## Phase 1 — standing re-verification sweep (close the coverage gap) ✅
 - Add `reconcileRegressionCoverage(admin)` to the [[../libraries/platform-director]] standing pass (dormant until live+autonomous). Each pass: pick the SHIPPED, unarchived specs least-recently verified (oldest [[spec_test_runs]] first, capped per pass like the groom cap) and enqueue a Vera spec-test re-run for them — so a silent regression is caught even when nothing event-triggered a re-test. An `issues` result flows to Remi through the EXISTING `enqueueRegressionJob` (no new detector).
 - Bounded + idempotent: a spec re-verified within a freshness window (e.g. 7d) is skipped; a spec already queued for spec-test is not double-queued.
 - Brain: [[../libraries/platform-director]] · [[regression-agent]] (`enqueueRegressionJob`) · [[spec_test_runs]] · [[../specs/spec-test-deep-verification]].

@@ -37,7 +37,7 @@ The `spec-test` skill is contracted to emit **only** the result JSON as its fina
 
 - **Writes:** `scripts/builder-worker.ts` → `runSpecTestJob` (one insert per run).
 - **Reads:** `src/lib/spec-test-runs.ts` (`getLatestSpecTestRuns`) → the [[../dashboard/roadmap|Developer → Spec Tests]] page, the roadmap board card chip + Agent-tested stamp, and the spec detail `VerificationCard` per-bullet verdicts.
-- **Enqueued by:** the daily [[../inngest/spec-test-cron]] (one job per shipped-but-not-archived spec) + the on-demand **Test now** button (`POST /api/roadmap/spec-test`).
+- **Enqueued by:** the daily [[../inngest/spec-test-cron]] (one job per shipped-but-not-archived spec) + the on-demand **Test now** button (`POST /api/roadmap/spec-test`) + the Platform director's standing **re-verification sweep** (`reconcileRegressionCoverage` — [[../libraries/platform-director]], [[../specs/regression-backlog-reconciliation]] Phase 1: the least-recently-verified shipped specs, so a silent regression is re-tested even when nothing event-triggered it). All three share the `enqueueSpecTestIfDue` dedupe chokepoint.
 
 ## Migration
 

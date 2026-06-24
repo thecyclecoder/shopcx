@@ -1934,6 +1934,19 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // regression-backlog-reconciliation (Phase 1) — standing re-verification sweep: enqueue a Vera spec-test
+    // re-run for the shipped, unarchived specs least-recently verified (skipping any fresh within the window),
+    // so a silent regression is caught even when nothing event-triggered a re-test. An `issues` result flows
+    // to Remi via the EXISTING enqueueRegressionJob (no new detector). The regression-side sibling of the
+    // error-backlog reconcile above.
+    const cov = await lib.reconcileRegressionCoverage(db);
+    if (cov.queued.length) notes.push(`re-verify → queued ${cov.queued.length} spec-test re-run(s): ${cov.queued.join(", ")}`);
+    else if (cov.scanned) notes.push(`re-verify: ${cov.scanned} shipped, all fresh (${cov.skippedFresh} within window)`);
+  } catch (e) {
+    notes.push(`re-verify sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing re-verify sweep failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
     const fixes = await lib.escortFixSpecs(db);
     if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);
@@ -1981,7 +1994,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   // to advance / all healthy) is skipped so the board isn't flooded every ~15m; the daily watch + activity feed
   // cover the all-quiet heartbeat.
   try {
-    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open/i;
+    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh/i;
     const meaningful = notes.filter((n) => n && !QUIET.test(n));
     if (meaningful.length) {
       const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));
