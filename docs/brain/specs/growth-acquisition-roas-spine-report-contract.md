@@ -1,5 +1,7 @@
 # Growth Director — AcqROAS Report Contract Output ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/growth]] · **Parent:** [[../goals/ceo-mode]] › M2 — Growth Director
 
 **Deferred:** split from [[growth-acquisition-roas-spine]] — not needed now: the per-product AcqROAS measurement *spine* (the parent's promise) is shipped + verified ([[../libraries/acquisition-roas]] `computeAcqROAS`, [[../libraries/shopify-internal-revenue]], [[../tables/product_ad_account_mappings]]). This report-contract wrapper has no consumer yet — the CEO synthesizer that reads director report contracts ([[../goals/ceo-mode]] M4) and the report-contract schema itself ([[../goals/ceo-mode]] M0) are both still planned, and the contribution-margin form is a declared dependency on M1 COGS. Build it alongside the Growth director-agent / CEO synthesizer so it targets the *final* schema with a real reader.
