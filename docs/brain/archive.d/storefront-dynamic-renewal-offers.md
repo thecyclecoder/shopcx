@@ -1,0 +1,1 @@
+- **Dynamic pricing-rules for persist-to-renewal offers** · verified 2026-06-24 · → [[tables/pricing_rule_offers]]
