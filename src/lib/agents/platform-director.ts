@@ -72,6 +72,11 @@ import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { getPersona } from "@/lib/agents/personas";
+import {
+  composeScorecardWatchLine,
+  type Cadence as ScorecardCadence,
+  type ScorecardSnapshotLite,
+} from "@/lib/agents/platform-scorecard-display";
 import type { PostgrestError } from "@supabase/supabase-js";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -2061,11 +2066,62 @@ function platformNeedsAttentionLine(a: PlatformWatchActivity): string | null {
 }
 
 /** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
-export function composePlatformWatchBody(health: PlatformHealth, activity: PlatformWatchActivity): string {
+export function composePlatformWatchBody(health: PlatformHealth, activity: PlatformWatchActivity, scorecardLine?: string | null): string {
   const persona = getPersona(PLATFORM);
   const repairLine = platformRepairReviewLine(activity);
   const parkedLine = platformNeedsAttentionLine(activity);
-  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}`;
+  const scorecard = scorecardLine ? ` ${scorecardLine}.` : "";
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}${scorecard}`;
+}
+
+/**
+ * Read the latest snapshot per (metric_key, cadence) from `platform_scorecard_snapshots` — the
+ * board-watch + EOD-recap consumers ([[../specs/platform-scorecard-surface]] Phase 3). The
+ * "read from the scorecard, never the raw tables" invariant ([[meta__scorecards]]) — both surfaces
+ * read this trended store, so they never re-compute the KPIs the engine wrote. Best-effort: on read
+ * error, returns empty groups so the watch line is simply omitted (no fabricated numbers).
+ */
+async function loadLatestScorecardSnapshots(
+  admin: Admin,
+  workspaceId: string,
+): Promise<Record<ScorecardCadence, ScorecardSnapshotLite[]>> {
+  const empty: Record<ScorecardCadence, ScorecardSnapshotLite[]> = { daily: [], weekly: [], monthly: [] };
+  try {
+    const { data } = await admin
+      .from("platform_scorecard_snapshots")
+      .select("metric_key, cadence, snapshot_date, value, delta_pct, unit")
+      .eq("workspace_id", workspaceId)
+      .order("snapshot_date", { ascending: false })
+      .limit(2000);
+    const rows = (data ?? []) as Array<{
+      metric_key: string;
+      cadence: string;
+      snapshot_date: string;
+      value: number | string;
+      delta_pct: number | string | null;
+      unit: string;
+    }>;
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const cadence = r.cadence as ScorecardCadence;
+      if (cadence !== "daily" && cadence !== "weekly" && cadence !== "monthly") continue;
+      const key = `${cadence}::${r.metric_key}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const value = typeof r.value === "number" ? r.value : Number(r.value);
+      const deltaRaw = r.delta_pct;
+      const deltaPct = deltaRaw == null ? null : typeof deltaRaw === "number" ? deltaRaw : Number(deltaRaw);
+      empty[cadence].push({
+        metric_key: r.metric_key,
+        value: Number.isFinite(value) ? value : 0,
+        delta_pct: deltaPct != null && Number.isFinite(deltaPct) ? deltaPct : null,
+        unit: r.unit,
+      });
+    }
+  } catch {
+    /* best-effort — fall through to empty groups */
+  }
+  return empty;
 }
 
 /**
@@ -2154,13 +2210,19 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
   const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0 || activity.reviewedRepairs > 0 || activity.needsAttention > 0 || activity.triagedReran > 0;
   if (!hasActivity && health.color === "green") return { posted: false, reason: "quiet" };
 
+  // Phase 3 (platform-scorecard-surface) — the one-line scorecard summary, reading the trended store
+  // ([[../tables/platform_scorecard_snapshots]]). No KPIs persisted yet → the line is omitted (no
+  // fabricated numbers), same invariant the surface page enforces.
+  const snapshots = await loadLatestScorecardSnapshots(admin, workspaceId);
+  const scorecardLine = composeScorecardWatchLine(snapshots);
+
   await postDirectorMessage({
     workspaceId,
     author: "director",
     authorFunction: PLATFORM,
-    body: composePlatformWatchBody(health, activity),
+    body: composePlatformWatchBody(health, activity, scorecardLine),
     kind: "update",
-    metadata: { source: "platform-watch", watch_date: date, health, activity },
+    metadata: { source: "platform-watch", watch_date: date, health, activity, scorecard_line: scorecardLine ?? null },
   });
   return { posted: true };
 }

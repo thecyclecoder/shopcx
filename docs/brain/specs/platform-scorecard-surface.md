@@ -1,4 +1,4 @@
-# Scorecard page + #directors board-watch line ⏳
+# Scorecard page + #directors board-watch line ✅
 
 **Priority:** critical
 
@@ -8,12 +8,12 @@
 Milestone (d) of the [[../goals/platform-department-scorecard|Platform Department Scorecard]]: **surface it**. The metrics engine + the three cadences ([[platform-scorecard-engine]] / [[platform-scorecard-weekly]] / [[platform-scorecard-monthly]]) fill `platform_scorecard_snapshots`; this spec turns that store into the **instrument panel** — a scorecard page on the Agents hub and a one-line **board-watch** post so the CEO sees the department's health at a glance without opening it. There's no such surface today: [[../dashboard/agents]] renders the org chart, the inbox, and the per-director [[../libraries/director-xp|XP card]] only, and the [[../libraries/director-board|#directors board]] carries persona/recap posts but no trended KPI summary. **Blocked-by all three metric specs** because the page + the board line render the *complete* daily/weekly/monthly card — they consume every cadence's output, so they must ship after the data exists.
 
 ## Phase 1 — the read API
-- ⏳ planned
+- ✅ shipped
 - New `GET /api/developer/agents/scorecard` (`src/app/api/developer/agents/scorecard/route.ts`) — **owner-gated** (`workspace_members.role='owner'`, 403 otherwise — mirror every [[../dashboard/agents]] API). Reads **only** `platform_scorecard_snapshots` (never the raw tables — the "read from the scorecard" invariant from [[../libraries/meta__scorecards]]): returns the latest row per `(metric_key, cadence)` with its `value`, `prior_value`, `delta_pct`, `unit`, `detail`, grouped by cadence → `{ daily[], weekly[], monthly[] }`. Optional `?metric=&cadence=` returns that metric's snapshot history (the trend sparkline series).
 - Read-only; no new table.
 
 ## Phase 2 — the scorecard page
-- ⏳ planned
+- ✅ shipped
 - New page `src/app/dashboard/agents/scorecard/page.tsx` at **`/dashboard/agents/scorecard`**, owner-gated (client `role` guard mirroring [[../dashboard/agents]]). Reachable from the Agents hub (a "Scorecard" entry alongside the org-chart / inbox toggle).
 - Three sections — **Daily pulse · Weekly throughput + quality · Monthly leading curve** — each a grid of KPI tiles. Per tile: label, current `value` (formatted by `unit`), a **trend arrow** off `delta_pct` (↑/↓ + good/bad colour — e.g. ↓ on `human_touch_per_build` is *good*, ↓ on `build_success_rate` is *bad*; the per-metric polarity is config), and a small sparkline from the `?metric=` history. Tiles with no data yet (e.g. `deploy_reliability` before [[deploy-health-rollback-guardian]] ships) render a muted "no data yet", never a fake value.
 - A **reserved Fleet-spend tile** (Cost / budget) — wired to light up when the [[../goals/grow-surface-platform-agent-team|grow-surface]] **cost governor** (its M4) lands its spend metric into the snapshot store. Cross-goal, **not a hard blocker** here (that spec isn't authored yet); the tile shows "no data yet" until then. Documented so the cost-governor build knows the slot exists.
@@ -21,7 +21,7 @@ Milestone (d) of the [[../goals/platform-department-scorecard|Platform Departmen
 - A brain page `dashboard/agents__scorecard.md` + a wikilink from [[../dashboard/agents]].
 
 ## Phase 3 — the #directors board-watch line
-- ⏳ planned
+- ✅ shipped
 - Extend the Platform director's daily watch post — `postPlatformWatchUpdate` ([[../libraries/platform-director]], run in the [[../inngest/platform-director-cron]] standing pass) — to append a **one-line scorecard summary** in 🛠️ Ada's voice (plain text, no markdown — the board's voice rules), e.g. *"Scorecard: 6 specs this week · 92% builds green · autonomy 0.78 ↑ · human-touch/build 0.4 ↓"*, posted to the [[../tables/director_messages]] board via [[../libraries/director-board]] `postDirectorMessage`. Pulls the numbers straight from the latest `platform_scorecard_snapshots` rows (no re-computation).
 - Also emit/extend the EOD **Daily Summaries** row ([[../libraries/director-recap]] → [[../tables/dashboard_notifications]] `agent_daily_summary`) so the recap deep-links to the scorecard page. Reuses the existing recap plumbing; adds the scorecard headline + link.
 
