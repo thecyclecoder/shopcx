@@ -5,6 +5,7 @@
 **Repair-signature:** `supabase-logs:6f16957ed72e1f38`
 **Repair-signature:** `cluster:repair`
 **Repair-signature:** `supabase-logs:bc3c30231145bed6`
+**Repair-signature:** `supabase-logs:1fd35d3ca23f421a`
 
 Make the feed-delivery liveness beat throttle atomic so a Vercel log-drain burst can no longer storm loop_heartbeats and trigger DB-saturation 500s on POST /rest/v1/loop_heartbeats. The beat is pure recency-of-latest liveness, so one row per minute per source is sufficient and should be enforced authoritatively at the DB, not by a leaky best-effort read guard.
 
