@@ -1,4 +1,4 @@
-# Control Tower: scope tickets-awaiting-decision work probe past positive-close/fraud short-circuits ⏳
+# Control Tower: scope tickets-awaiting-decision work probe past positive-close/fraud short-circuits 🚧
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/monitor.ts (the tickets-awaiting-decision case in fetchinlineagentstate — exclude inbound messages on tickets closed without an orchestrator beat, e.g. add a closed-ticket subtraction alongside the existing csat:reopened one; a still-open ticket with no beat keeps counting so real outages still alert).::monitor-false-positive`
@@ -11,8 +11,10 @@ monitor.ts fetchInlineAgentState's 'tickets-awaiting-decision' case (~line 523-5
 
 **Likely target:** `src/lib/control-tower/monitor.ts (the 'tickets-awaiting-decision' case in fetchInlineAgentState — exclude inbound messages on tickets closed without an orchestrator beat, e.g. add a closed-ticket subtraction alongside the existing csat:reopened one; a still-open ticket with no beat keeps counting so real outages still alert).`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+Shipped: `monitor.ts` `tickets-awaiting-decision` case now subtracts inbound-customer messages whose ticket is **closed OR `csat:reopened`** via a single positive-match `.or("status.eq.closed,tags.cs.{csat:reopened}", { referencedTable: "tickets" })` over the `tickets!inner` join — extending the prior csat:reopened-only subtraction to also drop the positive-close / fraud-gate / chargeback-gate short-circuits that close the ticket before `callSonnetOrchestratorV2`. Single NULL-safe, overlap-free subtraction (still-open no-beat tickets keep counting → real outages still alert). Brain page [[../libraries/control-tower]] updated.
 
 ## Verification
 - Re-trigger the originating condition (signature `loop:ai:orchestrator`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
