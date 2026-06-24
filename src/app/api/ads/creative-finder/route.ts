@@ -1,10 +1,12 @@
 /**
  * Winning Static-Creative Finder — skeletons list + manual sweep trigger.
  *
- *   GET  ?workspaceId=&status=&kind=  → analyzed creative_skeletons (browse/shortlist)
- *   POST { workspaceId }              → fire a manual sweep (ads/creative-finder.sweep)
+ *   GET  ?workspaceId=&status=&kind=        → analyzed creative_skeletons (browse/shortlist)
+ *   POST { workspaceId, mode? }             → fire a manual sweep (ads/creative-finder.sweep),
+ *                                             or mode:"video" → drain video_pending
+ *                                             (ads/creative-finder.video, creative-finder-video)
  *
- * See docs/brain/specs/winning-static-creative-finder.md.
+ * See docs/brain/specs/winning-static-creative-finder.md + creative-finder-video.md.
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
@@ -59,10 +61,16 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => ({}))) as { workspaceId?: string };
+  const body = (await req.json().catch(() => ({}))) as { workspaceId?: string; mode?: string };
   const workspaceId = body.workspaceId || null;
   const auth = await authorize(workspaceId);
   if (auth.error) return auth.error;
+
+  if (body.mode === "video") {
+    // Drain this workspace's video_pending backlog through the Phase-1 video pipeline.
+    await inngest.send({ name: "ads/creative-finder.video", data: { workspaceId } });
+    return NextResponse.json({ ok: true, queued: true, mode: "video" });
+  }
 
   await inngest.send({ name: "ads/creative-finder.sweep", data: { workspaceId } });
   return NextResponse.json({ ok: true, queued: true });

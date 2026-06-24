@@ -18,15 +18,21 @@ Daily sweep that pulls long-running competitor + category ads from [[../integrat
 - **Retries:** 1
 - Same sweep (incl. per-workspace `workspaceSeeds` + category-sweep promotion); scoped to `workspaceId` when supplied (else all ad-tool workspaces). Fired by the dashboard "Run sweep now" button.
 
+### `creative-finder-video-process`
+- **Trigger:** cron `30 9 * * *` (after the 9:00 static sweep) + event `ads/creative-finder.video` `{ workspaceId?, max? }`
+- **Retries:** 1
+- Phase 1 of [[../specs/creative-finder-video]]: drains each ad-tool workspace's `status='video_pending'` [[../tables/creative_skeletons]] backlog via [[../libraries/video-skeleton]] `processVideoPending` (download → ffmpeg keyframes + Whisper transcript → same four-slot skeleton; hook = opening frame + first spoken line). Each row flips to `analyzed`/`failed` → cost-bounded (no re-process).
+- **Gated** on `hasAdLibraryKey()` (download) + `hasFfmpeg()` (frames) → `{ skipped: "no_adlibrary_key" | "no_ffmpeg" }`; transcription is best-effort inside the pipeline (`hasOpenAiKey()`). Emits a Control-Tower heartbeat. Returns `{ workspaces, totals: { pending, analyzed, failed, bytesDownloaded, whisperCents } }`. Fired on demand by POST `/api/ads/creative-finder { mode:"video" }`.
+
 ## Downstream events sent
 
 _None._
 
 ## Tables written
 
-- [[../tables/creative_skeletons]] (via [[../libraries/creative-skeleton]] `ingestAd` — idempotent upsert; now stores the **complete AdLibrary payload** per ad — destination domain, copy, CTA, spend, engagement, channel — see [[../specs/ad-creative-scout]])
+- [[../tables/creative_skeletons]] (via [[../libraries/creative-skeleton]] `ingestAd` — idempotent upsert; now stores the **complete AdLibrary payload** per ad — destination domain, copy, CTA, spend, engagement, channel — see [[../specs/ad-creative-scout]]). `creative-finder-video-process` **updates** `video_pending` rows → `analyzed` with the four-slot skeleton (via [[../libraries/video-skeleton]]).
 - [[../tables/competitors]] (`promoteFromCategorySweep` inserts `source='category_sweep'`, `status='proposed'` candidates)
-- `ai_token_usage` (vision usage, via [[../libraries/ai-usage]])
+- `ai_token_usage` (vision usage — statics `creative_skeleton_vision`, video `creative_skeleton_video_vision` — via [[../libraries/ai-usage]])
 
 ## Tables read (not written)
 
@@ -41,4 +47,4 @@ _None._
 
 ---
 
-[[../README]] · [[../integrations/adlibrary]] · [[../libraries/creative-skeleton]] · [[../libraries/adlibrary]] · [[../libraries/ad-gap]] · [[../libraries/competitors]] · [[../tables/competitors]] · [[competitor-scout]] · [[../specs/ad-creative-scout]] · [[../specs/winning-static-creative-finder]] · [[../specs/competitor-scout]] · [[../../CLAUDE]]
+[[../README]] · [[../integrations/adlibrary]] · [[../integrations/openai]] · [[../libraries/creative-skeleton]] · [[../libraries/video-skeleton]] · [[../libraries/ad-transcribe]] · [[../libraries/adlibrary]] · [[../libraries/ad-gap]] · [[../libraries/competitors]] · [[../tables/competitors]] · [[competitor-scout]] · [[../specs/ad-creative-scout]] · [[../specs/winning-static-creative-finder]] · [[../specs/creative-finder-video]] · [[../specs/competitor-scout]] · [[../../CLAUDE]]
