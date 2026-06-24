@@ -393,14 +393,19 @@ interface AccountState {
 }
 const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0, capEventLogged: false }));
 const accountByDir = new Map(accounts.map((a) => [a.configDir, a]));
+// Which round-robin account each in-flight job is running on (job.id → account index), so the box view's
+// build card can show "Round Robin N". Stamped when a lane's account is chosen, cleared when it ends.
+const laneAccount = new Map<string, number>();
+function stampLaneAccount(jobId: string, configDir: string): void {
+  const idx = accounts.findIndex((a) => a.configDir === configDir);
+  if (idx >= 0) laneAccount.set(jobId, idx);
+}
 
-// A short, human label for an account ("account 1 · personal") derived from its config dir basename, so
-// the box-health surface doesn't leak the full path. `~/.claude` → "account 1 · default"; a "-personal"
-// suffix → "personal". Index keeps two same-named dirs distinguishable.
-function accountLabel(dir: string, idx: number): string {
-  const base = dir.replace(/\/+$/, "").split("/").pop() || dir;
-  const suffix = base === ".claude" ? "default" : base.replace(/^\.claude-?/, "") || base;
-  return `account ${idx + 1} · ${suffix}`;
+// Box-view label for a Max account. We DON'T surface the underlying email or config-dir name in the UI
+// (the account↔email mapping lives in the brain runbook, not the dashboard) — just the round-robin slot
+// the worker rotates new sessions across: "Round Robin 1/2/3…". See docs/brain/recipes/build-box-setup.md.
+function accountLabel(_dir: string, idx: number): string {
+  return `Round Robin ${idx + 1}`;
 }
 
 // Recent cap/failover events (box-multi-account-failover Phase 2) — a small in-memory ring surfaced on the
@@ -1180,7 +1185,7 @@ const WORKER_STARTED_AT = new Date().toISOString();
 // phase = which phase a chained/per-phase build is on (e.g. "Phase 2"), derived from the job's
 // instructions (the phaseScopedInstructions format embeds `"Phase N — <title>"`); null for a
 // whole-spec build or a non-build lane (box-lane-show-phase).
-interface LaneRow { kind: Job["kind"]; job_id: string; spec_slug: string; since: string; phase?: string | null }
+interface LaneRow { kind: Job["kind"]; job_id: string; spec_slug: string; since: string; phase?: string | null; account?: string | null }
 
 // Derive the phase a build lane is on from its instructions. A per-phase/chained build's
 // instructions embed `"Phase N — <title>"` (phaseScopedInstructions); a whole-spec build (or any
@@ -3123,6 +3128,7 @@ async function runPlanJob(job: Job) {
   const chosenAccount = accountByDir.get(configDir)!;
   chosenAccount.inFlight++;
   chosenAccount.lastAssignedAt = Date.now();
+  stampLaneAccount(job.id, configDir); // box view: which Round Robin account this lane is on
 
   sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
@@ -7862,6 +7868,7 @@ async function dispatchJob(job: Job) {
   const chosenAccount = accountByDir.get(configDir)!;
   chosenAccount.inFlight++;
   chosenAccount.lastAssignedAt = Date.now();
+  stampLaneAccount(job.id, configDir); // box view: which Round Robin account this lane is on
 
   // Set up the worktree (its own dir + branch).
   sh("git", ["fetch", "origin"]);
@@ -8205,6 +8212,7 @@ async function main() {
       })
       .finally(async () => {
         active.delete(job.id);
+        laneAccount.delete(job.id);
         // Control Tower: end-of-run agent-kind heartbeat. ok = ran without a thrown error AND
         // the job didn't land on a terminal failure status.
         let ok = !errored;
@@ -8437,7 +8445,7 @@ async function main() {
       if (!steady) { clearStartupCrashCounter(); steady = true; }
 
       // Heartbeat for the dashboard, then self-update if no SACROSANCT lane is running.
-      const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since, phase: v.phase }));
+      const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since, phase: v.phase, account: laneAccount.has(job_id) ? accountLabel("", laneAccount.get(job_id)!) : null }));
       await writeHeartbeat(active.size, "healthy", undefined, lanes);
 
       // Control Tower migration-drift check (control-tower-migration-drift-check P1): fire-and-forget
