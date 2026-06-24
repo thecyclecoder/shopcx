@@ -56,13 +56,48 @@ export interface ClassifyInput {
   phases?: { title: string; status: string }[];
   /** the build's last self-reported verdict (parsed status from the agent's JSON, when present). */
   agentSummary?: string | null;
+  /**
+   * the live `spec_card_state.status` for this spec at classification time. When the board says
+   * `shipped` for a build-style kind, that overrides any verdict-string ambiguity → `already_shipped`
+   * (park-classifier-trust-board-shipped Phase 1). `classifyAndStamp` looks this up from
+   * `spec_card_state` and passes it through; pure-function callers (tests) can set it directly.
+   */
+  boardStatus?: string | null;
 }
+
+/**
+ * Build-style `agent_jobs.kind`s that target a spec — the kinds for which "board says shipped"
+ * authoritatively means "this work is already done". `build` (the feature build), `regression` (the
+ * regression-agent's fix spec build), and `repair` (the repair-agent's fix spec build) all open a PR
+ * against a single spec; if that spec's `spec_card_state.status='shipped'`, a parked job against it
+ * is by definition `already_shipped`. Other kinds (`plan`, `fold`, `spec-test`, …) don't fit this
+ * shape and stay on the verdict-string heuristic + Sonnet pass. (park-classifier-trust-board-shipped)
+ */
+export const BUILD_STYLE_KINDS: ReadonlySet<string> = new Set(["build", "regression", "repair"]);
 
 export interface ClassifyResult {
   klass: NeedsAttentionClass;
   /** "heuristic" → matched a deterministic rule; "sonnet" → 1-shot LLM; "fallback" → defaulted to unknown. */
   source: "heuristic" | "sonnet" | "fallback";
   reason: string;
+}
+
+// ── BOARD-FIRST SHORT-CIRCUIT ─────────────────────────────────────────────────────────────
+// The board (`spec_card_state.status`) is the source of truth on whether a spec is shipped. A
+// build-style park against a `shipped` spec is by definition `already_shipped` — regardless of the
+// verdict-string heuristic or the Sonnet classifier's confidence. This runs BEFORE both, so a
+// build whose verdict reads 'Phase 1 was already built end-to-end in #315' (a phrasing the
+// heuristic doesn't recognize) never falls through to `class='unknown'` and never sits stuck in
+// `needs_attention` waiting on the 60-minute backstop. (park-classifier-trust-board-shipped Phase 1)
+export function classifyByBoardState(input: ClassifyInput): ClassifyResult | null {
+  if (!BUILD_STYLE_KINDS.has(input.jobKind)) return null;
+  if (!input.specSlug) return null;
+  if (input.boardStatus !== "shipped") return null;
+  return {
+    klass: "already_shipped",
+    source: "heuristic",
+    reason: `spec_card_state.status='shipped' for ${input.specSlug} (board is the source of truth)`,
+  };
 }
 
 // ── HEURISTICS ────────────────────────────────────────────────────────────────────────────
@@ -223,11 +258,35 @@ async function classifyBySonnet(input: ClassifyInput, workspaceId: string | null
  * Read-only — caller is responsible for stamping the result onto the row.
  */
 export async function classifyNeedsAttention(input: ClassifyInput, workspaceId: string | null): Promise<ClassifyResult> {
+  const board = classifyByBoardState(input);
+  if (board) return board;
   const h = classifyByHeuristic(input);
   if (h) return h;
   const s = await classifyBySonnet(input, workspaceId);
   if (s) return s;
   return { klass: "unknown", source: "fallback", reason: "no heuristic match and no Sonnet verdict" };
+}
+
+/**
+ * Look up the live `spec_card_state.status` for a `(workspace, spec_slug)` pair — the board's
+ * shipped/in_progress/planned/rejected rollup, the input to `classifyByBoardState`. Returns null on
+ * any miss / DB hiccup (the classifier then falls through to the heuristic + Sonnet path as if the
+ * board check was never asked). Best-effort: a Supabase glitch on the board lookup MUST NOT block
+ * classification, since the heuristic + Sonnet pass still has a reasonable chance to bucket the row.
+ */
+async function lookupBoardStatus(admin: Admin, workspaceId: string, specSlug: string): Promise<string | null> {
+  try {
+    const { data } = await admin
+      .from("spec_card_state")
+      .select("status")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", specSlug)
+      .maybeSingle();
+    return ((data as { status?: string } | null)?.status as string | undefined) ?? null;
+  } catch (e) {
+    console.warn(`[needs-attention-classify] board lookup failed for ${specSlug}:`, e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
 /**
@@ -241,7 +300,14 @@ export async function classifyAndStamp(
   jobId: string,
   input: ClassifyInput & { workspaceId: string },
 ): Promise<ClassifyResult> {
-  const result = await classifyNeedsAttention(input, input.workspaceId);
+  // Resolve the live board status for build-style kinds so `classifyByBoardState` can short-circuit
+  // a parked build against an already-shipped spec to `already_shipped` before the verdict-string
+  // heuristic + Sonnet pass even run. (park-classifier-trust-board-shipped Phase 1)
+  let boardStatus: string | null = input.boardStatus ?? null;
+  if (boardStatus === null && BUILD_STYLE_KINDS.has(input.jobKind) && input.specSlug) {
+    boardStatus = await lookupBoardStatus(admin, input.workspaceId, input.specSlug);
+  }
+  const result = await classifyNeedsAttention({ ...input, boardStatus }, input.workspaceId);
   try {
     await admin.from("agent_jobs").update({ needs_attention_class: result.klass, updated_at: new Date().toISOString() }).eq("id", jobId);
   } catch (e) {
