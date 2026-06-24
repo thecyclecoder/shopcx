@@ -32,6 +32,8 @@ import {
   type OrgChartGraph,
   type AutonomyMap,
 } from "@/lib/agents/approval-router";
+import { getSlackToken, postAsAda } from "@/lib/slack";
+import { buildInboxApprovalCard } from "@/lib/slack-ada";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -200,6 +202,13 @@ interface ApprovalMeta {
   routed_to_function: string;
   approve_action_id: string | null;
   deep_link: string;
+  /**
+   * The Slack #cto-ada message ts when the reconciler mirrored this request to Ada (ada-slack-
+   * routed-approvals Phase 1). Set ONLY for CEO-routed plain-action approvals whose workspace has
+   * `slack_ada_channel_id`. Read by the Phase 2 button handler + Phase 4 web-inbox mirror to
+   * `chat.update` the card. Absent ⇒ no Slack card was posted.
+   */
+  slack_message_ts?: string;
 }
 
 /** Resolve + shape the notification fields for one job (pure given the chart + autonomy snapshot). */
@@ -222,6 +231,67 @@ export function buildApprovalNotification(
     deep_link: link,
   };
   return { workspace_id: job.workspace_id, type: APPROVAL_REQUEST_TYPE, title, body: body || null, link, metadata, read: false, dismissed: false };
+}
+
+type AdaSurfaceCache = Map<string, { channelId: string | null; token: string | null }>;
+
+/**
+ * Read the workspace's Ada-channel surface (channel id + bot token), cached for the sweep. A
+ * workspace without `slack_ada_channel_id` set returns `{channelId:null}` and we skip the Slack
+ * emit — `#cto-ada` is opt-in per workspace.
+ */
+async function loadAdaSurface(admin: Admin, workspaceId: string, cache: AdaSurfaceCache): Promise<{ channelId: string | null; token: string | null }> {
+  const hit = cache.get(workspaceId);
+  if (hit) return hit;
+  const { data } = await admin
+    .from("workspaces")
+    .select("slack_ada_channel_id")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  const channelId = (data?.slack_ada_channel_id as string | null) ?? null;
+  const token = channelId ? await getSlackToken(workspaceId) : null;
+  const entry = { channelId, token };
+  cache.set(workspaceId, entry);
+  return entry;
+}
+
+/**
+ * Mirror a freshly inserted routed Approval Request into Slack #cto-ada as Ada (ada-slack-routed-
+ * approvals Phase 1) — TOP-LEVEL post, never threaded into an active coach thread. Conditions:
+ * (1) the request routed to the CEO (a director's own queue stays in the dashboard), (2) the
+ * workspace has an Ada channel configured + a bot token, (3) the job has plain inline actions
+ * (multi-choice falls back to the web inbox until Phase 3's chat-mode invitation ships). On a
+ * successful post, the message `ts` is stashed onto the notification's metadata so a later
+ * `chat.update` (resolve / web-inbox mirror) can find it. Best-effort — a Slack failure never
+ * rolls back the inbox row (the web inbox is still the source of truth).
+ */
+async function mirrorToAdaSlackInbox(
+  admin: Admin,
+  job: ApprovalJobRow,
+  row: ReturnType<typeof buildApprovalNotification>,
+  notificationId: string,
+  cache: AdaSurfaceCache,
+): Promise<void> {
+  if (row.metadata.routed_to_function !== CEO) return;
+  const actions = inlineApproveActions(job);
+  if (!actions) return; // multi-choice → Phase 3 chat-mode invitation will replace this skip
+  const surface = await loadAdaSurface(admin, job.workspace_id, cache);
+  if (!surface.channelId || !surface.token) return;
+
+  const card = buildInboxApprovalCard({
+    notificationId,
+    title: row.title,
+    body: row.body ?? "",
+    actions: actions.map((a) => ({ id: a.id, summary: a.summary })),
+  });
+  const post = await postAsAda(surface.token, surface.channelId, card.blocks, card.text);
+  if (!post.ok || !post.ts) return;
+
+  // Stash the posted message ts on the notification metadata so the dismiss pass + Phase 4 mirror
+  // can chat.update the card. The reconciler's job-id-based idempotency already prevents a re-park
+  // from double-posting; slack_message_ts is the read-path key for the resolve/update surfaces.
+  const nextMeta = { ...row.metadata, slack_message_ts: post.ts };
+  await admin.from("dashboard_notifications").update({ metadata: nextMeta }).eq("id", notificationId);
 }
 
 /**
@@ -264,11 +334,23 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
   }
 
   let created = 0;
+  // Per-workspace cache so a single sweep touching N jobs from M workspaces does ≤M Slack lookups,
+  // not N. A workspace with `slack_ada_channel_id` unset short-circuits below — token is only
+  // decrypted when a channel exists AND we'll actually post.
+  const slackAdaCache = new Map<string, { channelId: string | null; token: string | null }>();
   for (const job of jobs) {
     if (emittedJobIds.has(job.id)) continue; // already surfaced — idempotent across re-parks
     const row = buildApprovalNotification(job, chart, autonomy);
-    const { error } = await admin.from("dashboard_notifications").insert(row);
-    if (!error) created++;
+    // .select() so we know the new row's id — the routed-inbox Slack card (below) needs to embed it in
+    // each button's `value`, and the chat.update path (Phase 2/4) needs it to find the message ts.
+    const { data: inserted, error } = await admin
+      .from("dashboard_notifications")
+      .insert(row)
+      .select("id")
+      .maybeSingle();
+    if (error || !inserted) continue;
+    created++;
+    await mirrorToAdaSlackInbox(admin, job, row, inserted.id as string, slackAdaCache);
   }
 
   let dismissed = 0;
