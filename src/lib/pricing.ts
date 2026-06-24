@@ -81,7 +81,6 @@ interface OfferRow {
   status: string;
   starts_at: string | null;
   ends_at: string | null;
-  label: string | null;
 }
 
 export interface SubscriptionPricing {
@@ -204,7 +203,7 @@ export async function resolveSubscriptionPricing(
   if (sub.pricing_offer_id) {
     const { data: offerRow } = await admin
       .from("pricing_rule_offers")
-      .select("id, product_id, subscribe_discount_pct, renewal_price_cents, status, starts_at, ends_at, label")
+      .select("id, product_id, subscribe_discount_pct, renewal_price_cents, status, starts_at, ends_at")
       .eq("id", sub.pricing_offer_id)
       .eq("workspace_id", workspaceId)
       .maybeSingle();
@@ -313,7 +312,7 @@ export async function resolveSubscriptionPricing(
   // Persist-to-renewal offer pill — honest, owner-approved offer labeling. Only when
   // the offer actually touched a line on this sub.
   if (offer && productLines.some((l) => offerApplies(l.product_id))) {
-    discounts.push({ kind: "renewal_offer", label: offer.label || "Renewal Offer" });
+    discounts.push({ kind: "renewal_offer", label: "Renewal Offer" });
   }
 
   return { lines, product_subtotal_cents, product_msrp_cents, shipping_cents, free_shipping, discounts };
