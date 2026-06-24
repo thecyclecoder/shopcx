@@ -7,6 +7,7 @@ Phases 3 + 4 of the winning-static-creative finder. Vision-deconstructs a winner
 | Export | Notes |
 |---|---|
 | `visionDeconstruct(workspaceId, buffer, contentType)` | Claude vision (Opus) → `CreativeSkeleton \| null`. Logs `creative_skeleton_vision` usage. Strategist frameworks (hook-promise-proof / problem-pivot-payoff) baked into the system prompt |
+| `visionDeconstructFrames(workspaceId, frames[], transcript)` | **Video** path ([[../specs/creative-finder-video]]): same four-slot schema + frameworks, fed ordered keyframes (earliest-first storyboard) + the audio transcript. System prompt extended so **hook = opening frame + first spoken line**. Logs `creative_skeleton_video_vision`. Used by [[video-skeleton]] |
 | `sweepSeed(workspaceId, seed, opts?)` | search one seed → filter long-runners → dedup by `ad_key` → ingest. Returns `IngestResult` counts. `opts`: `minDays`/`maxPerSeed`/`daysBack`/`pageSize` |
 | `ingestAd(workspaceId, ad, seed)` | vision (statics) + idempotent upsert into [[../tables/creative_skeletons]]; videos → `status='video_pending'` (no vision) |
 | `buildPatternMatrix(workspaceId, { minBrands=2 })` | → `PatternMatrix`: `slotPatterns` (per-slot clusters repeating across ≥N **independent** brands) + ranked `testMatrix` (hook×mechanism×proof×offer) |
@@ -27,6 +28,7 @@ Phases 3 + 4 of the winning-static-creative finder. Vision-deconstructs a winner
 
 ## Callers
 - [[../inngest/creative-finder]] (`sweepSeed`).
+- [[video-skeleton]] (`visionDeconstructFrames` — the video pipeline).
 - `src/app/api/ads/creative-finder/patterns` (`buildPatternMatrix`).
 
 ## Related

@@ -8,7 +8,7 @@ const nextConfig: NextConfig = {
   // file tracer includes it in the serverless function's node_modules — the
   // Inngest render step dynamic-imports it to call AWS Lambda. Without this the
   // function throws "Cannot find package '@remotion/lambda'" at runtime.
-  serverExternalPackages: ["@remotion/lambda", "@remotion/lambda-client"],
+  serverExternalPackages: ["@remotion/lambda", "@remotion/lambda-client", "ffmpeg-static"],
   // The /dashboard/roadmap server component reads docs/brain/specs (+ lifecycles) at
   // request time. Vercel's file tracer prunes files nothing imports, so include the
   // brain markdown explicitly or the route renders empty on its own data in production.
@@ -43,7 +43,9 @@ const nextConfig: NextConfig = {
     "/api/slack/interactions": ["./docs/brain/specs/**/*.md"],
     // slack-roadmap-notify reads specs; brain-index-refresh regenerates archive.md (← archive.d/) and
     // the README folder counts (← the whole tree), so the cron bundle needs all of docs/brain.
-    "/api/inngest": ["./docs/brain/**/*.md"],
+    // The creative-finder-video pipeline spawns the bundled ffmpeg-static binary; Vercel's tracer
+    // prunes the binary file otherwise, so include it explicitly (see creative-finder-video.md).
+    "/api/inngest": ["./docs/brain/**/*.md", "./node_modules/ffmpeg-static/ffmpeg"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>
