@@ -128,32 +128,44 @@ It **never** edits product code, opens a PR, or runs a migration — it only dec
 
 ## Director coach cards — the chat surface ([[../specs/ada-director-spec-status-cards]])
 
-Ada's coach chat (`/api/director/coach` + the `runDirectorCoachJob` box lane) emits one of a fixed set of **`pending_action`** card types — the CEO approves each, the worker executes. Every card stops at the leash; Ada never mutates anything herself.
+Ada's coach chat (`/api/director/coach` + the `runDirectorCoachJob` box lane) emits one of a fixed set of **`pending_action`** card types — the CEO approves each, the worker executes. Every card stops at the leash; Ada never mutates anything herself. **One exception:** `spec-status` is **auto-applied** — see below.
 
-| `type` | What it does on CEO approval |
-|---|---|
-| `coaching` | Writes a durable coaching rule injected into Ada's future decisions ([[director-instructions]]). |
-| `spec` | Commits a new `docs/brain/specs/{slug}.md` (the worker `putFileMain`s it). |
-| `spec-edit` | Re-commits an EXISTING `docs/brain/specs/{slug}.md` with revised markdown. **Never** carries status (status is DB-only). |
-| `spec-status` | Flips a spec on the BOARD (status / per-phase / `flags.critical` / `flags.deferred`) via the existing `markSpecCard*` writers + a `spec_status_history` row per field (`actor=director:{fn}`). No markdown commit. ([[../specs/ada-director-spec-status-cards]]) |
-| `goal` | Commits a proposed goal artifact + surfaces it for the CEO's greenlight ([[../specs/director-proposed-goals]]). |
-| `directive` | Becomes the active directive (gates routine builds, marks critical specs, queues priority builds, cancels held). |
-| `model_tier` | Routes a model-tier change to the target agent's supervisor ([[../specs/box-agent-model-tiers]]). |
+| `type` | Resolution | What it does |
+|---|---|---|
+| `coaching` | CEO approval | Writes a durable coaching rule injected into Ada's future decisions ([[director-instructions]]). |
+| `spec` | CEO approval | Commits a new `docs/brain/specs/{slug}.md` (the worker `putFileMain`s it). |
+| `spec-edit` | CEO approval | Re-commits an EXISTING `docs/brain/specs/{slug}.md` with revised markdown. **Never** carries status (status is DB-only). |
+| `spec-status` | **Auto-applied** — owner-only leash | Flips a spec on the BOARD (status / per-phase / `flags.critical` / `flags.deferred`) via the existing `markSpecCard*` writers + a `spec_status_history` row per field (`actor=director:{fn}`). No markdown commit, no inbox card, no Slack approval thread. ([[../specs/ada-director-spec-status-cards]]) |
+| `goal` | CEO approval | Commits a proposed goal artifact + surfaces it for the CEO's greenlight ([[../specs/director-proposed-goals]]). |
+| `directive` | CEO approval | Becomes the active directive (gates routine builds, marks critical specs, queues priority builds, cancels held). |
+| `model_tier` | CEO approval (auto-applied within rail) | Routes a model-tier change to the target agent's supervisor ([[../specs/box-agent-model-tiers]]). |
 
-**Worked `spec-status` example** — Ada notices `ada-slack-routed-approvals` is fully merged but its `spec_card_state` row still reads `planned`, and she wants to mark it shipped, also bumping its `**Priority:** critical` flag off:
+### `spec-status` is auto-applied — why, and the rails
+
+Status tracking is bookkeeping over already-shipped reality. Every flip is reversible, and the daily drift reconciler is the safety net. Accountability is the audit trail (`spec_status_history` row stamped `actor=director:{fn}` with a `reason`) **plus** a `director_activity` row (`action_kind="spec_status_flipped"` or `"invalid_spec_status_action"`) — not a per-flip gate. The leash holds because the underlying code/build approvals already happened — the row is just catching up to reality.
+
+The rails (enforced in `applySpecStatusActionInline` inside `scripts/builder-worker.ts`):
+
+- **Owner-only.** The spec's `**Owner:** [[../functions/{fn}]]` line MUST equal the emitting director's function. A flip on a spec another function owns is rejected as out-of-leash and logged with `invalid_spec_status_action` — cross-function flips still go through the spec's actual owner or the CEO owner UI.
+- **Existence.** The slug must resolve to a `spec_card_state` row OR a `docs/brain/specs/{slug}.md` file. Phantom slugs are rejected.
+- **Shape.** At least one of `status` / `phases` / `critical` / `deferred` must be set. `phases[].index` is 0-based and validated against the markdown's parsed phase count.
+- **Reason required.** Stored verbatim on every `spec_status_history` row the flip writes.
+- **Reversibility backstop.** [[spec-drift]] auto-reverts a director-stamped `shipped` row whose phase code isn't on `main` within ~24h and re-logs the revert to `director_activity` so a recurring mis-flip pattern surfaces on the daily watch.
+
+**Worked `spec-status` example** — Ada notices `chat-fallback-absorbed-anthropic-overload-noise` is fully merged (PR #442) but its `spec_card_state` row still reads `planned`, and she wants to mark it shipped and clear the `**Priority:** critical` flag set by a prior directive:
 
 ```json
 {
   "type": "spec-status",
-  "summary": "ada-slack-routed-approvals merged — flip to shipped + clear priority",
-  "slug": "ada-slack-routed-approvals",
+  "summary": "chat-fallback-absorbed-anthropic-overload-noise merged — flip to shipped + clear priority",
+  "slug": "chat-fallback-absorbed-anthropic-overload-noise",
   "status": "shipped",
   "critical": false,
-  "reason": "PR #530 merged 2026-06-22; phases 1+2+3 all ✅ in the brain. Clearing the critical flag set by the prior directive."
+  "reason": "PR #442 merged 2026-06-21; phases 1+2 backed by code on main. Clearing the critical flag set by the prior directive."
 }
 ```
 
-On approval the worker calls `markSpecCardStatus(workspaceId, slug, "shipped", existingPhaseStates, { actor:"director:platform", reason })` and `markSpecCardCritical(workspaceId, slug, false, { actor:"director:platform", reason })` — two `spec_status_history` rows, no markdown commit, no deploy. A wrongly-flipped card is auto-corrected by the daily drift reconciler within 24h ([[spec-drift]]).
+The moment the chat reply is persisted, the worker calls `markSpecCardStatus(workspaceId, slug, "shipped", existingPhaseStates, { actor:"director:platform", reason })` + `markSpecCardCritical(workspaceId, slug, false, { actor:"director:platform", reason })` — two `spec_status_history` rows, one `director_activity` row (`spec_status_flipped`), no markdown commit, no deploy, no CEO inbox card. Ada mentions the flip in her reply text so the CEO sees it in chat. If she got it wrong, the daily drift reconciler reverts the row within 24h and stamps a `reverted_director_flip` activity entry.
 
 A `phases[]` entry flips just one phase by index (0-based, validated against the markdown's actual phase count); the rollup is recomputed via `rollupPhaseStatus` unless `status` is also supplied. `deferred:true` flips the parked flag (wins over phase progress for display via `effectiveStatusFromState`).
 

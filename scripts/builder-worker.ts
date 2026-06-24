@@ -5432,26 +5432,6 @@ async function postCoachTurnToSlack(
   try {
     const { getSlackToken, postAsAda } = await import("../src/lib/slack");
     const { buildAdaApprovalCard } = await import("../src/lib/slack-ada");
-    // ada-director-spec-status-cards Phase 3: any spec-status card on this turn — fetch current
-    // spec_card_state ONCE so each card's Slack body shows current→proposed exactly like the web inbox.
-    const statusSlugs = new Set<string>();
-    for (const a of actions) {
-      if (a.status === "pending" && a.type === "spec-status" && typeof a.slug === "string") statusSlugs.add(a.slug);
-    }
-    const currents: Record<string, { status: string; phaseStates: { index: number; title: string; status: "planned" | "in_progress" | "shipped" | "rejected" }[]; critical: boolean; deferred: boolean }> = {};
-    if (statusSlugs.size) {
-      const { getSpecCardStates, effectiveStatusFromState } = await import("../src/lib/spec-card-state");
-      const states = await getSpecCardStates(workspaceId);
-      for (const slug of statusSlugs) {
-        const s = states[slug];
-        currents[slug] = {
-          status: effectiveStatusFromState(s),
-          phaseStates: s?.phase_states ?? [],
-          critical: !!s?.flags?.critical,
-          deferred: !!s?.flags?.deferred,
-        };
-      }
-    }
     const token = await getSlackToken(workspaceId);
     if (!token) return;
     const channel = thread.slack_channel_id;
@@ -5459,29 +5439,148 @@ async function postCoachTurnToSlack(
     if (reply) await postAsAda(token, channel, [], reply, { thread_ts });
     for (const a of actions) {
       if (a.status !== "pending") continue;
-      const slug = typeof a.slug === "string" ? a.slug : undefined;
-      const card = buildAdaApprovalCard(
-        thread.id,
-        {
-          id: String(a.id),
-          type: String(a.type),
-          summary: String(a.summary || ""),
-          guidance: typeof a.guidance === "string" ? a.guidance : undefined,
-          slug,
-          proposedStatus: typeof a.proposedStatus === "string" ? (a.proposedStatus as "planned" | "in_progress" | "shipped" | "rejected") : undefined,
-          phases: Array.isArray(a.phases) ? (a.phases as { index: number; status: "planned" | "in_progress" | "shipped" | "rejected" }[]) : undefined,
-          critical: typeof a.critical === "boolean" ? (a.critical as boolean) : undefined,
-          deferred: typeof a.deferred === "boolean" ? (a.deferred as boolean) : undefined,
-          reason: typeof a.reason === "string" ? (a.reason as string) : undefined,
-        },
-        slug ? currents[slug] : undefined,
-      );
+      const card = buildAdaApprovalCard(thread.id, {
+        id: String(a.id),
+        type: String(a.type),
+        summary: String(a.summary || ""),
+        guidance: typeof a.guidance === "string" ? a.guidance : undefined,
+      });
       const res = await postAsAda(token, channel, card.blocks, card.text, { thread_ts });
       if (res.ts) a.slackTs = res.ts; // so the interactions/web approve can resolve THIS card
     }
   } catch (e) {
     console.error("[director-coach] postCoachTurnToSlack failed:", e instanceof Error ? e.message : e);
   }
+}
+
+/**
+ * ada-director-spec-status-cards Phase 1 (revised) — AUTO-APPLY a single spec-status action emitted in
+ * the director's chat reply. No CEO approval, no pending_actions row, no inbox/Slack card: the audit
+ * trail (spec_status_history row stamped `actor=director:{fn}` + a director_activity entry) IS the
+ * accountability, and the daily drift reconciler is the reversibility backstop. Leashed to the spec's
+ * `Owner:` director — a flip against a spec this director doesn't own is rejected as out-of-leash and
+ * logged. A validation failure (unknown slug · phase out of range · empty payload · not-owner) logs a
+ * director_activity row with `outcome=invalid_spec_status_action` so a recurring pattern surfaces on
+ * the daily watch, not a silent no-op. Returns the one-line text appended to Ada's reply so the chat
+ * history (and the CEO) sees the flip.
+ */
+async function applySpecStatusActionInline(
+  workspaceId: string,
+  directorFunction: string,
+  wt: string,
+  raw: Record<string, unknown>,
+): Promise<{ summary: string }> {
+  const slug = typeof raw.slug === "string" ? raw.slug.replace(/[^a-z0-9-]/gi, "") : "";
+  const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+  const summary = typeof raw.summary === "string" ? raw.summary : `Status: ${slug || "(no slug)"}`;
+  const logInvalid = async (detail: string): Promise<{ summary: string }> => {
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId,
+        directorFunction,
+        actionKind: "invalid_spec_status_action",
+        specSlug: slug || null,
+        reason: detail,
+        metadata: { summary, payload: raw, attempted_reason: reason || null },
+      });
+    } catch { /* audit is best-effort */ }
+    return { summary: `Status flip rejected (${slug || "no slug"}): ${detail}` };
+  };
+  if (!slug || !reason) return logInvalid("slug and reason are required");
+  // Validate payload shape (statuses + phase shape) up front.
+  const statusRaw = typeof raw.status === "string" ? raw.status.toLowerCase() : "";
+  const status = statusRaw === "planned" || statusRaw === "in_progress" || statusRaw === "shipped" || statusRaw === "rejected" ? statusRaw : undefined;
+  const phasesIn = Array.isArray(raw.phases) ? raw.phases : [];
+  const phases: { index: number; status: "planned" | "in_progress" | "shipped" | "rejected" }[] = [];
+  for (const p of phasesIn) {
+    if (!p || typeof p !== "object") continue;
+    const r = p as Record<string, unknown>;
+    const idx = typeof r.index === "number" && Number.isInteger(r.index) && r.index >= 0 ? r.index : null;
+    const sRaw = typeof r.status === "string" ? r.status.toLowerCase() : "";
+    const s = sRaw === "planned" || sRaw === "in_progress" || sRaw === "shipped" || sRaw === "rejected" ? sRaw : null;
+    if (idx === null || s === null) continue;
+    phases.push({ index: idx, status: s });
+    if (phases.length >= 40) break; // hard ceiling — no spec has more phases than this
+  }
+  const critical = typeof raw.critical === "boolean" ? raw.critical : undefined;
+  const deferred = typeof raw.deferred === "boolean" ? raw.deferred : undefined;
+  if (status === undefined && phases.length === 0 && critical === undefined && deferred === undefined) {
+    return logInvalid("no fields to flip (need status / phases / critical / deferred)");
+  }
+  // Existence: slug must resolve to a spec_card_state row OR a docs/brain/specs/{slug}.md file.
+  const cs = await import("../src/lib/spec-card-state");
+  const states = await cs.getSpecCardStates(workspaceId);
+  const existing = states[slug];
+  const specPath = join(wt, `docs/brain/specs/${slug}.md`);
+  const mdExists = existsSync(specPath);
+  if (!existing && !mdExists) return logInvalid("spec not found in spec_card_state or docs/brain/specs/");
+  // Owner-only leash: the spec's `Owner:` director must match the emitting director (or the spec is
+  // owner-less, in which case no director can flip it — only the CEO from the owner UI). Read from the
+  // worktree's checkout of origin/main so we see the canonical markdown the brain board renders from.
+  let owner: string | undefined;
+  if (mdExists) {
+    try {
+      const md = readFileSync(specPath, "utf8");
+      const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
+      if (m) owner = m[1].replace(/^.*\//, "").trim();
+    } catch { /* fall through to leash rejection */ }
+  }
+  if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
+  if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
+  // Validate phase indices against the markdown's actual phase count (when markdown exists).
+  if (phases.length && mdExists) {
+    const { getSpec } = await import("../src/lib/brain-roadmap");
+    const got = await getSpec(slug);
+    const phaseCount = got?.card.phases.length ?? 0;
+    const bad = phases.find((p) => p.index < 0 || p.index >= phaseCount);
+    if (bad) return logInvalid(`phase index ${bad.index} out of range (spec has ${phaseCount} phases)`);
+  }
+  // Apply the flips through the same markSpecCard* writers every other status writer uses; each appends
+  // one spec_status_history row stamped `actor=director:{fn}` with this `reason`.
+  const actor = `director:${directorFunction}`;
+  const audit = { actor, reason };
+  const did: string[] = [];
+  try {
+    if (phases.length) {
+      const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
+      const byIndex = new Map(priorPhases.map((p) => [p.index, p]));
+      for (const p of phases) {
+        const prior = byIndex.get(p.index);
+        byIndex.set(p.index, { index: p.index, title: prior?.title ?? `Phase ${p.index + 1}`, status: p.status });
+      }
+      const merged = [...byIndex.values()].sort((x, y) => x.index - y.index);
+      const rollup = status ?? cs.rollupPhaseStatus(merged);
+      await cs.markSpecCardStatus(workspaceId, slug, rollup, merged, audit);
+      did.push(`phases ${phases.map((p) => `#${p.index + 1}=${p.status}`).join(", ")} → ${rollup}`);
+    } else if (status) {
+      const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
+      await cs.markSpecCardStatus(workspaceId, slug, status, priorPhases, audit);
+      did.push(`status → ${status}`);
+    }
+    if (typeof critical === "boolean") {
+      await cs.markSpecCardCritical(workspaceId, slug, critical, audit);
+      did.push(`critical=${critical}`);
+    }
+    if (typeof deferred === "boolean") {
+      await cs.markSpecCardDeferred(workspaceId, slug, deferred, audit);
+      did.push(`deferred=${deferred}`);
+    }
+  } catch (e) {
+    return logInvalid(`write failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  try {
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+    await recordDirectorActivity(db, {
+      workspaceId,
+      directorFunction,
+      actionKind: "spec_status_flipped",
+      specSlug: slug,
+      reason,
+      metadata: { applied: did, auto_applied: true },
+    });
+  } catch { /* audit is best-effort */ }
+  return { summary: `Status flipped on ${slug}: ${did.join(" · ")}` };
 }
 
 function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown>[] {
@@ -5589,44 +5688,10 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         evidence: typeof a.evidence === "string" ? a.evidence : "",
         status: "pending",
       });
-    } else if (a.type === "spec-status") {
-      // ada-director-spec-status-cards: a director-proposed flip on the board (status / per-phase status /
-      // critical / deferred), executed through the existing markSpecCard* writers on CEO approval. Reuses
-      // the same approval-gate + audit trail as every other card — no parallel approval path.
-      const slug = typeof a.slug === "string" ? a.slug.replace(/[^a-z0-9-]/gi, "") : "";
-      const reason = typeof a.reason === "string" ? a.reason.trim() : "";
-      if (!slug || !reason) continue; // slug + reason are required (the audit row needs it)
-      const statusRaw = typeof a.status === "string" ? a.status.toLowerCase() : "";
-      const status = statusRaw === "planned" || statusRaw === "in_progress" || statusRaw === "shipped" || statusRaw === "rejected" ? statusRaw : undefined;
-      const phasesIn = Array.isArray(a.phases) ? a.phases : [];
-      const phases: { index: number; status: "planned" | "in_progress" | "shipped" | "rejected" }[] = [];
-      for (const p of phasesIn) {
-        if (!p || typeof p !== "object") continue;
-        const r = p as Record<string, unknown>;
-        const idx = typeof r.index === "number" && Number.isInteger(r.index) && r.index >= 0 ? r.index : null;
-        const sRaw = typeof r.status === "string" ? r.status.toLowerCase() : "";
-        const s = sRaw === "planned" || sRaw === "in_progress" || sRaw === "shipped" || sRaw === "rejected" ? sRaw : null;
-        if (idx === null || s === null) continue;
-        phases.push({ index: idx, status: s });
-        if (phases.length >= 40) break; // hard ceiling — no spec has more phases than this
-      }
-      const critical = typeof a.critical === "boolean" ? a.critical : undefined;
-      const deferred = typeof a.deferred === "boolean" ? a.deferred : undefined;
-      // At least one field must be set — an empty card has nothing to flip.
-      if (status === undefined && phases.length === 0 && critical === undefined && deferred === undefined) continue;
-      out.push({
-        id: `dc${ts}${i}`,
-        type: "spec-status",
-        summary: String(a.summary || `Status: ${slug}`),
-        slug,
-        proposedStatus: status, // the `status` field on the card payload; renamed in storage so the pending_action.status state ('pending'|'done'|…) doesn't collide
-        phases,
-        critical,
-        deferred,
-        reason,
-        status: "pending",
-      });
     }
+    // spec-status: NOT normalized into pending_actions — it's auto-applied directly from the raw LLM
+    // payload by `applySpecStatusActionInline` ([[../specs/ada-director-spec-status-cards]] Phase 1
+    // revised). Validation (slug/reason/phase shape/owner-leash) happens inside that helper.
   }
   return out;
 }
@@ -5647,8 +5712,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — for the INTENT: PLAN case (the CEO hands you a plan to execute). On approval it becomes your ONE active directive (runs FIRST, before routine) AND the worker acts immediately: it QUEUES the gate spec + every \`criticalSpecs\` build right now (no waiting for the init cadence), marks them \`**Priority:** critical\`, and CANCELS any parked \`holdBuilds\` (out-of-order builds to clear). \`gateBuildsUntil\` pauses ROUTINE builds until that spec ships (priority/critical builds still run; auto-lifts on ship). A directive re-prioritizes, never authorizes destructive work or a new goal.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"model_tier","summary":"<agent + tier change in one line>","targetKind":"<agent kind, e.g. fold>","tier":"<haiku|sonnet|opus, or null to clear to the Max default>","rollup":<the cited grade rollup 0-10, or omit>,"evidence":"<why — the grade slip / speed + 5-hr-window pressure>"}]}`,
   `  — when an agent's MODEL should change (box-agent-model-tiers): its grade rollup slipped on a small model, or a mechanical high-volume agent is burning the 5-hour usage window. You PROPOSE the tier; on the CEO's approval the worker routes it to the agent's SUPERVISOR (a worker's change → its director, a director's → the CEO), and on that approval the registry updates instantly (reversible — flip it back). A live+autonomous director may auto-apply a one-tier bump for a worker whose rollup is <7. Cite the rollup as the evidence.`,
-  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec-status","summary":"<one-line why>","slug":"<existing-spec-slug>","status":"<planned|in_progress|shipped|rejected>","phases":[{"index":0,"status":"shipped"}],"critical":true,"deferred":false,"reason":"<written to spec_status_history>"}]}`,
-  `  — when a spec needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:**). Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred). \`phases[].index\` is 0-based and validated against the markdown's phase count. On approval the worker calls the existing markSpecCard* writers + appends one spec_status_history row per field with actor=director:{your-function} — the same audit trail every other status writer uses.`,
+  `{"status":"replied","reply":"<acknowledge the flip in chat — no approval card is rendered>","pending_actions":[{"type":"spec-status","summary":"<one-line why>","slug":"<existing-spec-slug>","status":"<planned|in_progress|shipped|rejected>","phases":[{"index":0,"status":"shipped"}],"critical":true,"deferred":false,"reason":"<written to spec_status_history>"}]}`,
+  `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:**). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred). \`phases[].index\` is 0-based and validated against the markdown's phase count. The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -5663,7 +5728,7 @@ function directorCoachFraming(dirFn: string): string {
     `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
     `You MAY PROPOSE a new GOAL (for YOUR OWN function only). If the conversation surfaces a strategic, multi-spec objective (an initiative, not a single fix), emit a 'goal' pending_action with structured fields (slug, title, outcome, successMetric, body). You never START a goal yourself — on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate); once greenlit, Pia decomposes it. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
     `You can EDIT an existing spec, not just author a new one. If the CEO asks you to MODIFY specs (e.g. "update the milestone specs Pia made to add the right Blocked-by lines"), READ each spec and emit a 'spec-edit' card per spec carrying the FULL revised markdown — a real edit the worker commits on approval, NOT just a recommendation to make a new spec.`,
-    `To flip a spec on the BOARD (status / a single phase / **Priority:** critical / **Deferred:** parked) emit a 'spec-status' card — NEVER a 'spec-edit' for status, because status is DB-only after spec-status-db-driven (the markdown is content-only). One card per slug; multiple cards if you're flipping N specs. On approval the worker calls the existing markSpecCard* writers and appends a spec_status_history row per field (actor=director:{your-function}, reason=your reason). The daily drift reconciler auto-corrects a wrongly-flipped card within 24h — the reversibility backstop the leash relies on.`,
+    `To flip a spec YOU OWN on the BOARD (status / a single phase / **Priority:** critical / **Deferred:** parked) emit a 'spec-status' action — NEVER a 'spec-edit' for status, because status is DB-only after spec-status-db-driven (the markdown is content-only). One action per slug; multiple actions if you're flipping N specs. **This action AUTO-APPLIES the moment your reply is persisted — no CEO approval, no inbox/Slack card, no Approve button.** Accountability is the audit trail (spec_status_history row stamped actor=director:{your-function} + a director_activity row), not a per-flip gate, and the daily drift reconciler auto-corrects a wrong flip within 24h. Mention the flip in your reply so the CEO sees it in chat — but do NOT ask for approval. Owner-only: a flip on a spec whose \`Owner: [[../functions/x]]\` isn't your function is rejected as out-of-leash; flipping someone else's spec still goes through the CEO owner UI.`,
     `The CEO can hand you a PLAN to EXECUTE (the 'Give a plan' button → INTENT: PLAN). You emit a 'directive' card; on approval it becomes your ONE active directive that your standing pass runs FIRST, before routine. A directive can set 'gateBuildsUntil: <spec>' (PAUSE every other build until that spec ships — for "finish the assembly-line fix before more building", auto-lifts on ship) and 'criticalSpecs' (a '**Priority:** critical' marker so they jump the build queue). A spec marked '**Priority:** critical' is investigated + queued ahead of normal Planned specs. A directive re-prioritizes WHAT you do — it never loosens the leash.`,
     DIRECTOR_COACH_OUTPUT,
   ].join("\n\n");
@@ -5845,86 +5910,6 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "done";
             a.result = r.applied ? `auto-applied within rail → ${tier ?? "Max default"}` : `proposed → routed to ${r.routedTo} for approval`;
             notes.push(`Model tier: ${a.result}`);
-          } else if (a.type === "spec-status" && a.slug) {
-            // ada-director-spec-status-cards: flip a spec on the board (status / per-phase / critical / deferred)
-            // via the existing markSpecCard* writers — same approval-gate + audit trail as every other card. No
-            // markdown commit (status lives in spec_card_state after spec-status-db-driven). A wrongly-flipped
-            // card is auto-corrected by the daily drift reconciler within 24h (the reversibility backstop).
-            const slug = String(a.slug);
-            // Validation: the slug must resolve to an existing row OR a markdown file (no phantom rows).
-            const cs = await import("../src/lib/spec-card-state");
-            const states = await cs.getSpecCardStates(job.workspace_id);
-            const existing = states[slug];
-            const specPath = join(wt, `docs/brain/specs/${slug}.md`);
-            const mdExists = existsSync(specPath);
-            if (!existing && !mdExists) {
-              a.status = "failed";
-              a.result = `spec ${slug} not found in spec_card_state or docs/brain/specs/`;
-              notes.push(`${a.summary} → ${a.result}`);
-              continue;
-            }
-            // Validate phase indices against the markdown's actual phase count (when markdown exists).
-            const proposedPhases = Array.isArray(a.phases) ? (a.phases as { index: number; status: "planned" | "in_progress" | "shipped" | "rejected" }[]) : [];
-            if (proposedPhases.length && mdExists) {
-              const { getSpec } = await import("../src/lib/brain-roadmap");
-              const got = await getSpec(slug);
-              const phaseCount = got?.card.phases.length ?? 0;
-              const bad = proposedPhases.find((p) => p.index < 0 || p.index >= phaseCount);
-              if (bad) {
-                a.status = "failed";
-                a.result = `phase index ${bad.index} out of range (spec has ${phaseCount} phases)`;
-                notes.push(`${a.summary} → ${a.result}`);
-                continue;
-              }
-            }
-            const actor = `director:${thread.director_function}`;
-            const reason = typeof a.reason === "string" ? (a.reason as string) : "";
-            const audit = { actor, reason };
-            const proposedStatusRaw = typeof a.proposedStatus === "string" ? (a.proposedStatus as string) : "";
-            const proposedStatus = proposedStatusRaw === "planned" || proposedStatusRaw === "in_progress" || proposedStatusRaw === "shipped" || proposedStatusRaw === "rejected" ? proposedStatusRaw : undefined;
-            const did: string[] = [];
-            // 1) Per-phase flips: merge into existing phase_states by index, recompute rollup unless caller
-            //    supplied an explicit `status` to use instead. Single markSpecCardStatus call handles both.
-            if (proposedPhases.length) {
-              const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
-              const byIndex = new Map(priorPhases.map((p) => [p.index, p]));
-              for (const p of proposedPhases) {
-                const prior = byIndex.get(p.index);
-                byIndex.set(p.index, { index: p.index, title: prior?.title ?? `Phase ${p.index + 1}`, status: p.status });
-              }
-              const merged = [...byIndex.values()].sort((x, y) => x.index - y.index);
-              const rollup = proposedStatus ?? cs.rollupPhaseStatus(merged);
-              await cs.markSpecCardStatus(job.workspace_id, slug, rollup, merged, audit);
-              did.push(`phases ${proposedPhases.map((p) => `#${p.index}=${p.status}`).join(", ")} → ${rollup}`);
-            } else if (proposedStatus) {
-              // 2) Whole-spec rollup without per-phase changes — preserve existing phase_states.
-              const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
-              await cs.markSpecCardStatus(job.workspace_id, slug, proposedStatus, priorPhases, audit);
-              did.push(`status → ${proposedStatus}`);
-            }
-            // 3) flags.critical — orthogonal to status/phases.
-            if (typeof a.critical === "boolean") {
-              await cs.markSpecCardCritical(job.workspace_id, slug, a.critical as boolean, audit);
-              did.push(`critical=${a.critical}`);
-            }
-            // 4) flags.deferred — wins for display via effectiveStatusFromState; un-defer reveals progress.
-            if (typeof a.deferred === "boolean") {
-              await cs.markSpecCardDeferred(job.workspace_id, slug, a.deferred as boolean, audit);
-              did.push(`deferred=${a.deferred}`);
-            }
-            if (!did.length) {
-              a.status = "failed";
-              a.result = "no fields to flip (spec-status card needs at least one of status / phases / critical / deferred)";
-              notes.push(`${a.summary} → ${a.result}`);
-              continue;
-            }
-            try {
-              const { recordDirectorActivity } = await import("../src/lib/director-activity");
-              await recordDirectorActivity(db, { workspaceId: job.workspace_id, directorFunction: thread.director_function, actionKind: "spec_status_flipped", specSlug: slug, reason, metadata: { applied: did } });
-            } catch { /* audit is best-effort */ }
-            a.status = "done";
-            a.result = `spec_card_state[${slug}] ${did.join(" · ")}`;
-            notes.push(`Status: ${slug} → ${did.join(" · ")}`);
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
@@ -5995,15 +5980,34 @@ async function runDirectorCoachJob(job: Job) {
       return;
     }
     const ts = Date.now().toString(36);
-    const newActions = normalizeCoachActions(parsed?.pending_actions, ts);
+    // ada-director-spec-status-cards Phase 1 (revised): peel spec-status off the RAW LLM payload + auto-
+    // apply from its original shape (so the LLM's `status` field still names the proposed rollup, not the
+    // pending_action lifecycle status). Spec-status never enters pending_actions, never renders an inbox/
+    // Slack card. Its summary (applied or rejected) is appended to Ada's reply so the chat history
+    // reflects the flip and the CEO sees it in chat. All other action types still flow through
+    // normalizeCoachActions for the standard pending → approved → done lifecycle.
+    const rawActions = Array.isArray(parsed?.pending_actions) ? (parsed!.pending_actions as unknown[]) : [];
+    const specStatusRaw: Record<string, unknown>[] = [];
+    const nonStatusRaw: unknown[] = [];
+    for (const a of rawActions) {
+      if (a && typeof a === "object" && (a as Record<string, unknown>).type === "spec-status") specStatusRaw.push(a as Record<string, unknown>);
+      else nonStatusRaw.push(a);
+    }
+    const flipSummaries: string[] = [];
+    for (const raw of specStatusRaw) {
+      const r = await applySpecStatusActionInline(job.workspace_id, thread.director_function, wt, raw);
+      flipSummaries.push(r.summary);
+    }
+    const newActions = normalizeCoachActions(nonStatusRaw, ts);
+    const replyAugmented = flipSummaries.length ? `${reply}\n\n${flipSummaries.join("\n")}` : reply;
     // ada-slack-chat: mirror the turn to #cto-ada (Ada's reply + a card per new action). This stamps each
     // posted action with its Slack message ts BEFORE we persist, so a later approve/reject can resolve it.
-    await postCoachTurnToSlack(thread, job.workspace_id, reply, newActions);
+    await postCoachTurnToSlack(thread, job.workspace_id, replyAugmented, newActions);
     const fresh = await loadCoachThread(threadId);
-    const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: reply }];
+    const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: replyAugmented }];
     await db.from("director_coach_threads").update({ messages, box_session_id: newSession, turn_status: "idle", last_error: null, pending_actions: newActions, updated_at: new Date().toISOString() }).eq("id", threadId);
     await update(job.id, { status: "completed", log_tail: logTail });
-    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} card[s])` : ""}${thread.source === "slack" ? " → #cto-ada" : ""}`);
+    console.log(`${tag} ✓ reply appended${newActions.length ? ` (+${newActions.length} card[s])` : ""}${flipSummaries.length ? ` (+${flipSummaries.length} auto-flip[s])` : ""}${thread.source === "slack" ? " → #cto-ada" : ""}`);
   } finally {
     sh("git", ["worktree", "remove", "--force", wt]);
   }

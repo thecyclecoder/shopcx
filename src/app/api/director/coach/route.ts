@@ -20,7 +20,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createThread, loadThread, markThreadThinking, setActionDecision, listRecentThreads, type DirectorCoachThread } from "@/lib/agents/director-coach-threads";
 import { getSlackToken, postMessage, updateMessage } from "@/lib/slack";
 import { buildAdaResolvedCard } from "@/lib/slack-ada";
-import { getSpecCardStates, effectiveStatusFromState, type SpecCardState } from "@/lib/spec-card-state";
 
 export const dynamic = "force-dynamic";
 
@@ -56,35 +55,7 @@ async function resolveSlackCardFromWeb(thread: DirectorCoachThread | null, works
   try {
     const token = await getSlackToken(workspaceId);
     if (!token) return;
-    // ada-director-spec-status-cards Phase 3 — a spec-status card carries flips; the resolved render
-    // shows the same current→proposed diff the original card did (fetched fresh here).
-    let current: { status: ReturnType<typeof effectiveStatusFromState>; phaseStates: SpecCardState["phase_states"]; critical: boolean; deferred: boolean } | undefined;
-    if (card.type === "spec-status" && card.slug) {
-      const states = await getSpecCardStates(workspaceId);
-      const s = states[card.slug];
-      current = {
-        status: effectiveStatusFromState(s),
-        phaseStates: s?.phase_states ?? [],
-        critical: !!s?.flags?.critical,
-        deferred: !!s?.flags?.deferred,
-      };
-    }
-    const rebuilt = buildAdaResolvedCard(
-      {
-        id: card.id,
-        type: card.type,
-        summary: card.summary,
-        guidance: card.guidance,
-        slug: card.slug,
-        proposedStatus: card.proposedStatus,
-        phases: card.phases,
-        critical: card.critical,
-        deferred: card.deferred,
-        reason: card.reason,
-      },
-      decision,
-      current,
-    );
+    const rebuilt = buildAdaResolvedCard({ id: card.id, type: card.type, summary: card.summary, guidance: card.guidance }, decision);
     await updateMessage(token, thread.slack_channel_id, card.slackTs, rebuilt.blocks, rebuilt.text);
   } catch (e) {
     console.error("[director-coach] resolveSlackCardFromWeb failed:", e instanceof Error ? e.message : e);
@@ -169,37 +140,6 @@ export async function POST(req: Request) {
   return NextResponse.json({ thread });
 }
 
-/**
- * ada-director-spec-status-cards Phase 3 — for any `spec-status` card the inbox is about to render,
- * include the CURRENT spec_card_state for its slug so the UI can show a compact `current → proposed`
- * diff at render time. One DB read per GET (workspace-scoped), pruned to the slugs the thread refs.
- */
-type CurrentSpecState = {
-  status: ReturnType<typeof effectiveStatusFromState>;
-  phaseStates: SpecCardState["phase_states"];
-  critical: boolean;
-  deferred: boolean;
-};
-async function enrichSpecStatusCurrents(workspaceId: string, thread: DirectorCoachThread): Promise<Record<string, CurrentSpecState>> {
-  const slugs = new Set<string>();
-  for (const a of thread.pending_actions ?? []) {
-    if (a.type === "spec-status" && typeof a.slug === "string") slugs.add(a.slug);
-  }
-  if (!slugs.size) return {};
-  const states = await getSpecCardStates(workspaceId);
-  const out: Record<string, CurrentSpecState> = {};
-  for (const slug of slugs) {
-    const s = states[slug];
-    out[slug] = {
-      status: effectiveStatusFromState(s),
-      phaseStates: s?.phase_states ?? [],
-      critical: !!s?.flags?.critical,
-      deferred: !!s?.flags?.deferred,
-    };
-  }
-  return out;
-}
-
 export async function GET(req: Request) {
   const g = await gate();
   if (!g.ok) return g.res;
@@ -207,8 +147,7 @@ export async function GET(req: Request) {
   if (id) {
     const thread = await loadThread(g.workspaceId, id);
     if (!thread) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    const specStatusCurrents = await enrichSpecStatusCurrents(g.workspaceId, thread);
-    return NextResponse.json({ thread, specStatusCurrents });
+    return NextResponse.json({ thread });
   }
   const threads = await listRecentThreads(g.workspaceId, g.userId);
   return NextResponse.json({ threads });
