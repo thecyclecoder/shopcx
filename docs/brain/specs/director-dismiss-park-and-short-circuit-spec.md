@@ -1,8 +1,10 @@
-# Ada can dismiss a stale park + short-circuit a no-longer-needed spec 🚧
+# Ada can dismiss a stale park + short-circuit a no-longer-needed spec ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the director's action surface so I can clear cleanly instead of leaving stale park rows or part-shipped specs sitting forever.
 
 **Why now (2026-06-24):** the Amazing Creamer product-seed park. A real "we don't need this anymore" call the CEO made in chat, and I had no action for it. Parks sit in `agent_jobs` `needs_attention` until [[no-parked-specs-auto-route-needs-attention]] picks them up — but auto-route can't help here: there's no shipped target to fold to (the underlying spec [[box-product-seeding]] has 0 shipped phases) and no real_blocker to spec around (the blocker is "we changed our mind," not a code gap). The CEO had to manually tell me "we're done with this" and I still had no clean way to land that decision. This spec gives me the two actions to do it myself, with audit + reversibility instead of silent suppression.
+
+The one-off runtime application to the Amazing Creamer park itself is tracked separately at [[director-dismiss-park-and-short-circuit-spec-amazing-creamer-apply]] so this spec can fold on the shipped capability.
 
 ## North star — actions with an audit trail, not a coaching rule that hides a class
 
@@ -47,21 +49,9 @@ Today `spec-status` flips `planned|in_progress|shipped|rejected`. None fit "we c
 - `shortCircuit:true` with `status:'rejected'` → rejected as schema error (short-circuit is shipped-only).
 - `shortCircuit:true` on a spec owned by a different function → rejected as out-of-leash, no DB write.
 
-## Phase 3 — apply both to the Amazing Creamer park ⏳
-
-After Phase 1 + 2 land, run the two actions on the live state:
-
-- `dismiss-park` on the Amazing Creamer product-seed `agent_jobs` row with reason "underlying spec short-circuited — CEO 2026-06-24, see box-product-seeding."
-- `spec-status` on [[box-product-seeding]]: `{status:'shipped', shortCircuit:true, reason:'no longer needed — CEO 2026-06-24, retained as reference: seed-product skill + this spec + brain pages stay grep-able for future product seeding.'}`
-
-### Verification — Phase 3
-- The Amazing Creamer parked job drops out of `routeNeedsAttention`'s candidate list and is no longer surfaced to the CEO.
-- [[box-product-seeding]] flips shipped + short-circuited on the roadmap with the reason visible.
-- The `seed-product` skill, [[box-product-seeding]] spec, and product-seeding brain pages stay intact and grep-able — short-circuit only flips status, it does not delete or unindex.
-
 ## Verification
 
-End-to-end checklist for the owner once Phase 1 + 2 are live in prod. Phase 3 (the Amazing-Creamer apply) is a runtime conversation the director runs once deployed.
+End-to-end checklist for the owner once Phase 1 + 2 are live in prod.
 
 - In a #cto-ada chat, ask Ada to dismiss a stale park she owns. She emits a `pending_actions:[{type:"dismiss-park", jobId, reason}]` and ACKS the dismiss in her reply → expect `agent_jobs.status='dismissed'` + `needs_attention_class='dismissed_by_director'` for that `jobId`, a `dismissed_park` row in `director_activity` carrying her reason + `metadata.job_id` + `metadata.spec_slug` + `metadata.prior_class`, and NO inbox/Slack approval card rendered for the action.
 - Open `/dashboard/agents/platform` → expect the new `dismissed_park` row to appear in the activity feed with a "Re-open" button. Click Re-open → expect `agent_jobs.status='needs_attention'`, `needs_attention_class=null`, the button hidden on the next 30s tick, and a `reopened_park` row landed under the same `metadata.job_id`.
