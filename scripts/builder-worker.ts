@@ -968,8 +968,12 @@ function parseStatus(text: string): { status: string; questions?: unknown[]; sum
   return null;
 }
 
-// Generic last-JSON-object extractor for the solver/skeptic passes (they emit a final JSON object that
-// is NOT a {"status":…} envelope). Tries raw → fenced ```json``` → the widest {…} span.
+// Generic last-JSON-object extractor for the solver/skeptic + review-verdict passes (they emit a final
+// JSON object as the closing message). Tries whole-text → every fenced ```json``` block (last-wins) →
+// the LAST balanced {…} that parses (right-to-left close-brace scan, left-to-right open-brace match) —
+// so an envelope with prose-braces BEFORE it (`{like this}` in a quote, a JSON-shaped excerpt in the
+// review text) no longer breaks parsing. Strictly additive vs the prior greedy first-to-last span: it
+// only finds MORE valid JSONs, never fewer. (ada-director-spec-status-cards-fix-tooling-fa6848 P1.)
 function extractJson<T = Record<string, unknown>>(text: string): T | null {
   const tryParse = (s: string): T | null => {
     try {
@@ -981,15 +985,28 @@ function extractJson<T = Record<string, unknown>>(text: string): T | null {
   };
   let o = tryParse(text.trim());
   if (o) return o;
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) {
-    o = tryParse(fence[1].trim());
-    if (o) return o;
+  // Last fenced ```json block that parses — agents commonly emit the final JSON envelope as a fenced
+  // block, sometimes preceded by example JSON in earlier prose/fences. Last-wins picks the envelope.
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (let i = fences.length - 1; i >= 0; i--) {
+    const fenced = tryParse(fences[i][1].trim());
+    if (fenced) return fenced;
   }
-  const first = text.indexOf("{");
-  const last = text.lastIndexOf("}");
-  if (first >= 0 && last > first) o = tryParse(text.slice(first, last + 1));
-  return o;
+  // Scan for the LAST parseable balanced {…}: walk close braces from end → open braces from start.
+  // First hit is the outermost-latest object — skips prose braces wrapping the JSON envelope.
+  const opens: number[] = [];
+  for (let i = text.indexOf("{"); i >= 0; i = text.indexOf("{", i + 1)) opens.push(i);
+  const closes: number[] = [];
+  for (let i = text.indexOf("}"); i >= 0; i = text.indexOf("}", i + 1)) closes.push(i);
+  for (let e = closes.length - 1; e >= 0; e--) {
+    const end = closes[e];
+    for (const start of opens) {
+      if (start >= end) break;
+      const parsed = tryParse(text.slice(start, end + 1));
+      if (parsed) return parsed;
+    }
+  }
+  return null;
 }
 
 // ── needs-attention-triage-and-verdict-robustness Phase 2 — robust verdict resolution ───────────────────
@@ -1001,25 +1018,41 @@ function extractJson<T = Record<string, unknown>>(text: string): T | null {
 // if still inconclusive — hands the caller an ACTIONABLE fail-safe reason ("<agent> produced no parseable
 // verdict after 2 attempts — re-run or review manually: <excerpt>"). It NEVER auto-passes/auto-approves on
 // an inconclusive result (conservative default — the caller still parks it, just with a usable reason).
+//
+// ada-director-spec-status-cards-fix-tooling-fa6848 Phase 1 — the retry is no longer a blind re-run: the
+// runner gets a `RetryReason` so it can append a JSON-only repair hint to its prompt ("your previous
+// attempt did not produce a parseable verdict — emit ONLY the verdict envelope this time"). This nudges
+// the second attempt to deliver the JSON instead of repeating the same prose-around-JSON failure mode.
 type ReviewClaudeRun = { session: string | null; resultText: string; isError: boolean; raw: string; usage?: RunUsage; model?: string | null };
 
 const REVIEW_VERDICT_MAX_ATTEMPTS = 2;
+
+interface RetryReason {
+  /** the unparseable/unrecognized text from the previous attempt (last 400 chars). */
+  lastExcerpt: string;
+  /** the previous attempt's claude session id (so a caller may resume on the same account if it wants). */
+  prevSession: string | null;
+}
 
 async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   /** human label for the fail-safe reason — "security review" | "repair" | "regression review". */
   agent: string;
   /** the recognized status vocabulary (a parsed status outside it counts as inconclusive → retry). */
   recognized: ReadonlySet<string>;
-  /** (re-)invoke the claude investigation; called up to REVIEW_VERDICT_MAX_ATTEMPTS times. */
-  run: (attempt: number) => Promise<T>;
+  /**
+   * (re-)invoke the claude investigation; called up to REVIEW_VERDICT_MAX_ATTEMPTS times. On attempt > 1
+   * the runner receives a `RetryReason` from the prior attempt so it can append a JSON-only repair hint.
+   */
+  run: (attempt: number, retry: RetryReason | null) => Promise<T>;
   /** per-attempt side effects (metering + session persist) — runs after EACH attempt, not just the last. */
   onRun?: (r: T, attempt: number) => Promise<void>;
 }): Promise<{ run: T; parsed: Record<string, unknown> | null; verdict: string; fallbackReason: string | null }> {
   let last: T | null = null;
   let parsed: Record<string, unknown> | null = null;
   let verdict = "";
+  let retry: RetryReason | null = null;
   for (let attempt = 1; attempt <= REVIEW_VERDICT_MAX_ATTEMPTS; attempt++) {
-    const r = await opts.run(attempt);
+    const r = await opts.run(attempt, retry);
     last = r;
     if (opts.onRun) await opts.onRun(r, attempt);
     parsed = extractJson<Record<string, unknown>>(r.resultText);
@@ -1027,13 +1060,29 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
     if (parsed && verdict && opts.recognized.has(verdict)) {
       return { run: r, parsed, verdict, fallbackReason: null };
     }
-    // unparseable / empty / unrecognized verdict → retry once more (fresh investigation), then fail safe.
+    // unparseable / empty / unrecognized verdict → retry once more with a JSON-only repair hint, then fail safe.
+    retry = { lastExcerpt: (r.raw || "").trim().slice(-400), prevSession: r.session ?? null };
   }
   // Exhausted: still no recognizable verdict. A genuine process crash with no parse stays the caller's
   // `failed` path (the job machinery retries it); otherwise the caller fail-safes to this actionable reason.
   const excerpt = (last?.raw || "").trim().slice(-400) || "(no output)";
   const fallbackReason = `${opts.agent} produced no parseable verdict after ${REVIEW_VERDICT_MAX_ATTEMPTS} attempts — re-run or review manually: ${excerpt}`;
   return { run: last as T, parsed, verdict, fallbackReason };
+}
+
+// Shared JSON-only repair-hint builder appended to the retry prompt. The agent has the full investigation
+// in its first-attempt context; the retry just needs to deliver the verdict envelope. We give it the exact
+// vocabulary so an unparseable first attempt converges on a recognized status.
+function reviewVerdictRetryHint(agent: string, vocabulary: ReadonlySet<string>, retry: RetryReason): string {
+  const tail = retry.lastExcerpt.length > 280 ? retry.lastExcerpt.slice(-280) : retry.lastExcerpt;
+  return [
+    ``,
+    `## RETRY NOTICE — your previous ${agent} attempt did not produce a parseable JSON verdict.`,
+    `On this attempt, the ONLY thing that matters is the final JSON envelope. Re-investigate as briefly as needed and emit ONLY one valid JSON object as your final message — no prose around it, no commentary after it, no markdown if possible (if fenced in \`\`\`json\`\`\`, the fenced block MUST be the last thing in the message).`,
+    `The "status" field MUST be EXACTLY one of: ${[...vocabulary].map((v) => `"${v}"`).join(" | ")}.`,
+    `If you genuinely cannot classify with confidence, emit {"status":"needs-human","review":"<one-line note on what's ambiguous>"} — that is ALWAYS valid and surfaces a parked item for a human, never a silent no-verdict park.`,
+    `Tail of your previous output (last ~280 chars, for context): ${tail || "(empty)"}`,
+  ].join("\n");
 }
 
 async function gh(method: string, path: string, body?: unknown) {
@@ -6751,7 +6800,10 @@ async function runRepairJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "repair",
       recognized: REPAIR_VERDICTS,
-      run: () => runRepairClaude(repairBrief, null, REPO_DIR, pickHealthyConfigDir()),
+      run: (_attempt, retry) => {
+        const attemptPrompt = retry ? repairBrief + reviewVerdictRetryHint("repair", REPAIR_VERDICTS, retry) : repairBrief;
+        return runRepairClaude(attemptPrompt, null, REPO_DIR, pickHealthyConfigDir());
+      },
       onRun: async (r) => {
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
         if (r.session) await update(job.id, { claude_session_id: r.session });
@@ -7167,7 +7219,10 @@ async function runRegressionJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "regression review",
       recognized: REGRESSION_VERDICTS,
-      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR, pickHealthyConfigDir()),
+      run: (_attempt, retry) => {
+        const attemptPrompt = retry ? coachedRegressionPrompt + reviewVerdictRetryHint("regression review", REGRESSION_VERDICTS, retry) : coachedRegressionPrompt;
+        return runRegressionClaude(attemptPrompt, null, REPO_DIR, pickHealthyConfigDir());
+      },
       onRun: async (r) => {
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
         if (r.session) await update(job.id, { claude_session_id: r.session });
@@ -7680,7 +7735,10 @@ async function runSecurityReviewJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "security review",
       recognized: SECURITY_VERDICTS,
-      run: () => runSecurityClaude(prompt, null, REPO_DIR, pickHealthyConfigDir()),
+      run: (_attempt, retry) => {
+        const attemptPrompt = retry ? prompt + reviewVerdictRetryHint("security review", SECURITY_VERDICTS, retry) : prompt;
+        return runSecurityClaude(attemptPrompt, null, REPO_DIR, pickHealthyConfigDir());
+      },
       onRun: async (r) => {
         if (r.session) await update(job.id, { claude_session_id: r.session });
       },
