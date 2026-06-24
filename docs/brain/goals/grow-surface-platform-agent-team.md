@@ -25,7 +25,7 @@ Owner: [[../functions/platform]] (the boss, Ada). Reports to: [[ceo-mode]]. Pair
 Specs authored by the [[../specs/goal-decomposition-engine|goal-decomposition engine]] (owner-approved). Each is owner+parent tagged; `Blocked-by` encodes build order so only unblocked specs queue immediately and dependents auto-queue as their blockers ship.
 
 ### M1 — Roster sync
-- [[../specs/agent-roster-sync]] ⏳ — reconcile MONITORED_LOOPS (cron + agent-kind) ↔ PERSONAS ↔ live agent_jobs into one roster so the org view surfaces 100% of running agents (incl. Tao/Devi/Cole + control-tower-monitor) and flags inactive ones (Remi).
+- [[../specs/agent-roster-sync]] ✅ — reconcile MONITORED_LOOPS (cron + agent-kind) ↔ PERSONAS ↔ live agent_jobs into one roster so the org view surfaces 100% of running agents (incl. Tao/Devi/Cole + control-tower-monitor) and flags inactive ones (Remi).
 
 ### M2 — Deploy-Health / Auto-Rollback guardian
 - [[../specs/deploy-health-rollback-guardian]] ⏳ — already greenlit: watch each auto-merged deploy over a canary window and auto-rollback on a correlated regression.

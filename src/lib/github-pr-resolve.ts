@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
 import { findMergedSiblingBuild, handleAutoMergedBuildBranch, getBranchBuildSuccess } from "@/lib/agent-jobs";
+import { openDeployWatch } from "@/lib/deploy-guardian";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -611,6 +612,15 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
                 if (advanced) console.log(`[auto-merge] advanced post-merge state for ${advanced} (PR #${prNumber})`);
               } catch (e) {
                 console.warn(`[auto-merge] post-merge advance for PR #${prNumber} failed:`, e instanceof Error ? e.message : e);
+              }
+              // deploy-health-rollback-guardian Phase 1: this squash-merge triggers a Vercel deploy, so open
+              // a deploy-watch over the canary window (Reva). It snapshots the pre-deploy error/loop baseline
+              // now; the deploy-guardian-cron evaluates the verdict once the window elapses. Best-effort + never
+              // throws — a watch that crashes the merge it guards is worse than the gap.
+              try {
+                await openDeployWatch({ admin: db, branch, prNumber, mergeSha: m.mergeSha ?? null });
+              } catch (e) {
+                console.warn(`[auto-merge] deploy-watch open for PR #${prNumber} failed:`, e instanceof Error ? e.message : e);
               }
             } else {
               ok = false;

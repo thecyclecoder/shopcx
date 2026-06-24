@@ -4,14 +4,14 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { getPersona } from "@/lib/agents/personas";
-import { PersonaAvatar } from "@/components/agents/persona-chip";
+import { PersonaAvatar, WorkerStatusBadge, type WorkerLiveness } from "@/components/agents/persona-chip";
 
 // Workers roster (agents-hub-role-inboxes spec, Phase 5) — `/dashboard/agents/workers`.
 // Every box agent_jobs lane grouped under its owning director; each chip is clickable →
 // its `/dashboard/agents/[role]` profile + precise responsibilities. Brain-driven via
 // GET /api/developer/agents (the Control Tower registry's agent-kind loops).
 
-interface WorkerLane { kind: string; label: string; description: string }
+interface WorkerLane { kind: string; label: string; description: string; status: WorkerLiveness; statusReason?: string; flagged?: boolean }
 interface DirectorNode {
   slug: string;
   title: string;
@@ -47,7 +47,8 @@ function ScoreBadge({ score }: { score?: Rollup }) {
   );
 }
 
-function AgentChip({ kind, label, description, score }: { kind: string; label: string; description: string; score?: Rollup }) {
+function AgentChip({ worker, score }: { worker: WorkerLane; score?: Rollup }) {
+  const { kind, label, description, status, statusReason, flagged } = worker;
   const persona = getPersona(kind, label);
   return (
     <Link
@@ -61,8 +62,19 @@ function AgentChip({ kind, label, description, score }: { kind: string; label: s
           <span className="truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">{persona.name}</span>
           <span className="text-[11px] text-zinc-400">{persona.role}</span>
         </span>
-        <span className="mt-0.5 block truncate font-mono text-[10px] text-zinc-400">{kind}</span>
+        <span className="mt-0.5 flex items-center gap-1.5">
+          <span className="truncate font-mono text-[10px] text-zinc-400">{kind}</span>
+          {flagged && (
+            <span
+              title="Live lane with no MONITORED_LOOPS row — flagged by the roster drift audit."
+              className="rounded bg-amber-100 px-1 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+            >
+              unregistered
+            </span>
+          )}
+        </span>
       </span>
+      <WorkerStatusBadge status={status} reason={statusReason} />
       <ScoreBadge score={score} />
     </Link>
   );
@@ -151,7 +163,7 @@ export default function WorkersRosterPage() {
                 </h2>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {d.workers.map((w) => (
-                    <AgentChip key={w.kind} kind={w.kind} label={w.label} description={w.description} score={rollups[w.kind]} />
+                    <AgentChip key={w.kind} worker={w} score={rollups[w.kind]} />
                   ))}
                 </div>
               </section>

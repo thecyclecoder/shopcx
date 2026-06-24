@@ -10,11 +10,18 @@ Auto-merge optimizes 'ship the fix.' Its degenerate state is shipping a fix that
 ## The agent — a new DevOps worker (persona reskinnable)
 A new `agent_jobs` lane / control-tower agent-kind tile, under the DevOps Director, in the Workers roster + org chart with a profile + responsibilities (mirrors [[../specs/regression-agent|Remi]] / [[../specs/coverage-auto-register-agent|Cole]]). Proposed name: **Reva — Deploy Guardian** (🔁).
 
-## Phase 1 — watch each auto-merged deploy over a canary window ⏳
+## Phase 1 — watch each auto-merged deploy over a canary window ✅
 - On a deploy triggered by an auto-merged `claude/<slug>` PR (the director's auto-fix path), open a `deploy-watch` over a bounded canary window (e.g. 10–15 min): sample new [[../tables/error_events]] signatures + [[../tables/loop_alerts]] + the [[../dashboard/control-tower]] snapshot, attributing only errors that FIRST appear after the deploy timestamp (the correlation gate, mirroring [[../specs/agent-outage-resilience]]'s outage-correlation tagging).
 - Verdict per deploy: `healthy` (no new deploy-correlated regression → mark the deploy good, log it) · `regressed` (a clear spike of NEW errors / a loop flipping red, correlated to this deploy) · `unsure` (ambiguous → escalate, never auto-act).
 - Reuses Tao's Control-Tower signals + the error-feed; no new monitoring substrate.
 - Brain: new `libraries/deploy-guardian` + `inngest/deploy-guardian` (or box-lane) pages, [[../libraries/control-tower]], [[../tables/error_events]], [[../tables/loop_alerts]].
+
+**Shipped (watch-only — no rollback; Phase 2 acts on `regressed`):**
+- New [[../tables/deploy_watches]] — one row per auto-merged deploy (workspace-scoped, mirrors [[../tables/director_activity]]). `deployed_at` is the correlation-gate origin; `window_ends_at = deployed_at + CANARY_WINDOW_MS` (default **12 min**, env `DEPLOY_GUARDIAN_CANARY_WINDOW_MS`); `baseline` snapshots the pre-deploy error signatures + open loop_alerts; `verdict` is `pending｜healthy｜regressed｜unsure`. Partial-unique on `merge_sha` (one watch per deploy). Migration `20260705170000_deploy_watches.sql` · apply `npx tsx scripts/apply-deploy-watches-migration.ts`.
+- New [[../libraries/deploy-guardian]] (`src/lib/deploy-guardian.ts`) — `openDeployWatch` (resolves workspace+slug from the branch's `kind='build'` job, snapshots the baseline, inserts the watch; idempotent on `merge_sha`, never throws), `evaluateDueDeployWatches` (the cron driver, bounded 25/tick), `gatherDeployFindings` (the correlation gate: NEW `error_events` first-seen-after-deploy + not `outage_correlated` + not in baseline; NEW open `loop_alerts` opened-after-deploy; the live [[../libraries/control-tower]] red-loop cross-check), and `verdictFor` (the pure rule).
+- Wired into [[../libraries/github-pr-resolve]] `autoMergeReadyPrs` — right after the successful squash-merge (alongside `handleAutoMergedBuildBranch`), it opens the deploy-watch. Best-effort + never throws.
+- New [[../inngest/deploy-guardian-cron]] (`* * * * *`) → `evaluateDueDeployWatches`. Registered in `registered-functions.ts` + a `MONITORED_LOOPS` Control-Tower tile (`owner: platform`). Each evaluated watch stamps the verdict on its row + writes a `deploy_healthy｜deploy_regressed｜deploy_unsure` [[../tables/director_activity]] row (so it surfaces on the board-watch + KPI scorecard).
+- Verdict bar: `regressed` = a NEW red loop OR ≥`DEPLOY_REGRESSION_MIN_SIGNATURES` (2) distinct NEW signatures OR a single NEW signature recurring ≥`DEPLOY_REGRESSION_MIN_COUNT` (3) times; `healthy` = nothing new; `unsure` = one new low-count signature (ambiguous). All env-overridable.
 
 ### Verification — Phase 1
 - A clean auto-merged deploy → a `healthy` verdict + a logged deploy-watch, no action. A deploy that introduces a new correlated error signature → a `regressed` verdict surfaced within the canary window.

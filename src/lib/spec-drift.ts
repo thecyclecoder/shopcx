@@ -27,7 +27,7 @@
  * `spec_drift` table, rendered on the Control Tower for a one-tap flip. See docs/brain/libraries/spec-drift.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { deriveSpecStatus, getRoadmap, listArchivedSlugs, phaseEmoji, type Phase } from "@/lib/brain-roadmap";
+import { deriveSpecStatus, getRoadmap, listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { markSpecCardStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
@@ -249,7 +249,7 @@ export interface ReconcileResult {
   slug: string;
   flipped: { index: number; title: string }[]; // phases auto-flipped ✅ this run
   surfaced: { index: number; title: string }[]; // phases left for a one-tap owner flip (open drift rows)
-  status: Phase; // derived spec status after any flips
+  status: SpecStatus; // derived spec status after any flips (incl. `deferred`)
   // The post-reconcile per-phase snapshot (the same one mirrored to the board). The merge-write rolls these
   // up to the card status (chain-and-cardstate-under-automerge Bug A) — empty for a spec with no phases.
   phaseStates: SpecCardPhaseState[];

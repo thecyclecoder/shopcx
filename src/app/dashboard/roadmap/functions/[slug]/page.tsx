@@ -6,16 +6,17 @@ import {
   listSpecSlugs,
   listGoalSlugs,
   listFunctionSlugs,
-  type Phase,
+  type SpecStatus,
 } from "@/lib/brain-roadmap";
 import { preprocessBrainWikilinks } from "@/lib/brain-links";
 
 export const dynamic = "force-dynamic";
 
-const DOT: Record<Phase, string> = {
+const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
   shipped: "bg-emerald-500",
+  deferred: "bg-slate-400",
   rejected: "bg-rose-400",
 };
 

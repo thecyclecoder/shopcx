@@ -130,6 +130,10 @@ const MAX_REGRESSION = Number(process.env.AGENT_TODO_MAX_REGRESSION || 1);
 // One regression review: read-only investigation (the regressed spec + its failing checks + what
 // shipped) + a verdict, and (for a real regression) authoring the fix spec doc. Minutes, like repair.
 const REGRESSION_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_SECURITY_REVIEW = Number(process.env.AGENT_TODO_MAX_SECURITY_REVIEW || 1);
+// One security pass: read-only review of a merged diff (or an `npm audit` dep-watch scan) + a verdict,
+// and (for a real finding) authoring the fix/upgrade spec doc. Minutes, like repair/regression.
+const SECURITY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -222,7 +226,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -235,7 +239,7 @@ interface PendingAction {
   fix_kind?: "price_reconcile" | "variant_backfill" | "appstle_cancel";
   payload?: unknown;
   // set when type==='repair_build' (repair-agent) OR type==='storefront_build' (storefront-optimizer)
-  // OR type==='db_health_build' (db-health-agent): the fix/feature spec slug the agent authored to main
+  // OR type==='db_health_build' (db-health-agent) OR type==='security_build' (security-agent): the fix/feature spec slug the agent authored to main
   // (db_health: pre-authored at detection, committed on Build) + surfaced for one-tap owner Build. The
   // build is queued on approval, NOT auto.
   spec_slug?: string;
@@ -274,7 +278,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "proposed-goal" | "security-review";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -1821,6 +1825,17 @@ async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: 
   return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
+// brain-platform-live-autonomous-status (Phase 2 — the recurrence guard): wrap EVERY read-only director
+// investigation prompt with (a) the AUTHORITATIVE live-state from function_autonomy (the same DB row the lanes
+// guard on — so a decision can never again be premised on a stale 'not live' reading from brain prose) and
+// (b) the CEO's active coaching (P7). One seam for all four lanes (approval / groom / init / repair-dismissal).
+async function directorDecisionPrompt(workspaceId: string, basePrompt: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const di = await import("../src/lib/agents/director-instructions");
+  const liveState = await lib.directorLiveStateFact(db, "platform");
+  return di.appendDirectorInstructions(db, workspaceId, "platform", `${basePrompt}\n\n${liveState}`);
+}
+
 // platform-director-agent (Phase 4): the standing director pass the daily platform-director-cron enqueues
 // (a `platform-director` job with NO target_job_id). It runs the proactive, non-approval director work on a
 // reliable beat — escort each approved goal it owns + post the daily Control-Tower watch update to the board
@@ -1848,6 +1863,18 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing escalation reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // director-zero-backlog-error-autonomy (Phase 1) — reconcile the OPEN error backlog: every open
+    // error_events row + open loop_alerts incident that slipped Rafa's event trigger gets re-driven to a
+    // terminal state (enqueue a diagnosis where none exists, confirm a covered one, escalate a stuck fix).
+    const recon = await lib.reconcileErrorBacklog(db);
+    if (recon.enqueued.length) notes.push(`backlog → enqueued ${recon.enqueued.length} repair(s): ${recon.enqueued.join(", ")}`);
+    if (recon.escalated.length) notes.push(`backlog loop-guard → escalated ${recon.escalated.length}: ${recon.escalated.join(", ")}`);
+    if (recon.scanned && !recon.enqueued.length && !recon.escalated.length) notes.push(`backlog: ${recon.scanned} open, all covered`);
+  } catch (e) {
+    notes.push(`backlog reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
     const fixes = await lib.escortFixSpecs(db);
     if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);
@@ -1865,6 +1892,16 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   } catch (e) {
     notes.push(`init failed: ${e instanceof Error ? e.message : String(e)}`);
     console.error(`${tag} standing init failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // director-supervised-repair-dismissal (Phase 1) — SUPERVISE + clear Rafa's no-fix Control Tower items:
+    // adversarially re-check each `needs-human` repair item and dismiss ONLY what she independently confirms
+    // benign; a suspected masked real bug escalates to the CEO, a genuine needs-human call is left for the human.
+    const supervise = await superviseRepairDismissals(job, tag);
+    notes.push(supervise);
+  } catch (e) {
+    notes.push(`repair-supervise failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing repair-supervise failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     const groom = await groomBoard(job, tag);
@@ -1905,9 +1942,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   let escalated = 0;
   for (const c of candidates) {
     try {
-      // P7: inject the CEO's coaching into her grooming decisions too (e.g. "continue these spec types").
-      const diGroom = await import("../src/lib/agents/director-instructions");
-      const groomPrompt = await diGroom.appendDirectorInstructions(db, job.workspace_id, "platform", lib.groomInvestigationPrompt(c));
+      // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
+      // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
+      const groomPrompt = await directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c));
       const { resultText, usage, model } = await runDirectorClaude(groomPrompt, null, REPO_DIR);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
@@ -2082,9 +2119,9 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
   let escalated = 0;
   for (const c of candidates) {
     try {
-      // P7: inject the CEO's coaching into the soundness decision too (same as grooming/approval).
-      const di = await import("../src/lib/agents/director-instructions");
-      const investPrompt = await di.appendDirectorInstructions(db, job.workspace_id, "platform", lib.initInvestigationPrompt(c));
+      // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
+      // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
+      const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
       const { resultText, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
@@ -2173,6 +2210,147 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
   return `init: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
 
+// director-supervised-repair-dismissal (Phase 1): SUPERVISE + clear Rafa's no-fix Control Tower items. For each
+// of Rafa's open `needs-human` repair items (a `needs_attention` job, surfaced Dismiss-only) it runs a read-only
+// Max investigation that adversarially RE-CHECKS his no-fix call and decides:
+//   - dismiss  → independently confirmed transient/foreign-noise/benign → clear it via the EXISTING owner Dismiss path
+//                (resolve the error_events row + complete the job) + a `dismissed_repair` activity row (Ada's OWN reasoning).
+//   - escalate → suspects Rafa mislabeled a REAL bug in OUR code → do NOT dismiss; escalate the contrary diagnosis to the CEO.
+//   - external → verified the root cause is OUTSIDE our system (a vendor/API/credential break we can't code-fix) → do NOT
+//                author a fix; escalate to the CEO with the diagnosis + 2–3 alternatives (the ONLY routine error→CEO touch,
+//                director-zero-backlog-error-autonomy Phase 2). Deduped per signature so it pings once.
+//   - keep     → a genuine needs-human call → leave it on the Control Tower untouched for the human; record the review.
+// DEFAULT is not-dismissing; unsure ⇒ escalate/keep, never dismiss (north-star: hit a rail → escalate). Idempotent via
+// the repair_job_id ledger (each item reviewed once; a re-fire is a new job → fresh review). No-op unless Platform
+// is live+autonomous (findRepairDismissalCandidates returns []). Bounded per pass (PLATFORM_DIRECTOR_DISMISS_CAP).
+// Best-effort per item. Returns a one-line summary for the standing-pass log.
+async function superviseRepairDismissals(job: Job, tag: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  const candidates = await lib.findRepairDismissalCandidates(db);
+  if (!candidates.length) return "repair-supervise: nothing to review";
+
+  let dismissed = 0;
+  let escalated = 0;
+  let external = 0;
+  let kept = 0;
+  for (const c of candidates) {
+    try {
+      // Phase 2 live-state + P7 coaching: her supervision decision carries the authoritative function_autonomy
+      // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/initiation/approval).
+      const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.repairDismissalInvestigationPrompt(c));
+      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
+      const verdict = String(parsed.verdict || "");
+      const reasoning = String(parsed.reasoning || "").slice(0, 4000);
+
+      // ── DISMISS — independently confirmed benign → clear it via the existing owner Dismiss path. ──
+      if (verdict === "dismiss") {
+        const r = await lib.applyDirectorDismissal(db, c, reasoning || `Independently confirmed ${c.signature} is genuinely transient/foreign/benign, not a masked real bug — cleared the warning.`);
+        if (r.ok) {
+          dismissed++;
+          console.log(`${tag} repair-supervise ${c.signature} → dismiss → cleared via owner Dismiss path`);
+        } else {
+          console.warn(`${tag} repair-supervise ${c.signature} → dismiss failed: ${r.error}`);
+        }
+        continue;
+      }
+
+      // ── ESCALATE — suspects a real bug Rafa mislabeled benign → do NOT dismiss; escalate the contrary diagnosis. ──
+      if (verdict === "escalate") {
+        const diagnosis = reasoning || `Rafa cleared ${c.signature} as needs-human/benign, but my independent root-cause read suspects a REAL bug mislabeled benign. I did NOT dismiss it — please take a look.`;
+        const r = await lib.escalateDiagnosisToCeo(db, {
+          workspaceId: job.workspace_id,
+          specSlug: null,
+          title: `Possible real bug cleared as benign: ${c.signature}`,
+          diagnosis,
+          dedupeKey: lib.dismissKey(c.signature),
+          deepLink: "/dashboard/developer/control-tower",
+          escalationKind: "repair_dismissal_suspect",
+          metadata: { repair_job_id: c.jobId, signature: c.signature, verdict: "escalate" },
+        });
+        if (r.emitted) {
+          escalated++;
+          console.log(`${tag} repair-supervise ${c.signature} → escalate → surfaced contrary diagnosis to CEO`);
+        } else {
+          if (r.error) console.error(`${tag} repair-supervise ${c.signature} → escalation FAILED to surface to CEO: ${r.error.message}`);
+          // Already surfaced (or a surface error) — record the review so this same job isn't re-investigated each pass.
+          await recordDirectorActivity(db, {
+            workspaceId: job.workspace_id,
+            directorFunction: "platform",
+            actionKind: "kept_repair",
+            specSlug: null,
+            reason: diagnosis,
+            metadata: { dismiss_key: lib.dismissKey(c.signature), repair_job_id: c.jobId, signature: c.signature, verdict: "escalate-already-surfaced", autonomous: true },
+          });
+          console.log(`${tag} repair-supervise ${c.signature} → escalate but already surfaced — recorded review`);
+        }
+        continue;
+      }
+
+      // ── EXTERNAL — verified the root cause is OUTSIDE our system → no code fix; escalate to the CEO with alternatives. ──
+      // The ONLY routine error→CEO touch (Phase 2): a third-party API/contract change, a vendor outage beyond our
+      // retry/breaker, or a credential/permission change on their side. We can't code-fix it; the CEO makes the business
+      // call. Carry the diagnosis + 2–3 concrete options (wait/retry, swap provider, degrade gracefully). Deduped per
+      // signature (external:{sig}) so it pings once, distinct from the suspected-real-bug escalate key.
+      if (verdict === "external") {
+        const alts = Array.isArray(parsed.alternatives) ? parsed.alternatives.map((a) => String(a).trim()).filter(Boolean).slice(0, 3) : [];
+        const altText = alts.length ? `\n\nYour options:\n${alts.map((a, i) => `${i + 1}. ${a}`).join("\n")}` : "";
+        const diagnosis = `${reasoning || `${c.signature}'s root cause is an external dependency break, not our code — it needs a business call, not a code fix.`}${altText}`.slice(0, 4000);
+        const r = await lib.escalateDiagnosisToCeo(db, {
+          workspaceId: job.workspace_id,
+          specSlug: null,
+          title: `External blocker — your call: ${c.signature}`,
+          diagnosis,
+          dedupeKey: lib.externalBlockerKey(c.signature),
+          deepLink: "/dashboard/developer/control-tower",
+          escalationKind: "external_blocker",
+          metadata: { repair_job_id: c.jobId, signature: c.signature, verdict: "external", alternatives: alts },
+        });
+        if (r.emitted) {
+          external++;
+          console.log(`${tag} repair-supervise ${c.signature} → external → surfaced blocker + ${alts.length} option(s) to CEO`);
+        } else {
+          if (r.error) console.error(`${tag} repair-supervise ${c.signature} → external escalation FAILED to surface to CEO: ${r.error.message}`);
+          // Already surfaced (or a surface error) — record the review so this same job isn't re-investigated each pass.
+          await recordDirectorActivity(db, {
+            workspaceId: job.workspace_id,
+            directorFunction: "platform",
+            actionKind: "kept_repair",
+            specSlug: null,
+            reason: diagnosis,
+            metadata: { dismiss_key: lib.dismissKey(c.signature), repair_job_id: c.jobId, signature: c.signature, verdict: "external-already-surfaced", autonomous: true },
+          });
+          console.log(`${tag} repair-supervise ${c.signature} → external but already surfaced — recorded review`);
+        }
+        continue;
+      }
+
+      // ── KEEP (or no verdict) — a genuine needs-human call → leave it on the Control Tower untouched for the human. ──
+      kept++;
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "platform",
+        actionKind: "kept_repair",
+        specSlug: null,
+        reason: reasoning || `${c.signature} is a genuine needs-human call I can neither confirm benign nor confidently call a real bug — left it on the Control Tower for you.`,
+        metadata: { dismiss_key: lib.dismissKey(c.signature), repair_job_id: c.jobId, signature: c.signature, verdict: verdict || "keep", autonomous: true },
+      });
+      console.log(`${tag} repair-supervise ${c.signature} → ${verdict || "no verdict"} → left for the human`);
+    } catch (e) {
+      console.error(`${tag} repair-supervise ${c.signature} failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  const parts: string[] = [];
+  if (dismissed) parts.push(`dismissed ${dismissed}`);
+  if (escalated) parts.push(`escalated ${escalated}`);
+  if (external) parts.push(`external→CEO ${external}`);
+  if (kept) parts.push(`kept ${kept}`);
+  return `repair-supervise: reviewed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
+}
+
 async function runPlatformDirectorJob(job: Job) {
   const tag = `[platform-director:${job.id.slice(0, 8)}]`;
   let instr: { target_job_id?: string; target_kind?: string } = {};
@@ -2242,10 +2420,9 @@ async function runPlatformDirectorJob(job: Job) {
   console.log(`${tag} investigating ${t.kind} (${bundleLabel}) for target ${targetId.slice(0, 8)}`);
   try {
     const brief = lib.buildDirectorBrief(t, leashActions);
-    // P7: inject the CEO's coaching (director_instructions) into her decision prompt — so a coached rule
-    // ("auto-approve these going forward") actually steers this call.
-    const di = await import("../src/lib/agents/director-instructions");
-    const investPrompt = await di.appendDirectorInstructions(db, t.workspace_id, "platform", lib.directorInvestigationPrompt(brief));
+    // Phase 2 live-state + P7 coaching: she approves on the authoritative function_autonomy flag (never stale
+    // brain prose), and a coached rule ("auto-approve these going forward") still steers this call.
+    const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief));
     const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
@@ -5950,6 +6127,434 @@ async function runRegressionJob(job: Job) {
   }
 }
 
+// ── Box-hosted Security / Dependency agent (security-dependency-agent) ───────
+// A kind='security-review' job runs read-only on Max, the supervisor on the auto-merge proxy. Two modes
+// (instructions.mode): 'diff' — a per-merged-diff security pass (injection / secret-leak / authz / RLS /
+// unsafe admin-client / _encrypted handling) over the merged claude/* commit; 'dep-watch' — the daily
+// `npm audit` CVE scan. Both NEVER mutate product code, open a PR, or bump a dep: a real finding AUTHORS a
+// scoped fix/upgrade spec to main + SURFACES a one-tap owner Build card (routed via the approval-router —
+// auto-queued within a live director's leash, else the CEO inbox). Mirrors runRegressionJob / repair.
+async function runSecurityClaude(prompt: string, sessionId: string | null, cwd: string) {
+  // Same env discipline as regression/repair: KEEP read-only prod creds + GITHUB_TOKEN so the box can
+  // `git show` the merged diff; strip ONLY the API key so all LLM is Max-billed; web search stays on.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: SECURITY_REVIEW_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+}
+
+interface SecurityFixProposal {
+  slug?: string;
+  title?: string;
+  owner?: string;
+  parent?: string;
+  intent?: string;
+  fix?: string;
+  verification?: string[];
+}
+
+function securityDiffPrompt(mergeSha: string, specSlug: string, prNumber?: number | null): string {
+  return [
+    `You are the box's Security / Dependency Agent ("Vault") on Max (web search on, no API key). You KEEP read access to prod, but you NEVER mutate, NEVER edit product code, and NEVER open a PR in this pass: you REVIEW a merged diff read-only and either clear it or AUTHOR a fix spec (a doc). The actual code build is queued later by the DevOps Director — not now. cwd is the repo root.`,
+    `You are the supervisor on the auto-merge proxy: auto-merge optimizes "ship the fix"; its degenerate state is shipping a fix that introduces a vulnerability. Give THIS merged diff an autonomous security pass.`,
+    ``,
+    `THE MERGED DIFF: commit ${mergeSha} on main${prNumber ? ` (PR #${prNumber})` : ""}, the merged build of spec "${specSlug}".`,
+    `First run \`git fetch origin main\` then \`git show ${mergeSha}\` (or \`git diff ${mergeSha}~1 ${mergeSha}\`) to read EXACTLY what changed. Then read the touched files in the working tree for context. Run the /security-review skill's checks over the diff.`,
+    ``,
+    `Review for (ShopCX-specific, per CLAUDE.md invariants):`,
+    `  • Injection — SQL / command / prompt injection, unsanitized input reaching a query or shell.`,
+    `  • Secret / credential leak — a hardcoded key/token/password, a secret logged or echoed, an \`*_encrypted\` column read/written in plaintext.`,
+    `  • Authz / RLS-policy regressions — a tightened policy loosened, a tenant check dropped, a join on \`shopify_*_id\` instead of a UUID that crosses a tenant boundary.`,
+    `  • Unsafe \`createAdminClient()\` (service-role) exposure — a service-role client reachable from a client component / unauthenticated route / user-controlled path.`,
+    `  • Crypto / \`_encrypted\` handling — per-workspace credential decryption mishandled, an encryption helper bypassed.`,
+    ``,
+    `SECRET-SAFETY RAIL: reference any secret/credential finding by its LOCATION (file + line) ONLY. NEVER echo a secret value into your review / the spec / any log.`,
+    ``,
+    `Decide ONE overall verdict (cite each finding's file:line + category):`,
+    `  • "clean" — no real vulnerability the diff introduced. No spec, no action.`,
+    `  • "false-positive" — what looked risky is a safe/established pattern (or already mitigated). No spec, no action.`,
+    `  • "real-vuln" — the diff introduced ≥1 genuine vulnerability. Author a single-phase, ~30-min-scoped fix spec that closes it (the finding(s), the fix, and verification). Reference secrets by location only.`,
+    `  • "needs-human" — you CANNOT confidently classify (ambiguous, needs context only a human has). No spec, no guess — surface a plain one-line note.`,
+    ``,
+    `For "real-vuln", default owner "[[../functions/platform]]" and parent "extends [[../specs/security-dependency-agent]]" unless a more specific function clearly owns the affected system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build.`,
+    ``,
+    `Final message = ONLY one JSON object:`,
+    `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet that must hold>","..."]}}`,
+    `  {"status":"clean"|"false-positive","review":"<what you checked + why it's safe>"}`,
+    `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
+  ].join("\n");
+}
+
+function securityFixSpecMarkdown(spec: SecurityFixProposal, mergedSlug: string, mergeSha: string): string {
+  const verification = (Array.isArray(spec.verification) ? spec.verification : []).filter((b) => typeof b === "string" && b.trim());
+  const vBullets = verification.length
+    ? verification.map((b) => `- ${b.trim()}`).join("\n")
+    : `- Re-review the merged diff (\`git show ${mergeSha}\`) → expect the flagged vulnerability is closed.`;
+  return [
+    `# ${spec.title} ⏳`,
+    ``,
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/security-dependency-agent]]"} · **Fixes:** [[${mergedSlug}]]`,
+    `**Security-of-merge:** \`${mergeSha}\``,
+    ``,
+    (spec.intent || "Close the vulnerability the merged diff introduced.").trim(),
+    ``,
+    `## Phase 1 — close the vulnerability ⏳`,
+    (spec.fix || "Scope from the security review above; land the fix + its brain page.").trim(),
+    `Gate on \`npx tsc --noEmit\`.`,
+    ``,
+    `## Verification`,
+    vBullets,
+    ``,
+    `> Authored by the box Security Agent (Vault) — a security finding on the merged diff of [[${mergedSlug}]] (commit \`${mergeSha}\`). Read-only review; the owner-gated build applies the fix. The DevOps Director queues the build (auto-approve within its leash; pre-live the CEO queues it).`,
+    ``,
+  ].join("\n");
+}
+
+// Author the fix spec on main DIRECTLY (mirrors authorRegressionFixSpec — same-slug convergence stays
+// idempotent). Returns the resolved slug + whether it pre-existed, or null on failure.
+async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+  const s = (raw || {}) as SecurityFixProposal;
+  const rawSlug = String(s.slug || "");
+  const title = String(s.title || "");
+  if (!rawSlug || !title) return null;
+  const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
+  if (!slug) return null;
+  const path = `docs/brain/specs/${slug}.md`;
+  try {
+    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+    if (existing.ok) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
+    const put = await putFileMain(path, securityFixSpecMarkdown({ ...s, slug, title }, mergedSlug, mergeSha), `spec: ${slug} — security fix for merged ${mergedSlug} (security-agent, commit ${mergeSha.slice(0, 12)})`);
+    return put.ok ? { slug, alreadyExists: false } : null;
+  } catch (e) {
+    console.warn(`[security] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+// ── Phase 2: npm-audit dep-watch ─────────────────────────────────────────────
+interface NpmAuditVuln {
+  name?: string;
+  severity?: string;
+  via?: Array<string | { title?: string; url?: string; severity?: string }>;
+  range?: string;
+  fixAvailable?: boolean | { name?: string; version?: string; isSemVerMajor?: boolean };
+}
+interface NpmAuditReport {
+  vulnerabilities?: Record<string, NpmAuditVuln>;
+  metadata?: { vulnerabilities?: Record<string, number> };
+}
+interface DepFinding {
+  name: string;
+  severity: string;
+  title: string;
+  fixTo: string | null;
+  major: boolean;
+}
+
+const DEP_WATCH_SEVERITIES = new Set(["moderate", "high", "critical"]);
+
+/** Run `npm audit --json` on the box tree and extract the actionable (≥ moderate) advisory findings.
+ *  npm audit exits NON-ZERO when vulns exist, so we parse the JSON regardless of exit code. */
+async function runNpmAudit(): Promise<{ ok: boolean; findings: DepFinding[]; total: number; reason?: string }> {
+  const r = await shAsync("npm", ["audit", "--json"], { cwd: REPO_DIR, timeout: 5 * 60 * 1000 });
+  let report: NpmAuditReport;
+  try {
+    report = JSON.parse((r.out || "").trim()) as NpmAuditReport;
+  } catch {
+    return { ok: false, findings: [], total: 0, reason: `npm audit produced no parseable JSON (exit ${r.code})` };
+  }
+  const vulns = report.vulnerabilities || {};
+  const findings: DepFinding[] = [];
+  for (const [name, v] of Object.entries(vulns)) {
+    const severity = String(v.severity || "").toLowerCase();
+    if (!DEP_WATCH_SEVERITIES.has(severity)) continue;
+    const viaTitled = (v.via || []).find((x) => typeof x === "object" && x && "title" in x) as { title?: string } | undefined;
+    const fix = v.fixAvailable;
+    const fixTo = fix && typeof fix === "object" ? `${fix.name || name}@${fix.version || "?"}` : fix === true ? "available" : null;
+    const major = !!(fix && typeof fix === "object" && fix.isSemVerMajor);
+    findings.push({ name, severity, title: viaTitled?.title || `${name} ${v.range || ""}`.trim(), fixTo, major });
+  }
+  // Surface highest severity first for the spec body.
+  const rank: Record<string, number> = { critical: 0, high: 1, moderate: 2 };
+  findings.sort((a, b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9) || a.name.localeCompare(b.name));
+  const total = report.metadata?.vulnerabilities?.total ?? findings.length;
+  return { ok: true, findings, total };
+}
+
+function depUpgradeSpecMarkdown(findings: DepFinding[], signature: string): string {
+  const rows = findings.map((f) => {
+    const fix = f.fixTo ? (f.major ? `${f.fixTo} (⚠️ semver-major — review breaking changes)` : f.fixTo) : "no automatic fix — manual upgrade/replace";
+    return `- **${f.name}** (${f.severity}) — ${f.title}. Upgrade → ${fix}`;
+  });
+  return [
+    `# Security dependency upgrades ⏳`,
+    ``,
+    `**Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/security-dependency-agent]] · auto-authored by [[../libraries/security-agent]].`,
+    `**Dep-advisory-signature:** \`${signature}\``,
+    ``,
+    `The daily \`npm audit\` dep-watch found ${findings.length} actionable advisory(ies) (≥ moderate). Bump the affected dependencies to their fixed versions. NEVER auto-bumped — this owner-gated build does the bump + the \`tsc\` gate.`,
+    ``,
+    `## Phase 1 — upgrade the vulnerable dependencies ⏳`,
+    ...rows,
+    ``,
+    `Apply the upgrades (e.g. \`npm audit fix\`, or bump each in package.json + \`npm install\`), then gate on \`npx tsc --noEmit\` and a smoke of any affected path. Flag any semver-major bump for human review before merge.`,
+    ``,
+    `## Verification`,
+    `- Re-run \`npm audit\` → expect the flagged advisory(ies) no longer appear (or are downgraded below moderate).`,
+    `- \`npx tsc --noEmit\` is clean after the bumps.`,
+    ``,
+    `> Authored by the box Security Agent (Vault). Read-only watch; the owner-gated build applies the bump.`,
+    ``,
+  ].join("\n");
+}
+
+// Author/refresh the single stable dep-upgrade spec on main. Idempotent: re-writes the body so the
+// advisory list stays current (find-or-update, never N specs). Returns the slug + whether it pre-existed.
+async function authorDepUpgradeSpec(findings: DepFinding[], signature: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+  const { SECURITY_DEP_UPGRADE_SLUG } = await import("../src/lib/security-agent");
+  const slug = SECURITY_DEP_UPGRADE_SLUG;
+  const path = `docs/brain/specs/${slug}.md`;
+  try {
+    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+    const put = await putFileMain(path, depUpgradeSpecMarkdown(findings, signature), `spec: ${slug} — ${findings.length} security dep upgrade(s) (security-agent dep-watch, sig ${signature})`);
+    return put.ok ? { slug, alreadyExists: existing.ok } : null;
+  } catch (e) {
+    console.warn(`[security] dep-upgrade spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+/**
+ * Route an authored security fix/upgrade spec to the disposer + surface it. Mirrors the regression
+ * routing: resolveApproverLive walks from 'platform' to the first live+autonomous boss; if one exists
+ * (approver !== ceo) it auto-queues the build within its leash, else the fix surfaces needs_approval for
+ * the CEO inbox (the generic approval-inbox reconciler emits the routed request). The build still opens a
+ * PR the owner squash-merges — auto-queue ≠ auto-apply. Returns the terminal disposition for logging.
+ */
+async function routeSecurityFix(
+  job: Job,
+  authored: { slug: string; alreadyExists: boolean },
+  ctx: { tag: string; specLabel: string; review: string; ledger: string; recordDirectorActivity: typeof import("../src/lib/director-activity").recordDirectorActivity; SECURITY_DIRECTOR_FUNCTION: string },
+): Promise<void> {
+  const { tag, specLabel, review, ledger, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION } = ctx;
+  const existsNote = authored.alreadyExists ? " (existing slug — converged)" : "";
+  let approver = "ceo";
+  try {
+    const { resolveApproverLive } = await import("../src/lib/agents/approval-router");
+    approver = await resolveApproverLive(SECURITY_DIRECTOR_FUNCTION);
+  } catch (e) {
+    console.warn(`${tag} approver resolve degraded → CEO: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const autoQueue = approver !== "ceo";
+
+  if (autoQueue) {
+    const dupe = await hasActiveBuildForSlug(authored.slug);
+    let buildResult: string;
+    if (dupe.active) {
+      buildResult = `build already live (${dupe.reason}) — not re-queued`;
+    } else {
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: authored.slug,
+        kind: "build",
+        status: "queued",
+        instructions: `Auto-queued by the DevOps Director (${approver}) — security fix ${specLabel} (within leash). Follow the spec exactly; tsc-clean; open a PR.`,
+      });
+      buildResult = error ? `auto-queue FAILED: ${error.message}` : "auto-queued build";
+    }
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: approver,
+      actionKind: "authored_fix",
+      specSlug: authored.slug,
+      reason: `Security finding (${specLabel}) → authored fix [[${authored.slug}]]${existsNote}; ${approver} queued the build within its leash (${buildResult}).`,
+      metadata: { fix_slug: authored.slug, approver, job_id: job.id },
+    });
+    await update(job.id, {
+      status: "completed",
+      error: null,
+      instructions: ledger,
+      log_tail: `real finding → authored [[${authored.slug}]]${existsNote}; ${approver} auto-queued build (${buildResult}).\n\n${review}`.slice(-2000),
+    });
+    console.log(`${tag} real finding → authored ${authored.slug}${existsNote}; ${approver} auto-queued (${buildResult})`);
+    return;
+  }
+
+  // Pre-live (no autonomous director): surface the authored fix for one-tap CEO Build.
+  await recordDirectorActivity(db, {
+    workspaceId: job.workspace_id,
+    directorFunction: SECURITY_DIRECTOR_FUNCTION,
+    actionKind: "authored_fix",
+    specSlug: authored.slug,
+    reason: `Security finding (${specLabel}) → authored fix [[${authored.slug}]]${existsNote}; routed to the CEO inbox to queue the build (no live director yet).`,
+    metadata: { fix_slug: authored.slug, approver: "ceo", job_id: job.id },
+  });
+  const action: PendingAction = {
+    id: `sec${job.id.slice(0, 6)}`,
+    type: "security_build",
+    summary: `Security fix for ${specLabel} → build [[${authored.slug}]]`,
+    preview: review.slice(0, 400),
+    status: "pending",
+    spec_slug: authored.slug,
+  };
+  await update(job.id, {
+    status: "needs_approval",
+    pending_actions: [action],
+    instructions: ledger,
+    log_tail: `real finding → authored fix spec ${authored.slug}${existsNote}; routed to the CEO inbox to queue the build.\n\n${review}`.slice(-2000),
+  });
+  console.log(`${tag} real finding → authored ${authored.slug}${existsNote}, routed to CEO inbox`);
+}
+
+async function runSecurityReviewJob(job: Job) {
+  const tag = `[security:${job.id.slice(0, 8)}]`;
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  const { SECURITY_DIRECTOR_FUNCTION, depFindingSignature } = await import("../src/lib/security-agent");
+  let instr: { mode?: string; merge_sha?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  const mode = instr.mode === "dep-watch" ? "dep-watch" : "diff";
+
+  // ── Disposer action resume — a routed security_build was approved (queue) or declined (dismiss). ──
+  const buildAction = (job.pending_actions || []).find((a) => a.type === "security_build");
+  if (buildAction && (buildAction.status === "approved" || buildAction.status === "declined")) {
+    if (buildAction.status === "approved" && buildAction.spec_slug) {
+      const dupe = await hasActiveBuildForSlug(buildAction.spec_slug);
+      if (dupe.active) {
+        buildAction.status = "done";
+        buildAction.result = `build already live for ${buildAction.spec_slug} (${dupe.reason}) — not re-queued`;
+        await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `queue Build → ${buildAction.result}`.slice(-2000) });
+        console.log(`${tag} queue Build → dedup: ${buildAction.result}`);
+        return;
+      }
+      const { error } = await db.from("agent_jobs").insert({
+        workspace_id: job.workspace_id,
+        spec_slug: buildAction.spec_slug,
+        kind: "build",
+        status: "queued",
+        created_by: job.created_by,
+        instructions: `Build the security fix ${buildAction.spec_slug}. Follow the spec exactly; tsc-clean; open a PR.`,
+      });
+      buildAction.status = error ? "failed" : "done";
+      buildAction.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${buildAction.spec_slug}`;
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `queue Build → ${buildAction.result}`.slice(-2000) });
+      console.log(`${tag} queue Build → ${buildAction.result}`);
+    } else {
+      buildAction.result = "declined by disposer";
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `disposer declined the security fix ${buildAction.spec_slug ?? ""}`.slice(-2000) });
+      console.log(`${tag} disposer declined`);
+    }
+    return;
+  }
+
+  try {
+    if (mode === "dep-watch") {
+      // ── Phase 2: daily npm-audit CVE scan → author the upgrade-fix spec + surface a Build card. ──
+      console.log(`${tag} dep-watch scan (npm audit)`);
+      const audit = await runNpmAudit();
+      if (!audit.ok) {
+        await update(job.id, { status: "completed", error: null, log_tail: `dep-watch skipped: ${audit.reason}`.slice(-2000) });
+        console.log(`${tag} dep-watch skipped: ${audit.reason}`);
+        return;
+      }
+      if (audit.findings.length === 0) {
+        await update(job.id, { status: "completed", error: null, log_tail: `clean tree — no actionable (≥ moderate) advisories (total ${audit.total})`.slice(-2000) });
+        console.log(`${tag} dep-watch clean — no actionable advisories`);
+        return;
+      }
+      const signature = depFindingSignature(audit.findings.map((f) => ({ name: f.name, severity: f.severity })));
+      const authored = await authorDepUpgradeSpec(audit.findings, signature);
+      if (!authored) {
+        await update(job.id, { status: "needs_attention", error: "could not author dep-upgrade spec", log_tail: `${audit.findings.length} advisory(ies) but spec author failed` });
+        console.log(`${tag} dep-watch: spec author failed → needs-human`);
+        return;
+      }
+      const ledger = JSON.stringify({ ...instr, mode: "dep-watch", verdict: "real-vuln", authored_slug: authored.slug, finding_signature: signature });
+      const label = `${audit.findings.length} dep advisory(ies)`;
+      await routeSecurityFix(job, authored, { tag, specLabel: label, review: audit.findings.map((f) => `${f.name} (${f.severity}) → ${f.fixTo ?? "manual"}`).join("; "), ledger, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION });
+      return;
+    }
+
+    // ── Phase 1: per-merged-diff security pass. ──
+    const mergeSha = instr.merge_sha || "";
+    const mergedSlug = instr.spec_slug || job.spec_slug;
+    if (!mergeSha) {
+      await update(job.id, { status: "completed", error: null, log_tail: "no merge sha — nothing to review" });
+      console.log(`${tag} no merge sha → no-op`);
+      return;
+    }
+    console.log(`${tag} reviewing merged diff ${mergeSha.slice(0, 12)} (spec ${mergedSlug})`);
+    const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
+    const prompt = await appendAgentInstructions(db, job.workspace_id, "security-review", securityDiffPrompt(mergeSha, mergedSlug, instr.pr_number ?? null));
+    const { session, resultText, isError, raw } = await runSecurityClaude(prompt, null, REPO_DIR);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = String(parsed?.status || "");
+    console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
+
+    if (verdict === "clean" || verdict === "false-positive") {
+      const review = String(parsed?.review || `${verdict} — no vulnerability introduced`);
+      const ledger = JSON.stringify({ ...instr, verdict });
+      await update(job.id, { status: "completed", error: null, instructions: ledger, log_tail: `${verdict}: ${review}`.slice(-2000) });
+      console.log(`${tag} ${verdict} → no action`);
+      return;
+    }
+
+    if (verdict === "needs-human") {
+      const review = String(parsed?.review || "needs a human — couldn't confidently classify the finding");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: SECURITY_DIRECTOR_FUNCTION,
+        actionKind: "escalated",
+        specSlug: mergedSlug,
+        reason: `Security review of merged ${mergedSlug} (commit ${mergeSha.slice(0, 12)}): needs-human — ${review}`.slice(0, 4000),
+        metadata: { merge_sha: mergeSha, job_id: job.id },
+      });
+      await update(job.id, { status: "needs_attention", error: "needs-human", instructions: JSON.stringify({ ...instr, verdict }), log_tail: review.slice(-2000) });
+      console.log(`${tag} needs-human → surfaced, no spec`);
+      return;
+    }
+
+    if (verdict === "real-vuln") {
+      const review = String(parsed?.review || "");
+      const authored = await authorSecurityFixSpec(parsed?.spec, mergedSlug, mergeSha);
+      if (!authored) {
+        await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real vulnerability but no valid fix spec" });
+        console.log(`${tag} real-vuln but no valid spec → surfaced needs-human`);
+        return;
+      }
+      const ledger = JSON.stringify({ ...instr, verdict, authored_slug: authored.slug });
+      await routeSecurityFix(job, authored, { tag, specLabel: `merged ${mergedSlug}`, review, ledger, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION });
+      return;
+    }
+
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "security review errored", log_tail: raw.slice(-2000) });
+      return;
+    }
+    await update(job.id, { status: "needs_attention", error: "security review ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Box-hosted Storefront Optimizer agent (storefront-optimizer-agent) ───────
 // A kind='storefront-optimizer' job is enqueued by the scheduling cron ([[storefront-optimizer]]
 // → enqueueDueCampaigns) — one per DUE (product × lander-type × audience), deduped to ≤1 active
@@ -6412,6 +7017,7 @@ async function runJob(job: Job) {
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
   if (job.kind === "repair") return runRepairJob(job);
   if (job.kind === "regression") return runRegressionJob(job);
+  if (job.kind === "security-review") return runSecurityReviewJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
@@ -6792,12 +7398,13 @@ async function main() {
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
   const countRegression = () => [...active.values()].filter((v) => v.kind === "regression").length;
+  const countSecurityReview = () => [...active.values()].filter((v) => v.kind === "security-review").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "proposed-goal").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -6979,6 +7586,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed regression ${job.id.slice(0, 8)} → ${countRegression() + 1}/${MAX_REGRESSION} regression lane`);
+        launch(job);
+      }
+      // Fill the security-review lane (security-dependency-agent): per merged claude/* diff, give it an
+      // autonomous security pass read-only → classify findings → author a fix spec + surface for owner Build
+      // (or surface needs-human); also the daily npm-audit dep-watch scan. Concurrency-1, read-only on Max.
+      while (!claudeDown && countSecurityReview() < MAX_SECURITY_REVIEW) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["security-review"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed security-review ${job.id.slice(0, 8)} → ${countSecurityReview() + 1}/${MAX_SECURITY_REVIEW} security-review lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

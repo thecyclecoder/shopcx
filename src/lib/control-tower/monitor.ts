@@ -531,11 +531,26 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // the ticket, and routes it to a human — emitting NO ticket/inbound-message event — so
             // the handler legitimately never beats on it. Counting those over-counts demand: a
             // single reopen note in an otherwise-quiet window reads as work=1 with 0 beats and
-            // trips a false idle_while_work red. The CSAT-reopen path is the only inbound/customer/
-            // direction='inbound' insert that drives no handler; it tags the ticket csat:reopened,
-            // so subtract messages on csat:reopened tickets. Done as a NULL-safe subtraction (rather
-            // than a negated array filter) so tickets with NULL/empty tags always count.
-            const [allRes, reopenRes] = await Promise.all([
+            // trips a false idle_while_work red.
+            //
+            // Closed-ticket short-circuit (ticket-decision-workprobe-exclude-positive-close): the
+            // handler DOES fire ticket/inbound-message for these, but several pre-orchestrator
+            // gates resolve and CLOSE the ticket BEFORE reaching callSonnetOrchestratorV2 — the
+            // positive-close path (unified-ticket-handler.ts:1635 → status 'positive_close'), the
+            // fraud gate, and the chargeback gate (~1654). Those messages never drive an
+            // ai:orchestrator beat, so counting them over-counts demand the same way: a lone
+            // 'Thank you' that triggers a positive-close in an otherwise-quiet window reads as
+            // work=1 with 0 beats and false-pages idle_while_work. Subtract inbound messages whose
+            // ticket is now closed. A still-OPEN ticket with no beat keeps counting, so a genuine
+            // orchestrator outage (inbound traffic piling up on tickets nothing can close) still
+            // alerts; a normally-served ticket that the orchestrator closed has its own ok beat, so
+            // dropping it from the work count never manufactures a false negative.
+            //
+            // Both exclusions are expressed as a single positive-match (closed OR csat:reopened)
+            // subtraction — NULL-safe (tickets with NULL/empty tags still count) and overlap-free
+            // (a csat:reopened ticket that later closes is counted once, not double-subtracted),
+            // unlike a negated array filter.
+            const [allRes, excludedRes] = await Promise.all([
               admin
                 .from("ticket_messages")
                 .select("id", { count: "exact", head: true })
@@ -548,9 +563,9 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
-                .contains("tickets.tags", ["csat:reopened"]),
+                .or("status.eq.closed,tags.cs.{csat:reopened}", { referencedTable: "tickets" }),
             ]);
-            return Math.max(0, (allRes.count ?? 0) - (reopenRes.count ?? 0));
+            return Math.max(0, (allRes.count ?? 0) - (excludedRes.count ?? 0));
           }
           default:
             return 0;

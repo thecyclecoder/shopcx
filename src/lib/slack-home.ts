@@ -14,7 +14,7 @@
  *
  * See docs/brain/specs/slack-home-detail.md.
  */
-import { getRoadmap, functionLabel, parentLabel, extractSpecSection, type SpecCard, type Phase } from "@/lib/brain-roadmap";
+import { getRoadmap, functionLabel, parentLabel, extractSpecSection, type SpecCard, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { getLatestJobsBySlug, getPendingFolds, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import { jobChip } from "@/lib/slack-roadmap";
 import { publishHomeView } from "@/lib/slack";
@@ -33,7 +33,7 @@ export const HOME = {
   open: "roadmap_home_open:", // roadmap_home_open:{slug}        → URL button (no-op ack); legacy rows
 } as const;
 
-const PHASE_EMOJI: Record<Phase, string> = { planned: "⏳", in_progress: "🚧", shipped: "✅", rejected: "❌" };
+const PHASE_EMOJI: Record<SpecStatus, string> = { planned: "⏳", in_progress: "🚧", shipped: "✅", deferred: "⏸️", rejected: "❌" };
 
 // Block Kit ceilings: a view allows ≤100 blocks and an actions block ≤25 elements. Each spec is now a
 // single section row (Details accessory), so we can show more per group before linking out.

@@ -89,7 +89,7 @@ export interface PendingAction {
  *   conflicts, tsc-gate + push, or rebuild-on-main / surface to the owner)
  * | 'platform-director' (platform-director-agent — the first live director: investigate a Platform-routed
  *   Approval Request → auto-approve within the leash, else escalate to the CEO). */
-export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director";
+export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review";
 
 export interface AgentJob {
   id: string;
@@ -599,6 +599,18 @@ export async function applyMergedBuildEffects(
     }
   } catch {
     /* event missed → the daily backlog + spec-drift crons mop it up */
+  }
+  // security-dependency-agent Phase 1: give EVERY merged claude/* diff an autonomous security pass — the
+  // supervisor on the auto-merge proxy (the unguarded half auto-merge opened). Fires on every merged build
+  // (not only fully-shipped phases — each merged diff is reviewed), deduped by the merge SHA so the two
+  // merge-hook paths (manual reconcile + auto-merge webhook) never double-file. Best-effort; never blocks.
+  try {
+    if (opts.mergeSha) {
+      const { enqueueSecurityReviewJob } = await import("@/lib/security-agent");
+      await enqueueSecurityReviewJob(createAdminClient(), { mergeSha: opts.mergeSha, specSlug: slug, workspaceId });
+    }
+  } catch {
+    /* best-effort — a missed security pass is caught by the next merged diff, never blocks the merge */
   }
   // build-all-phases-chain: advance a "Build all" chain on this phase's merge (on fresh main, atop this
   // phase's code). Outside the shipped-check above — most phase merges leave the spec in_progress (more ⏳

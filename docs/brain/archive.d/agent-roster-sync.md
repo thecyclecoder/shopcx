@@ -1,0 +1,1 @@
+- **Agent Roster Sync — full-visibility org view** · verified 2026-06-24 · → [[dashboard/agents]]

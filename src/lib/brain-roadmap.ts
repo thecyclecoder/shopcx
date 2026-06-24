@@ -14,6 +14,12 @@ import path from "path";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
+// A spec's WHOLE-spec board status. `deferred` is a first-class status orthogonal to phase progress
+// (director-drives-all-specs-and-deferred-status Phase 1): a spec the board parks in its OWN column,
+// excluded by every auto-build lane until the CEO un-defers it. Phases themselves are never `deferred`
+// (no phase emoji maps to it) — only a SpecCard is, so `SpecPhase.status` + `counts` stay `Phase`.
+export type SpecStatus = Phase | "deferred";
+
 export interface SpecPhase {
   title: string;
   status: Phase;
@@ -22,7 +28,7 @@ export interface SpecPhase {
 export interface SpecCard {
   slug: string;
   title: string;
-  status: Phase;
+  status: SpecStatus;
   summary: string;
   phases: SpecPhase[];
   counts: Record<Phase, number>;
@@ -95,7 +101,11 @@ function cleanInline(s: string): string {
     .trim();
 }
 
-function deriveStatus(counts: Record<Phase, number>, titleStatus: Phase | null): Phase {
+function deriveStatus(counts: Record<Phase, number>, titleStatus: Phase | null, deferred: boolean): SpecStatus {
+  // Deferred wins over phase progress (director-drives-all-specs-and-deferred-status Phase 1): a spec carrying
+  // a `**Deferred:**` marker / `**Status:** deferred` is parked in its own column and excluded by every
+  // auto-build lane, regardless of its ⏳ phases — until the CEO un-defers it (removes the marker).
+  if (deferred) return "deferred";
   // A whole spec is never "rejected"; rejection is a phase-level state. Cut phases don't block shipped.
   const totalPhases = counts.planned + counts.in_progress + counts.shipped + counts.rejected;
   // Phase consensus beats a stale title: when every phase has shipped (none ⏳/🚧) and the title
@@ -225,10 +235,21 @@ function parseSpec(slug: string, raw: string): SpecCard {
   // "🔧 Repair" source chip (roadmap-goal-and-source-filters). Derived, not author-tagged.
   const repairSignature = lines.some((l) => /\*\*Repair-signature:\*\*/i.test(l));
 
+  // **Deferred:** … / **Status:** deferred — a first-class deferred spec
+  // (director-drives-all-specs-and-deferred-status Phase 1). The `**Deferred:**` marker is already authored
+  // by board-grooming split cards as a metadata LINE under the H1 (like Owner/Parent); `**Status:** deferred`
+  // is an explicit opt-in. Either parks the spec in the Deferred board column and excludes it from every
+  // auto-build lane until the CEO removes the marker. Anchored to line-start so a prose mention of the marker
+  // inside backticks (e.g. this spec discussing `**Deferred:**`, or board-grooming documenting the note) is
+  // NOT a false positive — only a real leading metadata line counts.
+  const deferred = lines.some(
+    (l) => /^\s*\*\*Deferred:\*\*/i.test(l) || /^\s*\*\*Status:\*\*\s*deferred\b/i.test(l),
+  );
+
   return {
     slug,
     title,
-    status: deriveStatus(counts, titleStatus),
+    status: deriveStatus(counts, titleStatus, deferred),
     summary: firstParagraph(lines),
     phases,
     counts,
@@ -250,7 +271,9 @@ function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCa
   return card.blockedBy.map((b) => {
     const target = bySlug.get(b.slug);
     if (target) {
-      return { slug: b.slug, title: target.title, status: target.status, cleared: target.status === "shipped" };
+      // A deferred prerequisite hasn't shipped → still blocking; show it as ⏳ (the chip cares shipped-or-not).
+      const status: Phase = target.status === "deferred" ? "planned" : target.status;
+      return { slug: b.slug, title: target.title, status, cleared: target.status === "shipped" };
     }
     // Not a live spec → archived/folded (the prereq shipped + was retired into the brain) or a dangling
     // slug. Either way treat it as cleared so a Blocked-by pointing at an already-shipped/archived spec
@@ -290,8 +313,8 @@ function buildSpecCards(rawBySlug: Map<string, string>): SpecCard[] {
   // source of truth for cleared/uncleared (spec-blockers). A blocker not in this map = archived/folded ⇒ cleared.
   const bySlug = new Map(cards.map((c) => [c.slug, c]));
   for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug);
-  // newest-feeling first: in-progress, then planned, then shipped; stable by title
-  const rank: Record<Phase, number> = { in_progress: 0, planned: 1, shipped: 2, rejected: 4 };
+  // newest-feeling first: in-progress, then planned, then shipped, then deferred (parked); stable by title
+  const rank: Record<SpecStatus, number> = { in_progress: 0, planned: 1, shipped: 2, deferred: 3, rejected: 4 };
   return cards.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
 }
 
@@ -360,7 +383,7 @@ export interface FunctionGroup {
   fn: string; // owner slug
   label: string; // display name
   total: number;
-  counts: Record<Phase, number>;
+  counts: Record<SpecStatus, number>; // per-status spec counts incl. `deferred` (its own taxonomy-map pill)
   groups: ParentGroup[];
 }
 export interface FunctionMap {
@@ -390,7 +413,7 @@ export async function getFunctionMap(): Promise<FunctionMap> {
   const functions: FunctionGroup[] = [...byFn.entries()]
     .sort((a, b) => ord(a[0]) - ord(b[0]) || a[0].localeCompare(b[0]))
     .map(([fn, list]) => {
-      const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
+      const counts: Record<SpecStatus, number> = { planned: 0, in_progress: 0, shipped: 0, deferred: 0, rejected: 0 };
       for (const s of list) counts[s.status]++;
       const pmap = new Map<string, SpecCard[]>();
       for (const s of list) {
@@ -399,7 +422,7 @@ export async function getFunctionMap(): Promise<FunctionMap> {
         arr.push(s);
         pmap.set(key, arr);
       }
-      const rank: Record<Phase, number> = { in_progress: 0, planned: 1, shipped: 2, rejected: 3 };
+      const rank: Record<SpecStatus, number> = { in_progress: 0, planned: 1, shipped: 2, deferred: 3, rejected: 4 };
       const groups: ParentGroup[] = [...pmap.entries()]
         .map(([parent, ss]) => ({ parent, label: parentLabel(parent), specs: ss.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title)) }))
         .sort((a, b) => a.label.localeCompare(b.label));
@@ -531,7 +554,7 @@ export function stripSpecSection(raw: string, heading: string): string {
  * board uses, exposed for callers that hold freshly-committed content in memory (e.g. /api/roadmap/status
  * computing the result of a status flip before disk reflects it). See spec-test-on-ship.
  */
-export function deriveSpecStatus(raw: string): Phase {
+export function deriveSpecStatus(raw: string): SpecStatus {
   return parseSpec("_", raw).status;
 }
 

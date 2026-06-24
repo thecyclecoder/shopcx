@@ -22,7 +22,11 @@ export type DirectorActionKind =
   | "detected_regression" // a regression entered the queue (the detector enqueued a review).
   | "dismissed_regression" // reviewed → transient/foreign/false/already-fixed, recorded reasoning, no spec.
   | "authored_fix" // reviewed → real regression, authored the fix spec directly + routed to the inbox.
-  | "escalated"; // loop-guard: a regression fix that didn't hold after N attempts → escalated to CEO.
+  | "escalated" // loop-guard: a regression fix that didn't hold after N attempts → escalated to CEO.
+  // deploy-health-rollback-guardian Phase 1 — the Deploy Guardian (Reva) stamps one per evaluated deploy-watch.
+  | "deploy_healthy" // a deploy's canary window closed clean — no new deploy-correlated regression.
+  | "deploy_regressed" // a deploy introduced a clear deploy-correlated regression (a spike / a loop went red).
+  | "deploy_unsure"; // a deploy's post-deploy signal was ambiguous → escalate, never auto-act.
 
 export interface DirectorActivityInput {
   workspaceId: string;

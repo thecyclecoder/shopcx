@@ -6,9 +6,10 @@ import {
   listSpecSlugs,
   listGoalSlugs,
   listFunctionSlugs,
-  type Phase,
+  type SpecStatus,
   type SpecCard,
 } from "@/lib/brain-roadmap";
+import { GoalStatusBadge } from "../GoalStatusBadge";
 import { preprocessBrainWikilinks } from "@/lib/brain-links";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestPlanJob } from "@/lib/agent-jobs";
@@ -16,10 +17,11 @@ import PlanButton from "../../PlanButton";
 
 export const dynamic = "force-dynamic";
 
-const DOT: Record<Phase, string> = {
+const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
   shipped: "bg-emerald-500",
+  deferred: "bg-slate-400",
   rejected: "bg-rose-400",
 };
 
@@ -81,8 +83,13 @@ export default async function GoalDetailPage({ params }: { params: Promise<{ slu
               </div>
             </div>
 
+            <div className="flex items-center justify-between gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Status</span>
+              <GoalStatusBadge status={card.status} proposedBy={card.proposedBy} />
+            </div>
+
             <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
-              <PlanButton goalSlug={slug} initialJob={planJob} />
+              <PlanButton goalSlug={slug} initialJob={planJob} goalStatus={card.status} />
             </div>
 
             {card.milestones.length > 0 && (

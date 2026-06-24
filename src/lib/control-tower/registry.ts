@@ -227,6 +227,16 @@ export interface MonitoredLoop {
   registeredAt?: string;
   /** agent-kind only: the agent_jobs.kind this loop maps to. */
   agentKind?: string;
+  /**
+   * Roster-linkage (agent-roster-sync spec, Phase 1): the [[../libraries/agent-personas]] persona
+   * key (personas.ts) a NON-`agent-kind` loop maps to a worker on the org view — so a personified
+   * platform cron declares its persona EXPLICITLY rather than by guesswork. `control-tower-monitor`
+   * (no `agentKind`) → "monitor" (Tao); both `db-health-*` crons → "db_health" (Devi). The org-chart
+   * reader ([[../libraries/org-chart]] `getOrgChart`) surfaces every `personaKind` cron as a worker
+   * (deduped by key, so the two db-health crons render as ONE Devi), keeping `agentKind` for the
+   * queue lanes. Unset ⇒ a pure infra cron (a Control Tower tile only, not an org-view worker).
+   */
+  personaKind?: string;
   /** agent-kind only: a queued/building job older than this is "stuck" → alert. */
   stuckThresholdMs?: number;
   /**
@@ -374,6 +384,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "The watchdog itself — so a dead monitor is visible too.",
     expectedCadence: "every 15 min (*/15 * * * *)",
     livenessWindowMs: 45 * MIN,
+    personaKind: "monitor", // Tao — surfaces this cron as a Platform worker on the org view (agent-roster-sync P1)
   },
   {
     id: "supabase-log-poll-cron",
@@ -420,6 +431,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every ~hour (box job)",
     livenessWindowMs: 2 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
+    personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
   },
   {
     // BOX-EMITTED — the DB Health Agent's daily size/growth/index/bloat sweep (db-health-agent P1).
@@ -433,6 +445,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "daily (box job)",
     livenessWindowMs: 26 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
+    personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
   },
 
   // ── Full Inngest cron coverage (control-tower-complete-coverage spec, Phase 1) ──
@@ -440,6 +453,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // them all + the watchdog catches any that go stale. Window = cadence + grace.
   // ─ Sub-minute / minute crons (window ~10 min) ─
   { id: "claude-status-poll-cron", kind: "cron", owner: "platform", label: "Claude status poll", description: "Polls status.claude.com for the Claude API + Claude Code components → drives the Claude-down breaker.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
+  { id: "deploy-guardian-cron", kind: "cron", owner: "platform", label: "Deploy guardian", description: "Evaluates each auto-merged deploy's canary watch over its window → healthy/regressed/unsure verdict (deploy-health-rollback-guardian).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
@@ -470,6 +484,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // not only on inbound approvals. registeredAt graces the first-tick window (newcron-grace).
   { id: "platform-director-cron", kind: "cron", owner: "platform", label: "Platform Director cadence", description: "Daily enqueue of the Platform/DevOps Director standing pass (escort approved goals through milestones + watch the platform), in addition to the event-driven approval processing.", expectedCadence: "daily (15 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "crisis-daily-campaign", kind: "cron", owner: "cmo", label: "Crisis campaign tick", description: "Advances active crisis-comms campaigns.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 26 * HOUR },
@@ -648,6 +663,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:pr-resolve", kind: "agent-kind", owner: "platform", agentKind: "pr-resolve", label: "Agent — PR resolve", description: "Webhook-fired dirty-PR resolver: merge main + resolve conflicts, tsc-gate, push (or rebuild/surface).", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
   { id: "agent:repair", kind: "agent-kind", owner: "platform", agentKind: "repair", label: "Agent — repair", description: "Event-fired Control Tower triage: diagnose a new error_events signature / loop_alert read-only → author a fix spec + surface for owner Build (or no-op-resolve transient / surface needs-human). The repairer is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:regression", kind: "agent-kind", owner: "platform", agentKind: "regression", label: "Agent — regression", description: "Event-fired the moment the spec-test agent records a regression: review it, dismiss the flaky/false ones, author a fix spec directly. Remi is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
+  { id: "agent:security-review", kind: "agent-kind", owner: "platform", agentKind: "security-review", label: "Agent — security review", description: "The supervisor on the auto-merge proxy: every merged claude/* diff gets an autonomous security pass (injection / secret-leak / authz / RLS / unsafe admin-client) read-only → classify each finding → author a scoped fix spec + surface for owner Build (or surface needs-human), never auto-mutating. Also runs the daily npm-audit dep-watch scan. Vault is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:storefront-optimizer", kind: "agent-kind", owner: "growth", agentKind: "storefront-optimizer", label: "Agent — storefront optimizer", description: "Scheduled campaign loop: read funnel + lever map + LTV proxy → propose ONE atomic reversible-lever hypothesis → stand up an M1 experiment vs holdout (auto-run reversible or surface for owner Approve), or author a missing-capability spec + surface for Build. The optimizer is watched too.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
 
   // ── Inline event-driven AI agents (loop_heartbeats, loop_id = `ai:<agent>`) ──

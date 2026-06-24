@@ -19,6 +19,9 @@ interface WorkerLane {
   kind: string;
   label: string;
   description: string;
+  status: "active" | "idle-healthy" | "inactive";
+  statusReason?: string;
+  flagged?: boolean;
 }
 interface DirectorMandate {
   name: string;
