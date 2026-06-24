@@ -119,6 +119,13 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
+  "spec-drift": {
+    key: "spec-drift", name: "Reese", role: "Spec Drift", emoji: "🔄",
+    personality: "Keeps the board honest — reconciles each phase's emoji against the code on main, flips the confirmed-shipped, surfaces the ambiguous for the director.",
+    mascotId: "default", avatarUrl: `${AV}reese-specdrift.jpg`,
+    chip: "bg-cyan-100 text-cyan-800 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-300 dark:border-cyan-900/40",
+    dot: "bg-cyan-500", ring: "bg-cyan-50 dark:bg-cyan-900/20", accent: "text-cyan-600 dark:text-cyan-400",
+  },
   db_health: {
     key: "db_health", name: "Devi", role: "DB Health", emoji: "🔵",
     personality: "Watches slow queries + growth, EXPLAIN-diagnoses, proposes the index.",

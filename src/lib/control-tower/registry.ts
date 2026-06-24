@@ -399,6 +399,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     id: "spec-drift-reconcile",
     kind: "cron",
     owner: "platform",
+    personaKind: "spec-drift", // Reese — surfaces under Ada in the agents roster (agent-roster-sync source 2)
     label: "Spec-drift reconciler",
     description: "Per-phase emoji↔code reconciler — flips shipped phases ✅, surfaces ambiguous drift.",
     expectedCadence: "every ~30 min (20,50 * * * *)",
