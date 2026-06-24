@@ -560,12 +560,103 @@ ${rubric ? `The worker's rubric (what good = 10 means):\n  ${rubric.criteria}\n\
   }
 }
 
+const GRADER_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
+const GRADER_ACTIVE_BUILD = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage", "blocked_on_dependency"];
+function graderGhToken(): string | undefined {
+  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
+}
+
+/** Commit a spec markdown to docs/brain/specs/{slug}.md on main via the GitHub Contents API (works from the
+ *  deployed cron, unlike the box's putFileMain). Get-then-PUT so it updates in place. */
+async function ghCommitSpec(slug: string, content: string, message: string): Promise<boolean> {
+  const token = graderGhToken();
+  if (!token) return false;
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+  const path = `docs/brain/specs/${slug}.md`;
+  let sha: string | undefined;
+  try {
+    const get = await fetch(`https://api.github.com/repos/${GRADER_REPO}/contents/${path}?ref=main`, { headers, cache: "no-store" });
+    if (get.ok) sha = ((await get.json()) as { sha?: string }).sha;
+  } catch {
+    /* new file */
+  }
+  const put = await fetch(`https://api.github.com/repos/${GRADER_REPO}/contents/${path}`, {
+    method: "PUT",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ message, content: Buffer.from(content, "utf8").toString("base64"), sha, branch: "main" }),
+  });
+  return put.ok;
+}
+
+/**
+ * director-grades-agents: when an agent persistently underperforms despite coaching, the Director does NOT
+ * escalate it to the CEO — it ROLLS the accumulated coaching into a fix spec that hardens the agent's mandate
+ * (a real build), then archives the coaching as "rolled into mandates". The supervisory loop graduates ephemeral
+ * coaching into a durable fix instead of pinging the CEO. Deterministic render + GitHub commit + build enqueue.
+ */
+export async function rollCoachingIntoFixSpec(
+  admin: Admin,
+  opts: { workspaceId: string; agentKind: string; rollupAvg: number | null; attempts: number },
+): Promise<{ ok: boolean; slug?: string; reason?: string }> {
+  const slug = `agent-mandate-hardening-${opts.agentKind.replace(/[^a-z0-9-]/gi, "")}`;
+  // Dedupe — a fix-spec build for this agent already in flight? Don't re-author.
+  const { data: live } = await admin.from("agent_jobs").select("id").eq("workspace_id", opts.workspaceId).eq("spec_slug", slug).eq("kind", "build").in("status", GRADER_ACTIVE_BUILD).limit(1);
+  if (live && live.length) return { ok: false, reason: "fix-spec build already in flight" };
+
+  const { data: coachings } = await admin
+    .from("agent_coaching_log")
+    .select("error_class, triggering_pattern, new_instruction, reasoning")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("agent_kind", opts.agentKind)
+    .eq("kind", "coaching")
+    .not("recheck_status", "in", "(stuck,rolled_in)")
+    .order("created_at", { ascending: false })
+    .limit(12);
+  const rows = (coachings as Array<{ error_class: string | null; triggering_pattern: string | null; new_instruction: string | null; reasoning: string | null }>) ?? [];
+  const persona = getPersona(opts.agentKind);
+  const bullets = rows.length
+    ? rows.map((r) => `- **When ${r.triggering_pattern || r.error_class || "the slip pattern"}:** ${r.new_instruction || "(see agent_coaching_log)"}${r.reasoning ? ` — ${r.reasoning}` : ""}`).join("\n")
+    : "- (the open coaching entries in agent_coaching_log for this agent)";
+  const day = new Date().toISOString().slice(0, 10);
+  const md = [
+    `# Harden the ${persona.name} agent — roll persistent coaching into its mandate ⏳`,
+    ``,
+    `**Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — graduate persistent coaching into a durable fix (director grades agents: low score → fix spec, never a CEO escalation)`,
+    `**Found in use ${day}:** the **${persona.name}** agent (\`${opts.agentKind}\`) sits at **${opts.rollupAvg?.toFixed(1) ?? "?"}/10** after **${opts.attempts}** coaching attempts that didn't stick. Rather than escalate to the CEO, roll the coaching into a permanent fix so the agent improves at the mandate level.`,
+    ``,
+    `## The accumulated coaching to bake in (now archived as rolled-into-mandates)`,
+    bullets,
+    ``,
+    `## Phase 1 — bake the coaching into the agent ⏳`,
+    `- Make the above coaching PERMANENT behavior of the \`${opts.agentKind}\` agent — fold it into its prompt/mandate/code (its run-job + prompt in \`scripts/builder-worker.ts\` and the relevant \`src/lib/agents/*\`), not ephemeral appended \`agent_instructions\`. Once baked, the agent should follow it by default.`,
+    `- Verify the agent's grade rollup recovers (≥ ${COACH_LOW_ROLLUP}/10) over the next window of graded actions; if a coaching class still recurs, the bake-in missed it.`,
+    ``,
+    `## Ownership`,
+    `Owner: [[../functions/platform]] (Ada supervises ${persona.name}). The director authored this from ${persona.name}'s coaching ledger; building it hardens the agent so the coaching never has to repeat.`,
+    ``,
+  ].join("\n");
+
+  const committed = await ghCommitSpec(slug, md, `spec: ${slug} — roll ${opts.agentKind} coaching into a durable agent fix`);
+  if (!committed) return { ok: false, reason: "commit failed (no GitHub token?)" };
+
+  await admin.from("agent_jobs").insert({ workspace_id: opts.workspaceId, spec_slug: slug, kind: "build", status: "queued", instructions: `Harden the ${opts.agentKind} agent: bake its accumulated coaching into its permanent mandate/prompt/code (director-authored from the coaching ledger).` });
+  // Archive the open coachings as "rolled into mandates" so they stop counting toward the loop-guard + are retired.
+  await admin
+    .from("agent_coaching_log")
+    .update({ recheck_status: "rolled_in", rechecked_at: new Date().toISOString() })
+    .eq("workspace_id", opts.workspaceId)
+    .eq("agent_kind", opts.agentKind)
+    .eq("kind", "coaching")
+    .not("recheck_status", "in", "(stuck,rolled_in)");
+  return { ok: true, slug };
+}
+
 /**
  * Detect a worker's grade slip and, when it has slipped, run a coaching pass (coachAgent). Slip =
  * the rolling average fell below COACH_LOW_ROLLUP (≥ COACH_MIN_SAMPLE grades in the window) OR dropped
  * more than DROP_THRESHOLD vs the prior window. The Director (PLATFORM) is the coachedBy gate. After
- * PLATFORM_DIRECTOR_LOOP_GUARD_MAX coaching attempts that never stuck the slip stops re-coaching and is
- * flagged for CEO escalation (the existing loop-guard) rather than spamming the worker.
+ * PLATFORM_DIRECTOR_LOOP_GUARD_MAX coaching attempts that never stuck the slip stops re-coaching and the
+ * coaching is ROLLED INTO A FIX SPEC that hardens the agent (rollCoachingIntoFixSpec) — never a CEO escalation.
  */
 export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin }): Promise<CoachingTriggerResult> {
   const admin = opts.admin ?? createAdminClient();
@@ -611,16 +702,23 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
     .eq("workspace_id", opts.workspaceId)
     .eq("agent_kind", opts.agentKind)
     .eq("kind", "coaching")
-    .neq("recheck_status", "stuck");
+    .not("recheck_status", "in", "(stuck,rolled_in)"); // 'stuck' = took; 'rolled_in' = baked into a fix spec already
   if ((openCoachings ?? 0) >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
-    await announceOnBoard(
-      admin,
-      opts.workspaceId,
-      `⚠️ ${nm(PLATFORM)} escalated ${nm(opts.agentKind)} (\`${opts.agentKind}\`) to the CEO — coached ${openCoachings}× without it sticking; the rollup is still ${rollup.average?.toFixed(1)}/10.`,
-      "escalated",
-      { agent_kind: opts.agentKind, average: rollup.average, attempts: openCoachings },
-    );
-    return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: true, reason: "loop_guard" };
+    // Coached too many times without it sticking → do NOT escalate to the CEO. ROLL the coaching into a fix
+    // spec that hardens the agent's mandate (a real build), and archive the coaching as rolled-into-mandates.
+    const roll = await rollCoachingIntoFixSpec(admin, { workspaceId: opts.workspaceId, agentKind: opts.agentKind, rollupAvg: rollup.average, attempts: openCoachings ?? 0 });
+    if (roll.ok) {
+      await announceOnBoard(
+        admin,
+        opts.workspaceId,
+        `🛠️ ${nm(PLATFORM)} rolled ${nm(opts.agentKind)}'s coaching into a fix spec [[${roll.slug}]] — coached ${openCoachings}× without it sticking (${rollup.average?.toFixed(1)}/10), so it's now a build that hardens the agent at the mandate level; the coaching is archived as rolled-into-mandates.`,
+        "rolled_coaching_into_spec",
+        { agent_kind: opts.agentKind, slug: roll.slug, average: rollup.average, attempts: openCoachings },
+      );
+      return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: false, reason: "rolled_into_fix_spec" };
+    }
+    // Roll didn't author (fix-spec build already in flight, or no GitHub token) — still NEVER escalate to the CEO.
+    return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: false, reason: roll.reason || "roll_skipped" };
   }
 
   // The low-graded recent actions that prompted the slip — the coaching material.
