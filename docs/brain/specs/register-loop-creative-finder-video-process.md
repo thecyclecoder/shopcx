@@ -23,7 +23,7 @@ In `src/lib/control-tower/registry.ts`, add this entry to `MONITORED_LOOPS` (in 
 No other change. After merge + deploy the amber "unregistered loop: creative-finder-video-process" gap clears and a `creative-finder-video-process` cron tile appears.
 
 ## Verification
-- On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: creative-finder-video-process".
+- ✅ On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: creative-finder-video-process".
 - A `creative-finder-video-process` cron tile appears in the monitored loops grid (green once it has beaten, amber "awaiting first run" until then — never a false red).
 
 <!-- coverage-register: register-loop-creative-finder-video-process for loop creative-finder-video-process -->
