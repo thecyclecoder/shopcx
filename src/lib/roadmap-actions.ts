@@ -12,7 +12,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { ACTIVE_STATUSES, getLiveJobForSlug, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
 import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
-import { ownerFunctionForKind, routingOwnerForJob } from "@/lib/agents/approval-inbox";
+import { ownerFunctionForKind, routingOwnerForJob, mirrorWebDecisionToAdaSlack } from "@/lib/agents/approval-inbox";
 import { resolveApproverLive, CEO } from "@/lib/agents/approval-router";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 
@@ -316,7 +316,19 @@ export async function answerRoadmapBuild(
 export async function approveRoadmapAction(
   workspaceId: string,
   userId: string,
-  opts: { jobId: string; actionId: string; decision: "approve" | "decline" | "reject"; notes?: string },
+  opts: {
+    jobId: string;
+    actionId: string;
+    decision: "approve" | "decline" | "reject";
+    notes?: string;
+    /**
+     * ada-slack-routed-approvals Phase 4 — `slack-inbox` (the in-Slack inbox card tap) skips the
+     * web→Slack mirror, since its handler updates the card locally without the "(in web inbox)"
+     * suffix. Any other caller (web inbox, slack-roadmap-console) defaults to `web` and triggers
+     * the mirror so the routed Slack card / chat-mode thread stays in sync.
+     */
+    source?: "web" | "slack-inbox";
+  },
 ): Promise<ActionResult<{ job: AgentJob }>> {
   const gate = await assertOwner(workspaceId, userId);
   if (!gate.ok) return gate;
@@ -393,6 +405,15 @@ export async function approveRoadmapAction(
     } catch {
       // ledger is best-effort; the decision already landed on the job.
     }
+  }
+
+  // ada-slack-routed-approvals Phase 4: mirror a non-Slack-inbox decision back to the routed Slack
+  // card (or chat-mode thread) in #cto-ada so the two surfaces never show stale state. Best-effort
+  // — `mirrorWebDecisionToAdaSlack` swallows its own errors so a Slack outage never blocks a
+  // decision that already landed on the job. Skipped on `slack-inbox` source (that handler updates
+  // the card locally, without the "(in web inbox)" suffix) and on `reject` (regen, not terminal).
+  if ((opts.decision === "approve" || opts.decision === "decline") && opts.source !== "slack-inbox") {
+    await mirrorWebDecisionToAdaSlack(admin, workspaceId, opts.jobId, opts.actionId, opts.decision);
   }
 
   return { ok: true, job: updated as AgentJob };

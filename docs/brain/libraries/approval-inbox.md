@@ -29,6 +29,23 @@ Catches **every** kind regardless of which surface raised it (repair / db_health
 
 **Phase 4 — one inbox, single source.** The shared `routedInboxHref(role?)` (in `src/lib/agents/inbox.ts`) is the deep-link every **migrated** surface now points at instead of raising its own standalone approval card: the [[control-tower]] repair/db-health feeds (now read-only views), the spec-card [[roadmap|BuildButton/PlanButton]], and the box page [[roadmap|`approvalHref`]] (paused jobs → the inbox; failed jobs → their spec/surface, never the retired Control-Tower default). After migration no approval surfaces anywhere except the routed inbox (genuinely multi-choice surfaces remain only as the inbox's deep-link **targets**).
 
+## Slack #cto-ada mirror ([[../specs/ada-slack-routed-approvals]])
+
+A **CEO-routed** Approval Request whose workspace has `slack_ada_channel_id` set is also mirrored into `#cto-ada` as Ada (the [[slack-ada]] surface). The reconciler picks the right surface per request:
+
+- **Card (Phase 1)** — `inlineApproveActions(job)` is non-null AND none of the chat-mode triggers fire. The card is built from `buildApprovalContent(job)` + `inlineApproveActions(job)` (same investigation body the web inbox shows inline), posted via `postAsAda`, and its `ts` stashed back on `dashboard_notifications.metadata.slack_message_ts` — the idempotency key (a re-parked job never double-posts) and the read-path key for `chat.update` (Phase 2 in-Slack tap, Phase 4 web→Slack mirror).
+- **Chat-mode invitation (Phase 3)** — `shouldUseChatMode(job, row)` is true (multi-choice action, `proposed-goal` / planner `spec` kind, or a >1200-char investigation preview — `CHAT_MODE_PREVIEW_LIMIT`). Instead of a card, Ada posts a short invitation ("…paused for your call. …Want to walk through it?") and creates a [[director_coach_threads]] row via `createChatModeInvitationThread` keyed off the post's ts so a founder reply in the thread resumes the same conversation. `metadata.slack_chat_mode=true` + `coach_thread_id` are stashed alongside `slack_message_ts`.
+
+A non-CEO routed approval, or a workspace without `slack_ada_channel_id`, short-circuits — those stay in the web inbox only.
+
+## Phase 4 — bidirectional mirror with the web inbox
+
+`mirrorWebDecisionToAdaSlack(admin, workspaceId, jobId, actionId, decision)` is called from [[roadmap-actions]] `approveRoadmapAction` after a terminal `approve`/`decline` so the routed Slack surface never shows stale state. It looks up the live `dashboard_notifications` row by `metadata.agent_job_id`, then forks on the surface:
+- **Card** — `chat.update` from the LIVE job state; the just-decided row's tail swaps to "✅ Approved (in web inbox)" / "✕ Declined (in web inbox)" (via `InboxCardAction.decidedInWebInbox`), other pending rows stay tappable, other previously-resolved rows keep their default label.
+- **Chat-mode invitation** — `postAsAda` posts a closing thread reply ("Decided in the web inbox — approved/declined. Anything to dig into?") keyed off `slack_message_ts`, so the conversation doesn't dangle.
+
+Slack-tap callers pass `source: 'slack-inbox'` to skip the mirror (their own `updateMessage` is the canonical "applying…" render); everyone else (web inbox, slack-roadmap-console) defaults to `web` and triggers it. Best-effort: the helper swallows its own errors so a Slack outage never blocks a decision that already landed on the job.
+
 ## Exports
 
 - **`reconcileApprovalInbox(admin)`** → `Promise<{ created, dismissed }>` — the sweep (above).
@@ -39,6 +56,7 @@ Catches **every** kind regardless of which surface raised it (repair / db_health
 - **`approvalDeepLink(kind, specSlug, specMissing?)`** → `string` — the canonical decide-surface fallback (multi-choice).
 - **`routedInboxHref(role?)`** (in `inbox.ts`) → `string` — the `/dashboard/agents?view=inbox&role=…` deep-link every migrated surface points at (Phase 4).
 - **`buildApprovalNotification(job, chart, autonomy)`** → the resolved notification row (pure given the snapshot).
+- **`mirrorWebDecisionToAdaSlack(admin, workspaceId, jobId, actionId, decision)`** (Phase 4) → `Promise<void>` — mirror a non-Slack-inbox approve/decline back to the routed `#cto-ada` card or chat-mode thread.
 - Type **`ApprovalJobRow`** — the `agent_jobs` columns the emitter reads.
 
 ## Safety invariants
