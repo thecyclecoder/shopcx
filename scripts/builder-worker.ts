@@ -374,7 +374,8 @@ const SECRET_RE = /SERVICE_ROLE|PASSWORD|SECRET|_TOKEN|PRIVATE|BRAINTREE|TWILIO|
 // rows persist in the DB (re-queued by requeueBlockedOnUsage once an account frees up). The chosen config
 // dir is persisted per-job (claude_session_config_dir) so a later resume knows which account to pin to.
 const ACCOUNT_POOL: string[] = (
-  process.env.CLAUDE_CONFIG_DIRS || "/home/builder/.claude,/home/builder/.claude-personal"
+  process.env.CLAUDE_CONFIG_DIRS ||
+  "/home/builder/.claude,/home/builder/.claude-personal,/home/builder/.claude-third"
 )
   .split(",")
   .map((s) => s.trim())
@@ -1052,7 +1053,18 @@ function listWorktrees(): { path: string; branch: string | null }[] {
 // Force-remove a worktree dir + nuke any lingering directory. `git worktree remove --force` clears the
 // admin entry; if the dir survived (or the remove failed because the dir was already gone), the rm -rf
 // + a later `git worktree prune` reconcile the admin list. Never throws — best-effort cleanup.
+//
+// SAFETY (the 2026-06-24 incident): this rm -rf once deleted the PRIMARY repo (/home/builder/shopcx) —
+// a resume passed a branch that matched the main checkout's worktree, removeWorktreeForBranch fed its
+// path here, and `rm -rf` nuked the live repo out from under the running worker. A build worktree ALWAYS
+// lives under BUILDS_DIR (builds/<uuid|spec-chat-*|…>); anything else (the primary repo, the
+// approval-merge clone, a branch-review tree) must NEVER be force-deleted by this helper. Refuse it loudly.
 function removeWorktreeDir(path: string) {
+  const resolved = resolve(path);
+  if (resolved !== BUILDS_DIR && !resolved.startsWith(BUILDS_DIR + "/")) {
+    console.error(`[worktree] REFUSING to remove ${resolved} — only build worktrees under ${BUILDS_DIR} are removable (guards the primary repo).`);
+    return;
+  }
   sh("git", ["worktree", "remove", "--force", path]);
   if (existsSync(path)) sh("rm", ["-rf", path]);
 }
@@ -1060,9 +1072,16 @@ function removeWorktreeDir(path: string) {
 // Idempotent worktree-add precondition: if ANY worktree already holds <branch> (from a prior run that
 // crashed or paused without tearing down), force-remove it so `git worktree add -B <branch>` can't fail
 // with "already used by worktree at …". Then prune stale admin entries.
+//
+// SAFETY: an empty/falsy branch must NEVER enter the match loop — the primary checkout shows as a
+// detached worktree (branch === null), so matching null/"" would target the main repo. Bail on no branch.
 function removeWorktreeForBranch(branch: string) {
+  if (!branch) {
+    console.error("[worktree] removeWorktreeForBranch called with empty branch — skipping (never match the primary checkout).");
+    return;
+  }
   for (const e of listWorktrees()) {
-    if (e.branch === branch) removeWorktreeDir(e.path);
+    if (e.branch && e.branch === branch) removeWorktreeDir(e.path);
   }
   sh("git", ["worktree", "prune"]);
 }
