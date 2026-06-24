@@ -1734,7 +1734,6 @@ async function runOrchestratorDecision(
             continue;
           }
         }
-        console.error(`Orchestrator (${modelKey}) API error: ${res.status}`, errBody.slice(0, 300));
         // Outage resilience (agent-outage-resilience Phase 1): a retryable
         // dependency failure (429/5xx/overloaded) must THROW so the Inngest
         // run retries with outage-spanning backoff and decides correctly on
@@ -1742,9 +1741,17 @@ async function runOrchestratorDecision(
         // (the old `return fallback…` swallow). A terminal status (4xx other
         // than 429) is a request/auth bug that won't succeed on retry, so it
         // still degrades gracefully to escalation.
+        // Log level mirrors that split: a retryable status is the designed
+        // Inngest-retry self-heal, so it logs via console.warn — NOT error —
+        // to avoid minting a false Control Tower 'vercel' incident off the
+        // Vercel log drain (orchestrator-retryable-anthropic-throw-not-control-tower-err,
+        // sibling of chat-fallback-absorbed-anthropic-overload-noise). Only the
+        // terminal degrade below keeps console.error.
         if (isRetryableAnthropicStatus(res.status)) {
+          console.warn(`Orchestrator (${modelKey}) retryable API error: ${res.status}`, errBody.slice(0, 300));
           throw new AnthropicDependencyError(`${modelKey} API error ${res.status}: ${errBody.slice(0, 100)}`, res.status);
         }
+        console.error(`Orchestrator (${modelKey}) API error: ${res.status}`, errBody.slice(0, 300));
         return fallbackWithCancelRoute(message, `${modelKey} API error ${res.status}: ${errBody.slice(0, 100)}`);
       }
 
@@ -1890,16 +1897,23 @@ async function runOrchestratorDecision(
         forceStatus = "ok but empty text";
       } else {
         const errBody = await forceRes.text().catch(() => "");
-        console.error(`Orchestrator (${modelKey}) force-decision API error: ${forceRes.status}`, errBody.slice(0, 300));
         // Same outage-resilience rule as the main round loop above: a
         // retryable dependency failure (429/5xx/overloaded) on the
         // force-decision call must THROW so the Inngest run retries across
         // the outage rather than silently degrading this ticket to a
         // generic escalation. A terminal 4xx still falls through to the
         // graceful fallback below. (orchestrator-retry-5xx Phase 1.)
+        // Log level split mirrors the main loop: a retryable status logs via
+        // console.warn (the throw + Inngest retry handle it) so it doesn't mint
+        // a false Control Tower 'vercel' incident off the Vercel log drain
+        // (orchestrator-retryable-anthropic-throw-not-control-tower-err, sibling
+        // of chat-fallback-absorbed-anthropic-overload-noise). Only the terminal
+        // degrade keeps console.error.
         if (isRetryableAnthropicStatus(forceRes.status)) {
+          console.warn(`Orchestrator (${modelKey}) force-decision retryable API error: ${forceRes.status}`, errBody.slice(0, 300));
           throw new AnthropicDependencyError(`${modelKey} force-decision API error ${forceRes.status}: ${errBody.slice(0, 100)}`, forceRes.status);
         }
+        console.error(`Orchestrator (${modelKey}) force-decision API error: ${forceRes.status}`, errBody.slice(0, 300));
         forceStatus = `http ${forceRes.status}: ${errBody.slice(0, 100)}`;
       }
     } catch (err) {

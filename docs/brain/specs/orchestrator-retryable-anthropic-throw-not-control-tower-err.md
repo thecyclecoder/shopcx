@@ -1,4 +1,4 @@
-# Don't open a Control Tower incident when the orchestrator throws a retryable Anthropic error for Inngest to retry ⏳
+# Don't open a Control Tower incident when the orchestrator throws a retryable Anthropic error for Inngest to retry ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] + [[../specs/chat-fallback-absorbed-anthropic-overload-noise]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/sonnet-orchestrator-v2.ts::monitor-false-positive`
@@ -11,7 +11,7 @@ sonnet-orchestrator-v2.ts:1737 emits console.error('Orchestrator (opus) API erro
 
 **Likely target:** `src/lib/sonnet-orchestrator-v2.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
