@@ -321,9 +321,15 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
     "",
     "Investigate read-only (the implicated spec / the migration SQL / the backfill script / the diagnosed code).",
     "Confirm every action is sound and within the leash before approving.",
+    brief.kind === "repair"
+      ? "REPAIR target: you SUPERVISE the Repair agent. If the bug is real but the AUTHORED FIX is UNSOUND (broken mechanism, mis-scoped to land, or the code contradicts its premise), choose `bounce` — that sends the fix BACK to the Repair agent with your reasoning to RE-DO its work; it never reaches the CEO. Reserve `escalate` for a call that genuinely needs the CEO (a real out-of-leash/irreversible decision), NOT a fix-quality problem you can hand back. `auto-approve` only a sound fix."
+      : "",
     "Final message = ONLY one JSON object:",
     '{"verdict":"auto-approve","leash_category":"error_fix|db_health|additive_migration|additive_backfill|monitoring_fix","reasoning":"<why every action is sound + low-risk + within the leash, and the bundle is reversible>"}',
-    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice>"}',
+    brief.kind === "repair"
+      ? '{"verdict":"bounce","reasoning":"<the bug is real but the authored fix is unsound — your concrete explanation of WHY, which is handed back to the Repair agent to re-author>"}'
+      : "",
+    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice (NOT a repair fix-quality issue — bounce those)>"}',
   ]
     .filter(Boolean)
     .join("\n");
