@@ -9,6 +9,11 @@
  * save-rebuttal that flips the customer's reason into a reason to stay.
  *
  * Returns null on any failure — caller falls back to a generic line.
+ *
+ * agent-outage-resilience Phase 3 (no-swallow audit): this is the legitimate
+ * EXPLICIT-optional-degrade case — a cosmetic one-liner whose `null` fallback is
+ * a documented, intended degrade (like `personalizeMacroText`'s `optional`), not
+ * the accidental swallow Phase 3 hardened in `selectRemedies`. Left as-is.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";

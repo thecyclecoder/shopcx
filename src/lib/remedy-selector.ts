@@ -6,6 +6,14 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getReviewsForProducts } from "@/lib/klaviyo";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
+import {
+  withAnthropicRetry,
+  throwForAnthropicStatus,
+  throwForAnthropicNetworkError,
+  isRetryableAnthropicStatus,
+  isRetryableThrownError,
+} from "@/lib/anthropic-retry";
+import { recordClaudeFailure, isClaudeBreakerTripped } from "@/lib/claude-health";
 
 interface RemedySelection {
   remedy_id: string;
@@ -164,6 +172,37 @@ export async function selectRemedies(
     health_change: "Health needs changed",
   };
 
+  const reviewPayload = bestReview
+    ? { summary: bestReview.summary, rating: bestReview.rating, body: bestReview.body, reviewer_name: bestReview.reviewer_name }
+    : null;
+
+  // Priority-ordered first-3 remedies — the explicit fallback when AI selection
+  // is unavailable. A valid (if un-personalised) save offer, so the cancel flow
+  // never breaks; serving it must be LOUD, never a silent swallow of a transient.
+  const fallbackRemedies = () => ({
+    remedies: remedies
+      .slice(0, 3)
+      .map(r => ({
+        remedy_id: r.id,
+        name: r.name,
+        description: r.description || null,
+        type: r.type,
+        pitch: r.description || r.name,
+        confidence: 0.5,
+      })),
+    review: reviewPayload,
+  });
+
+  // agent-outage-resilience Phase 3: this is a SYNCHRONOUS customer-facing path
+  // (the cancel-flow remedies step) — the customer is waiting, so there's no
+  // Inngest queue to park-and-drain across an outage. If the breaker already
+  // says Claude is down, degrade IMMEDIATELY to the priority-ordered remedies
+  // rather than make the customer sit through retries to a known-dead API.
+  if (await isClaudeBreakerTripped(admin)) {
+    console.warn("[remedy-selector] Claude breaker tripped — serving fallback remedies (explicit outage degrade)");
+    return fallbackRemedies();
+  }
+
   try {
     const firstRenewalContext = customer.first_renewal
       ? `\n\nIMPORTANT: This customer has NEVER renewed — they are in the highest churn risk window (pre-first-renewal). 50% of all churn happens here. Be more aggressive with save offers:
@@ -178,20 +217,28 @@ export async function selectRemedies(
       ? "\n\nIMPORTANT: This customer has GRANDFATHERED pricing (below standard). Do NOT offer any coupon/discount remedies — they already have special pricing locked in. Focus on pause, skip, frequency change, social proof, or specialist call instead."
       : "";
 
-    const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: HAIKU_MODEL,
-        max_tokens: 500,
-        messages: [
-          {
-            role: "user",
-            content: `You are a subscription retention specialist. Based on the customer profile and cancel reason, pick the 3 remedies most likely to convince this customer to stay.
+    // No silent swallow (agent-outage-resilience Phase 3): a transient Claude
+    // failure used to fall straight through to the first-3 remedies on the very
+    // first 529. Now we retry in-line on a retryable blip (feeding the breaker's
+    // local signal) and only the catch below degrades — explicitly.
+    const aiData = await withAnthropicRetry(async () => {
+      const where = "remedy-selection";
+      let aiRes: Response;
+      try {
+        aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: HAIKU_MODEL,
+            max_tokens: 500,
+            messages: [
+              {
+                role: "user",
+                content: `You are a subscription retention specialist. Based on the customer profile and cancel reason, pick the 3 remedies most likely to convince this customer to stay.
 
 Customer: LTV $${(customer.ltv_cents / 100).toFixed(0)}, retention score ${customer.retention_score}/100, subscribed ${customer.subscription_age_days} days, ${customer.total_orders} orders, products: ${customer.products.join(", ")}${customer.first_renewal ? ", FIRST RENEWAL (never renewed yet)" : ""}
 Cancel reason: "${reasonLabels[cancelReason] || cancelReason}"
@@ -208,13 +255,24 @@ Return a JSON array of exactly 3 remedies with:
 - confidence: 0-1 how likely to save
 
 Return ONLY the JSON array, no other text.`,
-          },
-        ],
-      }),
+              },
+            ],
+          }),
+        });
+      } catch (e) {
+        // Network blip → feed the breaker's local signal, then throw (retryable).
+        await recordClaudeFailure(admin, where);
+        throwForAnthropicNetworkError(e, where);
+      }
+      if (!aiRes.ok) {
+        if (isRetryableAnthropicStatus(aiRes.status)) await recordClaudeFailure(admin, `${where} → ${aiRes.status}`);
+        // retryable status → AnthropicDependencyError (withAnthropicRetry retries);
+        // terminal status → NonRetriableError (fail fast, the catch degrades).
+        throwForAnthropicStatus(aiRes.status, where);
+      }
+      return aiRes.json();
     });
 
-    if (!aiRes.ok) throw new Error(`Anthropic API error: ${aiRes.status}`);
-    const aiData = await aiRes.json();
     const text = (aiData.content?.[0] as { type: string; text: string })?.text?.trim() || "[]";
     // Parse JSON, handling potential markdown code blocks
     const jsonStr = text.replace(/^```json?\n?/, "").replace(/\n?```$/, "");
@@ -242,30 +300,18 @@ Return ONLY the JSON array, no other text.`,
       };
     });
 
-    return {
-      remedies: enriched,
-      review: bestReview
-        ? { summary: bestReview.summary, rating: bestReview.rating, body: bestReview.body, reviewer_name: bestReview.reviewer_name }
-        : null,
-    };
+    return { remedies: enriched, review: reviewPayload };
   } catch (err) {
-    console.error("AI remedy selection failed:", err);
-    // Fallback: return first 3 remedies with generic pitches
-    return {
-      remedies: remedies
-        .slice(0, 3)
-        .map(r => ({
-          remedy_id: r.id,
-          name: r.name,
-          description: r.description || null,
-          type: r.type,
-          pitch: r.description || r.name,
-          confidence: 0.5,
-        })),
-      review: bestReview
-        ? { summary: bestReview.summary, rating: bestReview.rating, body: bestReview.body, reviewer_name: bestReview.reviewer_name }
-        : null,
-    };
+    // Explicit degrade (no silent swallow): a retryable error survived in-line
+    // retries (a transient that didn't recover in-window), or a terminal/parse
+    // error. Either way we serve the priority-ordered remedies so the cancel
+    // flow never breaks — but LOUDLY, tagged with which case it was.
+    const retryable = isRetryableThrownError(err);
+    console.error(
+      `AI remedy selection failed (${retryable ? "retryable/outage — exhausted in-line retries" : "terminal"}) — serving fallback remedies:`,
+      err,
+    );
+    return fallbackRemedies();
   }
 }
 
@@ -301,10 +347,23 @@ export async function generateOpenEndedResponse(
     console.error("Failed to fetch reviews for AI chat:", err);
   }
 
+  // Explicit degrade reply for the real-time chat (no Inngest queue to park —
+  // the customer is typing). The breaker / failure branches all land here.
+  const escalationReply =
+    "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("ANTHROPIC_API_KEY not set — AI chat unavailable");
-    return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
+    return escalationReply;
+  }
+
+  // agent-outage-resilience Phase 3: if the breaker already says Claude is down,
+  // don't make the customer wait through two failing calls (Sonnet + Haiku) to a
+  // known-dead API — degrade explicitly to the escalation reply right away.
+  if (await isClaudeBreakerTripped(admin)) {
+    console.warn("[remedy-selector] Claude breaker tripped — AI chat serving escalation reply (explicit outage degrade)");
+    return escalationReply;
   }
 
   // Fetch product titles for context
@@ -354,6 +413,8 @@ IMPORTANT: You CANNOT perform cancellations or any subscription actions yourself
   if (!aiRes.ok) {
     const errText = await aiRes.text().catch(() => "");
     console.error(`Anthropic API error in generateOpenEndedResponse (Sonnet): ${aiRes.status}`, errText);
+    // Feed the breaker's local signal so a retryable Sonnet failure counts (Phase 3).
+    if (isRetryableAnthropicStatus(aiRes.status)) await recordClaudeFailure(admin, `chat sonnet → ${aiRes.status}`);
 
     // Retry with Haiku as fallback
     try {
@@ -374,10 +435,15 @@ IMPORTANT: You CANNOT perform cancellations or any subscription actions yourself
       } else {
         const retryErr = await retryRes.text().catch(() => "");
         console.error(`Anthropic API error in generateOpenEndedResponse (Haiku fallback): ${retryRes.status}`, retryErr);
+        if (isRetryableAnthropicStatus(retryRes.status)) await recordClaudeFailure(admin, `chat haiku → ${retryRes.status}`);
       }
-    } catch {}
+    } catch (e) {
+      // Network blip on the Haiku retry — feed the breaker, then fall through to degrade.
+      await recordClaudeFailure(admin, "chat haiku network");
+      console.error("generateOpenEndedResponse Haiku fallback threw:", e instanceof Error ? e.message : e);
+    }
 
-    return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
+    return escalationReply;
   }
   const aiData = await aiRes.json();
   return (aiData.content?.[0] as { type: string; text: string })?.text?.trim() || "I understand. I've escalated this to our team, and they will be in touch with you soon.";
