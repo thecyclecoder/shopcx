@@ -112,6 +112,13 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-red-100 text-red-800 border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-900/40",
     dot: "bg-red-500", ring: "bg-red-50 dark:bg-red-900/20", accent: "text-red-600 dark:text-red-400",
   },
+  "security-review": {
+    key: "security-review", name: "Vault", role: "Security", emoji: "🔒",
+    personality: "Reviews every merged diff for vulns, watches deps for CVEs, escalates — never auto-mutates.",
+    mascotId: "default", avatarUrl: `${AV}vault-security.jpg`,
+    chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
+    dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
+  },
   db_health: {
     key: "db_health", name: "Devi", role: "DB Health", emoji: "🔵",
     personality: "Watches slow queries + growth, EXPLAIN-diagnoses, proposes the index.",
@@ -215,6 +222,11 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Review every regression alert the test sweep raises",
     "Dismiss false / flaky regressions with a written rationale",
     "Author a fix spec for the real ones, directly on the roadmap",
+  ],
+  "security-review": [
+    "Give every merged diff an autonomous security pass (injection / secret-leak / authz / RLS)",
+    "Classify each finding (real-vuln / needs-human / false-positive); escalate, never auto-mutate",
+    "Watch dependencies for CVEs; author the upgrade-fix spec for owner-gated Build",
   ],
   db_health: [
     "Watch slow queries + table growth across the schema",

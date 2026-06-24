@@ -33,4 +33,4 @@ The [[../goals/devops-director]] goal stands up the Agent Org (CEO → Directors
 
 ## Related
 
-[[../dashboard/agents]] · [[../specs/agents-hub-role-inboxes]] · [[../goals/devops-director]] · [[brain-roadmap]] · [[control-tower]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../functions/platform]] · [[../operational-rules]]
+[[../dashboard/agents]] · [[../specs/agents-hub-role-inboxes]] · [[../goals/devops-director]] · [[brain-roadmap]] · [[control-tower]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../functions/platform]] · [[../libraries/security-agent]] · [[../operational-rules]]

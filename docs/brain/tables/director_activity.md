@@ -31,4 +31,4 @@ Written via [[../libraries/director-activity]] `recordDirectorActivity` (best-ef
 
 ## Related
 
-[[../libraries/director-activity]] · [[../specs/regression-agent]] · [[../goals/devops-director]] · [[../specs/director-loop-grading]] · [[../specs/worker-coaching-loop]] · [[../libraries/agent-coaching]] · [[../specs/board-grooming]] · [[../libraries/platform-director]] · [[director_messages]] · [[../libraries/director-board]]
+[[../libraries/director-activity]] · [[../specs/regression-agent]] · [[../specs/security-dependency-agent]] · [[../libraries/security-agent]] · [[../goals/devops-director]] · [[../specs/director-loop-grading]] · [[../specs/worker-coaching-loop]] · [[../libraries/agent-coaching]] · [[../specs/board-grooming]] · [[../libraries/platform-director]] · [[director_messages]] · [[../libraries/director-board]]

@@ -120,4 +120,6 @@ The two guards that stop a fold from **orphaning a live build**. A fold moves th
 
 ---
 
-[[../README]] · [[brain-roadmap]] · [[spec-drift]] · [[../tables/agent_jobs]] · [[../tables/spec_test_runs]] · [[../inngest/spec-test-cron]] · [[../specs/spec-test-agent]] · [[../specs/spec-test-on-ship]] · [[../lifecycles/roadmap-build-console]]
+> `applyMergedBuildEffects` also fires the per-diff security pass ([[security-agent]] `enqueueSecurityReviewJob`, deduped by merge SHA) on every merged build — [[../specs/security-dependency-agent]] Phase 1.
+
+[[../README]] · [[brain-roadmap]] · [[spec-drift]] · [[../tables/agent_jobs]] · [[../tables/spec_test_runs]] · [[../inngest/spec-test-cron]] · [[../specs/spec-test-agent]] · [[../specs/spec-test-on-ship]] · [[../lifecycles/roadmap-build-console]] · [[security-agent]]
