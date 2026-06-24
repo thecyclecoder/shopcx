@@ -1,21 +1,21 @@
 /**
- * /api/developer/agents/worker-grades — a worker's grade rollup + recent graded actions (worker
+ * /api/developer/agents/agent-grades — a worker's grade rollup + recent graded actions (worker
  * observability, worker-grading-and-director-management Phase 3).
  *
  * Owner-gated, read-only. `GET ?kind=<agent_jobs.kind>` returns:
  *   - `rollup`: the standing performance score — last-10 average grade + the prior-window average + the
- *     drop (computeWorkerRollup), the same signal the Director coaches on.
+ *     drop (computeAgentRollup), the same signal the Director coaches on.
  *   - `recent`: the worker's recently-CONCLUDED agent_jobs (newest first) each with its grade (1–10 +
  *     reasoning) if graded yet — the live activity feed on the worker's profile page.
  *
  * Backs the rollup-grade card + the activity feed on /dashboard/agents/[role] for a worker seat.
- * See docs/brain/tables/worker_action_grades.md · docs/brain/libraries/worker-grader.md.
+ * See docs/brain/tables/agent_action_grades.md · docs/brain/libraries/agent-grader.md.
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { computeWorkerRollup, WORKER_RUBRICS, GRADEABLE_KINDS } from "@/lib/agents/worker-grader";
+import { computeAgentRollup, AGENT_RUBRICS, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
 
 export const dynamic = "force-dynamic";
 
@@ -48,7 +48,7 @@ export async function GET(req: Request) {
 
   // Only a rubric-backed worker kind is graded — a non-worker kind has no rollup (return an empty shape).
   const gradeable = GRADEABLE_KINDS.includes(kind);
-  const rollup = gradeable ? await computeWorkerRollup(admin, workspaceId, kind) : { workerKind: kind, count: 0, average: null, priorAverage: null, drop: null };
+  const rollup = gradeable ? await computeAgentRollup(admin, workspaceId, kind) : { agentKind: kind, count: 0, average: null, priorAverage: null, drop: null };
 
   // Recent concluded actions of this worker + their grade (left join via a second lookup).
   const { data: jobs } = await admin
@@ -64,7 +64,7 @@ export async function GET(req: Request) {
   const gradeByJob = new Map<string, { grade: number | null; reasoning: string | null; graded_by: string }>();
   if (jobRows.length) {
     const { data: grades } = await admin
-      .from("worker_action_grades")
+      .from("agent_action_grades")
       .select("agent_job_id, grade, reasoning, graded_by")
       .in("agent_job_id", jobRows.map((j) => j.id));
     for (const g of (grades || []) as Array<{ agent_job_id: string; grade: number | null; reasoning: string | null; graded_by: string }>) {
@@ -88,7 +88,7 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     kind,
-    rubric: WORKER_RUBRICS[kind]?.criteria ?? null,
+    rubric: AGENT_RUBRICS[kind]?.criteria ?? null,
     rollup,
     recent,
   });

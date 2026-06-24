@@ -196,7 +196,7 @@ export interface CoachDirectorResult {
 }
 
 /**
- * The CEO-GATED coach action (mirror worker-instructions.coachWorker one level up). Amends the director's
+ * The CEO-GATED coach action (mirror worker-instructions.coachAgent one level up). Amends the director's
  * instruction set (a new active version superseding any prior active for the SAME class), logs the
  * CEO→director message (old→new diff + the attempt count), and returns both rows. Throws on a write error.
  *

@@ -22,7 +22,7 @@ interface OrgChart {
   directors: DirectorNode[];
 }
 
-function WorkerChip({ kind, label, description }: { kind: string; label: string; description: string }) {
+function AgentChip({ kind, label, description }: { kind: string; label: string; description: string }) {
   const persona = getPersona(kind, label);
   return (
     <Link
@@ -114,7 +114,7 @@ export default function WorkersRosterPage() {
                 </h2>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {d.workers.map((w) => (
-                    <WorkerChip key={w.kind} kind={w.kind} label={w.label} description={w.description} />
+                    <AgentChip key={w.kind} kind={w.kind} label={w.label} description={w.description} />
                   ))}
                 </div>
               </section>

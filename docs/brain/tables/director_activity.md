@@ -17,7 +17,7 @@ Written via [[../libraries/director-activity]] `recordDirectorActivity` (best-ef
 | `id` | `uuid` | PK · `gen_random_uuid()` |
 | `workspace_id` | `uuid` | FK → `workspaces(id)` on delete cascade |
 | `director_function` | `text` | the function slug whose objective owns the action (e.g. `platform`); a **worker** action carries its **supervising director's** function |
-| `action_kind` | `text` | what was done — **open vocabulary, no CHECK** (new kinds land without a migration). regression-agent emits: `detected_regression｜dismissed_regression｜authored_fix｜escalated`; the [[../libraries/worker-coaching|coaching pass]] emits: `coached_worker｜coaching_routed_to_repair｜escalated_coaching`; the [[../libraries/platform-director|Platform/DevOps Director]] emits: `approved_approval｜escorted_goal｜escalated` + (board-grooming) `groomed_continue｜groomed_split` |
+| `action_kind` | `text` | what was done — **open vocabulary, no CHECK** (new kinds land without a migration). regression-agent emits: `detected_regression｜dismissed_regression｜authored_fix｜escalated`; the [[../libraries/agent-coaching|coaching pass]] emits: `coached_worker｜coaching_routed_to_repair｜escalated_coaching`; the [[../libraries/platform-director|Platform/DevOps Director]] emits: `approved_approval｜escorted_goal｜escalated` + (board-grooming) `groomed_continue｜groomed_split` |
 | `spec_slug` | `text` | the spec the action touched (null for a non-spec action) |
 | `reason` | `text` | the plain-text "why" — the reasoning the recap/audit reads back · default `''` |
 | `metadata` | `jsonb` | structured per-action context: `{ job_id?, signature?, failing?, attempt?, verdict?, approver?, ... }` · default `{}` |
@@ -31,4 +31,4 @@ Written via [[../libraries/director-activity]] `recordDirectorActivity` (best-ef
 
 ## Related
 
-[[../libraries/director-activity]] · [[../specs/regression-agent]] · [[../goals/devops-director]] · [[../specs/director-loop-grading]] · [[../specs/worker-coaching-loop]] · [[../libraries/worker-coaching]] · [[../specs/board-grooming]] · [[../libraries/platform-director]] · [[director_messages]] · [[../libraries/director-board]]
+[[../libraries/director-activity]] · [[../specs/regression-agent]] · [[../goals/devops-director]] · [[../specs/director-loop-grading]] · [[../specs/worker-coaching-loop]] · [[../libraries/agent-coaching]] · [[../specs/board-grooming]] · [[../libraries/platform-director]] · [[director_messages]] · [[../libraries/director-board]]

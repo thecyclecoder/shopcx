@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 // Worker observability (worker-grading-and-director-management Phase 3) — on a worker's profile page
 // (/dashboard/agents/[role]) the Director's view of this worker: a rollup-grade card (last-10 average +
 // trend, the signal she coaches on) + a live feed of its recently-CONCLUDED agent_jobs, each with the
-// grade she gave it. One fetch of /api/developer/agents/worker-grades?kind=… backs both.
+// grade she gave it. One fetch of /api/developer/agents/agent-grades?kind=… backs both.
 
 interface RecentAction {
   id: string;
@@ -18,7 +18,7 @@ interface RecentAction {
   gradedBy: string | null;
 }
 interface Rollup {
-  workerKind: string;
+  agentKind: string;
   count: number;
   average: number | null;
   priorAverage: number | null;
@@ -73,14 +73,14 @@ function Trend({ drop }: { drop: number | null }) {
   return <span className="text-zinc-400">steady</span>;
 }
 
-export function WorkerGradePanel({ kind }: { kind: string }) {
+export function AgentGradePanel({ kind }: { kind: string }) {
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let alive = true;
     const load = () =>
-      fetch(`/api/developer/agents/worker-grades?kind=${encodeURIComponent(kind)}`)
+      fetch(`/api/developer/agents/agent-grades?kind=${encodeURIComponent(kind)}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
           if (alive) {

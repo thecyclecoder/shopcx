@@ -1,20 +1,20 @@
 /**
  * worker-instructions — the per-worker mutable instruction store + the director-gated coach write path
- * (worker-coaching-loop spec, Phase 1). See docs/brain/tables/worker_instructions.md +
- * docs/brain/tables/worker_coaching_log.md.
+ * (worker-coaching-loop spec, Phase 1). See docs/brain/tables/agent_instructions.md +
+ * docs/brain/tables/agent_coaching_log.md.
  *
  * The mechanism the DevOps Director uses to TEACH its workers without a deploy:
- *   • `loadWorkerInstructions` / `appendWorkerInstructions` — the RUNTIME load. Every worker run reads
+ *   • `loadAgentInstructions` / `appendAgentInstructions` — the RUNTIME load. Every worker run reads
  *     its ACTIVE guidance and appends it to the base prompt (called from scripts/builder-worker.ts).
- *   • `coachWorker` — the DIRECTOR-GATED write. When the director spots a repeated mistake it amends the
+ *   • `coachAgent` — the DIRECTOR-GATED write. When the director spots a repeated mistake it amends the
  *     worker's instruction set (a new active version, superseding any prior for the same error class),
  *     logs the director→worker message (the old→new diff + pattern), posts it to the #directors board,
  *     and records a director_activity row. Coaching = a data write, not a deploy.
  *   • `revertCoaching` — every amendment is reversible (status → 'reverted').
- *   • `getWorkerCoachingHistory` — the worker's coaching history for its profile page.
+ *   • `getAgentCoachingHistory` — the worker's coaching history for its profile page.
  *
  * north-star chain: CEO → director → worker. The worker NEVER edits its own instructions — only its
- * director coaches it. Enforced two ways: `coachWorker` requires a `coachedBy` director slug, and the
+ * director coaches it. Enforced two ways: `coachAgent` requires a `coachedBy` director slug, and the
  * tables are service-role-write-only (a worker runs read-only and has no write path). See
  * [[docs/brain/operational-rules.md]] § North star.
  */
@@ -22,11 +22,11 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-/** A row in `worker_instructions` — one versioned learning for a worker. */
-export interface WorkerInstruction {
+/** A row in `agent_instructions` — one versioned learning for a worker. */
+export interface AgentInstruction {
   id: string;
   workspaceId: string;
-  workerKind: string;
+  agentKind: string;
   errorClass: string;
   guidance: string;
   triggeringPattern: string;
@@ -39,11 +39,11 @@ export interface WorkerInstruction {
   createdAt: string;
 }
 
-/** A row in `worker_coaching_log` — one director→worker communication. */
-export interface WorkerCoachingEntry {
+/** A row in `agent_coaching_log` — one director→worker communication. */
+export interface AgentCoachingEntry {
   id: string;
   workspaceId: string;
-  workerKind: string;
+  agentKind: string;
   coachedBy: string;
   errorClass: string;
   triggeringPattern: string;
@@ -63,7 +63,7 @@ export interface WorkerCoachingEntry {
 interface InstructionRow {
   id: string;
   workspace_id: string;
-  worker_kind: string;
+  agent_kind: string;
   error_class: string;
   guidance: string;
   triggering_pattern: string | null;
@@ -79,7 +79,7 @@ interface InstructionRow {
 interface CoachingRow {
   id: string;
   workspace_id: string;
-  worker_kind: string;
+  agent_kind: string;
   coached_by: string;
   error_class: string;
   triggering_pattern: string | null;
@@ -96,11 +96,11 @@ interface CoachingRow {
   created_at: string;
 }
 
-function toInstruction(r: InstructionRow): WorkerInstruction {
+function toInstruction(r: InstructionRow): AgentInstruction {
   return {
     id: r.id,
     workspaceId: r.workspace_id,
-    workerKind: r.worker_kind,
+    agentKind: r.agent_kind,
     errorClass: r.error_class,
     guidance: r.guidance,
     triggeringPattern: r.triggering_pattern ?? "",
@@ -114,11 +114,11 @@ function toInstruction(r: InstructionRow): WorkerInstruction {
   };
 }
 
-function toCoaching(r: CoachingRow): WorkerCoachingEntry {
+function toCoaching(r: CoachingRow): AgentCoachingEntry {
   return {
     id: r.id,
     workspaceId: r.workspace_id,
-    workerKind: r.worker_kind,
+    agentKind: r.agent_kind,
     coachedBy: r.coached_by,
     errorClass: r.error_class,
     triggeringPattern: r.triggering_pattern ?? "",
@@ -137,40 +137,40 @@ function toCoaching(r: CoachingRow): WorkerCoachingEntry {
 }
 
 const INSTRUCTION_COLS =
-  "id, workspace_id, worker_kind, error_class, guidance, triggering_pattern, reasoning, status, version, supersedes_id, coached_by, source_grade_id, created_at";
+  "id, workspace_id, agent_kind, error_class, guidance, triggering_pattern, reasoning, status, version, supersedes_id, coached_by, source_grade_id, created_at";
 const COACHING_COLS =
-  "id, workspace_id, worker_kind, coached_by, error_class, triggering_pattern, old_instruction, new_instruction, reasoning, instruction_id, source_activity_ids, attempt, kind, recheck_status, rechecked_at, board_message_id, created_at";
+  "id, workspace_id, agent_kind, coached_by, error_class, triggering_pattern, old_instruction, new_instruction, reasoning, instruction_id, source_activity_ids, attempt, kind, recheck_status, rechecked_at, board_message_id, created_at";
 
 /**
  * Load a worker's ACTIVE guidance (the learnings it should obey), newest-first. Best-effort: returns
  * [] if the table isn't present yet (so a runtime caller never crashes on a missing migration).
  */
-export async function loadWorkerInstructions(
+export async function loadAgentInstructions(
   admin: Admin,
   workspaceId: string,
-  workerKind: string,
-): Promise<WorkerInstruction[]> {
+  agentKind: string,
+): Promise<AgentInstruction[]> {
   try {
     const { data, error } = await admin
-      .from("worker_instructions")
+      .from("agent_instructions")
       .select(INSTRUCTION_COLS)
       .eq("workspace_id", workspaceId)
-      .eq("worker_kind", workerKind)
+      .eq("agent_kind", agentKind)
       .eq("status", "active")
       .order("created_at", { ascending: false });
     if (error) {
-      console.warn(`[worker-instructions] load failed (${workerKind}):`, error.message);
+      console.warn(`[worker-instructions] load failed (${agentKind}):`, error.message);
       return [];
     }
     return (data ?? []).map((r) => toInstruction(r as InstructionRow));
   } catch (err) {
-    console.warn("[worker-instructions] loadWorkerInstructions threw:", err instanceof Error ? err.message : err);
+    console.warn("[worker-instructions] loadAgentInstructions threw:", err instanceof Error ? err.message : err);
     return [];
   }
 }
 
 /** Render active guidance as a prompt block (empty string when there are none). */
-export function formatWorkerInstructions(instructions: WorkerInstruction[]): string {
+export function formatAgentInstructions(instructions: AgentInstruction[]): string {
   if (!instructions.length) return "";
   const lines = instructions.map((i, idx) => {
     const why = i.reasoning ? ` (because ${i.reasoning})` : "";
@@ -187,21 +187,21 @@ export function formatWorkerInstructions(instructions: WorkerInstruction[]): str
  * The RUNTIME helper a worker run calls: append the worker's active coaching guidance to its base
  * prompt. Returns the base prompt unchanged when there is no guidance. Never throws.
  */
-export async function appendWorkerInstructions(
+export async function appendAgentInstructions(
   admin: Admin,
   workspaceId: string,
-  workerKind: string,
+  agentKind: string,
   basePrompt: string,
 ): Promise<string> {
-  const instructions = await loadWorkerInstructions(admin, workspaceId, workerKind);
-  const block = formatWorkerInstructions(instructions);
+  const instructions = await loadAgentInstructions(admin, workspaceId, agentKind);
+  const block = formatAgentInstructions(instructions);
   return block ? `${basePrompt}\n\n${block}` : basePrompt;
 }
 
-export interface CoachWorkerInput {
+export interface CoachAgentInput {
   workspaceId: string;
   /** the worker being coached (an agent_jobs kind, e.g. 'repair'). */
-  workerKind: string;
+  agentKind: string;
   /** the SUPERVISING director's function slug (e.g. 'platform') — the gate: a worker can't pass this for itself. */
   coachedBy: string;
   /** the class of mistake (supersede/dedup key). */
@@ -218,9 +218,9 @@ export interface CoachWorkerInput {
   sourceGradeId?: string | null;
 }
 
-export interface CoachWorkerResult {
-  instruction: WorkerInstruction;
-  coaching: WorkerCoachingEntry;
+export interface CoachAgentResult {
+  instruction: AgentInstruction;
+  coaching: AgentCoachingEntry;
   attempt: number;
 }
 
@@ -234,15 +234,15 @@ export interface CoachWorkerResult {
  * Director-gated: `coachedBy` is REQUIRED and is the supervising director's slug — the worker never
  * supplies it for itself, and the tables are service-role-write-only.
  */
-export async function coachWorker(admin: Admin, input: CoachWorkerInput): Promise<CoachWorkerResult> {
-  if (!input.coachedBy) throw new Error("coachWorker: coachedBy (the supervising director) is required — coaching is director-gated");
+export async function coachAgent(admin: Admin, input: CoachAgentInput): Promise<CoachAgentResult> {
+  if (!input.coachedBy) throw new Error("coachAgent: coachedBy (the supervising director) is required — coaching is director-gated");
 
   // Find the prior active instruction for this (worker, class) → supersede it (versioning + the diff).
   const { data: priorRows } = await admin
-    .from("worker_instructions")
+    .from("agent_instructions")
     .select(INSTRUCTION_COLS)
     .eq("workspace_id", input.workspaceId)
-    .eq("worker_kind", input.workerKind)
+    .eq("agent_kind", input.agentKind)
     .eq("error_class", input.errorClass)
     .eq("status", "active")
     .order("version", { ascending: false })
@@ -251,20 +251,20 @@ export async function coachWorker(admin: Admin, input: CoachWorkerInput): Promis
 
   // Attempt count = prior coaching messages for this (worker, class) + 1.
   const { count: priorCoachings } = await admin
-    .from("worker_coaching_log")
+    .from("agent_coaching_log")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", input.workspaceId)
-    .eq("worker_kind", input.workerKind)
+    .eq("agent_kind", input.agentKind)
     .eq("error_class", input.errorClass)
     .eq("kind", "coaching");
   const attempt = (priorCoachings ?? 0) + 1;
 
   // Insert the new ACTIVE instruction (it supersedes the prior).
   const { data: insRow, error: insErr } = await admin
-    .from("worker_instructions")
+    .from("agent_instructions")
     .insert({
       workspace_id: input.workspaceId,
-      worker_kind: input.workerKind,
+      agent_kind: input.agentKind,
       error_class: input.errorClass,
       guidance: input.guidance,
       triggering_pattern: input.triggeringPattern,
@@ -282,15 +282,15 @@ export async function coachWorker(admin: Admin, input: CoachWorkerInput): Promis
 
   // Retire the prior active instruction for this class.
   if (prior) {
-    await admin.from("worker_instructions").update({ status: "superseded", updated_at: new Date().toISOString() }).eq("id", prior.id);
+    await admin.from("agent_instructions").update({ status: "superseded", updated_at: new Date().toISOString() }).eq("id", prior.id);
   }
 
   // Log the director→worker message (the visible communication).
   const { data: logRow, error: logErr } = await admin
-    .from("worker_coaching_log")
+    .from("agent_coaching_log")
     .insert({
       workspace_id: input.workspaceId,
-      worker_kind: input.workerKind,
+      agent_kind: input.agentKind,
       coached_by: input.coachedBy,
       error_class: input.errorClass,
       triggering_pattern: input.triggeringPattern,
@@ -312,39 +312,39 @@ export async function coachWorker(admin: Admin, input: CoachWorkerInput): Promis
 
 /** Stamp the #directors board post id onto a coaching log row (after the caller posts it). */
 export async function linkCoachingBoardPost(admin: Admin, coachingId: string, boardMessageId: string): Promise<void> {
-  await admin.from("worker_coaching_log").update({ board_message_id: boardMessageId }).eq("id", coachingId);
+  await admin.from("agent_coaching_log").update({ board_message_id: boardMessageId }).eq("id", coachingId);
 }
 
 /** Revert a coaching amendment — the learning stops being loaded (status → 'reverted'). Reversible by design. */
 export async function revertCoaching(admin: Admin, instructionId: string): Promise<void> {
   await admin
-    .from("worker_instructions")
+    .from("agent_instructions")
     .update({ status: "reverted", updated_at: new Date().toISOString() })
     .eq("id", instructionId);
 }
 
 /** A worker's coaching history (its profile page reads this), newest-first. */
-export async function getWorkerCoachingHistory(
+export async function getAgentCoachingHistory(
   admin: Admin,
   workspaceId: string,
-  workerKind: string,
+  agentKind: string,
   limit = 50,
-): Promise<WorkerCoachingEntry[]> {
+): Promise<AgentCoachingEntry[]> {
   try {
     const { data, error } = await admin
-      .from("worker_coaching_log")
+      .from("agent_coaching_log")
       .select(COACHING_COLS)
       .eq("workspace_id", workspaceId)
-      .eq("worker_kind", workerKind)
+      .eq("agent_kind", agentKind)
       .order("created_at", { ascending: false })
       .limit(limit);
     if (error) {
-      console.warn(`[worker-instructions] history failed (${workerKind}):`, error.message);
+      console.warn(`[worker-instructions] history failed (${agentKind}):`, error.message);
       return [];
     }
     return (data ?? []).map((r) => toCoaching(r as CoachingRow));
   } catch (err) {
-    console.warn("[worker-instructions] getWorkerCoachingHistory threw:", err instanceof Error ? err.message : err);
+    console.warn("[worker-instructions] getAgentCoachingHistory threw:", err instanceof Error ? err.message : err);
     return [];
   }
 }
@@ -356,7 +356,7 @@ export async function recordRecheck(
   status: "stuck" | "recurred",
 ): Promise<void> {
   await admin
-    .from("worker_coaching_log")
+    .from("agent_coaching_log")
     .update({ recheck_status: status, rechecked_at: new Date().toISOString() })
     .eq("id", coachingId);
 }
