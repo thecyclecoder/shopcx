@@ -127,15 +127,17 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
     if (!inPhases) continue;
     const bm = lines[i].match(/^\s*[-*]\s+(.*\S)\s*$/);
     if (!bm) continue;
-    const st = statusFromText(lines[i]);
-    if (!st) continue; // a phase bullet must carry an emoji
+    // Recognize a phase bullet by a leading emoji (legacy) OR a `**P1**`/`**Phase 1**` label — Phase 3
+    // stripped the emojis, so an emoji-less `- **P1 — …**` must still parse (status defaults `planned`).
+    const inner = bm[1].replace(/^[⏳🚧✅❌]\s*/, "");
+    if (!statusFromText(lines[i]) && !/^\*{0,2}(P\d+|Phase\s+\d+)\b/i.test(inner)) continue;
     // Body = this bullet + its indented continuation (sub-bullets) until the next top-level bullet / section.
     let end = i + 1;
     while (end < lines.length && !/^[-*]\s/.test(lines[end]) && !/^##\s/.test(lines[end])) end++;
     phases.push({
       index: phases.length,
       title: cleanTitle(bm[1]),
-      status: st,
+      status: statusFromText(lines[i]) ?? "planned",
       emojiLine: i,
       body: lines.slice(i, end).join("\n"),
     });

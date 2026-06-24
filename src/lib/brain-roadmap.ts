@@ -199,9 +199,12 @@ function parseSpec(slug: string, raw: string): SpecCard {
       if (!inPhases) continue;
       const bm = lines[i].match(/^\s*[-*]\s+(.*\S)\s*$/);
       if (!bm) continue;
-      const st = statusFromText(lines[i]);
-      if (!st) continue; // a phase bullet must carry ⏳/🚧/✅/❌
-      phases.push({ title: cleanInline(bm[1]), status: st });
+      // A phase bullet is recognized by a leading status emoji (legacy) OR a `**P1**`/`**Phase 1**` label.
+      // spec-status-db-driven Phase 3 stripped the emojis, so an emoji-less `- **P1 — …**` MUST still parse
+      // as a phase (its status defaults to `planned`; the real status comes from the spec_card_state DB).
+      const inner = bm[1].replace(/^[⏳🚧✅❌]\s*/, "");
+      if (!statusFromText(lines[i]) && !/^\*{0,2}(P\d+|Phase\s+\d+)\b/i.test(inner)) continue;
+      phases.push({ title: cleanInline(bm[1]), status: statusFromText(lines[i]) ?? "planned" });
     }
   }
 
