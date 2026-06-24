@@ -619,7 +619,7 @@ export async function rollCoachingIntoFixSpec(
     : "- (the open coaching entries in agent_coaching_log for this agent)";
   const day = new Date().toISOString().slice(0, 10);
   const md = [
-    `# Harden the ${persona.name} agent — roll persistent coaching into its mandate ⏳`,
+    `# Harden the ${persona.name} agent — roll persistent coaching into its mandate`,
     ``,
     `**Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — graduate persistent coaching into a durable fix (director grades agents: low score → fix spec, never a CEO escalation)`,
     `**Found in use ${day}:** the **${persona.name}** agent (\`${opts.agentKind}\`) sits at **${opts.rollupAvg?.toFixed(1) ?? "?"}/10** after **${opts.attempts}** coaching attempts that didn't stick. Rather than escalate to the CEO, roll the coaching into a permanent fix so the agent improves at the mandate level.`,
@@ -627,7 +627,7 @@ export async function rollCoachingIntoFixSpec(
     `## The accumulated coaching to bake in (now archived as rolled-into-mandates)`,
     bullets,
     ``,
-    `## Phase 1 — bake the coaching into the agent ⏳`,
+    `## Phase 1 — bake the coaching into the agent`,
     `- Make the above coaching PERMANENT behavior of the \`${opts.agentKind}\` agent — fold it into its prompt/mandate/code (its run-job + prompt in \`scripts/builder-worker.ts\` and the relevant \`src/lib/agents/*\`), not ephemeral appended \`agent_instructions\`. Once baked, the agent should follow it by default.`,
     `- Verify the agent's grade rollup recovers (≥ ${COACH_LOW_ROLLUP}/10) over the next window of graded actions; if a coaching class still recurs, the bake-in missed it.`,
     ``,
