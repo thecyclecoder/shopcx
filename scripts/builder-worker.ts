@@ -608,6 +608,93 @@ async function handlePoolUsageCap(jobId: string, tag: string, configDir: string,
   return true;
 }
 
+// Token usage parsed off a `claude -p` result event (fleet-cost-metering Phase 1). Snake_case to
+// match the ai_token_usage / fleet-cost ClaudeRunUsage shape so the metering write is a straight pass.
+type RunUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+} | null;
+
+// Pull token usage + the dominant model off a parsed `claude -p` result object (stream-json OR json).
+// Prefers the cumulative per-model `modelUsage` (camelCase) the CLI reports; falls back to a top-level
+// `usage` (snake_case). Never throws — a shape we don't recognize → {usage:null} (skip metering).
+function extractClaudeUsage(obj: Record<string, unknown>): { usage: RunUsage; model: string | null } {
+  try {
+    const mu = obj.modelUsage as Record<string, Record<string, unknown>> | undefined;
+    if (mu && typeof mu === "object") {
+      const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+      let topModel: string | null = null;
+      let topTokens = -1;
+      for (const [model, v] of Object.entries(mu)) {
+        const it = Number(v?.inputTokens || 0);
+        const ot = Number(v?.outputTokens || 0);
+        usage.input_tokens += it;
+        usage.output_tokens += ot;
+        usage.cache_creation_input_tokens += Number(v?.cacheCreationInputTokens || 0);
+        usage.cache_read_input_tokens += Number(v?.cacheReadInputTokens || 0);
+        if (it + ot > topTokens) { topTokens = it + ot; topModel = model; }
+      }
+      if (usage.input_tokens || usage.output_tokens || usage.cache_creation_input_tokens || usage.cache_read_input_tokens) {
+        return { usage, model: topModel };
+      }
+    }
+    const u = obj.usage as Record<string, unknown> | undefined;
+    if (u && typeof u === "object") {
+      return {
+        usage: {
+          input_tokens: Number(u.input_tokens || 0),
+          output_tokens: Number(u.output_tokens || 0),
+          cache_creation_input_tokens: Number(u.cache_creation_input_tokens || 0),
+          cache_read_input_tokens: Number(u.cache_read_input_tokens || 0),
+        },
+        model: typeof obj.model === "string" ? obj.model : null,
+      };
+    }
+  } catch {
+    // best-effort — never let usage parsing affect the build
+  }
+  return { usage: null, model: null };
+}
+
+// Best-effort metering of a finished `claude -p` turn (fleet-cost-metering Phase 1/2). Writes one
+// agent_job_costs row keyed to the job + its Max account / config-dir. NEVER throws into the build
+// path — a metering failure must never block / fail / slow a lane (mirrors emitLoopHeartbeat). Box
+// lanes carry NO ANTHROPIC_API_KEY → token + usage-window only, never a fabricated `$`.
+async function meterAgentJob(
+  job: Pick<Job, "id" | "workspace_id" | "spec_slug" | "kind">,
+  configDir: string | undefined,
+  usage: RunUsage,
+  model: string | null,
+): Promise<void> {
+  if (!usage) return;
+  try {
+    const { recordAgentJobCost } = await import("../src/lib/fleet-cost");
+    let ownerFunction: string | null = null;
+    try {
+      const { ownerFunctionForKind } = await import("../src/lib/agents/approval-inbox");
+      ownerFunction = ownerFunctionForKind(job.kind);
+    } catch { /* owner attribution is optional */ }
+    const idx = configDir ? accounts.findIndex((a) => a.configDir === configDir) : -1;
+    await recordAgentJobCost({
+      jobId: job.id,
+      workspaceId: job.workspace_id,
+      specSlug: job.spec_slug,
+      kind: job.kind,
+      ownerFunction,
+      usage,
+      model,
+      account: configDir ? accountLabel(configDir, idx < 0 ? 0 : idx) : null,
+      configDir: configDir ?? null,
+      // Box lanes run on Max with NO ANTHROPIC_API_KEY → no per-token bill, never a `$`.
+      apiBilled: false,
+    });
+  } catch (err) {
+    console.error("[fleet-cost] meterAgentJob failed (swallowed — metering is best-effort):", err);
+  }
+}
+
 async function runClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
   const env: NodeJS.ProcessEnv = {};
@@ -635,6 +722,8 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
   // stream-json output is newline-delimited JSON events; the final {type:"result"} carries the
   // result text + session_id + is_error. Parse line-by-line; the last result event wins.
   let parsedResult = false;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   for (const line of (r.out || "").split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -645,6 +734,9 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
       resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
       isError = isError || obj.is_error === true;
       parsedResult = true;
+      // fleet-cost-metering Phase 1: the result event carries the run's token usage.
+      const ex = extractClaudeUsage(obj as Record<string, unknown>);
+      if (ex.usage) { usage = ex.usage; model = ex.model; }
     }
   }
   if (!parsedResult) {
@@ -659,7 +751,7 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
     isError = true;
     resultText = `[build killed: exceeded the ${Math.round(BUILD_HARD_CAP_MS / 60000)} min hard cap]\n` + resultText;
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 // Box product-seed runner (box-product-seeding): launch a TOP-LEVEL `claude -p`
@@ -679,15 +771,20 @@ async function runSeedClaude(prompt: string, sessionId: string | null, cwd: stri
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 function parseStatus(text: string): { status: string; questions?: unknown[]; summary?: string; no_changes_reason?: string } | null {
@@ -1712,15 +1809,20 @@ async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: 
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 // brain-platform-live-autonomous-status (Phase 2 — the recurrence guard): wrap EVERY read-only director
@@ -1767,6 +1869,17 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     }
   } catch (e) {
     console.error(`${tag} directive surface / self-watch failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // goal-milestone-build-sequencing (Phase 3) — re-sequence any milestone fan-out that built out of order:
+    // HOLD each premature build (cancel the jammed, unapprovable fan-out), apply the AUTHORED Blocked-by order
+    // from the goal doc onto the spec file, and let the reactive auto-queue + escort re-release it in sequence.
+    // Runs BEFORE the escort so the board is corrected (held + blocked) before any new queuing.
+    const seq = await reconcileMilestoneSequence(job, tag);
+    notes.push(seq);
+  } catch (e) {
+    notes.push(`sequence reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing sequence reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     const escort = await lib.escortApprovedGoals(db);
@@ -1846,6 +1959,78 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   console.log(`${tag} standing pass — ${notes.join(" · ")}`);
 }
 
+// goal-milestone-build-sequencing (Phase 3): re-sequence a milestone fan-out that built out of order. The lib
+// detects each milestone build that fanned out before its prerequisites (read-only); this box lane recovers it:
+//   1. apply the AUTHORED Blocked-by order — write the `**Blocked-by:**` line (transcribed from the goal doc by
+//      `findMilestoneSequenceViolations`) onto the spec file via the GitHub API (the spec-blockers enforcement
+//      point), skipping the commit when the file on `main` already carries it (fs-lag no-op),
+//   2. HOLD the premature build (cancel the jammed fan-out so it leaves needs_input/needs_approval),
+//   3. write one `reconciled_sequence` director_activity row.
+// The reactive auto-queue + the goal escort re-release each held spec in sequence as its blockers ship.
+// Idempotent (a re-sequenced spec is no longer a candidate: its file has the blocker, its build is held, and a
+// ledger row dedups it) and no-op unless Platform is live+autonomous. Best-effort per spec — one failure never
+// blocks the rest. Returns a one-line summary for the standing-pass log.
+async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string> {
+  const lib = await import("../src/lib/agents/platform-director");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  const { violations, scanned } = await lib.findMilestoneSequenceViolations(db);
+  if (!violations.length) return scanned ? `sequence: ${scanned} dependent milestone spec(s), all ordered` : "sequence: nothing to reconcile";
+
+  const resequenced: string[] = [];
+  for (const v of violations) {
+    try {
+      // 1) Apply the authored Blocked-by order — read the spec fresh from main (avoid clobbering a fs-lagged disk).
+      const path = `docs/brain/specs/${v.slug}.md`;
+      const get = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+      if (!get.ok) {
+        console.error(`${tag} sequence: cannot read ${path} (skipping ${v.slug})`);
+        continue;
+      }
+      const sha = (get.json as { sha?: string }).sha;
+      const md = Buffer.from(String((get.json as { content?: string }).content || "").replace(/\s/g, ""), "base64").toString("utf8");
+      const updated = lib.ensureBlockedByLine(md, v.declaredBlockers);
+      if (updated !== md) {
+        const put = await gh("PUT", `/repos/${REPO}/contents/${path}`, {
+          message: `spec: ${v.slug} — apply Blocked-by ${v.missingFromFile.join(", ")} (director sequence-reconcile)`,
+          content: Buffer.from(updated, "utf8").toString("base64"),
+          sha,
+          branch: "main",
+        });
+        if (!put.ok) {
+          console.error(`${tag} sequence: failed to write Blocked-by for ${v.slug} (skipping hold)`);
+          continue;
+        }
+      }
+      // 2) HOLD the premature build (cancel the out-of-order fan-out).
+      const reason = `Re-sequenced ${v.slug}: it fanned out concurrently for "${v.goalTitle}" before its prerequisite(s) ${v.unmetBlockers.join(", ")} were built. Held its premature build (was ${v.jobStatus}) and applied **Blocked-by:** ${v.missingFromFile.join(", ")} — it auto-queues when its last blocker ships.`;
+      const held = await lib.holdPrematureBuild(db, v.jobId, reason);
+      // 3) Audit the re-sequence.
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "platform",
+        actionKind: "reconciled_sequence",
+        specSlug: v.slug,
+        reason,
+        metadata: {
+          goal_slug: v.goalSlug,
+          held_job_id: v.jobId,
+          held_from_status: v.jobStatus,
+          held: held.ok,
+          declared_blockers: v.declaredBlockers,
+          unmet_blockers: v.unmetBlockers,
+          applied_blockers: v.missingFromFile,
+          autonomous: true,
+        },
+      });
+      resequenced.push(v.slug);
+    } catch (e) {
+      console.error(`${tag} sequence reconcile failed for ${v.slug} (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+  return resequenced.length ? `sequence → re-sequenced ${resequenced.length} out-of-order build(s): ${resequenced.join(", ")}` : "sequence: detected violations but none recovered (see logs)";
+}
+
 // board-grooming (Phase 1): the director MOVES the project board. For each PARTIALLY-shipped spec (≥1 ✅,
 // remaining ⏳, no active build) it runs a read-only Max investigation that classifies the leftover phases:
 //   - continue → queue the next phase's build to completion (loop-guarded, like the escort).
@@ -1870,7 +2055,8 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
       // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
       const groomPrompt = await directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c));
-      const { resultText } = await runDirectorClaude(groomPrompt, null, REPO_DIR);
+      const { resultText, usage, model } = await runDirectorClaude(groomPrompt, null, REPO_DIR);
+      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -2046,7 +2232,8 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
-      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      const { resultText, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -2371,7 +2558,8 @@ async function runPlatformDirectorJob(job: Job) {
       ? `\n\nYou are in a read-only worktree of the build's BRANCH (${targetBranch}) — the proposed migration SQL (supabase/migrations/), the apply script, and the new code ARE present here. READ them directly to confirm soundness; do NOT assume a file is missing just because it isn't on main.`
       : "";
     const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief) + branchNote);
-    const { session, resultText, isError } = await runDirectorClaude(investPrompt, null, investCwd);
+    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, investCwd);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
     const verdict = String(parsed?.verdict || "");
@@ -2609,7 +2797,8 @@ async function runPlanJob(job: Job) {
         `SELF-SEQUENCING (goal-decomposition-encodes-blockers): every proposed branch MUST declare its prerequisites as \`blocked_by\`: a (possibly empty) list of the slugs it depends on — each slug MUST reference another proposed spec in THIS tree or an already-existing spec under docs/brain/specs/. The graph MUST be acyclic (no spec blocks itself, directly or transitively). Foundation specs that nothing precedes have \`blocked_by: []\`; a spec that needs a framework/memory/metric built first lists those slugs. Do NOT over-serialize independent branches — only list a real build-order dependency. The approved tree becomes self-sequencing: only unblocked specs build immediately, dependents auto-queue as their blockers ship.`,
         `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","summary":"<title>","preview":"<intent>\\n\\nGap: <brain citation>","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…","blocked_by":["<sibling-or-existing-slug>"]}}]} | {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id":"q1","q":"…"}]}.`,
       ].join("\n");
-      const { session, resultText, isError, raw } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
+      const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
+      await meterAgentJob(job, configDir, usage, model);
       if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
       if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
         await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
@@ -2701,7 +2890,8 @@ async function runPlanJob(job: Job) {
       `Final message = ONLY {"status":"completed","summary":"authored N specs: …"} (or {"status":"needs_input","questions":[…]} only if a spec is genuinely under-specified).`,
     ].join("\n");
 
-    const { session, resultText, isError, raw } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
+    await meterAgentJob(job, configDir, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
     if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
       await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
@@ -2862,7 +3052,8 @@ async function runFoldJob(job: Job) {
       ? `${(job.answers || []).length ? `Answers to your questions: ${JSON.stringify(job.answers)}. ` : ""}Continue the batch fold-build for specs: ${slugs.join(", ")}. Same rules and the same final JSON output protocol as before.`
       : foldBatchPrompt(slugs);
 
-    const { session, resultText, isError, raw } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText);
@@ -3016,7 +3207,8 @@ async function runProductSeedJob(job: Job) {
         ].join("\n");
 
   try {
-    const { session, resultText, isError, raw } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText);
     const summary = parsed && typeof parsed.summary === "string" ? parsed.summary : "";
@@ -3199,7 +3391,8 @@ async function runSpecChatJob(job: Job) {
     }
 
     // ── Run the box session (top-level Max claude; secrets stripped; WebSearch allowed) ──
-    const { session, resultText, isError, raw } = await runClaude(prompt, sessionId, wt);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(prompt, sessionId, wt);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
@@ -3315,15 +3508,20 @@ async function runImproveClaude(prompt: string, sessionId: string | null, cwd: s
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 // Build the read-only context brief baked into turn 1 — so the box's FIRST reply already references
@@ -3463,7 +3661,8 @@ async function runTicketImproveJob(job: Job) {
           `See the ticket-improve skill for the exact action shapes (customer_action, sonnet_prompt, grader_rule, rescore, ticket_spec, resolve_sequence).`,
         ].join("\n");
 
-    const { session: boxSession, resultText, isError, raw } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR);
+    const { session: boxSession, resultText, isError, raw, usage, model } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
@@ -3536,15 +3735,20 @@ async function runTriageClaude(prompt: string, sessionId: string | null, cwd: st
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 const TRIAGE_TOOLS_LINE =
@@ -3625,6 +3829,7 @@ async function runEscalationTriageJob(job: Job) {
 
       // ── Solver (fresh session) ──
       let solver = await runTriageClaude(triageSolverPrompt(ticketId, brief), null, REPO_DIR);
+      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
       let proposal = extractJson<SolverProposal>(solver.resultText);
       if (!proposal || !proposal.decision) {
         await recordTriageRun(db, {
@@ -3640,14 +3845,17 @@ async function runEscalationTriageJob(job: Job) {
 
       // ── Skeptic (fresh eyes — separate session) ──
       let skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR);
+      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
       let verdict = extractJson<SkepticVerdict>(skeptic.resultText);
 
       // ── One bounded re-loop on "revise" (solver incorporates critique; skeptic re-checks fresh) ──
       if (verdict?.verdict === "revise") {
         solver = await runTriageClaude(triageRevisePrompt(verdict.critique || "", verdict.concerns || []), solverSession, REPO_DIR);
+        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
         const revised = extractJson<SolverProposal>(solver.resultText);
         if (revised?.decision) proposal = revised;
         skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR);
+        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
         verdict = extractJson<SkepticVerdict>(skeptic.resultText);
       }
 
@@ -3720,15 +3928,20 @@ async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: 
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 type SpecTestCheck = { text: string; verdict: string; category?: string; evidence?: string; screenshot?: string };
@@ -3847,7 +4060,8 @@ async function runSpecTestJob(job: Job) {
       await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
     };
 
-    let { session, resultText, isError, raw } = await runSpecTestClaude(prompt, null, REPO_DIR);
+    let { session, resultText, isError, raw, usage, model } = await runSpecTestClaude(prompt, null, REPO_DIR);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     let parsed = extractSpecTestResult(resultText);
 
@@ -3862,6 +4076,7 @@ async function runSpecTestJob(job: Job) {
         `Reuse the checks you already determined; do not re-run anything. If you genuinely could not proceed, return ONLY {"status":"error","error":"<why>"}.`,
       ].join("\n");
       const retry = await runSpecTestClaude(repair, session, REPO_DIR);
+      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, retry.usage, retry.model);
       if (retry.session) { session = retry.session; await update(job.id, { claude_session_id: session }); }
       resultText = retry.resultText; isError = retry.isError; raw = retry.raw;
       parsed = extractSpecTestResult(resultText);
@@ -3971,15 +4186,20 @@ async function runMigrationFixClaude(prompt: string, sessionId: string | null, c
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 // Best-effort re-fetch of the OLD Appstle contract's lines (for the grandfathered-base inference the
@@ -4294,7 +4514,8 @@ async function runMigrationFixJob(job: Job) {
       ? migrationFixAnswerPrompt(audit as Record<string, unknown>, brief, job.answers || [])
       : migrationFixPrompt(audit as Record<string, unknown>, brief);
     // On an answer-resume, resume the same Max session (the prior question + brief are in context).
-    const { session, resultText, isError, raw } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -4368,15 +4589,20 @@ async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: st
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 interface DevThreadRow {
@@ -4583,7 +4809,8 @@ async function runDeveloperMessageJob(job: Job) {
       ? `${latest}\n\n${DEV_ASK_OUTPUT}`
       : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
 
-    const { session, resultText, isError, raw } = await runDevAskClaude(await withCoaching(job, prompt), sessionId, wt);
+    const { session, resultText, isError, raw, usage, model } = await runDevAskClaude(await withCoaching(job, prompt), sessionId, wt);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
@@ -4960,7 +5187,8 @@ async function runDirectorCoachJob(job: Job) {
       ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
       : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
 
-    const { session, resultText, isError, raw } = await runDevAskClaude(prompt, sessionId, wt);
+    const { session, resultText, isError, raw, usage, model } = await runDevAskClaude(prompt, sessionId, wt);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
@@ -4999,15 +5227,20 @@ async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd:
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 // Surface a PR that can't be auto-resolved (and isn't a re-buildable spec build) to the owner — a
@@ -5134,7 +5367,8 @@ async function runPrResolveJob(job: Job) {
       `  {"status":"escalate","reason":"<why it needs a human merge or a rebuild — one line>"}`,
     ].join("\n");
 
-    const { session, resultText, isError, raw } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt);
+    const { session, resultText, isError, raw, usage, model } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText) as { status?: string; reason?: string; summary?: string } | null;
     const reason = String(parsed?.reason || parsed?.summary || "").slice(0, 500);
@@ -5258,15 +5492,20 @@ async function runRepairClaude(prompt: string, sessionId: string | null, cwd: st
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 // Load the read-only brief: the originating error_events signature + sample (or the loop_alert), so
@@ -5631,7 +5870,8 @@ async function runRepairJob(job: Job) {
       ? `\n\n⚠️ YOUR DIRECTOR (Ada) REVIEWED YOUR PRIOR FIX FOR THIS SIGNATURE AND FOUND IT UNSOUND. Her explanation:\n${(instr as { director_feedback?: string }).director_feedback}\nRe-author a CORRECT fix that directly addresses her point — do NOT repeat the same mistake. If her finding means there is no real bug (she may have shown the premise is false), say so (monitor-false-positive / transient) instead of authoring a fix.`
       : "";
     const repairBrief = await appendAgentInstructions(db, job.workspace_id, "repair", repairPrompt(brief) + bounceNote);
-    const { session, resultText, isError, raw } = await runRepairClaude(repairBrief, null, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runRepairClaude(repairBrief, null, REPO_DIR);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     const verdict = String(parsed?.status || "");
@@ -5755,15 +5995,20 @@ async function runRegressionClaude(prompt: string, sessionId: string | null, cwd
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 interface RegressionBriefInstr {
@@ -6009,7 +6254,8 @@ async function runRegressionJob(job: Job) {
     // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const coachedRegressionPrompt = await appendAgentInstructions(db, job.workspace_id, "regression", regressionPrompt(regressionBrief(instr)));
-    const { session, resultText, isError, raw } = await runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     const verdict = String(parsed?.status || "");
@@ -6590,15 +6836,20 @@ async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | 
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
   try {
     const obj = JSON.parse((r.out || "").trim());
     session = obj.session_id || session;
     resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
     isError = isError || obj.is_error === true;
+    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   } catch {
     resultText = (r.out || "") + (r.err || "");
   }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
 
 interface OptimizerSurfaceLite { workspace_id: string; product_id: string; lander_type: string; audience: string; lever_key?: string; lever_reason?: string }
@@ -6841,7 +7092,8 @@ async function runStorefrontOptimizerJob(job: Job) {
       return;
     }
 
-    const { session, resultText, isError, raw } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR);
+    const { session, resultText, isError, raw, usage, model } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -7168,7 +7420,8 @@ async function runJob(job: Job) {
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const coachedPrompt = await appendAgentInstructions(db, job.workspace_id, "build", prompt);
 
-    const { session, resultText, isError, raw } = await runClaude(coachedPrompt, sessionId, wt, configDir);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(coachedPrompt, sessionId, wt, configDir);
+    await meterAgentJob(job, configDir, usage, model);
     const logTail = raw.slice(-2000);
     // Persist the session AND its owning account so a later resume can pin to it (never cross-account).
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
