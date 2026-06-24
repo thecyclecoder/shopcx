@@ -1,5 +1,7 @@
 # Fix the error-reconcile endless loop — close errors to terminal + cooldown ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** [[director-zero-backlog-error-autonomy]] — fixes the reconcile that churns instead of draining, under [[../goals/devops-director]]
 **Found in use 2026-06-24:** 13 open [[../tables/error_events]] (oldest 2026-06-22) reconciled **126 times in 60 minutes** — the same ~10 signatures, 9–19× each, several times per standing pass. 14 [[../libraries/repair-agent|repair]] jobs COMPLETED in that hour but the error rows stayed `open`. Root cause: the disposition never flips the error_events row to terminal, so every pass re-reconciles + re-enqueues — an endless loop that drains nothing AND eats the standing pass (starving build initiation — the box sat 0/8 while this churned).
 
