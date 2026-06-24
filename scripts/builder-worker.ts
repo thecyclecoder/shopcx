@@ -840,6 +840,50 @@ function extractJson<T = Record<string, unknown>>(text: string): T | null {
   return o;
 }
 
+// ── needs-attention-triage-and-verdict-robustness Phase 2 — robust verdict resolution ───────────────────
+// The security-review, repair, and regression agents all share the same tail: run `claude -p` → extractJson
+// → read `status`. When that produced an empty/unparseable/unrecognized result, each used to fall straight
+// to a bare, reasonless `needs_attention` ("<agent> ended without a recognizable verdict") that NOTHING
+// triaged. This shared helper hardens that path for all three: it parses the verdict robustly and, on an
+// unparseable/unrecognized result, RE-RUNS the investigation ONCE (a fresh, independent attempt), then —
+// if still inconclusive — hands the caller an ACTIONABLE fail-safe reason ("<agent> produced no parseable
+// verdict after 2 attempts — re-run or review manually: <excerpt>"). It NEVER auto-passes/auto-approves on
+// an inconclusive result (conservative default — the caller still parks it, just with a usable reason).
+type ReviewClaudeRun = { session: string | null; resultText: string; isError: boolean; raw: string; usage?: RunUsage; model?: string | null };
+
+const REVIEW_VERDICT_MAX_ATTEMPTS = 2;
+
+async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
+  /** human label for the fail-safe reason — "security review" | "repair" | "regression review". */
+  agent: string;
+  /** the recognized status vocabulary (a parsed status outside it counts as inconclusive → retry). */
+  recognized: ReadonlySet<string>;
+  /** (re-)invoke the claude investigation; called up to REVIEW_VERDICT_MAX_ATTEMPTS times. */
+  run: (attempt: number) => Promise<T>;
+  /** per-attempt side effects (metering + session persist) — runs after EACH attempt, not just the last. */
+  onRun?: (r: T, attempt: number) => Promise<void>;
+}): Promise<{ run: T; parsed: Record<string, unknown> | null; verdict: string; fallbackReason: string | null }> {
+  let last: T | null = null;
+  let parsed: Record<string, unknown> | null = null;
+  let verdict = "";
+  for (let attempt = 1; attempt <= REVIEW_VERDICT_MAX_ATTEMPTS; attempt++) {
+    const r = await opts.run(attempt);
+    last = r;
+    if (opts.onRun) await opts.onRun(r, attempt);
+    parsed = extractJson<Record<string, unknown>>(r.resultText);
+    verdict = String(parsed?.status || "");
+    if (parsed && verdict && opts.recognized.has(verdict)) {
+      return { run: r, parsed, verdict, fallbackReason: null };
+    }
+    // unparseable / empty / unrecognized verdict → retry once more (fresh investigation), then fail safe.
+  }
+  // Exhausted: still no recognizable verdict. A genuine process crash with no parse stays the caller's
+  // `failed` path (the job machinery retries it); otherwise the caller fail-safes to this actionable reason.
+  const excerpt = (last?.raw || "").trim().slice(-400) || "(no output)";
+  const fallbackReason = `${opts.agent} produced no parseable verdict after ${REVIEW_VERDICT_MAX_ATTEMPTS} attempts — re-run or review manually: ${excerpt}`;
+  return { run: last as T, parsed, verdict, fallbackReason };
+}
+
 async function gh(method: string, path: string, body?: unknown) {
   const res = await fetch(`https://api.github.com${path}`, {
     method,
@@ -1958,6 +2002,19 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   } catch (e) {
     notes.push(`regression backlog reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
     console.error(`${tag} standing regression backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // needs-attention-triage-and-verdict-robustness (Phase 1) — triage every NON-build needs_attention item
+    // (security-review / spec-test / regression / proposed-goal / greenlight) the build loop-guard + the
+    // repair-dismissal lane don't own: re-run a recoverable inconclusive QC result ONCE, or surface a genuine
+    // blocker to the CEO with a clear reason + excerpt. Loop-guarded (a re-run that parks again escalates).
+    const triage = await lib.reconcileNeedsAttention(db);
+    if (triage.rerun.length) notes.push(`needs-attention → re-ran ${triage.rerun.length}: ${triage.rerun.join(", ")}`);
+    if (triage.escalated.length) notes.push(`needs-attention → escalated ${triage.escalated.length} to you: ${triage.escalated.join(", ")}`);
+    if (triage.scanned && !triage.rerun.length && !triage.escalated.length) notes.push(`needs-attention: ${triage.scanned} parked, all triaged`);
+  } catch (e) {
+    notes.push(`needs-attention triage failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing needs-attention triage failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // P4 — escort 0-phase authored fix specs the goal-walk + board-grooming both miss (real-bug fixes).
@@ -5998,11 +6055,19 @@ async function runRepairJob(job: Job) {
       ? `\n\n⚠️ YOUR DIRECTOR (Ada) REVIEWED YOUR PRIOR FIX FOR THIS SIGNATURE AND FOUND IT UNSOUND. Her explanation:\n${(instr as { director_feedback?: string }).director_feedback}\nRe-author a CORRECT fix that directly addresses her point — do NOT repeat the same mistake. If her finding means there is no real bug (she may have shown the premise is false), say so (monitor-false-positive / transient) instead of authoring a fix.`
       : "";
     const repairBrief = await appendAgentInstructions(db, job.workspace_id, "repair", repairPrompt(brief) + bounceNote);
-    const { session, resultText, isError, raw, usage, model } = await runRepairClaude(repairBrief, null, REPO_DIR);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = String(parsed?.status || "");
+    // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
+    // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
+    const REPAIR_VERDICTS = new Set(["transient", "needs-human", "real-bug", "monitor-false-positive", "foreign-app-noise"]);
+    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
+      agent: "repair",
+      recognized: REPAIR_VERDICTS,
+      run: () => runRepairClaude(repairBrief, null, REPO_DIR),
+      onRun: async (r) => {
+        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
+        if (r.session) await update(job.id, { claude_session_id: r.session });
+      },
+    });
+    const { isError, raw } = run;
     console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
 
     if (verdict === "transient") {
@@ -6093,8 +6158,8 @@ async function runRepairJob(job: Job) {
       await update(job.id, { status: "failed", error: "repair run errored", log_tail: raw.slice(-2000) });
       return;
     }
-    // No recognizable verdict — surface rather than assume resolved.
-    await update(job.id, { status: "needs_attention", error: "repair ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+    // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never assume resolved.
+    await update(job.id, { status: "needs_attention", error: fallbackReason ?? "repair produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -6382,11 +6447,19 @@ async function runRegressionJob(job: Job) {
     // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const coachedRegressionPrompt = await appendAgentInstructions(db, job.workspace_id, "regression", regressionPrompt(regressionBrief(instr)));
-    const { session, resultText, isError, raw, usage, model } = await runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = String(parsed?.status || "");
+    // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
+    // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
+    const REGRESSION_VERDICTS = new Set<string>([...REGRESSION_DISMISS_VERDICTS, "needs-human", "real-regression"]);
+    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
+      agent: "regression review",
+      recognized: REGRESSION_VERDICTS,
+      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR),
+      onRun: async (r) => {
+        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
+        if (r.session) await update(job.id, { claude_session_id: r.session });
+      },
+    });
+    const { isError, raw } = run;
     console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
 
     // DISMISS — transient / foreign / false-positive / already-fixed: recorded reasoning, no spec, no
@@ -6503,7 +6576,8 @@ async function runRegressionJob(job: Job) {
       await update(job.id, { status: "failed", error: "regression review errored", log_tail: raw.slice(-2000) });
       return;
     }
-    await update(job.id, { status: "needs_attention", error: "regression review ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+    // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never assume resolved.
+    await update(job.id, { status: "needs_attention", error: fallbackReason ?? "regression review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -6885,10 +6959,18 @@ async function runSecurityReviewJob(job: Job) {
     console.log(`${tag} reviewing merged diff ${mergeSha.slice(0, 12)} (spec ${mergedSlug})`);
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const prompt = await appendAgentInstructions(db, job.workspace_id, "security-review", securityDiffPrompt(mergeSha, mergedSlug, instr.pr_number ?? null));
-    const { session, resultText, isError, raw } = await runSecurityClaude(prompt, null, REPO_DIR);
-    if (session) await update(job.id, { claude_session_id: session });
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = String(parsed?.status || "");
+    // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
+    // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
+    const SECURITY_VERDICTS = new Set(["clean", "false-positive", "needs-human", "real-vuln"]);
+    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
+      agent: "security review",
+      recognized: SECURITY_VERDICTS,
+      run: () => runSecurityClaude(prompt, null, REPO_DIR),
+      onRun: async (r) => {
+        if (r.session) await update(job.id, { claude_session_id: r.session });
+      },
+    });
+    const { isError, raw } = run;
     console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
 
     if (verdict === "clean" || verdict === "false-positive") {
@@ -6931,7 +7013,8 @@ async function runSecurityReviewJob(job: Job) {
       await update(job.id, { status: "failed", error: "security review errored", log_tail: raw.slice(-2000) });
       return;
     }
-    await update(job.id, { status: "needs_attention", error: "security review ended without a recognizable verdict", log_tail: raw.slice(-2000) });
+    // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never auto-pass.
+    await update(job.id, { status: "needs_attention", error: fallbackReason ?? "security review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
