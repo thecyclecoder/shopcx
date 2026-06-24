@@ -596,6 +596,16 @@ export interface Milestone {
   completion: number; // 0..1 — avg of linked specs' completion (or status if none linked)
 }
 
+/**
+ * A goal's lifecycle state (director-proposed-goals spec). `proposed` — a director authored it and it
+ * AWAITS the CEO's greenlight (inert: the escort doesn't touch it, Pia doesn't decompose it). `greenlit` —
+ * the CEO approved it; it's active (a greenlit 0% goal is ready for decomposition, an in-progress one is
+ * escorted). `complete` — 100%. Replaces the old `pct > 0`-infers-greenlit hack: `proposed` is now an
+ * EXPLICIT `**Status:** proposed` marker, so a proposed 0% goal is unambiguously distinct from an active 0%
+ * one. A goal with no `**Status:**` line is a legacy CEO goal — treated as `greenlit` (or `complete` at 100%).
+ */
+export type GoalStatus = "proposed" | "greenlit" | "complete";
+
 export interface GoalCard {
   slug: string;
   title: string;
@@ -603,9 +613,22 @@ export interface GoalCard {
   successMetric: string; // **Success metric:** …
   target: string; // **Target:** …
   owner?: string; // function slug (the DRI) from the goal's `Owner: [[../functions/x]]` line
+  status: GoalStatus; // **Status:** line (proposed｜greenlit｜complete); legacy no-Status goals ⇒ greenlit
+  proposedBy?: string; // function slug from a `**Proposed-by:** [[../functions/x]]` marker (director-proposed only)
   milestones: Milestone[];
   pct: number; // 0..100 rollup of milestone completion
   linkedSpecCount: number; // resolvable specs across milestones
+}
+
+/** Derive a goal's lifecycle state from its `**Status:**` line (if any) + its rollup %. An explicit
+ * marker always wins; with no marker a legacy goal is `complete` at 100%, else `greenlit` (active). Only an
+ * explicit `Status: proposed` yields `proposed` — so a proposed 0% goal never collides with an active 0% one. */
+export function deriveGoalStatus(rawStatus: string, pct: number): GoalStatus {
+  const s = rawStatus.trim().toLowerCase();
+  if (s.startsWith("propose")) return "proposed";
+  if (s.startsWith("complete") || s.startsWith("done") || s.startsWith("shipped")) return "complete";
+  if (s.startsWith("greenlit") || s.startsWith("greenlight") || s === "active" || s.startsWith("in progress") || s.startsWith("in_progress")) return "greenlit";
+  return pct >= 100 ? "complete" : "greenlit"; // no explicit marker ⇒ legacy CEO goal (active)
 }
 
 /** How "done" a spec is, 0..1: shipped status ⇒ 1; else shipped phases / non-cut phases. */
@@ -716,6 +739,17 @@ export function parseGoal(slug: string, raw: string, specs: SpecCard[] = []): Go
     }
   }
 
+  // Proposed-by (director-proposed-goals): the function slug that AUTHORED this goal as a proposal. Present
+  // only on a director-proposed artifact; absent on a CEO-authored goal. Drives the hub's proposer badge.
+  let proposedBy: string | undefined;
+  for (const l of lines) {
+    const m = l.match(/\*\*Proposed-by:\*\*\s*\[\[([^\]|]+)/i);
+    if (m) {
+      proposedBy = m[1].trim().replace(/^.*\//, "").replace(/\.md$/, "");
+      break;
+    }
+  }
+
   // Milestones: top-level "- " bullets under "## Decomposition", each with its trailing lines.
   const decomp = sectionLines(lines, /^##\s+Decomposition/i);
   const milestones: Milestone[] = [];
@@ -765,6 +799,8 @@ export function parseGoal(slug: string, raw: string, specs: SpecCard[] = []): Go
     successMetric: meta("Success metric"),
     target: meta("Target"),
     owner,
+    status: deriveGoalStatus(meta("Status"), pct),
+    proposedBy,
     milestones,
     pct,
     linkedSpecCount,

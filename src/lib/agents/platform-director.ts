@@ -381,13 +381,14 @@ async function resolveDirectorWorkspace(admin: Admin): Promise<string | null> {
 }
 
 /**
- * An already-approved goal the director MAY escort (the leash): one with real progress (`pct > 0` — work
- * the CEO already greenlit) that isn't yet complete. A ZERO-progress goal is "not yet started"; kicking off
- * its first spec would be STARTING a new goal, which always escalates to the CEO (Phase 3) — never the
- * director. (No goal-approval flag exists in the DB; progress is the proxy for "already greenlit".)
+ * A greenlit goal the director MAY escort (the leash): one the CEO has greenlit (`status === "greenlit"`)
+ * with real progress (`0 < pct < 100`) that isn't yet complete. The CEO's greenlight is now an EXPLICIT
+ * goal state (director-proposed-goals) — no longer inferred from `pct > 0`. A `proposed` goal is skipped
+ * (it awaits the CEO via its own Approval Request); a `greenlit` 0% goal is "ready for decomposition" (Pia,
+ * Phase 2) and is NOT auto-started here; only a greenlit, in-progress goal is escorted toward its milestones.
  */
 function isApprovedInProgress(goal: GoalCard): boolean {
-  return goal.pct > 0 && goal.pct < 100;
+  return goal.status === "greenlit" && goal.pct > 0 && goal.pct < 100;
 }
 
 /** Every distinct spec linked across a goal's milestones, resolved to its live SpecCard. */
@@ -426,21 +427,14 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
   const mine = goals.filter((g) => g.owner === PLATFORM);
 
-  // Starting a NEW goal is never the director's call (only the CEO greenlights goals — devops-director
-  // § leash). A zero-progress owned goal is unstarted: surface it to the CEO ONCE (deduped), never auto-start.
-  for (const goal of mine.filter((g) => g.pct === 0)) {
-    const r = await escalateDiagnosisToCeo(admin, {
-      workspaceId,
-      specSlug: null,
-      title: `Greenlight needed: ${goal.title}`,
-      diagnosis: `The Platform goal "${goal.title}" is approved-but-unstarted (0%). Starting a new goal is a call only you can make, so I'm holding off — greenlight it and I'll escort it through its milestones.`,
-      dedupeKey: `newgoal:${goal.slug}`,
-      deepLink: `/dashboard/roadmap/goals/${goal.slug}`,
-      escalationKind: "new_goal",
-      metadata: { goal_slug: goal.slug, pct: goal.pct },
-    });
-    if (!r.emitted && r.error) console.error(`[platform-director] CEO escalation FAILED to surface (newgoal:${goal.slug}): ${r.error.message}`);
-  }
+  // director-proposed-goals (Phase 1): the goal's lifecycle state — not `pct > 0` — now decides escortability.
+  //   - `proposed` → awaits the CEO via its OWN Approval Request (the proposed-goal job). The escort does NOT
+  //     touch it and does NOT re-escalate it: surfacing it is the proposed-goal flow's job, not the escort's.
+  //   - `greenlit` at 0% → greenlit-but-unstarted, READY FOR DECOMPOSITION (Pia, Phase 2). The escort never
+  //     auto-starts a goal, so it's left for the human-gated planner — no escalation, no auto-queue.
+  //   - `greenlit` in-progress (0 < pct < 100) → escorted toward its milestones, exactly as before.
+  // This replaces the old "every 0% owned goal escalates as a new-goal greenlight request": a proposed goal
+  // is now an explicit, self-surfacing artifact and a greenlit 0% goal is genuinely approved-and-awaiting-Pia.
 
   const owned = mine.filter((g) => isApprovedInProgress(g));
   if (!owned.length) return { goals: [], queued: [], escalated: [] };
