@@ -88,3 +88,42 @@ export function StatusBadge({ status }: { status: AgentStatus }) {
     </span>
   );
 }
+
+/** A worker's live liveness (agent-roster-sync Phase 2) — distinct from the director live/autonomous badge. */
+export type WorkerLiveness = "active" | "idle-healthy" | "inactive";
+
+/**
+ * The worker liveness badge — `active` (recent work / beating), `idle-healthy` (fired before
+ * but quiet now), `inactive` (a persona + lane that has NEVER fired, e.g. Remi/regression).
+ * `reason` (optional) becomes the hover tooltip.
+ */
+export function WorkerStatusBadge({ status, reason }: { status: WorkerLiveness; reason?: string }) {
+  if (status === "inactive") {
+    return (
+      <span
+        title={reason}
+        className="inline-flex items-center gap-1 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-red-500" /> inactive
+      </span>
+    );
+  }
+  if (status === "active") {
+    return (
+      <span
+        title={reason}
+        className="inline-flex items-center gap-1 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-green-500" /> active
+      </span>
+    );
+  }
+  return (
+    <span
+      title={reason}
+      className="inline-flex items-center gap-1 rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" /> idle
+    </span>
+  );
+}
