@@ -1,4 +1,4 @@
-# Iteration Ingest — Async Insights Reports for Huge Backfills ⏳
+# Iteration Ingest — Async Insights Reports for Huge Backfills 🚧
 
 **Priority:** critical
 
@@ -19,5 +19,13 @@
 - Enable the flag for an account with an empty `meta_insights_daily` and a long backfill range → ingest submits an async report, polls to completion, pages results, and lands rows across all three levels with no `Service temporarily unavailable`; the daily incremental run still uses the light synchronous path.
 - Idempotency + the existing failure/alerting behavior from [[iteration-engine-ingest-resilience]] are unchanged.
 
-## Phase 1 — async report path behind a flag ⏳ (deferred — build on demand)
-The async-report submit/poll/page path for the backfill window, flag-gated per account; synchronous incremental unchanged. Brain: [[../libraries/meta-performance]] · [[../integrations/meta]].
+## Phase 1 — async report path behind a flag 🚧 (built — pending migration apply + verification)
+The async-report submit/poll/page path for the backfill window, flag-gated per account; synchronous incremental unchanged. Brain: [[../libraries/meta__performance]].
+
+**Built 2026-06-24** (promoted from deferred → critical by director directive):
+- `src/lib/meta/performance.ts` — extracted `mapInsightsRecords` (shared row→record mapping for sync + async), added `graphPost`, `submitInsightsReport`, `pollInsightsReport`, `syncMetaInsightsForLevelAsync`, `syncMetaInsightsAsync`, and the per-account flag reader `isAsyncBackfillEnabled` (defensive — missing column ⇒ disabled). `ingestMetaPerformance` now routes the **first-run backfill window only** through the async path when `backfilled && isAsyncBackfillEnabled(...)`; daily incremental is untouched. Returns `asyncBackfill` for observability.
+  - Submit `POST /act_{id}/insights` → `report_run_id`; poll `GET /{report_run_id}` until `async_status='Job Completed'` (tolerates `job_status`; throws on `Job Failed`/`Job Skipped`/10-min timeout); page `GET /{report_run_id}/insights`. Output → same `mapInsightsRecords` + `upsertOrThrow`, so idempotency + the rows-written assertion are unchanged.
+- `src/lib/inngest/meta-performance.ts` — the iteration-run `ingest` stage now records `async_backfill`.
+- Migration `supabase/migrations/20260706170000_meta_async_insights_backfill_flag.sql` + `scripts/apply-meta-async-insights-backfill-flag-migration.ts` — adds `meta_ad_accounts.async_insights_backfill_enabled boolean NOT NULL DEFAULT false`. **Applied to prod 2026-06-24.**
+
+**Remaining to ship:** flip the flag on for the target large-backfill account (an account with empty `meta_insights_daily` + a long range) and run the Verification steps above — confirm the ingest submits an async report, polls to completion, pages results, lands rows across all three levels with no `Service temporarily unavailable`, and the daily incremental still uses the light synchronous path. This is an operational/human verification step (needs a real large-backfill account + prod flag flip), not code.

@@ -66,6 +66,17 @@ async function graphGet(path: string, params: Record<string, string>, token: str
   return graphFetchJson(() => fetch(url.toString()), `GET ${path}`);
 }
 
+/** POST to a Graph edge (used to submit an async insights report). Same retry/backoff as GET. */
+async function graphPost(path: string, params: Record<string, string>, token: string): Promise<any> {
+  const url = new URL(`${GRAPH_BASE}/${path}`);
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) body.set(k, v);
+  body.set("access_token", token);
+  return graphFetchJson(() => fetch(url.toString(), { method: "POST", body }), `POST ${path}`);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /** Page through a Graph edge, following cursor pagination, collecting all rows. */
 async function graphGetAll(path: string, params: Record<string, string>, token: string): Promise<any[]> {
   const rows: any[] = [];
@@ -203,31 +214,19 @@ export async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: num
 
 const OBJECT_ID_FIELD: Record<Level, string> = { campaign: "campaign_id", adset: "adset_id", ad: "ad_id" };
 
-/** Pull daily insights for one level over [startDate, endDate] and upsert per (object, day). */
-export async function syncMetaInsightsForLevel(
-  p: SyncParams,
-  level: Level,
-  startDate: string,
-  endDate: string,
-): Promise<{ rows: number }> {
-  const admin = createAdminClient();
-  const acct = actId(p.metaAccountId);
+/** Fields requested for an insights pull at `level` (sync GET and async report alike). */
+const insightsFields = (level: Level) =>
+  `${OBJECT_ID_FIELD[level]},spend,impressions,clicks,ctr,cpc,frequency,actions,action_values`;
+
+/**
+ * Map raw Graph insight rows → `meta_insights_daily` records. Shared by the sync
+ * GET path ([[syncMetaInsightsForLevel]]) and the async-report path
+ * ([[syncMetaInsightsForLevelAsync]]) so both land byte-identical rows — the spec's
+ * "lands rows across all three levels … idempotency unchanged" invariant.
+ */
+function mapInsightsRecords(p: SyncParams, level: Level, rows: any[], now: string): Record<string, unknown>[] {
   const idField = OBJECT_ID_FIELD[level];
-  const now = new Date().toISOString();
-
-  const rows = await graphGetAll(
-    `${acct}/insights`,
-    {
-      level,
-      time_range: JSON.stringify({ since: startDate, until: endDate }),
-      time_increment: "1",
-      fields: `${idField},spend,impressions,clicks,ctr,cpc,frequency,actions,action_values`,
-      limit: "500",
-    },
-    p.accessToken,
-  );
-
-  const records = rows
+  return rows
     .filter((r) => r[idField] && r.date_start)
     .map((r) => {
       const spendCents = dollarsToCents(r.spend);
@@ -254,6 +253,32 @@ export async function syncMetaInsightsForLevel(
         updated_at: now,
       };
     });
+}
+
+/** Pull daily insights for one level over [startDate, endDate] and upsert per (object, day). */
+export async function syncMetaInsightsForLevel(
+  p: SyncParams,
+  level: Level,
+  startDate: string,
+  endDate: string,
+): Promise<{ rows: number }> {
+  const admin = createAdminClient();
+  const acct = actId(p.metaAccountId);
+  const now = new Date().toISOString();
+
+  const rows = await graphGetAll(
+    `${acct}/insights`,
+    {
+      level,
+      time_range: JSON.stringify({ since: startDate, until: endDate }),
+      time_increment: "1",
+      fields: insightsFields(level),
+      limit: "500",
+    },
+    p.accessToken,
+  );
+
+  const records = mapInsightsRecords(p, level, rows, now);
 
   // Chunk to stay well under statement/payload limits on a 90-day backfill, and
   // return the count actually PERSISTED — a swallowed upsert error here was the
@@ -314,6 +339,140 @@ export async function syncMetaInsights(
     }
   }
   return totals;
+}
+
+// ── Async insights reports (large first-run backfills) ─────────────────────────
+
+/**
+ * Meta's sanctioned path for heavy insights pulls (iteration-ingest-async-reports).
+ * For a brand-new account backfilling *years* of history, even the ≤14-day chunked
+ * synchronous GETs (P2) can strain — long ranges × 3 levels trip Meta's transient
+ * code 2 "Service temporarily unavailable" or rate-limit the GET volume. Meta
+ * instead lets us SUBMIT an async report (`POST /act_{id}/insights` → `report_run_id`),
+ * POLL it to completion, then PAGE the results once — one heavy job server-side
+ * rather than dozens of synchronous round-trips.
+ *
+ * Flag-gated per account ([[isAsyncBackfillEnabled]]) and used ONLY for the
+ * first-run backfill window; the small daily incremental window keeps the light
+ * synchronous GET (async submit/poll overhead isn't worth 3 days). Output is fed
+ * through the SAME `mapInsightsRecords` + `upsertOrThrow`, so idempotency and the
+ * rows-written assertion are unchanged.
+ */
+const ASYNC_POLL_INTERVAL_MS = 5_000;
+const ASYNC_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 min ceiling per (level) report
+
+/** Submit an async insights report for one level/window; returns Meta's `report_run_id`. */
+async function submitInsightsReport(p: SyncParams, level: Level, startDate: string, endDate: string): Promise<string> {
+  const acct = actId(p.metaAccountId);
+  const res = await graphPost(
+    `${acct}/insights`,
+    {
+      level,
+      time_range: JSON.stringify({ since: startDate, until: endDate }),
+      time_increment: "1",
+      fields: insightsFields(level),
+    },
+    p.accessToken,
+  );
+  const reportRunId = res?.report_run_id ? String(res.report_run_id) : null;
+  if (!reportRunId) {
+    throw new Error(
+      `Meta async insights submit returned no report_run_id (level=${level}, ${startDate}..${endDate}, account ${p.adAccountId})`,
+    );
+  }
+  return reportRunId;
+}
+
+/**
+ * Poll `GET /{report_run_id}` until the job completes. Meta reports progress in
+ * `async_status` ('Job Not Started' → 'Job Started' → 'Job Running' → 'Job Completed';
+ * 'Job Failed'/'Job Skipped' are terminal failures). Throws on a failed/skipped job
+ * or once the poll timeout is exhausted (a stuck report is a loud failure, not a
+ * silent hang — the engine's supervisable-not-silent invariant).
+ */
+async function pollInsightsReport(reportRunId: string, token: string): Promise<void> {
+  const deadline = Date.now() + ASYNC_POLL_TIMEOUT_MS;
+  for (;;) {
+    const status = await graphGet(reportRunId, {}, token);
+    // Real Graph field is `async_status`; tolerate `job_status` defensively.
+    const jobStatus: string = status?.async_status ?? status?.job_status ?? "";
+    if (jobStatus === "Job Completed") return;
+    if (jobStatus === "Job Failed" || jobStatus === "Job Skipped") {
+      throw new Error(`Meta async insights report ${reportRunId} ${jobStatus} (${status?.async_percent_completion ?? "?"}%)`);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Meta async insights report ${reportRunId} did not complete within ${ASYNC_POLL_TIMEOUT_MS / 1000}s ` +
+          `(last status '${jobStatus || "unknown"}', ${status?.async_percent_completion ?? "?"}%)`,
+      );
+    }
+    await sleep(ASYNC_POLL_INTERVAL_MS);
+  }
+}
+
+/** Pull one level over [startDate, endDate] via an async report, then upsert per (object, day). */
+export async function syncMetaInsightsForLevelAsync(
+  p: SyncParams,
+  level: Level,
+  startDate: string,
+  endDate: string,
+): Promise<{ rows: number }> {
+  const admin = createAdminClient();
+  const now = new Date().toISOString();
+
+  const reportRunId = await submitInsightsReport(p, level, startDate, endDate);
+  await pollInsightsReport(reportRunId, p.accessToken);
+  // Page the completed report's results — same cursor pagination + row shape as the GET path.
+  const rows = await graphGetAll(`${reportRunId}/insights`, { limit: "500" }, p.accessToken);
+
+  const records = mapInsightsRecords(p, level, rows, now);
+  const persisted = records.length
+    ? await upsertOrThrow(admin, "meta_insights_daily", records, "workspace_id,meta_object_id,level,snapshot_date", {
+        op: "meta-insights-upsert-async",
+        label: level,
+        extra: { account: p.adAccountId, level, since: startDate, until: endDate, report_run_id: reportRunId },
+      })
+    : 0;
+
+  return { rows: persisted };
+}
+
+/**
+ * Async-report variant of [[syncMetaInsights]] for the first-run backfill window.
+ * One async report per level over the FULL range (Meta does the chunking
+ * server-side — no client-side ≤14-day slicing needed). Returns the same
+ * per-level persisted-row totals so the caller's rows-written assertion is unchanged.
+ */
+export async function syncMetaInsightsAsync(
+  p: SyncParams,
+  startDate: string,
+  endDate: string,
+): Promise<{ campaign: number; adset: number; ad: number }> {
+  const levels: Level[] = ["campaign", "adset", "ad"];
+  const totals = { campaign: 0, adset: 0, ad: 0 };
+  for (const level of levels) {
+    const r = await syncMetaInsightsForLevelAsync(p, level, startDate, endDate);
+    totals[level] += r.rows;
+  }
+  return totals;
+}
+
+/**
+ * Per-account flag: is the async-report backfill path enabled for this account?
+ * Stored on `meta_ad_accounts.async_insights_backfill_enabled` (default false), so
+ * the path ships dark and is flipped on only where the large-backfill pain is real.
+ * Reads DEFENSIVELY — if the column isn't present yet (migration not applied) or the
+ * row is missing, treat as disabled rather than failing the ingest. Off → the sync
+ * chunked GET path (P2) handles the backfill exactly as before.
+ */
+export async function isAsyncBackfillEnabled(admin: Admin, adAccountId: string): Promise<boolean> {
+  const { data, error } = await admin
+    .from("meta_ad_accounts")
+    .select("async_insights_backfill_enabled")
+    .eq("id", adAccountId)
+    .maybeSingle();
+  if (error) return false; // column absent (pre-migration) or query failed → disabled
+  return data?.async_insights_backfill_enabled === true;
 }
 
 // ── Reconciliation ─────────────────────────────────────────────────────────--
@@ -398,6 +557,7 @@ export async function ingestMetaPerformance(
   opts?: { incrementalDays?: number; backfillDays?: number },
 ): Promise<{
   backfilled: boolean;
+  asyncBackfill: boolean;
   startDate: string;
   endDate: string;
   structure: { campaigns: number; adsets: number; ads: number };
@@ -417,7 +577,16 @@ export async function ingestMetaPerformance(
   const startDate = dayStr(new Date(Date.now() - (windowDays - 1) * 86400000));
 
   const structure = await syncMetaStructure(p);
-  const insights = await syncMetaInsights(p, startDate, endDate);
+
+  // For the first-run backfill window only, prefer Meta's async-report path when the
+  // per-account flag is on (iteration-ingest-async-reports) — a years-long first
+  // backfill can strain even the ≤14-day chunked synchronous GETs. The small daily
+  // incremental window always keeps the light synchronous path (async overhead isn't
+  // worth 3 days). Both feed the same map+upsert, so the assertion below is unchanged.
+  const useAsyncBackfill = backfilled && (await isAsyncBackfillEnabled(admin, p.adAccountId));
+  const insights = useAsyncBackfill
+    ? await syncMetaInsightsAsync(p, startDate, endDate)
+    : await syncMetaInsights(p, startDate, endDate);
 
   // ── Output assertion — rows-written > 0 when Meta has data (the false-success
   // class this spec exists to kill). The ingest used to report success even when
@@ -463,5 +632,5 @@ export async function ingestMetaPerformance(
 
   const reconcile = await reconcileInsightsVsSpend(p, startDate, endDate);
 
-  return { backfilled, startDate, endDate, structure, insights, reconcile };
+  return { backfilled, asyncBackfill: useAsyncBackfill, startDate, endDate, structure, insights, reconcile };
 }
