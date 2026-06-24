@@ -1,0 +1,1 @@
+- **Scorecard weekly throughput + quality rollup** · verified 2026-06-24 · → [[../lifecycles/platform-scorecard]]
