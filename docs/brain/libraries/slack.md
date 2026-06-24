@@ -36,9 +36,9 @@ async function postMessage(token: string, channel: string, blocks: unknown[], te
 async function lookupUserByEmail(token: string, email: string) : Promise<string | null>
 ```
 
-### Inbound helpers — Slack Roadmap Console
+### Inbound helpers
 
-Added for the [[../integrations/slack-roadmap-console]] (the first inbound Slack surface).
+Originally added for the first inbound Slack surface (the since-removed Slack roadmap console).
 
 ```ts
 function verifySlackSignature(rawBody: string, signature: string | null, timestamp: string | null) : boolean
@@ -60,7 +60,7 @@ async function updateMessage(token: string, channel: string, ts: string, blocks:
 async function listChannels(token: string) : Promise<{ id; name; is_private }[]>
 ```
 
-Merges **`conversations.list`** (`public_channel`) **+ `users.conversations`** (`public_channel,private_channel` — the bot's own memberships), deduped by id. The `users.conversations` half is required because **`conversations.list` does not return a bot's PRIVATE channels** even with `groups:read` + the bot invited (verified 2026-06-19) — that quirk previously made [[../inngest/slack-roadmap-notify]] never find a private `#roadmap`. Used by the Slack settings channel dropdown, ticket-share, and `findChannelByName`.
+Merges **`conversations.list`** (`public_channel`) **+ `users.conversations`** (`public_channel,private_channel` — the bot's own memberships), deduped by id. The `users.conversations` half is required because **`conversations.list` does not return a bot's PRIVATE channels** even with `groups:read` + the bot invited (verified 2026-06-19) — without it a name-based lookup never finds a private channel. Used by the Slack settings channel dropdown, ticket-share, and `findChannelByName`.
 
 > **Gotcha — Slack webhook endpoints must be in middleware `PUBLIC_ROUTES`.** Slack POSTs to `/api/slack/interactions` (Block Kit buttons / modals) and `/api/slack/events` (e.g. `app_home_opened`) **server-to-server with no session cookie**. The auth is the **signing-secret verification inside each route**, not a web session — so they must be listed in `PUBLIC_ROUTES` (`src/lib/supabase/middleware.ts`). Omitting them makes the middleware **307-redirect to `/login`**, which Slack surfaces as **"This app responded with Status Code 405"** (verified 2026-06-19 on the Squash & merge button). The OAuth `/api/slack/callback` does *not* need it — the browser carries the session there.
 
@@ -148,14 +148,14 @@ function buildNewTicketMessage(data: { ticketId: string; ticketNumber?: string; 
 - `src/app/api/slack/channels/route.ts`
 - `src/app/api/slack/disconnect/route.ts`
 - `src/app/api/slack/sync-members/route.ts`
-- `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` ([[../integrations/slack-roadmap-console]])
-- `src/lib/slack-notify.ts` · `src/lib/slack-roadmap.ts` · `src/lib/slack-home.ts` · `src/lib/slack-identity.ts` · `src/lib/inngest/slack-roadmap-notify.ts`
+- `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts`
+- `src/lib/slack-notify.ts` · `src/lib/slack-home.ts` · `src/lib/slack-identity.ts`
 
 ## Fetch hardening (`slackFetch`)
 
 Every Slack API call goes through a private `slackFetch(url, init)` wrapper (added by [[../specs/slack-fetch-timeout-hardening]]):
 
-- **Per-request timeout** — `AbortSignal.timeout(SLACK_TIMEOUT_MS = 5000)`. On timeout `fetch` rejects with a `TimeoutError`, which propagates to the caller's `try/catch`. This is the fix for the `loop:slack-roadmap-notify` hang: an un-timed fetch against a slow Slack endpoint froze the per-minute cron past Inngest's budget (killed before `emitCronHeartbeat`), going freshness-red. A thrown error still lets the heartbeat fire — one slow tick, not an open-ended outage.
+- **Per-request timeout** — `AbortSignal.timeout(SLACK_TIMEOUT_MS = 5000)`. On timeout `fetch` rejects with a `TimeoutError`, which propagates to the caller's `try/catch`. This is the fix for a per-minute Slack cron hang: an un-timed fetch against a slow Slack endpoint froze the cron past Inngest's budget (killed before `emitCronHeartbeat`), going freshness-red. A thrown error still lets the heartbeat fire — one slow tick, not an open-ended outage.
 - **Bounded 429 retry** — on HTTP 429 it honors `Retry-After` capped at `SLACK_MAX_RETRY_WAIT_MS = 3000`, up to `SLACK_MAX_RETRIES = 2` times, then returns the 429 response.
 - **Pagination cap** — `listChannels`' `collect` loop is bounded by `SLACK_MAX_PAGES = 20` (× `limit:200` = 4000 channels) so a never-emptying `next_cursor` can't fetch forever.
 
@@ -167,7 +167,7 @@ Every Slack API call goes through a private `slackFetch(url, init)` wrapper (add
 
 ## Related
 
-[[../integrations/slack-roadmap-console]] · [[slack-roadmap]] · [[slack-home]] · [[slack-identity]] · [[slack-notify]]
+[[slack-home]] · [[slack-identity]] · [[slack-notify]]
 
 ---
 

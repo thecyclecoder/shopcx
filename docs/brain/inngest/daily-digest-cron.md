@@ -27,14 +27,14 @@ The **one aggregated FYI post per day** to `#daily-digest` (`C0BCQ1ZNJ1F`) — t
 
 ## Gotchas
 
-- **Posts to a fixed channel id** (`C0BCQ1ZNJ1F`), not resolved by name — no bot-channel-list lookup like [[slack-roadmap-notify]]. The bot must be a member of `#daily-digest`.
+- **Posts to a fixed channel id** (`C0BCQ1ZNJ1F`), not resolved by name — no bot-channel-list lookup. The bot must be a member of `#daily-digest`.
 - **Critical ops alerts are unaffected** — they still page `#alerts-critical` in real time via [[../libraries/notify-ops-alert]]; they are never delayed into this digest. Customer/fraud channels unchanged.
 - **`daily_meta_ad_spend.spend_cents` / `purchase_value_cents` are dollars ×100.** The digest divides by 100 and ROAS is derived locally (`rev/spend`).
 - Each section is independent + best-effort: a failed query leaves that field at its zero rather than failing the post (the spec's "never an error" rule).
 
 ## Related
 
-[[../specs/daily-digest-channel]] · [[../libraries/slack]] · [[../tables/director_activity]] · [[../libraries/notify-ops-alert]] · [[../goals/devops-director]] · [[slack-roadmap-notify]] · [[../integrations/inngest]]
+[[../specs/daily-digest-channel]] · [[../libraries/slack]] · [[../tables/director_activity]] · [[../libraries/notify-ops-alert]] · [[../goals/devops-director]] · [[../integrations/inngest]]
 
 ---
 

@@ -1,12 +1,12 @@
 # libraries/roadmap-actions
 
-The owner-gated, server-revalidated mutations behind the roadmap build console — shared by **both** the dashboard API routes and the [[../integrations/slack-roadmap-console|Slack Roadmap Console]]. The approval logic lives here **once**; there is no second copy.
+The owner-gated, server-revalidated mutations behind the roadmap build console, called by the dashboard API routes. The approval logic lives here **once**; there is no second copy. (It was originally extracted so a since-removed Slack front-end could share the same gate.)
 
 **File:** `src/lib/roadmap-actions.ts`
 
 ## Why this exists
 
-The dashboard routes (`/api/roadmap/{build,answer,approve}`, `/api/branches/[number]/merge`) used to carry their owner-check + mutation inline. The Slack console needs the *same* logic but is authenticated by a Slack HMAC signature, not a Supabase cookie. So the core moved here as plain `(workspaceId, userId)` functions; the HTTP routes and the Slack handlers both call them. Each function **re-checks the owner gate itself** (`assertOwner`) — the caller's claimed identity is never trusted. This is the security boundary; [[slack-identity]] is only a UX filter on top.
+The dashboard routes (`/api/roadmap/{build,answer,approve}`, `/api/branches/[number]/merge`) used to carry their owner-check + mutation inline. A second (now-removed) Slack front-end needed the *same* logic but was authenticated by a Slack HMAC signature, not a Supabase cookie — so the core moved here as plain `(workspaceId, userId)` functions that any caller invokes. Each function **re-checks the owner gate itself** (`assertOwner`) — the caller's claimed identity is never trusted. This is the security boundary.
 
 ## Exports
 
@@ -15,7 +15,7 @@ Every function returns `ActionResult<T>` = `({ ok: true } & T) | { ok: false; st
 ### `queueRoadmapBuild(workspaceId, userId, { slug, instructions?, verify?, chainPhases? })`
 Owner-gated build dispatch. **`chainPhases:true`** ("Build all" — [[../specs/build-all-phases-chain]] Phase 1) reads the spec from `main`, queues the **first ⏳ phase** scoped (`phaseScopedInstructions`, [[agent-jobs]]) with **`chain_phases:true`** so the post-merge step (`reconcileMergedJobs` → `queueNextChainedPhase`) auto-queues the next ⏳ phase on each merge until all ✅; a phaseless spec degrades to a normal whole-spec build, an all-built spec is refused (`409`). An in-flight build for the spec coalesces (`alreadyActive`) rather than stacking. `verify:true` → `enqueue_fold` (coalesced batch fold-build) — but **fold-guard-live-build** first calls `getLiveJobForSlug` ([[agent-jobs]]) and **refuses with `409 "Can't archive — a {kind} build for this spec is still live ({status}). It'll fold once that build finishes."`** (no `pending_folds` row / no `kind='fold'` job) when a non-terminal `build`/`spec-test` job for the slug exists, so the owner's manual verify can't orphan a running build. The owner re-taps once the build is terminal; this mirrors the auto-fold gate's exclusion ([[../specs/auto-ship-pipeline]] Gate B). Otherwise, when a build is already live for the spec the behaviour **branches on `instructions`**: a plain Build tap (no instructions) coalesces → `{ job, alreadyActive:true }` (re-building the whole spec mid-build is pointless); a **Report Issue / scoped fix** (with `instructions`) inserts a **distinct** follow-up `queued` row → `{ job, queuedBehindActive:true }` so the new instructions are **never dropped** (the box serializes per-spec, running it after the active build). With no live build, inserts a fresh `queued` [[../tables/agent_jobs]] row. `instructions` scopes a fix-build (Slack `/bug`, dashboard Report Issue, per-phase build). See [[../specs/fix-report-issue-dropped]].
 
-**Build gate ([[../specs/spec-blockers]]).** Before inserting any build row (but *after* the `verify`/fold branch — folding an already-shipped spec isn't a build), it checks `getSpecBlockers(slug)` ([[brain-roadmap]]): if any blocker is **uncleared** (its prerequisite spec hasn't shipped / been archived), it refuses with `{ ok:false, status:409, error:"Blocked by: <slug> (<emoji>), …" }` and inserts **no job**. This is the single enqueue chokepoint — the dashboard `/api/roadmap/build` and the Slack `/build` ([[slack-home]]/[[slack-roadmap]]) both route here, so a blocked spec can't be queued from either. (Known gap: the box worker's planner auto-queue inserts `agent_jobs` directly, bypassing this — folded into spec-blockers P2.) The [[../dashboard/roadmap|BuildButton]] mirrors the gate client-side: a "🔒 Blocked by …" chip + disabled Build.
+**Build gate ([[../specs/spec-blockers]]).** Before inserting any build row (but *after* the `verify`/fold branch — folding an already-shipped spec isn't a build), it checks `getSpecBlockers(slug)` ([[brain-roadmap]]): if any blocker is **uncleared** (its prerequisite spec hasn't shipped / been archived), it refuses with `{ ok:false, status:409, error:"Blocked by: <slug> (<emoji>), …" }` and inserts **no job**. This is the single enqueue chokepoint — the dashboard `/api/roadmap/build` routes here, so a blocked spec can't be queued. (Known gap: the box worker's planner auto-queue inserts `agent_jobs` directly, bypassing this — folded into spec-blockers P2.) The [[../dashboard/roadmap|BuildButton]] mirrors the gate client-side: a "🔒 Blocked by …" chip + disabled Build.
 
 ### `answerRoadmapBuild(workspaceId, userId, { jobId, answers })`
 Writes `answers` + flips a `needs_input` job to `queued_resume`. 409 if the job isn't awaiting input.
@@ -33,16 +33,15 @@ Squash-merges an open `claude/*` PR via the GitHub API, **re-validating** server
 
 - `src/app/api/roadmap/build/route.ts` · `src/app/api/roadmap/answer/route.ts` · `src/app/api/roadmap/approve/route.ts`
 - `src/app/api/branches/[number]/merge/route.ts`
-- `src/app/api/slack/events/route.ts` · `src/app/api/slack/interactions/route.ts` ([[../integrations/slack-roadmap-console]])
 
 ## Gotchas
 
-- **Owner gate twice, by design.** Slack handlers pre-filter with [[slack-identity]] (`resolveSlackActor` → ephemeral "owner-only"); these functions then re-check. A spoofed/replayed Slack button can't act.
+- **Owner gate is re-checked here, by design.** Each function re-checks `assertOwner` itself — a route's claimed identity is never trusted.
 - The build route's GET (job polling) is unchanged — only the POST mutation moved here.
 
 ## Related
 
-[[../integrations/slack-roadmap-console]] · [[slack-identity]] · [[../tables/agent_jobs]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../dashboard/branches]]
+[[../tables/agent_jobs]] · [[../lifecycles/roadmap-build-console]] · [[../dashboard/roadmap]] · [[../dashboard/branches]]
 
 ---
 
