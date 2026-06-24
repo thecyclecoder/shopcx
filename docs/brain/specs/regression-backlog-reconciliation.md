@@ -15,7 +15,7 @@ Remi optimizes 'review the regression in front of me.' The degenerate state is a
 ### Verification — Phase 1
 - With Platform live+autonomous, a shipped spec not verified within the freshness window gets a spec-test re-run queued on the next standing pass; if it returns `issues`, a `regression` job is enqueued + a `detected_regression` activity row. A recently-verified spec is skipped (no churn).
 
-## Phase 2 — regression backlog reconciliation (drive every regression to terminal) ⏳
+## Phase 2 — regression backlog reconciliation (drive every regression to terminal) ✅
 - Each pass: find every shipped spec with an UNRESOLVED evidence-backed spec-test `fail` (the `getHumanTestQueue` regression definition) that has NO live `regression` job — and enqueue Remi for it (the detected-but-never-reviewed gap). Confirm in-flight regression fixes are progressing; a fix that failed ≥ `REGRESSION_LOOP_GUARD_MAX` with nothing in-flight escalates (Remi's existing loop-guard). So no regression sits undetected OR un-dispositioned.
 - Mirrors [[director-zero-backlog-error-autonomy]] Phase 1 for the regression surface; writes a `reconciled_regression` [[../tables/director_activity]] row per action.
 

@@ -60,7 +60,7 @@ export const REGRESSION_LOOP_GUARD_MAX = 2;
 export const REGRESSION_RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /** Statuses that mean a regression job for a signature is still "live" (being worked or surfaced). */
-const LIVE_REGRESSION_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "needs_attention"];
+export const LIVE_REGRESSION_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "needs_attention"];
 
 /** One failing `## Verification` check the spec-test agent observed breaking (evidence-backed). */
 export interface RegressionFailing {
