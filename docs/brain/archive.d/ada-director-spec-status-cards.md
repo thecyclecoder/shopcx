@@ -1,0 +1,1 @@
+- **Ada director spec status cards** · verified 2026-06-24 · → [[../libraries/platform-director]]
