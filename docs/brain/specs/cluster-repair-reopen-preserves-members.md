@@ -1,4 +1,4 @@
-# Re-opened cluster:repair job loses its batched members (director-bounce empties the cluster) ⏳
+# Re-opened cluster:repair job loses its batched members (director-bounce empties the cluster) ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]; fixes the re-open path in [[../specs/director-supervised-repair-dismissal]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/repair-agent.ts (add optional members to enqueuerepairinput and persist it onto the inserted cluster jobs instructions when source===cluster) + src/app/api/developer/control-tower/repair/route.ts (reopen handler: parse the dismissed jobs instructions.members and pass them through)::real-bug`
@@ -11,8 +11,10 @@ src/app/api/developer/control-tower/repair/route.ts (reopen handler, ~line 82) r
 
 **Likely target:** `src/lib/repair-agent.ts (add optional `members` to EnqueueRepairInput and persist it onto the inserted cluster job's instructions when source==='cluster') + src/app/api/developer/control-tower/repair/route.ts (reopen handler: parse the dismissed job's instructions.members and pass them through)`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+Shipped: `EnqueueRepairInput` gained an optional `members: ClusterMember[]` (new exported `ClusterMember` interface, reused by `ClusterInstructions`); `enqueueRepairJob`'s standard insert now persists `members` onto the inserted job's `instructions` when `source==='cluster'`. The reopen handler in `src/app/api/developer/control-tower/repair/route.ts` parses the dismissed job's `instructions.members` and passes them through. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `cluster:repair`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.

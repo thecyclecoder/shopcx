@@ -135,6 +135,19 @@ export interface EnqueueRepairInput {
   /** director BOUNCE feedback: when Ada found the prior authored fix UNSOUND, her explanation of WHY — the
    *  re-authoring repair pass reads this and fixes its work instead of repeating the same mistake. */
   directorFeedback?: string | null;
+  /** for a `cluster:repair` re-enqueue (source==='cluster'): the batched signatures the cluster must
+   *  investigate together. Persisted onto the inserted cluster job's instructions so a re-opened cluster
+   *  re-triages the SAME cluster instead of an empty '0 signatures' brief. Ignored for non-cluster jobs. */
+  members?: ClusterMember[];
+}
+
+/** One batched signature inside a `cluster:repair` job's `members` list. */
+export interface ClusterMember {
+  source: string;
+  signature: string;
+  title: string;
+  errorEventId?: string | null;
+  loopAlertId?: string | null;
 }
 
 /**
@@ -194,19 +207,26 @@ export async function enqueueRepairJob(admin: Admin, input: EnqueueRepairInput):
       return foldIntoClusterJob(admin, workspaceId, input);
     }
 
+    // When this is a re-enqueued cluster job (source==='cluster' — e.g. an owner re-open of a director-
+    // dismissed `cluster:repair`), carry the batched `members` through onto the inserted job's
+    // instructions. Without this the re-triage loads an empty '0 signatures' brief and wastes a pass.
+    const instructions: Record<string, unknown> = {
+      source: input.source,
+      signature: input.signature,
+      title: input.title.slice(0, 300),
+      error_event_id: input.errorEventId ?? null,
+      loop_alert_id: input.loopAlertId ?? null,
+      director_feedback: input.directorFeedback ? input.directorFeedback.slice(0, 3000) : null,
+    };
+    if (input.source === "cluster") {
+      instructions.members = Array.isArray(input.members) ? input.members : [];
+    }
     const { error } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
       spec_slug: input.signature,
       kind: "repair",
       status: "queued",
-      instructions: JSON.stringify({
-        source: input.source,
-        signature: input.signature,
-        title: input.title.slice(0, 300),
-        error_event_id: input.errorEventId ?? null,
-        loop_alert_id: input.loopAlertId ?? null,
-        director_feedback: input.directorFeedback ? input.directorFeedback.slice(0, 3000) : null,
-      }),
+      instructions: JSON.stringify(instructions),
     });
     if (error) {
       console.warn(`[repair-agent] enqueue failed for ${input.signature}:`, error.message);
@@ -262,7 +282,7 @@ interface ClusterInstructions {
   source: "cluster";
   signature: string; // == REPAIR_CLUSTER_SLUG, the dedupe key
   title: string;
-  members: Array<{ source: string; signature: string; title: string; errorEventId?: string | null; loopAlertId?: string | null }>;
+  members: ClusterMember[];
 }
 
 /**
