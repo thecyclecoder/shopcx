@@ -1,0 +1,35 @@
+# Ada supervises + dismisses Rafa's no-fix Control Tower items ⏳
+
+**Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the director's supervision of [[repair-agent]] under [[../goals/devops-director]]
+**Found in use 2026-06-24:** the CEO has to manually Dismiss Control Tower warnings whenever Rafa (the [[../libraries/repair-agent|Repair Agent]]) declines to propose a fix. Two `repair` jobs are sitting in `needs_attention` awaiting a manual dismiss right now (signatures `vercel:bb28f61b887be822`, `vercel:aef5e5da7ae32431`). The CEO wants the Platform Director to clear these — but to **double-check Rafa's reasoning so a real bug mislabeled 'not a problem' is never silently cleared.**
+
+## North star — this is the supervision, not a janitor
+
+Rafa optimizes the bounded proxy 'clear the error.' The degenerate state ([[../operational-rules]] § North star) is clearing a warning by declaring a real bug benign. So the Director's job here is NOT to auto-dismiss noise — it's to **adversarially re-check** Rafa's no-fix verdict and dismiss ONLY what she can independently confirm is benign; anything she can't confirm stays up and escalates. Supervise the tool; never rubber-stamp it.
+
+## The mechanism today (what we reuse, not rebuild)
+
+Rafa classifies each problem with a `RepairVerdict`. `transient` already auto-resolves the [[../tables/error_events]] row silently (no dismiss needed). The items that require a manual Dismiss are `needs-human` → parked as a `repair` [[../tables/agent_jobs]] in `needs_attention`, surfaced by `getOpenRepairs` (Dismiss-only). Dismiss runs through the existing owner path `POST /api/developer/control-tower/repair` (the `repair_build` action `declined`). This spec adds a Director reviewer in front of that existing path — no new dismiss plumbing, no migration.
+
+## Phase 1 — the supervised-dismissal lane (review → dismiss or escalate) ⏳
+- Add `superviseRepairDismissals(admin)` to [[../libraries/platform-director]], run in `runPlatformDirectorStandingPass` ([[platform-director-agent]] Phase 4/5 cadence), dormant until Platform is live+autonomous like every other lane.
+- It reads Rafa's open no-fix items via `getOpenRepairs` (the `needs_attention` / needs-human bucket; never the `needs_approval` fix-proposed items, never a `real-bug`). For each, a READ-ONLY Max `claude -p` investigation loads the original [[../tables/error_events]] / [[../tables/loop_alerts]] sample + Rafa's logged no-fix reasoning, then **independently re-derives the root cause and adversarially tests his call.** The prompt's stance is hard: DEFAULT to not-dismissing; emit `dismiss` ONLY if Ada can independently confirm the error is genuinely transient / foreign-app / benign and NOT a masked real bug.
+- Dispatch on the verdict: `dismiss` → call the existing owner Dismiss path (decline the `repair_build` action / resolve the error_events row + complete the job) and write a `dismissed_repair` [[../tables/director_activity]] row carrying Ada's INDEPENDENT reasoning (not a copy of Rafa's). `keep` → do NOT dismiss; if she suspects a masked real bug, `escalateDiagnosisToCeo` with her contrary diagnosis + an `escalated` row; otherwise leave it for the human (genuine needs-human) untouched.
+- **Leash:** dismissing a confirmed-benign monitoring warning is the `monitoring_fix` class — low-risk and reversible (dismissing a `needs_attention` item UN-blocks re-enqueue, so a wrongly-dismissed real problem re-fires and Rafa re-triages it). Unsure ⇒ escalate, never dismiss (north star: hit a rail → escalate). Never dismisses a `real-bug` or a fix-proposed item.
+- **Idempotent + loop-guarded:** a `dismiss_key` (`dismiss:{signature}`) ledger over `director_activity` so each item is reviewed once; a re-fire (new job) is a fresh review.
+- Brain: [[../libraries/platform-director]] · [[../libraries/repair-agent]] (`getOpenRepairs`, the Dismiss path) · [[../specs/repair-agent]] · [[../tables/director_activity]].
+
+### Verification — Phase 1
+- With Platform live+autonomous, a `needs_attention` repair item whose error Ada independently confirms benign → the warning clears via the existing Dismiss path + a `dismissed_repair` director_activity row with her own reasoning. The two current items (vercel:bb28f61b887be822, vercel:aef5e5da7ae32431) are reviewed on the next standing pass.
+- An item where Ada's independent review SUSPECTS a real bug Rafa mislabeled → NOT dismissed; a CEO escalation with her contrary diagnosis + an `escalated` row.
+- Re-run the pass → no double-review (the `dismiss_key` dedup). Never dismisses a `real-bug` / `needs_approval` fix-proposed item.
+
+## Phase 2 — surface the dismissal + a CEO re-open override ⏳
+- On the [[../dashboard/control-tower]] tile, render a dismissed item as `🛠️ Dismissed by Ada — <reasoning>` (instead of it silently vanishing) with a one-tap **Re-open** that restores the warning and re-enqueues Rafa. This is YOUR supervision over Ada — full visibility into what she cleared and an instant undo.
+- A daily rollup line in the [[../libraries/platform-director]] board watch: 'reviewed N of Rafa's calls — dismissed K, escalated J back to you.'
+
+### Verification — Phase 2
+- A Director-dismissed item shows `Dismissed by Ada` + reasoning on the Control Tower; tapping Re-open restores the open warning and a fresh `repair` job. The board-watch post counts the day's dismissals + escalations.
+
+## Open decision (for the CEO)
+When Ada's review finds Rafa actually MISSED a real bug (not just 'unsure'), Phase 1 escalates it to you. Alternatively she could author a fix spec herself (her `error_fix` mandate is already greenlit) and let the fix-escort build it — closing the loop without a CEO round-trip. Default here is escalate-only (conservative); say the word and I'll add 'author the fix' as the action when her diagnosis is high-confidence.
