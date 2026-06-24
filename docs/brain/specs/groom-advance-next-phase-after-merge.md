@@ -9,7 +9,7 @@
 
 The builder chain (`queueNextChainedPhase` / auto-ship) is supposed to queue the next phase on merge, and grooming is the backstop for specs the chain didn't carry — but the backstop is suppressed by the same merged-build-as-in-flight reading, so a phase the chain misses sits indefinitely.
 
-## Phase 1 — split 'active build' from 'a prior phase landed' ⏳
+## Phase 1 — split 'active build' from 'a prior phase landed' ✅
 - Add a distinct signal to `specBuildState` (e.g. `activeBuild`) that is true ONLY for a build in an ACTIVE state for the spec — `queued` / `building` / `needs_input` / `needs_approval` / `queued_resume` — and treat `completed` / `merged` as NOT a reason to skip grooming. Keep the existing `inFlight` for back-compat callers (the escort's duplicate-guard), but have `findGroomCandidates` gate on `activeBuild` instead, so a spec with only landed (merged/completed) builds and a remaining ⏳ phase becomes a groom candidate.
 - A spec with an active build for its NEXT phase is still skipped (no duplicate queue). The loop-guard is unchanged: ≥ `PLATFORM_DIRECTOR_LOOP_GUARD_MAX` failed attempts with nothing active still escalates instead of resubmitting.
 - The groom investigation's continue/split/escalate judgment is unchanged — this only fixes WHICH specs reach it. A continue still queues the next phase build via the existing chain; a future-work leftover still splits; an ambiguous one still escalates.
