@@ -42,4 +42,4 @@ The org chart is the `functions/*.md` tree, which today is **FLAT**: every direc
 
 ## Related
 
-[[../specs/approval-routing-engine]] · [[../tables/function_autonomy]] · [[../dashboard/agents]] · [[brain-roadmap]] · [[../goals/devops-director]] · [[../operational-rules]]
+[[../specs/approval-routing-engine]] · [[../tables/function_autonomy]] · [[../dashboard/agents]] · [[brain-roadmap]] · [[../goals/devops-director]] · [[../libraries/security-agent]] · [[../specs/security-dependency-agent]] · [[../operational-rules]]
