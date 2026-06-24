@@ -451,6 +451,28 @@ function accountsSnapshot(now: number) {
   };
 }
 
+// DB-driven account health (account-cap-state-survives-restart): cap state is in-memory, so a box restart
+// reset every account to "healthy" — then the worker re-discovered each cap by RUNNING into the wall again,
+// spamming cap+failover events and wasting a turn per account per restart. On boot we restore each account's
+// cappedUntil from the LAST heartbeat's per-account snapshot (pool[i] maps by index to accounts[i]), so a
+// still-capped account stays out of rotation across a restart — no re-probe, no spurious failover. Best-effort.
+async function restoreAccountCapsOnBoot(): Promise<void> {
+  try {
+    const { data } = await db.from("worker_heartbeats").select("accounts").eq("id", WORKER_BOX_ID).maybeSingle();
+    const pool = (data?.accounts as { pool?: { capped_until?: string | null }[] } | null)?.pool;
+    if (!Array.isArray(pool)) return;
+    const now = Date.now();
+    let restored = 0;
+    for (let i = 0; i < accounts.length && i < pool.length; i++) {
+      const until = pool[i]?.capped_until ? new Date(pool[i].capped_until as string).getTime() : 0;
+      if (until > now) { accounts[i].cappedUntil = until; accounts[i].capEventLogged = true; restored++; }
+    }
+    if (restored) console.log(`[multi-account] restored ${restored} capped account(s) from the last heartbeat — no re-probe`);
+  } catch (e) {
+    console.warn("[multi-account] cap-state restore failed (continuing healthy):", e instanceof Error ? e.message : e);
+  }
+}
+
 function healthyAccounts(now: number): AccountState[] {
   return accounts.filter((a) => a.cappedUntil <= now);
 }
@@ -549,6 +571,62 @@ function resolveAccountForJob(
   const acct = pickNewSessionAccount(now);
   if (!acct) return { kind: "blocked", resetAt: soonestReset(now) };
   return { kind: "run", configDir: acct.configDir, sessionId: null, startedFresh: false };
+}
+
+// Account-pool wrapper for EVERY NON-build box claude-run (dev-ask, director-coach, ticket-improve, triage,
+// spec-test, repair, regression, security-review, product-seed, migration-fix). Builds handle the pool
+// inline; this gives every OTHER runner the SAME resilience the North star wants — fundamental to anything
+// that runs `claude` on the box. It picks a healthy account, runs with its CLAUDE_CONFIG_DIR, and on the
+// 5-hour usage wall marks it capped (real reset time parsed from the message) + retries on another healthy
+// account. `run(configDir, sessionId)` is the runner's own claude call (it MUST set env.CLAUDE_CONFIG_DIR).
+// A resume pins to its session's account when healthy; if capped it starts FRESH on a healthy one — runners
+// that rebuild context from a transcript (the coach) lose nothing. `allCapped:true` → the caller should park
+// the job `blocked_on_usage` so it auto-resumes at reset instead of dead-erroring on the default account.
+async function withAccountFailover<T extends { isError: boolean; raw: string; resultText?: string }>(
+  pin: { sessionConfigDir?: string | null; sessionId?: string | null },
+  run: (configDir: string, sessionId: string | null) => Promise<T>,
+): Promise<{ result: T | null; configDir: string | null; allCapped: boolean }> {
+  const now = Date.now();
+  let sessionId = pin.sessionId ?? null;
+  let configDir: string | null;
+  if (sessionId) {
+    // Pin a resume to the session's account — NEVER cross-account --resume ("No conversation found"). Legacy
+    // threads don't record the account, so assume the default (RR1, where un-pooled turns historically ran).
+    // Resume only if that account is healthy; if capped, start FRESH on a healthy one (context is rebuilt
+    // from the runner's transcript prompt — no loss).
+    const ownerDir = pin.sessionConfigDir ?? accounts[0]?.configDir;
+    const owner = ownerDir ? accountByDir.get(ownerDir) : undefined;
+    if (owner && owner.cappedUntil <= now) configDir = owner.configDir;
+    else { sessionId = null; configDir = pickNewSessionAccount(now)?.configDir ?? null; }
+  } else {
+    configDir = pickNewSessionAccount(now)?.configDir ?? null;
+  }
+  if (!configDir) return { result: null, configDir: null, allCapped: true };
+
+  const tried = new Set<string>();
+  for (;;) {
+    if (tried.has(configDir)) return { result: null, configDir, allCapped: true };
+    tried.add(configDir);
+    const acct = accountByDir.get(configDir)!;
+    acct.inFlight++;
+    acct.lastAssignedAt = Date.now();
+    let r: T;
+    try {
+      r = await run(configDir, sessionId);
+    } finally {
+      acct.inFlight--;
+    }
+    if (r.isError && isUsageCapError(`${r.resultText ?? ""}\n${r.raw}`)) {
+      markAccountCapped(configDir, Date.now(), r.raw); // DB-driven: real reset parsed from the wall message
+      const next = pickNewSessionAccount(Date.now());
+      if (!next) return { result: null, configDir, allCapped: true };
+      recordAccountEvent("failover", configDir, `failing over — re-running on ${accountLabel(next.configDir, accounts.indexOf(next))}`);
+      sessionId = null; // a fresh account can't --resume the prior account's session
+      configDir = next.configDir;
+      continue;
+    }
+    return { result: r, configDir, allCapped: false };
+  }
 }
 
 // Re-queue jobs parked `blocked_on_usage` once an account that would actually RUN them is healthy again.
@@ -4997,11 +5075,12 @@ async function runMigrationFixJob(job: Job) {
 // box is REPORT-BACK, never a builder: reads (SELECT/join/analysis via throwaway uncommitted scripts/_*.ts)
 // are silent; every proposed DB write / migration / spec handoff stops at a pending_actions approval card
 // the owner must click. Only deterministic worker code (mode:'approve_action') executes an approved card.
-async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: string) {
+async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // KEEP the full env (DB/crypto creds for read-only probes + the throwaway query scripts) — only strip
   // the API key so ALL LLM is Max-billed (never the Anthropic API). WebSearch stays on (analyst/planner).
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected Max account
   const base = sessionId ? ["--resume", sessionId] : [];
   const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: DEV_ASK_TIMEOUT_MS });
@@ -5223,13 +5302,26 @@ async function runDeveloperMessageJob(job: Job) {
     }
 
     // ── mode:'turn' — run the box session (read-only investigation/analytics/planning). ──
+    // Account-pool failover (#20): pick a healthy Max account, run on it, and on the 5-hour wall hop to a
+    // healthy one (or park blocked_on_usage). The prompt is built INSIDE the closure from the sessionId the
+    // pool hands back — a failover that starts fresh rebuilds full context from the transcript (no loss).
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
-    const prompt = isResume
-      ? `${latest}\n\n${DEV_ASK_OUTPUT}`
-      : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
-
-    const { session, resultText, isError, raw, usage, model } = await runDevAskClaude(await withCoaching(job, prompt), sessionId, wt);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    const { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
+      { sessionId },
+      async (cfg, sid) => {
+        const turnPrompt = sid
+          ? `${latest}\n\n${DEV_ASK_OUTPUT}`
+          : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
+        return runDevAskClaude(await withCoaching(job, turnPrompt), sid, wt, cfg);
+      },
+    );
+    if (allCapped || !coachRun) {
+      await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — coach auto-resumes at reset" });
+      console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
+      return;
+    }
+    const { session, resultText, isError, raw, usage, model } = coachRun;
+    await meterAgentJob(job, coachDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
@@ -5692,13 +5784,26 @@ async function runDirectorCoachJob(job: Job) {
           : intent === "auto"
             ? `INTENT: AUTO. This message came from Slack (#cto-ada) as one natural message — there is no explicit Ask/Coach/Plan button. DEFAULT to answering read-only + honestly, exactly like ASK. But if your answer IMPLIES a durable change, ALSO emit the one matching pending_action, exactly as if the CEO had pressed that button: a 'coaching' card when they're telling you to do something differently going forward; a 'directive' card when they hand you a plan to execute; a 'spec' card for a real code/capability gap; a 'spec-edit' card when they ask you to modify an existing spec; a 'goal' card for a strategic multi-spec initiative; a 'model_tier' card when an agent's model should change. Emit AT MOST one card, and only when it's clearly warranted — when in doubt, just answer. Your reply is plain text (no markdown). Stay within your leash: a card never auto-does something destructive/irreversible or starts a goal — it always stops at the CEO's approval.`
             : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
+    // Account-pool failover (#20): Ask-Ada runs on a healthy Max account + hops on the wall (was the bug —
+    // it errored on the capped default account instead of failing over). Prompt built inside the closure
+    // from the pool's sessionId; a fresh-start failover rebuilds full context from the transcript.
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
-    const prompt = isResume
-      ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
-      : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
-
-    const { session, resultText, isError, raw, usage, model } = await runDevAskClaude(prompt, sessionId, wt);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    const { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
+      { sessionId },
+      (cfg, sid) => {
+        const turnPrompt = sid
+          ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
+          : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
+        return runDevAskClaude(turnPrompt, sid, wt, cfg);
+      },
+    );
+    if (allCapped || !coachRun) {
+      await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — Ask-Ada auto-resumes at reset" });
+      console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
+      return;
+    }
+    const { session, resultText, isError, raw, usage, model } = coachRun;
+    await meterAgentJob(job, coachDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
@@ -8299,6 +8404,8 @@ async function main() {
   await reapArchivedSpecJobs();
   // queue-restart: if a drain was staged, clear it now that we've (re)started on the advanced SHA.
   await reconcileDrainOnBoot();
+  // DB-driven account health: restore capped accounts from the last heartbeat so a restart doesn't re-probe.
+  await restoreAccountCapsOnBoot();
 
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
   let lastApprovalSweep = 0; // approval-routing-engine M2: throttle the routed-inbox reconcile
