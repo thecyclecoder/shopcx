@@ -1,4 +1,4 @@
-# Every spec is the director's to drive + a first-class Deferred status 🚧
+# Every spec is the director's to drive + a first-class Deferred status ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] + [[board-grooming]] — generalizes the auto-build lanes to all owners under [[../goals/devops-director]]
 **Found in use 2026-06-24:** the CEO established the operating principle — 'the existence of a spec means it's the director's to drive; CS/Growth won't queue their own builds.' Today the initiation lane ([[director-initialize-platform-specs-no-wait]] P2) and `escortFixSpecs` are gated to `owner === platform`, so other departments' Planned specs (e.g. [[portal-remediation-recognize-would-remove-last-item]] (CS), three Growth specs) never start — and those directors aren't live to start them. The exception is DEFERRED work, which has no first-class status today (only a `**Deferred:**` marker line) — the CEO wants a dedicated board column so Planned (start it) is cleanly separated from Deferred (leave it).
@@ -26,11 +26,7 @@ Widening WHICH specs the director drives does not loosen the leash. A spec is on
 - With only platform live, the four cross-dept Planned specs (portal-remediation-recognize-would-remove-last-item, creative-finder-video, growth-acquisition-roas-spine-report-contract, iteration-ingest-async-reports) become initiation candidates and get queued (each after a passing soundness check) — none requiring a CEO Build click. A deferred spec is still skipped. A blocked spec still waits. A destructive/ambiguous one still escalates.
 - (Routing) If a non-platform director were flipped live+autonomous, its owned specs route to IT, not me (the keystone fallback only catches specs whose owner-director isn't live).
 
-## Phase 3 — the board + activity reflect cross-dept drive ⏳
-- Activity rows + the daily board-watch note when the platform director drives another department's spec (owner shown, driver = me), so you can see the keystone covering for not-yet-live directors. Surfaces on the [[Platform Department Scorecard]].
-
-### Verification — Phase 3
-- Driving a CS/Growth spec writes an activity row naming the owning function + the driver; the daily watch reports specs driven across departments.
-
 ## Open decision (for the CEO)
 Default keeps the soundness investigation before initiating a non-fix FEATURE in another department (I don't blind-build an unfamiliar-domain feature). Alternative: 'just build any non-deferred, unblocked spec, no investigation.' I recommend the former for cross-domain features and straight-through for fixes; say the word to make it straight-through for everything.
+
+_Deferred follow-up: cross-dept drive surfacing on the board + activity + scorecard split to [[director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive]]._
