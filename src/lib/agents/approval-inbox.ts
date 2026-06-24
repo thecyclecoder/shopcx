@@ -211,11 +211,18 @@ export function buildApprovalNotification(
 export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: number; dismissed: number }> {
   const [chart, autonomy] = await Promise.all([buildOrgChartGraph(), loadAutonomyMap()]);
 
-  const { data: jobsData } = await admin
+  const { data: jobsData, error: jobsError } = await admin
     .from("agent_jobs")
     .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail, spec_missing")
     .eq("status", "needs_approval")
     .limit(500);
+  // SAFETY: never act on a FAILED read. A null/errored job query would otherwise look like "0 open jobs"
+  // and the dismiss loop below would dismiss EVERY approval notification — one transient read wipes the
+  // whole CEO inbox (observed 2026-06-24). On error, bail and leave the inbox untouched until the next tick.
+  if (jobsError) {
+    console.warn(`[approval-inbox] job read failed — skipping reconcile to protect the inbox: ${jobsError.message}`);
+    return { created: 0, dismissed: 0 };
+  }
   const jobs = (jobsData ?? []) as ApprovalJobRow[];
   const openJobIds = new Set(jobs.map((j) => j.id));
 

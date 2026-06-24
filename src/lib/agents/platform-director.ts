@@ -838,6 +838,80 @@ export async function escalateDiagnosisToCeo(
   return { emitted: true };
 }
 
+/**
+ * director-escalations-must-surface-to-ceo Phase 2 — the standing backstop. Re-surface any escalation that
+ * was LOGGED but whose CEO notification never landed (historically: the dashboard_notifications type CHECK
+ * rejected `agent_approval_request`, so the insert was swallowed). For every recent `escalated`
+ * director_activity row with no live CEO-routed Approval Request, re-emit one: a job escalation re-routes
+ * its approval to the CEO (escalateApprovalRequestToCeo), a standalone diagnosis re-emits via
+ * escalateDiagnosisToCeo (both idempotent — they dedupe on the notification that actually exists). So the
+ * ledger and the inbox can never silently disagree again. Best-effort; dormant until live+autonomous.
+ */
+export async function reconcileSwallowedEscalations(admin: Admin): Promise<{ reEmitted: number }> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return { reEmitted: 0 };
+
+  const sinceIso = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: acts } = await admin
+    .from("director_activity")
+    .select("workspace_id, spec_slug, reason, metadata")
+    .eq("director_function", PLATFORM)
+    .eq("action_kind", "escalated")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(100);
+  if (!acts?.length) return { reEmitted: 0 };
+
+  const { data: notifs } = await admin.from("dashboard_notifications").select("metadata").eq("type", APPROVAL_REQUEST_TYPE).eq("dismissed", false).limit(2000);
+  const surfacedJobs = new Set<string>();
+  const surfacedKeys = new Set<string>();
+  for (const n of notifs ?? []) {
+    const m = (n.metadata as Record<string, unknown> | null) ?? {};
+    if (typeof m["agent_job_id"] === "string") surfacedJobs.add(m["agent_job_id"] as string);
+    if (typeof m["dedupe_key"] === "string") surfacedKeys.add(m["dedupe_key"] as string);
+  }
+
+  let reEmitted = 0;
+  for (const a of acts as Array<{ workspace_id: string; spec_slug: string | null; reason: string | null; metadata: Record<string, unknown> | null }>) {
+    const m = a.metadata ?? {};
+    const jobId = typeof m["job_id"] === "string" ? (m["job_id"] as string) : null;
+    const dedupeKey = typeof m["dedupe_key"] === "string" ? (m["dedupe_key"] as string) : null;
+    try {
+      if (jobId && !surfacedJobs.has(jobId)) {
+        const { data: job } = await admin
+          .from("agent_jobs")
+          .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail, spec_missing")
+          .eq("id", jobId)
+          .maybeSingle();
+        if (job && (job as { status?: string }).status === "needs_approval") {
+          const r = await escalateApprovalRequestToCeo(admin, job as unknown as DirectorTargetJob, String(a.reason || "Escalated to you — outside the leash."));
+          if (r.ok) {
+            reEmitted++;
+            surfacedJobs.add(jobId);
+          }
+        }
+      } else if (!jobId && dedupeKey && !surfacedKeys.has(dedupeKey)) {
+        const r = await escalateDiagnosisToCeo(admin, {
+          workspaceId: a.workspace_id,
+          specSlug: a.spec_slug,
+          title: `Ada escalated: ${a.spec_slug ?? (typeof m["escalation_kind"] === "string" ? (m["escalation_kind"] as string) : "a decision")}`,
+          diagnosis: String(a.reason || "Escalated to you."),
+          dedupeKey,
+          deepLink: a.spec_slug ? `/dashboard/roadmap/${a.spec_slug}` : "/dashboard/agents",
+          escalationKind: typeof m["escalation_kind"] === "string" ? (m["escalation_kind"] as string) : "backfill",
+        });
+        if (r.emitted) {
+          reEmitted++;
+          surfacedKeys.add(dedupeKey);
+        }
+      }
+    } catch {
+      /* best-effort per row — one bad escalation never blocks the rest */
+    }
+  }
+  return { reEmitted };
+}
+
 // ── Phase 4 — watch the platform + report to the board ────────────────────────────────────────────
 // The director's TOP, human-legible layer: read Control Tower health (the EXISTING snapshot library —
 // no new monitoring) and post a conversational update as 🛠️ Ada to the M3 #directors board — what it

@@ -6565,6 +6565,11 @@ async function main() {
           const { reconcileApprovalInbox } = await import("../src/lib/agents/approval-inbox");
           const r = await reconcileApprovalInbox(db);
           if (r.created || r.dismissed) console.log(`[approval-inbox] +${r.created} request(s), -${r.dismissed} dismissed`);
+          // P2 backstop (director-escalations-must-surface-to-ceo): re-surface any escalation that was
+          // logged but whose CEO notification never landed. Idempotent; dormant unless Platform is live.
+          const { reconcileSwallowedEscalations } = await import("../src/lib/agents/platform-director");
+          const e2 = await reconcileSwallowedEscalations(db);
+          if (e2.reEmitted) console.log(`[escalation-backstop] re-surfaced ${e2.reEmitted} swallowed escalation(s) to the CEO`);
         } catch (e) {
           console.error("[approval-inbox] reconcile failed (continuing):", e instanceof Error ? e.message : e);
         }
