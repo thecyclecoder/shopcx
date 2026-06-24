@@ -1,14 +1,10 @@
-# Growth Director — AcqROAS Report Contract Output 🚧
-
-**Priority:** critical
+# Growth Director — AcqROAS Report Contract Output
 
 **Owner:** [[../functions/growth]] · **Parent:** [[../goals/ceo-mode]] › M2 — Growth Director
 
-**Deferred:** split from [[growth-acquisition-roas-spine]] — not needed now: the per-product AcqROAS measurement *spine* (the parent's promise) is shipped + verified ([[../libraries/acquisition-roas]] `computeAcqROAS`, [[../libraries/shopify-internal-revenue]], [[../tables/product_ad_account_mappings]]). This report-contract wrapper has no consumer yet — the CEO synthesizer that reads director report contracts ([[../goals/ceo-mode]] M4) and the report-contract schema itself ([[../goals/ceo-mode]] M0) are both still planned, and the contribution-margin form is a declared dependency on M1 COGS. Build it alongside the Growth director-agent / CEO synthesizer so it targets the *final* schema with a real reader.
-
 This is the **output/presentation layer** over the shipped metric: wrap `computeAcqROAS(product, window)` into the CEO-mode director **report contract** so the CEO synthesizer can compose it alongside the other directors. The agent **owns the objective** (profitable new-customer acquisition); AcqROAS is its **proxy** — see [[../goals/ceo-mode]] § 'Role agents own the objective'.
 
-## Phase 1 — Growth report contract output ✅
+## Phase 1 — Growth report contract output
 **Shipped 2026-06-24.** [[../libraries/growth-report-contract]] `buildGrowthReportContract` wraps
 `computeAcqROAS` per product line into the standard director [[../libraries/director-report-contract]]
 (the M0 schema-as-code: type + `validateDirectorReportContract`). Per-line metric row (AcqROAS, channel

@@ -1,4 +1,4 @@
-# PDP Refinement Pass (repeatable per-product polish) ✅
+# PDP Refinement Pass (repeatable per-product polish)
 
 **Owner:** [[../functions/cmo]] · **Parent:** CMO mandate — owned product/website content (extends [[box-product-seeding]]; runs on the same box/Max substrate). Derived from the Superfood Tabs refinement session (2026-06-20) — codified so it runs on **every** product without re-specifying.
 
@@ -71,9 +71,9 @@ The concrete B + C inputs captured 2026-06-20.
 - Negative: no fabricated endorsements/avatars remain; no Shopify-CDN hotlinks in `product_media`; no nutrition panel ships without verification.
 
 ## Phases
-- ✅ **P1 — global build:** section A landed, tsc-clean. Migrations applied (`20260620130000_before_after_stories.sql`, `20260620140000_split_trust_pills.sql` via `scripts/apply-pdp-refinement-migrations.ts`).
+- **P1 — global build:** section A landed, tsc-clean. Migrations applied (`20260620130000_before_after_stories.sql`, `20260620140000_split_trust_pills.sql` via `scripts/apply-pdp-refinement-migrations.ts`).
   - **Built:** `WhatToExpectTimeline` centering (cols = min(steps,5)) · `UGCSection`/`BeforeAfterPair` + `before_after_stories` 2-story model (legacy `before`/`after` still works) · `HeroSection` `ResearchCredibility` "N superfoods" badge excludes caffeine-style duplicates · `seed-tools.saveTrustPills` (individual pills) + skill guidance + one-time split migration · `seed-tools.getReviews` range-pagination (no 1000 cap) · `get_product_nutrition` orchestrator tool (improve delegates) + per-variant Supplement-Facts KB mirror in `publishProductContent` · PDP harvest (`getPdpImages` + `rehostImage` — re-host, never hotlink) · gallery slides (`resolveLifestyleSlide` Drive UGC + `generateStaticAdSlide` Nano-Banana w/ caption overlays) + `save-media` displayOrder for gallery rows. All wired into `scripts/seed-product-tools.ts` + the `seed-product` skill.
-- ✅ **P2 — Tabs run:** execute the pass on Superfood Tabs with its C specifics; verify live. **Trigger built:** `npx tsx scripts/queue-product-refinement.ts` (defaults to Superfood Tabs) enqueues the `product-seed` job in `refinement` mode (no UI/CLI path produced one before — the seed API route carries no `mode`). The box then runs the pass on Max, reading the founder-LOCKED Run-#1 inputs above. **Awaiting:** the prod-mutating box run + live verification (prod creds required).
+- **P2 — Tabs run:** execute the pass on Superfood Tabs with its C specifics; verify live. **Trigger built:** `npx tsx scripts/queue-product-refinement.ts` (defaults to Superfood Tabs) enqueues the `product-seed` job in `refinement` mode (no UI/CLI path produced one before — the seed API route carries no `mode`). The box then runs the pass on Max, reading the founder-LOCKED Run-#1 inputs above. **Awaiting:** the prod-mutating box run + live verification (prod creds required).
 
 > **Fan-out (P3) split out → [[pdp-refinement-pass-fan-out]]:** run the pass on Creamer, Guru, Zen, Creatine, K-Cups, Amazing Coffee — operational application of this shipped workflow, founder-verification-gated.
 

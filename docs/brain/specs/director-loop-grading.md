@@ -1,17 +1,17 @@
-# Director continuous loop + grading ✅
+# Director continuous loop + grading
 
 **Owner:** [[../functions/platform]] · **Parent:** M5 — Continuous loop + grading
 **Blocked-by:** [[platform-director-agent]]
 
 The supervisory loop that closes the **CEO → Director → tool** chain for the [[../goals/devops-director]] goal. The [[platform-director-agent|Platform/DevOps Director]] runs on a **standing cadence** (a scheduled pass), and the CEO **grades the director's calls 1–10** — *was the auto-approval right? did the escorted goal land clean?* — and those grades **train it and tighten/loosen the leash**. This directly mirrors the shipped [[storefront-campaign-grading-loop|Head-of-Growth campaign-grading loop]] (an AI/human grader against a rubric + human-approved calibration rules, human-overridable, feeding back as a training signal) — reusing its proven shape one level up the org chart. Today the leash in the goal is **static**: the [[platform-director-agent|M4 director]] auto-approves within a fixed policy with no feedback loop that widens or narrows the [[approval-routing-engine|`live + autonomous`]] envelope based on whether its past calls were good. Success metric served: **% of platform approvals the CEO never touches** can *safely* trend up because the director's decision quality is measured and the autonomy envelope is earned, not assumed.
 
-## Phase 1 — the standing cadence ✅
+## Phase 1 — the standing cadence
 - ✅ shipped
 - A scheduled Platform-Director pass (a cron enqueueing the [[platform-director-agent|`platform-director`]] [[../tables/agent_jobs]] kind, registered in `MONITORED_LOOPS` per [[coverage-auto-register-agent]] so it can't silently die), in addition to the event-driven processing — so escorting + watching happen on a reliable beat, not only on inbound approvals. Mirror [[../inngest/daily-analysis-report-cron]]'s cron shape.
 
 **Shipped:** `src/lib/inngest/platform-director-cron.ts` — a daily cron (`15 12 * * *`, mirroring [[../inngest/daily-analysis-report-cron]]) that inserts one `queued` `agent_jobs` row `kind='platform-director'` per build-console workspace (any workspace with an agent_jobs row, like [[../inngest/spec-test-cron]]), deduped against in-flight platform-director jobs — no daily pileup. Registered in the Inngest serve list (`src/lib/inngest/registered-functions.ts`) and in `MONITORED_LOOPS` (`src/lib/control-tower/registry.ts`, `owner: platform`, 26h window + `registeredAt` first-tick grace) so a dead cadence surfaces on Control Tower. End-of-run `emitCronHeartbeat`. Brain page [[../inngest/platform-director-cron]]. Free-text `platform-director` agent_jobs kind — no migration. The box lane that *processes* the enqueued job (`runPlatformDirectorJob`) is [[platform-director-agent]]'s deliverable.
 
-## Phase 2 — the director-decision grade store + rubric ✅
+## Phase 2 — the director-decision grade store + rubric
 - ✅ shipped
 - `director_decision_grades` (columns: `id`, `approval_decision_id` (→ [[../tables/approval_decisions]]) or `goal_slug`/`milestone`, `dimension` ∈ `auto-approval｜goal-escort`, `grade` (1–10), `reasoning`, `graded_by` ∈ `agent｜human`, `overridden_by`, `created_at`) — one row per graded call. Brain page [[../tables/director_decision_grades]] (probe live schema first per [[../README]]).
 - A grading rubric calibrated by **human-approved rules** in a `director_grader_prompts` store modeled on [[../tables/grader_prompts]] (`status` ∈ `proposed｜approved`) — so the CEO corrects the grader's scoring on edge cases, exactly as the ticket/campaign graders are calibrated.
@@ -21,7 +21,7 @@ The supervisory loop that closes the **CEO → Director → tool** chain for the
 - [[../tables/director_grader_prompts]] — the human-approved calibration store (`status` ∈ `proposed｜approved｜rejected｜archived`, `derived_from_decision_id`/`derived_from_grade_id`), modeled on [[../tables/grader_prompts]] — only `approved` rules calibrate the Phase-3 grader.
 - RLS mirrors [[../tables/approval_decisions]] (the ledger this grades): authenticated SELECT (the Agents-hub report is owner-gated above the DB), service-role write. Apply via `scripts/apply-director-decision-grades-migration.ts` (idempotent). The LLM grader that writes these rows is `src/lib/agents/director-grader.ts` — **Phase 3**.
 
-## Phase 3 — grade the two dimensions ✅
+## Phase 3 — grade the two dimensions
 - ✅ shipped
 - `src/lib/agents/director-grader.ts` `gradeDirectorCall(decision, dimension)` — an LLM grader ([[../libraries/ai-models]]) over (a) each **auto-approval** (was the cause+fix actually sound and within the leash? did it hold up — no rollback/repeat-failure after?) and (b) each **escorted goal/milestone** (did it land clean — merged, tsc/CI green, no regression?). Returns a 1–10 grade + reasoning, human-overridable (records `graded_by='human'`/`overridden_by`), mirroring [[storefront-campaign-grading-loop]]'s grader.
 - Fired on the M1 cadence over recently-concluded decisions; idempotent per decision.
@@ -32,7 +32,7 @@ The supervisory loop that closes the **CEO → Director → tool** chain for the
 - **Idempotent + human-safe:** keyed on the partial uniques; a re-run UPDATEs in place; `graded_by='human'` is never re-written by the agent.
 - **Fired on the M1 cadence:** `gradeConcludedDirectorCalls({ workspaceId })` is the sweep, wired into [[../inngest/platform-director-cron]]'s `grade-concluded-director-calls` step (runs in the deployed runtime — it needs the API key — not on the box; mirrors [[../inngest/acquisition-research-cadence]]'s grade sweep). Best-effort per workspace; a no-op while the director has made no autonomous calls (pre-Phase-4 → zero candidates).
 
-## Phase 4 — feed grades back to tighten/loosen the leash ✅
+## Phase 4 — feed grades back to tighten/loosen the leash
 - ✅ shipped
 - Grades **train the director**: a sustained high grade in a category widens its autonomy envelope (the CEO can promote a previously-escalated low-risk category into the auto-approve leash); a low grade narrows it (a category reverts to CEO-gated). The recommendation surfaces as an owner-confirmed change to Platform's [[approval-routing-engine|`live + autonomous`]] / leash policy — **the CEO disposes; the loop never widens its own envelope unilaterally** ([[../operational-rules]] § North star).
 - Surface per-period grades + trend + the leash-adjustment recommendations on the M1 Agents hub / M3 board (the CEO's report contract for the director).
@@ -43,7 +43,7 @@ The supervisory loop that closes the **CEO → Director → tool** chain for the
 - **Report surface** — `GET /api/developer/agents/grades` (owner-gated) → a new **Director grades** tab on the M1 Agents hub (CEO + Platform roles): the recommendations, per-dimension/category grades + trend, the proposed calibration rules (Approve/Reject), and the recent grades with a **one-click override**.
 - **Human-overridable + calibrated** — `POST /api/developer/agents/grades/{gradeId}` records `graded_by='human'` + `overridden_by` (the grader never re-writes a human grade); a ≥3-point override gap (or an explicit request) drafts a `proposed` [[../tables/director_grader_prompts]] rule (Opus). `PATCH /api/developer/agents/grader-prompts/{ruleId}` approves/rejects it — only an `approved` rule reaches the grader ([[../libraries/director-grader]] `buildDirectorGraderSystemPrompt`), closing the calibration loop.
 
-## Phase 5 — the human-readable EOD recap + detail page ✅
+## Phase 5 — the human-readable EOD recap + detail page
 - ✅ shipped
 - The standing cadence emits a **daily EOD recap**: a one-line standup post to the [[directors-board-gamified|#directors board]] (*"Shipped 8 specs · advanced 1 goal · fixed 2 bugs · approved 4 migrations"*) **plus its own human-readable detail page** (in the M1 Daily Summaries tab) — a readable narrative of the director's day (what it fixed + why, which goal it moved + how far, what it escalated), generated by reading that day's [[../tables/director_activity]] rows. The recap is a **query over the activity log**, never hand-maintained.
 - **Future (not this spec):** once the CEO is automated, it reads across *all* directors' `director_activity` into a single CEO roll-up report — design later.

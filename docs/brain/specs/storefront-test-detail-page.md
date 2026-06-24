@@ -1,4 +1,4 @@
-# Storefront test detail page — both-version previews + per-arm funnel stats ✅
+# Storefront test detail page — both-version previews + per-arm funnel stats
 
 **Owner:** [[../functions/growth]] · **Parent:** the owner-facing view for [[storefront-optimizer-agent]] experiments; extends the optimizer/funnel dashboards. · **Requested 2026-06-23:** the owner needs a place to actually *see* each running A/B test — **preview links for both versions** (control + variant) and **per-version stats** (sessions, engagement %, add-to-cart rate, lead rate, conversion rate, predicted LTV, …) — to judge a test at a glance and decide promote/kill.
 
@@ -16,7 +16,7 @@ Per experiment, render the arms **side by side** (control vs variant(s) vs holdo
 - Engagement: `storefront_events` (chapter_view/dwell/scroll_depth/CTA per exposed session, joined on the exposure's variant_id).
 - Reuse the existing attribution rollup ([[../libraries/storefront-experiment-attribution]]) — the page reads the same numbers the bandit decides on (no divergent math).
 
-## Phase 1 — tests index + detail page (both-arm preview + per-arm stats) ✅
+## Phase 1 — tests index + detail page (both-arm preview + per-arm stats)
 A tests index + `[experimentId]` detail page reading `storefront_experiments`/`_variants` + `storefront_events`; per-arm preview link (owner-only, exposure-excluded) + the funnel metric table with lift-vs-control + win-probability. Brain: [[storefront-optimizer-agent]] · [[storefront-experiment-bandit-framework]] · [[../libraries/storefront-experiment-attribution]] · [[../libraries/storefront-experiment-funnel]] · [[../libraries/storefront-experiments]] · [[../tables/storefront_experiments]] · [[../dashboard/storefront__optimizer]].
 
 **Landed:**

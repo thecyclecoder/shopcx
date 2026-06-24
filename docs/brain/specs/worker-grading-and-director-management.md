@@ -1,4 +1,4 @@
-# Worker grading + director management layer ✅
+# Worker grading + director management layer
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (the org learns + self-manages) · hardens [[platform-director-agent]] + [[director-loop-grading]] + [[worker-coaching-loop]].
 

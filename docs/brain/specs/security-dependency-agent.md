@@ -1,4 +1,4 @@
-# Security / Dependency Agent ✅
+# Security / Dependency Agent
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/grow-surface-platform-agent-team]] · M3 — Security / Dependency agent
 
@@ -10,7 +10,7 @@ Auto-merge optimizes "ship the fix"; its degenerate state is shipping a fix that
 ## The agent — a new DevOps worker (persona reskinnable)
 A new `agent_jobs.kind` (proposed `security-review`) on its own concurrency-1 lane, registered as a `MONITORED_LOOPS` `agent-kind` tile (owner `platform`, `agentKind: "security-review"`, a `stuckThresholdMs`) + a [[../libraries/agent-personas|persona]] in `personas.ts` / `RESPONSIBILITIES`. Proposed name: **Vault — Security Guardian** (🔒). Auto-surfaces on the org view via the `agent-kind` roster path ([[../libraries/org-chart]] `workersForFunction`).
 
-## Phase 1 — per-diff security review on every merged `claude/*` diff ✅
+## Phase 1 — per-diff security review on every merged `claude/*` diff
 - ✅ shipped — `security-review` job kind + lane; `enqueueSecurityReviewJob` fired from the merge hook ([[../libraries/agent-jobs]] `applyMergedBuildEffects`, deduped by merge SHA); `runSecurityReviewJob` (diff mode) reviews the merged diff read-only on Max, classifies, authors a fix spec + surfaces a `security_build` Build card routed via [[../libraries/approval-router]], writes a [[../tables/director_activity]] row.
 - Fire from the **existing merge hook** the way `spec-test` and `pr-resolve` ride events: on a merged `claude/*` build PR, `reconcileMergedJobs` ([[../libraries/agent-jobs]]) / the [[../integrations/github-webhook|GitHub webhook]] enqueues one `security-review` job (`enqueueSecurityReviewJob`, deduped by merge SHA; `spec_slug` = the merged spec slug / `pr-{number}`).
 - The worker (`runSecurityReviewJob` in `scripts/builder-worker.ts`) claims it on its concurrency-1 lane and runs a `claude -p` on Max (read-only, no `ANTHROPIC_API_KEY`, keeps read-only DB/crypto secrets) running the **`/security-review`** skill's checks over the merged diff: injection, secret/credential leak, authz / RLS-policy regressions, unsafe `createAdminClient()` exposure, `_encrypted` handling.
@@ -19,7 +19,7 @@ A new `agent_jobs.kind` (proposed `security-review`) on its own concurrency-1 la
 ### Verification — Phase 1
 - A merged `claude/*` diff with no issue → a logged `security-review` job, a clean verdict, no action. A diff that adds an obvious injection / leaked secret → a flagged finding surfaced to the platform approver + a `director_activity` row, with **no** auto-mutation.
 
-## Phase 2 — CVE / dependency-upgrade watch ✅
+## Phase 2 — CVE / dependency-upgrade watch
 - ✅ shipped — daily [[../inngest/security-dep-watch]] cron (`0 4 * * *`, a `MONITORED_LOOPS` `cron` tile owned by `platform`, with `registeredAt`) enqueues a `dep-watch` `security-review` job; `runSecurityReviewJob` (dep-watch mode) runs `npm audit --json` on the real tree and, on a ≥ moderate advisory, authors/refreshes the `security-dep-upgrades` fix spec to main + surfaces a Build card (never auto-bumps). `npm audit` runs on the box (where npm + the lockfile live), not in the serverless cron — see [[../libraries/security-agent]].
 - A daily cron (`inngest/security-dep-watch`, a `MONITORED_LOOPS` `cron` tile owned by `platform`, with a `registeredAt`) scans `package.json` + the lockfile for known-vulnerable deps / available **security** upgrades (e.g. `npm audit` / an advisory feed).
 - On a finding, **author a scoped upgrade-fix spec to main** + surface a one-tap owner Build card (never auto-bumps a dependency — the owner-gated build does the bump + `tsc` gate), mirroring [[coverage-auto-register-agent|Cole]] / [[repair-agent|Rafa]]. Write a `director_activity` row.
@@ -27,7 +27,7 @@ A new `agent_jobs.kind` (proposed `security-review`) on its own concurrency-1 la
 ### Verification — Phase 2
 - A seeded vulnerable/outdated dependency → the daily watch authors an upgrade-fix spec + surfaces a Build card; a clean tree → no spec, a healthy beat.
 
-## Phase 3 — surface on the org view + brain ✅
+## Phase 3 — surface on the org view + brain
 - ✅ shipped — `security-review` agent-kind tile + `security-dep-watch` cron tile registered in [[../libraries/control-tower]] `MONITORED_LOOPS` (owner `platform`); the lane auto-surfaces on `/dashboard/agents` via the `agent-kind` roster path ([[../libraries/org-chart]] `workersForFunction`). Persona **Vault — Security Guardian** (🔒) + responsibilities added to [[../libraries/agent-personas|personas.ts]]. New brain pages [[../libraries/security-agent]] + [[../inngest/security-dep-watch]]; cross-linked from [[../integrations/github-webhook]] · [[../libraries/approval-router]] · [[../tables/director_activity]] · [[../libraries/agent-jobs]].
 - The new `security-review` lane appears on `/dashboard/agents` automatically via the `agent-kind` roster path (and the [[agent-roster-sync]] reconciliation when it ships). Persona + responsibilities added to `personas.ts`.
 - Brain: new `libraries/security-agent` + `inngest/security-dep-watch` pages; register both in [[../libraries/control-tower]] `MONITORED_LOOPS`; cross-link [[../integrations/github-webhook]], [[../libraries/approval-router]], [[../tables/director_activity]].

@@ -1,4 +1,4 @@
-# Directors can propose goals (CEO-greenlit) ⏳
+# Directors can propose goals (CEO-greenlit)
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] — extends the Agent Org's [[approval-routing-engine]] + [[../libraries/brain-roadmap]] goal model so a director can PROPOSE a goal the CEO still greenlights
 **Found in use 2026-06-24:** the CEO wants directors to be able to make goals (then Pia decomposes them). Today only the CEO greenlights goals — a hard rail on the director leash — and a director can emit a spec card but NOT a goal artifact, so Ada had to paste goal drafts as plain text. This adds a first-class director-PROPOSED goal, keeping the CEO greenlight as the activation gate.
@@ -7,7 +7,7 @@
 
 A goal is a top-level company objective; the CEO owns objectives, directors own progress within approved ones ([[../operational-rules]] § North star). So this spec lets a director AUTHOR + SURFACE a goal — it does NOT let a director ACTIVATE one. A director-proposed goal is inert until the CEO greenlights it (mirroring how a director proposes a spec and the CEO approves the build). A director proposes only for ITS OWN function; greenlight is ALWAYS the CEO; a director never greenlights any goal — its own or another's. This is the friction-removal, not the rail-removal.
 
-## Phase 1 — the director-proposed goal artifact + explicit greenlit state ✅
+## Phase 1 — the director-proposed goal artifact + explicit greenlit state
 - Add a real `status` to the goal model: `proposed` (director-authored, awaiting CEO) → `greenlit` (CEO-approved, active) → (existing progress/complete). Replaces the current hack where [[../libraries/brain-roadmap]] `parseGoal` / the escort infer 'already greenlit' from `pct > 0` (the devops-director gotcha) — a `proposed` 0% goal is now unambiguously distinct from an active 0% goal.
 - A director authors a `docs/brain/goals/{slug}.md` with `**Owner:** [[../functions/{self}]]`, a `**Proposed-by:** [[../functions/{self}]]` marker, and `**Status:** proposed`. The author surface is the same committer path the spec cards use (no new infra), scoped so a director can only author for its own function.
 - It routes to the CEO as an Approval Request via [[approval-routing-engine]] — goals NEVER route to a director for greenlight, even a live+autonomous one (unlike owned approvals, which route to the live director). On greenlight the worker flips `Status: greenlit`; on decline it's archived. Writes a `proposed_goal` [[../tables/director_activity]] row.
@@ -25,7 +25,7 @@ What landed: the explicit goal-state model ([[../libraries/brain-roadmap]] `Goal
 - **Decline.** On a different proposal, click **Decline** → expect `runProposedGoalJob` to **delete** `docs/brain/goals/{slug}.md` from `main` (git history retains it) and mark the job `completed`.
 - **Scope rail.** `proposeGoal({ proposerFunction:'platform', ownerFunction:'growth', … })` → expect `{ ok:false, error:/only for its OWN function/ }` (a director cannot author a goal for another function). No director path ever greenlights a goal — `proposed-goal` is unmapped from `KIND_TO_FUNCTION`, so it always routes to the CEO.
 
-## Phase 2 — wire greenlit goals into decomposition + escort ✅
+## Phase 2 — wire greenlit goals into decomposition + escort
 - On greenlight, the goal is eligible for [[../specs/goal-decomposition-engine|Pia]]'s `kind='plan'` human-gated pass (proposes a milestone→spec tree; still CEO-approved per leaf), and once its first specs land (`pct > 0`) the director's `escortApprovedGoals` carries it — the existing chain, unchanged.
 - Surface director-proposed goals on the [[../dashboard/agents|Agents hub]] / roadmap with their proposer + `proposed/greenlit` state, so you see what each director is proposing vs what you've activated.
 
@@ -36,7 +36,7 @@ What landed: the **decomposition gate** + the **proposer/status surfaces**. The 
 - **Agents hub surface.** `getOrgChart` (`src/lib/agents/org-chart.ts`, [[../libraries/agent-personas]]) now carries `status` + `proposedBy` + `proposedByLabel` on each `ceo.goals` entry; the CEO profile (`/dashboard/agents/ceo`) renders a proposed goal as "⏳ Proposed by {Director} · awaiting your greenlight" vs a greenlit goal's "Greenlit · N% complete".
 - `npx tsc --noEmit` clean.
 
-## Phase 3 — the director's coaching/proposal seat gets a `goal` action type ✅
+## Phase 3 — the director's coaching/proposal seat gets a `goal` action type
 - Give the director output (coaching chats + the standing surfaces) a first-class `goal` proposal action alongside `spec` — so a director hands the CEO a ready-to-greenlight goal card instead of plain-text drafts. Closes the asymmetry that today only `spec`/`coaching` exist.
 - Shipped: the director coaching seat (`scripts/builder-worker.ts` `runDirectorCoachJob`) now emits + executes a `goal` card. `DIRECTOR_COACH_OUTPUT` + `directorCoachFraming` advertise the `goal` action (structured fields: slug/title/outcome/successMetric/body, own-function only); `normalizeCoachActions` validates it; on CEO approval the executor calls Phase-1 [[../libraries/goal-proposals]] `proposeGoal` (NOT a direct commit) — so a chat-proposed goal goes through the identical proposed→greenlight lifecycle (artifact committed `Status: proposed`, routed to the CEO for the greenlight). UI: `director-coach-chat.tsx` renders the `goal` card (outcome + "approve to surface for your greenlight"). Two deliberate gates: approve the card (accept the draft) → greenlight in the inbox (activate). Decomposition follows greenlight (Phase 2).
 

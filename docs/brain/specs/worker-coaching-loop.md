@@ -1,4 +1,4 @@
-# Worker coaching loop — the director teaches its workers ✅
+# Worker coaching loop — the director teaches its workers
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (M7 — the org learns)
 **Blocked-by:** [[platform-director-agent]]
@@ -18,7 +18,7 @@ The [[platform-director-agent|DevOps Director]] doesn't just queue + grade — i
 - **Coaching that doesn't take.** If a worker keeps erring *after* N coaching attempts on the same class → **escalate to CEO** (the instruction approach isn't working — maybe a deeper redesign), per the loop-guard.
 - **The worker never edits its own instructions** — only its director coaches it; the director answers to the CEO. (CEO → Director → worker.)
 
-## Phase 1 — worker instruction store + repeated-error detection + coach + log ✅
+## Phase 1 — worker instruction store + repeated-error detection + coach + log
 `agent_instructions` (per-worker versioned guidance, loaded into the worker's prompt at runtime) + `agent_coaching_log`; the director's repeated-error detector (off grades + `director_activity`); the coach action (amend instructions, log the director→worker message, post to the board); the guidance-gap-vs-code-bug router; post-coaching grade re-check. Brain: [[../goals/devops-director]] · [[platform-director-agent]] · [[director-loop-grading]] · [[../tables/grader_prompts]] · [[regression-agent]] · [[../specs/repair-agent]].
 
 **Shipped:**

@@ -1,4 +1,4 @@
-# Platform scorecard metrics engine + daily pulse ✅
+# Platform scorecard metrics engine + daily pulse
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/platform-department-scorecard]] — (a) Daily pulse
 

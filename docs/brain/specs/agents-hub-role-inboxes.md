@@ -1,20 +1,20 @@
-# Agents hub + role inboxes ✅
+# Agents hub + role inboxes
 
 **Owner:** [[../functions/platform]] · **Parent:** M1 — Agents hub + role inboxes
 
 The foundation surface for the [[../goals/devops-director]] goal — an owner-only **"Agents" hub** that renders the live org chart (CEO · Directors · Workers) read from the brain, and gives every role the **same three-tab inbox shell** (Messages · Approval Requests · Daily Summaries) that M2/M3/M4 fill. Today there is no single place to see the org or its queues — approvals scatter across the Control Tower feeds, spec cards, and the box page ([[../operational-rules]] default `approvalHref`), and [[../tables/dashboard_notifications]] is a generic bell, not a role-routed inbox. This milestone formalizes today's reality (no director is live → **everything lands in the CEO inbox**) into one consolidated surface, and lands the reusable **director-persona + SVG-mascot design-system piece** (🛠️ Ada/Platform · 🚀 Max/Growth · 🎨 Iris/CMO · 💬 June/CS · 🧲 Theo/Retention · 👑 CEO) every later milestone reuses. Success metric served: the CEO reads **one inbox**, not N scattered surfaces — the precondition for "% of platform approvals you never have to touch" to even be measurable.
 
-## Phase 1 — org-chart reader → the Agents hub sidebar ✅
+## Phase 1 — org-chart reader → the Agents hub sidebar
 - ✅ shipped
 - Read the org chart from the brain via [[../libraries/brain-roadmap]] `getFunctionMap()`/`getFunctions()` (the `functions/*.md` directors + their mandates) and `getGoals()` (the `goals/*.md` finite goals) — **no new parser**; reuse the existing markdown-as-data source. Workers = the existing [[../tables/agent_jobs]] `kind`s (the box lanes) grouped under their owning function.
 - New owner-only route `src/app/dashboard/agents/` (sibling of `/dashboard/developer/control-tower`): a left nav listing **CEO → Directors → Workers**, each director row showing its persona chip (name/color/mascot) + a live/autonomous badge (the flag itself lands in M2). Owner-gated like the Control Tower (workspace owner only).
 
-## Phase 2 — the director-persona + SVG-mascot design system ✅
+## Phase 2 — the director-persona + SVG-mascot design system
 - ✅ shipped
 - A reusable `src/lib/agents/personas.ts` (+ brain page `libraries/agent-personas.md`) mapping each function slug → `{ name, color, personality, mascotSvg }` for the cast (Ada/Max/Iris/June/Theo + CEO). Mascots are inline SVG components in `src/components/agents/` so M3's board can render them without an asset pipeline.
 - Persona data is **reskinnable** (names/mascots are config, per the goal) and keyed by function slug so a new director inherits a persona by adding one entry — the template every other director reuses.
 
-## Phase 3 — the three-tab inbox shell (CEO inbox live first) ✅
+## Phase 3 — the three-tab inbox shell (CEO inbox live first)
 - ✅ shipped
 - Each role page renders three filterable tabs — **Messages** (the board; populated by M3), **Approval Requests** (the routed queue; populated by M2), **Daily Summaries** (EOD recaps; populated by M3/M4). This milestone ships the **shell + filters + empty/loading states**; the CEO inbox is wired live first so M2 has a real target to emit into.
 - Reuse [[../tables/dashboard_notifications]] as the backing store for the shell where it fits (it already has `type`/`title`/`body`/`link`/`read`/`dismissed`), or add a thin `agent_inbox_items` view — decided at build time against the live schema (probe first, per [[../README]] § Probing technique). No approval-routing logic here — that is M2's keystone.
@@ -22,13 +22,13 @@ The foundation surface for the [[../goals/devops-director]] goal — an owner-on
 ## Information architecture (2026-06-23 — owner direction)
 **Agents is a TOP-LEVEL sidebar section** (not under Developer), with submenu items: **Message Board** (the current `/dashboard/agents` — the inbox/board IS the Message Board) · **Org Chart** (`/dashboard/agents/org-chart`, Phase 4 — shipped as an in-page **Org chart · Inbox** toggle on `/dashboard/agents`, so this nav item stays `comingSoon`) · **Directors** (`/dashboard/agents/directors`, Phase 5 — **live**) · **Workers** (`/dashboard/agents/workers`, Phase 5 — **live**). The non-Message-Board items are `comingSoon` in the nav until their phase ships, then flipped live (Directors + Workers flipped live with Phase 5). Avatars are served from the public `agent-avatars` bucket, **resized to 320px** (small placement — never the multi-hundred-KB originals).
 
-## Phase 4 — the org-chart (employee) view ✅
+## Phase 4 — the org-chart (employee) view
 - ✅ shipped
 - An Agents sidebar item that renders a **visual employee/org chart** — CEO at top → Directors → their Workers — with each node showing the persona avatar + name + role. **Every node is clickable** → routes to that role's profile detail page (Phase 5). Not just a list: a real org-tree layout (think a company team page).
 - Directors read from `functions/*.md`; Workers are the platform agents grouped under their director (the roster in [[../goals/devops-director]] § The Platform team) — brain-driven, no hand-maintained copy.
 - **Shipped:** an **Org chart / Inbox** view toggle on `/dashboard/agents` (defaults to the org chart — the team page) renders `<OrgTree>` (`src/components/agents/org-tree.tsx`) over the same brain-driven `getOrgChart()` payload — no second copy of the org chart. CEO at top → a Directors rail (each with its SVG mascot + live/autonomous badge) → each director's Workers (its box `agent_jobs` lanes) beneath it, every node a clickable persona card. Until Phase 5's per-role profile pages land, a node click selects that role and opens its inbox (a worker selection shows a minimal worker header + its routes-to-CEO inbox, so no node click is a dead end); Phase 5 repoints the nodes at `/dashboard/agents/[role]`.
 
-## Phase 5 — profile detail pages (responsibilities) ✅
+## Phase 5 — profile detail pages (responsibilities)
 - ✅ shipped
 - A profile detail page per role (`/dashboard/agents/[role]`): avatar, name, persona, and a **responsibilities list**. **Workers carry the most precise responsibility list** (their exact mandate — e.g. Repair: "triage inbound errors, root-cause, dismiss foreign/transient, author fixes"); directors a higher-level mandate (from `functions/*.md`); the CEO the company-objective level (from `goals/*.md`). Clickable from any tab (the org-chart nodes, a director row, a worker chip) — same profile page everywhere.
 - Worker personas extend the Phase-2 persona module with the full Platform worker cast (Rafa/Repair · Remi/Regression · Devi/DB-Health · Cole/Coverage · Vera/Verify · Bo/Build · Mira/Migrations · Pax/PR-Resolve · Fenn/Fold · Tao/Monitor · Pia/Planner), each with avatar + precise responsibilities.

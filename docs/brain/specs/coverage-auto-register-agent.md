@@ -1,4 +1,4 @@
-# Coverage auto-register agent — close Control Tower coverage gaps automatically ✅
+# Coverage auto-register agent — close Control Tower coverage gaps automatically
 
 **Owner:** [[../functions/platform]] · **Parent:** extends the [[control-tower-complete-coverage|coverage self-audit]] + mirrors [[repair-agent]] (detect → propose fix). · **Found in use 2026-06-23:** the coverage self-audit keeps surfacing **unregistered loops** — a cron `createFunction` served in code but absent from `MONITORED_LOOPS` (currently `storefront-ltv-reconcile-cron` + `storefront-optimizer-cron`; before them, the storefront-experiments + lever-decay crons). Each time the owner (or I) hand-adds the registry entry. That's a mechanical fix the system should propose itself.
 
@@ -16,7 +16,7 @@ The self-audit already *detects* the gap (it lists each unregistered loop with i
 - Re-run the audit with a gap already proposed → **no duplicate** proposal.
 - Negative: a fn that already has a `MONITORED_LOOPS` entry → never flagged; the agent never silently edits `registry.ts` without the owner tap.
 
-## Phase 1 — detect unregistered loop → propose the MONITORED_LOOPS entry ✅
+## Phase 1 — detect unregistered loop → propose the MONITORED_LOOPS entry
 On a coverage self-audit gap, author + surface (deduped) the inferred `MONITORED_LOOPS` entry for one-tap Build, with an "intentionally-unmonitored" exemption path. Brain: [[../libraries/coverage-register-agent]] · [[control-tower-complete-coverage]] · [[../libraries/control-tower-self-audit]] · [[../libraries/control-tower]] (registry) · [[repair-agent]].
 
 **Shipped:** `src/lib/coverage-register-agent.ts` — deterministic inference (`inferCadence`/`inferOwner`/`inferLoopEntry` → cadence-derived window + proposed owner + register/exempt fix-spec bodies) + `enqueueCoverageRegisterJob` (deduped: one open proposal per loop id, plus a 24h recently-built guard) + `getOpenCoverageRegistrations` (read surface). Triggered in `src/lib/control-tower/monitor.ts` `runControlTowerMonitor` (per `selfAudit.unregistered` loop, best-effort). Owner action: `src/app/api/developer/control-tower/coverage-register/route.ts` (`register`/`exempt`/`dismiss` → `queued_resume`). Box runner: `scripts/builder-worker.ts` `runCoverageRegisterJob` (materializes the chosen registry fix spec to main + queues its `build`, deduped by `hasActiveBuildForSlug`). Surfaced as the **"Coverage registration"** feed on `/dashboard/developer/control-tower`. Free-text `coverage-register` [[../tables/agent_jobs]] kind — no migration.

@@ -1,4 +1,4 @@
-# ✅ Ada on Slack — chat with your CTO in #cto-ada
+#  Ada on Slack — chat with your CTO in #cto-ada
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate "Autonomous build platform" (phone-first idea→spec→build, extended to phone-first founder↔CTO conversation)
 
