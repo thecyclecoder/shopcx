@@ -3,8 +3,9 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { useSectionNav } from "@/lib/section-nav-context";
 import type { WorkspaceWithRole } from "@/lib/types/workspace";
 import NotificationBell from "@/components/notification-bell";
 
@@ -177,6 +178,9 @@ export default function Sidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const { nav: sectionNav } = useSectionNav(); // contextual takeover (a section page registers its sub-nav)
+  const activeSection = searchParams.get("s") || (sectionNav?.sections[0]?.key ?? "");
   const [open, setOpen] = useState(false);
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
@@ -334,7 +338,35 @@ export default function Sidebar({
 
       {/* Navigation */}
       <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-3">
-        {NAV_STRUCTURE.map((entry, idx) => {
+        {/* Contextual takeover — a section page (e.g. a director profile) replaces the main nav with its own. */}
+        {sectionNav && (
+          <div className="space-y-0.5">
+            <Link
+              href={sectionNav.backHref}
+              className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+              {sectionNav.backLabel}
+            </Link>
+            <p className="px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{sectionNav.title}</p>
+            {sectionNav.sections.map((s) => {
+              const active = activeSection === s.key;
+              return (
+                <Link
+                  key={s.key}
+                  href={`${sectionNav.basePath}?s=${s.key}`}
+                  className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                    active ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300" : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  }`}
+                >
+                  {s.icon && <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={s.icon} /></svg>}
+                  {s.label}
+                </Link>
+              );
+            })}
+          </div>
+        )}
+        {!sectionNav && NAV_STRUCTURE.map((entry, idx) => {
           // Section with children
           if ("items" in entry) {
             const section = entry as NavSection;
