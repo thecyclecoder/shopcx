@@ -1,6 +1,6 @@
 # Initialize unblocked platform specs with no waiting period ⏳
 
-**Owner:** [[../functions/platform]] · **Parent:** [[worker-grading-and-director-management]] — extends the fix-escort lane (`escortFixSpecs`) under [[../goals/devops-director]]
+**Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (the org learns + self-manages) — extends the fix-escort lane (`escortFixSpecs`)
 **Found in use 2026-06-24:** the CEO asked why [[orchestrator-retry-5xx]] hasn't started. It's a platform-owned authored fix spec (Repair-signature `vercel:caec228f9136b469`, verdict real-bug), unblocked, with a single `## Phase 1 — close it ⏳` section and ZERO builds ever. It falls through every auto-build lane: the fix-escort lane requires `phases.length === 0`; grooming requires ≥1 ✅ phase; the goal-walk requires a goal link. [[slack-fetch-timeout-hardening]] is in the identical state. CEO policy: a platform-owned spec that checks out should initialize with NO waiting period; other-department specs are only babysat through their phases once started (never initialized by me).
 
 ## The bug
@@ -25,5 +25,5 @@
 - An unblocked platform-owned planned spec with 0 ✅, no goal link, no Repair-signature → after a passing soundness investigation, a `kind='build'` row + a `director_activity` row; a failed/ambiguous investigation → escalates to the CEO, queues nothing.
 - A non-platform unstarted spec → never initialized. A platform spec that is part of an unstarted (0%) goal → still escalates as a new-goal call, not initialized.
 
-## Open decision (for the CEO)
-Phase 2 defaults to requiring a soundness investigation before initializing a non-fix platform feature (vs. building it outright). Confirm that gate, or say 'just build any unblocked platform spec that isn't goal/destructive/multi-choice' and I'll drop the investigation step for platform-owned specs.
+## CEO decision (resolved 2026-06-24)
+**Confirmed: Phase 2 requires a read-only soundness investigation before initializing a non-fix platform spec** (a Max `claude -p` verdict that the spec is sound + in-scope), never a blind build. Do NOT drop the investigation step — initiation of a platform feature is gated by the same soundness rail as the approval/groom lanes.
