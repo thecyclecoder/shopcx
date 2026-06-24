@@ -1,5 +1,7 @@
 # Iteration Ingest — Async Insights Reports for Huge Backfills ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO" — follow-on to [[iteration-engine-ingest-resilience]] (the originally-deferred Phase 3, split out so the parent ships).
 **Deferred:** future optimization, build only if needed (P1/P2 of the parent already solve transient errors + large ranges). CEO-deferred 2026-06-24 — every auto-build lane skips it until promoted back to Planned.
 
