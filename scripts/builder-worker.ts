@@ -14,6 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, join, basename } from "path";
 import { spawn, spawnSync } from "child_process";
+import { AsyncLocalStorage } from "async_hooks";
 import { randomUUID } from "crypto";
 // Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
@@ -699,6 +700,19 @@ async function meterAgentJob(
   }
 }
 
+// box-agent-model-tiers (Phase 1): the per-job model tier the box resolves at dispatch (modelForKind
+// keyed by the claimed job's kind + workspace). Carried through the whole job's async call tree via
+// AsyncLocalStorage so EVERY `claude -p` runner — even the deeply-nested director/triage sub-passes —
+// can splice `--model <id>` with NO call-site threading. Per-job isolation (one store per runJob)
+// keeps concurrent lanes from racing. A null store (unset kind, or a kind that runs before the wrapper)
+// ⇒ no flag ⇒ the Max default — today's behavior, so an unset kind never regresses.
+const _modelCtx = new AsyncLocalStorage<{ modelId: string | null }>();
+/** The `--model <id>` arg fragment for the job currently executing, or [] when unset (Max default). */
+function currentModelArgs(): string[] {
+  const id = _modelCtx.getStore()?.modelId ?? null;
+  return id ? ["--model", id] : [];
+}
+
 async function runClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
   // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
   const env: NodeJS.ProcessEnv = {};
@@ -718,7 +732,7 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
   // detector can tell "actively building" from "stuck". Plain json buffers the whole run and prints
   // once at the very end — zero liveness signal, so idle detection would kill every long build.
   // --verbose is required by stream-json. The final {type:"result"} event carries the result text.
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
   const r = await shAsync("claude", args, { cwd, env, idleTimeout: BUILD_IDLE_TIMEOUT_MS, timeout: BUILD_HARD_CAP_MS });
   let session = sessionId;
   let resultText = "";
@@ -770,7 +784,7 @@ async function runSeedClaude(prompt: string, sessionId: string | null, cwd: stri
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SEED_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -1808,7 +1822,7 @@ async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: PLATFORM_DIRECTOR_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -3631,7 +3645,7 @@ async function runImproveClaude(prompt: string, sessionId: string | null, cwd: s
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: IMPROVE_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -3858,7 +3872,7 @@ async function runTriageClaude(prompt: string, sessionId: string | null, cwd: st
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: TRIAGE_PASS_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -4051,7 +4065,7 @@ async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SPEC_TEST_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -4309,7 +4323,7 @@ async function runMigrationFixClaude(prompt: string, sessionId: string | null, c
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: MIGRATION_FIX_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -4712,7 +4726,7 @@ async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: st
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: DEV_ASK_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -5350,7 +5364,7 @@ async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd:
     env[k] = v;
   }
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: PR_RESOLVE_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -5615,7 +5629,7 @@ async function runRepairClaude(prompt: string, sessionId: string | null, cwd: st
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: REPAIR_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -6118,7 +6132,7 @@ async function runRegressionClaude(prompt: string, sessionId: string | null, cwd
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: REGRESSION_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -6523,7 +6537,7 @@ async function runSecurityClaude(prompt: string, sessionId: string | null, cwd: 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: SECURITY_REVIEW_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -6959,7 +6973,7 @@ async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | 
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
   const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
   const r = await shAsync("claude", args, { cwd, env, timeout: STOREFRONT_OPTIMIZER_TIMEOUT_MS });
   let session = sessionId;
   let resultText = "";
@@ -7386,7 +7400,23 @@ async function materializeOptimizerCampaign(
   return { ok: r.ok, detail: r.detail };
 }
 
+// box-agent-model-tiers (Phase 1): resolve the claimed job's model tier ONCE at dispatch (keyed by
+// kind + workspace) and run the whole job inside an AsyncLocalStorage context carrying that id, so
+// every nested `claude -p` runner splices `--model <id>` with no threading. Unset kind / any read
+// error ⇒ null ⇒ no flag ⇒ the Max default (no regression). modelForKind is dynamic-imported (matches
+// the file's lazy-import style and tolerates the table being absent pre-migration).
 async function runJob(job: Job) {
+  let modelId: string | null = null;
+  try {
+    const { modelForKind } = await import("../src/lib/agent-model-tiers");
+    modelId = await modelForKind(await admin(), job.workspace_id, job.kind);
+  } catch {
+    modelId = null; // never let a registry hiccup block a job — fall back to the Max default
+  }
+  return _modelCtx.run({ modelId }, () => dispatchJob(job));
+}
+
+async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
   if (job.kind === "product-seed") return runProductSeedJob(job);
