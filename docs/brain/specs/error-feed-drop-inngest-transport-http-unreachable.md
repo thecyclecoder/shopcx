@@ -1,4 +1,4 @@
-# Drop transient Inngest http_unreachable transport noise from the Control Tower inngest feed ⏳
+# Drop transient Inngest http_unreachable transport noise from the Control Tower inngest feed ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] (sibling of [[../specs/error-feed-drop-bare-502-proxy-wrapper]] + [[../specs/error-feed-drop-aborted-stream-noise]]) · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/inngest/inngest-failure-capture.ts (add a reusable istransientinngesttransporterror(errname, errmessage) classifier in src/lib/control-tower/error-feed.ts matching http_unreachable / reset the connection / unexpected ending response / performing request to sdk url; on a first-sight match auto-resolve as transient instead of opening+paging, escalating only on recurrence within a window; add a regression fixture using this 06e8cf82e141fbaa blob in error-feed.test.ts; gate on npx tsc --noemit)::monitor-false-positive`
@@ -11,8 +11,10 @@ Signature inngest:06e8cf82e141fbaa opened (count=1, single timestamp 2026-06-24T
 
 **Likely target:** `src/lib/inngest/inngest-failure-capture.ts (add a reusable isTransientInngestTransportError(errName, errMessage) classifier in src/lib/control-tower/error-feed.ts matching http_unreachable / 'reset the connection' / 'Unexpected ending response' / 'performing request to SDK URL'; on a first-sight match auto-resolve as transient instead of opening+paging, escalating only on recurrence within a window; add a regression fixture using this 06e8cf82e141fbaa blob in error-feed.test.ts; gate on npx tsc --noEmit)`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
+
+**Shipped:** added `isTransientInngestTransportError(errName, errMessage)` to `src/lib/control-tower/error-feed.ts` (matches `http_unreachable` / `performing request to SDK URL` / `reset the connection` / `Unexpected ending response`), plus a `transient` flag on `recordError` that auto-resolves a first sighting (no page, no repair fan-out) and escalates to open+page only on recurrence within `TRANSIENT_RECUR_WINDOW_MS` (1 h). Wired into `src/lib/inngest/inngest-failure-capture.ts`. Regression fixtures (incl. the exact `inngest:06e8cf82e141fbaa` blob) added to `error-feed.test.ts` (11 tests pass). Brain pages updated: [[../libraries/control-tower]], [[../inngest/inngest-failure-capture]], [[../tables/error_events]]. `npx tsc --noEmit` clean.
 
 ## Verification
 - Re-trigger the originating condition (signature `inngest:06e8cf82e141fbaa`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
