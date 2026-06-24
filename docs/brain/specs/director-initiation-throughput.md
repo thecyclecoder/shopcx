@@ -1,5 +1,7 @@
 # Saturate the build pool — keep all 8 lanes full, not 4 per 15 min ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/platform]] · **Parent:** [[director-initialize-platform-specs-no-wait]] — opens the throughput throttle on the initiation/groom lanes under [[../goals/devops-director]]
 **Found in use 2026-06-24:** build capacity is `MAX_CONCURRENT = 8` lanes, but the director enqueues at most `PLATFORM_DIRECTOR_INIT_CAP = 4` (+ `GROOM_CAP = 4`) per pass, runs the soundness investigations SEQUENTIALLY (a slow Max call each), fires the [[../inngest/platform-director-cron]] only every 15 min, and escalates sound specs instead of building them. Snapshot: 6/8 lanes building, 0 queued, 2 idle — the pool runs under-fed. The CEO: 'we have 8 lanes, why not fill them?'
 
