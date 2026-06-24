@@ -1,0 +1,1 @@
+- **Goal milestone builds must be dependency-ordered + director-sequenced** · verified 2026-06-24 · → [[lifecycles/roadmap-build-console]]

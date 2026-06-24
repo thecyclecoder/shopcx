@@ -1,0 +1,1 @@
+- **Atomic per-minute throttle for feed:<source> liveness beats (kill the Vercel-drain write storm)** · verified 2026-06-24 · → [[tables/loop_heartbeats]]
