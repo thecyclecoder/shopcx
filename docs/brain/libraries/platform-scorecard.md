@@ -15,7 +15,7 @@ The **department-level KPI aggregation engine** behind the [[../goals/platform-d
 
 ## The daily KPI registry
 
-A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible (weekly/monthly cadences seed empty registries here — [[../specs/platform-scorecard-weekly]] + [[../specs/platform-scorecard-monthly]] fill them). The **daily** set:
+A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible ([[../specs/platform-scorecard-weekly]] adds the **weekly** set below; [[../specs/platform-scorecard-monthly]] seeds the monthly registry empty here until filled). The **daily** set:
 
 | `metric_key` | unit | Derivation |
 |---|---|---|
@@ -31,9 +31,22 @@ A declarative registry keyed by `metric_key` keeps the per-cadence metric set ex
 
 **Window model** (mirrors [[meta__scorecards]]): `curr = [snapshotDate − (windowDays−1), snapshotDate]`, `prev = [snapshotDate − (2·windowDays−1), snapshotDate − windowDays]`. `loop_health` is current-state, so its prior is read from the snapshot `windowDays` ago rather than recomputed.
 
+## The weekly KPI registry
+
+The **weekly** lens ([[../specs/platform-scorecard-weekly]]) — how much the build org shipped this week and how good it was, over a **trailing 7-day** window with a **prior-week delta**. Reuses the same engine machinery (window/delta/upsert); only the derivations are new:
+
+| `metric_key` | unit | Derivation |
+|---|---|---|
+| `specs_per_week` | count | [[../tables/agent_jobs]] `kind='build'` + `status='merged'` with `updated_at` (the merge flip) in-window, **`spec_slug` mapped to the `platform` owner** via the live spec→owner map ([[brain-roadmap]] `getRoadmap().specs[].owner` — the exact rule [[director-xp]] uses). Only platform-owned merged builds count; `detail.slugs` lists them. |
+| `build_success_rate` | ratio | `merged ÷ (merged + failed)` over the window from [[../tables/agent_jobs]] `kind='build'` (success = `status='merged'`, failure = `status ∈ failed｜needs_attention`), terminal flip by `updated_at`. `detail` carries the raw `merged`/`failed`/`total` counts; prior is null when the prior week had no terminal builds. |
+| `idea_to_merge_hours` | hours | Median over merged builds in-window of `(updated_at − created_at)` — the queued→merged "idea→merged-PR" north-star cycle time. `value` = p50; `detail` carries `p50`/`p90` + `merged_count`. |
+| `approvals_untouched_pct` | pct | [[../tables/approval_decisions]] `autonomous=true` ÷ all terminal decisions (`decision ∈ approved｜declined`) in-window, **as a percentage** — "% of platform approvals you never have to touch". A `decided_by ∈ ceo｜human` decision is a TOUCHED approval (surfaced in `detail`); escalated rows are excluded from the denominator. |
+| `worker_grade_rollup` | ratio | Per `agent_kind` average from [[../tables/agent_action_grades]] via [[agent-grader]] `computeAgentRollup` (the **same** last-`ROLLUP_WINDOW` rollup the coaching loop reads — not a second source of truth). `value` = the fleet mean; `detail.by_worker` carries each graded kind's `average`/`prior`/`drop`/`count`, so a slipping worker is visible. Prior = the mean of the per-worker prior-window averages. |
+| `regressions_caught` | count | [[../tables/agent_jobs]] `kind='regression'` **concluded** in-window (terminal status, `updated_at`) **+** [[../tables/director_activity]] rows the [[../specs/regression-agent|Regression Agent]] emits (`action_kind ∈ detected_regression｜authored_fix`). `detail` splits `detected` / `dismissed` / `fix_authored` / `regression_jobs_concluded` (a `dismissed_regression` is tracked but not counted toward the headline). |
+
 ## Caller
 
-The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. Runs in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
+The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. The **weekly** beat is the `snapshot-platform-scorecard-weekly` step on the same cron — **once per ISO week** per workspace (guarded on any weekly row already taken on/after the ISO-week Monday), `computePlatformScorecard(ws, { cadence:'weekly', windowDays:7 })`. Both run in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
 
 ## Related
 

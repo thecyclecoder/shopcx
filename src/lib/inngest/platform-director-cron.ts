@@ -159,12 +159,47 @@ export const platformDirectorCron = inngest.createFunction(
       return { snapshotted, metricsWritten, date: today };
     });
 
+    // The Platform Department Scorecard weekly throughput + quality rollup (platform-scorecard-weekly
+    // spec, Phase 2): on the same standing beat, snapshot the weekly KPI set (specs/week · build
+    // success rate · idea→merge cycle time · % approvals untouched · per-worker grade rollup ·
+    // regressions caught) into platform_scorecard_snapshots over a trailing 7-day window. Guarded to
+    // ONCE PER ISO WEEK per workspace (the upsert on (metric_key, cadence='weekly', snapshot_date)
+    // already makes a same-week re-run a no-op — the guard is spend-saving). Best-effort + idempotent.
+    const scorecardWeekly = await step.run("snapshot-platform-scorecard-weekly", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      // ISO week start (Monday, UTC) — any weekly snapshot already taken on/after it covers this week.
+      const d = new Date(`${today}T00:00:00Z`);
+      const mondayOffset = (d.getUTCDay() + 6) % 7; // Sun=0 → 6, Mon=1 → 0, …
+      const weekStart = new Date(d.getTime() - mondayOffset * 86_400_000).toISOString().slice(0, 10);
+      const { data: existing } = await admin
+        .from("platform_scorecard_snapshots")
+        .select("workspace_id")
+        .eq("cadence", "weekly")
+        .gte("snapshot_date", weekStart);
+      const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
+      let snapshotted = 0;
+      let metricsWritten = 0;
+      for (const workspaceId of result.workspaceIds || []) {
+        if (done.has(workspaceId)) continue; // already snapshotted this ISO week (spend-saving)
+        try {
+          const rows = await computePlatformScorecard(workspaceId, { cadence: "weekly", windowDays: 7 });
+          if (rows.length) {
+            snapshotted++;
+            metricsWritten += rows.length;
+          }
+        } catch (e) {
+          console.error(`[platform-director-cron] weekly scorecard snapshot failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      return { snapshotted, metricsWritten, week_start: weekStart };
+    });
+
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard } });
+      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard, scorecardWeekly } });
     });
 
-    return { ...result, grading, workerGrading, scorecard };
+    return { ...result, grading, workerGrading, scorecard, scorecardWeekly };
   },
 );
