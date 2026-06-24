@@ -34,6 +34,7 @@ type Thread = {
   turn_status: "idle" | "thinking" | "error";
   last_error: string | null;
   pending_actions: Action[];
+  source?: "web" | "slack";
 };
 
 export function DirectorCoachChat() {
@@ -43,6 +44,7 @@ export function DirectorCoachChat() {
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [source, setSource] = useState<"web" | "slack">("web");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -62,6 +64,7 @@ export function DirectorCoachChat() {
         setThreadId(latest.id);
         setMessages(latest.messages);
         setActions(latest.pending_actions || []);
+        setSource(latest.source === "slack" ? "slack" : "web");
         if (latest.turn_status === "thinking") setThinking(true);
       }
     } catch {
@@ -85,6 +88,7 @@ export function DirectorCoachChat() {
         if (!t || stop) return;
         setMessages(t.messages);
         setActions(t.pending_actions || []);
+        if (t.source) setSource(t.source);
         if (t.turn_status === "error") {
           setError(t.last_error || "The box turn failed.");
           setThinking(false);
@@ -123,6 +127,7 @@ export function DirectorCoachChat() {
           setThreadId(t.id);
           setMessages(t.messages);
           setActions(t.pending_actions || []);
+          if (t.source) setSource(t.source);
         } else {
           setError(d.error || "Could not start the turn.");
           setThinking(false);
@@ -166,13 +171,21 @@ export function DirectorCoachChat() {
     setActions([]);
     setError(null);
     setInput("");
+    setSource("web");
   };
 
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-800">
       {messages.length > 0 && (
         <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
-          <span className="text-[10px] uppercase tracking-wide text-zinc-400">Conversation</span>
+          <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-zinc-400">
+            Conversation
+            {source === "slack" && (
+              <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium normal-case text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300" title="This conversation is happening in your #cto-ada Slack channel — it stays in sync both ways.">
+                via Slack 💬
+              </span>
+            )}
+          </span>
           <button onClick={startNew} disabled={thinking} className="text-[11px] text-zinc-500 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:text-zinc-200">
             + New thread
           </button>

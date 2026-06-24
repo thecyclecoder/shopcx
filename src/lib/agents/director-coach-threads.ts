@@ -38,7 +38,14 @@ export type CoachThreadAction = {
   queueBuild?: boolean;
   status: CoachThreadActionStatus;
   result?: string;
+  // ada-slack-chat: when this card was posted to #cto-ada, the Slack message ts — so a web-side OR
+  // box-side decision can chat.update the card in place. Absent on web-only threads.
+  slackTs?: string;
 };
+
+// ada-slack-chat: where a thread lives. 'web' (default) = the dashboard coach chat; 'slack' = a
+// conversation in the #cto-ada channel, mirrored into the same web profile.
+export type CoachThreadSource = "web" | "slack";
 
 export type DirectorCoachThread = {
   id: string;
@@ -51,12 +58,15 @@ export type DirectorCoachThread = {
   turn_status: TurnStatus;
   last_error: string | null;
   pending_actions: CoachThreadAction[];
+  source: CoachThreadSource;
+  slack_channel_id: string | null;
+  slack_thread_ts: string | null;
   created_at: string;
   updated_at: string;
 };
 
 const ROW_COLUMNS =
-  "id, workspace_id, user_id, director_function, title, messages, box_session_id, turn_status, last_error, pending_actions, created_at, updated_at";
+  "id, workspace_id, user_id, director_function, title, messages, box_session_id, turn_status, last_error, pending_actions, source, slack_channel_id, slack_thread_ts, created_at, updated_at";
 
 function normalizeMessages(value: unknown): ThreadMsg[] {
   if (!Array.isArray(value)) return [];
@@ -83,13 +93,27 @@ function toRow(row: Record<string, unknown> | null): DirectorCoachThread | null 
     turn_status: (row.turn_status as TurnStatus) ?? "idle",
     last_error: (row.last_error as string | null) ?? null,
     pending_actions: normalizeActions(row.pending_actions),
+    source: (row.source as CoachThreadSource) ?? "web",
+    slack_channel_id: (row.slack_channel_id as string | null) ?? null,
+    slack_thread_ts: (row.slack_thread_ts as string | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
 }
 
-/** Create a thread with an opening CEO message. */
-export async function createThread(input: { workspaceId: string; userId: string; directorFunction?: string; message: string }): Promise<DirectorCoachThread | null> {
+/**
+ * Create a thread with an opening CEO message. `source`/`slack*` mark a #cto-ada conversation
+ * (ada-slack-chat) so the box posts Ada's reply back to Slack; omit them for a web thread.
+ */
+export async function createThread(input: {
+  workspaceId: string;
+  userId: string;
+  directorFunction?: string;
+  message: string;
+  source?: CoachThreadSource;
+  slackChannelId?: string;
+  slackThreadTs?: string;
+}): Promise<DirectorCoachThread | null> {
   const admin = createAdminClient();
   const now = new Date().toISOString();
   const { data } = await admin
@@ -100,10 +124,29 @@ export async function createThread(input: { workspaceId: string; userId: string;
       director_function: input.directorFunction ?? "platform",
       title: input.message.slice(0, 80),
       messages: [{ role: "user", content: input.message }],
+      source: input.source ?? "web",
+      slack_channel_id: input.slackChannelId ?? null,
+      slack_thread_ts: input.slackThreadTs ?? null,
       updated_at: now,
     })
     .select(ROW_COLUMNS)
     .single();
+  return toRow(data as Record<string, unknown> | null);
+}
+
+/**
+ * Find a #cto-ada thread by its Slack thread root ts (ada-slack-chat) — used to continue the same
+ * conversation when the founder replies inside one of Ada's threads. Null if no thread keys on it yet.
+ */
+export async function findThreadBySlackThreadTs(workspaceId: string, slackThreadTs: string): Promise<DirectorCoachThread | null> {
+  if (!slackThreadTs) return null;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("director_coach_threads")
+    .select(ROW_COLUMNS)
+    .eq("workspace_id", workspaceId)
+    .eq("slack_thread_ts", slackThreadTs)
+    .maybeSingle();
   return toRow(data as Record<string, unknown> | null);
 }
 

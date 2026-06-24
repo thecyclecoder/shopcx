@@ -3,8 +3,15 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt, decrypt } from "@/lib/crypto";
+import { getPersona } from "@/lib/agents/personas";
 
 const SLACK_API = "https://slack.com/api";
+
+// Ada's per-message Slack identity (chat:write.customize). The one bot speaks AS Ada — her name +
+// her real avatar — ONLY when a caller opts in via postAsAda; every other message stays "shopcx".
+// Sourced from personas.ts so the name/avatar never drift from the rest of the app (ada-slack-chat).
+const ADA = getPersona("platform");
+export const ADA_SLACK_IDENTITY = { username: ADA.name, icon_url: ADA.avatarUrl };
 
 // ── Fetch hardening ──
 // Per-request hard cap so one slow/hung Slack endpoint can't wedge a caller —
@@ -101,13 +108,52 @@ export async function postMessage(
   channel: string,
   blocks: unknown[],
   text: string,
+  opts?: { thread_ts?: string },
 ): Promise<boolean> {
-  const result = await slackApi(token, "chat.postMessage", { channel, blocks, text });
+  const body: Record<string, unknown> = { channel, blocks, text };
+  if (opts?.thread_ts) body.thread_ts = opts.thread_ts;
+  const result = await slackApi(token, "chat.postMessage", body);
   if (!result.ok) {
     console.error("[Slack] postMessage error:", result.error);
     return false;
   }
   beatSlackDelivery(channel);
+  return true;
+}
+
+/**
+ * Post a message AS Ada (her name + avatar, via the chat:write.customize override) — used only by the
+ * #cto-ada chat (ada-slack-chat). Returns the posted message `ts` so the caller can chat.update it later
+ * (e.g. resolve an approval card). `blocks` may be empty for a plain-text reply (Ada's voice is plain text).
+ * `opts.thread_ts` keeps the reply inside the founder's Slack thread so a reply to it continues the convo.
+ */
+export async function postAsAda(
+  token: string,
+  channel: string,
+  blocks: unknown[],
+  text: string,
+  opts?: { thread_ts?: string },
+): Promise<{ ok: boolean; ts?: string }> {
+  const body: Record<string, unknown> = { channel, text, ...ADA_SLACK_IDENTITY };
+  if (blocks.length) body.blocks = blocks;
+  if (opts?.thread_ts) body.thread_ts = opts.thread_ts;
+  const result = await slackApi(token, "chat.postMessage", body);
+  if (!result.ok) {
+    console.error("[Slack] postAsAda error:", result.error);
+    return { ok: false };
+  }
+  beatSlackDelivery(channel);
+  return { ok: true, ts: result.ts as string };
+}
+
+/** Add an emoji reaction to a message (reactions.add) — the 👀 "received, thinking" ack in #cto-ada. */
+export async function addReaction(token: string, channel: string, ts: string, name: string): Promise<boolean> {
+  const result = await slackApi(token, "reactions.add", { channel, timestamp: ts, name });
+  // already_reacted is a benign no-op (Slack retried the event); don't log it as an error.
+  if (!result.ok && result.error !== "already_reacted") {
+    console.error("[Slack] addReaction error:", result.error);
+    return false;
+  }
   return true;
 }
 

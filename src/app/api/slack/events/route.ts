@@ -12,13 +12,15 @@
  * See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md (Phases 1–4).
  */
 import { NextResponse } from "next/server";
-import { verifySlackSignature, resolveWorkspaceByTeamId, getSlackToken } from "@/lib/slack";
+import { verifySlackSignature, resolveWorkspaceByTeamId, getSlackToken, postAsAda, addReaction } from "@/lib/slack";
 import { resolveSlackActor, isOwner } from "@/lib/slack-identity";
 import { queueRoadmapBuild } from "@/lib/roadmap-actions";
 import { getRoadmap, getSpec } from "@/lib/brain-roadmap";
 import { getLatestJobsBySlug, getPendingFolds } from "@/lib/agent-jobs";
 import { buildBoardBlocks, buildSpecDetailBlocks } from "@/lib/slack-roadmap";
 import { buildHomeView, publishHome } from "@/lib/slack-home";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { createThread, markThreadThinking, findThreadBySlackThreadTs } from "@/lib/agents/director-coach-threads";
 
 export const maxDuration = 60;
 
@@ -46,12 +48,17 @@ export async function POST(request: Request) {
       type?: string;
       challenge?: string;
       team_id?: string;
-      event?: { type?: string; tab?: string; user?: string };
+      event?: SlackEvent;
     };
     if (payload.type === "url_verification") return NextResponse.json({ challenge: payload.challenge });
     // app_home_opened (Home tab) → (re)publish the roadmap Home view for that user. Other events: ack only.
     if (payload.event?.type === "app_home_opened" && payload.event.tab === "home") {
       await publishHomeForUser(payload.team_id || "", payload.event.user || "");
+    }
+    // A message in #cto-ada → a director-coach turn (ada-slack-chat). Skip Slack's retry redeliveries:
+    // we ack fast, so a retry would only double-enqueue the same message.
+    if (payload.event?.type === "message" && !request.headers.get("x-slack-retry-num")) {
+      await handleAdaMessage(payload.team_id || "", payload.event);
     }
     return NextResponse.json({ ok: true });
   }
@@ -68,7 +75,103 @@ export async function POST(request: Request) {
   if (command === "/roadmap") return handleRoadmap(workspaceId, text);
   if (command === "/build") return handleBuild(workspaceId, slackUserId, text, false);
   if (command === "/bug") return handleBuild(workspaceId, slackUserId, text, true);
+  if (command === "/ada-here") return handleAdaHere(workspaceId, slackUserId, form.get("channel_id") || "");
   return ephemeral(`Unknown command \`${command}\`.`);
+}
+
+// ── ada-slack-chat: #cto-ada two-way chat ──
+
+/** The subset of a Slack Events API `message` event we read (+ the app_home_opened fields). */
+interface SlackEvent {
+  type?: string;
+  tab?: string;
+  user?: string;
+  channel?: string;
+  text?: string;
+  ts?: string;
+  thread_ts?: string;
+  bot_id?: string;
+  subtype?: string;
+}
+
+/**
+ * `/ada-here` — run inside the channel you want to be #cto-ada. Owner-gated; saves the channel id on the
+ * workspace so inbound messages there become coach turns. Confirms in-channel AS Ada (needs the bot invited).
+ */
+async function handleAdaHere(workspaceId: string, slackUserId: string, channelId: string) {
+  const actor = await resolveSlackActor(workspaceId, slackUserId);
+  if (!isOwner(actor)) return ephemeral("Owner-only — only the workspace owner can set Ada's channel.");
+  if (!channelId) return ephemeral("Couldn't read this channel — run `/ada-here` inside the channel you want Ada to live in.");
+  const admin = createAdminClient();
+  const { error } = await admin.from("workspaces").update({ slack_ada_channel_id: channelId }).eq("id", workspaceId);
+  if (error) return ephemeral(`Couldn't save: ${error.message}`);
+  const token = await getSlackToken(workspaceId);
+  if (token) await postAsAda(token, channelId, [], "👋 This is now my channel. Ask me anything — I'm your CTO.");
+  return ephemeral("✅ Done — this channel is now wired to Ada. Try asking her something.");
+}
+
+/**
+ * An inbound message in #cto-ada → one director-coach turn (intent='auto'), mirrored into the same web
+ * coach thread. Loop-guarded (never re-trigger on Ada's own posts), channel-gated, and owner-gated.
+ * Threading: a top-level post starts a new thread (keyed on its ts); a reply inside Ada's thread continues
+ * the same conversation. Fast: a couple of DB writes + the 👀 ack, well within Slack's 3s window.
+ */
+async function handleAdaMessage(teamId: string, event: SlackEvent): Promise<void> {
+  // Loop guard — never act on a bot message (Ada's own posts carry bot_id) or any non-plain message
+  // subtype (edits/deletes/joins). This is what stops Ada answering Ada in an infinite loop.
+  if (event.bot_id || event.subtype) return;
+  const channel = event.channel;
+  const slackUserId = event.user;
+  const message = (event.text || "").trim();
+  if (!channel || !slackUserId || !message || !event.ts) return;
+
+  const workspaceId = await resolveWorkspaceByTeamId(teamId);
+  if (!workspaceId) return;
+
+  const admin = createAdminClient();
+  // Channel gate — only the configured #cto-ada channel is Ada's chat surface.
+  const { data: ws } = await admin.from("workspaces").select("slack_ada_channel_id").eq("id", workspaceId).maybeSingle();
+  if (!ws?.slack_ada_channel_id || ws.slack_ada_channel_id !== channel) return;
+
+  // Owner gate — only the founder talks to Ada; channel membership is NOT authorization.
+  const actor = await resolveSlackActor(workspaceId, slackUserId);
+  if (!isOwner(actor)) return;
+  const userId = actor!.userId;
+
+  // Threading: a reply (thread_ts set + ≠ own ts) continues the matching thread; anything else is a new
+  // conversation keyed on this message's ts (which becomes the Slack thread root once Ada replies in).
+  const isReply = !!event.thread_ts && event.thread_ts !== event.ts;
+  let threadId: string;
+  const existing = isReply ? await findThreadBySlackThreadTs(workspaceId, event.thread_ts!) : null;
+  if (existing) {
+    await markThreadThinking(workspaceId, existing.id, message);
+    threadId = existing.id;
+  } else {
+    const created = await createThread({
+      workspaceId,
+      userId,
+      message,
+      source: "slack",
+      slackChannelId: channel,
+      slackThreadTs: isReply ? event.thread_ts! : event.ts,
+    });
+    if (!created) return;
+    threadId = created.id;
+  }
+
+  // Enqueue the box turn — intent='auto' so Ada self-decides ask vs plan/coach/spec (ada-slack-chat P4).
+  await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    kind: "director-coach",
+    spec_slug: threadId,
+    status: "queued",
+    instructions: JSON.stringify({ thread_id: threadId, mode: "turn", intent: "auto" }),
+    created_by: userId,
+  });
+
+  // 👀 ack so it reads as "received, thinking" while the box runs.
+  const token = await getSlackToken(workspaceId);
+  if (token) await addReaction(token, channel, event.ts, "eyes");
 }
 
 /** Publish the App Home roadmap view for a user that just opened the Home tab. Best-effort, fast (<3s). */
