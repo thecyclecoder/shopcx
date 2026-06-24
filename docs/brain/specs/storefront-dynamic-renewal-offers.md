@@ -10,13 +10,12 @@ The gated, highest-stakes lever for the [[../goals/storefront-optimizer]] — **
 - Extend [[../tables/pricing_rules]] (or add a `pricing_rule_offers` child) to express a **scoped, time-boxed renewal offer**: an effective window (`starts_at`/`ends_at`), the persist-to-renewal price delta (an additional `subscribe_discount_pct` override or a fixed renewal price), the `(product × lander-type × audience)` / experiment scope it applies to, and `status` ∈ `proposed｜approved｜active｜expired`. Migration + update [[write-brain-page]] `tables/pricing_rules.md` (it currently documents no offer/time-boxing construct).
 - Ensure `resolveSubscriptionPricing` (the renewal + portal pricing engine, [[../libraries/pricing]]) reads the active scoped offer correctly at renewal time — the offer persists to renewal, not just first order; **probe the live pricing path before assuming its shape** (CLAUDE.md "database is the spec").
 
-## Phase 2 — the approval-gated offer lever in the optimizer ⏳
-- ⏳ planned
-- Add an `offer` variant type to the [[storefront-experiment-bandit-framework|M1 framework]] / [[storefront-optimizer-agent|M4 agent]] that, instead of a reversible content patch, proposes a **persist-to-renewal `pricing_rules` offer** — created `proposed`/inactive and surfaced for **owner approval** (the M4 build-approval gate / `pending_actions`), never auto-activated. First-order-only offers stay coupons ([[../tables/coupons]]) on the autonomous path; only persist-to-renewal offers hit this gate.
-- On approval, activate the scoped offer for the experiment arm; the M1 bandit runs it vs holdout and attributes outcomes on the predicted-LTV proxy exactly like any other lever (the offer's renewal-margin cost is in the LTV math — [[storefront-ltv-proxy-reconciler|M3]] — so a margin-bleeding offer that wins first-order but loses on LTV is caught).
+## Phase 2 — the approval-gated offer lever → **split to [[storefront-renewal-offer-lever]] (deferred, 2026-06-23)**
+The offer-*activation* lever was **deferred to its own card** — it's the margin-bleeding part that "turns on only once the optimizer's reversible levers are proven," so it shouldn't build alongside the foundation. A box build (PR #281, closed) built it prematurely; moved to [[storefront-renewal-offer-lever]] (⏳ deferred, `Blocked-by` this spec) so it's tracked, not lost, and not re-built until wanted. This spec now ships the **offer model (P1)** + its **guardrails (P3)**; the lever activates separately.
 
 ## Phase 3 — guardrails, expiry + rollback ⏳
 - ⏳ planned
+- *(Gated on [[storefront-renewal-offer-lever]] for live use — the floor/expiry/rollback guard the deferred offer lever; build the model + this guardrail scaffolding now, but a real activated offer only exists once the lever ships.)*
 - A margin floor: the agent may never *propose* (and the owner is warned before approving) an offer whose modeled renewal margin drops below a configured floor; breaching escalates to the [[../functions/growth|Growth director]] + CFO, it is not surfaced as a normal proposal.
 - Auto-expire at `ends_at`; on an LTV-proxy or refund-spike regression (M1 auto-rollback), **deactivate the offer** and revert affected subscriptions' renewal pricing to the base `pricing_rules` — with a clear audit trail (a persist-to-renewal offer touched real renewals, so rollback must un-touch them).
 
