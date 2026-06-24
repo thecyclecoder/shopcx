@@ -54,7 +54,8 @@ import {
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
-import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
+import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, listArchivedSlugs, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
+import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
 import { buildGate } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
@@ -1279,6 +1280,112 @@ export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogR
   }
 
   return { enqueued, escalated, confirmed, scanned: handled.size };
+}
+
+// ── regression-backlog-reconciliation Phase 1 — standing re-verification sweep (close the coverage gap) ──
+// The regression-side sibling of reconcileErrorBacklog. Remi (the regression-agent) is purely EVENT-driven:
+// `enqueueRegressionJob` only fires when a spec-test run happens to re-test a shipped spec and finds a `fail`.
+// Nothing GUARANTEES every shipped spec is periodically re-verified, so a silent regression can sit in a
+// shipped feature forever (Remi fired ZERO times — 0 regression jobs). Coverage is the Director's job: each
+// standing pass this picks the SHIPPED, unarchived specs LEAST-recently verified (oldest spec_test_runs first)
+// and enqueues a Vera spec-test re-run for them — so a silent regression is caught even when nothing
+// event-triggered a re-test. An `issues` result flows to Remi through the EXISTING `enqueueRegressionJob`
+// (the `runSpecTestJob` tail), so this adds NO new detector — only the standing coverage guarantee.
+//
+// Bounded + idempotent: a spec re-verified within the freshness window is SKIPPED (no churn); the shared
+// `enqueueSpecTestIfDue` chokepoint then guards the double-queue (it no-ops a (workspace, slug) with an
+// in-flight spec-test job or a fresh ~20h run, and re-asserts the spec is still shipped). NO-OP until
+// Platform is live+autonomous, like every other standing lane. Best-effort; the caller logs the result.
+
+/** Cap how many least-recently-verified shipped specs one re-verification sweep enqueues (the groom-cap analogue). */
+export const PLATFORM_DIRECTOR_REVERIFY_CAP = 8;
+
+/** Freshness window: a shipped spec re-verified within this is skipped (no churn). Mirrors the regression-agent's 7d. */
+export const PLATFORM_DIRECTOR_REVERIFY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** The outcome of one re-verification sweep — what coverage it topped up this pass. */
+export interface RegressionCoverageResult {
+  /** shipped specs we enqueued a spec-test re-run for (an `issues` result flows to Remi via enqueueRegressionJob). */
+  queued: string[];
+  /** shipped specs skipped because they were verified within the freshness window (no churn). */
+  skippedFresh: number;
+  /** total shipped, unarchived specs considered this pass. */
+  scanned: number;
+}
+
+/**
+ * One standing re-verification sweep: enqueue a spec-test re-run for the SHIPPED, unarchived specs least-recently
+ * verified (oldest spec_test_runs first; a never-verified spec sorts oldest), skipping any verified within the
+ * freshness window, capped per pass. Closes the coverage gap so a silent regression is caught even when nothing
+ * event-triggered a re-test — the `issues` result then flows to Remi through the existing `enqueueRegressionJob`.
+ */
+export async function reconcileRegressionCoverage(admin: Admin): Promise<RegressionCoverageResult> {
+  const empty: RegressionCoverageResult = { queued: [], skippedFresh: 0, scanned: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+
+  // The coverage universe — shipped-but-not-archived specs (the SAME set the spec-test cron sweeps).
+  const [{ specs }, archived] = await Promise.all([getRoadmap(), listArchivedSlugs()]);
+  const archivedSet = new Set(archived);
+  const shipped = specs.filter((s) => s.status === "shipped" && !archivedSet.has(s.slug));
+  if (!shipped.length) return empty;
+
+  // The latest spec-test run per slug → its run_at (newest first, so the first seen per slug wins). A spec with
+  // NO run was never verified → it sorts oldest (epoch), so it's picked first.
+  const slugs = shipped.map((s) => s.slug);
+  const { data: runs } = await admin
+    .from("spec_test_runs")
+    .select("spec_slug, run_at")
+    .eq("workspace_id", workspaceId)
+    .in("spec_slug", slugs)
+    .order("run_at", { ascending: false })
+    .limit(2000);
+  const latestRunMs = new Map<string, number>();
+  for (const r of (runs ?? []) as Array<{ spec_slug?: string; run_at?: string }>) {
+    const slug = String(r.spec_slug ?? "");
+    if (!slug || latestRunMs.has(slug)) continue; // first (newest) wins
+    latestRunMs.set(slug, r.run_at ? Date.parse(String(r.run_at)) : 0);
+  }
+
+  // Candidates = never-verified OR last-verified before the freshness window; the rest are skipped (no churn).
+  const freshCutoff = Date.now() - PLATFORM_DIRECTOR_REVERIFY_WINDOW_MS;
+  const candidates: Array<{ slug: string; lastVerifiedMs: number }> = [];
+  let skippedFresh = 0;
+  for (const card of shipped) {
+    const lastVerifiedMs = latestRunMs.get(card.slug) ?? 0; // 0 = never verified (oldest)
+    if (lastVerifiedMs && lastVerifiedMs >= freshCutoff) {
+      skippedFresh++;
+      continue;
+    }
+    candidates.push({ slug: card.slug, lastVerifiedMs });
+  }
+  candidates.sort((a, b) => a.lastVerifiedMs - b.lastVerifiedMs); // least-recently-verified first
+
+  const queued: string[] = [];
+  for (const c of candidates) {
+    if (queued.length >= PLATFORM_DIRECTOR_REVERIFY_CAP) break;
+    // Reuse the shared chokepoint: it re-asserts the spec is shipped, dedups an in-flight spec-test job, and
+    // skips a fresh (~20h) run — so we never double-queue and never pile up the spec-test lane.
+    const { enqueued } = await enqueueSpecTestIfDue(workspaceId, c.slug, "shipped");
+    if (enqueued) queued.push(c.slug);
+  }
+
+  if (queued.length) {
+    const windowDays = Math.round(PLATFORM_DIRECTOR_REVERIFY_WINDOW_MS / (24 * 60 * 60 * 1000));
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: PLATFORM,
+      actionKind: "reconciled_coverage",
+      specSlug: queued[0],
+      reason: `Standing re-verification sweep: ${queued.length} shipped spec(s) not re-verified within ${windowDays}d → queued a spec-test re-run so a silent regression is caught (an \`issues\` result flows to Remi via the existing regression trigger) — ${queued.join(", ")}.`,
+      metadata: { queued, skipped_fresh: skippedFresh, scanned: shipped.length, autonomous: true },
+    });
+  }
+
+  return { queued, skippedFresh, scanned: shipped.length };
 }
 
 // ── Phase 3 (goal-milestone-build-sequencing) — re-sequence an out-of-order milestone fan-out ──────

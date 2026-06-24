@@ -23,6 +23,8 @@ export type DirectorActionKind =
   | "dismissed_regression" // reviewed → transient/foreign/false/already-fixed, recorded reasoning, no spec.
   | "authored_fix" // reviewed → real regression, authored the fix spec directly + routed to the inbox.
   | "escalated" // loop-guard: a regression fix that didn't hold after N attempts → escalated to CEO.
+  // regression-backlog-reconciliation Phase 1 — the standing re-verification sweep (close the coverage gap).
+  | "reconciled_coverage" // a shipped spec not re-verified within the freshness window → queued a spec-test re-run.
   // deploy-health-rollback-guardian Phase 1 — the Deploy Guardian (Reva) stamps one per evaluated deploy-watch.
   | "deploy_healthy" // a deploy's canary window closed clean — no new deploy-correlated regression.
   | "deploy_regressed" // a deploy introduced a clear deploy-correlated regression (a spike / a loop went red).
