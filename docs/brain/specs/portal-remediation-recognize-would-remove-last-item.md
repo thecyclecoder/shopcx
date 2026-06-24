@@ -1,4 +1,4 @@
-# Portal remediation: dismiss `would_remove_last_item` instead of escalating it as unrecognized ⏳
+# Portal remediation: dismiss `would_remove_last_item` instead of escalating it as unrecognized ✅
 
 **Priority:** critical
 
@@ -12,7 +12,7 @@ src/lib/portal/handlers/remove-line-item.ts normalizes BOTH the local last-item 
 **Likely target:** `src/lib/portal/remediation.ts — in classifyPortalFailure(), extend the existing last-item dismiss branch (~line 134) to also match `e.includes("would_remove_last_item")` and the friendly detail substring `at least one recurring item must remain`, keeping the legacy Appstle substrings as a fallback. Keep getFailureContext joining error+message so any future message text is preserved. Add/adjust a unit case so a ticket whose error is exactly `would_remove_last_item` classifies as dismiss. Update docs/brain/libraries/portal__remediation.md (classifyPortalFailure dismiss list) and note the fix on docs/brain/lifecycles/customer-portal.md. Owner: cs. Derived-from-ticket: 055e807d-7122-415f-8b45-82a88f57cc42.`
 
 ## Phases
-- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- ✅ **P1 — implement the fix** — `classifyPortalFailure()` dismiss branch matches `would_remove_last_item` (landed earlier in #474) and now also the friendly detail substring `at least one recurring item must remain`, keeping the legacy raw Appstle strings as a fallback. `getFailureContext` already joins error+message+detail. Unit coverage added in `src/lib/portal/remediation.test.ts` (`npm run test:portal-remediation`, 8 cases incl. the exact `would_remove_last_item` → dismiss case). Brain pages updated: [[../libraries/portal__remediation]] (dismiss table + design note) and [[../lifecycles/customer-portal]] (last-item removal mis-escalation note). `npx tsc --noEmit` clean.
 
 ## Verification
 - Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).

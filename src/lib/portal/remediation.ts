@@ -136,9 +136,14 @@ export function classifyPortalFailure(
   // Match the normalized codes too — route.ts records body.error (the stable
   // code), so the raw Appstle strings below never appear on a portal-created
   // ticket. would_remove_all_regular_products is the replace-variants sibling.
+  // The friendly detail substring ("at least one recurring item must remain") is
+  // the text remove-line-item now surfaces in `detail`; getFailureContext folds
+  // it into `error`, so match it too in case a path carries the text without the
+  // code. The legacy raw Appstle strings stay as a fallback for old tickets.
   if (
     e.includes("would_remove_last_item") ||
     e.includes("would_remove_all_regular_products") ||
+    e.includes("at least one recurring item must remain") ||
     e.includes("at least one subscription product") ||
     e.includes("atleast one subscription product") ||
     e.includes("cannot remove line item")
