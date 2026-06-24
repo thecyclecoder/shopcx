@@ -1,0 +1,1 @@
+- **Park classifier — trust the board when status='shipped' (classifyByBoardState short-circuit)** · verified 2026-06-24 · → [[../specs/no-parked-specs-auto-route-needs-attention]]

@@ -51,6 +51,16 @@ This is distinct from [[../specs/director-escalations-must-surface-to-ceo-backfi
 - A 60-minute sweep finds any `needs_attention` row older than 60 minutes that isn't routed yet (the classifier returned `unknown` or the routing job failed). Forces it through a manual director investigation pass with full context.
 - Posts a `dashboard_notifications` row if any spec sits >70 minutes in `needs_attention` — the invariant alarm. Goal: that alarm fires zero times once Phase 4 ships.
 
+## Status / open work
+
+**Phase 0 — ✅ shipped (2026-06-24).**
+
+- Added `needs_attention_class` column to `agent_jobs` with values: `already_shipped` | `real_blocker` | `tooling_failure` | `design_change` | `unknown`.
+- **Classifier implementation** (`park-classifier-trust-board-shipped`, archived): `classifyByBoardState(input)` in `src/lib/agents/needs-attention-classify.ts` short-circuits when a build-style job (`build`, `regression`, `repair`) targets a spec with `spec_card_state.status='shipped'` — the board is the source of truth, verdict string is irrelevant. `BUILD_STYLE_KINDS = {build, regression, repair}` confirms the spec-targeted kinds. `classifyNeedsAttention` calls `classifyByBoardState` BEFORE heuristic + Sonnet pass — board verdict wins. `classifyAndStamp` resolves live board status and passes it through; lookup failures fall back to heuristic + Sonnet (best-effort). Unit test fixture proves a `build` job with `boardStatus='shipped'` classifies as `already_shipped` regardless of error string; tests also cover regression/repair short-circuit, non-build-style kinds skipping the rule, and non-shipped board statuses skipping the rule.
+- Worker applies `classifyAndStamp` on every park; the class is then routed by Phase 1–4 sweeps.
+
+**Phases 1–4 — ⏳ in progress.**
+
 ## Verification
 
 - A fresh park with `needs_attention_class='already_shipped'` flips the spec to `shipped` within ~15 min (Phase 1 cron + 1).

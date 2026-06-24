@@ -70,6 +70,15 @@ This spec closes that gap: one new `spec-status` action type that the director *
 - Run `npx tsx --test src/lib/spec-drift.test.ts` → expect 7 passing tests proving `decideDirectorRevertFromRows` reverts a director-stamped `shipped` row to its `from_value` (or `in_progress` on null) while leaving `merge:<sha>` / `owner:<uuid>` flips alone (the reversibility backstop).
 - After a wrong director flip in prod, wait for the next `spec-drift-reconcile` cron pass → expect a fresh `spec_status_history` row stamped `actor='drift-reconciler'`, `reason='director:platform flip not backed by merged code'`, and one `director_activity` row (`action_kind='reverted_director_flip'`, `metadata.director_actor='director:platform'`) so the recurring mis-flip pattern surfaces on the daily watch.
 
+## Status / open work
+
+**All phases ✅ shipped (2026-06-24).**
+
+- Phase 1 schema + worker handler landed in `scripts/builder-worker.ts` — `spec-status` action type emitted by director chat, auto-applied on the same turn. Added `spec-status-history` columns and validation.
+- Phase 2 director chat prompt updated — example + auto-applied flag documented. Updated [[../libraries/platform-director.md]] with the new action and leash boundary.
+- Phase 3 drift-reconciler integration tested — director-stamped `shipped` flips are reverted by the 24h reconciler if the row has no merged code backing.
+- **Tooling robustness (ada-director-spec-status-cards-fix-tooling-fa6848, archived):** during Phase 1 build, the security-review pipeline exposed two builder-worker tooling issues. Fixed in [[../specs/builder-worker-robustness]]: (1) `shAsync` now closes stdin to avoid 3s CLI timeout on never-written pipes (stdio: `["ignore", "pipe", "pipe"]`), (2) `extractJson` scans every fenced JSON block last-wins + walks balanced-brace spans right-to-left to avoid false-positives when prose contains example JSON. Fixes prevent `needs_attention` parks on genuine tooling failures (security-review stdin timeout, unparseable verdict envelopes).
+
 ## Related
 
 [[../specs/spec-status-db-driven]] · [[../tables/spec_card_state]] · [[../tables/spec_status_history]] · [[../libraries/spec-card-state]] · [[../libraries/platform-director]] · [[../specs/ada-slack-routed-approvals]] · [[../libraries/spec-drift]]

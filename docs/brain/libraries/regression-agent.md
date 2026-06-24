@@ -29,6 +29,28 @@ The agent **authors + dismisses** (a bounded proxy: "is this a real regression +
 
 A spec-test run flipping a ✅ spec to a `fail` IS the trigger. `enqueueRegressionJob` is called inline at the end of `scripts/builder-worker.ts` `runSpecTestJob`: when `agent_verdict === "issues"`, it reads `getHumanTestQueue` ([[spec_test_runs]] — the exact regression definition: shipped + unarchived + UNRESOLVED evidence-backed fails) and enqueues a review for the slug just tested. (The spec lists two further detectors — tsc/CI-regression and ship-correlated error — that reuse the same `enqueueRegressionJob`; the ship-correlated path is deliberately deferred to the [[repair-agent]] to avoid double-handling brand-new errors.)
 
+## Standing coverage sweep — guarantee detection
+
+The event-driven detector has a blind spot: nothing GUARANTEES every shipped spec is periodically re-verified. A silent regression (a ✅ spec that was never re-tested after it broke) can sit in a shipped feature forever. **`reconcileRegressionCoverage(admin)`** ([[../specs/regression-backlog-reconciliation]] Phase 1) is the **Platform Director's standing pass** that closes the gap:
+
+- Each pass: pick the **SHIPPED, unarchived** specs **least-recently verified** (oldest `spec_test_runs.run_at` first; a never-verified spec sorts oldest) and enqueue a Vera spec-test re-run.
+- **Bounded + idempotent:** a spec re-verified within `PLATFORM_DIRECTOR_REVERIFY_WINDOW_MS` (7d) is skipped (no churn); `enqueueSpecTestIfDue` guards the double-queue.
+- An `issues` result flows to Remi through the **EXISTING** `enqueueRegressionJob` (no new detector).
+- **Dormant** until Platform is live+autonomous.
+- Writes a `reconciled_coverage` [[../tables/director_activity]] row per pass that queues ≥1.
+
+## Standing backlog reconciliation — guarantee disposition
+
+The detector finds regressions, but nothing GUARANTEES every detected one reaches a **terminal state**. A break detected yet never reviewed (a regression job that slipped its enqueue, a fix that didn't hold, an event-driven miss while Platform was dormant) sits unresolved. **`reconcileRegressionBacklog(admin)`** ([[../specs/regression-backlog-reconciliation]] Phase 2) is the **Platform Director's disposition backstop**:
+
+- Per shipped spec with an **unresolved evidence-backed spec-test `fail`** (per `getHumanTestQueue`): classify against the live `regression` job + authored-fix state.
+  - Live review OR authored fix in-flight / merged-pending-deploy → **confirm** (no action).
+  - No live review AND under the loop-guard → **`enqueueRegressionJob`** so Remi reviews it (dedup guards no re-queue on a live job / a no-resurface dismissal).
+  - Remi authored ≥ `REGRESSION_LOOP_GUARD_MAX` (2) fixes that didn't hold with nothing in-flight → **`escalateDiagnosisToCeo`** instead of re-authoring forever.
+- Writes a `reconciled_regression` [[../tables/director_activity]] row per action (enqueue / escalate).
+- **Idempotent, bounded** by `PLATFORM_DIRECTOR_REGRESSION_RECONCILE_CAP` (8) new actions/pass. **Dormant** until live+autonomous.
+- **Net:** no regression sits undetected OR un-dispositioned.
+
 ## The box loop — `runRegressionJob`
 
 1. **Disposer resume** — a routed `regression_build` action approved (queue the build) / declined (dismiss).
