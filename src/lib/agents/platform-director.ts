@@ -56,6 +56,7 @@ import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
@@ -967,6 +968,187 @@ export async function reconcileSwallowedEscalations(admin: Admin): Promise<Escal
     reEmitted.push(dedupeKey);
   }
   return { reEmitted, checked: handled.size };
+}
+
+// ── Phase 1 (director-zero-backlog-error-autonomy) — drain the OPEN error backlog to a terminal state ──
+// Rafa ([[../libraries/repair-agent]]) is EVENT-triggered: it fires the moment the Control Tower records a
+// NEW signature (recordError / a newly-opened loop_alert). But an error that slipped that trigger — recorded
+// during an outage window, before Platform went live, or on a skipped enqueue — just SITS open: nothing
+// re-drives it, so the backlog never drains on its own. This standing reconciler is the backstop that
+// GUARANTEES every OPEN error_events row + OPEN loop_alerts incident reaches a terminal state. Each pass it
+// classifies every open signature against the live agent_jobs + fix-spec state:
+//   (a) a fix already in-flight / merged-pending-deploy → CONFIRM, leave it (no action);
+//   (b) no live repair job AND no authored fix spec → enqueueRepairJob so Rafa diagnoses + authors (then the
+//       fix-escort auto-builds it) — the only routinely-new action;
+//   (c) Rafa already authored a fix spec that's unbuilt → CONFIRM (the fix-escort / groom owns building it);
+//   (d) the fix's build is STUCK (failed ≥ the loop-guard, nothing in-flight) → escalate the deeper issue.
+// It REUSES the repair dedup (enqueueRepairJob is a no-op when a live repair job exists, and folds bursts into
+// the cluster job) and adds its OWN fix-spec-coverage check so an authored-but-unbuilt fix is never
+// re-diagnosed. Bounded per pass, idempotent, and DORMANT until Platform is live+autonomous — exactly like
+// the escort + the enqueuer. A `reconciled_error` director_activity row is written per ACTION (enqueue /
+// escalate), never per idle confirm. Net: the open-error count trends to zero on its own.
+
+/** Cap how many NEW reconcile ACTIONS (repair enqueues + stuck-fix escalations) one pass takes. */
+export const PLATFORM_DIRECTOR_RECONCILE_CAP = 8;
+
+/** One open backlog item the reconciler classifies — an error_events row OR a loop_alerts incident. */
+interface OpenErrorItem {
+  signature: string;
+  source: string;
+  title: string;
+  errorEventId: string | null;
+  loopAlertId: string | null;
+}
+
+/** The outcome of one backlog-reconcile pass — what it drove off the open feed. */
+export interface ErrorBacklogReconcileResult {
+  /** signatures with no coverage → a repair diagnosis we enqueued (case b). */
+  enqueued: string[];
+  /** fix specs whose build is stuck past the loop-guard → escalated to the CEO (case d). */
+  escalated: string[];
+  /** open errors already covered by a live repair job / authored fix spec — left alone (cases a/c). */
+  confirmed: number;
+  /** total open error_events + loop_alerts examined this pass. */
+  scanned: number;
+}
+
+/**
+ * Map every authored fix spec's Repair-signature(s) → its live SpecCard, so an open error already covered by
+ * an authored fix is recognized (case a/c/d) and never re-diagnosed. Reads each repair-signed spec's markdown
+ * and parses its `Repair-signature:` markers (the exact error_events signature / `loop:<id>` key Rafa stamped).
+ */
+async function fixSpecsBySignature(specs: SpecCard[]): Promise<Map<string, SpecCard>> {
+  const bySig = new Map<string, SpecCard>();
+  for (const card of specs) {
+    if (!card.repairSignature) continue;
+    const got = await getSpec(card.slug);
+    if (!got) continue;
+    for (const sig of parseRepairSpecMeta(got.raw).signatures) {
+      if (!bySig.has(sig)) bySig.set(sig, card); // first (newest) wins; siblings group onto one spec anyway
+    }
+  }
+  return bySig;
+}
+
+/**
+ * Reconcile the OPEN error backlog: classify every open error_events row + open loop_alerts incident against
+ * the live repair-job / fix-spec state and drive each toward a terminal state (enqueue a diagnosis where none
+ * exists, confirm one that's covered, or escalate a stuck fix). Idempotent + bounded (PLATFORM_DIRECTOR_RECONCILE_CAP
+ * new actions/pass), reuses the repair dedup, and a NO-OP until Platform is live+autonomous. Best-effort; the
+ * caller logs the result.
+ */
+export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogReconcileResult> {
+  const empty: ErrorBacklogReconcileResult = { enqueued: [], escalated: [], confirmed: 0, scanned: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+
+  // The open backlog — every OPEN error_events row + OPEN loop_alerts incident (global infra, not ws-scoped).
+  const [{ data: errs }, { data: alerts }] = await Promise.all([
+    admin.from("error_events").select("id, source, signature, title, status").eq("status", "open").order("last_seen_at", { ascending: false }).limit(200),
+    admin.from("loop_alerts").select("id, loop_id, detail, status").eq("status", "open").order("last_seen_at", { ascending: false }).limit(200),
+  ]);
+
+  const items: OpenErrorItem[] = [];
+  for (const e of (errs ?? []) as Array<{ id: string; source?: string; signature?: string; title?: string }>) {
+    if (!e.signature) continue; // ungrouped rows can't be deduped — skip rather than misfire
+    items.push({ signature: String(e.signature), source: String(e.source ?? "error"), title: String(e.title ?? e.signature), errorEventId: e.id, loopAlertId: null });
+  }
+  for (const a of (alerts ?? []) as Array<{ id: string; loop_id?: string; detail?: string }>) {
+    if (!a.loop_id) continue;
+    items.push({ signature: `loop:${a.loop_id}`, source: "loop-alert", title: `${a.loop_id}: ${a.detail ?? "loop red"}`.slice(0, 300), errorEventId: null, loopAlertId: a.id });
+  }
+  if (!items.length) return { ...empty, scanned: 0 };
+
+  // Which open signatures already have an authored fix spec (so we confirm / escalate, never re-diagnose).
+  const { specs } = await getRoadmap();
+  const fixBySig = await fixSpecsBySignature(specs);
+
+  const enqueued: string[] = [];
+  const escalated: string[] = [];
+  let confirmed = 0;
+
+  // Dedup repeated signatures within this same pass (an error + its sibling loop alert can collide); the cap
+  // bounds NEW actions (enqueues + escalations) — idle confirms are cheap and always counted.
+  const handled = new Set<string>();
+  for (const item of items) {
+    if (handled.has(item.signature)) continue;
+    handled.add(item.signature);
+    const atCap = enqueued.length + escalated.length >= PLATFORM_DIRECTOR_RECONCILE_CAP;
+
+    const coverSpec = fixBySig.get(item.signature);
+    if (coverSpec) {
+      // (a) merged-pending-deploy — the fix shipped; the error stays open only until the deploy lands. Leave it.
+      if (coverSpec.status === "shipped") {
+        confirmed++;
+        continue;
+      }
+      const state = await specBuildState(admin, workspaceId, coverSpec.slug);
+      // (d) the fix's build is STUCK past the loop-guard with nothing in-flight → a deeper issue, not a flaky
+      // retry. Escalate to the CEO (deduped on the SAME `loopguard:<slug>` key the fix-escort uses, so the two
+      // lanes never double-ping). The fix-escort owns RE-QUEUING; the reconciler just guarantees it's surfaced.
+      if (!state.inFlight && state.failedCount >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+        if (atCap) continue; // bounded — pick it up next pass
+        const diagnosis = `Open error \`${item.signature}\` is covered by fix spec "${coverSpec.slug}", but its build failed ${state.failedCount}× without landing — likely a deeper issue, not a flaky retry${state.lastError ? ` (latest: ${state.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach and I'll carry it from there.`;
+        const r = await escalateDiagnosisToCeo(admin, {
+          workspaceId,
+          specSlug: coverSpec.slug,
+          title: `Build stuck: ${coverSpec.slug}`,
+          diagnosis,
+          dedupeKey: `loopguard:${coverSpec.slug}`,
+          deepLink: `/dashboard/roadmap/${coverSpec.slug}`,
+          escalationKind: "loop_guard",
+          metadata: { kind: "reconcile", signature: item.signature, failed_attempts: state.failedCount, last_error: state.lastError ?? undefined },
+        });
+        if (r.emitted) {
+          escalated.push(coverSpec.slug);
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: PLATFORM,
+            actionKind: "reconciled_error",
+            specSlug: coverSpec.slug,
+            reason: diagnosis,
+            metadata: { signature: item.signature, source: item.source, action: "escalated_stuck", error_event_id: item.errorEventId, loop_alert_id: item.loopAlertId, autonomous: true },
+          });
+        } else if (r.error) {
+          console.error(`[platform-director] reconcile CEO escalation FAILED to surface (loopguard:${coverSpec.slug}): ${r.error.message}`);
+        }
+        continue;
+      }
+      // (c) authored fix spec, in-flight or awaiting its build → the fix-escort / groom owns driving it. Confirm.
+      confirmed++;
+      continue;
+    }
+
+    // (b) no authored fix spec — does a live repair JOB already cover it? enqueueRepairJob is the dedup: it
+    // no-ops (or folds into the cluster job) when one exists, and enqueues a fresh diagnosis when none does.
+    if (atCap) continue; // bounded — the backlog re-drives next pass; nothing is lost
+    const r = await enqueueRepairJob(admin, {
+      source: item.source,
+      signature: item.signature,
+      title: item.title,
+      errorEventId: item.errorEventId,
+      loopAlertId: item.loopAlertId,
+    });
+    if (r.enqueued) {
+      enqueued.push(item.signature);
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "reconciled_error",
+        specSlug: null,
+        reason: `Backlog item \`${item.signature}\` (${item.source}) had no live repair job and no fix spec — enqueued a repair diagnosis so Rafa authors a fix (then the fix-escort builds it).`,
+        metadata: { signature: item.signature, source: item.source, action: "enqueued_repair", error_event_id: item.errorEventId, loop_alert_id: item.loopAlertId, autonomous: true },
+      });
+    } else {
+      // a live repair job already exists / folded into the cluster — already being diagnosed. Confirm.
+      confirmed++;
+    }
+  }
+
+  return { enqueued, escalated, confirmed, scanned: handled.size };
 }
 
 // ── Phase 4 — watch the platform + report to the board ────────────────────────────────────────────
