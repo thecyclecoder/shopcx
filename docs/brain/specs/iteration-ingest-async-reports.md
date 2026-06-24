@@ -1,9 +1,6 @@
-# Iteration Ingest — Async Insights Reports for Huge Backfills 🚧
-
-**Priority:** critical
+# Iteration Ingest — Async Insights Reports for Huge Backfills
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Storefront CRO" — follow-on to [[iteration-engine-ingest-resilience]] (the originally-deferred Phase 3, split out so the parent ships).
-**Deferred:** future optimization, build only if needed (P1/P2 of the parent already solve transient errors + large ranges). CEO-deferred 2026-06-24 — every auto-build lane skips it until promoted back to Planned.
 
 **Build only if needed** — this is a future optimization, not a fix. [[iteration-engine-ingest-resilience]]'s P1 (retry/backoff) + P2 (≤14-day chunked, resumable backfill) already solve transient errors *and* large date ranges. This phase exists for the edge where even chunked sync GETs strain — a brand-new account backfilling *years* of insights — where Meta's sanctioned **async report** path is the right tool.
 
@@ -19,7 +16,7 @@
 - Enable the flag for an account with an empty `meta_insights_daily` and a long backfill range → ingest submits an async report, polls to completion, pages results, and lands rows across all three levels with no `Service temporarily unavailable`; the daily incremental run still uses the light synchronous path.
 - Idempotency + the existing failure/alerting behavior from [[iteration-engine-ingest-resilience]] are unchanged.
 
-## Phase 1 — async report path behind a flag ✅� (built — pending migration apply + verification)
+## Phase 1 — async report path behind a flag � (built — pending migration apply + verification)
 The async-report submit/poll/page path for the backfill window, flag-gated per account; synchronous incremental unchanged. Brain: [[../libraries/meta__performance]].
 
 **Built 2026-06-24** (promoted from deferred → critical by director directive):

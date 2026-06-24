@@ -1,4 +1,4 @@
-# Winning Static-Creative Finder ✅
+# Winning Static-Creative Finder
 
 **Owner:** [[../functions/growth]] · **Parent:** Growth mandate "Static-ad optimization"
 
@@ -14,21 +14,21 @@
 - ✅ **Query by `keyword` only** — `/explore` UI's `niche`/`brand` filters are NOT in the API (tested: `brand` ignored). Per-competitor = `keyword`=brand name (tested: `onnit`→15 ads).
 - ⛔ **Meta Ad Library API** — blocked behind `facebook.com/ID` identity confirmation (verified); a free alt only if the owner completes that KYC. AdLibrary is the path until then.
 
-## Phase 1 — Skeleton store ✅
+## Phase 1 — Skeleton store
 - ✅ `creative_skeletons` table (`supabase/migrations/20260619220000_creative_skeletons.sql`) — one row per analyzed winner: `source`, `dedup_key` (AdLibrary `ad_key`, unique per workspace+source), `advertiser`, `image_url`, `media_type`, `format`, `framework`, the four slots `hook`/`mechanism_claim`/`proof`/`offer`, plus `days_running`, `heat`, `first_seen`/`last_seen`/`resume_advertising`, `seed_keyword`/`seed_kind`, `status`, `raw`. RLS = member-read + service-write. (Structure + image link only, never a lifted asset.) Brain: [[../tables/creative_skeletons]].
 
-## Phase 2 — Discovery (AdLibrary.com) ✅
+## Phase 2 — Discovery (AdLibrary.com)
 - ✅ `src/lib/adlibrary.ts` — `searchAds({ keyword, appType:'3', geo:['USA'], daysBack, pageSize })`; `fetchCreative(url)` sends the Bearer key; `isLongRunner()` (days_count + resume flag); `classifyMedia()` routes static vs video at pull time. Brain: [[../libraries/adlibrary]] · [[../integrations/adlibrary]].
 - ✅ **Seed list** (`CATEGORY_SEEDS` + `COMPETITOR_SEEDS` + `ALL_SEEDS`): Amazing Coffee → `everydaydose`, `ryze`, `lifeboost`, `urthlabs`/`erthlabs`, `leanjoebean`, `atlascoffeeclub`, `piquelife`, `mudwtr`; Ashwavana → `onnit`; greens cross → `bloomnu`; plus category keywords across inflammation/energy/longevity/weight-loss/anti-aging.
 
-## Phase 3 — Vision deconstruction ✅
+## Phase 3 — Vision deconstruction
 - ✅ `src/lib/creative-skeleton.ts` `visionDeconstruct()` + `ingestAd()`: fetch image (Bearer) → **Claude vision (Opus)** → `{ format, framework, hook, mechanism_claim, proof, offer }` → upsert `creative_skeletons`. Dedup by `ad_key` (skipped before any vision spend). Videos routed to `status='video_pending'` (no vision). Brain: [[../libraries/creative-skeleton]].
 
-## Phase 4 — Pattern matrix (the deliverable) ✅
+## Phase 4 — Pattern matrix (the deliverable)
 - ✅ `buildPatternMatrix()` — clusters each slot's values across rows (token-overlap) and keeps clusters spanning **≥N _independent_ brands** (distinct `advertiser`); brand count is the score, longevity the tiebreak. Deterministic (no per-load LLM spend).
 - ✅ Emits a ranked `testMatrix`: hook × mechanism × proof × offer combos scored by summed cross-brand repetition (top 25) — the consumable hand-off for variant-generation.
 
-## Phase 5 — Surface + workflow ✅
+## Phase 5 — Surface + workflow
 - ✅ Dashboard `/dashboard/marketing/ads/winning` — **Pattern matrix** tab (slot patterns + supporting brands + test matrix) and **Browse** tab (deconstructed winners with shortlist/archive). "Run sweep now" fires the manual event. Creatives display via an authenticated proxy (no re-hosting). API: `/api/ads/creative-finder` (list + POST sweep), `/patterns`, `/[id]` (shortlist), `/media` (proxy).
 - ✅ Daily sweep cron + manual event: `src/lib/inngest/creative-finder.ts` (`creative-finder-daily-cron` `0 9 * * *` + `ads/creative-finder.sweep`), registered in `src/app/api/inngest/route.ts`. Brain: [[../inngest/creative-finder]].
 

@@ -1,4 +1,4 @@
-# Landing Page Scout — per-chapter lander snapshots + gap analysis ✅
+# Landing Page Scout — per-chapter lander snapshots + gap analysis
 
 **Owner:** [[../functions/growth]] · **Parent:** [[../goals/acquisition-research-engine]] (M3)
 **Blocked-by:** [[competitor-scout]] (shipped ✅)
@@ -14,7 +14,7 @@ Snapshot competitor landing pages **and ours**, mobile, broken into chapters, an
 - **Vision gap-analysis** — compare competitor landers vs ours: sections/proof/structure/offers they have that we lack (comparison table, founder story, ingredient breakdown, guarantee badges, …).
 - **Enhancement recommendations** — each gap → a recommendation that routes to **Build** (a missing component spec, mirroring the optimizer's missing-tool→build) or the **Optimizer** (a structural experiment). Supervisable: proposes, owner approves.
 
-## Phase 1 — mobile per-chapter snapshotter + vision gap-analysis → recommendations ✅
+## Phase 1 — mobile per-chapter snapshotter + vision gap-analysis → recommendations
 Mobile snapshot pipeline (competitor URLs from [[ad-creative-scout]] + [[competitor-scout]], + our own landers), per-chapter capture stored to a private bucket, vision gap-analysis pass, recommendation records that route to Build/optimizer. Brain: [[../goals/acquisition-research-engine]] · [[competitor-scout]] · [[ad-creative-scout]] · [[storefront-optimizer]] · [[../lifecycles/customer-portal]] (chapter tracking) · [[../specs/spec-test-deep-verification]] (headless browser).
 
 **Built (code-complete, tsc-clean; migration NOT yet applied to prod):**

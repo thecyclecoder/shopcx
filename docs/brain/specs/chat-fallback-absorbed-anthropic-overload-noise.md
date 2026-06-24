@@ -1,6 +1,4 @@
-# Don't open a Control Tower incident when the chat Haiku fallback absorbs a Sonnet overload ⏳
-
-**Priority:** critical
+# Don't open a Control Tower incident when the chat Haiku fallback absorbs a Sonnet overload
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/remedy-selector.ts::monitor-false-positive`
@@ -13,7 +11,7 @@ src/lib/remedy-selector.ts:415 emits a top-level console.error on EVERY Sonnet f
 
 **Likely target:** `src/lib/remedy-selector.ts`
 
-## Phase 1 — close it ⏳
+## Phase 1 — close it
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification

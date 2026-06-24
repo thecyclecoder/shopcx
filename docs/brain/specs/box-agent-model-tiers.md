@@ -1,6 +1,4 @@
-# Per-agent model tiers + director-proposed model changes 🚧
-
-**Priority:** critical
+# Per-agent model tiers + director-proposed model changes
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (the org learns + self-manages) · extends [[worker-grading-and-director-management]] (the grades become the evidence for a model change).
 

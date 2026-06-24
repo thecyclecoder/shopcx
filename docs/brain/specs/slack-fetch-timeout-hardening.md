@@ -1,4 +1,4 @@
-# Time-box Slack API fetches so a slow Slack endpoint can't wedge a per-minute Slack cron ✅
+# Time-box Slack API fetches so a slow Slack endpoint can't wedge a per-minute Slack cron
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/slack.ts::real-bug`
@@ -10,7 +10,7 @@ A per-minute Slack cron went freshness-red: it beat every minute until 2026-06-2
 
 **Likely target:** `src/lib/slack.ts`
 
-## Phase 1 — close it ✅
+## Phase 1 — close it
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 Shipped: `src/lib/slack.ts` now routes every Slack API `fetch` (`slackApi`, `lookupUserByEmail`, `listChannels`' paginated `collect`, `exchangeCodeForToken`) through a private `slackFetch` wrapper — `AbortSignal.timeout(5000)` per request (fail fast), bounded `Retry-After`-honoring 429 retry (≤2, ≤3s each), and a `SLACK_MAX_PAGES=20` cap on the pagination loop. A slow/hung Slack endpoint now costs one slow tick (the throw propagates to the cron's per-workspace try/catch, so `emitCronHeartbeat` still fires) instead of freezing a per-minute Slack cron past Inngest's budget. Brain page [[../libraries/slack]] updated. `npx tsc --noEmit` clean.

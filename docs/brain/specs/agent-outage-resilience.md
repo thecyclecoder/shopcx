@@ -1,4 +1,4 @@
-# Agent outage resilience — survive a Claude/API outage queue-driven, never drop work ✅
+# Agent outage resilience — survive a Claude/API outage queue-driven, never drop work
 
 **Owner:** [[../functions/platform]] · **Parent:** hardens every Claude-dependent agent (customer-facing first); relates to [[box-multi-account-failover]] (the box's version of this). · **Found in use 2026-06-23:** Claude (Code + API) was down ~1 hour. Audit of the **ticket orchestrator** ([[../inngest/unified-ticket-handler]]) shows it's an Inngest fn but `retries: 1` — two attempts with minute-scale backoff can't span an hour, so an in-flight ticket **fails with no AI response and no auto-recovery** when Claude returns. And some calls **swallow the error** (`unified-ticket-handler.ts:173` `if (!r.ok) return ""`) → proceed on empty data instead of retrying. The work isn't queue-durable across an outage.
 
@@ -20,7 +20,7 @@ A real outage must be a **pause, not a drop**: work parks in the queue and drain
 - With the breaker tripped (Claude down): new ticket/agent work parks (`blocked_on_dependency`) instead of each hammering the API; when Claude recovers, the parked backlog drains automatically — no manual re-queue. The Control Tower shows the breaker state.
 - Negative: a terminal logic error still fails fast (not retried for hours); optional-enrichment failures degrade explicitly, not accidentally.
 
-## Phase 1 — outage-spanning retry + kill the silent swallows (ticket path) ✅
+## Phase 1 — outage-spanning retry + kill the silent swallows (ticket path)
 Bump the ticket handler + analyzer to outage-spanning backoff retries on retryable-dependency errors; convert the swallow-on-!ok Claude calls to throw-and-retry. Brain: [[../inngest/unified-ticket-handler]] · [[../integrations/anthropic]] · [[control-tower]].
 
 **Shipped:**
@@ -37,7 +37,7 @@ Bump the ticket handler + analyzer to outage-spanning backoff retries on retryab
 - On `ticket-analysis-cron`: with Claude returning 5xx, run the cron → expect affected tickets counted as **`deferred`** in the run output and their `last_analyzed_at` **unchanged**; after recovery the next */30 tick **grades them** (`analyzed` increments). A genuine per-ticket logic error still counts as `exception`/`skipped` and is marked so it can't wedge the batch.
 - Send a macro reply during a transient Claude blip on `personalizeMacroText` only → expect the **raw macro still sends** (explicit `optional` degrade), not a thrown/parked ticket.
 
-## Phase 2 — Claude-down circuit-breaker + outage-aware error/repair loop (park-and-drain) ✅
+## Phase 2 — Claude-down circuit-breaker + outage-aware error/repair loop (park-and-drain)
 A Claude-health breaker driven by the local consecutive-failure counter + the `status.claude.com/api/v2/components.json` poll (Claude API + Claude Code components); parks agent work `blocked_on_dependency` when down + drains on recovery; an "is Claude up?" Control Tower tile; align the autonomous agents.
 
 **Plus — make the error-feed + repair agent outage-aware (the outage exposed this, 2026-06-23):**
@@ -62,7 +62,7 @@ A Claude-health breaker driven by the local consecutive-failure counter + the `s
 - **Repair fan-out suppressed:** with the breaker tripped, `recordError` for a NEW signature → the `error_events` row is created with `outage_correlated=true` and `status='resolved'`, NO owner page fires, and NO `repair` `agent_jobs` row is enqueued. With the breaker UP, the same new signature pages + enqueues a repair job as before.
 - **Negative:** a poll that can't reach Statuspage records `poll_ok=false` but does NOT trip the breaker (the tile still reads up); a breaker-read failure defaults to "up" (never wrongly parks the box).
 
-## Phase 3 — finish the no-swallow audit (residual paths) ✅
+## Phase 3 — finish the no-swallow audit (residual paths)
 Phase 1 hardened the ticket handler / orchestrator / analyzer, but the outage feed surfaced a residual: **`/api/portal` remedy-selection** swallows a `529` (`"AI remedy selection failed: Anthropic API error: 529 … falls back to the first 3 remedies"`, zero retries) — it degrades the customer's remedy set silently on a transient. Extend the no-silent-swallow conversion (throw → retry, or explicit-optional-degrade) to the portal remedy path + any other LLM call still doing `catch → default` on a retryable error. Brain: [[../libraries/anthropic-retry]] · [[box-multi-account-failover]] · [[../libraries/control-tower]] · [[repair-agent]] · [[../integrations/anthropic]].
 
 **Shipped:**

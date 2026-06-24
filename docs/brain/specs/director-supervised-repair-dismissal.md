@@ -1,4 +1,4 @@
-# Ada supervises + dismisses Rafa's no-fix Control Tower items ✅
+# Ada supervises + dismisses Rafa's no-fix Control Tower items
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the director's supervision of [[repair-agent]] under [[../goals/devops-director]]
 **Found in use 2026-06-24:** the CEO has to manually Dismiss Control Tower warnings whenever Rafa (the [[../libraries/repair-agent|Repair Agent]]) declines to propose a fix. Two `repair` jobs are sitting in `needs_attention` awaiting a manual dismiss right now (signatures `vercel:bb28f61b887be822`, `vercel:aef5e5da7ae32431`). The CEO wants the Platform Director to clear these — but to **double-check Rafa's reasoning so a real bug mislabeled 'not a problem' is never silently cleared.**
@@ -12,7 +12,7 @@ Rafa optimizes the bounded proxy 'clear the error.' The degenerate state ([[../o
 
 Rafa classifies each problem with a `RepairVerdict`. `transient` already auto-resolves the [[../tables/error_events]] row silently (no dismiss needed). The items that require a manual Dismiss are `needs-human` → parked as a `repair` [[../tables/agent_jobs]] in `needs_attention`, surfaced by `getOpenRepairs` (Dismiss-only). Dismiss runs through the existing owner path `POST /api/developer/control-tower/repair` (the `repair_build` action `declined`). This spec adds a Director reviewer in front of that existing path — no new dismiss plumbing, no migration.
 
-## Phase 1 — the supervised-dismissal lane (review → dismiss or escalate) ✅
+## Phase 1 — the supervised-dismissal lane (review → dismiss or escalate)
 - Add `superviseRepairDismissals(admin)` to [[../libraries/platform-director]], run in `runPlatformDirectorStandingPass` ([[platform-director-agent]] Phase 4/5 cadence), dormant until Platform is live+autonomous like every other lane.
 - It reads Rafa's open no-fix items via `getOpenRepairs` (the `needs_attention` / needs-human bucket; never the `needs_approval` fix-proposed items, never a `real-bug`). For each, a READ-ONLY Max `claude -p` investigation loads the original [[../tables/error_events]] / [[../tables/loop_alerts]] sample + Rafa's logged no-fix reasoning, then **independently re-derives the root cause and adversarially tests his call.** The prompt's stance is hard: DEFAULT to not-dismissing; emit `dismiss` ONLY if Ada can independently confirm the error is genuinely transient / foreign-app / benign and NOT a masked real bug.
 - Dispatch on the verdict: `dismiss` → call the existing owner Dismiss path (decline the `repair_build` action / resolve the error_events row + complete the job) and write a `dismissed_repair` [[../tables/director_activity]] row carrying Ada's INDEPENDENT reasoning (not a copy of Rafa's). `keep` → do NOT dismiss; if she suspects a masked real bug, `escalateDiagnosisToCeo` with her contrary diagnosis + an `escalated` row; otherwise leave it for the human (genuine needs-human) untouched.

@@ -1,4 +1,4 @@
-# Acquisition Research Hub — one surface for sets + findings + gap queue ✅
+# Acquisition Research Hub — one surface for sets + findings + gap queue
 
 **Owner:** [[../functions/growth]] · **Parent:** [[../goals/acquisition-research-engine]] (M4)
 **Blocked-by:** [[ad-creative-scout]], [[landing-page-scout]]
@@ -11,7 +11,7 @@ House it all together: one dashboard surface where the competitor sets, both sco
 - **Landing findings** ([[landing-page-scout]]) — competitor vs our lander snapshots (per chapter) + the enhancement-gap recommendations.
 - **The gap queue** — every surfaced gap (ad or lander) with its evidence, where the owner (or, later, the Growth director) **approves → routes to Build or the [[storefront-optimizer]]** as an experiment/component. Tracks gap → shipped → won.
 
-## Phase 1 — the hub dashboard + the gap queue + routing ✅
+## Phase 1 — the hub dashboard + the gap queue + routing
 A `/dashboard/.../acquisition` (owner-only) surface reading the `competitors` table + both scouts' findings; the gap queue with approve→route-to-Build/optimizer actions; gap-throughput stats (proposed → shipped → won). Brain: [[../goals/acquisition-research-engine]] · [[competitor-scout]] · [[ad-creative-scout]] · [[landing-page-scout]] · [[storefront-optimizer]].
 
 **Built (code-complete, tsc-clean; migration NOT yet applied to prod):**

@@ -1,4 +1,4 @@
-# Daily digest — one Slack post/day to #daily-digest ✅
+# Daily digest — one Slack post/day to #daily-digest
 
 **Owner:** [[../functions/platform]] · **Parent:** the Slack-cleanup pass (2026-06-23) — replace per-event FYI pings with **one** daily summary.
 
@@ -11,7 +11,7 @@ A single Slack message to `#daily-digest`:
 - **Platform FYIs:** count of non-critical ops warnings (the ones that no longer DM), DB-health/coverage proposals waiting in the Agents hub.
 - A link to the Agents hub for the detail. Concise — a scannable digest, not a wall.
 
-## Phase 1 — the daily-digest cron ✅
+## Phase 1 — the daily-digest cron
 A new Inngest daily cron (`daily-digest-cron`, `0 13 * * *`), registered in `MONITORED_LOOPS` ([[coverage-auto-register-agent]]); aggregates the last 24h of `director_activity` + `agent_jobs` (build/ship recap) + dunning + notable Meta ad-perf shifts + ops-warning counts into one Slack post to `#daily-digest` (`C0BCQ1ZNJ1F`) via [[../libraries/slack]] `postMessage`. Gated on a Slack token; no-op if absent. A quiet day still posts one brief "quiet day" digest. Brain: [[../inngest/daily-digest-cron]] · [[../tables/director_activity]] · [[../libraries/slack]] · [[devops-director]].
 
 **Shipped:** `src/lib/inngest/daily-digest-cron.ts` (registered in `registered-functions.ts` + `MONITORED_LOOPS` in `control-tower/registry.ts`, owner `platform`). Aggregation is per-section best-effort (a failed read leaves that field at zero, never fails the post). Ad-perf surfaces only material deltas (spend swing ≥25% AND ≥$50, or ROAS swing ≥0.5). Brain page: [[../inngest/daily-digest-cron]].

@@ -1,13 +1,11 @@
-# Dynamic pricing-rules for persist-to-renewal offers ✅
-
-**Deferred:** parked by the CEO — every auto-build lane skips it until promoted back to Planned.
+# Dynamic pricing-rules for persist-to-renewal offers
 
 **Owner:** [[../functions/growth]] · **Parent:** M6 — dynamic pricing-rules for persist-to-renewal offers
 **Blocked-by:** [[storefront-optimizer-agent]]
 
 The gated, highest-stakes lever for the [[../goals/storefront-optimizer]] — **offers that persist to renewal**. The autonomy leash (the goal § Autonomy) splits the offer space: a *first-order* offer is a coupon/discount ([[../tables/coupons]], already supported and low-risk); an offer that **persists to renewal** must become a dynamic [[../tables/pricing_rules]] entry — and today `pricing_rules` is effectively **static per product** (one rule joined via `product_pricing_rule`, read live by the renewal/portal pricing engine). This spec makes `pricing_rules` dynamic enough to express a **time-boxed, experiment-scoped persist-to-renewal offer**, and wires it as the [[storefront-optimizer-agent|M4 agent]]'s **approval-gated** offer lever. It is owner-approved because it **bleeds margin on every renewal** (not just the first order), so it is never autonomous. **Contributes-to** CFO (margin) + Retention (renewal pricing). Gated by design: it ships **after** the agent's reversible levers (copy/hero/chapter) are proven, so the offer lever turns on only once the optimizer is trustworthy.
 
-## Phase 1 — dynamic / time-boxed persist-to-renewal offer model ✅
+## Phase 1 — dynamic / time-boxed persist-to-renewal offer model
 - ✅ shipped (2026-06-24)
 - ✅ Added the `pricing_rule_offers` **child** table (migration `20260624000000_pricing_rule_offers.sql`) expressing a **scoped, time-boxed renewal offer**: window (`starts_at`/`ends_at`, CHECK `ends_at > starts_at`), the persist-to-renewal delta (`subscribe_discount_pct` override **or** `renewal_price_cents` fixed price — discriminated by `offer_type`, CHECK `value_present`), the `(product × lander_type × audience)` / `experiment_id` + `variant_id` scope, and `status` ∈ `proposed｜approved｜active｜expired` (CHECK). Brain pages: new [[../tables/pricing_rule_offers]], updated [[../tables/pricing_rules]] + [[../tables/subscriptions]] + [[../libraries/pricing]].
   - **Reconcile note (2026-06-24):** the live table was first created out-of-band by closed PR #281 carrying the **full guardrail shape** (`offer_type`, `margin_floor_pct`, `modeled_renewal_margin_pct`, `cogs_source_missing`, lifecycle timestamps). The migration here was rewritten to `CREATE … IF NOT EXISTS` that exact rich schema (no-op on prod, correct on a fresh DB) + add the genuinely-missing `subscriptions.pricing_offer_id`; `resolveSubscriptionPricing` reads the live columns (no `label`). Those guardrail columns are populated by the deferred [[storefront-renewal-offer-lever]].

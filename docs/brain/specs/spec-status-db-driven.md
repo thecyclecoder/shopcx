@@ -1,8 +1,7 @@
-# Spec status → 100% DB-driven (kill the status-commit deploys) ✅
+# Spec status → 100% DB-driven (kill the status-commit deploys)
 
 **Owner:** [[../functions/platform]]
 **Parent:** Platform mandate — the spec/board system stays fast + honest (continues the spec-card-db-companion lineage)
-**Priority:** critical
 
 ## Problem
 
@@ -64,20 +63,20 @@ All six PUT `docs/brain/specs/{slug}.md` on `branch:main` → bundle redeploy. *
 
 ## Phases
 
-## Phase 1 — DB authoritative for status (schema + backfill + reads) ✅
+## Phase 1 — DB authoritative for status (schema + backfill + reads)
 - Migration: add `deferred` to the status CHECK; add `critical` (+ `deferred`) to `spec_card_state`; create `spec_status_history`.
 - Backfill: parse current markdown status for every spec → write `spec_card_state` (status, phase_states, critical, deferred). One-time.
 - Flip every reader to **DB-only** for status: `brain-roadmap.parseSpec` parses CONTENT only (title, phase *titles*, owner, parent, blockedBy, autoBuild, repairSignature, summary) — stop deriving status/critical/deferred. Board + rollups + gate + box read status from `spec_card_state`. `resolveBoardStatus`/`mergePhaseStates` collapse to a plain DB read.
 
-## Phase 2 — Writers go DB-only (the deploy kill) ✅
+## Phase 2 — Writers go DB-only (the deploy kill)
 - Rewrite the six git-committing writers to write `spec_card_state` (+ `spec_status_history`) and **stop the markdown PUT**. Status/priority/drift/supervise/verification all become instant DB writes, zero deploys.
 - `roadmap-actions` chaining + the build gate read phase status from the DB.
 
-## Phase 3 — Strip status from markdown + simplify ✅
+## Phase 3 — Strip status from markdown + simplify
 - One migration commit: strip phase emojis, `**Deferred:**`, `**Priority:** critical`, H1 status emoji from all spec markdown (phases become plain `## Phase N — title`). One deploy, then quiet.
 - Delete now-dead code: `deriveStatus`, the spec `statusFromText`/marker regexes, `resolveBoardStatus`, `deploymentState`, `mergePhaseStates` forward-merge, the deploy-pending/SHA dance.
 
-## Phase 4 — Repurpose spec-drift + docs ✅
+## Phase 4 — Repurpose spec-drift + docs
 - spec-drift shrinks to a light DB backstop ("did a merged build's phase get marked shipped in the DB?") — most of the markdown reconciler retires.
 - Update brain docs: `project-management.md` ("markdown is the source of truth" → "content in markdown, status in DB"), `brain-roadmap.md`, `tables/spec_card_state.md`, fold this spec away.
 

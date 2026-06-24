@@ -1,4 +1,4 @@
-# Regression Agent — review regressions → dismiss or author a fix spec ✅
+# Regression Agent — review regressions → dismiss or author a fix spec
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/devops-director]] (a worker the Platform/DevOps Director supervises)
 **Blocked-by:** [[approval-routing-engine]]
@@ -20,7 +20,7 @@ A thing that **used to work and now doesn't** — distinct from a brand-new erro
 ## Supervisable (north-star)
 The agent **authors + dismisses** (a bounded proxy: "is this a real regression + here's the fix"); the **DevOps Director (objective owner) queues the build** and is graded on whether the fix held. The agent never builds/merges on its own — it authors; the manager disposes. Every detect/dismiss/author action writes a [[../tables/director_activity|`director_activity`]] row (feeds the audit history + board + EOD recap).
 
-## Phase 1 — regression detection + review + direct fix-spec authoring ✅
+## Phase 1 — regression detection + review + direct fix-spec authoring
 Shipped. The detector, the review/dismiss path (with recorded reasoning), and direct fix-spec authoring that routes into the inbox for the DevOps Director to queue. Brain: [[../libraries/regression-agent]] · [[../tables/director_activity]] · [[../libraries/director-activity]] · [[../goals/devops-director]] · [[platform-director-agent]] · [[approval-routing-engine]] · [[../specs/repair-agent]] · [[../specs/spec-test-deep-verification]] · [[director-loop-grading]].
 
 **What landed:**

@@ -1,26 +1,26 @@
-# Head-of-Growth campaign-grading loop ✅
+# Head-of-Growth campaign-grading loop
 
 **Owner:** [[../functions/growth]] · **Parent:** M5 — Head-of-Growth grading loop
 **Blocked-by:** [[storefront-optimizer-agent]]
 
 The supervisory loop that closes the CEO → Growth → Optimizer chain for the [[../goals/storefront-optimizer]]. The [[../functions/growth|Growth director]] **grades each campaign 1–10** (human-overridable), scoring **hypothesis quality separately from result** — a *sound* hypothesis that lost is good learning (high grade); a *lucky* win from a sloppy hypothesis is low. There are **two grades per campaign:** an **initial grade** at significance (on the proxy + the agent's reasoning), and a **revised grade ~4 months later** when the [[storefront-ltv-proxy-reconciler|M3 reconciler]]'s real LTV lands. Grades **train the agent** — they bias which levers/hypotheses it favors next (the feedback signal of the [[storefront-optimizer-agent|M4 agent]]). This directly mirrors the shipped 1–10 ticket grader ([[../libraries/ticket-analyzer]] `analyzeTicket` + the calibration-rule [[../tables/grader_prompts]] pattern), reusing its proven shape: an AI grader against a rubric + human-approved calibration rules, human-overridable. Success metric served: the agent's **average campaign grade trending up**, plus the report contract Growth uses to supervise.
 
-## Phase 1 — campaign grade store + rubric ✅
+## Phase 1 — campaign grade store + rubric
 - ✅ shipped — `20260628120000_storefront_campaign_grades.sql` (+ `scripts/apply-storefront-campaign-grades-migration.ts`); brain pages [[../tables/storefront_campaign_grades]] + [[../tables/storefront_grader_prompts]].
 - New table `storefront_campaign_grades` — one row per campaign (the [[storefront-optimizer-agent|M4]] campaign record): `experiment_id`, `grade_initial` (1–10), `grade_initial_reasoning`, `hypothesis_quality` + `result_quality` sub-scores (scored *separately*), `grade_revised` (1–10, nullable until 4-month LTV lands), `grade_revised_reasoning`, `graded_by` ∈ `agent｜human`, `overridden_by` (nullable workspace member). Migration + [[write-brain-page]] `tables/storefront_campaign_grades.md`.
 - A rubric for campaign grading, calibrated by **human-approved rules** in a `storefront_grader_prompts` store modeled on [[../tables/grader_prompts]] (`status` ∈ `proposed｜approved`, `derived_from_*`) — so the Growth director corrects the grader's scoring on edge cases the same way the ticket grader is calibrated.
 
-## Phase 2 — the initial grade (at significance) ✅
+## Phase 2 — the initial grade (at significance)
 - ✅ shipped — [[../libraries/storefront-campaign-grader]] `gradeCampaign(mode:'initial')`, hooked into [[../libraries/storefront-experiment-refresh]] on every terminal (promote/kill/rollback) decide step.
 - `src/lib/storefront/campaign-grader.ts` — `gradeCampaign(experiment, mode:'initial')`: an LLM grader ([[../libraries/ai-models]]) over the campaign's hypothesis (the cited funnel signal + lever posterior), the variant produced, and the proxy result, plus the approved calibration rules. Returns the 1–10 grade with **hypothesis-quality scored independently of result** (sound-but-lost = high; lucky-but-sloppy = low) + reasoning.
 - Fired when the M1 bandit reaches significance / a campaign concludes (hook the M4 decide step). Idempotent per campaign.
 
-## Phase 3 — the revised grade (4-month LTV) + training signal ✅
+## Phase 3 — the revised grade (4-month LTV) + training signal
 - ✅ shipped — `gradeCampaign(mode:'revised')` + `gradeRevisedForReconciledCohorts` wired into [[../inngest/storefront-ltv-reconcile]]'s daily run; large gap proposes a `storefront_grader_prompts` rule. Training signal: `loadLeverGradeSignal` feeds the M4 brief + the M2 `nextLeverToTest` `gradeBias` (`GRADE_BIAS_WEIGHT=0.15`).
 - `gradeCampaign(experiment, mode:'revised')`: re-grade once the [[storefront-ltv-proxy-reconciler|M3 reconciler]] lands the cohort's actual LTV — did the proxy-time call hold up? Persist `grade_revised` + reasoning; a large initial-vs-revised gap is a calibration signal (feeds a proposed `storefront_grader_prompts` rule).
 - **Train the agent:** expose grades back to [[storefront-optimizer-agent|M4]] so the agent biases toward high-graded hypothesis patterns (and to [[storefront-lever-importance-memory|M2]] as a secondary weight on lever choice). This is the CEO → Growth → Optimizer feedback loop made concrete.
 
-## Phase 4 — the Growth-director report contract + override ✅
+## Phase 4 — the Growth-director report contract + override
 - ✅ shipped — Campaign-grades panel on the [[../dashboard/storefront__funnel]] (per-campaign initial+revised grades, hypothesis/result sub-scores, the agent's average-grade trend, one-click override). `POST /api/workspaces/[id]/storefront-campaign-grades/[gradeId]` records the override; `PATCH /api/workspaces/[id]/storefront-grader-prompts/[ruleId]` approves a calibration rule.
 - A report surface on the [[../dashboard/storefront__funnel|funnel dashboard]] (or a Growth section): every campaign with its initial + revised grade, hypothesis/result sub-scores, the agent's average grade trend, and a one-click **human override** (sets `graded_by='human'`/`overridden_by`) — the human-overridable gate.
 - Define the structured report the Growth director (a future CEO-mode director-agent) consumes: per-period campaign grades + trend + the levers/products driving predicted-LTV-per-visitor.

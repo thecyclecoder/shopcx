@@ -1,4 +1,4 @@
-# Optimizer hero preview gate — see/reject-with-notes before a generated hero goes live ✅
+# Optimizer hero preview gate — see/reject-with-notes before a generated hero goes live
 
 **Owner:** [[../functions/growth]] · **Parent:** hardens [[storefront-optimizer-agent]] + [[storefront-optimizer-proposal-cards]]. · **Owner directive 2026-06-23:** for an `image` (hero) campaign, the owner approves the *concept* today and the hero is generated **post-approval and served to live shoppers sight-unseen**. Add a **preview gate**: generate the candidate first, the owner **sees the actual image** and either approves it live or **rejects with notes** that feed a better regeneration — iterate until it's right.
 
@@ -21,7 +21,7 @@
 - On the preview card, tap **Approve & go live** → `POST /api/roadmap/approve {decision:'approve'}` → after the worker resumes, `select status, lever from storefront_experiments where product_id='<pid>' order by created_at desc limit 1` → a `running` row whose variant arm `patch.heroImageUrl` equals the **approved** `preview_image_url` (not a fresh render); the canonical locked hero is untouched (control); rollback reverts to it.
 - Negative — a **content** (copy/chapter) proposal shows **Approve** (no "concept"/preview) and materializes the experiment on the first approve, skipping the gate (no image to preview). `POST /api/roadmap/approve {decision:'reject'}` on a non-`preview` action → 409 "this action has no image preview to reject". No image is ever served to a shopper without an explicit owner image-approval.
 
-## Phase 1 — generate-on-approve + preview/reject-with-notes loop + grounded gen ✅
+## Phase 1 — generate-on-approve + preview/reject-with-notes loop + grounded gen
 - ✅ shipped
 - Split the approval into generate-candidate (worker, Nano-Banana, compositing `isolated_image_url` at `hero_width×hero_height`/lander aspect) → re-surface for image-approval; add the image preview + reject-with-notes input to the proposal card + the regenerate path; only image-approval calls `materializeCampaign`. Brain: [[storefront-optimizer-agent]] · [[storefront-optimizer-proposal-cards]] · [[../libraries/gemini]] · [[../tables/product_variants]] · [[../dashboard/storefront__optimizer]].
 

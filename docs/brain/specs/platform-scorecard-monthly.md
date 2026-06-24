@@ -1,6 +1,4 @@
-# Scorecard monthly leading curve ✅
-
-**Priority:** critical
+# Scorecard monthly leading curve
 
 **Owner:** [[../functions/platform]] · **Parent:** [[../goals/platform-department-scorecard]] — (c) Monthly leading curve
 **Blocked-by:** [[platform-scorecard-engine]], [[deploy-health-rollback-guardian]]
