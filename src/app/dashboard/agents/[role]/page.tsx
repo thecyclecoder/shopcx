@@ -9,6 +9,8 @@ import { DirectorActivity } from "@/components/agents/director-activity";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
 import { WorkerCoachingHistory } from "@/components/agents/worker-coaching-history";
+import { WorkerGradePanel } from "@/components/agents/worker-grade-panel";
+import { DirectorAutonomy } from "@/components/agents/director-autonomy";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
 // `/dashboard/agents/[role]` — one page for every seat (CEO · a director slug · a
@@ -171,8 +173,11 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
         </div>
       ) : null;
     // Live activity feed — the director's own director_activity rows (is she alive + what she's doing).
+    // P5: for the leash-bearing Platform director, show what she ACTUALLY does autonomously (leash-derived),
+    // not just the functions/*.md charter mandates above.
     extra = (
       <>
+        {d.slug === "platform" && <DirectorAutonomy autonomous={d.autonomous} />}
         {teamBlock}
         <div className="mt-6">
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent activity</h3>
@@ -197,6 +202,13 @@ function ProfileCard({ org, role, xp }: { org: OrgChart; role: string; xp: Recor
           Box lane <span className="font-mono text-zinc-500 dark:text-zinc-400">{worker.kind}</span> — its requests route
           up to the CEO inbox until {dp.name} ({dp.role}) goes live (approval-routing engine, M2).
         </p>
+        {/* worker-grading Phase 3: the Director's grade rollup + the worker's recent graded actions. */}
+        <div className="mt-6">
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            Grades · from {dp.name} ({dp.role})
+          </h3>
+          <WorkerGradePanel kind={worker.kind} />
+        </div>
         {/* worker-coaching-loop: the director's messages to this worker over time (its coaching history). */}
         <div className="mt-6">
           <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">

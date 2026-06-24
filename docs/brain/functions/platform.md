@@ -22,6 +22,15 @@ AI-driven management of the live Shopify store + theme from inside ShopCX.
 The "actually improve the system" work — the build box + worker ([[../recipes/build-box-setup]]), deploys, CI/tsc gates, and reliability of the platform itself. (Folded into Platform rather than a separate function; promote to its own function only if the surface grows.)
 - **Metric:** build/deploy success rate, green CI, box uptime.
 
+## What the live director (Ada) does autonomously — the leash
+
+The mandates above are the function **charter** (the perpetual scope). What the **live Platform/DevOps Director** actually does *without asking* is narrower + concrete — her **leash** ([[../libraries/platform-director]] `LEASH_CATEGORIES` + the escort/grade/coach surfaces), surfaced on her profile as "What she does autonomously" (`DirectorAutonomy`, [[../specs/worker-grading-and-director-management]] P5):
+
+- **Auto-approves within the leash:** an `error_fix`, a `db_health` fix, an `additive_migration`, and a **migration + its idempotent backfill bundle** (`additive_backfill`, P8) — each only after a read-only investigation confirms it's sound (never rubber-stamps).
+- **Drives work:** escorts approved goals through their milestones; board-grooming continues/splits in-flight specs; queues 0-phase authored fix specs (`escortFixSpecs`).
+- **Grades + coaches:** grades every worker's concluded action 1–10 ([[../tables/worker_action_grades]]) and coaches a worker whose rollup slips.
+- **Always escalates to the CEO:** anything destructive/irreversible, a new feature or goal, a non-binary choice, or anything she can't confirm sound.
+
 ## Owned / contributed goals
 
 - Enables every other function — the build platform is what turns their specs into shipped code. Underpins [[../goals/ceo-mode]] (the engine that ships the capability-gap specs the CEO surfaces).
