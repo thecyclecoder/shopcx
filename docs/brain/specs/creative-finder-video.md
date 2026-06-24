@@ -1,5 +1,7 @@
 # Creative Finder — Video (follow-on) ⏳
 
+**Priority:** critical
+
 **Owner:** [[../functions/growth]] · **Parent:** [[winning-static-creative-finder]] (its video follow-on).
 **Deferred:** split from [[winning-static-creative-finder]] by a board-grooming sweep (2026-06-23) — **not needed now.** The static-creative finder is fully useful on its own; video is a heavier, separable pipeline. v1 already routes videos to `status='video_pending'`, so **nothing is lost** — they're captured + queued for when this builds.
 
