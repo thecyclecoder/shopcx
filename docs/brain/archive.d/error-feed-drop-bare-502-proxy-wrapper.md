@@ -1,0 +1,1 @@
+- **Drop bare Lambda 502 proxy-summary wrappers in the Vercel error feed** · verified 2026-06-24 · → [[integrations/vercel-log-drain]]

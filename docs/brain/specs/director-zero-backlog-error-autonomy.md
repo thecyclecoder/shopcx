@@ -1,4 +1,4 @@
-# Director-owned error autonomy: every error self-fixes or escalates as external ⏳
+# Director-owned error autonomy: every error self-fixes or escalates as external ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — the error-autonomy capstone over [[../libraries/repair-agent]] under [[../goals/devops-director]]
 **Found in use 2026-06-24:** the CEO wants to never handle errors unless they're genuinely unfixable by us — 'if there's a backlog, those should have specs made and fixed; only pull me in when something outside our system is broken and we need alternatives.' Today: 16 open `error_events`, 2 `repair` jobs in `needs_attention` awaiting manual dismiss, 2 open `loop_alerts`. Rafa ([[../libraries/repair-agent]]) is event-triggered (fires on a NEW signature) and authors fixes, but nothing GUARANTEES the existing open backlog drains, and 'needs a human' is not distinguished from 'external blocker, needs the CEO.'
@@ -22,12 +22,6 @@ Auto-building product-code fixes off a noisy error feed is the exact Goodhart fa
 
 ### Verification — Phase 2
 - An error whose verified root cause is an external vendor break → a single CEO escalation carrying the diagnosis + alternative options + an `escalated` row; NO code fix authored. An internally-fixable error → fixed end-to-end, the CEO never sees it.
-
-## Phase 3 — the autonomy is visible + reversible (your supervision over me) ⏳
-- A daily [[../libraries/platform-director]] board-watch rollup: 'errors tonight — F fixed & shipped, D dismissed-benign, R reconciled from backlog, E escalated to you as external.' Each auto-merged fix is a normal `claude/<slug>` PR with the verification trail, so any one is one `git revert` away. You get after-the-fact visibility and an instant undo without being in the loop up front.
-
-### Verification — Phase 3
-- After a day of error activity, ONE board-watch post summarizes fixed/dismissed/reconciled/escalated counts; each auto-fix is a revertable PR with its CI + spec-test trail.
 
 ## Open decision (for the CEO)
 Full autonomy means auto-MERGING product-code fixes once CI + verification are green — no glance from you. That matches 'I don't want to intervene,' and the safety is the verification gate + the one-tap revert. Alternative: auto-build but HOLD the merge for your one-tap confirm on anything touching customer-facing paths. Default in this spec is auto-merge-on-green (you're out of the loop); say the word and I'll gate the merge for customer-facing code only.

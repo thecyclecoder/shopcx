@@ -1,0 +1,1 @@
+- **Abandoned-cart cron: emit Control Tower heartbeat on empty (no-due-carts) runs** · verified 2026-06-24 · → [[inngest/abandoned-cart]]

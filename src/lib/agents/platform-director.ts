@@ -55,6 +55,7 @@ import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
+import { buildGate } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
@@ -508,6 +509,10 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   const owned = mine.filter((g) => isApprovedInProgress(g));
   if (!owned.length) return { goals: [], queued: [], escalated: [] };
 
+  // Build-gate (director-executable-plans-and-priority): if an active directive gates builds until a spec
+  // ships, this lane queues NOTHING but the gate spec itself until then. Computed once per pass.
+  const gate = await buildGate(admin, workspaceId, PLATFORM);
+
   const specBySlug = new Map(specs.map((s) => [s.slug, s]));
   const results: GoalEscortResult[] = [];
   const queuedAll: string[] = [];
@@ -520,6 +525,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
     for (const card of goalSpecs(goal, specBySlug)) {
       if (card.status === "shipped") continue; // already landed
       if (card.status === "deferred") continue; // parked — every auto-build lane skips a deferred spec until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
+      if (gate && card.slug !== gate.gatedUntil) continue; // build-gate: a directive paused all builds except the gate spec
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
       if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
 
@@ -639,12 +645,14 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
   if (!workspaceId) return { fixQueued: [], escalated: [] };
 
   const { specs } = await getRoadmap();
+  const gate = await buildGate(admin, workspaceId, PLATFORM); // build-gate (director-executable-plans-and-priority): the gate spec is itself often a fix, so it's allowed; others wait
   const fixQueued: string[] = [];
   const escalated: string[] = [];
 
   for (const card of specs) {
     if (card.status === "shipped") continue; // already landed
     if (card.status === "deferred") continue; // parked — a deferred fix spec is skipped until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
+    if (gate && card.slug !== gate.gatedUntil) continue; // build-gate: a directive paused all builds except the gate spec
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
@@ -1253,7 +1261,7 @@ export interface PlatformHealth {
   redLabels: string[];
 }
 
-/** What the director did today — the three headline counts the board update reads back. */
+/** What the director did today — the headline counts the board update reads back. */
 export interface PlatformWatchActivity {
   /** auto-approved fixes today (approved_approval rows — "squashed 500s"). */
   squashed: number;
@@ -1261,6 +1269,12 @@ export interface PlatformWatchActivity {
   escorting: number;
   /** calls escalated to the CEO today (escalated rows). */
   escalated: number;
+  /** Rafa's no-fix calls reviewed today (dismissed + kept + escalated-from-review) — Phase 2 rollup. */
+  reviewedRepairs: number;
+  /** of those reviews, how many Ada cleared (dismissed_repair rows). */
+  dismissedRepairs: number;
+  /** of those reviews, how many she escalated back to the CEO (escalated rows, repair_dismissal_suspect). */
+  escalatedRepairs: number;
 }
 
 /** The health half of the watch line — "all N platform loops green" / "K red (…)" / "X/N green, M degraded". */
@@ -1285,10 +1299,21 @@ function platformActivityLine(a: PlatformWatchActivity): string {
   return parts.length ? parts.join(" · ") : "nothing needed a decision";
 }
 
+/**
+ * The supervision-of-the-supervisor half (Phase 2) — "Reviewed N of Rafa's calls — dismissed K, escalated J
+ * back to you." Only rendered on a day she actually reviewed at least one of Rafa's no-fix items.
+ */
+function platformRepairReviewLine(a: PlatformWatchActivity): string | null {
+  if (!a.reviewedRepairs) return null;
+  const calls = `${a.reviewedRepairs} of Rafa's call${a.reviewedRepairs === 1 ? "" : "s"}`;
+  return `Reviewed ${calls} — dismissed ${a.dismissedRepairs}, escalated ${a.escalatedRepairs} back to you.`;
+}
+
 /** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
 export function composePlatformWatchBody(health: PlatformHealth, activity: PlatformWatchActivity): string {
   const persona = getPersona(PLATFORM);
-  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.`;
+  const repairLine = platformRepairReviewLine(activity);
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}`;
 }
 
 /**
@@ -1334,20 +1359,31 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
   const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
   const { data: activityRows } = await admin
     .from("director_activity")
-    .select("action_kind")
+    .select("action_kind, metadata")
     .eq("workspace_id", workspaceId)
     .eq("director_function", PLATFORM)
     .gte("created_at", dayStart)
     .lt("created_at", dayEnd);
-  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0 };
-  for (const r of (activityRows ?? []) as { action_kind: string }[]) {
+  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0 };
+  for (const r of (activityRows ?? []) as { action_kind: string; metadata: Record<string, unknown> | null }[]) {
+    const repairEscalation = r.action_kind === "escalated" && r.metadata?.["escalation_kind"] === "repair_dismissal_suspect";
     if (r.action_kind === "approved_approval") activity.squashed++;
     else if (r.action_kind === "escorted_goal") activity.escorting++;
     else if (r.action_kind === "escalated") activity.escalated++;
+    // Phase 2 rollup — each review of one of Rafa's no-fix calls (a dismiss, a keep, or an escalate-back).
+    if (r.action_kind === "dismissed_repair") {
+      activity.dismissedRepairs++;
+      activity.reviewedRepairs++;
+    } else if (r.action_kind === "kept_repair") {
+      activity.reviewedRepairs++;
+    } else if (repairEscalation) {
+      activity.escalatedRepairs++;
+      activity.reviewedRepairs++;
+    }
   }
 
   // Don't spam a fully-quiet, all-green day — post only when there's health to flag or work to report.
-  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0;
+  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0 || activity.reviewedRepairs > 0;
   if (!hasActivity && health.color === "green") return { posted: false, reason: "quiet" };
 
   await postDirectorMessage({
@@ -1662,8 +1698,18 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
       (filters.goalsBySpec[s.slug] ?? []).length === 0, // goal-linked → the goal-walk / new-goal escalation owns it
   );
 
+  // Critical-first (director-executable-plans-and-priority): a `**Priority:** critical` spec is investigated +
+  // queued ahead of normal Planned specs, within the per-pass cap. Stable for non-critical (preserves order).
+  unstarted.sort((a, b) => (b.critical ? 1 : 0) - (a.critical ? 1 : 0));
+
+  // Build-gate: while a directive gates builds until a spec ships, the init lane starts NOTHING but the gate
+  // spec (so a fix lands before new feature work compiles). The gate spec is usually a fix (escortFixSpecs owns
+  // it), so this typically yields an empty init list while gated — intended.
+  const gate = await buildGate(admin, workspaceId, PLATFORM);
+  const candidates = gate ? unstarted.filter((s) => s.slug === gate.gatedUntil) : unstarted;
+
   const out: InitCandidate[] = [];
-  for (const s of unstarted) {
+  for (const s of candidates) {
     if (out.length >= PLATFORM_DIRECTOR_INIT_CAP) break;
     const state = await specBuildState(admin, workspaceId, s.slug);
     if (state.inFlight) continue; // a build is already carrying it — not "unstarted with no build"
@@ -1929,7 +1975,7 @@ export async function applyDirectorDismissal(
     actionKind: "dismissed_repair",
     specSlug: null,
     reason: reasoning,
-    metadata: { dismiss_key: dismissKey(candidate.signature), repair_job_id: job.id, signature: candidate.signature, verdict: "dismiss", autonomous: true },
+    metadata: { dismiss_key: dismissKey(candidate.signature), repair_job_id: job.id, signature: candidate.signature, title: candidate.title, verdict: "dismiss", autonomous: true },
   });
   return { ok: true };
 }

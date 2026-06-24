@@ -16,7 +16,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { buildControlTowerSnapshot } from "@/lib/control-tower/monitor";
 import { buildErrorFeedSnapshot } from "@/lib/control-tower/error-feed";
 import { getOpenSpecDrift } from "@/lib/spec-drift";
-import { getOpenRepairs } from "@/lib/repair-agent";
+import { getOpenRepairs, getDirectorDismissedRepairs } from "@/lib/repair-agent";
 import { getDbHealthPanel } from "@/lib/control-tower/db-health";
 import { getOpenCoverageRegistrations } from "@/lib/coverage-register-agent";
 import { getClaudeHealth } from "@/lib/claude-health";
@@ -45,11 +45,12 @@ export async function GET() {
     return NextResponse.json({ error: "Only the workspace owner can view the Control Tower" }, { status: 403 });
   }
 
-  const [snapshot, errorFeed, specDrift, repairs, dbHealth, coverageRegister, claudeHealth] = await Promise.all([
+  const [snapshot, errorFeed, specDrift, repairs, directorDismissed, dbHealth, coverageRegister, claudeHealth] = await Promise.all([
     buildControlTowerSnapshot(admin),
     buildErrorFeedSnapshot(admin),
     getOpenSpecDrift(workspaceId),
     getOpenRepairs(admin, workspaceId),
+    getDirectorDismissedRepairs(admin, workspaceId),
     getDbHealthPanel(admin, workspaceId),
     getOpenCoverageRegistrations(admin, workspaceId),
     getClaudeHealth(admin),
@@ -60,5 +61,5 @@ export async function GET() {
   const counts = { ...snapshot.counts };
   for (const p of errorFeed.panels) counts[p.color]++;
 
-  return NextResponse.json({ ...snapshot, counts, errorFeed, specDrift, repairs, dbHealth, coverageRegister, claudeHealth });
+  return NextResponse.json({ ...snapshot, counts, errorFeed, specDrift, repairs, directorDismissed, dbHealth, coverageRegister, claudeHealth });
 }

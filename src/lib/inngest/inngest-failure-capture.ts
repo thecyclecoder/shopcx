@@ -10,7 +10,7 @@
  * See docs/brain/inngest/inngest-failure-capture.md · docs/brain/specs/error-feed-monitoring.md.
  */
 import { inngest } from "@/lib/inngest/client";
-import { recordError } from "@/lib/control-tower/error-feed";
+import { recordError, isTransientInngestTransportError } from "@/lib/control-tower/error-feed";
 import {
   APP_FUNCTION_ID_PREFIX,
   servedFunctionIds,
@@ -71,6 +71,12 @@ export const inngestFailureCapture = inngest.createFunction(
       typeof err === "string" ? err : (typeof err === "object" && err ? err.message : null) ?? "function failed after retries";
     const triggerEvent = data.event?.name ?? null;
 
+    // Inngest TRANSPORT noise (`http_unreachable` — Inngest couldn't get a clean reply from our
+    // Vercel SDK URL; a deploy-boundary reap / connection reset, not an app throw): mark it
+    // `transient` so recordError auto-resolves a first sighting (no page) and escalates only on
+    // recurrence within the window — a one-off blip is dropped, a chronic timeout still surfaces.
+    const transient = isTransientInngestTransportError(errName, errMessage);
+
     await recordError({
       source: "inngest",
       // Group by function + error class — flapping = one incident, not one per run.
@@ -83,6 +89,7 @@ export const inngestFailureCapture = inngest.createFunction(
         trigger_event: triggerEvent,
         error_name: errName,
       },
+      transient,
     });
 
     return { captured: functionId, run_id: data.run_id ?? null };

@@ -38,7 +38,7 @@ async function gate(): Promise<{ ok: false; res: NextResponse } | { ok: true; wo
   return { ok: true, workspaceId, userId: user.id };
 }
 
-async function enqueue(opts: { workspaceId: string; userId: string; threadId: string; mode: "turn" | "approve_action"; intent?: "ask" | "coach" }) {
+async function enqueue(opts: { workspaceId: string; userId: string; threadId: string; mode: "turn" | "approve_action"; intent?: "ask" | "coach" | "plan" }) {
   const admin = createAdminClient();
   await admin.from("agent_jobs").insert({
     workspace_id: opts.workspaceId,
@@ -60,7 +60,7 @@ export async function POST(req: Request) {
     action?: "chat" | "retry" | "approve";
     actionId?: string;
     decision?: "approve" | "decline";
-    intent?: "ask" | "coach";
+    intent?: "ask" | "coach" | "plan";
   };
   const action = body.action ?? "chat";
 

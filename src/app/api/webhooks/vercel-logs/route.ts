@@ -19,7 +19,7 @@
  */
 import { NextResponse } from "next/server";
 import crypto from "crypto";
-import { recordError, recordFeedDelivery, isAbortedStreamNoise } from "@/lib/control-tower/error-feed";
+import { recordError, recordFeedDelivery, isAbortedStreamNoise, isBareLifecycle } from "@/lib/control-tower/error-feed";
 
 export const dynamic = "force-dynamic";
 
@@ -65,37 +65,6 @@ function verifySignature(rawBody: string, signature: string | null, secret: stri
   } catch {
     return false;
   }
-}
-
-/**
- * A Vercel/Lambda log whose entire body is request-lifecycle scaffolding —
- * `START`/`END`/`REPORT RequestId` blocks (+ their Duration/Memory metric lines) and
- * the bare `[METHOD] path status=NNN` proxy summary — carries NO error body. For a 5xx
- * it is the non-actionable platform wrapper around a failure the function already logged
- * itself (a `console.error` with its own stable signature + repair spec). Recording it
- * too mints a SECOND, redundant signature for one failure (Control Tower
- * `vercel:ebdf493a37c60c34`), so we drop these before signature-grouping. A lifecycle
- * block that ALSO carries a real message/stack (e.g. "Task timed out", an uncaught
- * exception) is NOT bare and is still captured.
- */
-function isBareLifecycle(message: string): boolean {
-  const lines = message
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return false;
-  return lines.every(
-    (l) =>
-      /^START RequestId:/i.test(l) ||
-      /^END RequestId:/i.test(l) ||
-      /^REPORT RequestId:/i.test(l) ||
-      // REPORT continuation / metric lines when Lambda splits them onto their own lines.
-      /^(Duration|Billed Duration|Memory Size|Max Memory Used|Init Duration|Restore Duration):/i.test(l) ||
-      // XRAY/Segment trailers Lambda sometimes appends to a REPORT block.
-      /^(XRAY TraceId|SegmentId|Sampled|Status):/i.test(l) ||
-      // The bare proxy summary line: "[POST] /api/portal?route=x status=502".
-      /^\[[A-Z]+\]\s+\S+\s+status=\d{3}$/i.test(l),
-  );
 }
 
 /** Is this log an error / 500-level entry worth surfacing? */

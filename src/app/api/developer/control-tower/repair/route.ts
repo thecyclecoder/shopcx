@@ -8,16 +8,22 @@
  *                                  authored fix spec (the owner-gate the North star keeps).
  *   { jobId, action: 'dismiss' } → decline it + flip to queued_resume; the box resolves the
  *                                  originating error_events row and clears the surfaced item.
+ *   { jobId, action: 'reopen' }  → the CEO's override on one of the Director's (Ada's) dismissals
+ *                                  (director-supervised-repair-dismissal Phase 2): re-open the
+ *                                  originating error_events row + re-enqueue Rafa for a fresh triage,
+ *                                  and log a `reopened_repair` row so it leaves the dismissed list.
  *
  * Owner-gated. The build is NEVER queued without this tap (unless the verdict was on the narrow
  * REPAIR_AUTOBUILD_KINDS allow-list, which auto-queues inside the box and never surfaces here).
  *
- * See docs/brain/specs/repair-agent.md · docs/brain/libraries/repair-agent.md.
+ * See docs/brain/specs/repair-agent.md · docs/brain/specs/director-supervised-repair-dismissal.md · docs/brain/libraries/repair-agent.md.
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { enqueueRepairJob } from "@/lib/repair-agent";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -43,17 +49,54 @@ export async function POST(request: Request) {
 
   const body = (await request.json().catch(() => ({}))) as { jobId?: unknown; action?: unknown };
   const jobId = typeof body.jobId === "string" ? body.jobId : "";
-  const action = body.action === "build" || body.action === "dismiss" ? body.action : null;
-  if (!jobId || !action) return NextResponse.json({ error: "jobId and action ('build'|'dismiss') are required" }, { status: 400 });
+  const action = body.action === "build" || body.action === "dismiss" || body.action === "reopen" ? body.action : null;
+  if (!jobId || !action) return NextResponse.json({ error: "jobId and action ('build'|'dismiss'|'reopen') are required" }, { status: 400 });
 
   const { data: job } = await admin
     .from("agent_jobs")
-    .select("id, kind, status, spec_slug, pending_actions")
+    .select("id, kind, status, spec_slug, instructions, pending_actions")
     .eq("id", jobId)
     .eq("workspace_id", workspaceId)
     .eq("kind", "repair")
     .maybeSingle();
   if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 });
+
+  if (action === "reopen") {
+    // The CEO's override on Ada's dismissal: a dismissed item is a `completed` repair job — re-open its
+    // error + re-enqueue Rafa so it re-triages, and log `reopened_repair` so it leaves the dismissed list.
+    if (job.status !== "completed") {
+      return NextResponse.json({ error: `Repair job is ${job.status}, not a dismissed item to re-open` }, { status: 409 });
+    }
+    // Restore the warning — the inverse of the dismiss (which resolved the row).
+    if (job.spec_slug) {
+      await admin.from("error_events").update({ status: "open" }).eq("signature", job.spec_slug).eq("status", "resolved");
+    }
+    // Re-enqueue Rafa for a fresh triage, re-firing the SAME brief (source/title/error refs) from the job.
+    let instr: { source?: unknown; title?: unknown; signature?: unknown; error_event_id?: unknown; loop_alert_id?: unknown } = {};
+    try {
+      instr = job.instructions ? JSON.parse(String(job.instructions)) : {};
+    } catch {
+      /* instructions not JSON — fall back to the signature below */
+    }
+    const signature = job.spec_slug || (typeof instr.signature === "string" ? instr.signature : "");
+    const requeue = await enqueueRepairJob(admin, {
+      source: typeof instr.source === "string" && instr.source ? instr.source : (signature.split(":")[0] || "vercel"),
+      signature,
+      title: typeof instr.title === "string" && instr.title ? instr.title : signature || "re-opened repair",
+      errorEventId: typeof instr.error_event_id === "string" ? instr.error_event_id : null,
+      loopAlertId: typeof instr.loop_alert_id === "string" ? instr.loop_alert_id : null,
+    });
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: "platform",
+      actionKind: "reopened_repair",
+      specSlug: null,
+      reason: "Owner re-opened Ada's dismissal — restored the warning and re-enqueued Rafa for a fresh triage.",
+      metadata: { repair_job_id: jobId, signature, requeued: requeue.enqueued, reopened_by: "owner" },
+    });
+    return NextResponse.json({ ok: true, action, requeued: requeue.enqueued });
+  }
+
   // Both proposed (needs_approval) and needs-human (needs_attention) items are dismissible; only a
   // proposed item (which carries a repair_build action) can be Built.
   if (job.status !== "needs_approval" && job.status !== "needs_attention") {

@@ -1843,6 +1843,19 @@ async function directorDecisionPrompt(workspaceId: string, basePrompt: string): 
 async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   const lib = await import("../src/lib/agents/platform-director");
   const notes: string[] = [];
+  // director-executable-plans-and-priority: the CEO's active directive trumps routine — surface it FIRST so it
+  // headlines the pass + the daily watch. The build-GATE it carries is enforced inside each lane (buildGate);
+  // here we just make it visible (and auto-complete-on-ship is handled by buildGate when the gate spec lands).
+  try {
+    const dd = await import("../src/lib/agents/director-directives");
+    const directive = await dd.getActiveDirective(db, job.workspace_id, "platform");
+    if (directive) {
+      const gateNote = directive.gate_builds_until ? ` · builds GATED until ${directive.gate_builds_until} ships` : "";
+      notes.push(`🎯 active directive: ${directive.summary}${gateNote}`);
+    }
+  } catch (e) {
+    console.error(`${tag} directive surface failed (continuing):`, e instanceof Error ? e.message : e);
+  }
   try {
     const escort = await lib.escortApprovedGoals(db);
     if (escort.queued.length) notes.push(`escorted → queued ${escort.queued.length} spec(s): ${escort.queued.join(", ")}`);
@@ -2376,7 +2389,7 @@ async function runPlatformDirectorJob(job: Job) {
   // Load the target approval job.
   const { data: target } = await db
     .from("agent_jobs")
-    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail")
+    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail, spec_branch")
     .eq("id", targetId)
     .maybeSingle();
   if (!target) {
@@ -2418,12 +2431,37 @@ async function runPlatformDirectorJob(job: Job) {
 
   // Investigate read-only on Max → one JSON verdict. Never rubber-stamps: must confirm EVERY action sound + in-leash.
   console.log(`${tag} investigating ${t.kind} (${bundleLabel}) for target ${targetId.slice(0, 8)}`);
+  // Visibility fix (director-executable-plans-and-priority): a build's migration SQL / apply script / new code
+  // live on its PR BRANCH, not main. Investigating on REPO_DIR (main) makes Ada (correctly) escalate everything
+  // as "the script doesn't exist / premise false". So when the target has a branch, run the read-only
+  // investigation in a worktree of THAT branch — the proposed artifacts are present + inspectable. Fall back to
+  // main when there's no branch (e.g. a db_health/coverage proposal that didn't open a PR).
+  const targetBranch = (target as { spec_branch?: string | null }).spec_branch ?? null;
+  let investCwd = REPO_DIR;
+  let investWt: string | null = null;
+  if (targetBranch) {
+    const key = targetBranch.replace(/[^a-zA-Z0-9_-]/g, "");
+    investWt = join(BUILDS_DIR, `director-review-${key}`);
+    sh("git", ["fetch", "origin", targetBranch]);
+    sh("git", ["worktree", "remove", "--force", investWt]);
+    const add = sh("git", ["worktree", "add", "--detach", investWt, `origin/${targetBranch}`]);
+    if (add.code === 0) {
+      sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(investWt, "node_modules")]);
+      investCwd = investWt;
+    } else {
+      console.warn(`${tag} could not check out branch ${targetBranch} for review (${add.err.slice(0, 120)}) — investigating on main`);
+      investWt = null;
+    }
+  }
   try {
     const brief = lib.buildDirectorBrief(t, leashActions);
     // Phase 2 live-state + P7 coaching: she approves on the authoritative function_autonomy flag (never stale
     // brain prose), and a coached rule ("auto-approve these going forward") still steers this call.
-    const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief));
-    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR);
+    const branchNote = investCwd !== REPO_DIR
+      ? `\n\nYou are in a read-only worktree of the build's BRANCH (${targetBranch}) — the proposed migration SQL (supabase/migrations/), the apply script, and the new code ARE present here. READ them directly to confirm soundness; do NOT assume a file is missing just because it isn't on main.`
+      : "";
+    const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief) + branchNote);
+    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, investCwd);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
@@ -2452,6 +2490,8 @@ async function runPlatformDirectorJob(job: Job) {
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  } finally {
+    if (investWt) sh("git", ["worktree", "remove", "--force", investWt]); // clean up the branch-review worktree
   }
 }
 
@@ -4775,6 +4815,37 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         body: typeof a.body === "string" ? a.body : "",
         status: "pending",
       });
+    } else if (a.type === "spec-edit") {
+      // An EDIT to an existing spec (e.g. add **Blocked-by:** lines to Pia's milestone specs). Carries the
+      // full revised markdown; on approval the worker commits it to the existing file (never creates).
+      const slug = typeof a.slug === "string" ? a.slug.replace(/[^a-z0-9-]/gi, "") : "";
+      const content = typeof a.content === "string" ? a.content : "";
+      if (!slug || !content) continue;
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "spec-edit",
+        summary: String(a.summary || `Edit spec: ${slug}`),
+        slug,
+        content,
+        status: "pending",
+      });
+    } else if (a.type === "directive") {
+      // A CEO plan to execute (director-executable-plans-and-priority). On approval it becomes the active
+      // directive: the standing pass runs it first + the gate pauses other builds until the gate spec ships.
+      const summary = typeof a.summary === "string" ? a.summary : "";
+      if (!summary) continue;
+      const steps = Array.isArray(a.steps) ? a.steps.map((s) => String(s).slice(0, 500)).filter(Boolean).slice(0, 30) : [];
+      const gateBuildsUntil = typeof a.gateBuildsUntil === "string" ? a.gateBuildsUntil.replace(/[^a-z0-9-]/gi, "") : "";
+      const criticalSpecs = Array.isArray(a.criticalSpecs) ? a.criticalSpecs.map((s) => String(s).replace(/[^a-z0-9-]/gi, "")).filter(Boolean).slice(0, 20) : [];
+      out.push({
+        id: `dc${ts}${i}`,
+        type: "directive",
+        summary,
+        steps,
+        gateBuildsUntil,
+        criticalSpecs,
+        status: "pending",
+      });
     }
   }
   return out;
@@ -4790,6 +4861,10 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when the fix needs CODE (an automation/infra capability). The worker commits the spec on approval.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"goal","summary":"<the objective in one line>","slug":"<kebab-slug>","title":"<Title>","outcome":"<one-line outcome>","successMetric":"<how we'll measure it>","body":"<markdown body: a 'Why now' paragraph + a 'Milestone seeds for Pia' bullet list>"}]}`,
   `  — when you spot a STRATEGIC objective worth a MULTI-SPEC initiative (not one fix). You PROPOSE it for YOUR OWN function; on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate — directors propose, the CEO greenlights). Once greenlit, Pia decomposes it into a milestone→spec tree. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec-edit","summary":"<what you're changing + why>","slug":"<existing-spec-slug>","content":"<the FULL revised docs/brain/specs/{slug}.md markdown>"}]}`,
+  `  — when the CEO asks you to MODIFY an EXISTING spec (e.g. "add the right **Blocked-by:** lines to Pia's milestone specs"). READ the spec, edit it, emit the WHOLE revised markdown (not a diff). The worker commits it on approval (the spec must already exist — spec-edit never creates a new one). Emit ONE card per spec to revise several in one turn. This is a real edit, not just a recommendation.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"directive","summary":"<the plan in one line>","steps":["<ordered step>","<step>"],"gateBuildsUntil":"<spec-slug or omit>","criticalSpecs":["<slug>"]}]}`,
+  `  — for the INTENT: PLAN case (the CEO hands you a plan to execute). On approval it becomes your ONE active directive: your next standing pass runs it FIRST, before routine. \`gateBuildsUntil\` PAUSES every other build until that spec ships (then auto-lifts); \`criticalSpecs\` jump the build queue. A directive re-prioritizes, never authorizes destructive work or a new goal.`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -4799,6 +4874,8 @@ function directorCoachFraming(dirFn: string): string {
     `To explain "why haven't you built/done X": investigate read-only — read the spec (its phases ⏳/✅, its **Blocked-by:** line, its **Owner:**, whether it's goal-linked), check the agent_jobs queue for its build state, and your director_activity. A throwaway scripts/_*.ts that bootstraps createAdminClient can query the DB read-only (SELECT-only; never commit it). Then explain plainly + honestly.`,
     `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
     `You MAY PROPOSE a new GOAL (for YOUR OWN function only). If the conversation surfaces a strategic, multi-spec objective (an initiative, not a single fix), emit a 'goal' pending_action with structured fields (slug, title, outcome, successMetric, body). You never START a goal yourself — on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate); once greenlit, Pia decomposes it. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
+    `You can EDIT an existing spec, not just author a new one. If the CEO asks you to MODIFY specs (e.g. "update the milestone specs Pia made to add the right Blocked-by lines"), READ each spec and emit a 'spec-edit' card per spec carrying the FULL revised markdown — a real edit the worker commits on approval, NOT just a recommendation to make a new spec.`,
+    `The CEO can hand you a PLAN to EXECUTE (the 'Give a plan' button → INTENT: PLAN). You emit a 'directive' card; on approval it becomes your ONE active directive that your standing pass runs FIRST, before routine. A directive can set 'gateBuildsUntil: <spec>' (PAUSE every other build until that spec ships — for "finish the assembly-line fix before more building", auto-lifts on ship) and 'criticalSpecs' (a '**Priority:** critical' marker so they jump the build queue). A spec marked '**Priority:** critical' is investigated + queued ahead of normal Planned specs. A directive re-prioritizes WHAT you do — it never loosens the leash.`,
     DIRECTOR_COACH_OUTPUT,
   ].join("\n\n");
 }
@@ -4816,7 +4893,7 @@ async function runDirectorCoachJob(job: Job) {
     /* not JSON */
   }
   const mode = (params.mode as "turn" | "approve_action") || "turn";
-  const intent = (params.intent as "ask" | "coach") || "ask";
+  const intent = (params.intent as "ask" | "coach" | "plan") || "ask";
   const threadId = params.thread_id || job.spec_slug;
   if (!threadId) {
     await update(job.id, { status: "failed", error: "director-coach job missing thread_id" });
@@ -4905,6 +4982,53 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "done";
             a.result = `proposed goal ${a.slug} → committed + surfaced for your greenlight`;
             notes.push(`Goal ${a.slug} → proposed (awaiting your greenlight)`);
+          } else if (a.type === "spec-edit" && a.slug && a.content) {
+            // Modify an EXISTING spec (never create — the worktree is on origin/main, so check it's there).
+            const slug = String(a.slug);
+            if (!existsSync(join(wt, `docs/brain/specs/${slug}.md`))) {
+              a.status = "failed";
+              a.result = `specs/${slug}.md doesn't exist — spec-edit only modifies existing specs`;
+              notes.push(`${a.summary} → no such spec`);
+              continue;
+            }
+            const put = await putFileMain(`docs/brain/specs/${slug}.md`, String(a.content), `spec: update ${slug} (director edit)`);
+            if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
+            a.status = "done";
+            a.result = `updated specs/${slug}.md`;
+            notes.push(`Spec ${slug} → updated`);
+          } else if (a.type === "directive" && a.summary) {
+            // The CEO greenlit a PLAN → make it the active directive (director-executable-plans-and-priority).
+            const dd = await import("../src/lib/agents/director-directives");
+            const steps = Array.isArray(a.steps) ? (a.steps as unknown[]).map((s) => String(s)) : [];
+            const gate = typeof a.gateBuildsUntil === "string" && a.gateBuildsUntil ? String(a.gateBuildsUntil) : null;
+            const r = await dd.createDirective(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: thread.director_function,
+              summary: String(a.summary),
+              steps,
+              gateBuildsUntil: gate,
+              createdBy: job.created_by,
+            });
+            if (!r.ok) { a.status = "failed"; a.result = r.error || "createDirective failed"; notes.push(`${a.summary} → ${a.result}`); continue; }
+            // Mark any named specs **Priority:** critical so they jump the queue (insert the marker under the H1).
+            const criticalSpecs = Array.isArray(a.criticalSpecs) ? (a.criticalSpecs as unknown[]).map((s) => String(s).replace(/[^a-z0-9-]/gi, "")).filter(Boolean) : [];
+            const marked: string[] = [];
+            for (const cs of criticalSpecs) {
+              const p = join(wt, `docs/brain/specs/${cs}.md`);
+              if (!existsSync(p)) continue;
+              const md = readFileSync(p, "utf8");
+              if (/^\s*\*\*Priority:\*\*\s*critical\b/im.test(md)) { marked.push(cs); continue; }
+              const updated = md.replace(/^(#\s.*\n)/, `$1\n**Priority:** critical\n`);
+              const put = await putFileMain(`docs/brain/specs/${cs}.md`, updated, `spec: mark ${cs} **Priority:** critical (director directive)`);
+              if (put.ok) marked.push(cs);
+            }
+            try {
+              const { recordDirectorActivity } = await import("../src/lib/director-activity");
+              await recordDirectorActivity(db, { workspaceId: job.workspace_id, directorFunction: thread.director_function, actionKind: "directive_accepted", specSlug: gate, reason: String(a.summary), metadata: { steps, gate_builds_until: gate, critical: marked } });
+            } catch { /* audit is best-effort */ }
+            a.status = "done";
+            a.result = `directive active${gate ? ` · builds gated until ${gate} ships` : ""}${marked.length ? ` · critical: ${marked.join(", ")}` : ""}`;
+            notes.push(`Directive accepted: ${a.summary}`);
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
@@ -4931,7 +5055,9 @@ async function runDirectorCoachJob(job: Job) {
     const intentDirective =
       intent === "coach"
         ? `INTENT: COACH. The CEO is coaching you — distill their directive (from this whole conversation) into ONE durable coaching rule and emit a 'coaching' pending_action for their confirmation. Acknowledge briefly in reply, but the rule is what matters. Stay within your leash.`
-        : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight.`;
+        : intent === "plan"
+          ? `INTENT: PLAN. The CEO is handing you a PLAN to EXECUTE — it should trump your day-to-day work until done. Investigate read-only, then emit a 'directive' pending_action: {summary, steps[<ordered plain steps>], gateBuildsUntil?:"<spec-slug>", criticalSpecs?:["<slug>"]}. Use gateBuildsUntil when the plan is "finish spec X before any more building" (it PAUSES every other build until X ships, then auto-lifts). Use criticalSpecs to mark specs that should jump the build queue. On approval the directive becomes active and your next standing pass runs it FIRST, then routine. Stay within the leash — a directive re-prioritizes WHAT you do, never authorizes something destructive/irreversible or a new goal.`
+          : `INTENT: ASK. The CEO is asking — explain read-only and honestly. Do NOT emit a 'coaching' card (only their explicit Coach action does that). A 'spec' card is fine only if a real code/capability gap needs one; a 'goal' card is fine if the conversation surfaces a strategic multi-spec objective worth the CEO's greenlight; a 'spec-edit' card is exactly right when the CEO asks you to MODIFY existing spec(s) — do the edit, don't just recommend one.`;
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
     const prompt = isResume
       ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`

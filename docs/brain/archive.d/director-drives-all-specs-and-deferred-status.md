@@ -1,0 +1,1 @@
+- **Every spec is the director's to drive + a first-class Deferred status** · verified 2026-06-24 · → [[libraries/platform-director]]

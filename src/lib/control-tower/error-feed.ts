@@ -105,6 +105,77 @@ export function isAbortedStreamNoise(message: string, status: number): boolean {
   return atFrames.every((l) => /^at\s+ignore-listed frames\b/i.test(l));
 }
 
+/**
+ * A Vercel/Lambda log whose entire body is request-lifecycle scaffolding —
+ * `START`/`END`/`REPORT RequestId` blocks (+ their Duration/Memory metric lines) and
+ * the bare `[METHOD] path status=NNN` proxy summary — carries NO error body. For a 5xx
+ * it is the non-actionable platform wrapper around a failure the function already logged
+ * itself (a `console.error` with its own stable signature + repair spec). Recording it
+ * too mints a SECOND, redundant signature for one failure (Control Tower
+ * `vercel:ebdf493a37c60c34`), so we drop these before signature-grouping. A lifecycle
+ * block that ALSO carries a real message/stack (e.g. "Task timed out", an uncaught
+ * exception) is NOT bare and is still captured.
+ *
+ * Note the proxy-summary matcher is intentionally NOT `$`-anchored after `status=NNN`:
+ * the real Vercel proxy line carries trailing tokens (duration, region, byte counts)
+ * after the status, e.g. `[POST] /api/portal?route=removeLineItem status=502 669ms`.
+ * The original `$`-anchored regex never matched that line, so `.every()` failed and the
+ * wrapper was captured — the false-positive that opened `vercel:ebdf493a37c60c34`.
+ */
+export function isBareLifecycle(message: string): boolean {
+  const lines = (message ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return false;
+  return lines.every(
+    (l) =>
+      /^START RequestId:/i.test(l) ||
+      /^END RequestId:/i.test(l) ||
+      /^REPORT RequestId:/i.test(l) ||
+      // REPORT continuation / metric lines when Lambda splits them onto their own lines.
+      /^(Duration|Billed Duration|Memory Size|Max Memory Used|Init Duration|Restore Duration):/i.test(l) ||
+      // XRAY/Segment trailers Lambda sometimes appends to a REPORT block.
+      /^(XRAY TraceId|SegmentId|Sampled|Status):/i.test(l) ||
+      // The bare proxy summary line: "[POST] /api/portal?route=x status=502 [trailing…]".
+      // Tolerate trailing tokens after status=NNN (duration/region/bytes) — no `$` anchor.
+      /^\[[A-Z]+\]\s+\S+\s+status=\d{3}\b/i.test(l),
+  );
+}
+
+/**
+ * Inngest TRANSPORT-layer failure noise — the inngest companion to `isBareLifecycle` /
+ * `isAbortedStreamNoise`, factored here so the capture path can reuse it
+ * ([[../specs/error-feed-drop-inngest-transport-http-unreachable]]).
+ *
+ * `inngest/function.failed` fires for BOTH application throws and Inngest's own
+ * transport-layer failures — the `http_unreachable` class, where Inngest couldn't get a
+ * clean reply from our Vercel SDK URL (the deployment reset the connection mid-reply, an
+ * "Unexpected ending response"). That's a deploy-boundary Lambda reap / momentary
+ * connection reset against an every-15-min cron, NOT an application bug — the function body never
+ * threw and the next beat recovers. Minting a fresh OPEN incident for it pages Platform
+ * owners on a loop that already healed (Control Tower `inngest:06e8cf82e141fbaa`).
+ *
+ * `true` when the error name OR message names a member of the transport-failure family.
+ * NOTE this only CLASSIFIES the noise — the capture path uses it as the `transient` flag
+ * to `recordError`, which auto-resolves a FIRST sighting (recorded, not paged) and only
+ * escalates to a real open+page if the SAME signature recurs within the recur window —
+ * so a genuine chronic timeout (function always failing) still surfaces.
+ */
+export function isTransientInngestTransportError(
+  errName: string | null | undefined,
+  errMessage: string | null | undefined,
+): boolean {
+  const text = `${errName ?? ""} ${errMessage ?? ""}`.toLowerCase();
+  if (!text.trim()) return false;
+  return (
+    text.includes("http_unreachable") ||
+    text.includes("performing request to sdk url") ||
+    text.includes("reset the connection") ||
+    text.includes("unexpected ending response")
+  );
+}
+
 export interface RecordErrorInput {
   source: ErrorSource;
   /** the grouping key parts (stable bits — function id / route / error class). */
@@ -117,7 +188,21 @@ export interface RecordErrorInput {
   sample?: Record<string, unknown> | null;
   /** occurrences folded in this call (a pre-grouped Vercel batch may pass >1). */
   occurrences?: number;
+  /** Transient class (e.g. a one-off Inngest transport reset — see
+   *  `isTransientInngestTransportError`): a FIRST sighting is auto-resolved (recorded +
+   *  grouped for visibility, NOT paged, no repair fan-out). It escalates to a real
+   *  open+page ONLY if the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` — so a
+   *  one-off deploy-boundary blip is dropped while a chronic always-failing function still
+   *  surfaces. A stale prior sighting (beyond the window) is treated as another isolated
+   *  blip and re-resolved. */
+  transient?: boolean;
 }
+
+/** A transient-class signature only escalates if it RECURS within this window of its prior
+ *  sighting — a chronic failure re-fires every cron beat (well under an hour), so a recurrence
+ *  inside the window is "still broken / page"; a prior sighting older than this is just another
+ *  isolated blip and stays auto-resolved. */
+const TRANSIENT_RECUR_WINDOW_MS = 60 * 60_000;
 
 /**
  * Record one (grouped) error into error_events and page the owners on a new signature
@@ -145,13 +230,19 @@ export async function recordError(
 
     const { data: existing } = await admin
       .from("error_events")
-      .select("id, count, last_paged_at")
+      .select("id, count, last_paged_at, last_seen_at")
       .eq("source", input.source)
       .eq("signature", signature)
       .maybeSingle();
 
+    const transient = input.transient === true;
+
     if (!existing) {
-      // New signature → open an incident (status reopened to 'open') + page.
+      // New signature → open an incident (status 'open') + page. EXCEPT: an outage-window
+      // signature OR a first-sight transient blip is auto-resolved (recorded + grouped for
+      // visibility, but not churned — no page, no repair fan-out). A transient first-sight
+      // leaves last_paged_at null so a recurrence WITHIN the window can escalate + page.
+      const autoResolve = breakerTripped || transient;
       const { error } = await admin.from("error_events").insert({
         source: input.source,
         signature,
@@ -159,12 +250,11 @@ export async function recordError(
         detail: input.detail ?? null,
         sample: input.sample ?? null,
         count: occurrences,
-        // Outage window → auto-resolve as transient (recorded + grouped, but not churned).
-        status: breakerTripped ? "resolved" : "open",
+        status: autoResolve ? "resolved" : "open",
         outage_correlated: breakerTripped,
         first_seen_at: nowIso,
         last_seen_at: nowIso,
-        last_paged_at: nowIso,
+        last_paged_at: transient ? null : nowIso,
       });
       if (error) {
         // Racing insert (23505) — fall through to the update path.
@@ -172,8 +262,8 @@ export async function recordError(
         console.warn(`[error-feed] insert failed for ${signature}:`, error.message);
         return { opened: false, paged: false };
       }
-      if (breakerTripped) {
-        // Symptom of the outage — recorded for visibility, but no page + no repair fan-out.
+      if (autoResolve) {
+        // Outage symptom OR a one-off transient blip — recorded for visibility, no page + no repair fan-out.
         return { opened: true, paged: false };
       }
       await pageOwners(admin, input, signature, occurrences);
@@ -185,7 +275,31 @@ export async function recordError(
 
     // Existing incident → fold in. Re-page only if past the cooldown (burst = one page) AND the breaker
     // is up (an outage-window re-fire is a symptom — fold it, tag it, but never re-page).
-    const e = existing as { id: string; count: number | null; last_paged_at: string | null };
+    const e = existing as { id: string; count: number | null; last_paged_at: string | null; last_seen_at: string | null };
+
+    // A transient-class recurrence only escalates if it lands WITHIN the recur window of the prior
+    // sighting (chronic → still broken). A prior sighting older than the window is just another
+    // isolated blip — re-resolve it (fold count + bump last_seen_at), never page.
+    if (transient) {
+      const withinRecurWindow =
+        e.last_seen_at != null && Date.now() - new Date(e.last_seen_at).getTime() <= TRANSIENT_RECUR_WINDOW_MS;
+      if (!withinRecurWindow) {
+        await admin
+          .from("error_events")
+          .update({
+            title: input.title.slice(0, 300),
+            detail: input.detail ?? null,
+            sample: input.sample ?? null,
+            count: (e.count ?? 0) + occurrences,
+            status: "resolved",
+            last_seen_at: nowIso,
+          })
+          .eq("id", e.id);
+        return { opened: false, paged: false };
+      }
+      // within the window → chronic; fall through to the normal open+page path.
+    }
+
     const cooledDown = !e.last_paged_at || Date.now() - new Date(e.last_paged_at).getTime() > PAGE_COOLDOWN_MS;
     const paged = cooledDown && !breakerTripped;
     await admin
