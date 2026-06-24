@@ -158,6 +158,12 @@ const AUTO_SETTLE_MAX = 2;
 // resets the main repo to it and exits — systemd Restart=always relaunches the fresh builder-worker.ts.
 const WORKER_BOX_ID = process.env.WORKER_BOX_ID || "box"; // singleton heartbeat key (supports >1 box later)
 const SELF_UPDATE_MIN_INTERVAL_MS = 60 * 1000; // don't thrash: at most one self-update check per minute
+// Max-staleness override: the box normally self-updates only when IDLE (builds are sacrosanct). But a
+// SATURATED box (lanes always full — e.g. under a throughput directive) would otherwise lag main forever,
+// so box-side features never go live. When local is THIS many commits behind origin/main, update anyway —
+// the in-flight builds re-queue on restart (the reaper marks the abandoned 'building' rows). High enough
+// that it only fires when genuinely far behind, so build interruption is rare.
+const FORCE_STALE_COMMITS = 12;
 // Crash-loop guard: if the freshly-pulled worker keeps dying on startup we stop flapping and leave a
 // needs_attention heartbeat for a human instead of churning forever. Counter persists across restarts.
 const CRASH_FILE = resolve(REPO_DIR, "../.worker-startup.json");
@@ -2690,11 +2696,11 @@ async function runPlatformDirectorJob(job: Job) {
 // Restart=always relaunches the worker on the fresh builder-worker.ts. A clean exit + restart is the
 // safe re-exec; never hot-reload in-process. Returns true when it has triggered an exit path.
 async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
-  if (activeBuilds !== 0) return; // never self-update mid-build/fold
   const now = Date.now();
   if (now - lastSelfUpdateCheck < SELF_UPDATE_MIN_INTERVAL_MS) return; // don't thrash
   lastSelfUpdateCheck = now;
 
+  // Fetch + measure staleness EVEN while building, so a saturated box can still tell how far behind it is.
   const fetched = sh("git", ["fetch", "origin", "main"]);
   if (fetched.code !== 0) {
     console.error(`[self-update] git fetch failed: ${fetched.err.slice(0, 200)}`);
@@ -2704,8 +2710,16 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
   if (!local || !remote || local === remote) return; // current → no-op (no thrash)
 
+  // Idle → update on any drift. Busy → only when FAR behind (max-staleness override); a small lag waits for
+  // the next idle window so in-flight builds aren't interrupted for one or two commits.
+  const behind = parseInt(sh("git", ["rev-list", "--count", `${local}..${remote}`]).out.trim() || "0", 10);
+  if (activeBuilds !== 0 && behind < FORCE_STALE_COMMITS) return; // busy + small lag → wait for idle
+
   const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
-  console.log(`[self-update] behind origin/main (${fromTo}) — updating worker code`);
+  if (activeBuilds !== 0) {
+    console.warn(`[self-update] FORCING update — ${behind} commits behind origin/main despite ${activeBuilds} active build(s); they will re-queue on restart`);
+  }
+  console.log(`[self-update] behind origin/main by ${behind} (${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
   const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
 
@@ -2719,7 +2733,7 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
     const ci = sh("npm", ["ci"], { timeout: 10 * 60 * 1000 });
     if (ci.code !== 0) console.error(`[self-update] npm ci failed (continuing): ${ci.err.slice(-300)}`);
   }
-  await writeHeartbeat(0, "updating", `self-update ${fromTo}`);
+  await writeHeartbeat(0, "updating", `self-update ${fromTo}${activeBuilds ? ` (forced — ${behind} behind, ${activeBuilds} build(s) re-queue)` : ""}`);
   console.log(`[self-update] reset to ${remote.slice(0, 8)} → exiting for systemd restart`);
   process.exit(0);
 }
