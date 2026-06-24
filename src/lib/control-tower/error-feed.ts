@@ -261,7 +261,12 @@ export function feedLoopId(source: ErrorSource): string {
 // ("the drain is wired + delivering") — one per minute proves that. The Vercel log drain
 // firehoses batches (observed ~175/sec), and an unthrottled insert-per-delivery grew
 // loop_heartbeats to 21M rows / 4.5 GB and timed out the control_tower_loop_beats RPC.
-// In-memory debounce per warm instance + a DB recency guard so it holds across instances.
+// In-memory debounce per warm instance is the fast path; the AUTHORITATIVE throttle is a
+// UNIQUE partial index on loop_heartbeats(loop_id, date_trunc('minute', ran_at)) where
+// kind='feed' + an atomic INSERT … ON CONFLICT DO NOTHING (record_feed_beat). The old
+// non-atomic SELECT-then-INSERT recency guard let a drain burst across many cold instances
+// all SELECT-miss then all INSERT (15,508 feed:vercel beats in one hour vs ≤60 intended),
+// storming the table into DB-saturation 500s (signature supabase-logs:6f16957ed72e1f38).
 const FEED_BEAT_MIN_INTERVAL_MS = 60_000;
 const lastFeedBeatAt = new Map<string, number>();
 
@@ -271,23 +276,15 @@ export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admi
   // Fast path: this warm instance beat for this source < 1 min ago → skip (no DB call).
   const lastLocal = lastFeedBeatAt.get(loopId) ?? 0;
   if (now - lastLocal < FEED_BEAT_MIN_INTERVAL_MS) return;
+  // Mark before the DB call so a burst on THIS instance can't queue N concurrent RPCs.
+  lastFeedBeatAt.set(loopId, now);
   try {
     const admin = adminClient ?? createAdminClient();
-    // Cross-instance guard: skip if ANY instance already beat for this source < 1 min ago.
-    const { data: recent } = await admin
-      .from("loop_heartbeats")
-      .select("ran_at")
-      .eq("loop_id", loopId)
-      .gte("ran_at", new Date(now - FEED_BEAT_MIN_INTERVAL_MS).toISOString())
-      .limit(1);
-    lastFeedBeatAt.set(loopId, now);
-    if (recent && recent.length) return; // a beat in the last minute already exists
-    await admin.from("loop_heartbeats").insert({
-      loop_id: loopId,
-      kind: "feed",
-      ok: true,
-      ran_at: new Date().toISOString(),
-    });
+    // Atomic cross-instance throttle: the DB collapses every same-minute racer to one row. A
+    // burst that all gets past the fast path (cold/concurrent instances) no-ops at the DB
+    // instead of all inserting — no read-then-write race, no insert storm.
+    const { error } = await admin.rpc("record_feed_beat", { p_loop_id: loopId });
+    if (error) console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, error.message);
   } catch (e) {
     console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, e instanceof Error ? e.message : e);
   }
