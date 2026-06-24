@@ -15,7 +15,7 @@ The **department-level KPI aggregation engine** behind the [[../goals/platform-d
 
 ## The daily KPI registry
 
-A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible (weekly/monthly cadences seed empty registries here — [[../specs/platform-scorecard-weekly]] + [[../specs/platform-scorecard-monthly]] fill them). The **daily** set:
+A declarative registry keyed by `metric_key` keeps the per-cadence metric set extensible. The **weekly** cadence is still an empty registry here ([[../specs/platform-scorecard-weekly]] fills it); the **monthly** cadence is seeded by [[../specs/platform-scorecard-monthly]] (see below). The **daily** set:
 
 | `metric_key` | unit | Derivation |
 |---|---|---|
@@ -31,9 +31,23 @@ A declarative registry keyed by `metric_key` keeps the per-cadence metric set ex
 
 **Window model** (mirrors [[meta__scorecards]]): `curr = [snapshotDate − (windowDays−1), snapshotDate]`, `prev = [snapshotDate − (2·windowDays−1), snapshotDate − windowDays]`. `loop_health` is current-state, so its prior is read from the snapshot `windowDays` ago rather than recomputed.
 
+## The monthly KPI registry
+
+The **monthly leading curve** ([[../specs/platform-scorecard-monthly]]; milestone (c)) — the slow-moving indicators that prove autonomy is **compounding**, `cadence='monthly'`, `windowDays=30`, prior = the prior 30-day window. Headlined by `human_touch_per_build`.
+
+| `metric_key` | unit | Derivation |
+|---|---|---|
+| `human_touch_per_build` | ratio | **The goal's headline.** (CEO/human-decided [[../tables/approval_decisions]] `decided_by ∈ ceo｜human` in the month) ÷ ([[../tables/agent_jobs]] `kind='build'` + `status='merged'`, `updated_at` in the month). **Lower is better** — the prior-month `delta_pct` is the "declining MoM" signal. `detail` carries the numerator/denominator (+ prior). Builds=0 → value 0. |
+| `goals_escorted_unbabysat` | count | Goals whose milestones advanced **without** a CEO/human touch: [[../tables/director_activity]] `action_kind='escorted_goal'`, `director_function='platform'` (the escort rows, `metadata.goal_slug`) cross-checked against [[brain-roadmap]] `getGoals()[].milestones` SHIPPED milestones, counting only goals with **no** `decided_by ∈ ceo｜human` [[../tables/approval_decisions]] tying to the goal's specs (`agent_job_id → agent_jobs.spec_slug → the owning goal`) in the month. `detail` lists the counted goals + their shipped milestones. |
+| `time_to_approve_hours` | hours | Median over the month of `(approval_decisions.created_at − request_raised_at)` for terminal (`approved｜declined`) decisions. **No stored needs_approval-transition ts exists**, so `request_raised_at` is APPROXIMATED by the raising [[../tables/agent_jobs]] row's `updated_at`; non-positive deltas (the job already advanced) are excluded + surfaced in `detail`. `detail` carries p50/p90 + sample/excluded. The "mean time-to-approve down" metric ([[../goals/devops-director]]). |
+| `deploy_reliability` | ratio | From the [[../specs/deploy-health-rollback-guardian|Deploy Guardian]] verdicts: [[../tables/director_activity]] `action_kind='deploy_healthy'` ÷ (`deploy_healthy` + `deploy_rolled_back`), `director_function='platform'`, in the month. **HONEST about missing data** — with NO verdicts in-window the metric writes **no row** (the `value` column is NOT NULL, so absence is the only truthful "no data yet"; never a fabricated 100%). `detail` carries the healthy/rolled-back counts. |
+| `director_call_grade` | ratio | The CEO's grade of the Platform director's calls: blended mean of [[../tables/director_decision_grades]] `grade` (1–10) over the month, split by `dimension ∈ auto-approval｜goal-escort` (the shape [[director-leash-recommendations]] `computeDirectorGradeReport` reads). `value` = blended mean; `detail` = per-dimension means + counts (`scale: '1-10'`). Populated by [[../specs/director-loop-grading]] (✅). |
+
+**North-star invariant** ([[../operational-rules]] § North star): `human_touch_per_build` + `director_call_grade` are **measured, never targeted** — the directors must not learn to suppress escalations to game the curve. Read-only, persisted for trend, never written back.
+
 ## Caller
 
-The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. Runs in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
+The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-platform-scorecard` step) — once per UTC day per build-console workspace, `computePlatformScorecard(ws, { cadence:'daily', windowDays:1 })`. The **monthly** snapshot beat (`snapshot-platform-scorecard-monthly` step) on the same cron — once per **calendar month** per workspace, `computePlatformScorecard(ws, { cadence:'monthly', windowDays:30 })`. Both run in the deployed runtime (DB access), best-effort + idempotent. [[../specs/platform-scorecard-surface]] reads the snapshot table for the scorecard page.
 
 ## Related
 
