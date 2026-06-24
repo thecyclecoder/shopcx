@@ -54,7 +54,7 @@ import {
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
-import { getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
+import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
 import { buildGate } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
@@ -785,6 +785,10 @@ export async function specBuildState(admin: Admin, workspaceId: string, specSlug
   let lastError: string | null = null;
   for (const r of rows) {
     const status = String(r.status ?? "");
+    // A `held` build (goal-milestone-build-sequencing Phase 3) is a CANCELLED out-of-order fan-out: it counts
+    // as NEITHER in-flight NOR a failure, so once the reconcile's newly-applied blockers clear, the escort
+    // re-releases the spec fresh (it isn't suppressed as in-flight, and it doesn't trip the loop-guard).
+    if (status === SEQUENCE_HELD_STATUS) continue;
     if (FAILED_BUILD_STATUSES.has(status)) {
       failedCount++;
       if (lastError === null && r.error) lastError = String(r.error);
@@ -1236,6 +1240,219 @@ export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogR
   }
 
   return { enqueued, escalated, confirmed, scanned: handled.size };
+}
+
+// ── Phase 3 (goal-milestone-build-sequencing) — re-sequence an out-of-order milestone fan-out ──────
+// A goal is a DAG of milestones: building them concurrently without deps corrupts the build (a later spec
+// references an earlier one's outputs). When the decomposition emits a goal whose milestone specs lack the
+// `**Blocked-by:**` line that staggers them (the 2026-06-24 03:45 incident), the milestone builds fan out
+// CONCURRENTLY and the dependents jam — stuck in needs_input/needs_approval for prerequisites that don't
+// exist yet. This standing reconciler is the recovery + the standing guard: it detects each milestone build
+// that fanned out before its prerequisites, HOLDS the premature build (cancels the unapprovable fan-out),
+// applies the AUTHORED `Blocked-by` order (transcribed from the goal doc — NEVER a guessed DAG), and lets the
+// existing reactive auto-queue (`autoQueueUnblockedBy`) + the goal escort re-release it once its blockers ship.
+//
+// The order is NOT inferred: Pia ([[goal-decomposition-engine]]) writes the build order into the goal's
+// milestone list as a `*(blocked by [[../specs/x]])*` annotation per spec; this reconcile transcribes that
+// CEO-greenlit order onto the spec file's `**Blocked-by:**` line — the enforcement point the spec-blockers
+// chokepoint reads. So it only ever enforces a sequence the operator already approved, hitting the north star
+// (a DAG ordering is the CEO's call — the reconcile applies it, it does not author one).
+//
+// Idempotent on three fronts: it only acts on a spec whose file is MISSING a declared blocker (once the line
+// is written the spec is no longer a candidate), only on a spec with an ACTIVE build (once held the job leaves
+// the active set), and dedups on a recent `reconciled_sequence` ledger row (so the box's bundled fs lagging
+// `main` can't trigger a re-write). Bounded per pass; DORMANT until Platform is live+autonomous, like every
+// other lane. Writes one `reconciled_sequence` [[../tables/director_activity]] row per re-sequenced build.
+
+/** Cap how many out-of-order milestone builds one reconcile pass re-sequences. */
+export const PLATFORM_DIRECTOR_SEQUENCE_CAP = 8;
+
+/**
+ * The status the reconcile parks a premature milestone build at — it CANCELS the out-of-order fan-out so the
+ * job leaves needs_input/needs_approval (no longer jammed/unapprovable). `claim_agent_job` only claims
+ * `queued`/`queued_resume`, so a `held` job is never re-run; {@link specBuildState} ignores it (neither active
+ * nor a failure), so the goal escort re-releases the spec FRESH once its newly-applied blockers clear.
+ */
+export const SEQUENCE_HELD_STATUS = "held";
+
+/** One out-of-order milestone build the sequence reconcile recovers. */
+export interface MilestoneSequenceViolation {
+  /** the milestone spec that built (or is building) before its prerequisites. */
+  slug: string;
+  goalSlug: string;
+  goalTitle: string;
+  /** the premature build job to HOLD. */
+  jobId: string;
+  /** the status it was held FROM (queued/building/needs_input/needs_approval/queued_resume). */
+  jobStatus: string;
+  /** every blocker the goal doc declares for this spec (the authored order). */
+  declaredBlockers: string[];
+  /** declared blockers not yet shipped — why this build shouldn't have started. */
+  unmetBlockers: string[];
+  /** declared blockers absent from the spec's OWN `**Blocked-by:**` line — the blocker-less-fan-out bug. */
+  missingFromFile: string[];
+}
+
+/** The outcome of one read-only sequence-violation scan. */
+export interface SequenceReconcileResult {
+  /** out-of-order milestone builds detected (the box lane holds them + applies the Blocked-by line). */
+  violations: MilestoneSequenceViolation[];
+  /** goal-member dependent specs (declared blockers, unmet, missing from file) examined this pass. */
+  scanned: number;
+}
+
+/** Extract the spec-link slugs in a blob ([[../specs/x]] / [[x]]; goals/functions/lifecycles excluded). */
+function specLinkSlugs(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
+    const target = m[1].trim();
+    if (/\//.test(target) && !/(^|\/)specs\//.test(target)) continue; // a goal/function/etc. link, not a spec
+    out.push(target.replace(/^.*\//, "").replace(/\.md$/, ""));
+  }
+  return out;
+}
+
+/**
+ * Parse a goal doc's per-milestone-spec dependency annotations → `specSlug → declared blocker slugs`. Pia
+ * writes the build order in the goal's milestone list as a `*(blocked by [[../specs/x]], [[../specs/y]])*` (or
+ * `*(blocked_by [])*` for a foundation) annotation on each spec's bullet. This TRANSCRIBES that authored order
+ * — it never infers one: a line's first spec link (before the "blocked by" marker) is the milestone spec, and
+ * the spec links AFTER the marker are its declared blockers. A bullet with no `blocked by` marker (a
+ * foundation) yields no entry — correctly leaving it un-blocked. Exported for the box lane + tests.
+ */
+export function parseGoalSpecBlockers(rawGoalMd: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const line of rawGoalMd.split("\n")) {
+    // The authored annotation is bounded to its `*( … )*` parenthetical — `*(blocked by [[x]], [[y]])*`, or
+    // `*(foundation — blocked_by [])*`. Bound blocker extraction to INSIDE the parenthetical so an unrelated
+    // wikilink later in the bullet's prose (e.g. "feed the [[goal]] KPI") is never mistaken for a blocker.
+    const paren = line.match(/\*\(([^)]*blocked[_ ]by[^)]*)\)/i);
+    if (!paren || paren.index == null) continue;
+    const before = line.slice(0, paren.index);
+    const spec = specLinkSlugs(before)[0]; // the milestone spec named before the annotation
+    if (!spec) continue;
+    const inner = paren[1];
+    const after = inner.slice(inner.search(/blocked[_ ]by/i)); // from the marker onward, within the parenthetical
+    const blockers = [...new Set(specLinkSlugs(after))].filter((b) => b !== spec);
+    if (!blockers.length) continue; // a foundation (`blocked_by []`) — no entry
+    out.set(spec, blockers);
+  }
+  return out;
+}
+
+/** The newest ACTIVE (queued/building/needs_input/needs_approval/queued_resume) build job for a spec, or null. */
+async function activeBuildJob(admin: Admin, workspaceId: string, slug: string): Promise<{ id: string; status: string } | null> {
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("id, status")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .in("status", [...ACTIVE_BUILD_STATUSES])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data) return null;
+  return { id: (data as { id: string }).id, status: String((data as { status?: string }).status ?? "") };
+}
+
+/** A recent `reconciled_sequence` ledger row for this spec exists → already re-sequenced (fs-lag dedup). */
+async function alreadyResequenced(admin: Admin, slug: string): Promise<boolean> {
+  const sinceIso = new Date(Date.now() - PLATFORM_DIRECTOR_RECENT_WINDOW_MS).toISOString();
+  const { data } = await admin
+    .from("director_activity")
+    .select("id")
+    .eq("director_function", PLATFORM)
+    .eq("action_kind", "reconciled_sequence")
+    .eq("spec_slug", slug)
+    .gte("created_at", sinceIso)
+    .limit(1);
+  return !!(data && data.length);
+}
+
+/**
+ * Detect milestone builds that fanned out concurrently before their prerequisites (read-only). For each goal
+ * the director owns, transcribe its authored per-spec blocker annotations and flag every dependent spec that
+ * is unshipped, has ≥1 UNMET (unshipped) declared blocker MISSING from its own `**Blocked-by:**` line (the
+ * blocker-less-fan-out bug), and has an ACTIVE build (the jammed fan-out). Skips a spec already re-sequenced.
+ * Bounded by PLATFORM_DIRECTOR_SEQUENCE_CAP; a NO-OP until Platform is live+autonomous. Best-effort.
+ */
+export async function findMilestoneSequenceViolations(admin: Admin): Promise<SequenceReconcileResult> {
+  const empty: SequenceReconcileResult = { violations: [], scanned: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+
+  const goals = (await getGoals()).filter((g) => g.owner === PLATFORM && g.status !== "complete");
+  if (!goals.length) return empty;
+  const { specs } = await getRoadmap();
+  const specBySlug = new Map(specs.map((s) => [s.slug, s]));
+
+  const violations: MilestoneSequenceViolation[] = [];
+  let scanned = 0;
+  for (const goal of goals) {
+    const got = await getGoal(goal.slug);
+    if (!got) continue;
+    const declared = parseGoalSpecBlockers(got.raw);
+    for (const [slug, blockers] of declared) {
+      const card = specBySlug.get(slug);
+      if (!card || card.status === "shipped" || card.status === "deferred") continue;
+      const unmet = blockers.filter((b) => specBySlug.get(b)?.status !== "shipped");
+      if (!unmet.length) continue; // every prerequisite already shipped — building it now is in order
+      const fileBlockers = new Set(card.blockedBy.map((b) => b.slug));
+      const missingFromFile = unmet.filter((b) => !fileBlockers.has(b));
+      if (!missingFromFile.length) continue; // the file already carries its blockers — the spec-blockers gate owns it
+      scanned++;
+      const job = await activeBuildJob(admin, workspaceId, slug); // an active build = the out-of-order fan-out
+      if (!job) continue; // nothing fanned out — Phase 1 / the board will add the blocker the normal way
+      if (await alreadyResequenced(admin, slug)) continue; // already handled (fs lag) — don't re-write/re-hold
+      violations.push({ slug, goalSlug: goal.slug, goalTitle: goal.title, jobId: job.id, jobStatus: job.status, declaredBlockers: blockers, unmetBlockers: unmet, missingFromFile });
+      if (violations.length >= PLATFORM_DIRECTOR_SEQUENCE_CAP) return { violations, scanned };
+    }
+  }
+  return { violations, scanned };
+}
+
+/**
+ * HOLD a premature milestone build — cancel the out-of-order fan-out by parking it at {@link SEQUENCE_HELD_STATUS}
+ * with the reason. Re-asserts the job is still ACTIVE first (never clobbers a build that landed in the meantime).
+ * Best-effort; never throws.
+ */
+export async function holdPrematureBuild(admin: Admin, jobId: string, reason: string): Promise<{ ok: boolean; error?: string }> {
+  const { error } = await admin
+    .from("agent_jobs")
+    .update({ status: SEQUENCE_HELD_STATUS, error: reason.slice(0, 2000), log_tail: reason.slice(-2000) })
+    .eq("id", jobId)
+    .in("status", [...ACTIVE_BUILD_STATUSES]);
+  return { ok: !error, error: error?.message };
+}
+
+/**
+ * Return `md` with a `**Blocked-by:** [[a]], [[b]]` metadata line that LISTS every slug in `blockers`. If a
+ * Blocked-by line already exists, merge in the missing slugs (order-preserving union); otherwise insert a fresh
+ * line right after the H1 title. Returns `md` UNCHANGED when every blocker is already listed (idempotent — the
+ * box lane skips the commit on a no-op). Pure; the box lane commits the result via the GitHub API.
+ */
+export function ensureBlockedByLine(md: string, blockers: string[]): string {
+  if (!blockers.length) return md;
+  const lines = md.split("\n");
+  const idx = lines.findIndex((l) => /^\s*\*\*Blocked-by:\*\*/i.test(l));
+  const existing = idx >= 0 ? specLinkSlugs(lines[idx]) : [];
+  const union = [...existing];
+  for (const b of blockers) if (!union.includes(b)) union.push(b);
+  if (idx >= 0 && union.length === existing.length) return md; // nothing new to add
+  const newLine = `**Blocked-by:** ${union.map((s) => `[[${s}]]`).join(", ")}`;
+  if (idx >= 0) {
+    lines[idx] = newLine;
+    return lines.join("\n");
+  }
+  // No line yet — insert under the H1 (after the blank line that conventionally follows it, if present).
+  const h1 = lines.findIndex((l) => /^#\s/.test(l));
+  const at = h1 < 0 ? 0 : lines[h1 + 1]?.trim() === "" ? h1 + 2 : h1 + 1;
+  lines.splice(at, 0, newLine, "");
+  return lines.join("\n");
 }
 
 // ── Phase 4 — watch the platform + report to the board ────────────────────────────────────────────
