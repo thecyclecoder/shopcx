@@ -1,0 +1,1 @@
+- **Goal readers from DB — retire parseGoal + file-tracing** · verified 2026-06-25 · → [[lifecycles/roadmap-build-console]]
