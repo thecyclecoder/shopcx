@@ -1,0 +1,1 @@
+- **Worker coaching loop — the director teaches its workers** · verified 2026-06-25 · → [[libraries/agent-coaching]]
