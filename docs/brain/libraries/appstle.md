@@ -44,6 +44,8 @@ async function appstleGetUpcomingOrders(workspaceId: string, contractId: string,
 async function appstleAttemptBilling(workspaceId: string, billingAttemptId: string,) : Promise<
 ```
 
+On a non-2xx/204 response it returns the Appstle **response body** in `error` (mirrors `appstleSkipUpcomingOrder` / `appstleSubscriptionAction`) so callers can pattern-match instead of seeing a bare status string. When the upstream body matches *"billing operation is already in progress"* (Appstle's concurrency lock — meaning Appstle is ALREADY billing this contract), the helper logs at `console.warn` instead of `console.error` so the Vercel error feed / Control Tower stop capturing the benign race. [[portal__handlers__order-now]] keys off the same text to convert the response into a 200 with `alreadyBilling: true`.
+
 ### `appstleSkipUpcomingOrder` — function
 
 ```ts

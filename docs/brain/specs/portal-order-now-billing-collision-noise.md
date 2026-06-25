@@ -1,4 +1,4 @@
-# portal 'Order now' treats concurrent-billing race as customer-success
+# portal 'Order now' treats concurrent-billing race as customer-success ✅
 
 **Owner:** [[../functions/retention]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/lib/portal/handlers/order-now.ts (primary: detect billing operation is already in progress / another billing operation in the appstle error text, return jsonok with alreadybilling=true + a your renewal is already being processed message, log a portal.order_now customer event with properties.collision=true so the analytics still see it, and skip the 502 path so no portal-action-failed ticket is spawned). companion: src/lib/appstle.ts appstleattemptbilling (lines 325-349) — surface the raw response text in the returned error (matching the appstleskipupcomingorder pattern at line 375) so the handler can pattern-match, and downgrade the console.error to console.warn when the text matches the concurrency-lock phrase so the vercel error feed stops capturing the benign race.::real-bug`
@@ -11,10 +11,13 @@ Signature vercel:7b36a7f314c061ed (ERR /api/portal: 'Appstle attempt billing err
 
 **Likely target:** `src/lib/portal/handlers/order-now.ts (primary: detect 'billing operation is already in progress' / 'Another billing operation' in the Appstle error text, return jsonOk with alreadyBilling=true + a 'Your renewal is already being processed' message, log a portal.order_now customer event with properties.collision=true so the analytics still see it, and skip the 502 path so no portal-action-failed ticket is spawned). Companion: src/lib/appstle.ts appstleAttemptBilling (lines 325-349) — surface the raw response text in the returned error (matching the appstleSkipUpcomingOrder pattern at line 375) so the handler can pattern-match, and downgrade the console.error to console.warn when the text matches the concurrency-lock phrase so the Vercel error feed stops capturing the benign race.`
 
-## Phase 1 — close it
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
-- Re-trigger the originating condition (signature `vercel:7b36a7f314c061ed`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- Re-trigger the originating condition (signature `vercel:7b36a7f314c061ed`) → expect no new `error_events` row / `loop_alert` for it, and the Control Tower tile stays green.
+- In a portal session, click **Order now** on a contract whose scheduled charge is already in flight (or contrive the race in dev by firing `appstleAttemptBilling` twice back-to-back) → expect a `200` response from `POST /api/portal` with `{ ok: true, alreadyBilling: true, message: "Your renewal is already being processed." }`, and no new ticket with the `portal-action-failed` tag for this customer in the last hour.
+- Query `customer_events` for `event_type = 'portal.order_now'` after the race → expect one row whose `properties.collision = true` (analytics still see the click).
+- Tail Vercel function logs while the race is happening → expect a `console.warn` line `Appstle attempt billing race for …` (NOT a `console.error`), so the error drain stops capturing the benign race.
 
 > Authored by the box Repair Agent from Control Tower signature `vercel:7b36a7f314c061ed` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.

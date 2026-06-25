@@ -337,8 +337,19 @@ export async function appstleAttemptBilling(
 
     if (!res.ok && res.status !== 204) {
       const text = await res.text();
-      console.error(`Appstle attempt billing error for ${billingAttemptId}:`, text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
+      // The "Another billing operation is already in progress" body is a
+      // concurrency lock — Appstle is ALREADY billing this contract, so the
+      // customer's intent (renew now) is satisfied. order-now treats it as
+      // success; log at warn so the Vercel error feed / Control Tower stop
+      // capturing the benign race. See [[portal-order-now-billing-collision]].
+      if (/billing operation is already in progress/i.test(text)) {
+        console.warn(`Appstle attempt billing race for ${billingAttemptId} (concurrent charge already running):`, text);
+      } else {
+        console.error(`Appstle attempt billing error for ${billingAttemptId}:`, text);
+      }
+      // Surface raw upstream text so the handler can pattern-match (mirrors the
+      // appstleSkipUpcomingOrder shape).
+      return { success: false, error: text || `Appstle API error: ${res.status}` };
     }
 
     return { success: true };
