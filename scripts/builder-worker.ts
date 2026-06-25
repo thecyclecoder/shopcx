@@ -9640,6 +9640,28 @@ async function runJob(job: Job) {
   return _modelCtx.run({ modelId }, () => dispatchJob(job));
 }
 
+// ⭐ DEPLOY BUILD GATE (deploy-build-gate). The repo has no CI; `tsc --noEmit` is the only pre-merge check —
+// but cacheComponents PRERENDER errors + route-segment-config errors are NOT type errors, so they sail past
+// tsc and break the Vercel production build (8 breaks in one afternoon). The fix: before a build can COMPLETE
+// (→ auto-merge, which gates on `completed`), it must survive a REAL `next build` — a CLEAN one (wipe .next,
+// which otherwise serves stale prerenders that mask the error). Runs in the worktree (node_modules symlinked,
+// the worker's env inherited for prerender DB reads). On failure the worker re-dispatches Bo to fix his own
+// error; only after BUILD_GATE_MAX_ATTEMPTS does it escalate to a human. The CEO is never pulled in.
+const BUILD_GATE_MAX_ATTEMPTS = 3;
+async function runNextBuildGate(wt: string): Promise<{ ok: boolean; error: string; log: string }> {
+  sh("rm", ["-rf", join(wt, ".next")]); // a stale .next masks prerender errors — the build MUST be clean
+  const nb = await shAsync("npx", ["next", "build"], { timeout: 15 * 60 * 1000, cwd: wt });
+  const out = `${nb.out}\n${nb.err}`;
+  if (nb.code === 0) return { ok: true, error: "", log: out.slice(-2000) };
+  const m =
+    /Error: Route "[^"]+": [^\n]+/.exec(out) ||
+    /Route segment config[^\n]+/.exec(out) ||
+    /Error occurred prerendering page[^\n]+/.exec(out) ||
+    /Module not found[^\n]+/.exec(out) ||
+    /Failed to compile[\s\S]{0,200}/.exec(out);
+  return { ok: false, error: (m ? m[0] : "next build failed (see log)").replace(/\s+/g, " ").slice(0, 600), log: out.slice(-4000) };
+}
+
 async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -9780,6 +9802,12 @@ async function dispatchJob(job: Job) {
     const resumeBits: string[] = [];
     if ((job.answers || []).length) resumeBits.push(`Answers to your questions: ${JSON.stringify(job.answers)}`);
     if (executedSummary) resumeBits.push(`Gated actions executed: ${executedSummary}`);
+    // deploy-build-gate: you're being resumed because your last change FAILED the real `next build` (it
+    // passed tsc but breaks the production build). Fix THIS before anything else.
+    if ((job.error || "").startsWith("BUILD_GATE_FAILED")) {
+      const err = (job.error || "").replace(/^BUILD_GATE_FAILED\[\d+\]:\s*/, "");
+      resumeBits.push(`⛔ DEPLOY BUILD GATE FAILED — your last change passed tsc but BROKE \`next build\`: ${err}. Fix it FIRST. This is almost always a cacheComponents PRERENDER error: the fix is a <Suspense> boundary — wrap the dynamic page/layout's {children} in \`<Suspense fallback={null}>\` (a route-segment layout.tsx is the cleanest place; client pages reading useSearchParams/useParams/usePathname AND server pages reading uncached DB/auth data both need it). NEVER use \`connection()\` — it does NOT satisfy the data boundary. Also remove any \`export const runtime / revalidate / dynamicParams\` route-segment config (incompatible with cacheComponents). Then finish.`);
+    }
     // Phase 2: explicitly remind the resumed build which gated actions are already settled so it does
     // not re-request them (the #1 cause of a needs_approval loop).
     const settledActions = (job.pending_actions || []).filter(
@@ -9798,6 +9826,7 @@ async function dispatchJob(job: Job) {
           `⭐ PRE-FLIGHT STATE CHECK (mandate — do this FIRST, before writing any code or running any build tool): inspect the actual REPO STATE (git log, grep, file contents, existing migrations, open PRs) and determine, per phase, what is ALREADY BUILT on main. Mark satisfied phases DONE and SKIP them — build ONLY the unbuilt delta. If EVERY phase is already on main, make NO edits and return {"status":"completed","no_changes_reason":"already built — <which phases/files are on main>"} (the worker reconciles the board status from that). Judge "built" by the CODE ON MAIN — NOT by any ⏳/✅ in the markdown: spec status is DB-driven now, the .md carries no status. Never rebuild work that's already shipped. You build ONE phase (the first unbuilt one) per run; when your PR merges, the worker tags THAT phase shipped in the DB with your PR # + merge SHA (phase-pr-provenance) — you don't touch status yourself. A one-shot/single-phase spec is the whole thing in one PR.`,
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
+          `⭐ cacheComponents RULES (this app has \`cacheComponents: true\` in next.config — tsc does NOT catch prerender breaks, but the worker runs a real \`next build\` gate before merge, so get it right or the build bounces back to you): every page that reads DYNAMIC data must do so inside a <Suspense> boundary or the production build fails ("Uncached data accessed outside of <Suspense>"). When you add/edit a route: a SERVER page reading uncached DB/auth data, OR a CLIENT page using useSearchParams/useParams/usePathname → add a route \`layout.tsx\` that wraps {children} in \`<Suspense fallback={null}>\` (the cleanest fix — covers the whole segment). NEVER use \`connection()\` (it does NOT satisfy the boundary). NEVER add \`export const runtime / revalidate / dynamicParams\` (incompatible with cacheComponents — they fail the build). A storefront page that needs caching uses \`'use cache'\` + \`cacheLife\` (see the PDP). Static/marketing pages that read no dynamic data need nothing.`,
           `Final message = ONLY one JSON object: {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id","q"}]} | {"status":"needs_approval","actions":[{"type":"apply_migration|run_prod_script","summary":"what & why","cmd":"exact command, e.g. npx tsx scripts/apply-X-migration.ts"}]}. If you make NO file edits (nothing to build / already implemented), still return {"status":"completed","summary":"…","no_changes_reason":"why nothing changed"} — never claim done with no changes and no reason.`,
         ].join("\n");
 
@@ -9992,6 +10021,28 @@ async function dispatchJob(job: Job) {
         console.error(`${tag} PR#${pr.number} still draft after markReady — final retry before completing`);
         await markReady(pr.number);
       }
+    }
+    // ⭐ DEPLOY BUILD GATE: if this build touched code that affects the production build (pages/components/
+    // config/middleware), it must survive a real `next build` BEFORE it can complete (→ auto-merge). tsc
+    // already passed; this catches the cacheComponents/prerender/segment-config breaks tsc can't see.
+    const changed = sh("git", ["diff", "--name-only", "HEAD~1", "HEAD"], { cwd: wt }).out;
+    if (/(?:^|\n)(src\/app\/|src\/components\/|next\.config|middleware\.)/.test(changed)) {
+      console.log(`${tag} build gate: running next build (touched app/components/config)…`);
+      const gate = await runNextBuildGate(wt);
+      if (!gate.ok) {
+        const prior = /BUILD_GATE_FAILED\[(\d+)\]/.exec(job.error || "");
+        const attempt = (prior ? parseInt(prior[1], 10) : 0) + 1;
+        if (attempt >= BUILD_GATE_MAX_ATTEMPTS) {
+          await update(job.id, { status: "needs_attention", pr_url: pr.url, pr_number: pr.number, error: `next build failed ${attempt}× — Bo couldn't self-fix: ${gate.error}`, log_tail: gate.log.slice(-2000) });
+          console.error(`${tag} build gate failed ${attempt}× → needs_attention (human): ${gate.error}`);
+        } else {
+          // Re-dispatch Bo to fix HIS OWN error. Not `completed` → the auto-merge gate won't merge the PR.
+          await update(job.id, { status: "queued_resume", pr_url: pr.url, pr_number: pr.number, error: `BUILD_GATE_FAILED[${attempt}]: ${gate.error}`, log_tail: gate.log.slice(-2000) });
+          console.error(`${tag} build gate FAILED (attempt ${attempt}) → re-dispatching Bo: ${gate.error}`);
+        }
+        return;
+      }
+      console.log(`${tag} build gate: next build ✓`);
     }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
