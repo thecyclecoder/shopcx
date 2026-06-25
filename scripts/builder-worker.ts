@@ -2368,6 +2368,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const recon = await lib.reconcileErrorBacklog(db);
     if (recon.enqueued.length) notes.push(`backlog → enqueued ${recon.enqueued.length} repair(s): ${recon.enqueued.join(", ")}`);
     if (recon.escalated.length) notes.push(`backlog loop-guard → escalated ${recon.escalated.length}: ${recon.escalated.join(", ")}`);
+    if (recon.cooled) notes.push(`backlog cooldown → skipped ${recon.cooled} signature(s) recently reconciled`);
     if (recon.scanned && !recon.enqueued.length && !recon.escalated.length) notes.push(`backlog: ${recon.scanned} open, all covered`);
   } catch (e) {
     notes.push(`backlog reconcile failed: ${e instanceof Error ? e.message : String(e)}`);

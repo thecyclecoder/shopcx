@@ -26,6 +26,12 @@ The reconcile's job is to GUARANTEE each open error reaches a terminal state (fi
 - The reconcile SKIPS an error it reconciled within a cooldown window, and processes each signature at most ONCE per standing pass. A signature with a live/recent repair job is confirmed in-flight — never re-enqueued. This kills the 126×/hour re-processing and returns the standing pass to build initiation.
 - Brain: [[../libraries/platform-director]] (the reconcile lane) · [[../tables/director_activity]] (the dedup ledger).
 
+**Shipped:**
+- ✅ `reconcileErrorBacklog` (`src/lib/agents/platform-director.ts`) reads a **cooldown ledger** at the top of every pass and SKIPS any signature in it without burning a cap slot. Two OR'd sources: (1) `reconciled_error` `director_activity` rows within `PLATFORM_DIRECTOR_RECONCILE_COOLDOWN_MS` (30 min) — we already enqueued/escalated this signature, the action is still draining; (2) ANY `agent_jobs` `kind='repair'` row touched in that window (`spec_slug` IS the signature) — live OR completed/failed, so the "re-fire re-opens the row, next pass re-enqueues a repair that immediately short-circuits via `findAlreadyAddressing`" loop is impossible. The once-per-pass dedup already existed (the `handled` Set keyed on signature); the cooldown extends it across passes.
+- ✅ `ErrorBacklogReconcileResult` gains `cooled: number`; the box worker's standing pass log now surfaces `backlog cooldown → skipped N signature(s) recently reconciled` so the skip is visible.
+- ✅ Sized to comfortably span one diagnose → fix-spec-build → deploy cycle on the standing cadence (passes ~every 5 min), so a signature consumes at most ~2 cap slots per hour even when its row keeps re-firing — that's what restores the standing pass's build budget. The cooldown only DELAYS the next action; a still-open row reconciles fresh after the window lapses, so a genuinely-stuck error reaches Phase 3's loop-guard on cadence (no coverage gap).
+- ✅ `npx tsc --noEmit` clean. Brain updated ([[../libraries/platform-director]]).
+
 ### Verification — Phase 2
 - Across consecutive passes, a still-open error is reconciled at most once per pass (not 9–19×/hour); a signature with an in-flight repair is confirmed, not re-enqueued. The reconciled_error action count per hour drops to roughly (open errors), not 100+.
 
