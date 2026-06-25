@@ -12,7 +12,7 @@ The read/write surface for the DB-resident spec body — [[../tables/specs]] (th
 
 - **`SpecStatus`** = `'in_review' ｜ 'planned' ｜ 'in_progress' ｜ 'shipped' ｜ 'deferred' ｜ 'folded'` — the `specs.status` enum (CHECK-constrained in the migration). Includes `in_review` ([[../specs/spec-review-agent]]) and `folded` ([[../goals/db-driven-specs]] M4). The DB trigger keeps it consistent with the child [[../tables/spec_phases]] rows (terminal-ish `in_review` / `folded` excepted).
 - **`Phase`** — re-exported from [[brain-roadmap]] so callers don't churn imports. `'planned' ｜ 'in_progress' ｜ 'shipped' ｜ 'rejected'`.
-- **`SpecRow`** — `{ id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, auto_build, milestone_id, created_at, updated_at, phases: SpecPhaseRow[] }` — the parent + joined ordered phases.
+- **`SpecRow`** — `{ id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, milestone_id, created_at, updated_at, phases: SpecPhaseRow[] }` — the parent + joined ordered phases. `regression_of_slug` / `regression_signature` mirror the regression-agent header lines (`**Regression-of:** [[<slug>]]` / `**Regression-signature:** `<sig>``) — typed columns added in [[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 1, sibling to `repair_signature`.
 - **`SpecPhaseRow`** — `{ id, spec_id, position, title, body, status, pr, merge_sha, verification, created_at, updated_at }`. `position` is 1-indexed.
 - **`SpecRowInput`** / **`SpecPhaseInput`** — the writable field sets `upsertSpec` accepts.
 
@@ -37,7 +37,8 @@ supabase-js has no transaction surface, so `upsertSpec` is a sequence of writes 
 ## Callers
 
 - **[[../recipes/backfill-specs-from-markdown]]** (`scripts/backfill-specs-from-markdown.ts`) — runs [[brain-roadmap]] `parseSpec` ONE LAST TIME over `docs/brain/specs/*.md` and upserts the rows.
-- Future M2/M3 writers (authoring + reader cutover) will land here as [[../specs/spec-authoring-writes-db-and-worker-materialize]] / [[../specs/spec-readers-from-db-retire-parser]] flips.
+- **[[author-spec]]** (`src/lib/author-spec.ts`) — the dual-write chokepoint every spec-author surface routes through ([[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 1). Parses the just-committed markdown body and calls `upsertSpec`, so the DB row stays in step with the `.md` commit until [[../specs/spec-readers-from-db-retire-parser]] (M3) cuts readers over.
+- The future Phase 2 build materializer (worker-materializes-row-for-Bo) reads `getSpec` to render a temp `.md` for the [[../skills/build-spec]] skill.
 
 ## Gotchas
 

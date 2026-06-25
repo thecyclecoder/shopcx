@@ -47,3 +47,17 @@ Cut every spec-CREATION surface off `git commit docs/brain/specs/{slug}.md` and 
 - The `kind='mirror-spec-md'` lane appears on the box worker's lane list and commits each authored/edited spec to `main` as `docs/brain/specs/{slug}.md` — keeping the markdown-first readers ([[../libraries/brain-roadmap]] `parseSpec`) green. The commit is idempotent across re-saves.
 - [[spec-review-agent|Vale]]'s in_review→planned/deferred verdicts are pure DB writes; `spec_status_history` still records the audit row per transition (no regression of the existing audit ledger).
 - Brain pages: NEW [[../libraries/build-spec-materializer]] page, UPDATE [[../libraries/spec-card-state]] to note `flags.intended_status` is superseded by `specs.intended_status`, UPDATE [[spec-review-agent]] Phase 3 to point at `specs.status` as the canonical write surface, UPDATE [[spec-status-phase-pr-provenance]] to note the `spec_phases` row is the canonical phase-PR provenance surface (mirror retained until [[spec-readers-from-db-retire-parser]]).
+
+## Verification
+
+Phase 1 (dual-write at every author surface — this PR):
+- Apply `supabase/migrations/20260725120000_specs_regression_columns.sql` (or run `npx tsx scripts/apply-specs-regression-columns-migration.ts`) → expect `public.specs.regression_of_slug text` + `public.specs.regression_signature text` present.
+- Author a fresh spec via the planner: queue a `kind='plan'` job for a stub goal in dev, approve a branch on the proposed tree, let the worker resume → expect the `claude/plan-*` resume to commit `docs/brain/specs/{slug}.md` to `main` AND insert a `public.specs` row with `status='in_review'` + `intended_status='planned'` + matching N `public.spec_phases` rows ordered by `position`.
+- Re-fire the same planner with the same spec body (no markdown change) → expect the `upsertSpec` re-write is idempotent: no `spec_phases` row count change, the existing `(spec_id, position)` rows keep their `id + pr + merge_sha` (the read-modify-write of phases by position is deterministic).
+- Trigger the regression-agent on a known regression of a shipped spec → expect the authored fix spec lands `docs/brain/specs/{slug}.md` AND `public.specs` row carries `regression_of_slug = '<regressed-slug>'` + `regression_signature = '<sig>'` (the typed columns).
+- Run the repair-agent on a Control Tower signature it hasn't seen → expect the authored fix spec lands AND `public.specs.repair_signature = '<sig>'` (the existing column, written via the same `upsertSpec`).
+- A spec-chat finalize that creates a new spec → expect both the `.md` commit AND a `public.specs` + `public.spec_phases` row appear with `intended_status_set_by='spec-chat'`.
+- `select count(*) from public.specs where slug = '<authored-slug>'` after each surface fires = `1` (UPSERT by `(workspace_id, slug)` — no duplicates).
+- `npx tsc --noEmit` is clean on this PR.
+
+Phase 2-4 follow this PR — verification for those will land with their respective phases.

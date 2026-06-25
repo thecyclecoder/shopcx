@@ -27,6 +27,11 @@ import { resolve } from "path";
 import { createAdminClient } from "./_bootstrap";
 import { parseSpec, type SpecCard, type Phase, type SpecStatus } from "../src/lib/brain-roadmap";
 import { upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus } from "../src/lib/specs-table";
+import {
+  extractPhaseBodies,
+  extractRepairSignature,
+  extractRegressionHeaders,
+} from "../src/lib/author-spec";
 
 const APPLY = process.argv.includes("--apply");
 const SPECS_DIR = resolve(__dirname, "../docs/brain/specs");
@@ -52,76 +57,10 @@ interface Workspace {
   name: string | null;
 }
 
-/** Extract the per-phase body text from raw spec markdown — sibling to brain-roadmap's parseSpec which
- *  only captures title + status. Position is 1-indexed and lines up with `parseSpec().phases[i]`. */
-function extractPhaseBodies(raw: string): { title: string; body: string }[] {
-  const lines = raw.split("\n");
-  const isPhaseHeading = (l: string) => /^#{2,3}\s+Phase\b/.test(l);
-
-  // Pass 1: H2/H3-heading shape (the dominant form).
-  const headings: { lineIdx: number; rawTitle: string; isH3: boolean }[] = [];
-  let currentH2: string | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    if (/^##\s+/.test(lines[i])) currentH2 = lines[i].replace(/^##\s+/, "").trim();
-    if (!isPhaseHeading(lines[i])) continue;
-    // an `### Phase N` only counts inside a `## Phases` wrapper (parseSpec uses the same rule).
-    if (lines[i].startsWith("### ") && !/^Phases$/i.test(currentH2 ?? "")) continue;
-    const m = lines[i].match(/^#{2,3}\s+(.+?)\s*$/);
-    headings.push({ lineIdx: i, rawTitle: m ? m[1] : "", isH3: lines[i].startsWith("### ") });
-  }
-
-  if (headings.length) {
-    const out: { title: string; body: string }[] = [];
-    for (let p = 0; p < headings.length; p++) {
-      const start = headings[p].lineIdx + 1;
-      let end = lines.length;
-      for (let k = start; k < end; k++) {
-        if (isPhaseHeading(lines[k])) { end = k; break; }
-        // A non-phase H2 ends the block. An inner H3 doesn't (it might be subsection content).
-        if (/^##\s+/.test(lines[k]) && !/^##\s+Phases?\s*$/i.test(lines[k])) { end = k; break; }
-      }
-      out.push({ title: cleanInline(headings[p].rawTitle), body: lines.slice(start, end).join("\n").trim() });
-    }
-    return out;
-  }
-
-  // Pass 2: bullet-style phases under `## Phases` (some box-authored specs).
-  const out: { title: string; body: string }[] = [];
-  let inPhases = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (/^##\s+Phases?\s*$/i.test(lines[i])) { inPhases = true; continue; }
-    if (inPhases && /^##\s+/.test(lines[i])) break;
-    if (!inPhases) continue;
-    const bm = lines[i].match(/^\s*[-*]\s+(.*\S)\s*$/);
-    if (!bm) continue;
-    const inner = bm[1].replace(/^[⏳🚧✅❌]\s*/, "");
-    const hasEmoji = /^[\s]*[-*]\s+[⏳🚧✅❌]/.test(lines[i]);
-    if (!hasEmoji && !/^\*{0,2}(P\d+|Phase\s+\d+)\b/i.test(inner)) continue;
-    out.push({ title: cleanInline(bm[1]), body: bm[1].trim() });
-  }
-  return out;
-}
-
-function cleanInline(s: string): string {
-  return s
-    .replace(/[⏳🚧✅❌]/g, "")
-    .replace(/\*\*/g, "")
-    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, link, alias) => alias || link)
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/** The signature TEXT (not just presence) for a Repair-Agent-authored spec: `**Repair-signature:** \`{sig}\``. */
-function extractRepairSignature(raw: string): string | null {
-  const lines = raw.split("\n");
-  for (const l of lines) {
-    const m = l.match(/\*\*Repair-signature:\*\*\s*`([^`]+)`/i);
-    if (m) return m[1].trim();
-    const m2 = l.match(/\*\*Repair-signature:\*\*\s*(.+?)\s*$/i);
-    if (m2) return cleanInline(m2[1]);
-  }
-  return null;
-}
+// extractPhaseBodies / extractRepairSignature / extractRegressionHeaders moved to ../src/lib/author-spec.ts
+// (the shared helper used by every author surface in builder-worker for the dual-write — Phase 1 of
+// [[spec-authoring-writes-db-and-worker-materialize]]). Importing keeps a single source of truth so the
+// backfill + the live writers can't drift.
 
 /** Map a `SpecStatus` from the markdown/mirror to the `specs.status` DB enum.
  *  Markdown can yield `planned | in_progress | shipped | deferred | in_review`; the DB also accepts
@@ -227,6 +166,8 @@ async function main() {
 
       if (!APPLY) continue;
       totalUpserts++;
+      const rawMd = readFileSync(resolve(SPECS_DIR, `${slug}.md`), "utf8");
+      const regressionHeaders = extractRegressionHeaders(rawMd);
       await upsertSpec(
         ws.id,
         {
@@ -241,7 +182,9 @@ async function main() {
           intended_status: intendedStatus,
           status,
           intended_status_set_by: null,
-          repair_signature: extractRepairSignature(readFileSync(resolve(SPECS_DIR, `${slug}.md`), "utf8")),
+          repair_signature: extractRepairSignature(rawMd),
+          regression_of_slug: regressionHeaders.ofSlug,
+          regression_signature: regressionHeaders.signature,
           auto_build: card.autoBuild === true,
           milestone_id: null,
         },

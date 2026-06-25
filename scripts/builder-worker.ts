@@ -2147,7 +2147,7 @@ async function runDbHealthJob(job: Job) {
         console.warn(`${tag} owner Build → spec commit failed`);
         return;
       }
-      await markNewSpecInReview(job.workspace_id, buildAction.spec_slug, "planned", "db_health", `db-health fix spec authored (signature ${signature})`);
+      await markNewSpecInReview(job.workspace_id, buildAction.spec_slug, "planned", "db_health", `db-health fix spec authored (signature ${signature})`, bodyResult.body);
       const { error } = await db.from("agent_jobs").insert({
         workspace_id: job.workspace_id,
         spec_slug: buildAction.spec_slug,
@@ -2223,7 +2223,7 @@ async function runCoverageRegisterJob(job: Job) {
         console.warn(`${tag} owner ${what} → spec commit failed`);
         return;
       }
-      await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`);
+      await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
       const { error } = await db.from("agent_jobs").insert({
         workspace_id: job.workspace_id,
         spec_slug: specSlug,
@@ -3016,7 +3016,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
             console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
             break;
           }
-          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split — split from ${c.slug}`);
+          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split — split from ${c.slug}`, String(s.markdown));
           authored.push(slug);
         }
         if (failed) {
@@ -3152,7 +3152,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
             console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
             break;
           }
-          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split (via author_followup_spec) — split from ${c.slug}`);
+          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split (via author_followup_spec) — split from ${c.slug}`, String(s.markdown));
           authoredSplits.push(slug);
         }
         if (splitFailed) {
@@ -3990,7 +3990,7 @@ async function runDirectorBounceBackJob(job: Job) {
           }
           const put = await putFileMain(path, String(s.markdown), `spec: ${sslug} — split future phase from ${slug} (bounce-back)`);
           if (put.ok) {
-            await markNewSpecInReview(job.workspace_id, sslug, "planned", "director:platform", `bounce-back split — from ${slug}`);
+            await markNewSpecInReview(job.workspace_id, sslug, "planned", "director:platform", `bounce-back split — from ${slug}`, String(s.markdown));
             authoredSplits.push(sslug);
           }
         }
@@ -4386,12 +4386,19 @@ async function putFileMain(filePath: string, content: string, message: string) {
 // (repair / regression / db-health / security / migration-fix / storefront-optimizer) default to
 // `planned` (a bug fix you don't want built is a contradiction); planner/chat/coaching paths default to
 // `planned` too unless the surface knows the author meant `deferred`.
+//
+// spec-authoring-writes-db-and-worker-materialize Phase 1 — when the caller passes the markdown body,
+// ALSO write the spec row to public.specs + public.spec_phases via author-spec.authorSpecRowFromMarkdown.
+// Dual-write: the .md commit is still the canonical source for the markdown-first readers
+// ([[../libraries/brain-roadmap]] parseSpec) until [[spec-readers-from-db-retire-parser]] retires the
+// parser, but the DB row is now the future-canonical source the build materializer (Phase 2) reads from.
 async function markNewSpecInReview(
   workspaceId: string,
   slug: string,
   intendedStatus: "planned" | "deferred",
   actor: string,
   reason?: string,
+  markdown?: string,
 ): Promise<void> {
   try {
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
@@ -4401,6 +4408,19 @@ async function markNewSpecInReview(
       `[spec-card-state] markNewSpecInReview ${slug} failed:`,
       e instanceof Error ? e.message : e,
     );
+  }
+  if (markdown && markdown.trim()) {
+    try {
+      const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
+      await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
+        intendedStatusSetBy: actor,
+      });
+    } catch (e) {
+      console.warn(
+        `[author-spec] authorSpecRowFromMarkdown ${slug} failed:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
   }
 }
 
@@ -4658,7 +4678,7 @@ async function runPlanJob(job: Job) {
           // is Ada's, downstream of Vale).
           if (f.startsWith("docs/brain/specs/")) {
             const slug = f.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
-            await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`);
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`, content);
           }
         } else console.error(`${tag} commit failed for ${f}: ${r.status}`);
       } catch (e) {
@@ -5205,7 +5225,7 @@ async function runSpecChatJob(job: Job) {
     // intended_status=planned. A `refine` (a spec that already has a card row) leaves the existing flags
     // intact — we don't re-park an in-progress/shipped spec back into review.
     if (!refineSlug) {
-      await markNewSpecInReview(job.workspace_id, slug, "planned", "spec-chat", `authored via box spec-chat`);
+      await markNewSpecInReview(job.workspace_id, slug, "planned", "spec-chat", `authored via box spec-chat`, content);
     }
     // Flip the thread finalized + link the slug, store the session, clear thinking.
     await db.from("roadmap_chats").update({
@@ -6258,13 +6278,14 @@ async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: stri
       problem: String(s.problem || "(see the migration-fix diagnosis above)"),
       target: typeof s.target === "string" ? s.target : undefined,
     };
+    const markdown = migrationGapSpecMarkdown(spec, auditId, subId);
     const put = await putFileMain(
       path,
-      migrationGapSpecMarkdown(spec, auditId, subId),
+      markdown,
       `spec: ${slug} (from failed migration ${auditId} via migration-fix code-gap escalation)`,
     );
     if (put.ok) {
-      await markNewSpecInReview(workspaceId, slug, "planned", "migration-fix", `code-gap fix spec authored (audit ${auditId})`);
+      await markNewSpecInReview(workspaceId, slug, "planned", "migration-fix", `code-gap fix spec authored (audit ${auditId})`, markdown);
       return `gap spec authored: ${path} (owner=retention) — commission on Roadmap`;
     }
     return `gap spec commit failed (${put.status})`;
@@ -6583,7 +6604,7 @@ async function runDeveloperMessageJob(job: Job) {
             if (!content) { a.status = "failed"; a.result = "no spec content"; notes.push(`${a.summary} → failed (no content)`); continue; }
             const put = await putFileMain(filePath, content, `spec: create ${slug} (developer message center)`);
             if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
-            await markNewSpecInReview(job.workspace_id, slug, "planned", "developer-message-center", `authored via developer message center`);
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "developer-message-center", `authored via developer message center`, content);
             let queued = false;
             const wantBuild = !!(a.payload && (a.payload as { queueBuild?: boolean }).queueBuild);
             if (wantBuild) {
@@ -7425,7 +7446,7 @@ async function runDirectorCoachJob(job: Job) {
             const slug = String(a.slug);
             const put = await putFileMain(`docs/brain/specs/${slug}.md`, String(a.content), `spec: create ${slug} (director coaching)`);
             if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
-            await markNewSpecInReview(job.workspace_id, slug, "planned", "director-coach", `authored via director coaching (${thread.director_function})`);
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "director-coach", `authored via director coaching (${thread.director_function})`, String(a.content));
             let queued = false;
             if (a.queueBuild === true) {
               const { error } = await db.from("agent_jobs").insert({ workspace_id: job.workspace_id, spec_slug: slug, kind: "build", status: "queued", instructions: "Created via director coaching", created_by: job.created_by });
@@ -8137,26 +8158,27 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
       await appendSignatureToSpec(slug, existing.body, existing.sha, signature);
       return { slug, alreadyExists: true, grouped: false, rootCause };
     }
+    const markdown = repairSpecMarkdown(
+      {
+        slug,
+        title,
+        owner: String(s.owner || "[[../functions/platform]]"),
+        parent: String(s.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"),
+        intent: String(s.intent || "Close the issue behind this Control Tower signature."),
+        problem: String(s.problem || "(see the repair diagnosis above)"),
+        target: typeof s.target === "string" ? s.target : undefined,
+      },
+      signature,
+      verdict,
+      rootCause,
+    );
     const put = await putFileMain(
       path,
-      repairSpecMarkdown(
-        {
-          slug,
-          title,
-          owner: String(s.owner || "[[../functions/platform]]"),
-          parent: String(s.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"),
-          intent: String(s.intent || "Close the issue behind this Control Tower signature."),
-          problem: String(s.problem || "(see the repair diagnosis above)"),
-          target: typeof s.target === "string" ? s.target : undefined,
-        },
-        signature,
-        verdict,
-        rootCause,
-      ),
+      markdown,
       `spec: ${slug} (from Control Tower signature ${signature} via repair-agent ${verdict})`,
     );
     if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "repair-agent", `repair-agent ${verdict} fix spec for signature ${signature}`);
+    await markNewSpecInReview(workspaceId, slug, "planned", "repair-agent", `repair-agent ${verdict} fix spec for signature ${signature}`, markdown);
     return { slug, alreadyExists: false, grouped: false, rootCause };
   } catch (e) {
     console.warn(`[repair] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -8547,13 +8569,14 @@ async function authorRegressionFixSpec(raw: unknown, regressedSlug: string, sign
   try {
     const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
     if (existing.ok) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
+    const markdown = regressionFixSpecMarkdown({ ...s, slug, title }, regressedSlug, signature);
     const put = await putFileMain(
       path,
-      regressionFixSpecMarkdown({ ...s, slug, title }, regressedSlug, signature),
+      markdown,
       `spec: ${slug} — fix regression of ${regressedSlug} (regression-agent, signature ${signature})`,
     );
     if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "regression-agent", `regression-agent fix spec for ${regressedSlug} (signature ${signature})`);
+    await markNewSpecInReview(workspaceId, slug, "planned", "regression-agent", `regression-agent fix spec for ${regressedSlug} (signature ${signature})`, markdown);
     return { slug, alreadyExists: false };
   } catch (e) {
     console.warn(`[regression] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -8941,9 +8964,10 @@ async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha:
   try {
     const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
     if (existing.ok) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
-    const put = await putFileMain(path, securityFixSpecMarkdown({ ...s, slug, title }, mergedSlug, mergeSha), `spec: ${slug} — security fix for merged ${mergedSlug} (security-agent, commit ${mergeSha.slice(0, 12)})`);
+    const markdown = securityFixSpecMarkdown({ ...s, slug, title }, mergedSlug, mergeSha);
+    const put = await putFileMain(path, markdown, `spec: ${slug} — security fix for merged ${mergedSlug} (security-agent, commit ${mergeSha.slice(0, 12)})`);
     if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent fix for merged ${mergedSlug}`);
+    await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent fix for merged ${mergedSlug}`, markdown);
     return { slug, alreadyExists: false };
   } catch (e) {
     console.warn(`[security] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -9036,11 +9060,12 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
   const path = `docs/brain/specs/${slug}.md`;
   try {
     const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-    const put = await putFileMain(path, depUpgradeSpecMarkdown(findings, signature), `spec: ${slug} — ${findings.length} security dep upgrade(s) (security-agent dep-watch, sig ${signature})`);
+    const markdown = depUpgradeSpecMarkdown(findings, signature);
+    const put = await putFileMain(path, markdown, `spec: ${slug} — ${findings.length} security dep upgrade(s) (security-agent dep-watch, sig ${signature})`);
     if (!put.ok) return null;
     // Refresh-only writes don't change the card state — only flag in_review on FIRST creation.
     if (!existing.ok) {
-      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent dep-watch (sig ${signature})`);
+      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent dep-watch (sig ${signature})`, markdown);
     }
     return { slug, alreadyExists: existing.ok };
   } catch (e) {
@@ -9376,7 +9401,7 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite, 
     if (existing.ok) return { slug, note: `spec already tracked: ${path} (commission on Roadmap)` };
     const put = await putFileMain(path, md, `spec: ${slug} (from storefront-optimizer build-or-request)`);
     if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "storefront-optimizer", `storefront-optimizer build-or-request for surface ${surface.product_id}:${surface.lander_type}:${surface.audience}`);
+    await markNewSpecInReview(workspaceId, slug, "planned", "storefront-optimizer", `storefront-optimizer build-or-request for surface ${surface.product_id}:${surface.lander_type}:${surface.audience}`, md);
     return { slug, note: `spec authored: ${path} (owner=growth) — commission on Roadmap` };
   } catch (e) {
     console.warn(`[storefront-optimizer] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
