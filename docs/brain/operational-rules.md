@@ -32,6 +32,12 @@ See also: [[README]] § Naming conventions for the table-level version of this r
 - **All status / enum-like text columns are lowercase.** `subscriptions.status='active'`, `dunning_cycles.status='retrying'`, etc. Writing `.eq("status", "ACTIVE")` returns zero rows silently.
 - When in doubt, probe a sample before filtering. See [[README]] § Probing technique.
 
+## PM data — through the SDK, never raw SQL
+
+The project-management tables — `public.goals`, `public.goal_milestones`, `public.specs`, `public.spec_phases` — are read/written ONLY through the typed SDK ([[libraries/specs-table]]: `getSpec`/`listSpecs`/`upsertSpec`/`movePhase`/`stampPhaseShipped`/`markPhaseInProgress` + [[libraries/goals-table]]: `getGoal`/`listGoals`/`upsertGoal`/`getMilestone`/`greenlightGoal`/`reparentGoal`). NO agent (Bo/Ada/Pia/Vale/Fenn), route, or library issues raw `.from("specs"|"goals"|"goal_milestones"|"spec_phases")` SQL — the SDK is the single chokepoint where the invariants (rollup-derived status, PR/SHA provenance, parent-cycle guard, owner-scope, single-workspace) hold. The one-time markdown backfill scripts were the only exception and were retired with the markdown (db-driven-specs). See [[specs/pm-db-agent-toolkit]].
+
+**Status is derived from children, never manually set.** A spec's planned/in_progress/shipped status is the rollup of its `spec_phases` (computed at read time); a milestone's is the rollup of its specs; a goal's `complete` is all-milestones-complete. The ONLY stored statuses are genuine *inputs*: a phase's merge state (stamped via `stampPhaseShipped` on PR merge, `markPhaseInProgress` on build start), a goal's greenlight (proposed→greenlit), and a spec's explicit lifecycle override (in_review / deferred / folded). Never write a rollup status — it can only drift from the children. See [[specs/derive-rollup-status-retire-stored-columns]].
+
 ## Customer-identity rules
 
 - **`shopify_customer_id` is the primary external lookup** for matching a customer to a Shopify-side payload. Match by Shopify ID first; email is a fallback because emails change.
