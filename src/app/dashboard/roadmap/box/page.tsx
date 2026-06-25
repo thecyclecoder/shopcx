@@ -185,20 +185,22 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time */}
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
           <PersonaAvatar persona={persona} size={20} />
           <span className="truncate text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{title}</span>
-          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
         </span>
-        <span className="flex shrink-0 items-center gap-1.5">
-          {lane.account && (
-            <span title={`Running on ${lane.account}`} className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-              {lane.account}
-            </span>
-          )}
-          <span className="text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
-        </span>
+        <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
+      </div>
+      {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header) */}
+      <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-[26px]">
+        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
+        {lane.account && (
+          <span title={`Running on ${lane.account}`} className="shrink-0 rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+            {lane.account}
+          </span>
+        )}
       </div>
       {isCoach ? (
         <span className="block text-[11px] text-zinc-400">{action}</span>
