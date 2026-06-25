@@ -1,0 +1,1 @@
+- **Wire storefront experiments into the PDP render (+ edge-cached A/B)** · verified 2026-06-25 · → [[libraries/storefront-experiments]]

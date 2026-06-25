@@ -1,0 +1,1 @@
+- **Worker grading + director management layer** · verified 2026-06-25 · → [[libraries/agent-grader]]
