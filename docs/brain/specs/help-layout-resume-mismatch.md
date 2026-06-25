@@ -1,4 +1,4 @@
-# Fix /help/[slug]/[articleSlug] resume mismatch — wrap help layout in a host element so the metadata boundary doesn't collide with the page root
+# ✅ Fix /help/[slug]/[articleSlug] resume mismatch — wrap help layout in a host element so the metadata boundary doesn't collide with the page root
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `src/app/help/layout.tsx::real-bug`
@@ -11,10 +11,15 @@ Vercel error digest 34312922 on /help/[slug]/[articleSlug] (host help.superfoods
 
 **Likely target:** `src/app/help/layout.tsx`
 
-## Phase 1 — close it
+## Phase 1 — close it ✅
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
+Wrapped `src/app/help/layout.tsx` `<Suspense fallback={null}>{children}</Suspense>` in a stable host-element `<div className="help-root">`, mirroring `src/app/widget/[workspaceId]/layout.tsx` and `src/app/(storefront)/layout.tsx`. The metadata boundary streamed by Next 16 (because the help [slug] + [articleSlug] pages both export `generateMetadata`) now lives as a sibling of `<Suspense>` inside the stable `.help-root` host, so PPR resume no longer sees `<__next_metadata_boundary__>` where it expected the page's root `<div>`.
+
 ## Verification
-- Re-trigger the originating condition (signature `vercel:babb63e4abbf5a59`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- On help.superfoodscompany.com/<slug> (KB minisite root) → view-source contains the article cards + footer (SSR HTML, not a client shell), and the browser console shows no React resume mismatch warning.
+- On help.superfoodscompany.com/<slug>/<articleSlug> (any published article) → view-source contains the article title + body, and no new error_events row appears with signature `vercel:babb63e4abbf5a59`.
+- On Control Tower (/dashboard/control-tower) → the `vercel:babb63e4abbf5a59` tile stays green (no fresh loop_alert) after the next prod deploy.
+- In Vercel logs for the help.superfoodscompany.com host → grep for digest `34312922` returns no new entries after the deploy that lands this PR.
 
 > Authored by the box Repair Agent from Control Tower signature `vercel:babb63e4abbf5a59` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.
