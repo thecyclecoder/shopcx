@@ -45,7 +45,6 @@ import {
  * assigned arm emits client-side from the `sx_variant` cookie (the pixel),
  * internal/bot excluded.
  */
-export const dynamicParams = true;
 
 /**
  * Override the PDP `hero` media slot with an experiment variant's hero image.
