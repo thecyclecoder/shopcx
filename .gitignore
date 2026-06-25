@@ -54,3 +54,5 @@ remotion/public/adbuild/
 scripts/_*
 # ...except the shared, committed bootstrap (the foundation every script imports)
 !scripts/_bootstrap.ts
+# ...and committed audit/utility scripts the brain refers to by their spec-mandated names.
+!scripts/_audit-spec-phase-overcount.ts
