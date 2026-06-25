@@ -21,6 +21,11 @@ export interface SpecCardPhaseState {
   index: number; // 0-based, matches the board parser order
   title: string;
   status: Phase;
+  // Provenance (db-driven-status-trust-the-merge): the PR # + merge commit SHA that SHIPPED this phase.
+  // A phase is `shipped` because a specific build PR merged it — this records WHICH, so the status is
+  // provable/auditable, not inferred. Set when the merge hook ships the phase; absent on a planned phase.
+  pr?: number | null;
+  merge_sha?: string | null;
 }
 
 /**
