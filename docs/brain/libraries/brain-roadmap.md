@@ -24,6 +24,7 @@ The [[../dashboard/roadmap|Roadmap board]], goal/function maps, and detail pages
 - **`GoalCard.status`** (`proposed｜greenlit｜complete`) + **`GoalCard.proposedBy?`** + **`deriveGoalStatus(rawStatus, pct)`** ([[../specs/director-proposed-goals]] Phase 1) — the goal's **explicit lifecycle state**, parsed from a `**Status:**` line. See [[goal-proposals]].
 - **`getRoadmapFilters()`** → `{ goals, goalsBySpec, sourceBySpec }` for the board's goal + source filters ([[../specs/roadmap-goal-and-source-filters]]). **`SpecSource`** = `repair` (the spec has a `**Repair-signature:**` metadata line from [[../tables/specs]]), else `goal` (wikilinked from a goal doc), else `manual`.
 - **`getArchive()`/`listArchivedSlugs()`** — verified/folded specs from `archive.d/` (← `archive.md` fallback).
+- **`getFoldedGoals(workspaceId)`/`getFoldedGoal(slug, workspaceId)`** ([[../specs/goal-fold-from-db-row]] Phase 2) — the goal ARCHIVE readers: every `public.goals` row with `status='folded'` (the rows `getGoals`/`getGoal` drop), each as an `ArchivedGoal` (`{ card, raw, updatedAt }`). The Goals board's Archive section reads `getFoldedGoals`; the goal detail page falls back to `getFoldedGoal` (read-only, no greenlight/plan controls) when `getGoal` returns null. The preserved row is the archive — a folded goal renders identically to its pre-fold live view.
 - **`phaseEmoji(Phase)`** → `⏳/🚧/✅/❌`. Used by the blocker chip + status cards.
 
 ## Spec status & content — DB-authoritative ([[../tables/spec_card_state]], [[../specs/spec-status-db-driven]])

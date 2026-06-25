@@ -1,6 +1,6 @@
 ---
 name: fold-to-brain
-description: Use when a shipped spec (all phases ✅) has been owner-verified and should be archived — fold its knowledge into the permanent brain pages (lifecycle/table/library/inngest/integration/recipe/dashboard), cross-link, append to the archive index, update README counts, and git rm the spec file. The shipped→verified transition. Triggered by a fold-build or "archive the {slug} spec."
+description: Use when a shipped spec (all phases ✅) OR a complete goal (all milestones rolled up) should be archived — fold its knowledge into the permanent brain pages (lifecycle/table/library/inngest/integration/recipe/dashboard/functions), cross-link, append to the archive index, and flip the DB row to status='folded'. The shipped→verified (spec) / complete→folded (goal) transition. Triggered by a fold-build or "archive the {slug} spec/goal."
 ---
 
 # fold-to-brain
@@ -34,5 +34,15 @@ A shipped spec lives in `public.specs` + `public.spec_phases` (the DB row, post-
 - **To revisit an archived feature**, don't unfold the row — author a *fresh* spec from the current brain page ("New spec from brain" re-hydration).
 - Under the box worker, **the worker owns git** — make the edits + the `git rm` (when a legacy `.md` exists) as file ops and emit your status JSON; the worker commits and flips `specs.status='folded'` after the PR opens.
 
+## Folding a GOAL (goal-fold-from-db-row)
+
+A **goal** also folds — the same `complete → folded` archive move, dispatched on the row's table. A goal lives in `public.goals` + `public.goal_milestones` ([[../tables/goals]] · [[../tables/goal_milestones]]), with child specs in `public.specs` (`milestone_id` FK). Unlike specs, goals are **not batched** — one goal per fold job (a goal is a large multi-spec narrative). The box worker's `runGoalFoldJob` (kind=`goal-fold`, shares the concurrency-1 fold lane) drives it.
+
+- **Precondition / GUARD:** `public.goals.status === 'complete'`. The DB rollup ([[../tables/goals]]) makes `complete` ≡ every milestone complete ≡ every child spec `shipped|folded` — so the guard is the same guarantee written twice. A `proposed`/`greenlit` goal can NEVER fold (the worker fails the job with a clear reason). The worker enforces this before dispatch; if the goal isn't `complete`, **stop**.
+- **No per-goal markdown — read the materialized copy.** There is NO `docs/brain/goals/{slug}.md` (the per-goal markdown was retired in [[../specs/goal-readers-from-db-retire-parsegoal]]). The worker materializes the goal ROW (+ milestones + joined child specs) to a gitignored `{worktree}/.box/goal-{slug}.md` ([[build-goal-materializer]]) — read THAT.
+- **⚠️ NEVER create or write `docs/brain/goals/*.md`.** A folded goal writes its durable knowledge ONLY into the surviving PERMANENT pages — extend the relevant `lifecycles/` (end-to-end flow, "Status / open work" block), `dashboard/` (the surface the goal shipped), `functions/` (the owning function's mandate progress), `tables/` / `libraries/` (new shapes). The preserved `public.goals` row (flipped to `status='folded'`) IS the archive — the board renders it from the row.
+- **Archive entry:** create `docs/brain/archive.d/goal-{slug}.md` with ONE line — `- **{Goal title}** · folded {YYYY-MM-DD} · → [[lifecycles/{primary home}]]`. Never hand-edit `archive.md`/`README.md` (generated; aggregates refreshed out-of-band).
+- **Worker owns the flip.** Make the brain edits + the archive.d entry as file ops and emit your status JSON; the worker commits, opens the PR, then flips `public.goals.status='folded'` via the [[../libraries/goals-table]] SDK (`setGoalStatus`) — every other column (title, body, outcome, success_metric, owner, parent_goal_id, milestones via FK) is PRESERVED so the board's archive view + audit history render the folded goal unchanged.
+
 ## Related
-`docs/brain/project-management.md` (§ Folding a shipped spec into the brain) · `docs/brain/archive.md` · `docs/brain/README.md` · skills: `write-brain-page`, `build-spec` · `docs/brain/lifecycles/ai-learning.md` (example of a folded spec)
+`docs/brain/project-management.md` (§ Folding a shipped spec into the brain) · `docs/brain/archive.md` · `docs/brain/README.md` · skills: `write-brain-page`, `build-spec` · libraries: [[../libraries/build-goal-materializer]] · [[../libraries/goals-table]] · `docs/brain/lifecycles/ai-learning.md` (example of a folded spec)
