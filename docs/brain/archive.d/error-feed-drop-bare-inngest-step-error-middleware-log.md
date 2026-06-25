@@ -1,0 +1,1 @@
+- **Error feed: drop the bare Inngest middleware step-error log from the Vercel feed** · verified 2026-06-25 · → [[libraries/control-tower]]
