@@ -220,7 +220,15 @@ export interface HistoryEntry {
 
 /** Upsert one (workspace, slug) row, MERGE-patching the `flags` jsonb (read-modify-write; best-effort).
  * Optionally appends per-transition rows to `spec_status_history` for the audit ledger
- * (spec-status-db-driven Phase 1). The history write itself is best-effort — never blocks the upsert. */
+ * (spec-status-db-driven Phase 1). The history write itself is best-effort — never blocks the upsert.
+ *
+ * spec-authoring-writes-db-and-worker-materialize Phase 3 — DUAL-WRITE to `public.specs`. Every
+ * spec-card-state status/flag flip ALSO writes the corresponding typed column on the future-canonical
+ * `public.specs` row (status, deferred, priority, intended_status). The mirror stays the READ-path
+ * until [[../specs/spec-readers-from-db-retire-parser]] cuts readers over; the dual-write keeps the
+ * row honest with the mirror so callers reading either source see the same answer. Best-effort: a
+ * missing specs row (pre-authored slug / pre-backfill) is a 0-row UPDATE, not an error.
+ */
 async function upsertCardState(
   workspaceId: string,
   slug: string,
@@ -248,6 +256,15 @@ async function upsertCardState(
     if (patch.last_merge_sha !== undefined) row.last_merge_sha = patch.last_merge_sha;
     await admin.from("spec_card_state").upsert(row, { onConflict: "workspace_id,spec_slug" });
 
+    // Phase 3 dual-write to public.specs — the future-canonical row. Map mirror-shape fields to typed
+    // columns: status → specs.status, flags.deferred → specs.deferred (the trigger rolls status to
+    // 'deferred' when set; un-setting restores the phase rollup), flags.critical → specs.priority,
+    // flags.intended_status → specs.intended_status (cleared on disposition). The phase_states snapshot
+    // remains spec_card_state-only — per-phase PR/merge_sha already dual-writes via
+    // `applyMergedBuildEffects` ([[agent-jobs]]), so the typed `spec_phases` row stays canonical for
+    // phase progress. Best-effort + scoped: a 0-row UPDATE (no specs row yet) is silently fine.
+    await dualWriteSpecRow(workspaceId, slug, patch);
+
     if (history && history.length) {
       const prior = {
         status: (existing?.status as SpecStatus | undefined),
@@ -265,6 +282,63 @@ async function upsertCardState(
     }
   } catch {
     /* best-effort mirror — never break the underlying merge/flip/build path; the reconcile cron backstops */
+  }
+}
+
+/**
+ * spec-authoring-writes-db-and-worker-materialize Phase 3 — dual-write helper. Map a spec_card_state
+ * patch (status / flags subset) onto the typed `public.specs` columns so the future-canonical row stays
+ * in sync with the mirror writes. Best-effort: a 0-row UPDATE (no specs row yet for this slug — a pre-
+ * backfill / pre-author edge) is silently fine; the mirror is still the read-path until
+ * [[../specs/spec-readers-from-db-retire-parser]] cuts readers over.
+ *
+ * Field mapping:
+ *  - patch.status        → specs.status (the rollup trigger keeps phase progress consistent on the
+ *                          NEXT phase write; in_review / folded are terminal-ish — the trigger leaves
+ *                          them alone, so an explicit caller write is what flips out of them).
+ *  - patch.flags.deferred → specs.deferred (the specs_deferred_rollup_trigger recomputes status to
+ *                          'deferred' when set; un-setting restores the underlying phase rollup).
+ *  - patch.flags.critical → specs.priority ('critical' / null — mirrors the markdown column shape).
+ *  - patch.flags.intended_status → specs.intended_status (cleared on Ada's disposition;
+ *                          'planned' / 'deferred' otherwise).
+ *
+ * A flag key whose value is `undefined` in the incoming flags object is treated as a CLEAR (writes null
+ * for nullable columns, false for booleans) — this matches the spec_card_state writers' convention of
+ * setting flags to `undefined` to consume them (e.g. applyAdaDisposition clearing intended_status on
+ * dispose). A flag key absent from the patch is left untouched on the specs row.
+ */
+async function dualWriteSpecRow(
+  workspaceId: string,
+  slug: string,
+  patch: { status?: SpecStatus; flags?: SpecCardFlags },
+): Promise<void> {
+  try {
+    const updateFields: Record<string, unknown> = {};
+    if (patch.status !== undefined) updateFields.status = patch.status;
+    if (patch.flags) {
+      const f = patch.flags;
+      if (Object.prototype.hasOwnProperty.call(f, "deferred")) {
+        updateFields.deferred = !!f.deferred;
+      }
+      if (Object.prototype.hasOwnProperty.call(f, "critical")) {
+        updateFields.priority = f.critical ? "critical" : null;
+      }
+      if (Object.prototype.hasOwnProperty.call(f, "intended_status")) {
+        const v = f.intended_status;
+        updateFields.intended_status = v === "planned" || v === "deferred" ? v : null;
+      }
+    }
+    if (!Object.keys(updateFields).length) return;
+    updateFields.updated_at = new Date().toISOString();
+    const admin = createAdminClient();
+    await admin
+      .from("specs")
+      .update(updateFields)
+      .eq("workspace_id", workspaceId)
+      .eq("slug", slug);
+  } catch {
+    /* best-effort — the spec_card_state mirror already landed; the future-canonical row catches up on
+       the next author/edit pass via [[specs-table]] upsertSpec (idempotent), or the backfill script. */
   }
 }
 
