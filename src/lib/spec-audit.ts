@@ -4,9 +4,11 @@
  * Implements [[../../docs/brain/specs/director-trust-phase-pr-provenance]] Phase 2. Triggered by a
  * director's `request-audit` action (auto-applies → queues an `audit-spec-shipped-state` agent_jobs row
  * scoped to one slug → the worker runs `auditSpecShippedState`). The audit walks `spec_status_history` +
- * the squash-merge subjects on origin/main, emits a verdict per phase, and re-stamps `phase_states` via
- * `markSpecCardStatus` with PROPER `{pr, merge_sha}` provenance — the same `phase_states[i].pr` truth a
- * real merge would have written. A phase whose `shipped` flip has no `merge:*` actor on record
+ * the squash-merge subjects on origin/main, emits a verdict per phase, and re-stamps the CANONICAL
+ * `spec_phases` table (`restampPhases`) with PROPER `{status, pr, merge_sha}` provenance — the same truth a
+ * real merge would have written. derive-rollup-status: the verdict lands on `spec_phases` (not the
+ * `spec_card_state` mirror), because the board status now DERIVES from those phases via the DB trigger.
+ * A phase whose `shipped` flip has no `merge:*` actor on record
  * (director hand-flip / pre-provenance reconciler) is REGRESSED to `planned` so the board reflects
  * "we cannot prove this phase shipped" rather than "✅ ungrounded".
  *
@@ -17,10 +19,10 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getSpecCardStates,
-  markSpecCardStatus,
   rollupPhaseStatus,
   type SpecCardPhaseState,
 } from "@/lib/spec-card-state";
+import { restampPhases } from "@/lib/specs-table";
 import { getSpec } from "@/lib/brain-roadmap";
 import type { Phase } from "@/lib/brain-roadmap";
 
@@ -171,10 +173,14 @@ export async function auditSpecShippedState(
     `${regressed} regressed (no merge evidence)`;
 
   if (restampedStates.length) {
-    await markSpecCardStatus(workspaceId, slug, rollup, restampedStates, {
-      actor: "audit:request-audit",
-      reason: `request-audit: ${notes}`,
-    });
+    // derive-rollup-status: write the verdict to the CANONICAL `spec_phases` (1-based positions). The board
+    // status DERIVES from these phases (via the DB trigger → specs.status), so re-stamping the mirror would
+    // no longer move the card. The status is no longer written directly — it's inferred from the phases below.
+    await restampPhases(
+      workspaceId,
+      slug,
+      restampedStates.map((p) => ({ position: p.index + 1, status: p.status, pr: p.pr ?? null, merge_sha: p.merge_sha ?? null })),
+    );
   }
 
   return {

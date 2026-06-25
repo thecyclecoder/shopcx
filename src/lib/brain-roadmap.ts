@@ -25,6 +25,9 @@ import { promises as fs } from "fs";
 import path from "path";
 import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
 import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
+// derive-rollup-status: the canonical phase→status rollup. spec-card-state only TYPE-imports from this
+// module (Phase/SpecStatus), so this value import is runtime-cycle-free (the type import erases).
+import { rollupPhaseStatus } from "@/lib/spec-card-state";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
@@ -482,6 +485,31 @@ function dbStatusToSpecStatus(status: SpecRow["status"]): SpecStatus {
   return status;
 }
 
+/**
+ * derive-rollup-status: a spec's BOARD status is computed from its phase children, never read from the
+ * stored `specs.status` column (which is now vestigial for the planned/in_progress/shipped axis). The
+ * canonical rollup (`rollupPhaseStatus`: ignore rejected; all shipped → shipped; any shipped/in_progress →
+ * in_progress; else planned) is the same one the DB trigger maintains on `specs.status` and the merge hook
+ * uses — so a stored status can never drift from the children, and the manual status-reconcile writes that
+ * used to fight that drift are retired.
+ *
+ * Terminal / override statuses are NOT rollups and still win where they apply (they live on the row, not
+ * the phases):
+ *   - `deferred`   — the CEO parked the spec (specs.deferred flag); wins over phase progress.
+ *   - `in_review`  — a newly-authored / sent-back spec awaiting Vale + Ada disposition; the build pipeline
+ *                    refuses it, so it must read in_review regardless of any phase the body declares.
+ *   - `folded`     — archived; callers filter it before this runs (isBoardableStatus), but preserved here.
+ * A spec with ZERO phases (a one-shot spec) has nothing to roll up — fall back to the stored status (the
+ * merge hook stamps `specs.status='shipped'` on its single-PR ship; in_progress/planned otherwise).
+ */
+function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
+  if (row.deferred) return "deferred";
+  if (row.status === "in_review") return "in_review";
+  if (row.status === "folded") return "shipped"; // boardable callers filter folded; mirror dbStatusToSpecStatus
+  if (!phases.length) return dbStatusToSpecStatus(row.status); // one-shot spec — no children to roll up
+  return rollupPhaseStatus(phases.map((p, i) => ({ index: i, title: p.title, status: p.status })));
+}
+
 /** Build a SpecCard from one DB row + its joined `spec_phases`. The phases keep their stable id-by-position
  *  ordering from the join (specs-table.listSpecs sorts ASC by position). PR/merge_sha provenance flows
  *  through to the per-phase chip ([[spec-status-phase-pr-provenance]]). */
@@ -497,7 +525,9 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
   return {
     slug: row.slug,
     title: row.title,
-    status: dbStatusToSpecStatus(row.status),
+    // derive-rollup-status: status is the PHASE ROLLUP, not the stored `specs.status` read — so a stored
+    // status can never drift from the children. Terminal/override (deferred/in_review/folded) still win.
+    status: deriveSpecCardStatus(row, phases),
     critical: row.priority === "critical" ? true : undefined,
     summary: row.summary ?? "",
     phases,

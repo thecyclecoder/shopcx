@@ -401,6 +401,124 @@ export async function stampPhaseShipped(
   if (error) throw error;
 }
 
+/**
+ * derive-rollup-status: mark the LEAF phase being built `in_progress` at BUILD START. Now that a spec's
+ * board status is the phase rollup (never a stored card-status read), a build that's underway must move a
+ * PHASE — not the card — to in_progress, or the spec would read `planned` until its first phase ships. Flips
+ * the earliest `planned` phase (the next one to build) to `in_progress`; the DB trigger then rolls
+ * `specs.status` to `in_progress` and the derived card reads it correctly.
+ *
+ * Idempotent + safe: a no-op if a phase is already `in_progress` (a build is already signaled) or there's no
+ * `planned` phase left (every phase shipped/rejected, or a one-shot spec with no phases — there the
+ * builder's own status write handles in_progress). Never regresses a `shipped`/`rejected` phase. Returns the
+ * position it flipped, or null when it made no change. Best-effort at the call site — a failure must never
+ * break the build start.
+ */
+export async function markPhaseInProgress(workspaceId: string, slug: string): Promise<number | null> {
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) return null;
+  const specId = (spec as { id: string }).id;
+  const { data: phases, error: pErr } = await admin
+    .from("spec_phases")
+    .select("position, status")
+    .eq("spec_id", specId)
+    .order("position", { ascending: true });
+  if (pErr) throw pErr;
+  const rows = (phases ?? []) as { position: number; status: Phase }[];
+  if (!rows.length) return null; // one-shot spec — no phase to advance
+  if (rows.some((p) => p.status === "in_progress")) return null; // already signaled
+  const next = rows.find((p) => p.status === "planned");
+  if (!next) return null; // nothing planned left to start
+  const { error } = await admin
+    .from("spec_phases")
+    .update({ status: "in_progress", updated_at: new Date().toISOString() })
+    .eq("spec_id", specId)
+    .eq("position", next.position);
+  if (error) throw error;
+  return next.position;
+}
+
+/**
+ * derive-rollup-status: flip every non-shipped, non-rejected phase of a spec to `shipped` on the CANONICAL
+ * `spec_phases` table — the deliberate "close the rest" write the director's fold-now / short-circuit lane
+ * needs. Now that the board status DERIVES from `spec_phases`, a fold-now that only touched the
+ * `spec_card_state` mirror would leave the canonical phases planned and the derived card would read
+ * `in_progress` instead of `shipped`. This moves the source of truth so the rollup lands on `shipped`.
+ * No merge provenance is stamped (a fold-now isn't a merge — there's no PR/SHA); `merge_sha`/`pr` are left
+ * untouched. Returns the positions it flipped. Idempotent: an already-all-shipped spec flips nothing.
+ */
+export async function markRemainingPhasesShipped(workspaceId: string, slug: string): Promise<number[]> {
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) return [];
+  const specId = (spec as { id: string }).id;
+  const { data: phases, error: pErr } = await admin
+    .from("spec_phases")
+    .select("position, status")
+    .eq("spec_id", specId)
+    .order("position", { ascending: true });
+  if (pErr) throw pErr;
+  const toFlip = ((phases ?? []) as { position: number; status: Phase }[])
+    .filter((p) => p.status === "planned" || p.status === "in_progress")
+    .map((p) => p.position);
+  if (!toFlip.length) return [];
+  const { error } = await admin
+    .from("spec_phases")
+    .update({ status: "shipped", updated_at: new Date().toISOString() })
+    .eq("spec_id", specId)
+    .in("position", toFlip);
+  if (error) throw error;
+  return toFlip;
+}
+
+/**
+ * derive-rollup-status: re-stamp a spec's phases on the CANONICAL `spec_phases` table — the audit's
+ * deterministic verdict writer (the request-audit lane that grounds each phase against `spec_status_history`
+ * + the merge subjects, regressing an "✅ ungrounded" phase to `planned`). Pre-derive the audit re-stamped
+ * the `spec_card_state` mirror; now the board derives from `spec_phases`, so the verdict must land HERE for
+ * the rollup to reflect it. Each entry is keyed by 1-based `position` and writes `{status, pr, merge_sha}`
+ * (PR/SHA null clears). The DB trigger rolls `specs.status` from the new phase states. Positions absent from
+ * the input are left untouched. Best-effort upstream — never the source-of-truth for in-flight phase work.
+ */
+export async function restampPhases(
+  workspaceId: string,
+  slug: string,
+  phases: { position: number; status: Phase; pr: number | null; merge_sha: string | null }[],
+): Promise<void> {
+  if (!phases.length) return;
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) return;
+  const specId = (spec as { id: string }).id;
+  for (const p of phases) {
+    const { error } = await admin
+      .from("spec_phases")
+      .update({ status: p.status, pr: p.pr, merge_sha: p.merge_sha, updated_at: new Date().toISOString() })
+      .eq("spec_id", specId)
+      .eq("position", p.position);
+    if (error) throw error;
+  }
+}
+
 /** One phase by its stable id — the join-free read for provenance / phase-move tooling. */
 export async function getPhase(phaseId: string): Promise<SpecPhaseRow | null> {
   const admin = createAdminClient();

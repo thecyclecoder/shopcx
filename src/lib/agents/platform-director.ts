@@ -68,7 +68,7 @@ import {
   type RegressionInstructions,
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
-import { markSpecCardForReview, markSpecCardStatus, rollupPhaseStatus, type SpecCardFlags } from "@/lib/spec-card-state";
+import { markSpecCardForReview, type SpecCardFlags } from "@/lib/spec-card-state";
 import {
   driftSuspectPhases,
   isCardFullyShippedWithProvenance,
@@ -669,9 +669,9 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
       if (!error) {
         queued.push(card.slug);
         queuedAll.push(card.slug);
-        // P6 — reflect the start on the live PM board instantly (the spec_card_state mirror), so the
-        // board shows the director moving this spec without waiting on a markdown deploy. Best-effort.
-        await markSpecCardStatus(workspaceId, card.slug, "in_progress", phaseStatesOf(card));
+        // derive-rollup-status: reflect the start on the board by moving the LEAF phase in_progress (the card
+        // status DERIVES from the phase rollup — no direct card-status write). Best-effort.
+        await markLeafPhaseInProgress(workspaceId, card.slug);
       }
     }
 
@@ -698,6 +698,21 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
 /** A SpecCard's phases mapped to the spec_card_state per-phase snapshot shape (the P6 PM-companion write). */
 function phaseStatesOf(card: SpecCard): { index: number; title: string; status: SpecCard["phases"][number]["status"] }[] {
   return card.phases.map((p, i) => ({ index: i, title: p.title, status: p.status }));
+}
+
+/**
+ * derive-rollup-status: mark a spec's leaf phase `in_progress` at BUILD START. The board status now DERIVES
+ * from the phase rollup, so a started build must move a PHASE (not the card) to in_progress. Delegates to the
+ * canonical `spec_phases` writer; best-effort (a failure must never break the build enqueue). No-op on a spec
+ * with no planned phase (one-shot / already started).
+ */
+async function markLeafPhaseInProgress(workspaceId: string, slug: string): Promise<void> {
+  try {
+    const { markPhaseInProgress } = await import("@/lib/specs-table");
+    await markPhaseInProgress(workspaceId, slug);
+  } catch (e) {
+    console.warn(`[platform-director] markLeafPhaseInProgress failed for ${slug}:`, e instanceof Error ? e.message : e);
+  }
 }
 
 export interface FixEscortResult {
@@ -797,8 +812,9 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     if (error) continue;
 
     fixQueued.push(card.slug);
-    // P6 — instant PM-companion mirror so the board shows the fix moving (its phase snapshot, if any).
-    await markSpecCardStatus(workspaceId, card.slug, "in_progress", phaseStatesOf(card));
+    // derive-rollup-status: move the LEAF phase in_progress so the board shows the fix moving (the card
+    // status derives from the phase rollup).
+    await markLeafPhaseInProgress(workspaceId, card.slug);
     await recordDirectorActivity(admin, {
       workspaceId,
       directorFunction: PLATFORM,
@@ -821,17 +837,18 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
 // director ITSELF authored (groom/init/repair followups, fix specs) through to ship. So a build that
 // errored out, a spec stuck `in_progress` with no agent_jobs row in flight, or a critical spec marked
 // by the CEO can sit for hours before any lane re-touches it. escortSweep runs at the START of every
-// standing pass and closes that gap with five mechanical lanes (no `claude -p` investigation — the
+// standing pass and closes that gap with four mechanical lanes (no `claude -p` investigation — the
 // follow-up lanes do that):
 //   1. `queued_build`  — no build job ever for this slug                  → queue one + log
-//   2. `status_drift`  — terminal-success build (completed/merged) but    → owner-scoped: flip card status
-//                        spec_card_state still planned/in_progress          + audit; non-owned: escalate
-//   3. `failed_retry`  — exactly one failed build, nothing in-flight      → queue a retry build + log
-//   4. `failed_repeat` — ≥2 failed builds, nothing in-flight              → escalate to CEO (deeper issue;
+//   2. `failed_retry`  — exactly one failed build, nothing in-flight      → queue a retry build + log
+//   3. `failed_repeat` — ≥2 failed builds, nothing in-flight              → escalate to CEO (deeper issue;
 //                                                                          the groom/init lane re-investigates
 //                                                                          if it has shipped phases)
-//   5. `stalled`       — an active build older than the stall window with → log + escalate so the owner can
+//   4. `stalled`       — an active build older than the stall window with → log + escalate so the owner can
 //                        no merge SHA yet                                   investigate (parked? branch-stuck?)
+// derive-rollup-status: the old `status_drift` lane (a terminal-success build whose card mirror never caught
+// up) is GONE — board status now DERIVES from the phase rollup, so that drift class is structurally
+// impossible (a merge stamps the leaf phase shipped → the trigger rolls specs.status → the card derives it).
 // Loop-guard: the SAME lane on the SAME slug ≥3× in 24h escalates instead of re-acting, so a build that
 // always fails the same way (or a misclassified card) never enters an infinite re-enqueue. Every action
 // stamps a `director_activity` row `kind='escorted'` with `metadata.lane` so the audit ledger + the EOD
@@ -868,7 +885,6 @@ export const ESCORT_AUTHORED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 /** A lane the escort took on one spec — the metadata.lane stamp + the recap surface. */
 export type EscortLane =
   | "queued_build"
-  | "status_drift"
   | "failed_retry"
   | "failed_repeat"
   | "stalled"
@@ -878,7 +894,6 @@ export type EscortLane =
 export interface EscortSweepResult {
   scanned: number;
   queuedBuild: string[];
-  statusDrift: string[];
   failedRetry: string[];
   failedRepeat: string[];
   stalled: string[];
@@ -1029,7 +1044,7 @@ async function recordEscort(admin: Admin, args: { workspaceId: string; slug: str
  * until Platform is live+autonomous; best-effort per spec — one failure never blocks the rest.
  */
 export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
-  const empty: EscortSweepResult = { scanned: 0, queuedBuild: [], statusDrift: [], failedRetry: [], failedRepeat: [], stalled: [], escalated: [], loopGuarded: [], skipped: 0 };
+  const empty: EscortSweepResult = { scanned: 0, queuedBuild: [], failedRetry: [], failedRepeat: [], stalled: [], escalated: [], loopGuarded: [], skipped: 0 };
   const autonomy = await loadAutonomyMap();
   if (!platformIsAutoApprover(autonomy)) return empty;
   const workspaceId = await resolveDirectorWorkspace(admin);
@@ -1084,33 +1099,18 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
     let extra: Record<string, unknown> = {};
 
     const { latest, bs } = await loadLatestBuildState(admin, workspaceId, c.slug);
-    const ownerScoped = isInScope(card);
 
     if (!latest) {
       lane = "queued_build";
       reason = `No build job has ever existed for ${c.slug} (${c.source}, status=${c.cardStatus}${c.critical ? ", critical" : ""}) — queuing one.`;
     } else if (latest.status === "merged" || latest.status === "completed") {
-      // Lane 2 — a terminal-success build but the card mirror never caught up. For owner-scoped slugs we
-      // flip the card status ourselves (the standard spec-status writer + spec_status_history audit); for
-      // non-owned slugs we escalate the drift so the spec's actual driver can act.
-      if (card.status === "planned" || card.status === "in_progress") {
-        lane = "status_drift";
-        // PHASE-AWARE (not "merged → shipped"): a multi-phase spec ships ONE phase per merge, so a merged
-        // build does NOT mean the whole spec shipped. Derive the target from the phase rollup — `shipped`
-        // only when EVERY phase is shipped; otherwise stay `in_progress`. A one-shot spec (no phases) keeps
-        // the old "merged = shipped". This was the bug that flipped a 1/N-phase spec to shipped and
-        // prematurely released its dependents (spec-body-table-and-backfill, 2026-06-25).
-        const phases = phaseStatesOf(card);
-        const rolled: SpecStatus = phases.length ? rollupPhaseStatus(phases) : "shipped";
-        const targetStatus: SpecStatus =
-          latest.status === "merged" ? (rolled === "planned" ? "in_progress" : rolled) : "in_progress";
-        reason = `Build of ${c.slug} is ${latest.status} but spec_card_state still ${card.status} — drift; flipping to ${targetStatus} (phase rollup).`;
-        extra = { build_status: latest.status, prior_card_status: card.status, target_status: targetStatus, owner_scoped: ownerScoped };
-      } else {
-        // Card already past planned/in_progress — no drift to fix.
-        result.skipped++;
-        continue;
-      }
+      // derive-rollup-status: the `status_drift` lane is RETIRED. A spec's board status now DERIVES from its
+      // phase rollup (the same rollup the DB trigger maintains on specs.status), so a "merged build but the
+      // card never caught up" drift is structurally impossible — the merge hook stamps the leaf phase
+      // shipped and the derived card reflects it instantly. There is nothing for the escort to reconcile on
+      // a terminal-success build; the groom lane advances the next phase if more remain.
+      result.skipped++;
+      continue;
     } else if (FAILED_BUILD_STATUSES.has(latest.status) && !bs.activeBuild) {
       if (bs.failedCount <= 1) {
         lane = "failed_retry";
@@ -1177,36 +1177,12 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
           console.warn(`[platform-director] escortSweep ${lane} enqueue failed for ${c.slug}: ${error.message}`);
           continue;
         }
-        await markSpecCardStatus(workspaceId, c.slug, "in_progress", phaseStatesOf(card), { actor: "director:platform", reason: `escort:${lane}` });
+        // derive-rollup-status: signal the start by moving the LEAF phase in_progress (the card status derives
+        // from the phase rollup — no direct card-status write). Best-effort.
+        await markLeafPhaseInProgress(workspaceId, c.slug);
         if (lane === "queued_build") result.queuedBuild.push(c.slug);
         else result.failedRetry.push(c.slug);
         await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
-      } else if (lane === "status_drift") {
-        if (ownerScoped) {
-          const targetStatus = String(extra["target_status"] ?? "in_progress") as SpecStatus;
-          await markSpecCardStatus(workspaceId, c.slug, targetStatus, phaseStatesOf(card), { actor: "director:platform", reason: `escort:status_drift — build ${latest?.status}, card was ${card.status}` });
-          result.statusDrift.push(c.slug);
-          await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
-        } else {
-          // Not driven by THIS director — escalate the drift so the actual owner can flip it.
-          const r = await escalateDiagnosisToCeo(admin, {
-            workspaceId,
-            specSlug: c.slug,
-            title: `Status drift on a non-owned spec: ${c.slug}`,
-            diagnosis: `${c.slug}'s build is ${latest?.status} but its card still reads ${card.status}, and the spec isn't owned by Platform (owner=${card.owner ?? "—"}) — I can't flip a card outside my own scope. Please drive the owning director (or flip the card yourself).`,
-            dedupeKey: `escort-status-drift:${c.slug}`,
-            deepLink: `/dashboard/roadmap/${c.slug}`,
-            escalationKind: "escort_status_drift_non_owned",
-            metadata: { ...extra, owner: card.owner ?? null },
-          });
-          if (r.emitted) {
-            result.statusDrift.push(c.slug);
-            result.escalated.push(c.slug);
-            await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra: { ...extra, escalated_non_owned: true } });
-          } else if (r.error) {
-            console.error(`[platform-director] escortSweep status-drift escalation FAILED for ${c.slug}:`, r.error.message);
-          }
-        }
       } else if (lane === "failed_repeat") {
         const r = await escalateDiagnosisToCeo(admin, {
           workspaceId,
@@ -3821,21 +3797,19 @@ export async function applyDirectorFoldNow(
   c: GroomCandidate,
   reason: string,
 ): Promise<{ ok: boolean; error?: string; flippedPhases: number[] }> {
-  const got = await getSpec(c.slug);
-  const allPhases = got?.card.phases ?? [];
-  const flippedPhases: number[] = [];
-  const phaseStates = allPhases.map((p, i) => {
-    if (p.status === "planned") flippedPhases.push(i);
-    return { index: i, title: p.title, status: "shipped" as const };
-  });
+  // derive-rollup-status: flip the leftover phases on the CANONICAL `spec_phases` table (not just the
+  // spec_card_state mirror) — the board status derives from `spec_phases`, so the rollup only reads `shipped`
+  // once the canonical phases are shipped. The DB trigger rolls `specs.status` → shipped from this write; no
+  // direct card-status write needed (that path is retired).
+  let flippedPositions: number[] = [];
   try {
-    await markSpecCardStatus(workspaceId, c.slug, "shipped", phaseStates, {
-      actor: "director:platform",
-      reason: `fold_now: ${reason}`.slice(0, 2000),
-    });
+    const { markRemainingPhasesShipped } = await import("@/lib/specs-table");
+    flippedPositions = await markRemainingPhasesShipped(workspaceId, c.slug);
   } catch (e) {
-    console.warn(`[platform-director] applyDirectorFoldNow: markSpecCardStatus failed for ${c.slug}:`, e instanceof Error ? e.message : e);
+    console.warn(`[platform-director] applyDirectorFoldNow: markRemainingPhasesShipped failed for ${c.slug}:`, e instanceof Error ? e.message : e);
   }
+  // `flippedPhases` is 0-based for the activity row's metadata; map from the 1-based phase positions.
+  const flippedPhases: number[] = flippedPositions.map((pos) => pos - 1);
   // Queue the fold via the existing RPC — coalesces into the next batch fold-build automatically.
   const { error } = await admin.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: c.slug, p_user: null });
   if (error) return { ok: false, error: error.message, flippedPhases };

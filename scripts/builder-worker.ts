@@ -2679,11 +2679,10 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const sweep = await lib.escortSweep(db);
     if (sweep.queuedBuild.length) notes.push(`escort-sweep → queued ${sweep.queuedBuild.length} build(s): ${sweep.queuedBuild.join(", ")}`);
     if (sweep.failedRetry.length) notes.push(`escort-sweep → retried ${sweep.failedRetry.length} failed build(s): ${sweep.failedRetry.join(", ")}`);
-    if (sweep.statusDrift.length) notes.push(`escort-sweep → resolved ${sweep.statusDrift.length} status drift(s): ${sweep.statusDrift.join(", ")}`);
     if (sweep.failedRepeat.length) notes.push(`escort-sweep → escalated ${sweep.failedRepeat.length} repeat-failure(s): ${sweep.failedRepeat.join(", ")}`);
     if (sweep.stalled.length) notes.push(`escort-sweep → flagged ${sweep.stalled.length} stalled build(s): ${sweep.stalled.join(", ")}`);
     if (sweep.loopGuarded.length) notes.push(`escort-sweep loop-guard → escalated ${sweep.loopGuarded.length}: ${sweep.loopGuarded.join(", ")}`);
-    if (sweep.scanned && !sweep.queuedBuild.length && !sweep.failedRetry.length && !sweep.statusDrift.length && !sweep.failedRepeat.length && !sweep.stalled.length && !sweep.loopGuarded.length) {
+    if (sweep.scanned && !sweep.queuedBuild.length && !sweep.failedRetry.length && !sweep.failedRepeat.length && !sweep.stalled.length && !sweep.loopGuarded.length) {
       notes.push(`escort-sweep: ${sweep.scanned} scanned, all healthy`);
     }
   } catch (e) {
@@ -3292,8 +3291,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
 async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
   const lib = await import("../src/lib/agents/platform-director");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
-  const { markSpecCardStatus } = await import("../src/lib/spec-card-state");
-  const { getSpec } = await import("../src/lib/brain-roadmap");
+  // derive-rollup-status: build-start moves a PHASE in_progress (the rollup derives the card status); we no
+  // longer write the card status directly here.
+  const { markPhaseInProgress } = await import("../src/lib/specs-table");
 
   const candidates = await lib.findInitCandidates(db);
   if (!candidates.length) return "init: nothing to assess";
@@ -3365,10 +3365,9 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           return;
         }
         initiated++;
-        // P6 — instant PM-companion mirror so the board shows the spec moving (its planned-phase snapshot).
-        const got = await getSpec(c.slug);
-        const phaseStates = (got?.card.phases ?? []).map((p, i) => ({ index: i, title: p.title, status: p.status }));
-        await markSpecCardStatus(job.workspace_id, c.slug, "in_progress", phaseStates);
+        // derive-rollup-status: mark the LEAF phase in_progress so the rollup derives the card to in_progress
+        // instantly (no waiting on the first ship). Best-effort — never break the build start.
+        await markPhaseInProgress(job.workspace_id, c.slug).catch(() => {});
         await recordDirectorActivity(db, {
           workspaceId: job.workspace_id,
           directorFunction: "platform",
