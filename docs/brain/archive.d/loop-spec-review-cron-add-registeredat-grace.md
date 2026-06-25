@@ -1,0 +1,1 @@
+- **Add registeredAt to spec-review-cron monitor tile so first-tick window is graced** · verified 2026-06-25 · → [[libraries/control-tower]]
