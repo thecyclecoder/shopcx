@@ -24,8 +24,10 @@ The `goals-milestones` backfill mis-parsed several goals' milestones — it read
 - No agent issues raw SQL against the PM tables — only the toolkit. The toolkit is the single chokepoint where the invariants (rollup, provenance, cycle-guard, owner-scope) are enforced.
 - Write tools are owner-scoped + audited; read tools are open.
 - The toolkit reads the relational tables (`specs`/`spec_phases`/`goals`/`goal_milestones`), aligning agents with the db-driven source ahead of the M2 reader-cutover.
+- **PM data is SINGLE-WORKSPACE — never per-tenant.** The project-management roadmap is ShopCX's own internal DevOps org, not customer data, so it lives ONLY in the canonical PM workspace (Superfoods). Every PM operation — the backfill, the toolkit writers, the escort / auto-queue / decomposition loops — MUST scope to that one workspace and NEVER iterate `workspaces.is_test = true` (or any other tenant). The original backfill iterated *all* workspaces and leaked the full roadmap into the `ShopCX Spec-Test Sandbox`, where a workspace-agnostic build loop could have queued INVISIBLE duplicate builds (caught + cleaned 2026-06-25 before the box acted). A test workspace gets the SCHEMA (migrations) for spec-tests, never the PM DATA.
 
 ## Completion criteria
 - `src/lib/specs-table.ts` + `src/lib/goals-table.ts` expose the full read/edit/write surface above, each with invariant enforcement + an audit trail.
 - The box agents (Bo/Ada/Pia/Vale/Fenn) call the toolkit tools; their prompts forbid raw PM SQL; a grep shows no agent path issuing SQL against `specs`/`goals`/`goal_milestones`/`spec_phases`.
 - The milestone backfill is fixed: `db-driven-specs` (+ the other mis-parsed goals) have correctly-titled milestones, and `specs.milestone_id` is populated for every milestone-parented spec; `goals-milestones-tables-and-backfill`'s spec-test passes its `milestone_id` check.
+- The backfill + every PM loop is workspace-scoped to the canonical PM workspace; a grep shows no PM write iterates all workspaces / `is_test` rows; the spec-test sandbox holds the schema but zero PM rows.
