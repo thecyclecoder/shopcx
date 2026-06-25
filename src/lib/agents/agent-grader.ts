@@ -110,7 +110,7 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   regression: { name: "Remi", criteria: "caught a real regression · correctly dismissed flaky ones · the authored fix spec is sound" },
   db_health: { name: "Devi", criteria: "correct EXPLAIN diagnosis · the index/fix actually addresses the slow query · no foreign/sunset false-positives" },
   "spec-test": { name: "Vera", criteria: "caught real drift / false-✅ · no false alarms · verification matched live prod" },
-  "spec-review": { name: "Vale", criteria: "caught real spec defects (mangled phases · missing owner/parent/blockers · missing Verification) · correct planned/deferred routing · no false-fix calls on sound specs · diagnoses match the markdown" },
+  "spec-review": { name: "Vale", criteria: "caught real spec defects (mangled phases · missing owner/parent/blockers · missing Verification) · no false-fix calls on sound specs · diagnoses match the markdown (Phase 3: QUALITY only — pass/needs_fix; planned/deferred is Ada's call, not Vale's)" },
   "migration-fix": { name: "Mira", criteria: "migration applied/repaired correctly · audit cleared · no data loss" },
   "pr-resolve": { name: "Pax", criteria: "conflicts resolved without lost work · clean rebase · queue left mergeable" },
   fold: { name: "Fenn", criteria: "folded into the right brain pages · cross-links correct · archived cleanly" },

@@ -84,7 +84,8 @@ const MAX_SPEC_TEST = 3; // read-only QC runs — bumped 1→3 so a backlog re-s
 // 90-min seed ceiling — give it a build-sized ceiling so a tsc + a few probes never get cut short.
 const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
 // Spec-review (Vale) — the in_review queue reviewer ([[docs/brain/specs/spec-review-agent]]). A single
-// `claude -p` pass walks every in_review spec and emits one verdict per spec (approve/defer/needs_fix).
+// `claude -p` pass walks every in_review spec and emits one QUALITY verdict per spec (pass/needs_fix);
+// the planned/deferred call belongs to Ada (Phase 3 — director-disposition lane).
 // Read-only against repo/DB. Minutes, like the other supervisory passes (repair/regression/spec-test).
 const SPEC_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // Migration-fix jobs (migration-fix-agent) run in their OWN concurrency-1 lane: a top-level Max
@@ -1950,6 +1951,7 @@ async function runDbHealthJob(job: Job) {
         console.warn(`${tag} owner Build → spec commit failed`);
         return;
       }
+      await markNewSpecInReview(job.workspace_id, buildAction.spec_slug, "planned", "db_health", `db-health fix spec authored (signature ${signature})`);
       const { error } = await db.from("agent_jobs").insert({
         workspace_id: job.workspace_id,
         spec_slug: buildAction.spec_slug,
@@ -2025,6 +2027,7 @@ async function runCoverageRegisterJob(job: Job) {
         console.warn(`${tag} owner ${what} → spec commit failed`);
         return;
       }
+      await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`);
       const { error } = await db.from("agent_jobs").insert({
         workspace_id: job.workspace_id,
         spec_slug: specSlug,
@@ -2840,6 +2843,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
             console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
             break;
           }
+          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split — split from ${c.slug}`);
           authored.push(slug);
         }
         if (failed) {
@@ -2975,6 +2979,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
             console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
             break;
           }
+          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split (via author_followup_spec) — split from ${c.slug}`);
           authoredSplits.push(slug);
         }
         if (splitFailed) {
@@ -3811,7 +3816,10 @@ async function runDirectorBounceBackJob(job: Job) {
             continue;
           }
           const put = await putFileMain(path, String(s.markdown), `spec: ${sslug} — split future phase from ${slug} (bounce-back)`);
-          if (put.ok) authoredSplits.push(sslug);
+          if (put.ok) {
+            await markNewSpecInReview(job.workspace_id, sslug, "planned", "director:platform", `bounce-back split — from ${slug}`);
+            authoredSplits.push(sslug);
+          }
         }
         const parentPut = await putFileMain(`docs/brain/specs/${slug}.md`, String(parsed.parent_markdown), `spec: close out ${slug} — split ${authoredSplits.length} future phase(s) (bounce-back)`);
         if (!parentPut.ok) {
@@ -4190,6 +4198,31 @@ async function putFileMain(filePath: string, content: string, message: string) {
   });
 }
 
+// spec-review-agent Phase 3 — every NEWLY-authored spec lands `in_review` AND records the AUTHOR'S
+// intended destination on `flags.intended_status`. A SUGGESTION (Ada's disposition lane reads it later),
+// never binding. Best-effort: a mirror-write failure logs a warning but never blocks the upstream commit
+// (the spec markdown is canonical; the daily reconciler picks up any missing row). Auto-fix-spec paths
+// (repair / regression / db-health / security / migration-fix / storefront-optimizer) default to
+// `planned` (a bug fix you don't want built is a contradiction); planner/chat/coaching paths default to
+// `planned` too unless the surface knows the author meant `deferred`.
+async function markNewSpecInReview(
+  workspaceId: string,
+  slug: string,
+  intendedStatus: "planned" | "deferred",
+  actor: string,
+  reason?: string,
+): Promise<void> {
+  try {
+    const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
+    await markSpecCardForReview(workspaceId, slug, intendedStatus, { actor, reason });
+  } catch (e) {
+    console.warn(
+      `[spec-card-state] markNewSpecInReview ${slug} failed:`,
+      e instanceof Error ? e.message : e,
+    );
+  }
+}
+
 // Re-plan hygiene: record declined proposals as ❌ in the goal doc so re-plan never re-proposes them.
 // Best-effort append under a "## Declined branches" section (created if absent).
 async function recordDeclined(goalSlug: string, declined: ProposedSpec[]) {
@@ -4437,8 +4470,16 @@ async function runPlanJob(job: Job) {
       try {
         const content = readFileSync(join(wt, f), "utf8");
         const r = await putFileMain(f, content, `plan: ${goalSlug} → ${f.replace("docs/brain/", "")}`);
-        if (r.ok) committed++;
-        else console.error(`${tag} commit failed for ${f}: ${r.status}`);
+        if (r.ok) {
+          committed++;
+          // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with the author's
+          // intended_status=planned (the planner only proposes specs it wants built; the deferred call
+          // is Ada's, downstream of Vale).
+          if (f.startsWith("docs/brain/specs/")) {
+            const slug = f.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`);
+          }
+        } else console.error(`${tag} commit failed for ${f}: ${r.status}`);
       } catch (e) {
         console.error(`${tag} read/commit ${f}: ${e instanceof Error ? e.message : e}`);
       }
@@ -4978,6 +5019,12 @@ async function runSpecChatJob(job: Job) {
     if (!put.ok) {
       await failTurn(`commit failed (${put.status})`, logTail);
       return;
+    }
+    // spec-review-agent Phase 3 — a freshly-created spec from spec-chat (Sage) lands `in_review` with
+    // intended_status=planned. A `refine` (a spec that already has a card row) leaves the existing flags
+    // intact — we don't re-park an in-progress/shipped spec back into review.
+    if (!refineSlug) {
+      await markNewSpecInReview(job.workspace_id, slug, "planned", "spec-chat", `authored via box spec-chat`);
     }
     // Flip the thread finalized + link the slug, store the session, clear thinking.
     await db.from("roadmap_chats").update({
@@ -5795,7 +5842,10 @@ async function runSpecReviewClaude(prompt: string, sessionId: string | null, cwd
 
 interface SpecReviewDecisionJson {
   slug: string;
-  verdict: "approve" | "defer" | "needs_fix";
+  // Phase 3 narrowed the live vocabulary to `pass | needs_fix`; the legacy `approve`/`defer` strings
+  // still parse for back-compat (the verdict applier auto-routes both as `pass`, since the planned/deferred
+  // call is Ada's now).
+  verdict: "pass" | "needs_fix" | "approve" | "defer";
   reason: string;
   defects?: string[];
 }
@@ -5803,11 +5853,16 @@ interface SpecReviewDecisionJson {
 async function runSpecReviewJob(job: Job) {
   const tag = `[spec-review:${job.id.slice(0, 8)}]`;
   const { selectInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
+  const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
   const a = await admin();
   const pending = await selectInReviewSpecs(a, job.workspace_id);
   if (!pending.length) {
-    await update(job.id, { status: "completed", log_tail: "no in_review specs to review" });
-    console.log(`${tag} no in_review specs — done`);
+    // Phase 3 — even with no Vale queue, run Ada's disposition sweep over any Vale-passed in_review spec
+    // a prior pass left behind (a re-fire after a transient failure resumes from the disposition leg).
+    const dispo = await runAdaDispositionSweep(a, job.workspace_id);
+    const tail = `no in_review specs to review · dispose: ${dispo.same}=${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ${tail}`);
     return;
   }
   console.log(`${tag} reviewing ${pending.length} in_review spec(s): ${pending.join(", ")}`);
@@ -5815,6 +5870,8 @@ async function runSpecReviewJob(job: Job) {
   try {
     const prompt = [
       `You are Vale, the box's Spec-Review agent — the meticulous reviewer who guards the build pipeline. Use the spec-review skill (cwd is the repo root). You are on Max (no ANTHROPIC_API_KEY, web search on), read-only against the repo + DB. The WORKER (deterministic Node) is the only component that mutates state — you investigate and emit verdicts.`,
+      ``,
+      `Phase 3 (governance — CEO design): you check QUALITY only. The DIRECTOR (Ada) decides planned vs deferred — NOT you. So your verdict is a binary "is this spec well-formed?" — pass OR needs_fix. A passing spec stays in_review for Ada's disposition lane (she picks it up next); a malformed spec stays in_review with the diagnosis recorded.`,
       ``,
       `THE QUEUE — ${pending.length} spec(s) parked in_review awaiting your review:`,
       pending.map((s) => `  • docs/brain/specs/${s}.md`).join("\n"),
@@ -5828,13 +5885,12 @@ async function runSpecReviewJob(job: Job) {
       `  • A DB-companion plan if the spec adds a customer-referenced table (the CLAUDE.md hard rule — a Sonnet data tool must be wired in sonnet-orchestrator-v2.ts).`,
       `  • A **Verification** section (## Verification block) so the spec-test agent can grade it later.`,
       ``,
-      `Then route each spec with ONE verdict:`,
-      `  • approve — the checklist passes AND the spec is needed now (no "deferred / not needed now" directive in its own body). The worker flips its status from in_review → planned.`,
-      `  • defer — the checklist passes BUT the spec's own body says "park this / not needed now / deferred". The worker flips its status to deferred + sets flags.deferred.`,
-      `  • needs_fix — the checklist FAILS (mangled phases / missing Owner / missing Parent / no Verification / missing Blocked-by when prerequisites exist / customer-referenced table with no Sonnet data tool). The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Be SPECIFIC in defects — name the missing field / the mangled phase numbers.`,
+      `Then route each spec with ONE quality verdict:`,
+      `  • pass — the CHECKLIST passes. The worker sets flags.vale_pass=true; the spec stays in_review for Ada's disposition lane (she'll decide planned vs deferred). You DO NOT decide that — even if the spec's own body says "park this," report pass; Ada reads the same signal and disposes.`,
+      `  • needs_fix — the CHECKLIST FAILS (mangled phases / missing Owner / missing Parent / no Verification / missing Blocked-by when prerequisites exist / customer-referenced table with no Sonnet data tool). The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Be SPECIFIC in defects — name the missing field / the mangled phase numbers.`,
       ``,
       `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating script. Your final message is ONE JSON object, no prose before/after (if fenced, the JSON is the last thing in the message):`,
-      `  {"status":"completed","decisions":[{"slug":"…","verdict":"approve|defer|needs_fix","reason":"<one plain-text sentence>","defects":["…"]}]}`,
+      `  {"status":"completed","decisions":[{"slug":"…","verdict":"pass|needs_fix","reason":"<one plain-text sentence>","defects":["…"]}]}`,
       `  {"status":"error","error":"<why you cannot proceed>"}`,
       ``,
       `Every slug in the queue MUST appear in decisions[]. needs_fix.defects MUST list the specific checklist failures (no defects → not a needs_fix).`,
@@ -5857,22 +5913,25 @@ async function runSpecReviewJob(job: Job) {
     }
 
     const queuedSet = new Set(pending);
-    let approved = 0;
-    let deferred = 0;
+    let passed = 0;
     let needsFix = 0;
     const skipped: string[] = [];
     for (const d of parsed.decisions) {
       if (!d || typeof d.slug !== "string" || !queuedSet.has(d.slug)) { skipped.push(d?.slug ?? "(no-slug)"); continue; }
-      const verdict = d.verdict === "approve" || d.verdict === "defer" || d.verdict === "needs_fix" ? d.verdict : null;
+      // Phase 3 — accept the live vocabulary (`pass`/`needs_fix`) and the legacy strings (`approve`/`defer`)
+      // for back-compat; the verdict applier auto-routes the legacy values to `pass`.
+      const verdict = d.verdict === "pass" || d.verdict === "needs_fix" || d.verdict === "approve" || d.verdict === "defer" ? d.verdict : null;
       if (!verdict) { skipped.push(d.slug); continue; }
       const reason = String(d.reason || "").slice(0, 1000);
       const defects = Array.isArray(d.defects) ? d.defects.map((x) => String(x).slice(0, 300)).slice(0, 20) : [];
-      await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects });
-      if (verdict === "approve") approved++;
-      else if (verdict === "defer") deferred++;
+      const result = await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects });
+      if (result.applied === "pass") passed++;
       else needsFix++;
     }
-    const tail = `reviewed ${parsed.decisions.length}/${pending.length} — ✅${approved} ⏸${deferred} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""}`;
+    // Phase 3 — every Vale pass enqueues a candidate for Ada's disposition lane. Run the sweep INLINE
+    // so a pass + dispose lands in one cron tick (no waiting for the next director pass).
+    const dispo = await runAdaDispositionSweep(a, job.workspace_id);
+    const tail = `reviewed ${parsed.decisions.length}/${pending.length} — ✅${passed} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
@@ -6109,7 +6168,7 @@ function migrationGapSpecMarkdown(spec: GapSpec, auditId: string, subId: string)
 
 // Commit the gap-fix spec to main. Idempotent: if a spec with this (stable, gap-class) slug already
 // exists, leave it for the in-flight fix rather than clobbering. Returns a one-line result for log_tail.
-async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: string): Promise<string> {
+async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: string, workspaceId: string): Promise<string> {
   const s = (raw || {}) as Record<string, unknown>;
   const rawSlug = String(s.slug || "");
   const title = String(s.title || "");
@@ -6132,7 +6191,11 @@ async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: stri
       migrationGapSpecMarkdown(spec, auditId, subId),
       `spec: ${slug} (from failed migration ${auditId} via migration-fix code-gap escalation)`,
     );
-    return put.ok ? `gap spec authored: ${path} (owner=retention) — commission on Roadmap` : `gap spec commit failed (${put.status})`;
+    if (put.ok) {
+      await markNewSpecInReview(workspaceId, slug, "planned", "migration-fix", `code-gap fix spec authored (audit ${auditId})`);
+      return `gap spec authored: ${path} (owner=retention) — commission on Roadmap`;
+    }
+    return `gap spec commit failed (${put.status})`;
   } catch (e) {
     return `gap spec commit failed: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -6270,7 +6333,7 @@ async function runMigrationFixJob(job: Job) {
       // hand for now, so the row stays `failed` with the diagnosis.
       const diagnosis = String(parsed.diagnosis || "code/data gap — needs a permanent fix");
       const subId = params.subscription_id || String(audit.subscription_id || "");
-      const specResult = await authorMigrationGapSpec(parsed.spec, auditId, subId);
+      const specResult = await authorMigrationGapSpec(parsed.spec, auditId, subId, job.workspace_id);
       await update(job.id, { status: "completed", error: `code-gap`, log_tail: `${diagnosis}\n\n${specResult}`.slice(-2000) });
       console.log(`${tag} code-gap — ${specResult}; stays failed with diagnosis`);
       return;
@@ -6472,6 +6535,7 @@ async function runDeveloperMessageJob(job: Job) {
             if (!content) { a.status = "failed"; a.result = "no spec content"; notes.push(`${a.summary} → failed (no content)`); continue; }
             const put = await putFileMain(filePath, content, `spec: create ${slug} (developer message center)`);
             if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "developer-message-center", `authored via developer message center`);
             let queued = false;
             const wantBuild = !!(a.payload && (a.payload as { queueBuild?: boolean }).queueBuild);
             if (wantBuild) {
@@ -7275,6 +7339,7 @@ async function runDirectorCoachJob(job: Job) {
             const slug = String(a.slug);
             const put = await putFileMain(`docs/brain/specs/${slug}.md`, String(a.content), `spec: create ${slug} (director coaching)`);
             if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "director-coach", `authored via director coaching (${thread.director_function})`);
             let queued = false;
             if (a.queueBuild === true) {
               const { error } = await db.from("agent_jobs").insert({ workspace_id: job.workspace_id, spec_slug: slug, kind: "build", status: "queued", instructions: "Created via director coaching", created_by: job.created_by });
@@ -8002,7 +8067,7 @@ async function appendSignatureToSpec(slug: string, body: string, sha: string, si
 //   2. Else author a new spec, stamping the Repair-root-cause key for future grouping.
 // Same-slug convergence stays idempotent (a recurring failure folds onto one spec). Returns the
 // resolved slug + whether it pre-existed + whether this was a group-onto-sibling, or null on failure.
-async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict: string): Promise<{ slug: string; alreadyExists: boolean; grouped: boolean; rootCause: string } | null> {
+async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean; grouped: boolean; rootCause: string } | null> {
   const { rootCauseKey, REPAIR_RECENT_FIX_WINDOW_MS } = await import("../src/lib/repair-agent");
   const s = (raw || {}) as RepairSpecProposal;
   const rawSlug = String(s.slug || "");
@@ -8052,7 +8117,9 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
       ),
       `spec: ${slug} (from Control Tower signature ${signature} via repair-agent ${verdict})`,
     );
-    return put.ok ? { slug, alreadyExists: false, grouped: false, rootCause } : null;
+    if (!put.ok) return null;
+    await markNewSpecInReview(workspaceId, slug, "planned", "repair-agent", `repair-agent ${verdict} fix spec for signature ${signature}`);
+    return { slug, alreadyExists: false, grouped: false, rootCause };
   } catch (e) {
     console.warn(`[repair] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -8218,7 +8285,7 @@ async function runRepairJob(job: Job) {
       const diagnosis = String(parsed?.diagnosis || "");
       // Author OR GROUP: a sibling spec for the same root cause (implicated file + failure mode) →
       // add this signature to it, don't author a near-duplicate (one root cause → one spec).
-      const authored = await groupOrAuthorRepairSpec(parsed?.spec, signature, verdict);
+      const authored = await groupOrAuthorRepairSpec(parsed?.spec, signature, verdict, job.workspace_id);
       if (!authored) {
         // Verdict reached but no valid spec landed → surface for a human rather than silently dropping it.
         // Terminal disposition: close the error row (the human-review item lives on this needs_attention job).
@@ -8453,7 +8520,7 @@ function regressionFixSpecMarkdown(spec: RegressionFixProposal, regressedSlug: s
 // Author the fix spec on main DIRECTLY (regression-agent: no "propose" step — a confirmed break). Slugs
 // like repair; same-slug convergence stays idempotent (a recurring regression folds onto one spec).
 // Returns the resolved slug + whether it pre-existed, or null on failure.
-async function authorRegressionFixSpec(raw: unknown, regressedSlug: string, signature: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+async function authorRegressionFixSpec(raw: unknown, regressedSlug: string, signature: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
   const s = (raw || {}) as RegressionFixProposal;
   const rawSlug = String(s.slug || "");
   const title = String(s.title || "");
@@ -8469,7 +8536,9 @@ async function authorRegressionFixSpec(raw: unknown, regressedSlug: string, sign
       regressionFixSpecMarkdown({ ...s, slug, title }, regressedSlug, signature),
       `spec: ${slug} — fix regression of ${regressedSlug} (regression-agent, signature ${signature})`,
     );
-    return put.ok ? { slug, alreadyExists: false } : null;
+    if (!put.ok) return null;
+    await markNewSpecInReview(workspaceId, slug, "planned", "regression-agent", `regression-agent fix spec for ${regressedSlug} (signature ${signature})`);
+    return { slug, alreadyExists: false };
   } catch (e) {
     console.warn(`[regression] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -8650,7 +8719,7 @@ async function runRegressionJob(job: Job) {
 
     if (verdict === "real-regression") {
       const review = String(parsed?.review || "");
-      const authored = await authorRegressionFixSpec(parsed?.spec, regressedSlug, signature);
+      const authored = await authorRegressionFixSpec(parsed?.spec, regressedSlug, signature, job.workspace_id);
       if (!authored) {
         await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real regression but no valid fix spec" });
         console.log(`${tag} real-regression but no valid spec → surfaced needs-human`);
@@ -8864,7 +8933,7 @@ function securityFixSpecMarkdown(spec: SecurityFixProposal, mergedSlug: string, 
 
 // Author the fix spec on main DIRECTLY (mirrors authorRegressionFixSpec — same-slug convergence stays
 // idempotent). Returns the resolved slug + whether it pre-existed, or null on failure.
-async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
   const s = (raw || {}) as SecurityFixProposal;
   const rawSlug = String(s.slug || "");
   const title = String(s.title || "");
@@ -8876,7 +8945,9 @@ async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha:
     const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
     if (existing.ok) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
     const put = await putFileMain(path, securityFixSpecMarkdown({ ...s, slug, title }, mergedSlug, mergeSha), `spec: ${slug} — security fix for merged ${mergedSlug} (security-agent, commit ${mergeSha.slice(0, 12)})`);
-    return put.ok ? { slug, alreadyExists: false } : null;
+    if (!put.ok) return null;
+    await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent fix for merged ${mergedSlug}`);
+    return { slug, alreadyExists: false };
   } catch (e) {
     console.warn(`[security] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -8962,14 +9033,19 @@ function depUpgradeSpecMarkdown(findings: DepFinding[], signature: string): stri
 
 // Author/refresh the single stable dep-upgrade spec on main. Idempotent: re-writes the body so the
 // advisory list stays current (find-or-update, never N specs). Returns the slug + whether it pre-existed.
-async function authorDepUpgradeSpec(findings: DepFinding[], signature: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
   const { SECURITY_DEP_UPGRADE_SLUG } = await import("../src/lib/security-agent");
   const slug = SECURITY_DEP_UPGRADE_SLUG;
   const path = `docs/brain/specs/${slug}.md`;
   try {
     const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
     const put = await putFileMain(path, depUpgradeSpecMarkdown(findings, signature), `spec: ${slug} — ${findings.length} security dep upgrade(s) (security-agent dep-watch, sig ${signature})`);
-    return put.ok ? { slug, alreadyExists: existing.ok } : null;
+    if (!put.ok) return null;
+    // Refresh-only writes don't change the card state — only flag in_review on FIRST creation.
+    if (!existing.ok) {
+      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent dep-watch (sig ${signature})`);
+    }
+    return { slug, alreadyExists: existing.ok };
   } catch (e) {
     console.warn(`[security] dep-upgrade spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -9118,7 +9194,7 @@ async function runSecurityReviewJob(job: Job) {
         return;
       }
       const signature = depFindingSignature(audit.findings.map((f) => ({ name: f.name, severity: f.severity })));
-      const authored = await authorDepUpgradeSpec(audit.findings, signature);
+      const authored = await authorDepUpgradeSpec(audit.findings, signature, job.workspace_id);
       if (!authored) {
         await update(job.id, { status: "needs_attention", error: "could not author dep-upgrade spec", log_tail: `${audit.findings.length} advisory(ies) but spec author failed` });
         console.log(`${tag} dep-watch: spec author failed → needs-human`);
@@ -9188,7 +9264,7 @@ async function runSecurityReviewJob(job: Job) {
 
     if (verdict === "real-vuln") {
       const review = String(parsed?.review || "");
-      const authored = await authorSecurityFixSpec(parsed?.spec, mergedSlug, mergeSha);
+      const authored = await authorSecurityFixSpec(parsed?.spec, mergedSlug, mergeSha, job.workspace_id);
       if (!authored) {
         await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real vulnerability but no valid fix spec" });
         console.log(`${tag} real-vuln but no valid spec → surfaced needs-human`);
@@ -9292,7 +9368,7 @@ function storefrontOptimizerPrompt(brief: string, surface: OptimizerSurfaceLite)
 
 // Author the missing-capability spec to main (Phase 5 build-or-request). Idempotent on a stable slug:
 // if it already exists, leave it for the in-flight build rather than clobbering. Returns {slug, note}.
-async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite): Promise<{ slug: string; note: string } | null> {
+async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite, workspaceId: string): Promise<{ slug: string; note: string } | null> {
   const s = (raw || {}) as Record<string, unknown>;
   const rawSlug = String(s.slug || "");
   const title = String(s.title || "");
@@ -9324,7 +9400,9 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite):
     const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
     if (existing.ok) return { slug, note: `spec already tracked: ${path} (commission on Roadmap)` };
     const put = await putFileMain(path, md, `spec: ${slug} (from storefront-optimizer build-or-request)`);
-    return put.ok ? { slug, note: `spec authored: ${path} (owner=growth) — commission on Roadmap` } : null;
+    if (!put.ok) return null;
+    await markNewSpecInReview(workspaceId, slug, "planned", "storefront-optimizer", `storefront-optimizer build-or-request for surface ${surface.product_id}:${surface.lander_type}:${surface.audience}`);
+    return { slug, note: `spec authored: ${path} (owner=growth) — commission on Roadmap` };
   } catch (e) {
     console.warn(`[storefront-optimizer] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -9573,7 +9651,7 @@ async function runStorefrontOptimizerJob(job: Job) {
 
     if (parsed?.status === "needs_build") {
       // Phase 5 — build-or-request. Author the scoped spec to main + surface a Build card (no auto-build).
-      const authored = await authorOptimizerSpec(parsed.spec, surface);
+      const authored = await authorOptimizerSpec(parsed.spec, surface, job.workspace_id);
       if (!authored) {
         await update(job.id, { status: "needs_attention", error: "no valid capability spec proposed", log_tail: String(parsed.hypothesis || "missing-capability, no spec").slice(-2000) });
         return;

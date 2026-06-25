@@ -43,6 +43,10 @@ The pipeline flow: **author creates spec → Spec Review (Vale, quality) → Dir
 
 ## Verification
 - A newly authored spec appears in the **In Review** column, not Planned. Clicking Build on it is refused.
-- Vale reviews it → it moves to Planned (or Deferred) with a recorded rationale; only then can it build.
-- A malformed spec (duplicate phases / no owner) → Vale fixes it in-place + moves to Planned.
-- The build pipeline keeps flowing (specs don't pile up in In Review — Vale clears them each cadence).
+- Every NEW spec-creation surface (planner, repair, regression, db-health, security, migration-fix, storefront-optimizer, dev-message-center, director-coaching, director split/author/bounce-back, spec-chat) writes `spec_card_state.status='in_review'` + `flags.intended_status='planned'|'deferred'` → the row's `intended_status` is captured on creation, never the markdown.
+- Vale reviews it → on `pass` the row picks up `flags.vale_pass=true` (stays in_review), on `needs_fix` the spec stays in_review with `spec_review_needs_fix` on `director_activity`.
+- Ada's disposition lane (`runAdaDispositionSweep`) picks up the Vale-passed row → the asymmetric check fires:
+  - same → autonomous flip (status→planned OR deferred + flags.deferred). One `spec_dispose_same` row in director_activity. No CEO surface.
+  - downgrade (planned-suggested → defer) → autonomous flip + a CEO Approval Request (link → roadmap card; one-click override to planned). One `spec_dispose_downgrade` row.
+  - upgrade (deferred-suggested → planned) → card parked `flags.ada_disposition='pending_upgrade'` + a CEO Approval Request (Planned / Deferred). The card stays in_review until the CEO picks. One `spec_dispose_upgrade_proposed` row.
+- The build pipeline keeps flowing (specs don't pile up in In Review — Vale + Ada clear them each cadence; `runSpecReviewJob` tails Vale with the disposition sweep so a pass + dispose lands in one cron tick).
