@@ -69,6 +69,12 @@ export interface SpecRow {
    *  on one spec, sibling to repair_signature. */
   regression_signature: string | null;
   auto_build: boolean;
+  /** spec-review-agent Phase 3 — Vale's CHECKLIST verdict; `true` once she's passed the spec. The In
+   *  Review board lane reads this to render Vale's pending vs Vale-passed state per card. */
+  vale_pass: boolean | null;
+  /** spec-review-agent Phase 3 — Ada's disposition state. `pending_upgrade` means a CEO Planned/Deferred
+   *  call is parked waiting; null means Ada hasn't touched this Vale-passed spec yet. */
+  ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
   milestone_id: string | null;
   created_at: string;
   updated_at: string;
@@ -143,13 +149,15 @@ interface SpecRowDb {
   regression_of_slug: string | null;
   regression_signature: string | null;
   auto_build: boolean;
+  vale_pass: boolean | null;
+  ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
   milestone_id: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, milestone_id, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, ada_disposition, milestone_id, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, verification, created_at, updated_at";
 
@@ -172,6 +180,8 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     regression_of_slug: db.regression_of_slug,
     regression_signature: db.regression_signature,
     auto_build: db.auto_build,
+    vale_pass: db.vale_pass,
+    ada_disposition: db.ada_disposition,
     milestone_id: db.milestone_id,
     created_at: db.created_at,
     updated_at: db.updated_at,

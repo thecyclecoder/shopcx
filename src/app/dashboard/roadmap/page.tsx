@@ -47,6 +47,48 @@ const HEADER_ACCENT: Record<SpecStatus, string> = {
   rejected: "text-rose-600",
 };
 
+/**
+ * spec-review-agent Phase 4 — the In Review lane state chip. Renders the agent-pipeline state of a card
+ * sitting in the In Review column so the CEO can see at a glance which step the spec is parked at:
+ *
+ *   - Vale pending           → still waiting on the CHECKLIST quality pass
+ *   - Vale ✓ · Ada disposing → Vale cleared it; Ada's disposition lane will pick it up next
+ *   - Ada → CEO upgrade      → Ada wants to upgrade a deferred suggestion to planned; CEO call queued
+ *
+ * The author's intended_status (a SUGGESTION, never binding) is rendered inline as "↳ planned/deferred"
+ * so the CEO sees the proposal alongside the agent state. Rendered only on cards whose effective board
+ * status is `in_review` (the column-only lane).
+ */
+function InReviewLane({ spec }: { spec: SpecCard }) {
+  const intent = spec.intendedStatus ? ` ↳ ${spec.intendedStatus}` : "";
+  let label: string;
+  let title: string;
+  let chip: string;
+  if (spec.adaDisposition === "pending_upgrade") {
+    label = `⬆ Ada → CEO upgrade${intent}`;
+    title = "Ada wants to UPGRADE a deferred suggestion to planned — awaiting CEO Planned/Deferred call.";
+    chip = "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
+  } else if (spec.valePass) {
+    label = `🔍✓ Vale passed · ⏳ Ada disposing${intent}`;
+    title = "Vale cleared the CHECKLIST; Ada's disposition lane will pick it up next.";
+    chip = "bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300";
+  } else {
+    label = `🔍 Vale: pending review${intent}`;
+    title = "Awaiting Vale's CHECKLIST quality pass — the build pipeline refuses this spec until it clears.";
+    chip = "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200";
+  }
+  return (
+    <div className="mt-1.5">
+      <span
+        title={title}
+        className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${chip}`}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
 function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   const all: { key: Phase; n: number }[] = [
     { key: "in_progress", n: counts.in_progress },
@@ -137,6 +179,10 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
           {spec.parent && <span className="truncate text-[10px] text-zinc-400">↳ {spec.parent}</span>}
         </div>
       )}
+      {/* spec-review-agent Phase 4 — the In Review column surface: which pipeline step the spec is parked
+          at (Vale pending / Vale-passed-Ada-disposing / Ada-upgrade-awaiting-CEO) + the author's
+          intended_status as a SUGGESTION the director reads but isn't bound by. */}
+      {status === "in_review" && <InReviewLane spec={spec} />}
       <CountPills counts={spec.counts} />
       {/* Spec-test agent stamp + chip on a shipped-awaiting-verification card (spec-test-agent). */}
       {spec.status === "shipped" && testRun && (

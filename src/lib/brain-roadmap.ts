@@ -91,6 +91,19 @@ export interface SpecCard {
    *  so the board can render a card-level "✓ #PR" chip. Multi-phase specs leave this undefined; their
    *  per-phase PRs live in `phases[i].pr`. */
   shippedPr?: number | null;
+  /** spec-review-agent Phase 4 — the In Review lane surface signals (read straight off public.specs):
+   *
+   *   - `valePass` true  → Vale's CHECKLIST cleared; the card is waiting on Ada's disposition lane.
+   *   - `valePass` false → Vale hasn't passed it yet (a fresh send-back, or a never-reviewed spec).
+   *   - `adaDisposition='pending_upgrade'` → Ada parked an UPGRADE; a CEO Planned/Deferred call is queued.
+   *   - `intendedStatus` is the AUTHOR'S suggested destination — surfaced inline as "↳ planned" / "↳ deferred"
+   *     so the CEO can see what was proposed alongside the agent state.
+   *
+   * All optional — older rows / non-in_review cards carry undefined. Consumed by the In Review column on the
+   * roadmap board (`InReviewLane`) and by Vale's role page; not used for status routing. */
+  valePass?: boolean;
+  adaDisposition?: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade";
+  intendedStatus?: "planned" | "deferred";
 }
 
 export interface RoadmapData {
@@ -476,6 +489,12 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
     // semantics consumers rely on (`card.autoBuild !== false`) keep working.
     autoBuild: row.auto_build ? true : undefined,
     repairSignature: !!row.repair_signature,
+    // spec-review-agent Phase 4 — In Review lane state. Surfaced only when set (a never-touched row leaves
+    // them undefined so consumers can branch on presence). Boolean→true|undefined keeps the SpecCard shape
+    // tri-state-friendly the way autoBuild already does.
+    valePass: row.vale_pass === true ? true : undefined,
+    adaDisposition: row.ada_disposition ?? undefined,
+    intendedStatus: row.intended_status ?? undefined,
   };
 }
 
