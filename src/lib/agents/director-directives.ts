@@ -79,6 +79,23 @@ export async function completeDirective(admin: Admin, id: string): Promise<void>
 }
 
 /**
+ * CEO clear — terminate the active directive without claiming it shipped. The build gate (if any) lifts on
+ * the next read because there's no `active` row left. Idempotent: a row that's already non-active is a no-op.
+ * Returns whether a row was actually flipped, so the API can decide between 200 + 404.
+ */
+export async function clearDirective(admin: Admin, workspaceId: string, id: string): Promise<{ ok: boolean; cleared: boolean }> {
+  const { data, error } = await admin
+    .from("director_directives")
+    .update({ status: "cleared", completed_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("id", id)
+    .eq("status", "active")
+    .select("id");
+  if (error) return { ok: false, cleared: false };
+  return { ok: true, cleared: (data?.length ?? 0) > 0 };
+}
+
+/**
  * The build gate. If the active directive names `gate_builds_until` and that spec is NOT yet shipped, the
  * build-enqueue lanes must pause for every spec EXCEPT the gate spec itself (so the gating fix lands first).
  * Returns the gating slug, or null when there's no gate (no directive, no gate set, or the gate spec shipped —
