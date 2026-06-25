@@ -305,7 +305,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -5025,6 +5025,204 @@ async function runFoldJob(job: Job) {
       .update({ status: "folded", updated_at: new Date().toISOString() })
       .eq("workspace_id", job.workspace_id)
       .in("slug", slugs);
+    await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
+    console.log(`${tag} ✓ completed → ${pr.url}`);
+  } finally {
+    sh("git", ["worktree", "remove", "--force", wt]);
+  }
+}
+
+// ── Goal fold-build (goal-fold-from-db-row) ─────────────────────────────────
+// A kind='goal-fold' job folds ONE COMPLETE goal into the PERMANENT brain pages and retires the goal
+// row (status='folded'). Goals are large multi-spec narratives, NOT batched like specs — one goal per
+// job, carried on `job.spec_slug` (the goal slug). Shares the concurrency-1 fold lane so a goal fold
+// never races a feature build (or a spec fold) on the brain index/cross-link files.
+//
+// The end-state has NO per-goal markdown: the per-goal `docs/brain/goals/{slug}.md` was retired in
+// goal-readers-from-db-retire-parsegoal. The goal's durable knowledge folds ONLY into the surviving
+// permanent pages (lifecycles/ · dashboard/ · functions/ · tables/ · libraries/); the preserved
+// `public.goals` row (flipped to status='folded') is the archive the board renders.
+
+function goalFoldPrompt(slug: string): string {
+  return [
+    `GOAL FOLD-BUILD — fold this COMPLETE goal's durable knowledge into the PERMANENT brain pages and retire it. The goal rolled up complete (every milestone complete ≡ every child spec shipped|folded). This is DOCS-ONLY: do NOT rebuild or change any product code.`,
+    ``,
+    `The goal's narrative comes from \`public.goals\` + \`public.goal_milestones\` + the joined child \`public.specs\` (the DB rows, per [[goal-fold-from-db-row]]). The worker materialized a read-only copy at \`.box/goal-${slug}.md\` (gitignored, regenerated each dispatch) — read THAT file. There is NO \`docs/brain/goals/${slug}.md\` (per-goal markdown was retired in goal-readers-from-db-retire-parsegoal) — do NOT read for it and do NOT create one.`,
+    ``,
+    `CRITICAL: do NOT create or write ANY \`docs/brain/goals/*.md\` file. A folded goal writes its durable knowledge ONLY into the surviving PERMANENT brain pages. The preserved \`public.goals\` row (the worker flips it to status='folded' after this PR opens) IS the archive.`,
+    ``,
+    `Follow docs/brain/project-management.md "Folding ... into the brain", adapted for a goal:`,
+    `1. Read \`.box/goal-${slug}.md\`. List the goal's lasting record: what it accomplished, the milestones that landed, the specs that shipped, and the residual brain pages the work created/changed.`,
+    `2. Fold that record into its PERMANENT homes — extend the relevant \`lifecycles/\` (end-to-end flow, with a "Status / open work" block), \`dashboard/\` (surfaces the goal shipped), \`functions/\` (the owning function's mandate progress), \`tables/\` / \`libraries/\` (new shapes the work introduced). Most folds EXTEND an existing page; create one via the write-brain-page house format only if genuinely new.`,
+    `3. Cross-link: every touched/new page wikilinks 3-5 relatives and is wikilinked FROM at least one existing page — the brain stays navigable.`,
+    `4. Create \`docs/brain/archive.d/goal-${slug}.md\` containing EXACTLY ONE line — the goal's archive entry. archive.md is GENERATED from this directory, so NEVER hand-edit docs/brain/archive.md. Use exactly this shape:`,
+    `     - **<the goal's real title>** · folded <today's date — run \`date +%F\`> · → [[lifecycles/<the goal's primary lifecycle or brain home slug>]]`,
+    `5. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
+    ``,
+    `Do NOT run brain-index.mjs and do NOT modify docs/brain/archive.md or docs/brain/README.md (the aggregates are refreshed out-of-band; re-editing them is the #1 cause of fold PRs going Dirty). Your PR should touch ONLY: \`docs/brain/archive.d/goal-${slug}.md\` and the brain pages you folded into.`,
+    ``,
+    `If you cannot determine where the goal's knowledge belongs (no obvious lifecycle/brain home), do NOT guess — surface it as a needs_input question naming the goal slug.`,
+    ``,
+    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control). Final message = ONLY one JSON object: {"status":"completed","summary":"folded goal ${slug}: …"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
+  ].join("\n");
+}
+
+async function runGoalFoldJob(job: Job) {
+  const isResume = !!job.claude_session_id;
+  const tag = `[goal-fold:${job.id.slice(0, 8)}]`;
+  const wt = join(BUILDS_DIR, job.id);
+  const slug = job.spec_slug;
+  if (!slug) {
+    await update(job.id, { status: "failed", error: "goal-fold job missing goal slug (spec_slug)" });
+    return;
+  }
+  console.log(`${tag} ${isResume ? "resuming" : "folding"} goal: ${slug}`);
+
+  // goal-fold-from-db-row Phase 1 GUARD: refuse to fold a goal whose `public.goals.status` is anything
+  // other than `complete`. The DB-trigger rollup (goals-milestones-tables-and-backfill) guarantees
+  // `complete` ≡ every milestone complete ≡ every child spec shipped|folded — so the guard is the same
+  // guarantee written twice (app rail + DB rail). A non-complete goal is released back to `queued` is
+  // not meaningful here (goals aren't claimed from a pending table); instead we fail the job with a
+  // clear reason — the goal must reach `complete` (autonomously, via the rollup) before it can fold.
+  {
+    const { getGoal } = await import("../src/lib/goals-table");
+    let goalRow: Awaited<ReturnType<typeof getGoal>>;
+    try {
+      goalRow = await getGoal(job.workspace_id, slug);
+    } catch (e) {
+      await update(job.id, { status: "failed", error: `goal-fold: getGoal failed for ${slug}: ${e instanceof Error ? e.message : String(e)}` });
+      return;
+    }
+    if (!goalRow) {
+      await update(job.id, { status: "failed", error: `goal-fold: no goals row for slug ${slug}`, log_tail: "nothing to fold — goal not found" });
+      return;
+    }
+    if (goalRow.status === "folded") {
+      // Idempotent re-fold: the row is already folded — nothing to do.
+      await update(job.id, { status: "completed", log_tail: `goal ${slug} already folded; nothing to do` });
+      return;
+    }
+    if (goalRow.status !== "complete") {
+      await update(job.id, {
+        status: "failed",
+        error: `goal-fold guard: goal '${slug}' status is '${goalRow.status}', not 'complete' — refusing to fold`,
+        log_tail: `goal must roll up complete (every milestone complete) before it can fold; current status '${goalRow.status}'`,
+      });
+      return;
+    }
+  }
+
+  sh("git", ["fetch", "origin"]);
+  let branch = job.spec_branch;
+  sh("git", ["worktree", "remove", "--force", wt]);
+  if (!isResume) {
+    branch = `claude/goal-fold-${Date.now().toString(36)}`;
+    const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
+    if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
+    await update(job.id, { spec_branch: branch });
+  } else {
+    let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
+    if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]);
+    if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
+  }
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  // goal-fold-from-db-row Phase 1: materialize the COMPLETE `public.goals` row (+ milestones + child
+  // specs) into the worktree's gitignored `.box/goal-{slug}.md` so the fold-agent reads the DB row.
+  // NOTE: this writes to `.box`, NOT to docs/brain/goals/ (which no longer exists for any goal).
+  {
+    const { materializeGoal } = await import("../src/lib/build-goal-materializer");
+    try {
+      await materializeGoal(job.workspace_id, slug, join(wt, ".box"));
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      await update(job.id, {
+        status: "failed",
+        error: `materializeGoal failed for ${slug}: ${why}`,
+        log_tail: `goal fold aborted — could not materialize ${slug} from DB row; no PR opened`,
+      });
+      sh("git", ["worktree", "remove", "--force", wt]);
+      return;
+    }
+  }
+
+  try {
+    const prompt = isResume
+      ? `${(job.answers || []).length ? `Answers to your questions: ${JSON.stringify(job.answers)}. ` : ""}Continue the goal fold-build for goal: ${slug}. Same rules and the same final JSON output protocol as before.`
+      : goalFoldPrompt(slug);
+
+    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt, undefined, job.id);
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    const logTail = raw.slice(-2000);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = parseStatus(resultText);
+    console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    const prBody = `Goal fold-build by the box worker — folds the complete goal \`${slug}\` into the permanent brain and retires its row (status='folded'). See docs/brain/specs/goal-fold-from-db-row.md.`;
+
+    if (parsed?.status === "needs_input") {
+      if (sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()) {
+        sh("git", ["add", "-A"], { cwd: wt });
+        sh("git", ["commit", "-m", `wip: goal-fold ${slug} (needs input)`], { cwd: wt });
+        sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+      }
+      const pr = await ensurePr(branch!, `goal-fold-${slug}`, true, prBody);
+      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      return;
+    }
+
+    if (isError && !parsed) {
+      await update(job.id, { status: "failed", error: "claude run errored", log_tail: logTail });
+      return;
+    }
+
+    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    if (tsc.code !== 0) {
+      await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
+      return;
+    }
+
+    // goal-fold-from-db-row Phase 1: flip the goal row to `folded` after the brain edits land. The DB
+    // rollup leaves `folded` alone (terminal-ish) — every other column (title, body, outcome,
+    // success_metric, owner, parent_goal_id, milestones via FK) stays, so the board's archive view +
+    // audit history render the folded goal unchanged. Done via the goals-table SDK, never raw SQL.
+    const flipFolded = async () => {
+      const { getGoal, setGoalStatus } = await import("../src/lib/goals-table");
+      const row = await getGoal(job.workspace_id, slug);
+      if (row && row.status !== "folded") await setGoalStatus(row.id, "folded", `box:goal-fold:${job.id.slice(0, 8)}`);
+    };
+
+    const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
+    if (!dirty) {
+      // Nothing changed — brain already folded. Flip the row anyway so it leaves the active board.
+      await flipFolded();
+      const pr = await ensurePr(branch!, `goal-fold-${slug}`, false);
+      if (pr) {
+        await markReady(pr.number);
+        await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR; goal flipped to folded" });
+      } else {
+        await update(job.id, { status: "completed", log_tail: "no file changes; goal flipped to folded" });
+      }
+      return;
+    }
+    sh("git", ["add", "-A"], { cwd: wt });
+    const commit = sh("git", ["commit", "-m", `fold: goal ${slug}`], { cwd: wt });
+    if (commit.code !== 0) {
+      await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
+      return;
+    }
+    const push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+    if (push.code !== 0) {
+      await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
+      return;
+    }
+    const pr = await ensurePr(branch!, `goal-fold-${slug}`, false, prBody);
+    if (!pr) {
+      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
+      return;
+    }
+    await markReady(pr.number);
+    await flipFolded();
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
   } finally {
@@ -10088,6 +10286,7 @@ async function runNextBuildGate(wt: string): Promise<{ pass: boolean; error: str
 async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
+  if (job.kind === "goal-fold") return runGoalFoldJob(job);
   if (job.kind === "product-seed") return runProductSeedJob(job);
   if (job.kind === "spec-chat") return runSpecChatJob(job);
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
@@ -10542,7 +10741,10 @@ async function main() {
   // started, so each heartbeat tick can publish the full lane picture (kind/spec_slug/since).
   interface LaneInfo { kind: Job["kind"]; spec_slug: string; since: string; phase: string | null }
   const active = new Map<string, LaneInfo>();
-  const countFold = () => [...active.values()].filter((v) => v.kind === "fold").length;
+  // goal-fold shares the concurrency-1 fold lane: a goal fold is doc-only + touches the brain
+  // index/cross-link files just like a spec fold, so it must never race a feature build (or another
+  // fold) on those files (goal-fold-from-db-row Phase 1).
+  const countFold = () => [...active.values()].filter((v) => v.kind === "fold" || v.kind === "goal-fold").length;
   const countSeed = () => [...active.values()].filter((v) => v.kind === "product-seed").length;
   const countSpecChat = () => [...active.values()].filter((v) => v.kind === "spec-chat").length;
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
@@ -10565,7 +10767,7 @@ async function main() {
   // races the standing pass on the same workspace (bounce-escalation-back-to-director).
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -10661,10 +10863,10 @@ async function main() {
       if (!draining) {
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
       while (countFold() < MAX_FOLD) {
-        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold"] });
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold", "goal-fold"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
-        console.log(`claimed fold ${job.id.slice(0, 8)} → ${countFold() + 1}/${MAX_FOLD} fold lane`);
+        console.log(`claimed ${job.kind} ${job.id.slice(0, 8)} → ${countFold() + 1}/${MAX_FOLD} fold lane`);
         launch(job);
       }
       // Fill the product-seed lane (Max `claude -p` seed-product skill; box-product-seeding).

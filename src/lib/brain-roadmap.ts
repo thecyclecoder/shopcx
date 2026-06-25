@@ -1266,6 +1266,61 @@ export async function getGoal(slug: string, workspaceId?: string): Promise<{ raw
   return { raw: row.body, card, specs: bySlug };
 }
 
+// ── Folded-goal archive readers (goal-fold-from-db-row Phase 2) ──────────────────────────────────────
+// A folded goal is `public.goals.status='folded'` — off the active board (`getGoals` drops it) but
+// PRESERVED in full. The board's Archive section + the goal detail page render it FROM THE ROW (the
+// row is the archive; its durable knowledge also lives in the permanent brain pages it folded into).
+// These readers are the only path that surfaces folded rows — every other goal reader filters them out.
+
+/** An archived (folded) goal as a `GoalCard`, read from the preserved `public.goals` row. The card carries
+ *  the goal's full shape (title, outcome, success metric, milestones, rollup %) so the archive renders it
+ *  identically to its pre-fold live view. `updatedAt` is the fold timestamp (the `updated_at` bump the
+ *  worker wrote when it flipped `status='folded'`). */
+export interface ArchivedGoal {
+  card: GoalCard;
+  raw: string;
+  updatedAt: string;
+}
+
+function archivedGoalFrom(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>): ArchivedGoal {
+  return { card: goalRowToCard(row, specsByMilestone), raw: row.body, updatedAt: row.updated_at };
+}
+
+/**
+ * Every FOLDED goal as an `ArchivedGoal`, read from `public.goals` where `status='folded'` (the rows
+ * `getGoals` drops). The board's Archive section reads this. Newest-fold first (by `updated_at`, the fold
+ * timestamp), tie-broken by title.
+ */
+export async function getFoldedGoals(workspaceId?: string): Promise<ArchivedGoal[]> {
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return [];
+  const [{ specs }, rows] = await Promise.all([getRoadmap(wsId), listGoalsFromDb(wsId, { status: "folded" })]);
+  if (!rows.length) return [];
+  const specsByMilestone = await specsByMilestoneForGoals(wsId, rows, specs);
+  return rows
+    .map((row) => archivedGoalFrom(row, specsByMilestone))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.card.title.localeCompare(b.card.title));
+}
+
+/**
+ * One FOLDED goal by slug — the detail page renders this when `getGoal` returns null (folded). Reads the
+ * preserved row directly; returns null when the goal is missing OR not folded (an active goal stays on
+ * the live `getGoal` path).
+ */
+export async function getFoldedGoal(slug: string, workspaceId?: string): Promise<{ raw: string; card: GoalCard; specs: Record<string, SpecCard>; updatedAt: string } | null> {
+  if (!/^[a-z0-9-]+$/i.test(slug)) return null;
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return null;
+  const row = await getGoalFromDbRow(wsId, slug);
+  if (!row || row.status !== "folded") return null;
+  const { specs } = await getRoadmap(wsId);
+  const specsByMilestone = await specsByMilestoneForGoals(wsId, [row], specs);
+  const card = goalRowToCard(row, specsByMilestone);
+  const bySlug: Record<string, SpecCard> = {};
+  for (const list of specsByMilestone.values()) for (const s of list) bySlug[s.slug] = s;
+  return { raw: row.body, card, specs: bySlug, updatedAt: row.updated_at };
+}
+
 // ── Roadmap board filters: goal-membership + per-spec source (roadmap-goal-and-source-filters) ──
 
 /** What created a spec, derived (no author tag): 🔧 repair · 🎯 goal · ✋ manual. */
