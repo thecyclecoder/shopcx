@@ -27,7 +27,7 @@ The card row for every spec — title, summary, owner, parent, blocked_by, prior
 | `intended_status_set_by` | `text?` | who set `intended_status` (Slack disposition flow) |
 | `repair_signature` | `text?` | the box Repair-Agent's signature for a repair-authored spec (drives the board's 🔧 Repair source chip) |
 | `auto_build` | `boolean` | owner opt-out from [[../specs/spec-blockers]] auto-queue. Default `false` |
-| `milestone_id` | `uuid?` | typed FK → `goal_milestones(id)` (set by [[../specs/goals-milestones-tables-and-backfill]]). Null for standalone specs |
+| `milestone_id` | `uuid?` | typed FK → [[goal_milestones]]`(id)` `ON DELETE SET NULL` (constrained by [[../specs/goals-milestones-tables-and-backfill]] Phase 1). Null for standalone specs (function-mandate, ad-hoc, regression). Indexed via `specs_ws_milestone_idx` |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | bumped every write · default `now()` |
 
@@ -44,6 +44,10 @@ The card row for every spec — title, summary, owner, parent, blocked_by, prior
 - Otherwise: any phase `in_progress` or any `shipped` (but not all) → `in_progress`; all (ignoring `rejected`) `shipped` → `shipped`; no phases → `planned`.
 
 The DB enforcement closes the [[../specs/spec-review-agent]] "shipped with 1 phase" class of bug — impossible to commit `specs.status='shipped'` with non-shipped phases.
+
+## Milestone attach + rollup
+
+`milestone_id` is the typed link from a spec to its [[goal_milestones]] row (FK-constrained by [[../specs/goals-milestones-tables-and-backfill]] Phase 1, `ON DELETE SET NULL`). A row-level trigger (`specs_milestone_rollup`) on this table fires `public.roll_up_milestone_status(milestone_id)` after any `status` or `milestone_id` write — so a milestone's status follows the rollup of its attached specs, and a re-attach recomputes BOTH the old + the new milestone. Specs without a milestone (standalone fix-spec / function-mandate / regression) keep `milestone_id=null` — the explicit zero-milestone shape, not a missing attachment.
 
 ## Reads / writes
 
