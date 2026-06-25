@@ -468,6 +468,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Every-15-min crons (window ~45 min) ─
   { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
+  {
+    id: "spec-review-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "spec-review-cron",
+    description: "Auto-proposed monitored loop for the spec-review-cron cron (every 15 min (*/15 * * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "every 15 min (*/15 * * * *)",
+    livenessWindowMs: 1 * HOUR,
+  },
   // ─ Every-30-min crons (window ~90 min) ─
   { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
   // ─ Hourly crons (window ~2h) ─
