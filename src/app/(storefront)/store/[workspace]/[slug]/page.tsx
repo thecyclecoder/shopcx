@@ -146,6 +146,8 @@ export async function generateMetadata({
 }: {
   params: Promise<{ workspace: string; slug: string }>;
 }): Promise<Metadata> {
+  "use cache";
+  cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
   const { workspace, slug } = await params;
   const data = await getPageData(workspace, slug);
   if (!data) return { title: "Not Found" };

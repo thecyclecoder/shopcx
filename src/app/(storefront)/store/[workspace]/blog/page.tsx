@@ -43,6 +43,8 @@ export async function generateMetadata({
 }: {
   params: Promise<{ workspace: string }>;
 }): Promise<Metadata> {
+  "use cache";
+  cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
   const { workspace } = await params;
   const ws = await getBlogWorkspaceBySlug(workspace);
   if (!ws) return { title: "Not Found" };

@@ -20,6 +20,8 @@ import { storefrontThemeStyle } from "../../../_lib/storefront-theme";
 const MAIN_SITE = "https://superfoodscompany.com";
 
 export async function generateMetadata({ params }: { params: Promise<{ workspace: string }> }): Promise<Metadata> {
+  "use cache";
+  cacheLife({ stale: 300, revalidate: 300, expire: 300 });
   const { workspace } = await params;
   const ws = await getBlogWorkspaceBySlug(workspace);
   if (!ws) return { title: "Not Found" };
