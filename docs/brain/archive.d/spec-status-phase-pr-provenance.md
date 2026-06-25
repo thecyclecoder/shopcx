@@ -1,0 +1,1 @@
+- **Phase-level PR + merge-SHA provenance for spec status** · verified 2026-06-25 · → [[../tables/spec_card_state]]
