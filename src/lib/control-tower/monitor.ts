@@ -143,6 +143,136 @@ function fmtDur(ms: number): string {
   return `${Math.floor(sec / 86_400)}d`;
 }
 
+// ── registered_not_firing grace clock (control-tower-cron-grace-uses-next-firing-after-registration) ──
+// The grace starts at the cron's FIRST scheduled firing at-or-after `registeredAt`, not at
+// `registeredAt` itself. A daily cron registered just after its hour-of-day tick (e.g.
+// security-dep-watch at `0 4 * * *` with registeredAt 00:00 UTC + a deploy that landed at 04:08)
+// would otherwise false-page registered_not_firing 26h after midnight even though the first valid
+// firing was at 04:00 the next day. We parse the cron expression carried inside `expectedCadence`
+// (e.g. "daily (0 4 * * *)"), compute the first firing at-or-after registeredAt, and use THAT as
+// the grace anchor — preserving the red for genuinely-dead schedules but removing the boundary
+// false-page. Computed once per loop and memoized (both inputs are code constants).
+export function extractCronExpr(cadence: string): string | null {
+  const m = cadence.match(/\(([\d*/,\- ]+)\)/);
+  if (!m) return null;
+  const expr = m[1].trim();
+  if (expr.split(/\s+/).length !== 5) return null;
+  return expr;
+}
+
+interface CronSets {
+  minute: Set<number>;
+  hour: Set<number>;
+  dayOfMonth: Set<number>;
+  month: Set<number>;
+  dayOfWeek: Set<number>;
+}
+
+function parseCronField(field: string, min: number, max: number): Set<number> | null {
+  const result = new Set<number>();
+  for (const part of field.split(",")) {
+    const [range, stepStr] = part.split("/");
+    const step = stepStr ? parseInt(stepStr, 10) : 1;
+    if (!Number.isFinite(step) || step <= 0) return null;
+    let start: number;
+    let end: number;
+    if (range === "*") {
+      start = min;
+      end = max;
+    } else if (range.includes("-")) {
+      const [a, b] = range.split("-").map((s) => parseInt(s, 10));
+      if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+      start = a;
+      end = b;
+    } else {
+      const v = parseInt(range, 10);
+      if (!Number.isFinite(v)) return null;
+      start = v;
+      // Vixie cron: a literal-with-step ("5/15") means "5,20,35,…" up to max.
+      end = stepStr ? max : v;
+    }
+    if (start < min || end > max || start > end) return null;
+    for (let v = start; v <= end; v += step) result.add(v);
+  }
+  return result;
+}
+
+export function parseCronExpr(expr: string): CronSets | null {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const ranges: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+  const out: Set<number>[] = [];
+  for (let i = 0; i < 5; i++) {
+    const set = parseCronField(parts[i], ranges[i][0], ranges[i][1]);
+    if (!set) return null;
+    out.push(set);
+  }
+  return { minute: out[0], hour: out[1], dayOfMonth: out[2], month: out[3], dayOfWeek: out[4] };
+}
+
+function cronDayMatch(sets: CronSets, t: Date): boolean {
+  const dom = t.getUTCDate();
+  const dow = t.getUTCDay();
+  const domRestricted = sets.dayOfMonth.size !== 31;
+  const dowRestricted = sets.dayOfWeek.size !== 7;
+  // Standard Vixie cron: if BOTH day-of-month and day-of-week are restricted, match either.
+  if (domRestricted && dowRestricted) return sets.dayOfMonth.has(dom) || sets.dayOfWeek.has(dow);
+  if (domRestricted) return sets.dayOfMonth.has(dom);
+  if (dowRestricted) return sets.dayOfWeek.has(dow);
+  return true;
+}
+
+/** First firing at-or-after `from` for the given cron expression, in UTC. Returns null when the
+ *  expression can't be parsed (caller stays conservative — falls back to registeredAt). */
+export function nextFiringAtOrAfter(from: Date, expr: string): Date | null {
+  const sets = parseCronExpr(expr);
+  if (!sets) return null;
+  // Round up to the next whole minute (cron fires on minute boundaries; ms/sec ⇒ post-tick).
+  const t = new Date(from.getTime());
+  t.setUTCMilliseconds(0);
+  if (t.getUTCSeconds() !== 0) {
+    t.setUTCSeconds(0);
+    t.setUTCMinutes(t.getUTCMinutes() + 1);
+  }
+  // Walk at most 8 days: any standard 5-field cron matches within a week, +1d safety margin.
+  const MAX_MINUTES = 8 * 24 * 60;
+  for (let i = 0; i < MAX_MINUTES; i++) {
+    if (
+      sets.minute.has(t.getUTCMinutes()) &&
+      sets.hour.has(t.getUTCHours()) &&
+      sets.month.has(t.getUTCMonth() + 1) &&
+      cronDayMatch(sets, t)
+    ) {
+      return t;
+    }
+    t.setUTCMinutes(t.getUTCMinutes() + 1);
+  }
+  return null;
+}
+
+const FIRST_FIRING_CACHE = new Map<string, number | null>();
+/** ms-since-epoch of the loop's first scheduled firing at-or-after `registeredAt`. Returns null
+ *  when the loop has no `registeredAt`; falls back to `registeredAt` itself when the cadence
+ *  carries no parseable cron expression (e.g. "box job" cadences) — preserving prior behavior. */
+function firstScheduledFiringMs(loop: MonitoredLoop): number | null {
+  if (!loop.registeredAt) return null;
+  if (FIRST_FIRING_CACHE.has(loop.id)) return FIRST_FIRING_CACHE.get(loop.id) ?? null;
+  const registered = Date.parse(loop.registeredAt);
+  let result: number | null;
+  if (!Number.isFinite(registered)) {
+    result = null;
+  } else {
+    result = registered;
+    const expr = extractCronExpr(loop.expectedCadence);
+    if (expr) {
+      const next = nextFiringAtOrAfter(new Date(registered), expr);
+      if (next) result = next.getTime();
+    }
+  }
+  FIRST_FIRING_CACHE.set(loop.id, result);
+  return result;
+}
+
 // Per-account Max load the box worker writes onto its heartbeat (box-multi-account-failover Phase 2). The
 // box tile reads `all_capped` to surface a (non-silent) all-accounts-capped state, and shows per-account load.
 interface AccountsSnapshot {
@@ -312,16 +442,25 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
     // (monitorUptimeMs is conservative — beat retention can only shorten it, never inflate it — so it
     // never over-fires; null = unknown ⇒ stay amber.)
     //
-    // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace): monitorUptimeMs is
-    // the watchdog's OWN run-span, independent of when THIS cron was added — so a long-cadence cron
-    // shipped AFTER the watchdog passed its window would trip the moment it deploys, hours before its
-    // first scheduled tick. registeredAt (a code constant, deploy-SURVIVING unlike deployAgeMs) gives a
-    // per-loop "how long has this cron been registered" reference: require its age past the full window
-    // too, so a just-added cron stays amber ("awaiting first run") until it's actually had a cadence to
-    // fire — graced like the deploy-anchored never_fired above. Unset (legacy crons) ⇒ no extra gate.
-    const registrationAgeMs = loop.registeredAt ? ageMs(loop.registeredAt) : null;
-    if (everBeatCount === 0 && registrationAgeMs != null && registrationAgeMs <= window) {
-      return { ...base, color: "amber", statusText: `awaiting first run — registered ${fmtDur(registrationAgeMs)} ago (within ${fmtDur(window)} cadence+grace)`, violation: null };
+    // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace, refined by
+    // control-tower-cron-grace-uses-next-firing-after-registration): monitorUptimeMs is the
+    // watchdog's OWN run-span, independent of when THIS cron was added — so a long-cadence cron
+    // shipped AFTER the watchdog passed its window would trip the moment it deploys, hours before
+    // its first scheduled tick. registeredAt (a code constant, deploy-SURVIVING unlike
+    // deployAgeMs) gives a per-loop "how long has this cron been registered" reference — but
+    // `registeredAt` itself is the WRONG grace clock when it falls before the cron's hour-of-day:
+    // security-dep-watch (`0 4 * * *`) registered at 00:00 UTC has 4h before its first valid tick,
+    // so a 26h window measured from 00:00 trips at 02:00 the next day, 2h before it has actually
+    // had a chance to fire. Use the first scheduled firing AT-OR-AFTER `registeredAt` (parsed from
+    // expectedCadence, memoized) instead — preserves the red for genuinely-dead schedules but
+    // removes the boundary false-page. Unset (legacy crons) ⇒ no extra gate.
+    const firstFiringMs = firstScheduledFiringMs(loop);
+    const sinceFirstFiringMs = firstFiringMs != null ? Date.now() - firstFiringMs : null;
+    if (everBeatCount === 0 && sinceFirstFiringMs != null && sinceFirstFiringMs <= window) {
+      const statusText = sinceFirstFiringMs >= 0
+        ? `awaiting first run — first scheduled firing ${fmtDur(sinceFirstFiringMs)} ago (within ${fmtDur(window)} cadence+grace)`
+        : `awaiting first run — first scheduled firing in ${fmtDur(-sinceFirstFiringMs)}`;
+      return { ...base, color: "amber", statusText, violation: null };
     }
     if (everBeatCount === 0 && monitorUptimeMs != null && monitorUptimeMs > window) {
       return {
