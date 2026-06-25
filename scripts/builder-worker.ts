@@ -8429,6 +8429,19 @@ async function runRegressionJob(job: Job) {
         metadata: { signature, verdict, job_id: job.id },
       });
       await update(job.id, { status: "completed", error: null, instructions: ledger, log_tail: `dismissed (${verdict}): ${reason}`.slice(-2000) });
+      // regressions-out-of-human-queue: a dismissed regression must CLEAR off the queue, not linger as a red
+      // check until a human re-tests it (the pileup the CEO flagged). Record a `dismissed` resolution per
+      // failing check — persists across re-runs, so a mis-firing check is suppressed after one dismissal.
+      try {
+        const { getHumanTestQueue, dismissRegressionChecks } = await import("../src/lib/spec-test-runs");
+        const reg = (await getHumanTestQueue(job.workspace_id)).regressions.find((r) => r.slug === regressedSlug);
+        if (reg) {
+          const n = await dismissRegressionChecks({ workspaceId: job.workspace_id, specSlug: regressedSlug, failing: reg.failing, verdict, reason });
+          console.log(`${tag} cleared ${n} check(s) off the human-test queue (dismissed)`);
+        }
+      } catch (e) {
+        console.error(`${tag} clear-on-dismiss failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      }
       console.log(`${tag} dismissed (${verdict}) → no spec, no re-surface`);
       return;
     }

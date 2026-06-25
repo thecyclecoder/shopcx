@@ -335,6 +335,43 @@ export async function upsertHumanCheckResolution(args: {
   return error ? { error: error.message } : {};
 }
 
+/**
+ * Agent-written (regressions-out-of-human-queue): when the regression-agent (Remi) DISMISSES a regression
+ * (false-positive / already-fixed / transient / foreign — i.e. "not a real break to fix"), clear its failing
+ * checks off the queue by recording a `dismissed` resolution per check. Because the resolution is keyed by
+ * `spec_slug:check_key` and persists, a dismissed check stays cleared across future spec-test re-runs — so a
+ * repeatedly-mis-firing check (the slack-fetch ×6 churn) gets permanently suppressed after one dismissal,
+ * not re-surfaced every run. `resolved_by` is null (agent, not the owner); the owner can still re-open it via
+ * clearHumanCheckResolution. Best-effort per check; returns how many cleared.
+ */
+export async function dismissRegressionChecks(args: {
+  workspaceId: string;
+  specSlug: string;
+  failing: { text: string; check_key: string }[];
+  verdict: string;
+  reason: string;
+}): Promise<number> {
+  const admin = createAdminClient();
+  let cleared = 0;
+  for (const f of args.failing) {
+    const { error } = await admin.from("spec_test_human_checks").upsert(
+      {
+        workspace_id: args.workspaceId,
+        spec_slug: args.specSlug,
+        check_key: f.check_key,
+        check_text: f.text,
+        resolution: "dismissed" as HumanCheckResolution,
+        note: `Auto-dismissed by Remi (regression-agent): ${args.verdict} — ${args.reason}`.slice(0, 1000),
+        resolved_by: null,
+        resolved_at: new Date().toISOString(),
+      },
+      { onConflict: "workspace_id,spec_slug,check_key" },
+    );
+    if (!error) cleared++;
+  }
+  return cleared;
+}
+
 /** Clear a resolution (owner re-opens a check) — removes it from the "Done" pile back into "waiting". */
 export async function clearHumanCheckResolution(
   workspaceId: string,
