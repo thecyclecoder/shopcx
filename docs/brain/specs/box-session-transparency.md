@@ -1,4 +1,4 @@
-# Box-session transparency — a live checklist + notes on every box session
+# Box-session transparency — a live checklist + notes on every box session ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** Platform mandate — the autonomous box is supervisable (you can see what every agent is doing, live)
 **Priority:** critical
@@ -26,12 +26,17 @@ This is a **helper attached to EVERY box session**, not one agent. Today ~12 nea
 - Compact form on the card chip: the `session_note` (one line). Expand → the full checklist.
 - Shared `<SessionChecklist>` component (`src/components/agents/session-checklist.tsx`) so both surfaces render identically; the box API (`/api/roadmap/box`) enriches each lane with the row's `session_checklist`/`session_note` (same enrichment pattern as the existing director-coach intent).
 
-## Phase 3 — the session-review surface
+## Phase 3 — the session-review surface ✅
 - A session's preserved `session_checklist` + `session_note` (+ log_tail, verdict, grade) is viewable after the fact — per job, and rolled up per agent — so a human can review HOW an agent worked, not just its terminal status. Pairs with the grading loop (the grader can cite the checklist).
+- Per-job permalink: `/dashboard/agents/sessions/[jobId]` — persona header (who ran), kind/spec/status chips, the full expanded checklist with per-item notes, the streamed session_note, the agent_action_grades row (grade · reasoning · graded_by), the raw `log_tail`, and any `error`. Backed by owner-gated `GET /api/developer/agents/sessions/[jobId]` (workspace-scoped).
+- Rolled up per agent: on `/dashboard/agents/[role]` for a worker, the existing AgentGradePanel's "Recent sessions" list now renders each row with the live `<SessionChecklist>` (compact note + expandable plan), the grader's reasoning inline, and a "view session →" link to the per-job permalink. `GET /api/developer/agents/agent-grades?kind=…` enriches each recent action with the preserved `session_checklist` + `session_note`.
 
 ## Verification
 - On `/dashboard/roadmap` while any spec is mid-build, the spec card under the chip → expect a one-line italic note (the agent's current `activeForm`) and a `▾ N/M` expand button that opens the full checklist with `○ ◐ ●` glyphs and the in-progress item bolded.
 - On `/dashboard/roadmap/box` while any lane is occupied, each lane tile → expect the same one-line note under "{action} {spec_slug}" + the same expand control showing the lane's live plan.
 - Trigger a director/repair/regression/spec-review/spec-test/migration-fix session (any non-build agent kind) and watch /dashboard/roadmap/box → expect the lane tile to show its checklist too (every `runBoxSession` caller, not just `kind='build'`).
 - On a completed/failed job card → expect NO checklist render (the active gate hides it once the session is no longer live), but the row's `session_checklist`/`session_note` columns are still populated for later review (Phase 3).
-- `npx tsc --noEmit` → expect 0 errors after the Phase 2 changes.
+- On `/dashboard/agents/[role]` for a worker that has shipped at least one graded action (e.g. `build` → Bo, `repair` → Rafa), the "Recent sessions" section → expect each row to show the compact session note + a `▾ N/M` expand opening the preserved checklist, the grader's reasoning under "Grader: …", and a "view session →" link.
+- Click "view session →" on any row → expect to land on `/dashboard/agents/sessions/{jobId}` showing the persona avatar/name, status/kind/spec chips, the Grade card (when graded), the full expanded plan with per-step notes, the raw `log_tail`, and any `error`.
+- Hit `GET /api/developer/agents/sessions/{jobId}` as a non-owner → expect `403`. As an owner with a `jobId` from another workspace → expect `404`.
+- `npx tsc --noEmit` → expect 0 errors.

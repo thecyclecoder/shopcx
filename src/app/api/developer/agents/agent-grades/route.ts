@@ -16,6 +16,7 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { computeAgentRollup, AGENT_RUBRICS, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
+import type { SessionChecklistItem } from "@/lib/agent-jobs";
 
 
 const TERMINAL = ["completed", "failed", "needs_attention"];
@@ -50,15 +51,26 @@ export async function GET(req: Request) {
   const rollup = gradeable ? await computeAgentRollup(admin, workspaceId, kind) : { agentKind: kind, count: 0, average: null, priorAverage: null, drop: null };
 
   // Recent concluded actions of this worker + their grade (left join via a second lookup).
+  // box-session-transparency Phase 3: include the preserved session_checklist + session_note so the
+  // panel can render each row's plan/notes inline (the "how did it work" view, not just "what was its
+  // status"). Each row links to /dashboard/agents/sessions/[jobId] for the full log_tail/error view.
   const { data: jobs } = await admin
     .from("agent_jobs")
-    .select("id, spec_slug, status, pr_url, created_at")
+    .select("id, spec_slug, status, pr_url, created_at, session_checklist, session_note")
     .eq("workspace_id", workspaceId)
     .eq("kind", kind)
     .in("status", TERMINAL)
     .order("created_at", { ascending: false })
     .limit(20);
-  const jobRows = (jobs || []) as Array<{ id: string; spec_slug: string | null; status: string; pr_url: string | null; created_at: string }>;
+  const jobRows = (jobs || []) as Array<{
+    id: string;
+    spec_slug: string | null;
+    status: string;
+    pr_url: string | null;
+    created_at: string;
+    session_checklist: SessionChecklistItem[] | null;
+    session_note: string | null;
+  }>;
 
   const gradeByJob = new Map<string, { grade: number | null; reasoning: string | null; graded_by: string }>();
   if (jobRows.length) {
@@ -82,6 +94,9 @@ export async function GET(req: Request) {
       grade: g?.grade ?? null,
       reasoning: g?.reasoning ?? null,
       gradedBy: g?.graded_by ?? null,
+      // box-session-transparency Phase 3 — the preserved live-plan + last note for the row's expand.
+      sessionChecklist: j.session_checklist ?? null,
+      sessionNote: j.session_note ?? null,
     };
   });
 
