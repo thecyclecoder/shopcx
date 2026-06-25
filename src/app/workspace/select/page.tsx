@@ -1,9 +1,13 @@
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getUserWorkspaces } from "@/lib/workspace";
 import WorkspaceList from "./workspace-list";
 
 export default async function SelectWorkspacePage() {
+  // cacheComponents is ON — this page reads uncached auth/workspace data at request time, so it must render
+  // dynamically (not prerender). connection() is the idiomatic opt-out. See dashboard/layout.tsx.
+  await connection();
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
