@@ -16,20 +16,13 @@ interface Props {
 }
 
 export default function LoginClient(props: Props) {
-  // cacheComponents: the login page's server entry exports `generateMetadata`, so Next streams a
-  // <__next_metadata_boundary__> as a sibling of this client tree. Without a stable host element, the
-  // PPR resume sees the boundary in the slot where it cached this page's root <div> and forces a full
-  // client re-render (see operational-rules.md § "Layouts that export metadata must wrap children in a
-  // host element" — the same shape applies to a page whose top-level returned element is a <Suspense>).
   return (
-    <div className="portal-login-root">
-      <Suspense fallback={<div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center" }}><p style={{ color: "#6b7280" }}>Loading...</p></div>}>
-        <PortalLogin {...props} />
-        {props.chatEnabled && props.workspaceId && (
-          <LoginChat workspaceId={props.workspaceId} primaryColor={props.primaryColor} />
-        )}
-      </Suspense>
-    </div>
+    <Suspense fallback={<div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center" }}><p style={{ color: "#6b7280" }}>Loading...</p></div>}>
+      <PortalLogin {...props} />
+      {props.chatEnabled && props.workspaceId && (
+        <LoginChat workspaceId={props.workspaceId} primaryColor={props.primaryColor} />
+      )}
+    </Suspense>
   );
 }
 
