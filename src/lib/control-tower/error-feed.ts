@@ -203,6 +203,47 @@ export function isTransientInngestTransportError(
 }
 
 /**
+ * Inngest STEP-RETRY noise — when an Inngest `step.run` intentionally throws to trigger
+ * its own retry (the companion to `isTransientInngestTransportError`, but on the Vercel
+ * log-drain side — the throw IS the retry mechanism so it surfaces as an `/api/inngest`
+ * error log even though the function body never finally-failed).
+ *
+ * Example: `socialPublish` detects a transient Meta Graph failure and throws so Inngest
+ * re-runs the step with backoff (`throw new Error('transient publish failure (attempt 1/5): …')`).
+ * Attempt 1/5 means 4 attempts remain; the function body has not finally-failed and the
+ * existing `mark-publishing`+`finalize` bracket means no row is stuck. Minting a fresh
+ * OPEN incident for it pages Platform owners on a loop that already self-heals
+ * (Control Tower `vercel:0ffd0e07c0fe9336`).
+ *
+ * `true` when the log is from `/api/inngest` AND the message carries an `(attempt N/M)`
+ * marker with `N < M` — i.e. retries remain. The N==M final-attempt throw IS the terminal
+ * failure (the step ran out of retries) and stays captured / paged.
+ *
+ * NOTE this only CLASSIFIES — `/api/webhooks/vercel-logs` passes the result as the
+ * `transient` flag to `recordError`, which auto-resolves a FIRST sighting (recorded for
+ * visibility, NOT paged, no repair fan-out) and only escalates to a real open+page if the
+ * SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` (chronic → still broken). So a
+ * one-off blip is dropped while a function that throws on every retry still surfaces.
+ */
+export function isTransientInngestStepRetryThrow(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  const p = (path ?? "").trim().toLowerCase();
+  if (!p.startsWith("/api/inngest")) return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  // `(attempt N/M)` — the convention a step-retry throw uses to surface its current
+  // attempt index and the configured total. N<M ⇒ retries remain (non-final throw).
+  const m = text.match(/\(attempt\s+(\d+)\s*\/\s*(\d+)\)/i);
+  if (!m) return false;
+  const attempt = Number(m[1]);
+  const total = Number(m[2]);
+  if (!Number.isFinite(attempt) || !Number.isFinite(total) || total <= 0) return false;
+  return attempt < total;
+}
+
+/**
  * Transient Supabase-logs noise — the supabase-logs companion to `isBareLifecycle` /
  * `isTransientInngestTransportError`, factored here so the poller can reuse it
  * ([[../specs/error-feed-supabase-logs-transient-5xx-scoping]]).

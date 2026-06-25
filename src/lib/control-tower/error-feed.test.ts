@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
   isTransientSupabaseLogNoise,
 } from "./error-feed";
@@ -107,6 +108,59 @@ test("isTransientInngestTransportError returns false on empty / nullish input", 
   assert.equal(isTransientInngestTransportError(null, null), false);
   assert.equal(isTransientInngestTransportError("", "   "), false);
   assert.equal(isTransientInngestTransportError(undefined, undefined), false);
+});
+
+// ── isTransientInngestStepRetryThrow (error-feed-drop-inngest-step-retry-throws) ──
+// Regression fixture: the exact mid-retry throw that opened Control Tower signature
+// `vercel:0ffd0e07c0fe9336` — socialPublish detected a transient Meta Graph failure
+// (codes 1/2/4/17/32/341/613/5xx/429 per isTransientGraph) and threw so Inngest re-runs
+// the step with backoff (PUBLISH_RETRIES=4 ⇒ attempt 1/5 means 4 attempts remain). The
+// function body never finally-failed; minting a fresh OPEN incident on every transient
+// blip pages Platform owners on a healthy retry loop. Classifying it `transient` keeps
+// a first sighting from paging while the recur window still catches a chronic failure.
+const INNGEST_RETRY_BLOB =
+  "Error: transient publish failure (attempt 1/5): Please reduce the amount of data you're asking for, then retry your request";
+
+test("isTransientInngestStepRetryThrow matches the vercel:0ffd0e07c0fe9336 mid-retry throw", () => {
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", INNGEST_RETRY_BLOB), true);
+});
+
+test("isTransientInngestStepRetryThrow matches any (attempt N/M) with N<M (retries remain)", () => {
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", "x (attempt 2/5): y"), true);
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", "x (attempt 3/5): y"), true);
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", "x (attempt 4/5): y"), true);
+  // Case-insensitive + whitespace-tolerant marker.
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", "x (Attempt 1 / 4): y"), true);
+});
+
+test("isTransientInngestStepRetryThrow KEEPS the FINAL attempt (N==M) — terminal failure", () => {
+  // The final attempt's throw IS the terminal failure (no retries remain) — recordError
+  // should treat it as a real error, not transient, so it pages on first sighting.
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", "x (attempt 5/5): y"), false);
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", "x (attempt 4/4): y"), false);
+});
+
+test("isTransientInngestStepRetryThrow KEEPS a non-/api/inngest path even with the marker", () => {
+  // The marker only matters on the Inngest webhook route — a different route saying
+  // "(attempt 1/5)" is some other unrelated string, not a step-retry throw.
+  assert.equal(isTransientInngestStepRetryThrow("/api/portal", "transient publish failure (attempt 1/5)"), false);
+  assert.equal(isTransientInngestStepRetryThrow("/api/foo", "x (attempt 1/5) y"), false);
+});
+
+test("isTransientInngestStepRetryThrow KEEPS a real /api/inngest error without the attempt marker", () => {
+  // A real bug on /api/inngest (no `(attempt N/M)` marker) — pages on first sighting.
+  assert.equal(
+    isTransientInngestStepRetryThrow("/api/inngest", "TypeError: Cannot read properties of undefined (reading 'id')"),
+    false,
+  );
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", "function failed after retries"), false);
+});
+
+test("isTransientInngestStepRetryThrow returns false on empty / nullish input", () => {
+  assert.equal(isTransientInngestStepRetryThrow(null, null), false);
+  assert.equal(isTransientInngestStepRetryThrow(undefined, undefined), false);
+  assert.equal(isTransientInngestStepRetryThrow("", ""), false);
+  assert.equal(isTransientInngestStepRetryThrow("/api/inngest", ""), false);
 });
 
 // ── isTransientSupabaseLogNoise (error-feed-supabase-logs-transient-5xx-scoping) ──

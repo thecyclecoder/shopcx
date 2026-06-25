@@ -25,6 +25,7 @@ import {
   isAbortedStreamNoise,
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isTransientInngestStepRetryThrow,
 } from "@/lib/control-tower/error-feed";
 
 
@@ -138,6 +139,12 @@ export async function POST(request: Request) {
 
   let recorded = 0;
   for (const g of groups.values()) {
+    // Inngest STEP-RETRY noise (a `step.run` throwing to trigger its own retry — attempt
+    // N/M with N<M; the function body never finally-failed): classify it `transient` so
+    // recordError auto-resolves a first sighting (no page) and only escalates to a real
+    // open+page on recurrence within the window — a one-off Meta-Graph blip is dropped
+    // while a function that throws on every retry still surfaces.
+    const transient = isTransientInngestStepRetryThrow(g.path, g.message);
     await recordError({
       source: "vercel",
       // Group on path + status + normalized message (stable bits, not requestId/deploymentId).
@@ -153,6 +160,7 @@ export async function POST(request: Request) {
         deploymentId: g.sample.deploymentId ?? null,
       },
       occurrences: g.count,
+      transient,
     });
     recorded++;
   }
