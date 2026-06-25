@@ -634,21 +634,16 @@ export async function applyMergedBuildEffects(
 ): Promise<void> {
   try {
     const drift = await reconcileSpecDrift(workspaceId, slug);
-    // TRUST THE MERGE (db-driven-status-trust-the-merge). reconcileSpecDrift only flips a phase shipped when
-    // it can verify that phase's code paths are on main — but a PROSE-only phase declares no paths, so it can
-    // NEVER flip, and a merged build would leave the spec stuck at `planned` despite shipping ("Built" pill +
-    // Planned status). The merge itself is proof the work shipped, so advance the phases the reconciler
-    // couldn't confirm: a NON-chained (whole-spec) build implemented the ENTIRE spec → every non-rejected
-    // phase ships; a chained build that the reconciler couldn't confirm advanced the FIRST not-yet-shipped
-    // phase it targeted. Forward-only (rejected phases stay; reconcile's confirmed flips are kept).
+    // TRUST THE MERGE — but ONE PHASE AT A TIME (db-driven-status-trust-the-merge). Builds ship a spec
+    // phase-by-phase: a merged build means the phase IT delivered shipped, NOT the whole spec. reconcileSpecDrift
+    // flips a phase only when it can verify that phase's code paths are on main; a PROSE-only phase declares no
+    // paths so it can NEVER flip, leaving the spec stuck at `planned` despite the merge ("Built" pill + Planned
+    // status). So when reconcile confirmed nothing, advance the FIRST not-yet-shipped phase — the one this build
+    // delivered (phases build in order). Never blanket-ship the rest; the next phase's own build ships it.
     let phaseStates = drift.phaseStates;
-    if (phaseStates.length) {
-      if (!opts.chainPhases) {
-        phaseStates = phaseStates.map((p) => (p.status === "rejected" ? p : { ...p, status: "shipped" }));
-      } else if (drift.flipped.length === 0) {
-        const idx = phaseStates.findIndex((p) => p.status === "planned");
-        if (idx >= 0) phaseStates = phaseStates.map((p, i) => (i === idx ? { ...p, status: "shipped" } : p));
-      }
+    if (phaseStates.length && drift.flipped.length === 0) {
+      const idx = phaseStates.findIndex((p) => p.status === "planned");
+      if (idx >= 0) phaseStates = phaseStates.map((p, i) => (i === idx ? { ...p, status: "shipped" } : p));
     }
     const rolled = phaseStates.length ? rollupPhaseStatus(phaseStates) : drift.status;
     await markSpecCardMergeShipped(workspaceId, slug, {
