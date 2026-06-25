@@ -1,10 +1,10 @@
 # libraries/spec-drift
 
-The **Spec-Drift Agent** ([[../specs/spec-drift-agent]]) — keeps a spec's per-phase status in [[../tables/spec_card_state]] in sync with shipped code, so shipped work stops parking in the Planned/In-progress columns. The flip side of [[../specs/spec-test-agent|spec-test]]: that proves a *shipped* spec works; this proves a spec's *status* is true. **Per-phase + evidence-gated** — it never guesses "merged ⇒ done".
+**DEPRECATED** (2026-06-24 — [[../specs/spec-readers-from-db-retire-parser]] Phase 3). The spec-drift reconciliation function `reconcileSpecDrift` is **scheduled for deletion** — its core purpose (keeping per-phase status in sync with shipped code) is now handled by [[../specs/spec-readers-from-db-retire-parser]] Phase 1 readers which read `public.spec_phases.status` directly from the DB (no markdown parse needed). 
 
-**spec-status-db-driven Phase 2** (2026-06-24): the reconciler no longer commits the spec markdown to `main` on a flip. It writes the DB mirror (`spec_card_state`) directly — instant, zero deploys. The markdown is still parsed off `main` (for the phase body + named code paths), but the flip lands in the DB.
+The remaining live use case is **drift detection** (`runSpecDriftReconciler`) — the hourly backstop that surfaces mismatches between "code on main" and "DB says shipped," for manual operator review via the [[../dashboard/control-tower]]. This function is retained until [[migration-drift-track-table-renames]] folds its table dependency; refer to that spec for the timeline.
 
-**File:** `src/lib/spec-drift.ts`
+**File:** `src/lib/spec-drift.ts` (candidate for retirement)
 
 ## The evidence model
 
