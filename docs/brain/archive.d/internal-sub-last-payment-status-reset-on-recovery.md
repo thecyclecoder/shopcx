@@ -1,0 +1,1 @@
+- **Reset subscriptions.last_payment_status on internal-sub recovery so portal change-date/frequency unlock** · verified 2026-06-25 · → [[../lifecycles/subscription-billing]]
