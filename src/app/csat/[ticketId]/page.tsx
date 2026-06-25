@@ -11,12 +11,23 @@
  */
 "use client";
 
-import { useEffect, useState, use } from "react";
+import { Suspense, useEffect, useState, use } from "react";
 import { useSearchParams } from "next/navigation";
 
 type Step = "loading" | "gate" | "reopen" | "rate" | "comment" | "thanks-rated" | "thanks-reopened" | "already-submitted";
 
-export default function CsatPage({
+// cacheComponents is ON (for the storefront's fast cached PDPs). This client page reads useSearchParams() +
+// use(params), which are dynamic — under Cache Components that MUST sit inside a <Suspense> boundary or the
+// prerender fails ("Uncached data accessed outside of <Suspense>"). The default export wraps the real page.
+export default function CsatPage({ params }: { params: Promise<{ ticketId: string }> }) {
+  return (
+    <Suspense fallback={null}>
+      <CsatPageInner params={params} />
+    </Suspense>
+  );
+}
+
+function CsatPageInner({
   params,
 }: {
   params: Promise<{ ticketId: string }>;
