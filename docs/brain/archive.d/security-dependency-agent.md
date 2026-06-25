@@ -1,0 +1,1 @@
+- **Security / Dependency Agent** · verified 2026-06-25 · → [[libraries/security-agent]]

@@ -1,0 +1,1 @@
+- **Storefront test detail page — both-version previews + per-arm funnel stats** · verified 2026-06-25 · → [[dashboard/storefront__optimizer]]
