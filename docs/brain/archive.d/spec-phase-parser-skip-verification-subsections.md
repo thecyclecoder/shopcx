@@ -1,0 +1,1 @@
+- **Spec phase parser: skip `### Phase N` sub-headers under `## Verification`** · verified 2026-06-25 · → [[../libraries/spec-drift]]
