@@ -170,7 +170,7 @@ function firstParagraph(lines: string[]): string {
   return cleanInline(buf.join(" "));
 }
 
-function parseSpec(slug: string, raw: string): SpecCard {
+export function parseSpec(slug: string, raw: string): SpecCard {
   const lines = raw.split("\n");
 
   let title = slug;
