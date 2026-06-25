@@ -3581,7 +3581,11 @@ async function runDirectorBounceBackJob(job: Job) {
       }
       const phases = got.card.phases;
       const remaining = phases.filter((p) => p.status === "planned").map((p) => p.title);
-      const shipped = phases.filter((p) => p.status === "shipped").map((p) => p.title);
+      // director-trust-phase-pr-provenance Phase 1: split ✅ phases into REAL (with `pr`) vs DRIFT SUSPECT
+      // (no `pr`) so the brief flags them distinctly — a tagless ✅ phase is not "ready to fold" (the merge
+      // hook is the only authoritative writer of `pr`, so we can't prove the merge landed).
+      const shipped = phases.filter((p) => p.status === "shipped" && (p.pr ?? null) !== null).map((p) => p.title);
+      const driftSuspect = phases.filter((p) => p.status === "shipped" && (p.pr ?? null) === null).map((p) => p.title);
       const state = await lib.specBuildState(db, job.workspace_id, slug);
       const candidate = {
         slug,
@@ -3589,6 +3593,7 @@ async function runDirectorBounceBackJob(job: Job) {
         owner: got.card.owner,
         parent: got.card.parent,
         shippedPhases: shipped,
+        driftSuspectPhases: driftSuspect,
         remainingPhases: remaining,
         raw: got.raw,
         failedBuilds: state.failedCount,
@@ -6373,6 +6378,32 @@ async function applySpecStatusActionInline(
   }
   if (status === undefined && phases.length === 0 && critical === undefined && deferred === undefined && shortCircuit === undefined) {
     return logInvalid("no fields to flip (need status / phases / critical / deferred / shortCircuit)");
+  }
+  // director-trust-phase-pr-provenance Phase 1: directors do NOT stamp `pr` tags directly — the merge hook
+  // is the only authoritative writer of `phase_states[i].pr`. So a director-emitted phase flip to `shipped`
+  // would create a tagless ✅ phase (drift suspect) on the board — exactly what this spec is removing. Reject
+  // any such flip and point at `request-audit` (Phase 2), which queues `audit-spec-shipped-state` to re-stamp
+  // phases with real provenance (or drop phantom ones). The whole-spec status flip to `shipped` is similarly
+  // refused UNLESS it's paired with `shortCircuit:true` — short-circuit has its own provenance
+  // (`flags.short_circuit` + `short_circuit_reason`) and is the legitimate "we changed our mind, close it
+  // cleanly" path, distinct from claiming the phases were built.
+  const phaseShippedFlip = phases.find((p) => p.status === "shipped");
+  if (phaseShippedFlip) {
+    return logInvalid(
+      `phase #${phaseShippedFlip.index + 1} → shipped rejected: directors don't stamp PR provenance — the merge ` +
+        `hook does. A director-flipped ✅ phase has no \`pr\` tag and reads as drift on the board. If the work ` +
+        `actually shipped via another PR/spec, emit a \`request-audit\` action to queue audit-spec-shipped-state ` +
+        `(it walks merged PRs + code-on-main and re-stamps phases with real provenance). If you want to close the ` +
+        `spec without all phases shipping, use shortCircuit:true.`,
+    );
+  }
+  if (status === "shipped" && shortCircuit !== true) {
+    return logInvalid(
+      `status → shipped rejected: directors don't stamp PR provenance — the merge hook does. A director-flipped ` +
+        `card-status to shipped without shortCircuit:true reads as drift on the board. Use \`request-audit\` to ` +
+        `re-stamp phases with real provenance, or shortCircuit:true (+ reason) to close the spec cleanly without ` +
+        `claiming the phases were built.`,
+    );
   }
   // When shortCircuit=true is set without an explicit status, force the status flip to 'shipped' — the
   // semantics of short-circuit ARE "close it shipped without all phases shipping," so a bare

@@ -69,6 +69,12 @@ import {
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
 import { markSpecCardStatus, type SpecCardFlags } from "@/lib/spec-card-state";
+import {
+  driftSuspectPhases,
+  isCardFullyShippedWithProvenance,
+  phaseHasProvenance,
+  provenanceShippedCount,
+} from "@/lib/spec-phase-provenance";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { getPersona } from "@/lib/agents/personas";
@@ -456,6 +462,62 @@ export async function enqueuePlatformDirectorJobs(admin: Admin): Promise<{ enque
 // progress, and the per-spec blocker gate keeps it from queuing anything out of sequence.
 
 /**
+ * director-trust-phase-pr-provenance Phase 1 — when an escort lane spots a `status='shipped'` card that
+ * lacks per-phase merge-hook provenance (`pr` tags), surface it to the CEO ONCE so the canonical miss
+ * (5 phases live on main, board said `planned`) can't recur silently. The merge hook is the only authoritative
+ * writer of `pr`, so a tagless shipped phase means we cannot prove the merge landed. Deduped by `drift:{slug}`
+ * (one ping per spec until acted on); the activity row carries the suspect phase indices for the audit ledger.
+ *
+ * Phase 2 will give Ada a `request-audit` action so she can self-serve the cleanup; until then this is the
+ * surface that gets the drift in front of the CEO. Best-effort; never blocks the calling lane.
+ */
+async function flagShippedWithoutProvenance(
+  admin: Admin,
+  workspaceId: string,
+  card: SpecCard,
+  lane: string,
+): Promise<void> {
+  // SpecPhase has no `index` field (phases are array-positioned), so derive indices from the parent array.
+  const indices: number[] = [];
+  const titles: string[] = [];
+  card.phases.forEach((p, i) => {
+    if (p.status === "shipped" && (p.pr ?? null) === null) {
+      indices.push(i);
+      if (p.title) titles.push(p.title);
+    }
+  });
+  const diagnosis =
+    `Spec "${card.slug}" is rolled up as shipped on the board, but ` +
+    `${indices.length} phase(s) are tagged ✅ WITHOUT a merge-hook PR + SHA — drift suspect. ` +
+    `Indices: ${indices.map((i) => `#${i + 1}`).join(", ") || "—"}${titles.length ? ` (${titles.join(" · ")})` : ""}. ` +
+    `The merge hook is the only authoritative writer of \`pr\`, so a tagless ✅ phase means we can't prove ` +
+    `the merge landed (e.g. a director hand-flip or an old reconciler pass). Run \`audit-spec-shipped-state\` ` +
+    `on this slug to re-stamp the real phases with provenance, or drop the phantom phase if its work shipped elsewhere.`;
+  try {
+    await escalateDiagnosisToCeo(admin, {
+      workspaceId,
+      specSlug: card.slug,
+      title: `Drift suspect: ${card.slug}`,
+      diagnosis,
+      dedupeKey: `drift:${card.slug}`,
+      deepLink: `/dashboard/roadmap/${card.slug}`,
+      escalationKind: "drift_suspect",
+      metadata: { lane, drift_suspect_phase_indices: indices, drift_suspect_phase_titles: titles, autonomous: true },
+    });
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: PLATFORM,
+      actionKind: "drift_suspect_flagged",
+      specSlug: card.slug,
+      reason: `Shipped rollup with ${indices.length} tagless ✅ phase(s) — drift suspect; audit recommended.`,
+      metadata: { lane, drift_suspect_phase_indices: indices, drift_suspect_phase_titles: titles, autonomous: true },
+    });
+  } catch {
+    /* best-effort surface; the next escort/groom pass will re-detect and re-attempt */
+  }
+}
+
+/**
  * Resolve the (effectively single-tenant) workspace the escort queues builds under — ride the latest
  * agent_jobs row's workspace, else the oldest workspace. Mirrors coverage-register's resolveWorkspace.
  */
@@ -545,7 +607,15 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
     const inFlight: string[] = [];
     const escalated: string[] = [];
     for (const card of goalSpecs(goal, specBySlug)) {
-      if (card.status === "shipped") continue; // already landed
+      // director-trust-phase-pr-provenance Phase 1: a `shipped` rollup is only "really done" when every shipped
+      // phase carries the merge hook's `pr` stamp. A tagless shipped phase is DRIFT SUSPECT — the escort surfaces
+      // it to the CEO (deduped) instead of skipping past it, so the canonical miss (5 phases live on main, board
+      // said `planned`) can't recur silently.
+      if (isCardFullyShippedWithProvenance(card)) continue; // really landed (status=shipped + every phase has pr)
+      if (card.status === "shipped") {
+        await flagShippedWithoutProvenance(admin, workspaceId, card, `escortApprovedGoals (${goal.title})`);
+        continue;
+      }
       if (card.status === "deferred") continue; // parked — every auto-build lane skips a deferred spec until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
       if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
@@ -672,7 +742,14 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
   const escalated: string[] = [];
 
   for (const card of specs) {
-    if (card.status === "shipped") continue; // already landed
+    // director-trust-phase-pr-provenance Phase 1: skip only on a FULLY-shipped-with-provenance card; if the
+    // rollup says shipped but a phase lacks `pr`, that's drift suspect — surface to the CEO (deduped), don't
+    // silently skip past it.
+    if (isCardFullyShippedWithProvenance(card)) continue; // really landed (status=shipped + every phase has pr)
+    if (card.status === "shipped") {
+      await flagShippedWithoutProvenance(admin, workspaceId, card, "escortFixSpecs");
+      continue;
+    }
     if (card.status === "deferred") continue; // parked — a deferred fix spec is skipped until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
     if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
     if (card.autoBuild === false) continue; // owner opted out of auto-build
@@ -681,10 +758,10 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     // The gap: an UNSTARTED (no ✅ phase) spec carrying a Repair-signature (an authored fix for a real bug)
     // that THIS director drives (its owning department-director isn't live yet — owner-agnostic keystone routing,
     // Phase 2). The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so gating on
-    // `phases.length === 0` skipped them; gate on `counts.shipped === 0` instead so a fix spec with 0, 1, or N ⏳
-    // phases (but nothing landed) is escorted, and the build chain carries its phases to completion. An unstarted
-    // spec with NO repair signature is a new feature — the init lane handles it (with a soundness check), never here.
-    const isFixSpec = card.counts.shipped === 0 && card.repairSignature && platformDrivesSpec(card.owner, chart, autonomy);
+    // `phases.length === 0` skipped them; gate on `provenanceShippedCount === 0` instead so a fix spec with 0,
+    // 1, or N ⏳ phases (but nothing landed-WITH-PROVENANCE) is escorted; a tagless ✅ phase doesn't count as
+    // "started." An unstarted spec with NO repair signature is a new feature — the init lane handles it.
+    const isFixSpec = provenanceShippedCount(card) === 0 && card.repairSignature && platformDrivesSpec(card.owner, chart, autonomy);
     if (!isFixSpec) continue;
 
     const state = await specBuildState(admin, workspaceId, card.slug);
@@ -970,9 +1047,17 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
       result.skipped++;
       continue;
     }
+    // director-trust-phase-pr-provenance Phase 1: only skip on a FULLY-shipped-with-provenance card. A
+    // `status='shipped'` rollup without every phase carrying a `pr` stamp is DRIFT SUSPECT (the merge hook
+    // is the only authoritative `pr` writer) — flag it so the next groom/init/CEO touch can audit it,
+    // instead of silently treating it as done.
+    if (isCardFullyShippedWithProvenance(card)) {
+      // The spec really shipped (every phase has its merge-hook PR + SHA) — nothing for the escort to drive.
+      result.skipped++;
+      continue;
+    }
     if (card.status === "shipped") {
-      // The spec already shipped — nothing for the escort to drive. (A flags.deferred would surface as
-      // status='deferred' via overlayDbStateOnSpec; we skip those too in the deferred check below.)
+      await flagShippedWithoutProvenance(admin, workspaceId, card, "escortSweep");
       result.skipped++;
       continue;
     }
@@ -2774,7 +2859,12 @@ export interface GroomCandidate {
   title: string;
   owner?: string;
   parent?: string;
-  shippedPhases: string[]; // titles of the ✅ phases (context for the investigation)
+  shippedPhases: string[]; // titles of the ✅ phases WITH merge-hook provenance (real shipped, ready to fold)
+  /** director-trust-phase-pr-provenance Phase 1: ✅ phases that LACK a `pr` tag — DRIFT SUSPECT. Surfaced
+   *  distinctly in the groom brief so Ada doesn't classify a fully-shipped-but-tagless spec as ready-to-fold;
+   *  the merge hook is the only authoritative `pr` writer, so a tagless ✅ phase means we can't prove the
+   *  merge landed. Titles only (matches the brief shape). */
+  driftSuspectPhases: string[];
   remainingPhases: string[]; // titles of the leftover ⏳ phases (what gets classified)
   raw: string; // the parent spec's full markdown — the investigation reads it + (on a split) rewrites it
   /** prior failed build attempts (no in-flight) — the loop-guard count the continue path reads. */
@@ -2826,11 +2916,14 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
   if (target <= 0) return [];
 
   const { specs } = await getRoadmap();
+  // director-trust-phase-pr-provenance Phase 1: a candidate is partially shipped iff ≥1 phase landed WITH
+  // merge-hook provenance AND ≥1 phase is planned. A tagless ✅ phase does NOT count as "landed" — counting
+  // it would let a drift-suspect spec re-fire as a continue candidate every pass instead of being audited.
   const partial = specs.filter(
     (s) =>
-      s.status !== "shipped" &&
+      !isCardFullyShippedWithProvenance(s) &&
       s.status !== "deferred" && // parked — grooming skips a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
-      s.counts.shipped >= 1 && // at least one phase has landed
+      provenanceShippedCount(s) >= 1 && // at least one phase has landed WITH a pr tag (real shipped)
       s.counts.planned >= 1 && // at least one ⏳ phase remains
       s.counts.in_progress === 0 && // no 🚧 phase (a phase actively building) — that's an active build
       s.autoBuild !== false, // owner opted out of auto-build → leave it under manual control (mirrors the escort)
@@ -2849,7 +2942,10 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
       title: s.title,
       owner: s.owner,
       parent: s.parent,
-      shippedPhases: s.phases.filter((p) => p.status === "shipped").map((p) => p.title),
+      // director-trust-phase-pr-provenance Phase 1: split ✅ phases into REAL (with `pr`) vs DRIFT SUSPECT
+      // (no `pr`) so the brief surfaces them distinctly. A tagless ✅ phase is not "ready to fold."
+      shippedPhases: s.phases.filter(phaseHasProvenance).map((p) => p.title),
+      driftSuspectPhases: driftSuspectPhases(s).map((p) => p.title),
       remainingPhases: s.phases.filter((p) => p.status === "planned").map((p) => p.title),
       raw: got.raw,
       failedBuilds: state.failedCount,
@@ -2890,7 +2986,16 @@ export function groomInvestigationPrompt(c: GroomCandidate): string {
     "",
     `Spec: ${c.slug} — ${c.title}`,
     `Owner: ${c.owner ?? "—"} · Parent: ${c.parent ?? "—"}`,
-    `Shipped phases (✅): ${c.shippedPhases.join(" · ") || "—"}`,
+    `Shipped phases (✅, with merge PR + SHA): ${c.shippedPhases.join(" · ") || "—"}`,
+    // director-trust-phase-pr-provenance Phase 1: a tagless ✅ phase (status=shipped, no `pr`) is DRIFT SUSPECT —
+    // the merge hook is the only authoritative `pr` writer, so we cannot prove the merge landed. Surface these
+    // distinctly so you don't classify a partially-tagless spec as ready-to-fold (a fully-shipped spec is the
+    // ONLY fold-ready state — every ✅ phase must carry its merge PR). If drift-suspect phases exist, the
+    // RIGHT verdict is `escalate` (the CEO can audit via the request-audit lane) UNLESS the leftover ⏳
+    // phases are genuinely phantom AND you can name which merge shipped each suspect phase.
+    c.driftSuspectPhases.length
+      ? `Drift-suspect phases (✅ but no merge PR — provenance missing): ${c.driftSuspectPhases.join(" · ")}`
+      : "",
     `Remaining phases (⏳): ${c.remainingPhases.join(" · ") || "—"}`,
     c.failedBuilds ? `Note: ${c.failedBuilds} prior build attempt(s) failed${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}.` : "",
     "",
@@ -2985,6 +3090,20 @@ export function validateFoldNow(c: GroomCandidate, v: GroomVerdict): { ok: true 
   if (!c.remainingPhases.length) return { ok: false, error: "no remaining ⏳ phases to flip" };
   const reason = String(v.reasoning ?? "").trim();
   if (reason.length < DIRECTOR_VERDICT_MIN_REASON_LEN) return { ok: false, error: `fold_now reason is empty or under ${DIRECTOR_VERDICT_MIN_REASON_LEN} chars` };
+  // director-trust-phase-pr-provenance Phase 1: fold_now ALSO flips the leftover ⏳ phases to ✅ in the DB
+  // with no `pr` tag (director:platform actor), which would CREATE the very drift we just refused to skip
+  // past. So fold_now is only safe when the CARD'S ALREADY-✅ phases all carry provenance — every drift
+  // suspect must be resolved via the request-audit lane FIRST. If the suspect set is non-empty, escalate
+  // instead of folding so the CEO can audit (the audit re-stamps real phases + drops phantom ones).
+  if (c.driftSuspectPhases.length) {
+    return {
+      ok: false,
+      error:
+        `fold_now blocked: ${c.driftSuspectPhases.length} ✅ phase(s) are drift suspect (no merge PR + SHA): ` +
+        `${c.driftSuspectPhases.join(", ")}. Resolve via request-audit before folding — fold_now would stamp ` +
+        `more tagless ✅ phases on top of existing drift.`,
+    };
+  }
   return { ok: true };
 }
 
@@ -3158,11 +3277,16 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
   if (!workspaceId) return [];
 
   const [{ specs }, filters] = await Promise.all([getRoadmap(), getRoadmapFilters()]);
+  // director-trust-phase-pr-provenance Phase 1: the "already shipped, skip" check requires every phase to
+  // carry a `pr` tag (the merge hook is the only authoritative writer). A tagless ✅ phase is DRIFT SUSPECT,
+  // NOT proof the work landed — counting it as "started" would let init silently bypass a spec that hasn't
+  // really begun. Use `isCardFullyShippedWithProvenance` instead of `status !== "shipped"`, and the
+  // provenance-shipped count for the "unstarted" gate.
   const unstarted = specs.filter(
     (s) =>
-      s.status !== "shipped" &&
+      !isCardFullyShippedWithProvenance(s) && // really shipped means every phase has its merge PR + SHA
       s.status !== "deferred" && // parked — the initiation lane never starts a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
-      s.counts.shipped === 0 && // unstarted — no phase has landed
+      provenanceShippedCount(s) === 0 && // unstarted — no phase has landed WITH provenance (tagless ✅ doesn't count)
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
       platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it ("first live boss else up")
