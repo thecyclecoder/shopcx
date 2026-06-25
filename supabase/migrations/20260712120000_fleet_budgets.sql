@@ -35,9 +35,10 @@ create table if not exists public.fleet_budgets (
   -- lane default, since a subscription has no per-token bill).
   usd_ceiling_cents numeric check (usd_ceiling_cents is null or usd_ceiling_cents > 0),
   notes text,
-  -- Owner who last edited (workspace_members.user_id) — best-effort attribution,
-  -- nullable so the seeded defaults can land with no editor.
-  updated_by uuid references public.workspace_members(user_id) on delete set null,
+  -- Owner who last edited (auth.users.id) — best-effort attribution, nullable so the
+  -- seeded defaults can land with no editor. References auth.users directly because
+  -- workspace_members has no unique single-column referent (only (workspace_id, user_id)).
+  updated_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   -- Exactly one of (kind, owner_function) must be set — never both, never neither.

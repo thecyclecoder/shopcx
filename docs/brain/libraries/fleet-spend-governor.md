@@ -53,7 +53,7 @@ async function upsertFleetBudget(p: UpsertBudgetParams): Promise<FleetBudget>
 
 Owner-editable upsert. Supply exactly **one** of (`kind`, `ownerFunction`) — both / neither throw. Matches the partial unique indexes (`fleet_budgets_kind_uniq` / `fleet_budgets_function_uniq`) — implemented as SELECT + INSERT/UPDATE since PostgREST `upsert` doesn't support a partial unique target. Service-role only.
 
-`UpsertBudgetParams`: `{ workspaceId?, kind?, ownerFunction?, windowDays?, tokenCeiling?, usdCeilingCents?, notes?, updatedBy? }`. `updatedBy` is the `workspace_members.user_id` of the editor (best-effort attribution).
+`UpsertBudgetParams`: `{ workspaceId?, kind?, ownerFunction?, windowDays?, tokenCeiling?, usdCeilingCents?, notes?, updatedBy? }`. `updatedBy` is the `auth.users.id` of the editor (best-effort attribution).
 
 ### `deleteFleetBudget` — function
 

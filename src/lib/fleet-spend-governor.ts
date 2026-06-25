@@ -50,7 +50,7 @@ export interface UpsertBudgetParams {
   tokenCeiling?: number | null;
   usdCeilingCents?: number | null;
   notes?: string | null;
-  /** workspace_members.user_id of the editor — best-effort attribution. */
+  /** auth.users.id of the editor — best-effort attribution. */
   updatedBy?: string | null;
 }
 

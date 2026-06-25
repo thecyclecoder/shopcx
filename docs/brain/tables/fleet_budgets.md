@@ -27,7 +27,7 @@ Units mirror [[agent_job_costs]] / [[../libraries/fleet-cost]]: **tokens** for t
 | `token_ceiling` | `bigint?` | TOKEN ceiling for the window (input + output + cache) · `> 0` when set · `NULL` = no token guardrail |
 | `usd_ceiling_cents` | `numeric?` | USD ceiling in CENTS — meaningful only where genuinely API-billed rows contribute · `> 0` when set · `NULL` = no $ guardrail (the Max-lane default) |
 | `notes` | `text?` | owner notes — surfaced on the editor |
-| `updated_by` | `uuid?` | → `workspace_members.user_id` · ON DELETE SET NULL · `NULL` for the seeded defaults |
+| `updated_by` | `uuid?` | → `auth.users.id` · ON DELETE SET NULL · `NULL` for the seeded defaults (references `auth.users` directly — `workspace_members` has no unique single-column referent) |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | default `now()` · auto-bumped by `fleet_budgets_touch_updated_at` trigger |
 
