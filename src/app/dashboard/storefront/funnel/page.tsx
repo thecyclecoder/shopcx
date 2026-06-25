@@ -306,7 +306,7 @@ export default function StorefrontFunnelPage() {
             <RunningExperimentsPanel rows={data.runningExperiments} />
           )}
 
-          {data.leverImportance && data.leverImportance.length > 0 && (
+          {data.leverImportance && (
             <LeverImportancePanel rows={data.leverImportance} />
           )}
 
@@ -871,6 +871,11 @@ function LeverImportancePanel({ rows }: { rows: NonNullable<FunnelData["leverImp
           Learned lever importance per (product × lander × audience) — updated by each experiment, win or loss.
         </span>
       </div>
+      {rows.length === 0 ? (
+        <p className="text-xs text-zinc-400">
+          No learnings yet — every concluded experiment commits one here, win or loss.
+        </p>
+      ) : (
       <div className="overflow-x-auto">
         <table className="w-full min-w-[640px] text-sm">
           <thead>
@@ -920,6 +925,7 @@ function LeverImportancePanel({ rows }: { rows: NonNullable<FunnelData["leverImp
           </tbody>
         </table>
       </div>
+      )}
     </section>
   );
 }
