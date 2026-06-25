@@ -698,6 +698,36 @@ export async function applyMergedBuildEffects(
       phaseStates,
       prNumber: pr,
     });
+    // spec-authoring-writes-db-and-worker-materialize Phase 2: ALSO write the per-phase PR provenance to
+    // `public.spec_phases` (the future-canonical surface). Double-write — `spec_card_state.phase_states[i]`
+    // above stays the read-path until [[spec-readers-from-db-retire-parser]] retires it. The DB rollup
+    // trigger keeps `specs.status` consistent on each phase write — no app-side rollup needed here.
+    if (shipped.size) {
+      try {
+        const admin = createAdminClient();
+        const { data: specRow } = await admin
+          .from("specs")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("slug", slug)
+          .maybeSingle();
+        const specId = (specRow as { id: string } | null)?.id;
+        if (specId) {
+          await Promise.all(
+            [...shipped].map(async (idx) => {
+              await admin
+                .from("spec_phases")
+                .update({ status: "shipped", pr, merge_sha: sha, updated_at: new Date().toISOString() })
+                .eq("spec_id", specId)
+                .eq("position", idx + 1);
+            }),
+          );
+        }
+      } catch {
+        /* best-effort — spec_card_state.phase_states above is still the read-path; the row dual-write is
+           reconciled on the next author/edit pass via specs-table.upsertSpec. */
+      }
+    }
     if (rolled === "shipped") {
       await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
       await autoQueueUnblockedBy(workspaceId, slug);

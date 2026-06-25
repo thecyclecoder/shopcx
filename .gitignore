@@ -47,6 +47,10 @@ next-env.d.ts
 twilio-recovery.txt
 .claude/worktrees/
 
+# worker-materialized spec body the build-spec skill consumes
+# (spec-authoring-writes-db-and-worker-materialize Phase 2 — see src/lib/build-spec-materializer.ts).
+.box/
+
 # ad-tool example render assets (binary, regenerated locally)
 remotion/public/adbuild/
 
