@@ -1,4 +1,4 @@
-# Reset subscriptions.last_payment_status on internal-sub recovery so portal change-date/frequency unlock
+# ✅ Reset subscriptions.last_payment_status on internal-sub recovery so portal change-date/frequency unlock
 
 **Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** `efe0d2ad-3752-495a-9b18-75ba13056678`
 
@@ -10,9 +10,19 @@ subscriptions.last_payment_status is only flipped to 'succeeded' by the Appstle 
 **Likely target:** `src/lib/inngest/internal-subscription-renewals.ts (add last_payment_status: 'succeeded' to the advance-next-billing-date update at ~L706); src/lib/inngest/internal-dunning.ts (extend closeInternalDunningOnSuccess at ~L197–L215 to also update the subscription row's last_payment_status to 'succeeded' alongside the dunning_cycle update); add scripts/backfill-internal-sub-last-payment-status.ts following the backfill skill conventions (chunked, --apply gated) to clear last_payment_status='failed' on rows where is_internal=true AND status='active' AND the most-recent dunning_cycles row for that subscription_id is status='recovered' AND there is at least one paid order on that subscription_id after dunning_cycles.recovered_at; cross-check that no other writer (re-import paths in src/lib/inngest/import-subscriptions.ts:299) is going to re-set 'failed' on the same rows.`
 
 ## Phases
-- **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on `npx tsc --noEmit`.
+- **P1 ✅ — implement the fix** — landed `last_payment_status: 'succeeded'` on the internal-renewal success update in `src/lib/inngest/internal-subscription-renewals.ts` (`advance-next-billing-date` step); extended `closeInternalDunningOnSuccess` in `src/lib/inngest/internal-dunning.ts` to also clear it (defence-in-depth backstop for non-renewal recovery paths); authored `scripts/backfill-internal-sub-last-payment-status.ts` (chunked, --apply-gated, idempotent) to clear stuck `'failed'` rows on internal subs whose most-recent dunning cycle is `recovered` AND have a paid order after `recovered_at`; documented the dual writers on `docs/brain/tables/subscriptions.md`. Confirmed no internal-failure writer re-sets `'failed'` (the internal-dunning failure path only writes `next_billing_date` / `status`, not `last_payment_status`). Gated on `npx tsc --noEmit`.
 
 ## Verification
-- Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).
+- Open a SQL probe for a known affected sub (Annmarie `496e3f53`, ticket `efe0d2ad`): before the backfill runs in prod, confirm `subscriptions.last_payment_status='failed'`, `subscriptions.is_internal=true`, `subscriptions.status='active'`, the most-recent `dunning_cycles` row `status='recovered'`, and at least one paid order on the sub after `dunning_cycles.recovered_at` → expect the row qualifies as a candidate.
+- Run the backfill in dry-run (`npx tsx scripts/backfill-internal-sub-last-payment-status.ts`) → expect a `Candidates:` count, a `to clear:` resolved count, and ≥ 5 sample rows printed; nothing mutated.
+- Run the backfill with `--apply` (`npx tsx scripts/backfill-internal-sub-last-payment-status.ts --apply`) → expect `✓ cleared N rows.` matching the dry-run resolved count.
+- Re-probe Annmarie's `496e3f53` row after apply → expect `subscriptions.last_payment_status='succeeded'`.
+- In the Superfoods customer portal, log in as a recovered-internal-sub customer (e.g. Annmarie) and attempt change-date on the recovered sub → expect HTTP 200 (no `payment_failed_update_blocked` 409 from `src/lib/portal/handlers/change-date.ts:50`).
+- Same customer, attempt change-frequency → expect HTTP 200 (no `payment_failed_update_blocked` 409 from `src/lib/portal/handlers/frequency.ts:39`).
+- Load the same sub's `/api/portal/subscription-detail` → expect `needsAttention: false` (not flagged).
+- Load `/api/portal/subscriptions` for the same customer → expect the sub no longer appears in the `needsAttention` bucket.
+- Fire a fresh internal renewal that succeeds for a previously-failed sub (via the `internal-subscription/renewal-attempt` Inngest event or the daily renewal cron picking up the row): inspect the sub row after the renewal lands → expect `last_payment_status='succeeded'` was written by the `advance-next-billing-date` step (not just by the historical backfill).
+- Force-close a dunning cycle from a non-renewal recovery path (call `closeInternalDunningOnSuccess` directly from a script for a test sub) → expect both `dunning_cycles.status='recovered'` AND `subscriptions.last_payment_status='succeeded'` after the call (defence-in-depth backstop).
+- Reproduce the original `efe0d2ad` escalation flow against the analyzer with Annmarie's now-cleared sub → expect the ticket would NOT re-escalate (the symptom is gone, so escalation-triage has nothing to flag).
 
 > Authored by the box escalation-triage routine (solver+skeptic quorum) from escalated ticket `efe0d2ad-3752-495a-9b18-75ba13056678`. Commission the build from the Roadmap board (owner = cs).

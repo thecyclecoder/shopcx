@@ -705,6 +705,11 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       // shouldn't recur.
       const update: Record<string, unknown> = {
         next_billing_date: next.toISOString(),
+        // Clear the stale failed flag — internal subs never fire the Appstle
+        // billing-success webhook, so without this the portal change-date /
+        // change-frequency guards stay locked forever after the first failure
+        // (escalated ticket efe0d2ad — Annmarie).
+        last_payment_status: "succeeded",
         // Keep only the coupon codes that still have cycles left — codes that
         // hit their one-time / cycle limit this charge are dropped off the sub.
         // Stored as bare { code } references; the value is re-read live next time.
