@@ -29,35 +29,28 @@ const nextConfig: NextConfig = {
   // Inngest render step dynamic-imports it to call AWS Lambda. Without this the
   // function throws "Cannot find package '@remotion/lambda'" at runtime.
   serverExternalPackages: ["@remotion/lambda", "@remotion/lambda-client", "ffmpeg-static"],
-  // The /dashboard/roadmap server component reads docs/brain/specs (+ lifecycles) at
-  // request time. Vercel's file tracer prunes files nothing imports, so include the
-  // brain markdown explicitly or the route renders empty on its own data in production.
+  // The /dashboard/roadmap server component reads docs/brain (lifecycles, archive, goals, functions) at
+  // request time — the specs themselves come from Supabase now (spec-readers-from-db-retire-parser).
+  // Vercel's file tracer prunes files nothing imports, so include the brain markdown explicitly or the
+  // route renders empty on its own data in production.
   outputFileTracingIncludes: {
     // The goal/function layer reads docs/brain/{goals,functions} too — trace them into every
     // roadmap route that resolves the taxonomy (board, map, spec/goal/function detail). Vercel
     // prunes docs/brain otherwise. See docs/brain/specs/goal-decomposition-engine.md.
-    "/dashboard/roadmap": ["./docs/brain/specs/**/*.md", "./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md", "./docs/brain/archive.d/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/map": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/goals": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md"],
-    "/dashboard/roadmap/goals/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/functions/[slug]": ["./docs/brain/specs/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    // The Developer → Spec Tests page (spec-test-agent) reads specs + archive.d to list shipped-unverified
-    // specs (getRoadmap / listArchivedSlugs); the board card chip needs them too (already covered above).
-    "/dashboard/developer/spec-tests": ["./docs/brain/specs/**/*.md", "./docs/brain/archive.d/**/*.md"],
+    "/dashboard/roadmap": ["./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md", "./docs/brain/archive.d/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/[slug]": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/map": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/goals": ["./docs/brain/goals/**/*.md"],
+    "/dashboard/roadmap/goals/[slug]": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/functions/[slug]": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    // The Developer → Spec Tests page (spec-test-agent) reads archive.d to list shipped-unverified specs
+    // (getRoadmap is DB-driven now — spec-readers-from-db-retire-parser; listArchivedSlugs still hits disk).
+    "/dashboard/developer/spec-tests": ["./docs/brain/archive.d/**/*.md"],
     "/dashboard/brain": ["./docs/brain/**/*.md"],
     "/dashboard/brain/[...slug]": ["./docs/brain/**/*.md"],
     // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into
     // its Opus system prompt for grounding; trace the markdown into its bundle.
     "/api/roadmap/chat": ["./docs/brain/**/*.md"],
-    // The build dispatch POST runs the spec-blockers enqueue gate (queueRoadmapBuild → getSpecBlockers →
-    // getRoadmap reads docs/brain/specs at request time). Trace the specs in or the gate sees zero blockers
-    // in prod and silently passes. See docs/brain/specs/spec-blockers.md.
-    "/api/roadmap/build": ["./docs/brain/specs/**/*.md"],
-    // The Slack Roadmap Console renders the board/detail from the brain markdown (getRoadmap /
-    // getSpec) inside the slash-command + Inngest-watcher bundles. Trace the specs in or they
-    // render empty in prod. See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md.
-    "/api/slack/events": ["./docs/brain/specs/**/*.md"],
     // The interactions handler builds the App Home roadmap view (slack-home → getRoadmap) after a
     // queued build, so it reads the brain specs too. See docs/brain/specs/slack-roadmap-home.md.
     "/api/slack/interactions": ["./docs/brain/specs/**/*.md"],
