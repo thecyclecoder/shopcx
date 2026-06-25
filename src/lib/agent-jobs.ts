@@ -102,7 +102,7 @@ export interface PendingAction {
  *   conflicts, tsc-gate + push, or rebuild-on-main / surface to the owner)
  * | 'platform-director' (platform-director-agent — the first live director: investigate a Platform-routed
  *   Approval Request → auto-approve within the leash, else escalate to the CEO). */
-export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review" | "proposed-model-tier";
+export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
 
 export interface AgentJob {
   id: string;

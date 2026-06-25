@@ -6,18 +6,18 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 221 |
-| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 85 |
-| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
-| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 293 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 30 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 225 |
+| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 84 |
+| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 22 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 301 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 32 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 31 + README |
-| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 59 + 38 settings |
+| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 60 + 38 settings |
 | [functions/](functions/) | One page per org-chart function (Growth, CMO, Retention, CFO, Logistics, CS — the CEO-mode directors — plus Platform/Eng, the build org) — the permanent owner of work. Lists its perpetual mandates + the specs/goals it owns. Doubles as the CEO-mode director-agent charter. | 5 |
 | [goals/](goals/) | One page per finite company goal / BHAG (e.g. CEO mode) — outcome, success metric, and the milestone → spec decomposition. Rolls up to 100% then closes. | 6 |
-| [specs/](specs/) | Roadmap specs for in-flight or planned features. Every spec declares an **owner** (one function) + **parent** (a function mandate or a goal milestone). When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 58 |
+| [specs/](specs/) | Roadmap specs for in-flight or planned features. Every spec declares an **owner** (one function) + **parent** (a function mandate or a goal milestone). When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 57 |
 | (root) | Cross-cutting reference: [customer-voice.md](customer-voice.md), [operational-rules.md](operational-rules.md), [ui-conventions.md](ui-conventions.md), [orchestrator-tools.md](orchestrator-tools.md), [project-management.md](project-management.md), [archive.md](archive.md) (verified/retired specs) | 6 |
 
 **How project management works in the brain** → see [project-management.md](project-management.md). The work hierarchy is **Function → (Mandate | Goal) → Spec → Phase → Build** — no orphan specs. Specs go in `specs/`, phases use ⏳ 🚧 ✅ emoji, lifecycle pages carry "Status / open work" blocks for shipped state. Spawn a session: `/goal do everything in docs/brain/specs/{slug}.md`.

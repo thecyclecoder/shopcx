@@ -298,7 +298,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -2045,6 +2045,120 @@ async function runCoverageRegisterJob(job: Job) {
   console.log(`${tag} no owner decision yet — parked as needs_approval`);
 }
 
+// director-trust-phase-pr-provenance Phase 2 — a kind='audit-spec-shipped-state' job is the per-slug
+// drift-cleanup audit, enqueued by a director's `request-audit` action. Deterministic: walks
+// spec_status_history for `merge:<sha>` rows + git log on origin/main to resolve `<sha>` → PR #, then
+// re-stamps spec_card_state.phase_states with proper `{pr, merge_sha}` provenance (or regresses a
+// tagless ✅ phase to `planned` if no merge evidence exists). Writes a director_activity row with the
+// verdict so the activity feed shows the outcome. No PR / no worktree / no LLM — fast and read-only on
+// origin/main + the DB. See docs/brain/specs/director-trust-phase-pr-provenance.md.
+async function runAuditSpecShippedStateJob(job: Job) {
+  const tag = `[audit-spec-shipped-state:${job.id.slice(0, 8)}]`;
+  const slug = job.spec_slug;
+  if (!slug) {
+    await update(job.id, { status: "failed", error: "audit-spec-shipped-state job missing spec_slug" });
+    return;
+  }
+  let instr: { requested_by?: string; reason?: string } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch { /* non-JSON instructions are fine */ }
+  const requestedBy = instr.requested_by || "unknown";
+  const requestReason = instr.reason || "";
+  console.log(`${tag} auditing ${slug} (requested by ${requestedBy})`);
+
+  // Pre-resolve SHA → PR # from git log on origin/main. The squash-merge subject ends with "(#NNN)";
+  // walk recent claude/* merges (cap a large but bounded window) so the audit's PR-tag stamp is
+  // grounded in the actual git log, not a guess. The deployed runtime has no checkout, so this lookup
+  // only runs on the box worker.
+  const shaToPr = new Map<string, number>();
+  try {
+    sh("git", ["fetch", "origin", "main"], { timeout: 60_000 });
+    const r = sh("git", ["log", "origin/main", "--format=%H %s", "-n", "5000"], { timeout: 60_000 });
+    if (r.code === 0) {
+      for (const line of r.out.split("\n")) {
+        const m = line.match(/^([0-9a-f]{7,40})\s+.*\(#(\d+)\)\s*$/);
+        if (m) shaToPr.set(m[1], parseInt(m[2], 10));
+      }
+    }
+  } catch (e) {
+    console.warn(`${tag} git log lookup failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  try {
+    const audit = await import("../src/lib/spec-audit");
+    const verdict = await audit.auditSpecShippedState(job.workspace_id, slug, {
+      lookupPrForSha: (sha: string): number | null => {
+        // Match full SHA or shortest distinct prefix; the merge hook stamps the full 40-char SHA, so a
+        // direct lookup almost always hits.
+        const direct = shaToPr.get(sha);
+        if (direct) return direct;
+        // Fall back to prefix scan (≤7-char SHAs in older history).
+        for (const [k, v] of shaToPr) if (k.startsWith(sha) || sha.startsWith(k)) return v;
+        return null;
+      },
+    });
+    const changedPhases = verdict.phases.filter((p: typeof verdict.phases[number]) => p.changed);
+    const stamped = verdict.phases.filter((p: typeof verdict.phases[number]) => p.new_pr !== null && p.new_pr !== p.prior_pr);
+    const regressed = verdict.phases.filter((p: typeof verdict.phases[number]) => p.prior_status === "shipped" && p.new_status === "planned");
+    const verdictLine =
+      `audit of ${slug}: ${verdict.prior_rollup ?? "(none)"} → ${verdict.rollup_status} · ` +
+      `${changedPhases.length}/${verdict.phases.length} phase(s) changed · ${stamped.length} stamped with provenance · ` +
+      `${regressed.length} regressed to planned`;
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: requestedBy.startsWith("director:") ? requestedBy.slice("director:".length) : "platform",
+        actionKind: "audit_spec_shipped_state_completed",
+        specSlug: slug,
+        reason: requestReason ? `${requestReason} — ${verdictLine}` : verdictLine,
+        metadata: {
+          job_id: job.id,
+          requested_by: requestedBy,
+          rollup_status: verdict.rollup_status,
+          prior_rollup: verdict.prior_rollup,
+          phases: verdict.phases.map((p: typeof verdict.phases[number]) => ({
+            index: p.index,
+            title: p.title,
+            prior_status: p.prior_status,
+            prior_pr: p.prior_pr,
+            new_status: p.new_status,
+            new_pr: p.new_pr,
+            new_merge_sha: p.new_merge_sha,
+            changed: p.changed,
+            evidence: p.evidence,
+          })),
+          notes: verdict.notes,
+          autonomous: true,
+        },
+      });
+    } catch (e) {
+      console.warn(`${tag} activity write failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await update(job.id, {
+      status: "completed",
+      log_tail: verdictLine.slice(-2000),
+    });
+    console.log(`${tag} ✓ ${verdictLine}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: requestedBy.startsWith("director:") ? requestedBy.slice("director:".length) : "platform",
+        actionKind: "audit_spec_shipped_state_failed",
+        specSlug: slug,
+        reason: `audit run failed: ${msg}`,
+        metadata: { job_id: job.id, requested_by: requestedBy, error: msg },
+      });
+    } catch { /* audit best-effort */ }
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 // box-agent-model-tiers (P3): a governed model-tier change. proposeModelTierChange
 // (src/lib/model-tier-proposals.ts) either auto-applies an in-rail change (a live+autonomous director,
 // logged autonomous) or surfaces a `proposed-model-tier` agent_jobs row parked needs_approval with ONE
@@ -2674,7 +2788,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           actionKind: "groomed_continue",
           specSlug: c.slug,
           reason: reasoning || `Next phase (${c.remainingPhases[0] ?? "next ⏳"}) needed now — queued its build to completion.`,
-          metadata: { remaining_phases: c.remainingPhases, retry, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count keystone-cover drives.
+          metadata: { remaining_phases: c.remainingPhases, retry, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} groom ${c.slug} → continue → queued next-phase build`);
         continue;
@@ -2742,7 +2858,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           actionKind: "groomed_split",
           specSlug: c.slug,
           reason: reasoning || `Leftover phase(s) are future, not needed now — split into their own planned card(s) (${authored.join(", ")}) and closed out the parent so it folds.`,
-          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authored, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count keystone-cover drives.
+          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authored, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} groom ${c.slug} → split → authored ${authored.join(", ")} + closed out parent (folds)`);
         continue;
@@ -2807,11 +2925,14 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           continue;
         }
         // 1) Author the followup card (create-only; an existing slug is treated as already authored).
+        // Pass the candidate's OWNING function so the activity row carries `owner_function` for the
+        // daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-reflects-
+        // cross-dept-drive Phase 1).
         const authored = await lib.applyDirectorAuthorFollowup(
           db,
           job.workspace_id,
           "groom",
-          { slug: c.slug },
+          { slug: c.slug, owner: c.owner ?? null },
           parsed.followup ?? {},
           reasoning || `Investigation surfaced a code-level root cause — authored a followup spec.`,
           followupCommit,
@@ -2873,7 +2994,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           actionKind: "groomed_split",
           specSlug: c.slug,
           reason: reasoning || `Followup spec authored — and the leftover phases are future (split into their own cards) so the parent folds.`,
-          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authoredSplits, followup_slug: authored.authoredSlug, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count keystone-cover drives.
+          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authoredSplits, followup_slug: authored.authoredSlug, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} groom ${c.slug} → author_followup_spec → authored ${authored.authoredSlug} + split ${authoredSplits.join(", ")} + closed out parent`);
         continue;
@@ -2899,7 +3022,10 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           console.warn(`${tag} groom ${c.slug} → dismiss_candidate INVALID (${valid.error}) → escalated to CEO`);
           continue;
         }
-        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "groom", { slug: c.slug }, reasoning);
+        // Pass the candidate's OWNING function so the dismiss ledger row carries `owner_function` for
+        // the daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-
+        // reflects-cross-dept-drive Phase 1).
+        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "groom", { slug: c.slug, owner: c.owner ?? null }, reasoning);
         if (r.ok) {
           dismissed++;
           console.log(`${tag} groom ${c.slug} → dismiss_candidate → ledger row written; will skip next pass`);
@@ -3033,7 +3159,10 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           actionKind: "escorted_init",
           specSlug: c.slug,
           reason: reasoning || `Unstarted platform spec confirmed sound + in-scope — initiated its build (no waiting period).`,
-          metadata: { planned_phases: c.plannedPhases, retry, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count the keystone covering for a
+          // not-yet-live department's director (CS/Growth/CMO etc.).
+          metadata: { planned_phases: c.plannedPhases, retry, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} init ${c.slug} → initiate → queued build`);
         return;
@@ -3059,11 +3188,14 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           console.warn(`${tag} init ${c.slug} → author_followup_spec INVALID (${valid.error}) → escalated to CEO`);
           return;
         }
+        // Pass the candidate's OWNING function so the activity row carries `owner_function` for the
+        // daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-reflects-
+        // cross-dept-drive Phase 1).
         const authored = await lib.applyDirectorAuthorFollowup(
           db,
           job.workspace_id,
           "init",
-          { slug: c.slug },
+          { slug: c.slug, owner: c.owner ?? null },
           parsed.followup ?? {},
           reasoning || `Right scope is a different spec — authored the followup and dismissed this candidate.`,
           followupCommit,
@@ -3097,7 +3229,10 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           console.warn(`${tag} init ${c.slug} → dismiss_candidate INVALID (${valid.error}) → escalated to CEO`);
           return;
         }
-        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug }, reasoning);
+        // Pass the candidate's OWNING function so the dismiss ledger row carries `owner_function` for
+        // the daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-
+        // reflects-cross-dept-drive Phase 1).
+        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug, owner: c.owner ?? null }, reasoning);
         if (r.ok) {
           dismissed++;
           console.log(`${tag} init ${c.slug} → dismiss_candidate → ledger row written; will skip next pass`);
@@ -6598,6 +6733,114 @@ async function applyDismissParkActionInline(
   return { summary: `Dismissed parked ${job.kind} ${jobId.slice(0, 8)}${specSlug ? ` (${specSlug})` : ""}: ${reason}` };
 }
 
+/**
+ * director-trust-phase-pr-provenance Phase 2 — AUTO-APPLY a single `request-audit` action emitted in a
+ * director's chat reply. Same audit-is-the-gate model as `spec-status` / `dismiss-park`: no CEO approval,
+ * no inbox/Slack card. Validates (slug/reason/owner-leash) and on success ENQUEUES an
+ * `audit-spec-shipped-state` agent_jobs row scoped to the single spec slug + writes a `requested_audit`
+ * director_activity row carrying the reason. The audit's verdict surfaces in the activity feed when the
+ * job runs (the runner writes a second `audit_spec_shipped_state_completed` row).
+ *
+ * Owner-only leash: the spec's `Owner: [[../functions/{fn}]]` MUST match the emitting director's
+ * function — out-of-leash otherwise. This is the legitimate cleanup path for a tagless ✅ phase (a
+ * director hand-flip / old pre-provenance reconciler pass): the audit re-stamps with real provenance or
+ * regresses the phase to `planned` (cannot confirm). Directors NEVER stamp `pr` tags themselves.
+ */
+async function applyRequestAuditActionInline(
+  workspaceId: string,
+  directorFunction: string,
+  wt: string,
+  raw: Record<string, unknown>,
+): Promise<{ summary: string }> {
+  const slug = typeof raw.slug === "string" ? raw.slug.replace(/[^a-z0-9-]/gi, "") : "";
+  const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+  const logInvalid = async (detail: string): Promise<{ summary: string }> => {
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId,
+        directorFunction,
+        actionKind: "invalid_request_audit_action",
+        specSlug: slug || null,
+        reason: detail,
+        metadata: { payload: raw, attempted_slug: slug || null, attempted_reason: reason || null },
+      });
+    } catch { /* audit best-effort */ }
+    return { summary: `request-audit rejected (${slug || "no slug"}): ${detail}` };
+  };
+  if (!slug) return logInvalid("slug is required");
+  if (!reason) return logInvalid("reason is required (no silent audits)");
+
+  // Owner-only leash: the spec's declared `Owner:` must match THIS director. Read the markdown out of
+  // the worktree's checkout of origin/main so we see the canonical owner the board renders from.
+  const specPath = join(wt, `docs/brain/specs/${slug}.md`);
+  if (!existsSync(specPath)) return logInvalid("spec not found in docs/brain/specs/");
+  let owner: string | undefined;
+  try {
+    const md = readFileSync(specPath, "utf8");
+    const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
+    if (m) owner = m[1].replace(/^.*\//, "").trim();
+  } catch { /* fall through to leash rejection */ }
+  if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
+  if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
+
+  // Dedupe: if there's already an unfinished audit job for this slug, don't queue a second — the
+  // verdict from the in-flight one will surface to the activity feed anyway. ACTIVE statuses match
+  // the agent_jobs lifecycle's non-terminal states.
+  const { data: existing } = await db
+    .from("agent_jobs")
+    .select("id, status")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "audit-spec-shipped-state")
+    .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_approval", "blocked_on_usage"])
+    .limit(1)
+    .maybeSingle();
+  if (existing) {
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId,
+        directorFunction,
+        actionKind: "requested_audit",
+        specSlug: slug,
+        reason,
+        metadata: { dedup: true, existing_job_id: (existing as { id: string }).id, autonomous: true },
+      });
+    } catch { /* audit best-effort */ }
+    return { summary: `request-audit for ${slug} already queued (${(existing as { id: string }).id.slice(0, 8)}) — reason logged` };
+  }
+
+  const { data: inserted, error } = await db
+    .from("agent_jobs")
+    .insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "audit-spec-shipped-state",
+      status: "queued",
+      instructions: JSON.stringify({ requested_by: `director:${directorFunction}`, reason }),
+      created_by: null,
+    })
+    .select("id")
+    .single();
+  if (error || !inserted) return logInvalid(`enqueue failed: ${error?.message ?? "no row"}`);
+  const jobId = (inserted as { id: string }).id;
+
+  try {
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+    await recordDirectorActivity(db, {
+      workspaceId,
+      directorFunction,
+      actionKind: "requested_audit",
+      specSlug: slug,
+      reason,
+      metadata: { job_id: jobId, auto_applied: true, autonomous: true },
+    });
+  } catch { /* audit best-effort */ }
+
+  return { summary: `Queued audit-spec-shipped-state on ${slug} (job ${jobId.slice(0, 8)}): ${reason}` };
+}
+
 function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown>[] {
   if (!Array.isArray(raw)) return [];
   const out: Record<string, unknown>[] = [];
@@ -6709,6 +6952,9 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
     // revised). Validation (slug/reason/phase shape/owner-leash) happens inside that helper.
     // dismiss-park: same treatment ([[../specs/director-dismiss-park-and-short-circuit-spec]] Phase 1) —
     // auto-applied by `applyDismissParkActionInline`, never a pending_action / inbox card.
+    // request-audit: same treatment ([[../specs/director-trust-phase-pr-provenance]] Phase 2) —
+    // auto-applied by `applyRequestAuditActionInline`, queues an audit-spec-shipped-state job + writes a
+    // `requested_audit` director_activity row; never a pending_action / inbox card.
   }
   return out;
 }
@@ -6733,6 +6979,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:** / shortCircuit). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred/shortCircuit). \`phases[].index\` is 0-based and validated against the markdown's phase count. **shortCircuit:true** closes a spec CLEANLY without all phases shipping ("we changed our mind, this isn't needed anymore") — required \`reason\`, must be paired with \`status:'shipped'\` (or omitted — it auto-forces shipped), SKIPS the fold-build, and the roadmap renders the card as "shipped + short-circuited — <reason>". The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
   `{"status":"replied","reply":"<acknowledge the dismiss in chat — no approval card is rendered>","pending_actions":[{"type":"dismiss-park","summary":"<one-line why>","jobId":"<agent_jobs.id of the parked row>","reason":"<written to director_activity>"}]}`,
   `  — when a PARKED \`agent_jobs\` row (status=\`needs_attention\`) you own is genuinely not worth pursuing (the underlying work is being short-circuited, a prereq won't be supplied, the park is stale and not auto-routable). **AUTO-APPLIED — no CEO approval, no inbox card.** Flips \`agent_jobs.status='dismissed'\`, stamps \`needs_attention_class='dismissed_by_director'\`, and writes a \`dismissed_park\` director_activity row carrying your reason + the original park's class + the underlying spec slug. Owner-only: the parked job's underlying spec slug must resolve to a spec whose \`Owner: [[../functions/{fn}]]\` matches your function; a dismiss on someone else's job is rejected as out-of-leash. Reversible: the CEO clicks Re-open from the activity feed and the job flips back to \`needs_attention\` (a wrongly-dismissed park is one tap away from re-routing). Use this for parks the [[no-parked-specs-auto-route-needs-attention]] router can't help with (no shipped target to fold to, no real_blocker to spec around — the blocker is "we changed our mind").`,
+  `{"status":"replied","reply":"<acknowledge the audit request in chat — no approval card is rendered>","pending_actions":[{"type":"request-audit","summary":"<one-line why>","slug":"<existing-spec-slug>","reason":"<drift suspect | hand-flip cleanup | missing provenance — written to director_activity>"}]}`,
+  `  — when a spec YOU OWN has \`phase_states\` you can't trust (a tagless ✅ phase / a director hand-flip / pre-provenance reconciler pass) and you need the audit to RE-VERIFY + re-stamp provenance from the merge ledger. **AUTO-APPLIED — no CEO approval, no inbox card.** Enqueues an \`audit-spec-shipped-state\` agent_jobs row scoped to this slug + writes a \`requested_audit\` director_activity row carrying your reason; the audit's verdict (per-phase {status, pr, merge_sha}) shows up in the activity feed when the job runs. The audit walks \`spec_status_history\` for \`merge:<sha>\` rows + the squash-merge subjects on origin/main to resolve SHA → PR #, then re-stamps \`phase_states\` with PROPER provenance (or REGRESSES a tagless ✅ phase to \`planned\` if no merge evidence exists — "we cannot prove this phase shipped" is better than "✅ ungrounded"). Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function — out-of-leash otherwise. This is the LEGITIMATE cleanup path; do NOT use a \`spec-status\` flip to "catch up" the board (that path now rejects shipped-flips that don't carry merge provenance).`,
 ].join("\n");
 
 function directorCoachFraming(dirFn: string): string {
@@ -6744,13 +6992,14 @@ function directorCoachFraming(dirFn: string): string {
     `You are ${persona.name} — the ${dirFn === "platform" ? "Platform/DevOps" : dirFn} Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior and taking coaching on it.`,
     `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your own definition is docs/brain/libraries/platform-director.md (your leash, escort, grooming) + docs/brain/specs/worker-grading-and-director-management.md. Your leash is LEASH_CATEGORIES in src/lib/agents/platform-director.ts.`,
     `⭐ SPEC STATUS IS DB-DRIVEN — NOT IN THE MARKDOWN. After spec-status-db-driven, a spec's status + per-phase status (shipped/in_progress/planned), its **Priority:** critical, and its **Deferred:** parked state ALL live in the \`spec_card_state\` DB table — the markdown is CONTENT ONLY (title, phase titles, the plan; no status emojis). NEVER judge a spec's status by reading ⏳/✅ in the .md (there are none, or stale ones) — READ THE DB. Easiest: \`getRoadmap()\` from src/lib/brain-roadmap returns each spec's live status/phases/counts already overlaid from spec_card_state. Or a throwaway scripts/_*.ts that bootstraps createAdminClient and SELECTs spec_card_state directly (status, phase_states, flags). The audit trail is spec_status_history.`,
-    `⭐ PHASE-PR PROVENANCE (phase-pr-provenance) — a phase is \`shipped\` because a specific PR MERGED it, and \`spec_card_state.phase_states[i]\` records the proof: \`{status:'shipped', pr, merge_sha}\`. So "is this phase done?" = does it carry a \`pr\` tag. Builds ship a spec ONE PHASE AT A TIME — a P1 merge ships P1, NOT the whole spec (though a single PR can ship several phases at once). The merge hook (applyMergedBuildEffects) is the authoritative writer: when a build PR merges it tags exactly the phase(s) it shipped — you NEVER hand-flip a phase shipped to "catch up" the board; if you suspect drift, the audit-spec-shipped-state workflow re-verifies against the actual code. To ESCORT/SEQUENCE a partially-shipped spec, drive the FIRST un-shipped phase (the next one with no \`pr\`). Shapes: one-shot (0 phases — ships in one PR, tagged at the card via last_merge_sha), single-phase (1 phase = the whole spec), multi-phase (N phases, each by its own PR). Don't treat a prose-only multi-phase spec as un-built just because its file paths aren't greppable — the \`pr\` tags are the truth.`,
+    `⭐ PHASE-PR PROVENANCE (phase-pr-provenance) — a phase is \`shipped\` because a specific PR MERGED it, and \`spec_card_state.phase_states[i]\` records the proof: \`{status:'shipped', pr, merge_sha}\`. So "is this phase done?" = does it carry a \`pr\` tag. Builds ship a spec ONE PHASE AT A TIME — a P1 merge ships P1, NOT the whole spec (though a single PR can ship several phases at once). The merge hook (applyMergedBuildEffects) is the authoritative writer: when a build PR merges it tags exactly the phase(s) it shipped — you NEVER hand-flip a phase shipped to "catch up" the board; if you suspect drift, emit a 'request-audit' action and the box runs audit-spec-shipped-state against the actual code + the merge ledger to re-stamp provenance (or regress an ungrounded ✅ to planned). To ESCORT/SEQUENCE a partially-shipped spec, drive the FIRST un-shipped phase (the next one with no \`pr\`). Shapes: one-shot (0 phases — ships in one PR, tagged at the card via last_merge_sha), single-phase (1 phase = the whole spec), multi-phase (N phases, each by its own PR). Don't treat a prose-only multi-phase spec as un-built just because its file paths aren't greppable — the \`pr\` tags are the truth.`,
     `To explain "why haven't you built/done X": investigate read-only — check the spec's STATUS in the DB (above), its **Blocked-by:** line, its **Owner:**, whether it's goal-linked, the agent_jobs queue for its build state, and your director_activity. A throwaway scripts/_*.ts that bootstraps createAdminClient can query the DB read-only (SELECT-only; never commit it). Then explain plainly + honestly.`,
     `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash: never propose a rule to auto-do something destructive/irreversible or to start a new goal (those always escalate). You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
     `You MAY PROPOSE a new GOAL (for YOUR OWN function only). If the conversation surfaces a strategic, multi-spec objective (an initiative, not a single fix), emit a 'goal' pending_action with structured fields (slug, title, outcome, successMetric, body). You never START a goal yourself — on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate); once greenlit, Pia decomposes it. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
     `You can EDIT an existing spec, not just author a new one. If the CEO asks you to MODIFY specs (e.g. "update the milestone specs Pia made to add the right Blocked-by lines"), READ each spec and emit a 'spec-edit' card per spec carrying the FULL revised markdown — a real edit the worker commits on approval, NOT just a recommendation to make a new spec.`,
     `To flip a spec YOU OWN on the BOARD (status / a single phase / **Priority:** critical / **Deferred:** parked / shortCircuit) emit a 'spec-status' action — NEVER a 'spec-edit' for status, because status is DB-only after spec-status-db-driven (the markdown is content-only). One action per slug; multiple actions if you're flipping N specs. **This action AUTO-APPLIES the moment your reply is persisted — no CEO approval, no inbox/Slack card, no Approve button.** Accountability is the audit trail (spec_status_history row stamped actor=director:{your-function} + a director_activity row), not a per-flip gate, and the daily drift reconciler auto-corrects a wrong flip within 24h. Mention the flip in your reply so the CEO sees it in chat — but do NOT ask for approval. Owner-only: a flip on a spec whose \`Owner: [[../functions/x]]\` isn't your function is rejected as out-of-leash; flipping someone else's spec still goes through the CEO owner UI.`,
     `To DISMISS a PARKED \`agent_jobs\` row YOU OWN (status=needs_attention, the underlying work is being short-circuited / a prereq won't be supplied / the park is stale and not auto-routable) emit a 'dismiss-park' action with the jobId + a reason. **AUTO-APPLIES — no CEO approval, no inbox card.** Flips the row to status='dismissed' + writes a 'dismissed_park' director_activity row carrying the reason + the original park's class + the underlying spec slug; the CEO can Re-open it from your activity feed in one tap. Owner-only: the parked job's underlying spec slug must resolve to a spec whose \`Owner:\` matches your function; a dismiss on someone else's job is rejected as out-of-leash. Use this for parks the [[no-parked-specs-auto-route-needs-attention]] router CAN'T help with — a "we changed our mind" call, not a real_blocker.`,
+    `To AUDIT a spec YOU OWN whose \`phase_states\` you can't trust (a tagless ✅ phase from a director hand-flip / a pre-provenance reconciler pass / drift suspect) emit a 'request-audit' action with the slug + reason. **AUTO-APPLIES — no CEO approval, no inbox card.** Enqueues an \`audit-spec-shipped-state\` agent_jobs row scoped to that slug + writes a 'requested_audit' director_activity row; the audit walks \`spec_status_history\` for \`merge:<sha>\` rows + the squash-merge subjects on origin/main, then re-stamps \`phase_states\` with proper provenance (or REGRESSES a tagless ✅ phase to \`planned\` if no merge evidence exists). The verdict surfaces in your activity feed when the audit completes. Owner-only — the spec's \`Owner:\` must match your function. This is the legitimate cleanup path: do NOT use a 'spec-status' flip to "catch up" the board (that path now rejects shipped-flips that don't carry merge provenance — it points at 'request-audit' instead).`,
     `The CEO can hand you a PLAN to EXECUTE (the 'Give a plan' button → INTENT: PLAN). You emit a 'directive' card; on approval it becomes your ONE active directive that your standing pass runs FIRST, before routine. A directive can set 'gateBuildsUntil: <spec>' (PAUSE every other build until that spec ships — for "finish the assembly-line fix before more building", auto-lifts on ship) and 'criticalSpecs' (a '**Priority:** critical' marker so they jump the build queue). A spec marked '**Priority:** critical' is investigated + queued ahead of normal Planned specs. A directive re-prioritizes WHAT you do — it never loosens the leash.`,
     DIRECTOR_COACH_OUTPUT,
   ].join("\n\n");
@@ -7012,6 +7261,7 @@ async function runDirectorCoachJob(job: Job) {
     const rawActions = Array.isArray(parsed?.pending_actions) ? (parsed!.pending_actions as unknown[]) : [];
     const specStatusRaw: Record<string, unknown>[] = [];
     const dismissParkRaw: Record<string, unknown>[] = [];
+    const requestAuditRaw: Record<string, unknown>[] = [];
     const nonStatusRaw: unknown[] = [];
     for (const a of rawActions) {
       if (a && typeof a === "object") {
@@ -7021,6 +7271,10 @@ async function runDirectorCoachJob(job: Job) {
         // the raw LLM payload, like spec-status. It never enters pending_actions / renders an inbox or
         // Slack card. The audit row (dismissed_park director_activity) IS the gate.
         if (t === "dismiss-park") { dismissParkRaw.push(a as Record<string, unknown>); continue; }
+        // director-trust-phase-pr-provenance Phase 2: request-audit is auto-applied like spec-status /
+        // dismiss-park — no CEO approval, no inbox card. Enqueues an audit-spec-shipped-state job + writes
+        // a `requested_audit` director_activity row; the audit's verdict shows up in the activity feed.
+        if (t === "request-audit") { requestAuditRaw.push(a as Record<string, unknown>); continue; }
       }
       nonStatusRaw.push(a);
     }
@@ -7031,6 +7285,10 @@ async function runDirectorCoachJob(job: Job) {
     }
     for (const raw of dismissParkRaw) {
       const r = await applyDismissParkActionInline(job.workspace_id, thread.director_function, wt, raw);
+      flipSummaries.push(r.summary);
+    }
+    for (const raw of requestAuditRaw) {
+      const r = await applyRequestAuditActionInline(job.workspace_id, thread.director_function, wt, raw);
       flipSummaries.push(r.summary);
     }
     const newActions = normalizeCoachActions(nonStatusRaw, ts);
@@ -9390,6 +9648,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "director-bounce-back") return runDirectorBounceBackJob(job);
   if (job.kind === "proposed-goal") return runProposedGoalJob(job);
   if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
+  if (job.kind === "audit-spec-shipped-state") return runAuditSpecShippedStateJob(job);
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -9787,7 +10046,10 @@ async function main() {
   const countSecurityReview = () => [...active.values()].filter((v) => v.kind === "security-review").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
-  const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register").length;
+  // director-trust-phase-pr-provenance Phase 2: audit-spec-shipped-state shares the coverage-register
+  // small deterministic lane — both are fast, no-LLM, single-DB-write jobs; count them together so the
+  // MAX_COVERAGE_REGISTER cap caps the combined lane and the loop above only fills slots actually free.
+  const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register" || v.kind === "audit-spec-shipped-state").length;
   // platform-director shares its concurrency-1 lane with director-bounce-back so a bounce never
   // races the standing pass on the same workspace (bounce-escalation-back-to-director).
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back").length;
@@ -10007,11 +10269,13 @@ async function main() {
       }
       // Fill the coverage-register lane (coverage-register-agent): owner Register/Exempt resume on a
       // surfaced unregistered-loop proposal — materialize the chosen registry fix spec + queue its build.
+      // director-trust-phase-pr-provenance Phase 2: `audit-spec-shipped-state` shares this small
+      // deterministic-no-LLM lane — same shape (read DB + restamp + write an activity row, fast).
       while (countCoverageRegister() < MAX_COVERAGE_REGISTER) {
-        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["coverage-register"] });
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["coverage-register", "audit-spec-shipped-state"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
-        console.log(`claimed coverage-register ${job.id.slice(0, 8)} → ${countCoverageRegister() + 1}/${MAX_COVERAGE_REGISTER} coverage-register lane`);
+        console.log(`claimed ${job.kind} ${job.id.slice(0, 8)} → ${countCoverageRegister() + 1}/${MAX_COVERAGE_REGISTER} coverage-register lane`);
         launch(job);
       }
       // Fill the platform-director lane (platform-director-agent): investigate a Platform-routed Approval

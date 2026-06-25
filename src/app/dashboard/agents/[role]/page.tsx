@@ -15,6 +15,7 @@ import { ModelTierCard } from "@/components/agents/model-tier-card";
 import { DirectorAutonomy } from "@/components/agents/director-autonomy";
 import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
 import { DirectorGradePanel } from "@/components/agents/director-grade-panel";
+import { DirectiveCard } from "@/components/agents/directive-card";
 import { RoleInbox, AutonomyToggle } from "@/components/agents/role-inbox";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
@@ -307,6 +308,14 @@ function ProfileCard({
 
       {scopeLine && persona.personality !== scopeLine && (
         <p className="mt-3 max-w-2xl text-sm text-zinc-600 dark:text-zinc-300">{scopeLine}</p>
+      )}
+
+      {/* director-executable-plans-and-priority-hub-pip Phase 1 — surface the platform director's ONE
+          active directive at the top of her profile so it's visible across every section tab. */}
+      {resolved.kind === "director" && resolved.director.slug === "platform" && (
+        <div className="mt-5">
+          <DirectiveCard functionSlug="platform" title={persona.name} />
+        </div>
       )}
 
       {/* Directors render their content via section-gated `extra` (sidebar takeover); CEO/agents use this block. */}

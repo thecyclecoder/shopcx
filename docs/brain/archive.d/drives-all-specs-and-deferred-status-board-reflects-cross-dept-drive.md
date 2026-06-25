@@ -1,0 +1,1 @@
+- **The board + activity reflect cross-dept drive** · verified 2026-06-25 · → [[../tables/director_activity]]
