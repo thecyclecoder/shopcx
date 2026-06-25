@@ -292,7 +292,7 @@ interface WorkerRow {
   accounts: AccountsSnapshot | null;
 }
 
-interface ActiveJob {
+export interface ActiveJob {
   id: string;
   kind: string;
   status: string;
@@ -301,12 +301,30 @@ interface ActiveJob {
   updated_at: string | null;
 }
 
-/** When did this in-flight job last make progress? (claim time for running jobs.) */
-function jobStuckSince(j: ActiveJob): string | null {
+/** When did this in-flight job last make progress? (claim time for running jobs.)
+ *
+ * Worker-restart clamp for queued/queued_resume jobs
+ * (control-tower-stuck-jobs-clamp-on-worker-restart): a worker that wasn't alive earlier couldn't
+ * have claimed earlier than it started, so the queued-floor is `max(base, worker.started_at)`.
+ * Without this, a backlog enqueued during a worker-down window is mis-attributed as a stuck lane
+ * the moment the worker restarts and false-pages stuck_jobs, even though the lane is actively
+ * draining post-restart (the signal `loop:agent:spec-test` incident: 8 spec-test rows queued at
+ * 10:45 by the regression-backlog sweep, the box was offline until 11:45, the monitor at 12:00
+ * read 75-min ages and went red even though the queue had only existed for 15 min of worker
+ * uptime). Building/claimed jobs are NOT clamped — `claimed_at` already reflects the worker that
+ * picked them up. */
+export function jobStuckSince(j: ActiveJob, workerStartedAt: string | null = null): string | null {
   if (j.status === "building" || j.status === "claimed") {
     return j.claimed_at ?? j.updated_at ?? j.created_at;
   }
-  return j.updated_at ?? j.created_at;
+  const base = j.updated_at ?? j.created_at;
+  if (!workerStartedAt) return base;
+  const startedMs = Date.parse(workerStartedAt);
+  if (!Number.isFinite(startedMs)) return base;
+  if (!base) return workerStartedAt;
+  const baseMs = Date.parse(base);
+  if (!Number.isFinite(baseMs)) return workerStartedAt;
+  return baseMs >= startedMs ? base : workerStartedAt;
 }
 
 function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
@@ -489,10 +507,10 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
   return { ...base, color: "green", statusText: `ran ${elapsed(latest.ran_at)} ago`, violation: null };
 }
 
-function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[]): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[], workerStartedAt: string | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const mine = activeJobs.filter((j) => j.kind === loop.agentKind);
   const threshold = loop.stuckThresholdMs ?? 60 * 60_000;
-  const stuck = mine.filter((j) => ageMs(jobStuckSince(j)) > threshold);
+  const stuck = mine.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -504,12 +522,12 @@ function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activ
     detail: latest?.detail ?? null,
   };
   if (stuck.length) {
-    const oldest = stuck.reduce((a, b) => (ageMs(jobStuckSince(a)) > ageMs(jobStuckSince(b)) ? a : b));
+    const oldest = stuck.reduce((a, b) => (ageMs(jobStuckSince(a, workerStartedAt)) > ageMs(jobStuckSince(b, workerStartedAt)) ? a : b));
     return {
       ...base,
       color: "red",
-      statusText: `${stuck.length} job${stuck.length === 1 ? "" : "s"} stuck (oldest ${elapsed(jobStuckSince(oldest))})`,
-      violation: { reason: "stuck_jobs", detail: `${stuck.length} ${loop.agentKind} job(s) stuck in ${stuck[0].status} past ${Math.round(threshold / 60_000)}m (oldest ${elapsed(jobStuckSince(oldest))}, job ${oldest.id.slice(0, 8)}).` },
+      statusText: `${stuck.length} job${stuck.length === 1 ? "" : "s"} stuck (oldest ${elapsed(jobStuckSince(oldest, workerStartedAt))})`,
+      violation: { reason: "stuck_jobs", detail: `${stuck.length} ${loop.agentKind} job(s) stuck in ${stuck[0].status} past ${Math.round(threshold / 60_000)}m (oldest ${elapsed(jobStuckSince(oldest, workerStartedAt))}, job ${oldest.id.slice(0, 8)}).` },
     };
   }
   // Genuinely-idle or running-within-threshold = green (no false positives).
@@ -1093,7 +1111,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs);
-    else core = evalAgentKind(loop, latest, activeJobs);
+    else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
     // carry several (the renewal cron: renewal-integrity + outcome-distribution) — first to fail wins.

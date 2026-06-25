@@ -79,6 +79,7 @@ Catches a **silently-skipped migration**: a migration that never applied is invi
 
 - **SHA-behind needs `VERCEL_GIT_COMMIT_SHA`** (the deployed commit) as the origin/main proxy; unset locally ⇒ the check is skipped (no false positive). It only fires red after `shaGraceMs` (default 30m) so an in-progress deploy / self-update never pages.
 - **Agent-kind alert is off [[../tables/agent_jobs]], not the heartbeat** — idle = green. The heartbeat only feeds last-ran/history.
+- **Worker-restart clamp on queued stuck-jobs** ([[../specs/control-tower-stuck-jobs-clamp-on-worker-restart]], signal `loop:agent:spec-test`, verdict monitor-false-positive): `jobStuckSince` clamps the `queued`/`queued_resume` floor to `worker_heartbeats.started_at` — a worker that wasn't alive earlier can't have claimed earlier than it started, so `floor = max(updated_at/created_at, worker.started_at)`. Without this, a backlog enqueued during a worker-down window is mis-attributed as a stuck lane the moment the worker restarts (the originating false page: 8 spec-test rows queued at 10:45 by the regression-backlog sweep, box offline until 11:45, monitor at 12:00 read 75-min ages and went red even though the queue had only existed for 15 min of worker uptime). `building`/`claimed` jobs are NOT clamped — `claimed_at` already reflects the worker that picked them up. Null/malformed `started_at` ⇒ no clamp (preserves prior behavior, never lifts a real stuck-since forward). Unit-tested in `monitor.test.ts` (`npx tsx --test src/lib/control-tower/monitor.test.ts`).
 
 ## Callers
 
