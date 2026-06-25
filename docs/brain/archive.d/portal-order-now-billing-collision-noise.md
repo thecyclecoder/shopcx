@@ -1,0 +1,1 @@
+- **Portal 'Order now' treats concurrent-billing race as customer-success** · verified 2026-06-25 · → [[lifecycles/customer-portal]]
