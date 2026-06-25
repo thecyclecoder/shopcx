@@ -250,26 +250,37 @@ export function nextFiringAtOrAfter(from: Date, expr: string): Date | null {
   return null;
 }
 
-const FIRST_FIRING_CACHE = new Map<string, number | null>();
-/** ms-since-epoch of the loop's first scheduled firing at-or-after `registeredAt`. Returns null
- *  when the loop has no `registeredAt`; falls back to `registeredAt` itself when the cadence
- *  carries no parseable cron expression (e.g. "box job" cadences) — preserving prior behavior. */
-function firstScheduledFiringMs(loop: MonitoredLoop): number | null {
-  if (!loop.registeredAt) return null;
-  if (FIRST_FIRING_CACHE.has(loop.id)) return FIRST_FIRING_CACHE.get(loop.id) ?? null;
-  const registered = Date.parse(loop.registeredAt);
-  let result: number | null;
-  if (!Number.isFinite(registered)) {
-    result = null;
-  } else {
-    result = registered;
-    const expr = extractCronExpr(loop.expectedCadence);
-    if (expr) {
-      const next = nextFiringAtOrAfter(new Date(registered), expr);
-      if (next) result = next.getTime();
+/** ms-since-epoch of the loop's grace anchor — the LATER of:
+ *  (a) the cron's first scheduled firing at-or-after `registeredAt`, parsed from the cadence
+ *      (falls back to `registeredAt` itself when the cadence carries no parseable cron expression,
+ *      e.g. "box job" cadences), and
+ *  (b) `firstObservedMs` — the empirical first time the snapshot SAW this loop registered, read
+ *      from `monitored_loops_first_seen` (a deploy-SURVIVING per-loop anchor).
+ *
+ *  The empirical anchor prevents a hand-edited registeredAt SET BEFORE the cron actually shipped
+ *  from shortening the grace below "we have actually seen this loop registered for one full
+ *  window" — fleet-spend-governor (registeredAt 00:00 UTC with cadence `10,40 * * * *`) was
+ *  computing a first firing of 00:10 SAME day, so its 90-min grace evaporated the moment the
+ *  deploy landed; using max() with first_observed_at restores the window
+ *  (control-tower-registered-not-firing-observed-anchor-grace P1).
+ *
+ *  Returns null when the loop has no `registeredAt` AND no `firstObservedMs` (no grace clock). */
+export function firstScheduledFiringMs(loop: MonitoredLoop, firstObservedMs: number | null = null): number | null {
+  let result: number | null = null;
+  if (loop.registeredAt) {
+    const registered = Date.parse(loop.registeredAt);
+    if (Number.isFinite(registered)) {
+      result = registered;
+      const expr = extractCronExpr(loop.expectedCadence);
+      if (expr) {
+        const next = nextFiringAtOrAfter(new Date(registered), expr);
+        if (next) result = next.getTime();
+      }
     }
   }
-  FIRST_FIRING_CACHE.set(loop.id, result);
+  if (firstObservedMs != null && Number.isFinite(firstObservedMs)) {
+    result = result != null ? Math.max(result, firstObservedMs) : firstObservedMs;
+  }
   return result;
 }
 
@@ -398,7 +409,7 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedMs: number | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -461,7 +472,8 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
     // never over-fires; null = unknown ⇒ stay amber.)
     //
     // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace, refined by
-    // control-tower-cron-grace-uses-next-firing-after-registration): monitorUptimeMs is the
+    // control-tower-cron-grace-uses-next-firing-after-registration, refined again by
+    // control-tower-registered-not-firing-observed-anchor-grace): monitorUptimeMs is the
     // watchdog's OWN run-span, independent of when THIS cron was added — so a long-cadence cron
     // shipped AFTER the watchdog passed its window would trip the moment it deploys, hours before
     // its first scheduled tick. registeredAt (a code constant, deploy-SURVIVING unlike
@@ -469,10 +481,15 @@ function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeM
     // `registeredAt` itself is the WRONG grace clock when it falls before the cron's hour-of-day:
     // security-dep-watch (`0 4 * * *`) registered at 00:00 UTC has 4h before its first valid tick,
     // so a 26h window measured from 00:00 trips at 02:00 the next day, 2h before it has actually
-    // had a chance to fire. Use the first scheduled firing AT-OR-AFTER `registeredAt` (parsed from
-    // expectedCadence, memoized) instead — preserves the red for genuinely-dead schedules but
-    // removes the boundary false-page. Unset (legacy crons) ⇒ no extra gate.
-    const firstFiringMs = firstScheduledFiringMs(loop);
+    // had a chance to fire. We use the first scheduled firing AT-OR-AFTER `registeredAt` (parsed
+    // from expectedCadence) — preserves the red for genuinely-dead schedules but removes the
+    // boundary false-page. And we additionally take the MAX with the empirical
+    // `first_observed_at` (from monitored_loops_first_seen) so a hand-edited registeredAt SET
+    // BEFORE the cron actually shipped (fleet-spend-governor: registeredAt 00:00 with cadence
+    // `10,40 * * * *` → computed first-firing 00:10 SAME day → grace evaporates the moment the
+    // deploy lands hours later) can never shorten the grace below "we have empirically seen this
+    // loop registered for at least one full window." Unset (legacy crons) ⇒ no extra gate.
+    const firstFiringMs = firstScheduledFiringMs(loop, firstObservedMs);
     const sinceFirstFiringMs = firstFiringMs != null ? Date.now() - firstFiringMs : null;
     if (everBeatCount === 0 && sinceFirstFiringMs != null && sinceFirstFiringMs <= window) {
       const statusText = sinceFirstFiringMs >= 0
@@ -1041,7 +1058,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }] = await Promise.all([
+  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }, { data: firstSeenRows }] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at, accounts").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly read (control-tower-loop-beats-rpc-perf P1): a lateral join takes
     // the distinct cron + agent-kind loop_ids and, per loop, reads only its latest HISTORY_LIMIT
@@ -1064,6 +1081,16 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     // (loop_id, ran_at) index (single oldest row). Beat retention can only shorten this span, never
     // inflate it ⇒ conservative (never a false registered_not_firing).
     admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "control-tower-monitor").order("ran_at", { ascending: true }).limit(1).maybeSingle(),
+    // Empirical first-observed-at anchor for the registered_not_firing grace
+    // (control-tower-registered-not-firing-observed-anchor-grace P1). A deploy-SURVIVING per-loop
+    // record of when the snapshot first SAW each loop registered. The grace clock in evalCron takes
+    // MAX(firstScheduledFiringMs, first_observed_at), so a hand-edited `registeredAt` SET BEFORE the
+    // cron actually shipped (fleet-spend-governor: registeredAt 00:00 with cadence `10,40 * * * *`
+    // → computed first-firing 00:10 SAME day → the 90-min grace evaporates the moment the deploy
+    // lands hours later) can never shorten the grace below "we have empirically seen this loop
+    // registered for at least one full window." Tiny table (one row per registered loop) — read
+    // unbounded.
+    admin.from("monitored_loops_first_seen").select("loop_id, first_seen_at"),
   ]);
 
   // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
@@ -1098,6 +1125,40 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   }
   const activeJobs = (jobs ?? []) as ActiveJob[];
 
+  // Empirical first-observed-at anchor (control-tower-registered-not-firing-observed-anchor-grace
+  // P1). Build the loop_id → first_seen_at(ms) map from the read above, then best-effort upsert a
+  // fresh row for every registered loop missing one — on-conflict-do-nothing so the FIRST tick that
+  // ever sees a loop wins, and every subsequent tick is a no-op. We compute the timestamp NOW (one
+  // shared value per tick) so a future-now() column isn't sensitive to clock skew, and so the
+  // freshly-upserted rows are immediately usable in this same tick. Failures are swallowed: the
+  // empirical anchor is a refinement of the existing grace, not a load-bearing dependency — a
+  // transient DB error must not break the snapshot or false-page anything.
+  const firstSeenByLoop = new Map<string, number>();
+  for (const r of (firstSeenRows ?? []) as Array<{ loop_id: string; first_seen_at: string }>) {
+    const ms = Date.parse(r.first_seen_at);
+    if (Number.isFinite(ms)) firstSeenByLoop.set(r.loop_id, ms);
+  }
+  const tickIso = new Date().toISOString();
+  const tickMs = Date.parse(tickIso);
+  const missingFirstSeen = MONITORED_LOOPS.filter((l) => !firstSeenByLoop.has(l.id));
+  if (missingFirstSeen.length) {
+    try {
+      const { error: upsertErr } = await admin
+        .from("monitored_loops_first_seen")
+        .upsert(
+          missingFirstSeen.map((l) => ({ loop_id: l.id, first_seen_at: tickIso })),
+          { onConflict: "loop_id", ignoreDuplicates: true },
+        );
+      if (upsertErr) {
+        console.warn(`[control-tower] monitored_loops_first_seen upsert failed:`, upsertErr.message);
+      } else {
+        for (const l of missingFirstSeen) firstSeenByLoop.set(l.id, tickMs);
+      }
+    } catch (e) {
+      console.warn(`[control-tower] monitored_loops_first_seen upsert threw:`, e instanceof Error ? e.message : e);
+    }
+  }
+
   const loops: LoopStatus[] = MONITORED_LOOPS.map((loop) => {
     // Inline + reactive agents source their history + latest from the dedicated windowed fetch
     // (they're excluded from the main beats query above) and share the inline evaluation.
@@ -1110,7 +1171,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
