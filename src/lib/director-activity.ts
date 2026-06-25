@@ -49,7 +49,14 @@ export type DirectorActionKind =
   // spec-review-agent Phase 4 — any agent (Vale on re-check, Bo, Ada, repair/regression, the CEO via the
   // board control) that flips a malformed/off spec BACK to `in_review` so it returns to Vale's queue.
   // The `actor` on the row records WHO sent it back; the `reason` records WHAT was off.
-  | "spec_sent_back_to_review"; // a malformed/off spec was returned to the in_review column; the build pipeline refuses to dispatch it until Vale clears it again.
+  | "spec_sent_back_to_review" // a malformed/off spec was returned to the in_review column; the build pipeline refuses to dispatch it until Vale clears it again.
+  // goal-greenlight-button-and-author-writes-db Phase 1 — the CEO's one-click DB-flag actions on a goal
+  // card. `greenlit_goal` activates a proposed goal (proposed → greenlit); `ungreenlit_goal` reverts
+  // (greenlit → proposed, only while no milestone has rolled past planned); `declined_goal` flips a
+  // proposed goal to folded (the row stays for audit; the mirror-md lane reflects the new status).
+  | "greenlit_goal"
+  | "ungreenlit_goal"
+  | "declined_goal";
 
 export interface DirectorActivityInput {
   workspaceId: string;

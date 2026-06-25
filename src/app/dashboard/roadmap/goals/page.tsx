@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getGoals } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { GoalStatusBadge } from "./GoalStatusBadge";
+import { GreenlightButton } from "./GreenlightButton";
 
 // Reads docs/brain/goals + specs at request time — always reflects the live brain.
 
@@ -57,7 +58,10 @@ export default async function GoalsBoardPage() {
                 <h2 className="text-sm font-semibold text-zinc-900 group-hover:text-indigo-600 dark:text-zinc-100 dark:group-hover:text-indigo-400">
                   {g.title}
                 </h2>
-                <GoalStatusBadge status={g.status} proposedBy={g.proposedBy} />
+                <div className="flex flex-col items-end gap-1.5">
+                  <GoalStatusBadge status={g.status} proposedBy={g.proposedBy} />
+                  <GreenlightButton slug={g.slug} status={g.status} hasProgress={g.pct > 0} compact />
+                </div>
               </div>
               {g.successMetric && (
                 <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
