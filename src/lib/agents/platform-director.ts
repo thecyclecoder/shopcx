@@ -1133,9 +1133,32 @@ export async function reconcileSwallowedEscalations(admin: Admin): Promise<Escal
 // re-diagnosed. Bounded per pass, idempotent, and DORMANT until Platform is live+autonomous — exactly like
 // the escort + the enqueuer. A `reconciled_error` director_activity row is written per ACTION (enqueue /
 // escalate), never per idle confirm. Net: the open-error count trends to zero on its own.
+//
+// Phase 2 (fix-error-reconcile-endless-loop) — cooldown + once-per-pass dedup. The dispose-on-completion
+// of Phase 1 closes the row when the repair finishes; but a re-fire of the SAME signature before the
+// fix deploys (recordError) re-opens the row (status→open, resolution_reason cleared) — so the very
+// next pass scanned it as "open, no live repair, no fix spec" and enqueued a FRESH repair, which
+// immediately short-circuited via `findAlreadyAddressing` and closed again. Net: ~12 pointless repair
+// enqueues per signature per hour, burning the per-pass action cap and starving build initiation.
+// The cooldown blocks that churn: a signature we already reconciled (or have a recent repair job for —
+// live OR completed within the window) is SKIPPED this pass without burning a cap slot. The in-pass
+// `handled` Set already guaranteed once-per-pass; the cooldown extends that across passes.
+//
+// NOT a coverage gap: the cooldown only delays the NEXT action on a signature — if the row is still
+// open after the cooldown lapses, the next pass reconciles it fresh. So a genuinely-stuck error reaches
+// Phase 3's loop-guard escalation on its own cadence; only the per-pass churn is gone.
 
 /** Cap how many NEW reconcile ACTIONS (repair enqueues + stuck-fix escalations) one pass takes. */
 export const PLATFORM_DIRECTOR_RECONCILE_CAP = 8;
+
+/**
+ * Cooldown window — a signature already reconciled (or with a repair job, live or recently completed)
+ * within this is SKIPPED this pass without burning a cap slot. Sized to comfortably cover one
+ * repair-diagnose → fix-spec-build → deploy cycle on the standing cadence (passes ~every 5 min), so the
+ * SAME signature can't be re-enqueued 9-19× in an hour while the prior repair was still draining.
+ * 30 min ⇒ at most ~2 reconcile actions per signature per hour even when the row keeps re-firing.
+ */
+export const PLATFORM_DIRECTOR_RECONCILE_COOLDOWN_MS = 30 * 60 * 1000;
 
 /** One open backlog item the reconciler classifies — an error_events row OR a loop_alerts incident. */
 interface OpenErrorItem {
@@ -1154,6 +1177,8 @@ export interface ErrorBacklogReconcileResult {
   escalated: string[];
   /** open errors already covered by a live repair job / authored fix spec — left alone (cases a/c). */
   confirmed: number;
+  /** signatures in the cooldown window (recently reconciled OR a live/recent repair job) — skipped without burning a cap slot. */
+  cooled: number;
   /** total open error_events + loop_alerts examined this pass. */
   scanned: number;
 }
@@ -1184,7 +1209,7 @@ async function fixSpecsBySignature(specs: SpecCard[]): Promise<Map<string, SpecC
  * caller logs the result.
  */
 export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogReconcileResult> {
-  const empty: ErrorBacklogReconcileResult = { enqueued: [], escalated: [], confirmed: 0, scanned: 0 };
+  const empty: ErrorBacklogReconcileResult = { enqueued: [], escalated: [], confirmed: 0, cooled: 0, scanned: 0 };
   const autonomy = await loadAutonomyMap();
   if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
 
@@ -1212,9 +1237,42 @@ export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogR
   const { specs } = await getRoadmap();
   const fixBySig = await fixSpecsBySignature(specs);
 
+  // Phase 2 cooldown ledger — a signature we already acted on within PLATFORM_DIRECTOR_RECONCILE_COOLDOWN_MS,
+  // OR has a repair job (live OR completed/failed within the window), is in cooldown: SKIP this pass without
+  // burning a cap slot. Two sources, OR'd:
+  //   • prior `reconciled_error` director_activity rows → we already enqueued/escalated; the action is still
+  //     in-flight, re-firing now would just churn.
+  //   • repair agent_jobs touched within the window → covers the case where the row keeps re-opening via
+  //     recordError after a repair already diagnosed it (the "stale-error trap" the loop was caused by).
+  // The window comfortably spans one diagnose→build→deploy cycle, so a signature consumes at most ~2 cap
+  // slots per hour even when its row keeps re-firing — that's what restores the standing pass's build budget.
+  const cooldownSinceIso = new Date(Date.now() - PLATFORM_DIRECTOR_RECONCILE_COOLDOWN_MS).toISOString();
+  const [{ data: cooldownActs }, { data: recentRepairs }] = await Promise.all([
+    admin
+      .from("director_activity")
+      .select("metadata")
+      .eq("director_function", PLATFORM)
+      .eq("action_kind", "reconciled_error")
+      .gte("created_at", cooldownSinceIso),
+    admin
+      .from("agent_jobs")
+      .select("spec_slug")
+      .eq("kind", "repair")
+      .gte("created_at", cooldownSinceIso),
+  ]);
+  const cooledSigs = new Set<string>();
+  for (const a of (cooldownActs ?? []) as Array<{ metadata: Record<string, unknown> | null }>) {
+    const sig = typeof a.metadata?.signature === "string" ? (a.metadata.signature as string) : null;
+    if (sig) cooledSigs.add(sig);
+  }
+  for (const j of (recentRepairs ?? []) as Array<{ spec_slug?: string | null }>) {
+    if (j.spec_slug) cooledSigs.add(String(j.spec_slug));
+  }
+
   const enqueued: string[] = [];
   const escalated: string[] = [];
   let confirmed = 0;
+  let cooled = 0;
 
   // Dedup repeated signatures within this same pass (an error + its sibling loop alert can collide); the cap
   // bounds NEW actions (enqueues + escalations) — idle confirms are cheap and always counted.
@@ -1222,6 +1280,14 @@ export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogR
   for (const item of items) {
     if (handled.has(item.signature)) continue;
     handled.add(item.signature);
+    // Phase 2 cooldown — a signature already reconciled (or with a live/recent repair job) within the
+    // window is SKIPPED. The prior action is still draining; re-acting now would just burn another cap slot
+    // and starve build initiation. Skipping doesn't lose coverage — when the cooldown lapses, the next pass
+    // reconciles a still-open row fresh, and a genuinely-stuck error reaches Phase 3's loop-guard on cadence.
+    if (cooledSigs.has(item.signature)) {
+      cooled++;
+      continue;
+    }
     const atCap = enqueued.length + escalated.length >= PLATFORM_DIRECTOR_RECONCILE_CAP;
 
     const coverSpec = fixBySig.get(item.signature);
@@ -1294,7 +1360,7 @@ export async function reconcileErrorBacklog(admin: Admin): Promise<ErrorBacklogR
     }
   }
 
-  return { enqueued, escalated, confirmed, scanned: handled.size };
+  return { enqueued, escalated, confirmed, cooled, scanned: handled.size };
 }
 
 // ── regression-backlog-reconciliation Phase 1 — standing re-verification sweep (close the coverage gap) ──
