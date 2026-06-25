@@ -69,6 +69,7 @@ import {
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
 import { markSpecCardForReview, type SpecCardFlags } from "@/lib/spec-card-state";
+import { authorSpecRowFromMarkdown } from "@/lib/author-spec";
 import {
   driftSuspectPhases,
   isCardFullyShippedWithProvenance,
@@ -3107,8 +3108,8 @@ export function groomInvestigationPrompt(c: GroomCandidate): string {
     "   reason logged to spec_status_history) and queue a fold via the existing fold chain. Reversible via the",
     "   CEO drift-reconciler. REQUIRES owner=platform (rejected otherwise → I escalate).",
     "5. AUTHOR_FOLLOWUP_SPEC — the investigation surfaced a real CODE-LEVEL root cause that is a SEPARATE spec",
-    "   (a parser bug, a broken library, a missing tool — NOT just a future phase of THIS spec). → I COMMIT the",
-    "   followup as its own planned spec card (docs/brain/specs/{slug}.md), AND apply the immediate candidate's",
+    "   (a parser bug, a broken library, a missing tool — NOT just a future phase of THIS spec). → I AUTHOR the",
+    "   followup as its own planned spec card (to public.specs — a DB row, NOT a .md file), AND apply the immediate candidate's",
     "   PRIMARY disposition you choose (`fold_now` or `split`) in the same pass so the candidate doesn't re-fire.",
     "   The followup is a NEW spec for the root cause; it is NOT a split of THIS spec. REQUIRES owner=platform.",
     "6. DISMISS_CANDIDATE — the spec shouldn't have been groomed (false-alarm candidacy: not actionable today,",
@@ -3666,8 +3667,8 @@ export function repairDismissalInvestigationPrompt(c: RepairDismissalCandidate):
     "   code, NOR confirm is an external break. → I leave it on the Control Tower untouched for the human to decide.",
     "   Prefer this over a wrong dismiss (north-star: hit a rail → escalate, never execute).",
     "5. AUTHOR_FOLLOWUP_SPEC — Rafa's no-fix item is a REAL bug he miscategorized: your independent root-cause says",
-    "   it IS our code defect AND you can scope the fix as a concrete spec. → I commit the fix as its own planned",
-    "   spec (docs/brain/specs/{slug}.md) and KEEP the item open on the Control Tower so the fix's build retires",
+    "   it IS our code defect AND you can scope the fix as a concrete spec. → I author the fix as its own planned",
+    "   spec (to public.specs — a DB row, NOT a .md file) and KEEP the item open on the Control Tower so the fix's build retires",
     "   it. This is the constructive alternative to `escalate` — the spec IS the proposed fix; the build chain",
     "   takes it from there. Use this ONLY when you can write a real, scoped fix; otherwise prefer `escalate`.",
     "",
@@ -3754,9 +3755,10 @@ export async function applyDirectorDismissal(
 // Every read-only Max judgment lane (groom · init · repair-dismissal) returns the SAME three new
 // action types when a sound diagnosis exits the lane's native verdict set. This module hosts the
 // reversible DB-only halves (fold_now phase flip + enqueue_fold; dismiss_candidate ledger row) +
-// the followup-spec MARKDOWN-COMMIT callback signature the worker satisfies (the worker owns
-// putFileMain). Each lane keeps its own native verdicts (continue/split for groom, initiate for
-// init, dismiss for repair) — these helpers ONLY handle the three new cross-lane actions.
+// the followup-spec DB AUTHORING (author_followup_spec → public.specs via authorSpecRowFromMarkdown;
+// the in-memory followup markdown is the INPUT, no .md file is written). Each lane keeps its own native
+// verdicts (continue/split for groom, initiate for init, dismiss for repair) — these helpers ONLY handle
+// the three new cross-lane actions.
 
 /** Which read-only judgment lane is dispatching the action — drives the lane-specific dedup key
  *  (groom_key / init_key / dismiss_key) and the activity-row `action_kind` (groomed_* / init_* /
@@ -3833,22 +3835,18 @@ export async function applyDirectorFoldNow(
   return { ok: true, flippedPhases };
 }
 
-/** A small interface for the followup-spec markdown commit so the lib helper doesn't reach into the
- *  worker's gh helpers. The worker passes its own `putFileMain` wrapper. Returns `{ ok }` for the
- *  commit attempt; `existed: true` means the file was already on main (treat as authored). */
-export type FollowupSpecCommitter = (
-  filePath: string,
-  content: string,
-  message: string,
-) => Promise<{ ok: boolean; existed?: boolean; status?: number }>;
-
 /**
- * Commit the new followup spec to `docs/brain/specs/{slug}.md` (via the caller's `putFileMain` wrapper)
- * AND write the lane-appropriate `*_authored_spec` director_activity row carrying the dedup key for the
- * CANDIDATE that produced it (groom_key / init_key / dismiss_key) + the followup slug. The candidate's
- * primary disposition (groom: fold_now|split · init: dismiss · repair-dismissal: keep) is NOT applied
- * here — the lane calls it separately so the same applyDirectorFoldNow / applyDirectorDismiss / split
- * machinery covers both the standalone-action path and the followup path.
+ * Author the new followup spec straight to the DB (public.specs + public.spec_phases via
+ * author-spec.authorSpecRowFromMarkdown — the in-memory followup markdown body is the INPUT; NO `.md`
+ * file is written) AND write the lane-appropriate `*_authored_spec` director_activity row carrying the
+ * dedup key for the CANDIDATE that produced it (groom_key / init_key / dismiss_key) + the followup slug.
+ * The candidate's primary disposition (groom: fold_now|split · init: dismiss · repair-dismissal: keep) is
+ * NOT applied here — the lane calls it separately so the same applyDirectorFoldNow / applyDirectorDismiss /
+ * split machinery covers both the standalone-action path and the followup path.
+ *
+ * Post spec-pm-markdown-purge / db-driven-specs: the spec board reads public.specs (getRoadmap), so the
+ * followup body MUST land there to render — and the repo no longer carries `docs/brain/specs/*.md`. This
+ * mirrors the DB-driven split path (markNewSpecInReview → authorSpecRowFromMarkdown) the same lanes use.
  *
  * Pre-condition: `validateFollowupSpec(parentSlug, parentOwner, action.followup)` returned ok.
  */
@@ -3859,19 +3857,29 @@ export async function applyDirectorAuthorFollowup(
   candidate: { slug: string | null; signature?: string; jobId?: string; owner?: string | null },
   followup: FollowupSpec,
   reason: string,
-  commit: FollowupSpecCommitter,
 ): Promise<{ ok: boolean; error?: string; authoredSlug: string; existed: boolean }> {
   const slug = String(followup.slug ?? "");
-  const path = `docs/brain/specs/${slug}.md`;
-  const message = `spec: ${slug} — follow-up authored by director (${lane}) from ${candidate.slug ?? candidate.signature ?? "candidate"}`;
-  const put = await commit(path, String(followup.content ?? ""), message);
-  if (!put.ok && !put.existed) return { ok: false, error: `followup spec commit failed${put.status ? ` (status ${put.status})` : ""}`, authoredSlug: slug, existed: false };
+  const markdown = String(followup.content ?? "");
 
-  // spec-review-agent Phase 3 — a director-authored followup is a freshly-created spec; mark its card
-  // `in_review` with `flags.intended_status='planned'` (the director only authors followups she wants
-  // built). Skip on `existed` (re-author over an already-tracked spec — its card state is whatever the
-  // original author left it). Best-effort: a mirror-write failure is swallowed (caller's `ok` doesn't gate on this).
-  if (!put.existed) {
+  // spec-pm-markdown-purge: existence is the DB spec row, not a file on main (a convergent re-author over
+  // an already-tracked slug is treated as already authored — its card state is whatever the original
+  // author left it). Matches the split path's `getSpec` existence check in the same lanes.
+  const existing = await getSpec(slug, workspaceId);
+  const existed = !!existing;
+  if (!existed) {
+    try {
+      // Land the body in public.specs + public.spec_phases so the board / getRoadmap renders it. The
+      // in-memory followup markdown is the INPUT; intended `planned` (the director only authors followups
+      // she wants built).
+      await authorSpecRowFromMarkdown(workspaceId, slug, markdown, "planned", {
+        intendedStatusSetBy: `director:${PLATFORM}`,
+      });
+    } catch (e) {
+      return { ok: false, error: `followup spec DB author failed: ${e instanceof Error ? e.message : String(e)}`, authoredSlug: slug, existed: false };
+    }
+    // spec-review-agent Phase 3 — a director-authored followup is a freshly-created spec; mark its card
+    // `in_review` with `flags.intended_status='planned'`. Best-effort: a mirror-write failure is swallowed
+    // (caller's `ok` doesn't gate on this).
     try {
       await markSpecCardForReview(workspaceId, slug, "planned", {
         actor: `director:${PLATFORM}`,
@@ -3889,7 +3897,7 @@ export async function applyDirectorAuthorFollowup(
     followup_title: String(followup.title ?? ""),
     followup_owner: String(followup.owner ?? ""),
     followup_parent: String(followup.parent ?? ""),
-    existed: put.existed === true,
+    existed,
     autonomous: true,
   };
   // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1: when the lane
@@ -3907,7 +3915,7 @@ export async function applyDirectorAuthorFollowup(
     reason,
     metadata,
   });
-  return { ok: true, authoredSlug: slug, existed: put.existed === true };
+  return { ok: true, authoredSlug: slug, existed };
 }
 
 /**
