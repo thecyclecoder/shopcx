@@ -1,0 +1,25 @@
+# PDP edge-served variants — actually cache each `_sxv` arm via Next 16 'use cache'
+
+**Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/regression-agent]] · **Regression-of:** [[pdp-edge-served-experiments]]
+**Regression-signature:** `regression:pdp-edge-served-experiments:4ca32afcf125`
+
+Restore the [[pdp-edge-served-experiments]] verification bullet that requires each variant-keyed PDP URL (`?_sxv=<variantId>`) to be edge-cached per arm. The middleware-driven assign+rewrite ships correctly and per-arm hero swap works, but the page reads `await searchParams` in Next 16 without a `'use cache'` opt-in, which forces dynamic rendering on every request — so `x-vercel-cache: MISS` on every curl and the spec's 'cached per `_sxv`, HIT after warm-up' guarantee never holds. Add the Next 16 cacheComponents opt-in and wrap the `_sxv` render path in `'use cache'` so the arm-keyed render is actually cacheable, restoring the prior-working contract the spec ships against.
+
+## What regressed
+Verification bullet of [[pdp-edge-served-experiments]]: two curls of `https://{domain}/{handle}` with distinct sticky `sx_variant` cookies (mapping to distinct variants) should return different hero `<img>` URLs AND, after warm-up, `x-vercel-cache: HIT` on each variant URL (one cached render per `_sxv`, not one shared render). Hero diff: passes. Cache HIT after warm-up: fails — `cache-control: private, no-cache, no-store, max-age=0, must-revalidate` + `x-vercel-cache: MISS` on 4 consecutive identical-cookie requests.
+
+## Offending change
+#327 / commit 649934bf 'build: pdp-edge-served-experiments' — the bare-PDP branch in src/app/(storefront)/store/[workspace]/[slug]/page.tsx now does `await searchParams` and reads `sp._sxv`. In Next 16.2.9 the searchParams Promise is a dynamic API, so the page is rendered dynamically on every request and `export const revalidate = 3600` is effectively dead for any `_sxv` URL. The spec narrative claims 'no `cookies()` read → cacheable per variant', but the Next 16 dynamic-API rule applies to searchParams too — the cacheable-per-variant claim was never actually realised in the implementation. No `'use cache'` exists anywhere in src/ and `experimental.cacheComponents` is not enabled in next.config.ts.
+
+## Phase 1 — restore it
+1) next.config.ts: add `experimental.cacheComponents: true` (the Next 16 flag that enables the `'use cache'` directive). 2) src/app/(storefront)/store/[workspace]/[slug]/page.tsx: extract the bare-PDP `_sxv` render path into a helper (e.g. `renderEdgeAssignedPdpHero(workspace, slug, sxv)`) that returns the rendered JSX (or the patched PageData), with `'use cache'` as the first statement and `cacheLife({ revalidate: 3600, expire: 3600, stale: 3600 })` so Next keys the cache by `(workspace, slug, sxv)`. Keep the `?variant=`/`?sx_preview=` branches dynamic exactly as they are. Leave `revalidate = 3600` / `dynamicParams = true` in place so the param-less PDP keeps its SSG path. 3) Confirm via the cacheTag-based purge already shipped (`republishExperimentManifest` → revalidatePath/Tag) still invalidates the new per-`_sxv` cache entries — if the `'use cache'` segments aren't reached by the existing tag, add a `cacheTag('storefront-experiment:'+workspaceId+':'+productId)` inside the helper and call `revalidateTag` from the optimizer purge (it already runs on materializeCampaign/promote/kill/rollback per the spec).
+Gate on `npx tsc --noEmit`.
+
+## Verification
+- `curl -s -D- 'https://{domain}/{handle}'` directly (no cookie) → Set-Cookie `sx_variant=<exp>:<variantId>[:h]` from edge middleware; re-curl with that cookie → same `sx_variant` (sticky, unchanged).
+- `curl` the served-arm URL `https://{domain}/{handle}` with two distinct sticky `sx_variant` cookies that map to different variants → a different hero `<img>` URL per arm AND, on the second curl of each variant URL after the first warm-up, `x-vercel-cache: HIT` with `cache-control` carrying `s-maxage` (not `private, no-cache, no-store`).
+- Bare PDP with no `?variant=`, no `_sxv` and no running experiment → param-less SSG render is still served from cache (`x-vercel-cache: HIT`, no per-request server compute) — confirm the `'use cache'` extraction didn't move the control/holdout path off SSG.
+- Start a PDP experiment (`materializeCampaign`) and re-approve a hero → within seconds the manifest reflects it, a fresh visitor gets assigned, and the corresponding variant URL serves the new hero on the next curl (i.e. the purge invalidates the per-`_sxv` cache entry); kill/rollback → all `_sxv` cache entries drop and every visitor reverts to the real cached PDP hero.
+- Re-run spec-test on [[pdp-edge-served-experiments]] → expect its previously-failing verification check(s) pass again (the original ✅ holds).
+
+> Authored by the box Regression Agent — a confirmed regression of [[pdp-edge-served-experiments]] (signature `regression:pdp-edge-served-experiments:4ca32afcf125`). The DevOps Director queues the build (auto-approve within its leash; pre-M4 the CEO queues it).
