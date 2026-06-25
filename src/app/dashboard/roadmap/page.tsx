@@ -2,10 +2,8 @@ import Link from "next/link";
 import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecStatus, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
-import { getSpecCardStates, resolveBoardStatus, mergePhaseStates, deploymentState, type SpecCardState, type DeployState } from "@/lib/spec-card-state";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
-import StatusControl from "./StatusControl";
-import PriorityControl from "./PriorityControl";
+import LifecycleControls from "./LifecycleControls";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
@@ -13,7 +11,11 @@ import BoxChip from "./BoxChip";
 import RoadmapFilters from "./RoadmapFilters";
 import { AgentTestedStamp, TestChip } from "../developer/spec-tests/SpecTestView";
 
-// The board reads docs/brain/specs at request time — always reflect the live brain.
+// roadmap-board-renders-from-derived-getroadmap: the board reads EVERY spec signal from getRoadmap's
+// derived SpecCard — `card.status` is the board status (phase rollup, plus the explicit in_review /
+// deferred / folded overrides) and `card.phases` is the DB phase list with per-phase pr/merge_sha
+// provenance. The retired `spec_card_state` mirror is no longer overlaid here — getRoadmap is the
+// SOLE spec data source the board reads.
 
 const COLUMNS: { key: SpecStatus; label: string }[] = [
   { key: "in_review", label: "In Review" },
@@ -69,25 +71,7 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-/** "shipped · deploying" (merged, not yet live) vs "shipped · live" (a deploy carrying the merge SHA is up). */
-function DeployChip({ state }: { state: DeployState }) {
-  const deploying = state === "deploying";
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-        deploying
-          ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
-          : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-      }`}
-      title={deploying ? "Merged — the deployment carrying this code isn't live yet" : "Live — a deployment carrying this merge is up"}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${deploying ? "bg-amber-500" : "bg-emerald-500"}`} />
-      {deploying ? "shipped · deploying" : "shipped · live"}
-    </span>
-  );
-}
-
-function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source, deploy }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: SpecStatus; goalSlugs: string[]; source: SpecSource; deploy: DeployState | null }) {
+function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: SpecStatus; goalSlugs: string[]; source: SpecSource }) {
   return (
     <div
       data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}
@@ -112,22 +96,20 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
           {spec.title}
         </h3>
       </Link>
-      {deploy && (
+      {/* spec-status-phase-pr-provenance Phase 3: one-shot specs (no phases) carry their shipping PR at
+          the card level (specs.merged_pr → shippedPr on the derived SpecCard). Link to the PR so a shipped
+          one-shot card is provable. Multi-phase specs surface per-phase PRs in PhaseList instead. */}
+      {spec.status === "shipped" && spec.phases.length === 0 && spec.shippedPr && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          <DeployChip state={deploy} />
-          {/* spec-status-phase-pr-provenance Phase 3: one-shot specs (no phases) carry their shipping PR
-              at the card level (flags.merged_pr → shippedPr). Link to the PR so a shipped card is provable. */}
-          {spec.phases.length === 0 && spec.shippedPr && (
-            <a
-              href={`https://github.com/thecyclecoder/shopcx/pull/${spec.shippedPr}`}
-              target="_blank"
-              rel="noreferrer"
-              title={`Shipped by PR #${spec.shippedPr}`}
-              className="inline-flex items-center rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-300 dark:hover:bg-emerald-950/50"
-            >
-              #{spec.shippedPr}
-            </a>
-          )}
+          <a
+            href={`https://github.com/thecyclecoder/shopcx/pull/${spec.shippedPr}`}
+            target="_blank"
+            rel="noreferrer"
+            title={`Shipped by PR #${spec.shippedPr}`}
+            className="inline-flex items-center rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-300 dark:hover:bg-emerald-950/50"
+          >
+            ✓ #{spec.shippedPr}
+          </a>
         </div>
       )}
       {/* director-dismiss-park-and-short-circuit-spec Phase 2 — render a shipped card that was closed
@@ -165,14 +147,17 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
       )}
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
       <div className="mt-2 space-y-2">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <StatusControl slug={spec.slug} status={spec.status} />
-          <PriorityControl slug={spec.slug} status={spec.status} critical={spec.critical} />
-        </div>
+        {/* Status is DERIVED (getRoadmap rolls up spec_phases) and never user-settable — the only real
+            board inputs are the explicit-lifecycle levers: Review / Prioritize / Defer / Make Active. */}
+        <LifecycleControls slug={spec.slug} status={spec.status} critical={spec.critical} />
         <BuildButton slug={spec.slug} initialJob={job} specStatus={spec.status} initialFold={fold} blockedBy={spec.blockedBy} />
       </div>
+      {/* The per-spec markdown is deleted (db-driven-specs) — link to the DB-backed spec detail route
+          instead of a dead `specs/{slug}.md` file path. */}
       <div className="mt-1.5 text-[11px] text-zinc-400">
-        <code>specs/{spec.slug}.md</code>
+        <Link href={`/dashboard/roadmap/${spec.slug}`} className="font-mono hover:text-indigo-600 dark:hover:text-indigo-400">
+          {spec.slug}
+        </Link>
       </div>
     </div>
   );
@@ -180,8 +165,9 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
 
 export default async function RoadmapPage() {
   const workspaceId = await getActiveWorkspaceId();
-  // spec-status-db-driven Phase 1: getRoadmap(workspaceId) overlays the DB mirror onto every spec —
-  // status / critical / deferred / per-phase status all come from spec_card_state authoritatively.
+  // getRoadmap(workspaceId) returns SpecCard[] with status DERIVED from spec_phases (the phase rollup
+  // plus the explicit in_review / deferred overrides) and card.phases straight from the DB row with
+  // per-phase pr/merge_sha provenance — the SOLE spec data source the board reads. No spec_card_state.
   const [{ specs }, archive, filters] = await Promise.all([
     getRoadmap(workspaceId ?? undefined),
     // spec-fold-from-db-row Phase 2: pass the workspaceId so getArchive() reads folded specs from
@@ -194,21 +180,13 @@ export default async function RoadmapPage() {
     ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId), getHumanResolutionCounts(workspaceId)])
     : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, {} as Record<string, number>];
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
-  // spec-card-db-companion: the board reads the live DB mirror (instant status + the deploy flag),
-  // falling back to the markdown-parsed status when a spec has no row. Read AFTER reconcileMergedJobs so
-  // a merge it just detected is reflected this render. The deployed app exposes its own commit SHA —
-  // compared to each card's last_merge_sha to tell "shipped · deploying" (merge not yet live) from
-  // "shipped · live" (a deployment carrying that SHA is up). Zero GitHub API calls for status.
-  const cardStates = workspaceId ? await getSpecCardStates(workspaceId) : ({} as Record<string, SpecCardState>);
-  const deployedSha = process.env.VERCEL_GIT_COMMIT_SHA || "";
-  // Status the board shows = the DB mirror forward-merged with the markdown bundle (resolveBoardStatus:
-  // whichever is further along — DB-first for the deploy-lag, markdown wins when it's ahead), then the
-  // live-build overlay promotes a still-Planned card with an active job to In progress (never demotes).
+  // Column placement = the DERIVED `card.status` from getRoadmap, with ONE live-build overlay: a card
+  // that derives `planned` but has an active build job in flight is promoted to In progress (never
+  // demotes a further-along status). The job overlay reads agent_jobs, not spec_card_state.
   const effectiveStatus = (sp: SpecCard): SpecStatus => {
-    const base = resolveBoardStatus(sp.status, cardStates[sp.slug]);
     const job = jobsBySlug[sp.slug];
-    if (base === "planned" && job && isActive(job.status)) return "in_progress";
-    return base;
+    if (sp.status === "planned" && job && isActive(job.status)) return "in_progress";
+    return sp.status;
   };
   const byStatus = (s: SpecStatus) => specs.filter((sp) => effectiveStatus(sp) === s);
 
@@ -229,15 +207,16 @@ export default async function RoadmapPage() {
         </div>
       </div>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-        Live view of <code>docs/brain/specs/</code> — the markdown is the source of truth, so this never drifts.
-        Status comes from the <span className="font-medium">⏳ planned · 🚧 in progress · ✅ shipped</span> phase emojis.
+        Live view of <code>public.specs</code> — the DB row is the source of truth, so this never drifts.
+        Each card&apos;s column is the status <span className="font-medium">derived from its phases</span> (planned · in progress · shipped),
+        plus the explicit in&nbsp;review / deferred lifecycle states.
       </p>
 
       <RoadmapFilters goals={filters.goals} />
 
       {specs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
-          No specs found in <code>docs/brain/specs/</code>.
+          No specs found in <code>public.specs</code>.
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -256,7 +235,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={{ ...spec, phases: mergePhaseStates(spec.phases, cardStates[spec.slug]) }} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} deploy={deploymentState(cardStates[spec.slug], spec.status, deployedSha)} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} />)
                   )}
                 </div>
               </div>
@@ -273,8 +252,8 @@ export default async function RoadmapPage() {
           </summary>
           <div className="border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
             <p className="mb-3 text-xs text-zinc-400">
-              Shipped + owner-verified in production, folded into the brain, and removed from{" "}
-              <code>specs/</code>. Reads <code>docs/brain/archive.md</code>. Re-hydrate any of these into a fresh spec.
+              Shipped + owner-verified in production, folded into the brain. Reads the folded{" "}
+              <code>public.specs</code> rows (status=&apos;folded&apos;). Re-hydrate any of these into a fresh spec.
             </p>
             <ul className="space-y-1.5">
               {archive.map((e, i) => (
