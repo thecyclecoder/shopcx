@@ -1,0 +1,1 @@
+- **Control Tower stuck-jobs clamps queued age to worker restart** · verified 2026-06-25 · → [[libraries/control-tower]]
