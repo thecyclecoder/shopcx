@@ -11,7 +11,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { computeAgentRollup, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
 
-export const dynamic = "force-dynamic";
 
 export async function GET() {
   const supabase = await createClient();

@@ -17,7 +17,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { computeAgentRollup, AGENT_RUBRICS, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
 
-export const dynamic = "force-dynamic";
 
 const TERMINAL = ["completed", "failed", "needs_attention"];
 

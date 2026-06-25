@@ -25,7 +25,6 @@ import {
   projectRefFromEnv,
 } from "@/lib/control-tower/supabase-log-poll";
 
-export const dynamic = "force-dynamic";
 
 type Admin = ReturnType<typeof createAdminClient>;
 

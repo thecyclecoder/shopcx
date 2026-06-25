@@ -15,7 +15,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { computeDirectorGradeReport } from "@/lib/agents/director-leash-recommendations";
 
-export const dynamic = "force-dynamic";
 
 export async function GET() {
   const supabase = await createClient();

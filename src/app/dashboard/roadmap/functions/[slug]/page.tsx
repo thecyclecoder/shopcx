@@ -10,7 +10,6 @@ import {
 } from "@/lib/brain-roadmap";
 import { preprocessBrainWikilinks } from "@/lib/brain-links";
 
-export const dynamic = "force-dynamic";
 
 const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",

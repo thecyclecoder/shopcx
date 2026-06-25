@@ -14,7 +14,6 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const fn = new URL(req.url).searchParams.get("fn");

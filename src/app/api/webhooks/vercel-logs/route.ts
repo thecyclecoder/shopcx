@@ -21,7 +21,6 @@ import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { recordError, recordFeedDelivery, isAbortedStreamNoise, isBareLifecycle } from "@/lib/control-tower/error-feed";
 
-export const dynamic = "force-dynamic";
 
 interface VercelLog {
   id?: string;

@@ -25,7 +25,6 @@ import {
 } from "@/lib/agents/director-bounce-back";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
-export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   const supabase = await createClient();

@@ -22,7 +22,6 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-export const dynamic = "force-dynamic";
 
 type Cadence = "daily" | "weekly" | "monthly";
 const CADENCES: Cadence[] = ["daily", "weekly", "monthly"];

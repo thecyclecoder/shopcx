@@ -39,7 +39,6 @@ interface PageProps {
   searchParams: Promise<{ token?: string }>;
 }
 
-export const dynamic = "force-dynamic";
 
 export default async function CheckoutPage({ searchParams }: PageProps) {
   const params = await searchParams;

@@ -13,7 +13,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { AGENT_INBOX_TYPES } from "@/lib/agents/inbox";
 
-export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   const supabase = await createClient();

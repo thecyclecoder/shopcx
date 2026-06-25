@@ -14,7 +14,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { CEO } from "@/lib/agents/approval-router";
 import { listApprovalDecisions, type DecisionHistoryFilters, type DecisionOutcome } from "@/lib/agents/approval-decisions";
 
-export const dynamic = "force-dynamic";
 
 const DECISIONS: DecisionOutcome[] = ["approved", "declined", "escalated"];
 

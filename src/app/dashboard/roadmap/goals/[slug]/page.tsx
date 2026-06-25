@@ -15,7 +15,6 @@ import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestPlanJob } from "@/lib/agent-jobs";
 import PlanButton from "../../PlanButton";
 
-export const dynamic = "force-dynamic";
 
 const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",

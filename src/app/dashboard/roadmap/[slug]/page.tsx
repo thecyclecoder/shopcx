@@ -19,7 +19,6 @@ import BuildButton from "../BuildButton";
 import PhaseList from "../PhaseList";
 import VerificationCard from "../VerificationCard";
 
-export const dynamic = "force-dynamic";
 
 const STATUS_LABEL: Record<SpecStatus, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", deferred: "Deferred", rejected: "Cut" };
 const STATUS_BADGE: Record<SpecStatus, string> = {

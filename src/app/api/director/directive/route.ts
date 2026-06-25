@@ -16,7 +16,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { clearDirective, getActiveDirective } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
-export const dynamic = "force-dynamic";
 
 const DEFAULT_DIRECTOR = "platform";
 

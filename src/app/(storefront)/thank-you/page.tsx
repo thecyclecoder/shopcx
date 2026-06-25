@@ -32,7 +32,6 @@ interface PageProps {
   searchParams: Promise<{ order?: string }>;
 }
 
-export const dynamic = "force-dynamic";
 
 export default async function ThankYouPage({ searchParams }: PageProps) {
   const params = await searchParams;

@@ -14,7 +14,6 @@ import RoadmapFilters from "./RoadmapFilters";
 import { AgentTestedStamp, TestChip } from "../developer/spec-tests/SpecTestView";
 
 // The board reads docs/brain/specs at request time — always reflect the live brain.
-export const dynamic = "force-dynamic";
 
 const COLUMNS: { key: SpecStatus; label: string }[] = [
   { key: "planned", label: "Planned" },
