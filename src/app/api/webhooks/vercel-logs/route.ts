@@ -19,7 +19,13 @@
  */
 import { NextResponse } from "next/server";
 import crypto from "crypto";
-import { recordError, recordFeedDelivery, isAbortedStreamNoise, isBareLifecycle } from "@/lib/control-tower/error-feed";
+import {
+  recordError,
+  recordFeedDelivery,
+  isAbortedStreamNoise,
+  isBareInngestStepErrorMiddlewareLog,
+  isBareLifecycle,
+} from "@/lib/control-tower/error-feed";
 
 
 interface VercelLog {
@@ -78,6 +84,11 @@ function isError(log: VercelLog): boolean {
   // Drop Node Web-Streams client-abort teardown noise (status 0, ignore-listed-only
   // stack) — non-actionable framework noise, same genre as the bare lifecycle wrappers.
   if (isAbortedStreamNoise(message, status)) return false;
+  // Drop Inngest's built-in LoggerMiddleware bare "Inngest step error" log on
+  // /api/inngest — terminal failures are already captured on source='inngest' via
+  // inngest/function.failed; the bare label is duplicate noise on a healthy retry loop.
+  const path = log.path ?? log.proxy?.path ?? null;
+  if (isBareInngestStepErrorMiddlewareLog(message, path)) return false;
   return true;
 }
 
