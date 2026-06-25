@@ -1,6 +1,6 @@
 # libraries/brain-roadmap
 
-**DB-first spec + goal/function loaders** (2026-06-24). `getRoadmap(workspaceId)` / `getSpec(slug, workspaceId)` / `getFunctionMap(workspaceId)` / `getGoals(workspaceId)` read from `[[../tables/specs]]` + `[[../tables/spec_phases]]` (spec content + status) + the markdown (goal/function content). **Spec content** (title, phase titles, owner, parent, blockedBy, autoBuild, repairSignature, summary) is **now DB-authoritative** ([[spec-body-table-and-backfill]]); **goal/function content stays in markdown** (goals/, functions/). The [[../dashboard/roadmap|Roadmap board]], taxonomy map, and detail pages all read the DB — a board flip lands the moment a writer touches `[[../tables/spec_card_state]]` (no deploy needed). Legacy code paths that parsed `docs/brain/specs/*.md` with `parseSpec` / `overlayDbStateOnSpec` have been retired ([[../specs/spec-readers-from-db-retire-parser]]); the reader surfaces (board, detail page, Slack, spec-test agent) all read the DB.
+**DB-first spec + goal/function loaders** (2026-06-24). `getRoadmap(workspaceId)` / `getSpec(slug, workspaceId)` / `getFunctionMap(workspaceId)` / `getGoals(workspaceId)` read from `[[../tables/specs]]` + `[[../tables/spec_phases]]` + `[[../tables/goals]]` + `[[../tables/goal_milestones]]` (spec content + status + goal/milestone content). **Spec content** (title, phase titles, owner, parent, blockedBy, autoBuild, repairSignature, summary) and **goal/milestone content** are **DB-authoritative** ([[spec-body-table-and-backfill]] and [[goal-readers-from-db-retire-parsegoal]]); **function content stays in markdown** (functions/). The [[../dashboard/roadmap|Roadmap board]], taxonomy map, and detail pages all read the DB — a board flip lands the moment a writer touches `[[../tables/spec_card_state]]` or `[[../tables/goals]]` (no deploy needed). Legacy code paths that parsed markdown with `parseSpec` / `parseGoal` / `overlayDbStateOnSpec` have been retired; the reader surfaces (board, detail page, Slack, spec-test agent, org-chart) all read the DB.
 
 **File:** `src/lib/brain-roadmap.ts`
 
@@ -20,8 +20,8 @@ The [[../dashboard/roadmap|Roadmap board]], goal/function maps, and detail pages
 - **`getRoadmap(workspaceId)`** → `{ specs: SpecCard[], tracks }`. Reads `public.specs` + `public.spec_phases` ordered by position, **resolves each spec's `blockedBy`** against the live set, overlays `[[../tables/spec_card_state]]` for live status, sorts (in-progress → planned → shipped → deferred).
 - **`getSpec(slug, workspaceId)`** → `{ raw, card }` for the detail page (also resolves `blockedBy`, overlays status). **`raw` is the markdown copy** (lifecycle/content view), **`card` is the DB row + overlay** (live state).
 - **`getFunctionMap(workspaceId)`/`getFunctions(workspaceId)`/`getFunction(slug, workspaceId)`** + `parseFunction` — the Function → Mandate/Goal → Spec taxonomy (goals + functions still read markdown).
-- **`getGoals(workspaceId)`/`getGoal(slug, workspaceId)`** + `parseGoal`, `specCompletion` — finite goals, milestone rollup %. `GoalCard.owner?` is the DRI function slug parsed from the goal's `Owner: [[../functions/x]]` line (bold or plain) — the canonical goal→function link the Platform/DevOps Director escort uses to pick the goals it owns ([[platform-director]] Phase 2).
-- **`GoalCard.status`** (`proposed｜greenlit｜complete`) + **`GoalCard.proposedBy?`** + **`deriveGoalStatus(rawStatus, pct)`** ([[../specs/director-proposed-goals]] Phase 1) — the goal's **explicit lifecycle state**, parsed from a `**Status:**` line. See [[goal-proposals]].
+- **`getGoals(workspaceId)`/`getGoal(slug, workspaceId)`** — finite goals + milestones read from `[[../tables/goals]]` + `[[../tables/goal_milestones]]` ([[goal-readers-from-db-retire-parsegoal]]), with milestone rollup %. `GoalCard.owner?` is the DRI function slug from `goals.owner` — the canonical goal→function link the Platform/DevOps Director escort uses to pick the goals it owns ([[platform-director]] Phase 2). Milestone completion % computed from child specs.
+- **`GoalCard.status`** (`proposed｜greenlit｜complete`) + **`GoalCard.proposedBy?`** — the goal's lifecycle state from `goals.status` + `goals.proposer_function` ([[../specs/director-proposed-goals]] Phase 1). Status rolls up automatically when every milestone is complete (the `goal_milestones_rollup` trigger ([[../tables/goals]]) — only the CEO can flip `proposed → greenlit` ([[../specs/goal-greenlight-button-and-author-writes-db]]). See [[goal-proposals]].
 - **`getRoadmapFilters()`** → `{ goals, goalsBySpec, sourceBySpec }` for the board's goal + source filters ([[../specs/roadmap-goal-and-source-filters]]). **`SpecSource`** = `repair` (the spec has a `**Repair-signature:**` metadata line from [[../tables/specs]]), else `goal` (wikilinked from a goal doc), else `manual`.
 - **`getArchive()`/`listArchivedSlugs()`** — verified/folded specs from `archive.d/` (← `archive.md` fallback).
 - **`phaseEmoji(Phase)`** → `⏳/🚧/✅/❌`. Used by the blocker chip + status cards.
@@ -41,16 +41,19 @@ Spec metadata is **DB-stored** ([[spec-body-table-and-backfill]]). The `getSpec(
 - **`specs` table columns:** `slug`, `title`, `status`, `summary`, `owner_id` (FK → function), `parent_id` (FK → goal/milestone), `blocked_by` (JSON array of spec slugs), `auto_build`, `repair_signature`
 - **`spec_phases` table:** per-phase content `(index, title, status, pr, merge_sha, body)` ordered by position. `status` is `planned | in_progress | shipped | rejected`.
 - **`spec_card_state` table:** live flags (`critical`, `deferred`, `blocked`, `deploy_pending`) and merged build provenance (`last_merge_sha`, `phase_states`).
+- **`goals` + `goal_milestones` tables:** goal content (title, body, outcome, success_metric, owner, proposer_function, status) + milestone content (title, body, status) ([[goal-readers-from-db-retire-parsegoal]]).
 
-Goal/function metadata **still live in markdown** (see [[#Spec metadata lines|Goal/function metadata below]]).
+Function metadata **still lives in markdown** (see [[#Goal metadata — DB columns|Goal metadata below]]).
 
-## Goal / function metadata lines (parsed in `parseGoal` / `parseFunction`)
+## Goal metadata — DB columns
 
-Goals + functions still read from markdown. Under a doc's H1, one-per-concept bold metadata lines:
+Goals read from `[[../tables/goals]]`. Under the H1 in `docs/brain/goals/{slug}.md`, optional bold metadata lines are **parsed once per backfill** and then forgotten — the DB columns are authoritative:
 
-- `**Owner:** [[../functions/{slug}]]` → `owner` (the DRI function).
-- `**Status:** proposed | greenlit | complete` (goals only) → explicit lifecycle state.
-- `**Proposed-by:** [[../functions/{slug}]]` (goals only) → proposing director.
+- `**Owner:** [[../functions/{slug}]]` → `goals.owner` (the DRI function slug).
+- `**Status:** proposed | greenlit | complete` (rare in .md now — the DB is the live source) → `goals.status`.
+- `**Proposed-by:** [[../functions/{slug}]]` → `goals.proposer_function`.
+
+Functions still read from markdown: `docs/brain/functions/{slug}.md` with `**Owner:** [[../functions/{parent}]]` + `**Mandate:**` lines, parsed by `parseFunction`.
 
 ## `blockedBy` — spec build prerequisites ([[../specs/spec-blockers]])
 

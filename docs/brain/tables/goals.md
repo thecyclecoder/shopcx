@@ -4,7 +4,7 @@ The goal row for every entry in [[../goals/]] — the top tier of the [[../proje
 
 **A SubGoal is just a goal with a `parent_goal_id`.** Not a separate table — the CEO-locked design contract is explicit: subgoals are reassignable ("a goal CAN be (re)assigned under another goal at any time") via one `UPDATE goals SET parent_goal_id=…`. Cycles are rejected at the rail (the `goals_parent_cycle` trigger walks the chain on every write).
 
-**Today** goals are still parsed from `docs/brain/goals/{slug}.md` by [[../libraries/brain-roadmap]] `parseGoal` ([[../libraries/brain-roadmap|L868]]). This table holds the secondary copy until [[../specs/goal-readers-from-db-retire-parsegoal]] flips the readers; the [[../libraries/goals-table]] writers ([[../specs/goals-milestones-tables-and-backfill]] Phase 2) keep it in sync via the one-time backfill (Phase 3) + a future dual-write.
+Goals are now read from this table by [[../libraries/brain-roadmap]] `getGoals` / `getGoal` ([[../specs/goal-readers-from-db-retire-parsegoal]] Phase 2). The backfill ([[../recipes/backfill-goals-from-markdown]]) seeded rows from `docs/brain/goals/{slug}.md` via the legacy `parseGoal` parser, which is now retired ([[../specs/goal-readers-from-db-retire-parsegoal]] Phase 3).
 
 **Workspace-scoped** (mirrors [[specs]] / [[spec_card_state]]). RLS: any authenticated user reads; service role does all writes (the writers hold the creds). No client-side goal writes.
 
@@ -52,7 +52,7 @@ The goal row for every entry in [[../goals/]] — the top tier of the [[../proje
 
 ## Reads / writes
 
-- **Reader cutover is** [[../specs/goal-readers-from-db-retire-parsegoal]] — until then, `getGoals` / `getGoal` ([[../libraries/brain-roadmap|L1004]]) still read `docs/brain/goals/*.md`. This table is the secondary copy.
+- **Reader cutover** [[../specs/goal-readers-from-db-retire-parsegoal]] (Phase 2) — completed. `getGoals` / `getGoal` ([[../libraries/brain-roadmap]]) now read this table. The markdown files `docs/brain/goals/*.md` are retained for fold operations ([[../specs/goal-fold-from-db-row]]).
 - **Writer surface** is [[../libraries/goals-table]] — `upsertGoal`, `setGoalStatus` (the CEO-greenlight write surface for [[../specs/goal-greenlight-button-and-author-writes-db]]).
 - **One-time backfill** from markdown: [[../recipes/backfill-goals-from-markdown]] — runs the EXISTING [[../libraries/brain-roadmap]] `parseGoal` one last time and INSERTs both `goals` + [[goal_milestones]] rows.
 

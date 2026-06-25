@@ -1,12 +1,12 @@
 # libraries/goals-table
 
-The read/write surface for the DB-resident goal hierarchy — [[../tables/goals]] (the goal row) + [[../tables/goal_milestones]] (the per-milestone rows). Authored by [[../specs/goals-milestones-tables-and-backfill]] Phase 2; parallel to [[brain-roadmap]] `getGoals` / `getGoal` (markdown-backed) until [[../specs/goal-readers-from-db-retire-parsegoal]] retires the parser.
+The canonical read/write surface for the DB-resident goal hierarchy — [[../tables/goals]] (the goal row) + [[../tables/goal_milestones]] (the per-milestone rows). The `getGoals` / `getGoal` readers in [[brain-roadmap]] have been switched over to read from this surface ([[../specs/goal-readers-from-db-retire-parsegoal]] Phase 2). Authored by [[../specs/goals-milestones-tables-and-backfill]] Phase 2.
 
 **File:** `src/lib/goals-table.ts`
 
 ## Why this exists
 
-[[../specs/goals-milestones-tables-and-backfill]] adds the relations [[../tables/goals]] + [[../tables/goal_milestones]] so the top two tiers of the [[../project-management|Goal → Milestone → Spec → Phase]] hierarchy are queryable in the DB (and so the CEO greenlight is a typed write, not a markdown edit + Vercel deploy — [[../specs/goal-greenlight-button-and-author-writes-db]]). This module is the canonical writer + read surface those rows are managed through. NO reader has been retargeted yet — `getGoals` / `getGoal` ([[brain-roadmap|L1004]]) still parse `docs/brain/goals/*.md`; the [[../recipes/backfill-goals-from-markdown]] one-time backfill seeds the rows so the cutover ([[../specs/goal-readers-from-db-retire-parsegoal]]) can lean on them.
+[[../specs/goals-milestones-tables-and-backfill]] adds the relations [[../tables/goals]] + [[../tables/goal_milestones]] so the top two tiers of the [[../project-management|Goal → Milestone → Spec → Phase]] hierarchy are queryable in the DB (and so the CEO greenlight is a typed write, not a markdown edit + Vercel deploy — [[../specs/goal-greenlight-button-and-author-writes-db]]). This module is the canonical writer + read surface those rows are managed through. The readers ([[brain-roadmap]] `getGoals` / `getGoal`) have been switched over ([[../specs/goal-readers-from-db-retire-parsegoal]] Phase 2) and now read from these rows; the legacy `parseGoal` markdown parser has been retired (Phase 3).
 
 ## Types
 
@@ -45,10 +45,10 @@ supabase-js has no transaction surface, so `upsertGoal` is a sequence (UPSERT go
 
 ## Callers
 
-- **[[../recipes/backfill-goals-from-markdown]]** (`scripts/backfill-goals-from-markdown.ts`) — runs [[brain-roadmap]] `parseGoal` ONE LAST TIME over `docs/brain/goals/*.md` and upserts the rows.
+- **[[../recipes/backfill-goals-from-markdown]]** (`scripts/backfill-goals-from-markdown.ts`) — ran the legacy [[brain-roadmap]] `parseGoal` once over `docs/brain/goals/*.md` and upserted the rows (backfill complete).
 - **`/api/roadmap/goal/greenlight` · `/ungreenlight` · `/decline`** ([[../specs/goal-greenlight-button-and-author-writes-db]] Phase 1) — the CEO's one-click DB-flag routes. `greenlight` flips `proposed → greenlit` via `setGoalStatus`, `ungreenlight` reverses (while `goal_milestones.status` is all `planned`), and `decline` flips `proposed → folded`. Each is CEO-only (gated on `workspace_members.role='owner'`) and writes one [[../tables/director_activity]] row (`greenlit_goal` / `ungreenlit_goal` / `declined_goal`) for audit.
 - **`<GreenlightButton>`** (`src/app/dashboard/roadmap/goals/GreenlightButton.tsx`) — the client component on the goal card list + detail page that posts to those routes. Hides itself for non-owner viewers; the route enforces CEO-only server-side too.
-- **[[../specs/goal-readers-from-db-retire-parsegoal]]** — the future cutover that swaps `getGoals` / `getGoal` ([[brain-roadmap|L1004]]) to read FROM here instead of markdown.
+- **[[../specs/goal-readers-from-db-retire-parsegoal]]** (Phase 2) — completed cutover. `getGoals` / `getGoal` ([[brain-roadmap]]) now read FROM these tables instead of markdown.
 
 ## Gotchas
 
