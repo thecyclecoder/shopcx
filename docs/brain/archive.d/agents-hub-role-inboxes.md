@@ -1,0 +1,1 @@
+- **Agents hub + role inboxes** · verified 2026-06-25 · → [[../dashboard/agents]]
