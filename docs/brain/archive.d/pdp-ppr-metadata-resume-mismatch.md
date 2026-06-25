@@ -1,0 +1,1 @@
+- **Storefront PDP — eliminate Next 16 PPR metadata-boundary resume mismatch under bot UAs** · verified 2026-06-25 · → [[../lifecycles/storefront-checkout]]
