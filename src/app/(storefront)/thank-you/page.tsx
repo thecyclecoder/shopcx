@@ -10,12 +10,14 @@
  */
 
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ThankYouClient } from "./_components/ThankYouClient";
 import { getStorefrontMetadata } from "../_lib/storefront-metadata";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
+  await connection();
   const params = await searchParams;
   if (!params.order) return {};
   const admin = createAdminClient();
@@ -34,6 +36,7 @@ interface PageProps {
 
 
 export default async function ThankYouPage({ searchParams }: PageProps) {
+  await connection();
   const params = await searchParams;
   if (!params.order) redirect("/");
 

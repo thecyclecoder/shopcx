@@ -19,6 +19,7 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CustomizeClient } from "./_components/CustomizeClient";
@@ -31,6 +32,7 @@ import type { Review } from "../_lib/page-data";
 import { getStorefrontMetadata } from "../_lib/storefront-metadata";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
+  await connection();
   // Inherit the originating workspace's favicon so the customer's
   // browser tab keeps the brand they started shopping on.
   const params = await searchParams;
@@ -53,6 +55,7 @@ interface PageProps {
 
 
 export default async function CustomizePage({ searchParams }: PageProps) {
+  await connection();
   const params = await searchParams;
   const cookieToken = (await cookies()).get("cart")?.value;
   const token = params.token || cookieToken;

@@ -1,11 +1,13 @@
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
+import { connection } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import Link from "next/link";
 import HelpSearch from "./help-search";
 import TicketForm from "./ticket-form";
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
+  await connection();
   const { slug } = await params;
   const admin = createAdminClient();
   const { data: workspace } = await admin.from("workspaces").select("name").eq("help_slug", slug).single();

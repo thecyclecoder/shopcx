@@ -5,11 +5,13 @@
  * the client component below.
  */
 import type { Metadata } from "next";
+import { connection } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getStorefrontIcons } from "@/app/(storefront)/_lib/storefront-metadata";
 import LoginClient from "./LoginClient";
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  await connection();
   const { slug } = await params;
   const admin = createAdminClient();
   const { data: ws } = await admin
