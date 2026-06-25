@@ -27,7 +27,6 @@ import { StorefrontFooter } from "../../../_components/StorefrontFooter";
  * The page renders every published post into the initial HTML (crawler +
  * LLM friendly); the header topic tabs filter client-side via ?topic=.
  */
-export const dynamicParams = true;
 
 const MAIN_SITE = "https://superfoodscompany.com";
 
