@@ -120,6 +120,9 @@ export interface AgentJob {
   log_tail: string | null;
   error: string | null;
   claimed_at: string | null;
+  // The build's scope/instructions (phaseScopedInstructions embeds "Phase N") — used by the merge hook to
+  // attribute which phase(s) a merged PR shipped (phase-pr-provenance). Optional: not every select reads it.
+  instructions?: string | null;
   // build-all-phases-chain Phase 1: a "Build all" build → its first ⏳ phase is tagged true; the
   // post-merge step queues the next ⏳ phase (also chain_phases) on merge, until all phases ✅. Default
   // false (single-phase / non-chained builds). May be undefined on a pre-migration row read.
@@ -627,28 +630,47 @@ export async function enqueueDirectorTopUp(workspaceId: string, adminClient?: Ad
   }
 }
 
+/** Phase indices (0-based) a build's instructions name — "Phase 2 — …" → [1]; a single PR may name several. */
+function parsePhaseIndices(instructions: string | null | undefined, count: number): number[] {
+  if (!instructions) return [];
+  const idxs = new Set<number>();
+  for (const m of instructions.matchAll(/\bPhase\s+(\d+)\b/gi)) {
+    const i = parseInt(m[1], 10) - 1;
+    if (i >= 0 && i < count) idxs.add(i);
+  }
+  return [...idxs];
+}
+
 export async function applyMergedBuildEffects(
   workspaceId: string,
   slug: string,
-  opts: { chainPhases?: boolean; mergeSha?: string | null },
+  opts: { chainPhases?: boolean; mergeSha?: string | null; prNumber?: number | null; instructions?: string | null },
 ): Promise<void> {
   try {
     const drift = await reconcileSpecDrift(workspaceId, slug);
-    // TRUST THE MERGE — but ONE PHASE AT A TIME (db-driven-status-trust-the-merge). Builds ship a spec
-    // phase-by-phase: a merged build means the phase IT delivered shipped, NOT the whole spec. reconcileSpecDrift
-    // flips a phase only when it can verify that phase's code paths are on main; a PROSE-only phase declares no
-    // paths so it can NEVER flip, leaving the spec stuck at `planned` despite the merge ("Built" pill + Planned
-    // status). So when reconcile confirmed nothing, advance the FIRST not-yet-shipped phase — the one this build
-    // delivered (phases build in order). Never blanket-ship the rest; the next phase's own build ships it.
     let phaseStates = drift.phaseStates;
-    if (phaseStates.length && drift.flipped.length === 0) {
-      const idx = phaseStates.findIndex((p) => p.status === "planned");
-      if (idx >= 0) phaseStates = phaseStates.map((p, i) => (i === idx ? { ...p, status: "shipped" } : p));
+    const pr = opts.prNumber ?? null;
+    const sha = opts.mergeSha ?? null;
+    // TRUST THE MERGE + TAG ITS PROVENANCE (db-driven-status-trust-the-merge / phase-pr-provenance). Builds
+    // ship a spec phase-by-phase, but a single PR/merge can ship SEVERAL phases at once. Which phases did THIS
+    // merge ship? (1) the phases reconcileSpecDrift flipped planned→shipped THIS pass — their code-path landed
+    // on main with this merge (could be several); (2) for PROSE phases reconcile can't verify (no declarable
+    // paths → it would leave them stuck `planned` despite the merge), the phase(s) the build's instructions
+    // name ("Phase N", possibly several), else the first not-yet-shipped. Tag EACH shipped phase with this
+    // PR # + merge SHA so "shipped" is provable, not inferred. Never blanket-ship phases with no evidence.
+    const shipped = new Set<number>(drift.flipped.map((f) => f.index));
+    if (shipped.size === 0 && phaseStates.length) {
+      const named = parsePhaseIndices(opts.instructions, phaseStates.length);
+      if (named.length) named.forEach((i) => shipped.add(i));
+      else { const i = phaseStates.findIndex((p) => p.status === "planned"); if (i >= 0) shipped.add(i); }
     }
+    phaseStates = phaseStates.map((p) =>
+      shipped.has(p.index) ? { ...p, status: "shipped" as const, pr, merge_sha: sha } : p,
+    );
     const rolled = phaseStates.length ? rollupPhaseStatus(phaseStates) : drift.status;
     await markSpecCardMergeShipped(workspaceId, slug, {
       status: rolled,
-      mergeSha: opts.mergeSha ?? null,
+      mergeSha: sha,
       phaseStates,
     });
     if (rolled === "shipped") {
@@ -727,6 +749,8 @@ export async function handleAutoMergedBuildBranch(branch: string, mergeSha: stri
     await applyMergedBuildEffects(job.workspace_id, job.spec_slug, {
       chainPhases: !!job.chain_phases,
       mergeSha,
+      prNumber: job.pr_number ?? null,
+      instructions: job.instructions ?? null,
     });
     return job.spec_slug;
   } catch {
@@ -768,6 +792,8 @@ export async function reconcileMergedJobs(jobs: AgentJob[]): Promise<void> {
             await applyMergedBuildEffects(j.workspace_id, j.spec_slug, {
               chainPhases: j.chain_phases,
               mergeSha: pr.merge_commit_sha ?? null,
+              prNumber: j.pr_number ?? null,
+              instructions: j.instructions ?? null,
             });
           }
           // fold-guard-live-build (Phase 1): a just-merged FOLD just archived its batch of specs (their
