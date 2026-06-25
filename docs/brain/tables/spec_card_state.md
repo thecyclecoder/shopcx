@@ -18,8 +18,8 @@ The live, **instant** project-management mirror the [[../dashboard/roadmap|Roadm
 | `workspace_id` | `uuid` | FK → `workspaces(id)` on delete cascade |
 | `spec_slug` | `text` | the spec this is the state for (`docs/brain/specs/{slug}.md`) |
 | `status` | `text` | phase rollup — `planned ｜ in_progress ｜ shipped ｜ rejected` · CHECK-constrained · the board signal |
-| `phase_states` | `jsonb` | per-phase status `[{ index, title, status }]` — authoritative · default `[]` |
-| `flags` | `jsonb` | board flags: `{ deploy_pending?, blocked?, critical?, deferred? }` · default `{}` · merge-patched on write. spec-status-db-driven Phase 1 added `critical` (the **Priority:** flag) and `deferred` (the parked flag) here — no schema change needed for them. `flags.deferred=true` wins over `status` for display via `effectiveStatusFromState` / `resolveBoardStatus`. |
+| `phase_states` | `jsonb` | per-phase status `[{ index, title, status, pr?, merge_sha? }]` — authoritative · default `[]`. `pr` + `merge_sha` ([[../specs/spec-status-phase-pr-provenance]]) tag each shipped phase with the PR # + merge commit SHA that shipped it, so "shipped" is provable/auditable rather than inferred. |
+| `flags` | `jsonb` | board flags: `{ deploy_pending?, blocked?, critical?, deferred?, short_circuit?, short_circuit_reason?, merged_pr? }` · default `{}` · merge-patched on write. spec-status-db-driven Phase 1 added `critical` (the **Priority:** flag) and `deferred` (the parked flag) here — no schema change needed for them. `flags.deferred=true` wins over `status` for display via `effectiveStatusFromState` / `resolveBoardStatus`. `flags.merged_pr` ([[../specs/spec-status-phase-pr-provenance]]) carries the card-level shipping PR for a **one-shot spec** (no phases) — multi-phase specs carry their PR per-phase via `phase_states[i].pr` instead. |
 | `last_merge_sha` | `text?` | the build merge commit SHA that shipped this card — compared to `VERCEL_GIT_COMMIT_SHA` for `deploying` vs `live` |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | bumped every write · default `now()` |
@@ -60,6 +60,7 @@ Every writer goes through `upsertCardState` and additionally appends one row per
 - `supabase/migrations/20260624130000_spec_status_history.sql` — adds [[spec_status_history]] audit table (spec-status-db-driven Phase 1) · apply: `scripts/apply-spec-status-history-migration.ts`
 - One-time backfill from markdown: `scripts/backfill-spec-status-from-markdown.ts`
 - One-time markdown strip (Phase 3 content migration): `scripts/strip-spec-status-markers.ts`
+- One-time phase-PR-provenance backfill ([[../specs/spec-status-phase-pr-provenance]] Phase 2): `scripts/backfill-phase-pr-provenance.ts` — attributes each merged build to the phase(s) it shipped and stamps `phase_states[i].{pr,merge_sha}` (or `flags.merged_pr` for one-shot specs).
 
 ## Related
 

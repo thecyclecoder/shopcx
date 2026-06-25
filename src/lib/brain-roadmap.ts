@@ -23,6 +23,11 @@ export type SpecStatus = Phase | "deferred";
 export interface SpecPhase {
   title: string;
   status: Phase;
+  /** spec-status-phase-pr-provenance Phase 3: the PR # + merge SHA that SHIPPED this phase. Surfaced from
+   *  `spec_card_state.phase_states[i].{pr,merge_sha}` by `overlayDbStateOnSpec` / `mergePhaseStates` so the
+   *  board and the spec-detail page can render a "P2 ✓ #519" PR chip per shipped phase (provable status). */
+  pr?: number | null;
+  merge_sha?: string | null;
 }
 
 export interface SpecCard {
@@ -57,6 +62,11 @@ export interface SpecCard {
   shortCircuited?: boolean;
   /** The reason captured at the moment of short-circuit (from `flags.short_circuit_reason`). */
   shortCircuitReason?: string;
+  /** spec-status-phase-pr-provenance Phase 3: card-level shipping PR for a ONE-SHOT spec (a spec with no
+   *  `## Phase` sections, where the whole spec ships in ONE PR). Surfaced from `spec_card_state.flags.merged_pr`
+   *  so the board can render a card-level "✓ #PR" chip. Multi-phase specs leave this undefined; their
+   *  per-phase PRs live in `phases[i].pr`. */
+  shippedPr?: number | null;
 }
 
 export interface ProjectTrack {
@@ -378,12 +388,16 @@ function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/
   // `flags.deferred` wins over phase rollup for display. Un-defer reveals the underlying rollup.
   const status: SpecStatus = state.flags?.deferred ? "deferred" : state.status;
   // Per-phase: DB is authoritative; markdown is the fallback for indices the DB doesn't know.
-  const byIndex = new Map((state.phase_states ?? []).map((p) => [p.index, p.status]));
+  // spec-status-phase-pr-provenance Phase 3: carry the PR/SHA provenance through so the board can render
+  // a "P2 ✓ #519" chip per shipped phase.
+  const byIndex = new Map((state.phase_states ?? []).map((p) => [p.index, p]));
   const phases = spec.phases.map((p, i) => {
-    const dbStatus = byIndex.get(i);
-    return dbStatus !== undefined ? { ...p, status: dbStatus } : p;
+    const db = byIndex.get(i);
+    if (!db) return p;
+    return { ...p, status: db.status, pr: db.pr ?? null, merge_sha: db.merge_sha ?? null };
   });
-  // Forward-merge safety: if markdown has a more-advanced phase than the DB (a fresh edit), keep it.
+  // Forward-merge safety: if markdown has a more-advanced phase than the DB (a fresh edit), keep it
+  // (and drop any stale DB provenance — the markdown is ahead).
   for (let i = 0; i < phases.length; i++) {
     if (PHASE_RANK[spec.phases[i].status] > PHASE_RANK[phases[i].status]) {
       phases[i] = spec.phases[i];
@@ -396,6 +410,10 @@ function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/
   const rawScReason = state.flags?.short_circuit_reason;
   const shortCircuited = state.flags?.short_circuit === true ? true : spec.shortCircuited;
   const shortCircuitReason = typeof rawScReason === "string" && rawScReason ? rawScReason : spec.shortCircuitReason;
+  // spec-status-phase-pr-provenance Phase 3: one-shot specs (no phases) carry their shipping PR at the
+  // card level via `flags.merged_pr`. Surfaced as `shippedPr` so the board renders a card-level "✓ #PR" chip.
+  const flagsMergedPr = state.flags?.merged_pr;
+  const shippedPr = typeof flagsMergedPr === "number" ? flagsMergedPr : spec.shippedPr ?? null;
   return {
     ...spec,
     status,
@@ -404,6 +422,7 @@ function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/
     counts,
     shortCircuited,
     shortCircuitReason,
+    shippedPr,
   };
 }
 

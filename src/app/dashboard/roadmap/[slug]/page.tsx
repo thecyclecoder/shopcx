@@ -105,6 +105,19 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
               <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE[spec.card.status]}`}>
                 {STATUS_LABEL[spec.card.status]}
               </span>
+              {/* spec-status-phase-pr-provenance Phase 3: card-level shipping PR (one-shot specs).
+                  Multi-phase specs surface per-phase PRs via PhaseList below instead. */}
+              {spec.card.status === "shipped" && spec.card.phases.length === 0 && spec.card.shippedPr && (
+                <a
+                  href={`https://github.com/thecyclecoder/shopcx/pull/${spec.card.shippedPr}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`Shipped by PR #${spec.card.shippedPr}`}
+                  className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-300 dark:hover:bg-emerald-950/50"
+                >
+                  #{spec.card.shippedPr}
+                </a>
+              )}
               <StatusControl slug={slug} status={spec.card.status} />
               <PriorityControl slug={slug} status={spec.card.status} critical={spec.card.critical} />
             </div>

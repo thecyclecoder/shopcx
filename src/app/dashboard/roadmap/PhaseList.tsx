@@ -13,6 +13,11 @@ const DOT: Record<Phase, string> = {
 const ORDER: Phase[] = ["planned", "in_progress", "shipped", "rejected"];
 const LABEL: Record<Phase, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", rejected: "Cut" };
 
+const GH_REPO = "thecyclecoder/shopcx";
+function prUrl(n: number): string {
+  return `https://github.com/${GH_REPO}/pull/${n}`;
+}
+
 /**
  * Collapsible phase list. Owners can set each phase's status (commits the phase emoji to the
  * brain) and queue a build scoped to just that phase. Read-only dots for everyone else.
@@ -87,6 +92,19 @@ export default function PhaseList({ slug, phases }: { slug: string; phases: Spec
               <span className={`mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full ${DOT[statuses[i]]}`} />
             )}
             <span className={`flex-1 ${statuses[i] === "rejected" ? "text-zinc-400 line-through" : ""}`}>{p.title}</span>
+            {/* spec-status-phase-pr-provenance Phase 3: the PR that shipped this phase (link to the merge).
+                Only rendered for shipped phases that carry a `pr` tag — backfill or merge-hook stamps it. */}
+            {statuses[i] === "shipped" && p.pr && (
+              <a
+                href={prUrl(p.pr)}
+                target="_blank"
+                rel="noreferrer"
+                title={`Shipped by PR #${p.pr}${p.merge_sha ? ` (${p.merge_sha.slice(0, 7)})` : ""}`}
+                className="flex-shrink-0 rounded px-1 text-[10px] font-medium text-emerald-600 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+              >
+                #{p.pr}
+              </a>
+            )}
             {isOwner && statuses[i] !== "rejected" && (
               <button
                 type="button"

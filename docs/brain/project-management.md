@@ -98,6 +98,8 @@ business outcome.
 
 Phase status is tracked in [[tables/spec_card_state]] (DB), not the markdown. The roadmap board reads it live, no deploy needed. Phase titles + the `## Phase N` headings stay in markdown as the durable record of what was planned.
 
+**One PR ships ONE phase ([[specs/spec-status-phase-pr-provenance]]).** A `kind='build'` merge tags THAT phase `shipped` on `spec_card_state.phase_states[i]` with the PR # + merge commit SHA — so "shipped" is provable/auditable, not inferred from heuristics. The board renders a `P2 ✓ #519` link per shipped phase so the audit trail is visible. **Three spec shapes**: a **multi-phase spec** (N `## Phase` sections) ships one phase per merged PR over time; a **single-phase spec** (1 phase) ships in one PR tagged at P0; a **one-shot spec** (0 phases, the whole spec ships in one PR) tags the PR at the card level via `flags.merged_pr`. Bo (build) ships the first un-shipped phase; Ada (director, grooming/escort) treats a spec with ≥1 phase carrying a `pr` tag and ≥1 still planned as **partially shipped** and sequences the next phase's build.
+
 The **`## Verification` section** is the "how do I test this?" checklist ([[specs/verification-guides]]). The build that ships a spec **writes it** from the routes/tables/actions it actually touched, so a shipped spec arrives test-ready — and the spec detail page renders it as a prominent card right beside **Mark verified & archive** (the [[dashboard/roadmap]] verify gate), where the owner needs it. A shipped spec missing the section offers an owner-only **Generate test plan** button (Opus drafts one, brain-grounded). It folds into the brain with the rest of the spec on archive.
 
 ## Kicking off a build session
