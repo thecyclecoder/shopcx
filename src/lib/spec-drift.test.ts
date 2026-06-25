@@ -187,3 +187,113 @@ test("parsePhasesWithLines (regression — bounce-escalation-back-to-director sh
     ["Phase 1 — bounce-detection", "Phase 2 — bounce-handler", "Phase 3 — board surface"],
   );
 });
+
+// ── parsePhasesWithLines — fenced-code-block skip (skip-fenced-code-blocks) ──────────────────────────
+// PR #562 fixed the H3 boundary case, but `## Phase` / `### Phase` lines INSIDE a ``` / ~~~ fenced
+// code block still counted as real phases — any spec embedding a canonical-shape EXAMPLE in
+// `## Background` / `## Anti-pattern` inflated its phase count. These fixtures lock the by-fence
+// skip in, both for ``` and ~~~ delimiters.
+
+test("parsePhasesWithLines skips a fenced `## Phase N` example, counts only the real H2 phase", () => {
+  const raw = [
+    "# Test spec",
+    "",
+    "## Phase 1 — real ⏳",
+    "- src/lib/real.ts",
+    "",
+    "## Background",
+    "Example canonical shape — must not be counted:",
+    "```",
+    "## Phase 1 — example",
+    "- src/lib/example.ts",
+    "```",
+  ].join("\n");
+  const phases = parsePhasesWithLines(raw);
+  assert.equal(phases.length, 1);
+  assert.equal(phases[0].title, "Phase 1 — real");
+});
+
+test("parsePhasesWithLines (regression — folded-sibling `## Background` block) returns exactly 2 real phases", () => {
+  // The folded sibling's `## Background` documented the parser with a fenced canonical-shape
+  // example: 3 fenced H2 + 3 fenced H3 lines. Pre-fix that parsed as 6 phantom phases on top
+  // of the 2 real H2 phases (+ a `## Verification` block with H3 subheaders the PR #562 rule
+  // already drops). The new parser drops the fenced lines AND the verification subheaders →
+  // exactly 2 real phases survive.
+  const raw = [
+    "# folded-sibling-shape",
+    "",
+    "## Background",
+    "The canonical-shape example we used to document the parser was:",
+    "```",
+    "## Phase 1 — endpoint",
+    "## Phase 2 — UI",
+    "## Phase 3 — handler",
+    "### Phase 1 — endpoint",
+    "### Phase 2 — UI",
+    "### Phase 3 — handler",
+    "```",
+    "",
+    "## Phase 1 — parser",
+    "- src/lib/spec-drift.ts",
+    "",
+    "## Phase 2 — backfill",
+    "- scripts/_audit-spec-phase-overcount.ts",
+    "",
+    "## Verification",
+    "### Phase 1 — parser",
+    "- check the parser",
+    "### Phase 2 — backfill",
+    "- check the audit",
+  ].join("\n");
+  const phases = parsePhasesWithLines(raw);
+  assert.equal(phases.length, 2);
+  assert.deepEqual(
+    phases.map((p) => p.title),
+    ["Phase 1 — parser", "Phase 2 — backfill"],
+  );
+});
+
+test("parsePhasesWithLines still counts `### Phase` under a real `## Phases` wrapper when NOT inside a fence", () => {
+  // PR #557 / PR #562 wrapper case must continue to work — fence skipping must not regress it.
+  const raw = [
+    "# wrapper-with-background-fence",
+    "",
+    "## Background",
+    "```",
+    "### Phase 1 — fenced example",
+    "### Phase 2 — fenced example",
+    "```",
+    "",
+    "## Phases",
+    "### Phase 1 — real-endpoint",
+    "- src/app/api/foo/route.ts",
+    "### Phase 2 — real-UI",
+    "- src/app/dashboard/foo/page.tsx",
+    "### Phase 3 — real-handler",
+    "- src/lib/foo-handler.ts",
+  ].join("\n");
+  const phases = parsePhasesWithLines(raw);
+  assert.equal(phases.length, 3);
+  assert.deepEqual(
+    phases.map((p) => p.title),
+    ["Phase 1 — real-endpoint", "Phase 2 — real-UI", "Phase 3 — real-handler"],
+  );
+});
+
+test("parsePhasesWithLines treats a ~~~ fence identically to a ``` fence", () => {
+  const raw = [
+    "# tilde-fence-spec",
+    "",
+    "## Phase 1 — real",
+    "- src/lib/real.ts",
+    "",
+    "## Background",
+    "~~~",
+    "## Phase 1 — example",
+    "## Phase 2 — example",
+    "~~~",
+  ].join("\n");
+  const phases = parsePhasesWithLines(raw);
+  assert.equal(phases.length, 1);
+  assert.equal(phases[0].title, "Phase 1 — real");
+});
