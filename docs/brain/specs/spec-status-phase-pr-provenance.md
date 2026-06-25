@@ -8,9 +8,11 @@
 After spec-status-db-driven moved status to the DB, a phase is marked `shipped` by `reconcileSpecDrift` ONLY when it can verify that phase's code paths are on `main`. A **prose-only** phase (no declarable file paths) can never be verified, so a merged build leaves the spec stuck at `planned` despite shipping — the board shows the "Built" pill + Planned status, and the director re-grooms it forever (observed: `no-parked-specs-auto-route-needs-attention`, 5 prose phases, a whole-spec build merged → all still planned). The fix-via-heuristic ("count merged builds") is unreliable.
 
 **The right model (CEO directives, 2026-06-24):**
-- A merged build ships **one phase at a time** — a P1 merge ships P1, NOT the whole spec. The next phase's own build ships it.
-- A phase should be tagged in the DB with the **PR # + merge SHA** that shipped it — so "shipped" is **provable/auditable**, not inferred.
-- Handle **all three spec shapes**: one-shot (0 `## Phase` sections — the whole spec ships in one PR), single-phase (1 phase = the whole spec), multi-phase (N phases, each shipped by its own PR over time).
+- A merged build usually ships **one phase at a time** — a P1 merge ships P1, NOT the whole spec. BUT a single PR/commit/merge can ship **multiple phases at once** (a whole-spec build, or one commit that closes out P1+P2+P3) — so the tagging must allow N phases → the same PR/SHA, not assume 1:1.
+- A phase should be tagged in the DB with the **PR # + merge SHA** that shipped it — so "shipped" is **provable/auditable**, not inferred. Multiple phases can share the same PR/SHA.
+- Handle **all spec shapes**: one-shot (0 `## Phase` sections — the whole spec ships in one PR), single-phase (1 phase = the whole spec), multi-phase (N phases — each by its own PR over time, OR several in one PR).
+
+**Which phases did THIS merge ship?** The authoritative signals, in order: (1) the phases `reconcileSpecDrift` flips from planned→shipped THIS pass (their code-path landed on main with this merge) — tag ALL of them with this PR/SHA; (2) for PROSE phases reconcile can't verify, the phase(s) the build's instructions name ("Phase N", possibly several), else the first not-yet-shipped. Never blanket-ship phases with no evidence.
 
 ## The model
 
@@ -24,12 +26,11 @@ After spec-status-db-driven moved status to the DB, a phase is marked `shipped` 
 - Callers `reconcileMergedJobs` + the GitHub-webhook merge path pass `job.pr_number` + `job.instructions`.
 - One-shot specs: `markSpecCardMergeShipped` records the card-level PR (flags.merged_pr) + last_merge_sha.
 
-## Phase 2 — backfill all active specs
-A one-time script (`scripts/backfill-phase-pr-provenance.ts`): for every LIVE spec (file in docs/brain/specs/) with merged build jobs:
-- Pull its merged `kind='build'` agent_jobs (each has `pr_number`, `instructions`, created_at). Fetch each PR's `merge_commit_sha` from GitHub.
-- Map each merged build → the phase it shipped: parse "Phase N" from its instructions; else assign sequentially in merge order (1st merge → P1, 2nd → P2 …) for multi-phase; for single-phase → P0; for one-shot → card level. Dedupe (latest PR wins per phase).
-- Write `spec_card_state.phase_states[idx] = {status:'shipped', pr, merge_sha}` for shipped phases; leave un-built phases `planned`. Roll up the overall status. Record a `spec_status_history` row (actor='backfill').
-- Phases with NO merged build → stay `planned` (genuinely unbuilt). The result: each shipped phase tagged with its real PR/SHA; the board shows the true in_progress/shipped state.
+## Phase 2 — backfill all active specs (WORKFLOW-driven, not regex)
+A regex parser is too brittle (two parsers already disagreed on `## Fix` + `### Phase` specs). Instead a **workflow fans out one agent per live spec** (`audit-spec-shipped-state`) — each agent READS its spec with judgment (handles one-shot / single / multi-phase, `## Fix`/`## Phases`/H3, ignores `## Verification` mirror subheaders), then VERIFIES each phase against reality: the merged PRs (`gh pr view/diff`) + the code on `main` (grep src/). It returns a structured verdict per spec: `{slug, shape, overall_status, phases:[{index,title,status,pr,merge_sha,evidence}], confidence, notes}`.
+- Input: the 49 live specs with merged build jobs (their `pr_number` + instruction snippets) — gathered from agent_jobs.
+- Apply: `scripts/apply-spec-audit-verdicts.ts --in=<verdicts.json> --apply` writes each verdict into `spec_card_state` via `markSpecCardStatus` — every shipped phase tagged with its PR # + merge SHA; one-shots get `last_merge_sha`. Low-confidence verdicts are flagged for review before/after applying.
+- Phases with NO shipping evidence → stay `planned`. The result: each shipped phase tagged with its REAL, agent-verified PR/SHA; the board shows the true in_progress/shipped state.
 
 ## Phase 3 — surface + docs
 - Board/spec-detail: show the PR # (link) per shipped phase ("P2 ✓ #519").
