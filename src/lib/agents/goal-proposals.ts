@@ -3,24 +3,36 @@
  * but it does NOT activate one. The CEO's greenlight stays the activation gate (north star: the CEO owns
  * objectives, directors own progress within approved ones — operational-rules § North star).
  *
- * The lifecycle this module owns:
- *   1. A director proposes a goal for ITS OWN function → `proposeGoal` enqueues a `proposed-goal` agent_jobs
- *      row (no GitHub commit here — the box worker owns all commits, exactly like db_health/coverage-register).
- *   2. The box worker's `runProposedGoalJob` commits `docs/brain/goals/{slug}.md` with `**Status:** proposed`
- *      (an inert artifact — the escort skips it, Pia doesn't decompose it) and parks the job `needs_approval`
- *      with ONE `greenlight_goal` action. It writes a `proposed_goal` director_activity row.
+ * The lifecycle this module owns (post goal-greenlight-button-and-author-writes-db Phase 2 — the DB row is
+ * authoritative; the markdown commit is a transitional mirror retired in goal-readers-from-db-retire-parsegoal):
+ *   1. A director proposes a goal for ITS OWN function → `proposeGoal` writes a `public.goals` row
+ *      (`status='proposed'`, `proposer_function`, `owner`, `body`, optional `parent_goal_id`) + any milestones
+ *      parsed from the body's `## Decomposition` block as `public.goal_milestones` rows via `upsertGoal`,
+ *      then enqueues a `proposed-goal` agent_jobs row (no GitHub commit from this code path — the box worker
+ *      owns the transitional mirror commit, exactly like db_health/coverage-register).
+ *   2. The box worker's `runProposedGoalJob` commits the mirror artifact `docs/brain/goals/{slug}.md` with
+ *      `**Status:** proposed` (an inert artifact — the escort skips it, Pia doesn't decompose it) so the
+ *      markdown-first readers ([[../libraries/brain-roadmap]] `parseGoal`) stay green until the reader
+ *      cutover, and parks the job `needs_approval` with ONE `greenlight_goal` action. It writes a
+ *      `proposed_goal` director_activity row.
  *   3. The approval-routing-engine reconciler surfaces it as an Approval Request. Goals NEVER route to a
  *      director — `proposed-goal` is deliberately absent from approval-inbox's KIND_TO_FUNCTION, so
  *      `resolveApprover` falls through to the CEO even when the proposing director is live + autonomous.
- *   4. On CEO greenlight the worker flips `**Status:** greenlit`; on decline it deletes the inert artifact
- *      (git history is the archive). A director never greenlights any goal — its own or another's.
+ *   4. On CEO greenlight the worker flips the row via `setGoalStatus(goalId, 'greenlit')` (Phase 3 — the
+ *      RESUME path); on decline it flips the row to `folded` (the active board filters folded rows). The
+ *      `setGoalStatusLine` markdown flip + the inert-artifact delete remain as the transitional fallback
+ *      while a row may not yet exist (the [[../specs/goals-milestones-tables-and-backfill]] migration is
+ *      WIP). A director never greenlights any goal — its own or another's.
  *
- * This module is the PURE side (markdown render + status flip + the self-function scope check) plus the
- * enqueuer; the GitHub commit/flip/delete lives in scripts/builder-worker.ts `runProposedGoalJob`.
+ * This module is the PURE side (markdown render + status flip + the self-function scope check + the
+ * decomposition-block milestone extractor) plus the enqueuer; the GitHub mirror commit lives in
+ * `scripts/builder-worker.ts` `runProposedGoalJob`.
  *
- * See docs/brain/specs/director-proposed-goals.md · docs/brain/libraries/goal-proposals.md.
+ * See docs/brain/specs/director-proposed-goals.md · docs/brain/specs/goal-greenlight-button-and-author-writes-db.md
+ * · docs/brain/libraries/goal-proposals.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { upsertGoal, type GoalMilestoneInput } from "@/lib/goals-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -55,6 +67,11 @@ export interface ProposeGoalInput {
   target?: string;
   /** extra markdown body appended after the metadata block (prose / a Decomposition draft). */
   body?: string;
+  /** goal-greenlight-button-and-author-writes-db Phase 2 — when the proposer is the plan-goal planner
+   *  authoring a SUBGOAL (a milestone too big for one spec), the parent goal's `public.goals.id` goes here.
+   *  Most proposals (a director-coach goal, a top-level director-proposed goal) leave this undefined. The
+   *  acyclicity rail (`goals_parent_cycle` trigger) rejects a self-ancestor. */
+  parentGoalId?: string;
 }
 
 /** A goal slug is lowercase-kebab (mirrors the spec/goal slug guard in brain-roadmap). */
@@ -125,10 +142,77 @@ export function setGoalStatusLine(raw: string, status: GoalStatusLiteral): strin
 export type GoalStatusLiteral = "proposed" | "greenlit" | "complete";
 
 /**
- * Enqueue a director-proposed goal. Validates the self-function scope rail + the slug, then inserts a
- * `proposed-goal` agent_jobs row (status `queued`) carrying the rendered artifact in `instructions`. The box
- * worker commits the artifact + parks it `needs_approval` (→ routes to the CEO). No GitHub commit happens
- * here — keeping all commits in the worker (the db_health/coverage-register pattern). Best-effort insert.
+ * Pull the top-level `- ` bullets out of the artifact's `## Decomposition` block as `goal_milestones`
+ * rows. Each bullet becomes one milestone: position is the bullet order (1-indexed); title is the bullet's
+ * first non-empty text, lightly cleaned (strip the leading `**M1 — ` / `**` markers + a trailing period);
+ * body is the rest of the bullet's lines joined (or null when there's only a title). Lines that aren't
+ * inside `## Decomposition`, or that fall before the first bullet, are ignored. Returns `[]` for the
+ * default placeholder body (`_Awaiting CEO greenlight — Pia decomposes…_`) — Pia owns decomposition then.
+ *
+ * Pure — no DB / fs access. Mirrors the milestone slicer [[../libraries/brain-roadmap]] `parseGoal` uses
+ * (kept here as a tiny standalone fn so the proposer code path avoids a cross-import into the heavier
+ * brain-roadmap parser).
+ */
+export function extractDecompositionMilestones(artifact: string): GoalMilestoneInput[] {
+  const lines = artifact.split("\n");
+  const decomp: string[] = [];
+  let inside = false;
+  for (const l of lines) {
+    if (/^##\s+Decomposition\b/i.test(l)) { inside = true; continue; }
+    if (inside && /^##\s/.test(l)) break;
+    if (inside) decomp.push(l);
+  }
+  const blocks: string[][] = [];
+  let cur: string[] | null = null;
+  for (const l of decomp) {
+    if (/^[-*]\s/.test(l)) {
+      if (cur) blocks.push(cur);
+      cur = [l];
+    } else if (cur) {
+      cur.push(l);
+    }
+  }
+  if (cur) blocks.push(cur);
+  const milestones: GoalMilestoneInput[] = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const first = block[0].replace(/^[-*]\s+/, "").trim();
+    if (!first) continue;
+    // Skip the default placeholder paragraph that buildProposedGoalMarkdown emits when no body is supplied.
+    if (/^_?Awaiting CEO greenlight/i.test(first)) continue;
+    // Strip bold + a leading `M\d+ —` label so the title is the human-readable phrase. Keep the M-id when
+    // the writer used `**M1 — Title.**` so the milestone's title carries it (the rollup doesn't depend on
+    // the id; it's a display affordance).
+    let title = first;
+    const boldM = title.match(/^\*\*\s*(.+?)\.?\s*\*\*/);
+    if (boldM) title = boldM[1].trim();
+    title = title.replace(/\.+$/, "").trim();
+    if (!title) continue;
+    const rest = block.slice(1).map((l) => l.trim()).filter(Boolean).join("\n").trim();
+    milestones.push({ position: i + 1, title, body: rest || null });
+  }
+  return milestones;
+}
+
+/**
+ * Enqueue a director-proposed goal. Validates the self-function scope rail + the slug, then:
+ *
+ *  1. **Writes the goal row** ([[goal-greenlight-button-and-author-writes-db]] Phase 2). Calls `upsertGoal`
+ *     with `status='proposed'`, `proposer_function`, `owner`, `body=` the rendered artifact, and N
+ *     `public.goal_milestones` rows extracted from the artifact's `## Decomposition` block (zero when the
+ *     proposer left decomposition to Pia). When `parentGoalId` is set (the planner SUBGOAL case), it goes
+ *     onto the row; the `goals_parent_cycle` trigger guards acyclicity.
+ *
+ *  2. Inserts a `proposed-goal` agent_jobs row (status `queued`) carrying the rendered artifact in
+ *     `instructions`. The box worker commits the markdown mirror + parks it `needs_approval` (→ routes to
+ *     the CEO). No GitHub commit happens from this code path — the worker owns the mirror commit.
+ *
+ * The row write is BEST-EFFORT: if the [[goals-milestones-tables-and-backfill]] migration hasn't applied
+ * yet (the goals table doesn't exist) or the upsert fails, we log + continue to enqueue the job; the
+ * worker's RESUME path already falls back to the markdown flip when no row is found. Once the migration
+ * applies, every proposer-path write is a real row + a mirror commit (dual-write).
+ *
+ * Returns the new agent_jobs `jobId` on success.
  */
 export async function proposeGoal(
   admin: Admin,
@@ -142,6 +226,42 @@ export async function proposeGoal(
   if (!input.outcome.trim()) return { ok: false, error: "a goal outcome is required" };
 
   const artifact = buildProposedGoalMarkdown(input);
+
+  // Step 1 — write the public.goals row + any seeded milestones (Phase 2). Best-effort: a missing table
+  // (migration not yet applied) shouldn't block the proposal lifecycle — the worker's markdown commit +
+  // RESUME-fallback keep the CEO greenlight surface live in that transitional window.
+  // Clobber guard: refuse to silently overwrite an existing goal of the same slug (mirrors the worker's
+  // markdown-side clobber refusal). A row that's already greenlit/complete must not be reset to `proposed`
+  // by a stray re-proposal — the lifecycle is propose → greenlight, not propose → reset.
+  try {
+    const { data: existing } = await admin
+      .from("goals")
+      .select("id, status")
+      .eq("workspace_id", workspaceId)
+      .eq("slug", input.slug)
+      .maybeSingle();
+    if (existing && (existing as { status?: string }).status && (existing as { status?: string }).status !== "proposed") {
+      return { ok: false, error: `goal ${input.slug} already exists (status ${(existing as { status?: string }).status}) — refusing to re-propose` };
+    }
+    await upsertGoal(
+      workspaceId,
+      {
+        slug: input.slug,
+        title: input.title,
+        body: artifact,
+        outcome: input.outcome,
+        success_metric: input.successMetric ?? null,
+        owner: input.ownerFunction,
+        proposer_function: input.proposerFunction,
+        parent_goal_id: input.parentGoalId ?? null,
+        status: "proposed",
+      },
+      extractDecompositionMilestones(artifact),
+    );
+  } catch (e) {
+    console.warn(`[goal-proposals] proposeGoal row write failed for ${input.slug} — falling through to worker markdown path:`, e instanceof Error ? e.message : e);
+  }
+
   const instructions: GoalProposalInstructions = {
     slug: input.slug,
     ownerFunction: input.ownerFunction,
