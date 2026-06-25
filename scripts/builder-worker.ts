@@ -165,12 +165,14 @@ const AUTO_SETTLE_MAX = 2;
 // resets the main repo to it and exits — systemd Restart=always relaunches the fresh builder-worker.ts.
 const WORKER_BOX_ID = process.env.WORKER_BOX_ID || "box"; // singleton heartbeat key (supports >1 box later)
 const SELF_UPDATE_MIN_INTERVAL_MS = 60 * 1000; // don't thrash: at most one self-update check per minute
-// Max-staleness override: the box normally self-updates only when IDLE (builds are sacrosanct). But a
-// SATURATED box (lanes always full — e.g. under a throughput directive) would otherwise lag main forever,
-// so box-side features never go live. When local is THIS many commits behind origin/main, QUEUE A RESTART
-// (requestDrain): stop claiming new work, let in-flight lanes DRAIN to idle, then self-update on the fresh
-// SHA. Never kills a live session (the old behavior force-killed + re-queued in-flight builds — removed).
-const FORCE_STALE_COMMITS = 12;
+// Self-update TRIGGER (worker-self-update): the worker restarts to run fresh code ONLY when an incoming
+// change impacts the BOX's own runtime — its orchestration (`scripts/builder-worker.ts`) or the libs it
+// imports (`src/lib/`). A dashboard / UI / docs change (src/app, src/components, docs, …) doesn't run in
+// the worker process and reaches builds via their fresh per-build worktrees, so it triggers NO restart.
+// This replaced a commit-count staleness timer that needlessly drained + restarted the box for non-box
+// drift. When a box-impacting change lands: idle → self-update now; busy → QUEUE a restart (requestDrain:
+// stop claiming, drain in-flight lanes to idle, then update — never kills a live session).
+const BOX_RUNTIME_PATHS = /^(scripts\/|src\/lib\/)/m;
 // Crash-loop guard: if the freshly-pulled worker keeps dying on startup we stop flapping and leave a
 // needs_attention heartbeat for a human instead of churning forever. Counter persists across restarts.
 const CRASH_FILE = resolve(REPO_DIR, "../.worker-startup.json");
@@ -4258,17 +4260,20 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // the next idle window so in-flight builds aren't interrupted for one or two commits.
   const behind = parseInt(sh("git", ["rev-list", "--count", `${local}..${remote}`]).out.trim() || "0", 10);
 
-  // Busy box: NEVER interrupt a live session. If FAR behind, QUEUE a restart (set the drain flag) so the
-  // box stops claiming new work, drains to idle, then self-updates on the fresh SHA via the idle path below.
-  // A small lag just waits for the next natural idle window. Replaces the old destructive force-kill path
-  // that abandoned in-flight builds for a re-queue.
+  // Trigger on BOX-IMPACT, not a timer: only restart when the incoming diff touches the worker's own
+  // runtime (scripts/ or src/lib/). Non-box drift (dashboard/UI/docs) needs no restart — the worker keeps
+  // running and each build picks up the new code through its fresh per-build worktree.
+  const changed = sh("git", ["diff", "--name-only", local, remote]).out;
+  if (!BOX_RUNTIME_PATHS.test(changed)) return; // non-box drift → no restart, no drain
+
+  // Box-impacting change. Busy → QUEUE a restart (drain to idle; never kill a live session). Idle → now.
   if (activeBuilds !== 0) {
-    if (behind >= FORCE_STALE_COMMITS) await requestDrain(behind, activeBuilds, RUNNING_SHA);
+    await requestDrain(behind, activeBuilds, RUNNING_SHA);
     return; // never reset/exit while a session is live — the drain takes us to idle first
   }
 
   const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
-  console.log(`[self-update] idle + behind origin/main by ${behind} (${fromTo}) — updating worker code`);
+  console.log(`[self-update] idle + box-impacting change (${behind} behind, ${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
   const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
 
