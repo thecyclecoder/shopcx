@@ -1,0 +1,1 @@
+- **Storefront lever-importance memory — restore persist path + rebaseline verification** · verified 2026-06-25 · → [[libraries/storefront-lever-memory]]
