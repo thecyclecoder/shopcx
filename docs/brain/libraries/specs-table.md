@@ -38,7 +38,9 @@ supabase-js has no transaction surface, so `upsertSpec` is a sequence of writes 
 
 - **[[../recipes/backfill-specs-from-markdown]]** (`scripts/backfill-specs-from-markdown.ts`) — runs [[brain-roadmap]] `parseSpec` ONE LAST TIME over `docs/brain/specs/*.md` and upserts the rows.
 - **[[author-spec]]** (`src/lib/author-spec.ts`) — the dual-write chokepoint every spec-author surface routes through ([[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 1). Parses the just-committed markdown body and calls `upsertSpec`, so the DB row stays in step with the `.md` commit until [[../specs/spec-readers-from-db-retire-parser]] (M3) cuts readers over.
-- The future Phase 2 build materializer (worker-materializes-row-for-Bo) reads `getSpec` to render a temp `.md` for the [[../skills/build-spec]] skill.
+- **[[build-spec-materializer]]** ([[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 2) reads `getSpec` to render a temp `.box/spec-{slug}.md` for the [[../skills/build-spec]] skill — Bo never reads the on-disk spec body once a `public.specs` row exists.
+- **[[spec-card-state]] `upsertCardState`** ([[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 3) dual-writes the corresponding typed columns on this table (status, deferred, priority, intended_status) on every mirror flip, so the future-canonical row stays in sync with the mirror.
+- **[[agent-jobs]] `applyMergedBuildEffects`** ([[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 2) double-writes per-phase PR provenance to [[../tables/spec_phases]] (`UPDATE spec_phases SET pr=…, merge_sha=… WHERE spec_id=… AND position=…`) alongside `spec_card_state.phase_states[i]` — the typed phase row is the canonical phase-PR provenance surface.
 
 ## Gotchas
 

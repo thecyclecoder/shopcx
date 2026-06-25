@@ -70,4 +70,14 @@ Phase 2 (worker materializes the row for Bo — this PR):
 - Tap Build on a spec whose `specs.status='in_review'` → `queueRoadmapBuild` returns `409 spec is in review — not approved to build yet` (the hard-stop reads `public.specs.status` directly via [[../libraries/specs-table]] `getSpec` — flip the row to `planned` to unblock).
 - `npx tsc --noEmit` is clean on this PR.
 
-Phase 3-4 follow this PR — verification for those will land with their respective phases.
+Phase 3 (in_review flow + status writers dual-write `public.specs` — this PR):
+- `markSpecCardStatus`, `markSpecCardMergeShipped`, `markSpecCardBackToReview`, `markSpecCardForReview`, `applyAdaDisposition`, `markSpecCardDeferred`, `markSpecCardCritical` all dual-write the corresponding typed column on `public.specs`. The mirror stays the read-path until [[spec-readers-from-db-retire-parser]]; the dual-write keeps the future-canonical row in sync.
+- Flip an owner status on the board for a spec whose `public.specs` row exists → `select status from public.specs where slug='<slug>'` reflects the new value within the same request, AND `spec_card_state.status` carries the same value, AND `spec_status_history` records the audit row.
+- Run the Vale → Ada disposition lane against a Vale-passed `in_review` spec → on `same/planned` the row carries `(status='planned', intended_status=null, deferred=false)` AND the mirror's `flags.{vale_pass,ada_disposition,intended_status}` are all cleared; on `same/deferred` the row carries `(status='deferred', deferred=true, intended_status=null)` (the `specs_deferred_rollup_trigger` keeps `status='deferred'` until `deferred` flips back to false).
+- Flip a spec's **Priority:** to `critical` from the board → `select priority from public.specs where slug='<slug>'` returns `'critical'`; un-flip → returns `null`.
+- Flip the **Deferred:** marker on from the board (or via the director-coach `priority` action) → `specs.deferred=true` AND the rollup trigger flips `specs.status='deferred'`; un-flip → `specs.deferred=false` AND status recomputes from the phases.
+- Send a spec back to `in_review` via the CEO board control → `specs.status='in_review'` AND `specs.deferred=false` AND `specs.intended_status=null`, AND `spec_card_state.flags.{vale_pass,ada_disposition,intended_status}` are cleared so the next Vale + Ada pass start clean.
+- Merge a multi-phase spec's P1 build → `specs.status='in_progress'` (the rollup trigger driven by the `UPDATE spec_phases SET status='shipped'` write — the canonical phase-PR provenance surface), AND `spec_card_state.phase_states[0].{pr,merge_sha}` mirrors the same value (double-write retained until [[spec-readers-from-db-retire-parser]]).
+- `npx tsc --noEmit` is clean on this PR.
+
+Phase 4 follows this PR — verification for that will land with the mirror-commit lane.
