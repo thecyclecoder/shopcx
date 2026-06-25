@@ -114,6 +114,7 @@ import { adToolFunctions } from "@/lib/inngest/ad-tool";
 import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 import { triageEscalationsCron } from "@/lib/inngest/triage-escalations";
 import { specTestCron } from "@/lib/inngest/spec-test-cron";
+import { specReviewCron } from "@/lib/inngest/spec-review-cron";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
 import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
@@ -252,6 +253,7 @@ export const registeredInngestFunctions = [
   agentTodoExecute,
   triageEscalationsCron,
   specTestCron,
+  specReviewCron,
   portalActionHealer,
   slackRoadmapNotify,
   brainIndexRefresh,

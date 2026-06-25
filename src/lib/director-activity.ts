@@ -32,7 +32,11 @@ export type DirectorActionKind =
   | "deploy_regressed" // a deploy introduced a clear deploy-correlated regression (a spike / a loop went red).
   | "deploy_unsure" // a deploy's post-deploy signal was ambiguous → escalate, never auto-act.
   // deploy-health-rollback-guardian Phase 2 — Reva acts on `regressed`.
-  | "deploy_rolled_back"; // a regressed deploy was auto-reverted to the prior good build (+ escalated to the CEO).
+  | "deploy_rolled_back" // a regressed deploy was auto-reverted to the prior good build (+ escalated to the CEO).
+  // spec-review-agent Phase 2 — Vale stamps one per in_review spec it processes.
+  | "spec_review_approved" // sound + needed now → spec flipped from in_review to planned.
+  | "spec_review_deferred" // sound but parked per the spec's own directive → flipped to deferred + flags.deferred set.
+  | "spec_review_needs_fix"; // checklist failed (mangled phases / missing owner / parent / verification / blockers / db-companion) — diagnosis recorded; spec stays in_review.
 
 export interface DirectorActivityInput {
   workspaceId: string;
