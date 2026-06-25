@@ -41,18 +41,60 @@ Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_emai
 **Either** answer/investigate with no actions:
 
 ```json
-{"status":"reply","message":"<plain-text reply, mirror the founder's language, no markdown>"}
+{"status":"reply","message":"<plain-text reply, mirror the founder's language, no markdown>","change_summary":{ ... }}
 ```
 
 **Or** propose an approval-gated plan (the human taps Approve-all, or declines/redirects):
 
 ```json
-{"status":"propose","message":"<what you'll do + why, plain text>","plan":{"summary":"<one line>","actions":[ ...action objects... ]}}
+{"status":"propose","message":"<what you'll do + why, plain text>","plan":{"summary":"<one line>","actions":[ ...action objects... ]},"change_summary":{ ... }}
 ```
 
 Propose the **smallest correct plan**. Order doesn't matter (the executor runs customer actions + rule
 proposals first, then re-score, then ticket→spec, then the closeout last). The human never has to
 state the ticket; never echo raw ids at them unless useful.
+
+### `change_summary` — MANDATORY on every turn (`agent-mandate-hardening-ticket-improve`)
+
+Graders can only score what they can observe; a `completed` turn with no diff is indistinguishable
+from a no-op and caps the rubric at ~6/10 regardless of how correct the underlying work was. So every
+final JSON — `reply` OR `propose` — MUST carry a `change_summary` envelope that proves the rubric
+criteria (genuine improvement, correct categorization, preserved customer voice). Self-check it
+before you close the turn — if you can't show graders a before/after, a tag/category delta, or a
+preserved-voice quote, you haven't actually finished.
+
+```json
+"change_summary": {
+  "text_diff": { "before": "<original ticket snippet you touched>", "after": "<the reply/proposed message snippet>" },
+  "field_changes": [{ "field": "category|tag|status|...", "old": "...", "new": "...", "rationale": "..." }],
+  "tags_added":   ["..."],
+  "tags_removed": ["..."],
+  "categorization_rationale": "<why this category>",
+  "customer_voice": { "preserved": true, "evidence": "<one quoted key phrase kept intact, OR where voice departed and why>" },
+  "no_changes": false
+}
+```
+
+- `text_diff` — the original snippet you're addressing vs. the reply/proposed message snippet. Set
+  `null` only when the turn changes no text at all.
+- `field_changes` — every ticket field you're touching (category, tag, status, customer linkage,
+  etc.), each with `old → new` + a one-line rationale. The executor's field-touching actions
+  (`reassign_ticket_customer`, `link_customer_accounts`, a closeout's `unescalate`/`unassign`/
+  `close`, etc.) all belong here. Omit when none.
+- `tags_added` / `tags_removed` — the literal tag strings, separate from `field_changes`.
+- `categorization_rationale` — when this turn changes (or confirms) the ticket's category, the
+  one-line reasoning the grader needs.
+- `customer_voice` — `preserved: true` with a **quoted key phrase from the customer's original
+  wording** you kept intact, OR `preserved: false` with the explicit place voice departed and why.
+  Not stated = the grader will flag the omission. Mirror the customer's language; don't paraphrase.
+- `no_changes: true` — investigation-only turns that propose no actions/edits set this true with a
+  one-line note (e.g. `"note":"customer asked when a refill ships — answered from the brain, no edits"`).
+  All other fields may then be omitted.
+
+The worker renders this block as plain text at the head of `log_tail`, so the grader and the profile
+view see the diff without parsing JSON — a missing envelope shows as
+`Change summary: (missing — agent did not emit the mandated change_summary envelope; flag for grader)`,
+which is the rubric-visibility gap this mandate exists to close.
 
 ### Action object shapes (put any number in `plan.actions`)
 

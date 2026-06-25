@@ -5125,6 +5125,55 @@ function normalizePlan(plan: any, ts: string): { summary: string; actions: any[]
   return { summary: String(plan.summary || "Proposed plan"), actions };
 }
 
+// agent-mandate-hardening-ticket-improve Phase 1: render the agent's structured change_summary as a
+// plain-text block prepended to log_tail. Graders + the profile page see the before/after diff, the
+// field/tag deltas, the categorization rationale, and the customer-voice evidence WITHOUT having to
+// parse JSON. Returns "" when the envelope is well-formed and explicitly says no_changes; returns a
+// "(missing change_summary)" stub when the agent forgot the mandate so a grader can flag it.
+function formatImproveChangeSummary(raw: unknown): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cs = raw as any;
+  if (!cs || typeof cs !== "object") {
+    return "Change summary: (missing — agent did not emit the mandated change_summary envelope; flag for grader).";
+  }
+  const lines: string[] = ["Change summary:"];
+  if (cs.no_changes === true) {
+    lines.push(`- no_changes: true${cs.note ? ` — ${String(cs.note)}` : ""}`);
+  } else {
+    if (cs.text_diff && typeof cs.text_diff === "object") {
+      const before = String(cs.text_diff.before ?? "").trim();
+      const after = String(cs.text_diff.after ?? "").trim();
+      if (before || after) {
+        lines.push(`- before: ${before || "(none)"}`);
+        lines.push(`- after:  ${after || "(none)"}`);
+      }
+    }
+    if (Array.isArray(cs.field_changes) && cs.field_changes.length) {
+      for (const fc of cs.field_changes) {
+        const field = String(fc?.field ?? "?");
+        const oldV = String(fc?.old ?? "");
+        const newV = String(fc?.new ?? "");
+        const why = fc?.rationale ? ` — ${String(fc.rationale)}` : "";
+        lines.push(`- ${field}: ${oldV} → ${newV}${why}`);
+      }
+    }
+    const added = Array.isArray(cs.tags_added) ? (cs.tags_added as unknown[]).map(String) : [];
+    const removed = Array.isArray(cs.tags_removed) ? (cs.tags_removed as unknown[]).map(String) : [];
+    if (added.length) lines.push(`- tags +: ${added.join(", ")}`);
+    if (removed.length) lines.push(`- tags −: ${removed.join(", ")}`);
+    if (cs.categorization_rationale) lines.push(`- categorization: ${String(cs.categorization_rationale)}`);
+    const cv = cs.customer_voice;
+    if (cv && typeof cv === "object") {
+      const verdict = cv.preserved === false ? "departed" : "preserved";
+      const evidence = cv.evidence ? ` — ${String(cv.evidence)}` : "";
+      lines.push(`- customer voice: ${verdict}${evidence}`);
+    } else {
+      lines.push("- customer voice: (not stated — flag for grader)");
+    }
+  }
+  return lines.join("\n");
+}
+
 async function runTicketImproveJob(job: Job) {
   const tag = `[improve:${job.id.slice(0, 8)}]`;
   let params: { ticket_id?: string; session_id?: string; mode?: string; user_message?: string } = {};
@@ -5158,6 +5207,10 @@ async function runTicketImproveJob(job: Job) {
       ? [
           `New message from the human on ticket ${ticketId}: "${userMessage}"`,
           `Continue the conversation. Same role, same read-only-investigation rule, same final JSON output protocol ("reply" or "propose") as before.`,
+          ``,
+          `MANDATE — every final JSON MUST carry the structured \`change_summary\` envelope (see the ticket-improve skill).`,
+          `Graders score only what they can see; a "completed" turn with no diff is indistinguishable from a no-op.`,
+          `For an investigation-only reply that proposes no changes set \`change_summary.no_changes\`:true with a one-line reason.`,
         ].join("\n")
       : [
           `Use the ticket-improve skill (cwd is the repo root). You are the founder's CX co-pilot fixing ONE specific ticket, super-powered on Max.`,
@@ -5172,9 +5225,20 @@ async function runTicketImproveJob(job: Job) {
           `Investigation is free + read-only. To ACT, propose a typed plan for approval — NEVER mutate anything yourself.`,
           ``,
           `Final message = ONLY one JSON object:`,
-          `  {"status":"reply","message":"<plain-text reply / investigation answer, no actions>"}`,
-          `  {"status":"propose","message":"<what you'll do + why>","plan":{"summary":"...","actions":[ ... ]}}`,
+          `  {"status":"reply","message":"<plain-text reply / investigation answer, no actions>","change_summary":{ ... }}`,
+          `  {"status":"propose","message":"<what you'll do + why>","plan":{"summary":"...","actions":[ ... ]},"change_summary":{ ... }}`,
           `See the ticket-improve skill for the exact action shapes (customer_action, sonnet_prompt, grader_rule, rescore, ticket_spec, resolve_sequence).`,
+          ``,
+          `MANDATE — every final JSON MUST carry a \`change_summary\` envelope so graders can verify rubric compliance:`,
+          `  change_summary: {`,
+          `    text_diff: { before: "<original ticket snippet you touched>", after: "<the reply/proposed message snippet>" } | null,`,
+          `    field_changes: [{ field: "category|tag|status|...", old: "...", new: "...", rationale: "..." }],`,
+          `    tags_added: [...], tags_removed: [...],`,
+          `    categorization_rationale: "<why this category>" | null,`,
+          `    customer_voice: { preserved: true|false, evidence: "<one quoted key phrase kept intact OR where voice departed and why>" },`,
+          `    no_changes: false  // set true (with a one-line note) when the turn is investigation-only and proposes no edits/actions`,
+          `  }`,
+          `Self-check it before you close: if you can't show graders a before/after, a tag/category delta, or a preserved-voice quote, the turn caps at ~6/10 regardless of how correct the underlying work was.`,
         ].join("\n");
 
     const { session: boxSession, resultText, isError, raw, usage, model } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR, pickHealthyConfigDir());
@@ -5190,6 +5254,12 @@ async function runTicketImproveJob(job: Job) {
     const ts = job.id.slice(0, 6);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const p = parsed as any;
+    // agent-mandate-hardening-ticket-improve: the agent MUST emit a change_summary envelope so graders
+    // can verify rubric compliance (before/after diff, tag/category delta, customer-voice evidence).
+    // Surface it at the head of log_tail so the profile/grader views see it without parsing the JSON,
+    // and flag missing/empty summaries so a graceful failure is visible (not silently capped at ~6/10).
+    const summaryHeader = formatImproveChangeSummary(p?.change_summary);
+    const improveLogTail = (summaryHeader ? `${summaryHeader}\n\n` : "") + raw.slice(-2000 + (summaryHeader?.length ?? 0));
 
     if (p?.status === "propose") {
       const plan = normalizePlan(p.plan, ts);
@@ -5205,7 +5275,7 @@ async function runTicketImproveJob(job: Job) {
         // proposed but the plan was malformed/empty → treat as a plain reply, no parked plan
         await setSession({ messages: [...messages, { role: "assistant", content: reply }], turn_status: "idle", pending_plan: null, last_error: null });
       }
-      await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
+      await update(job.id, { status: "completed", log_tail: improveLogTail.slice(-2000) });
       return;
     }
 
@@ -5216,7 +5286,7 @@ async function runTicketImproveJob(job: Job) {
         pending_plan: null,
         last_error: null,
       });
-      await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
+      await update(job.id, { status: "completed", log_tail: improveLogTail.slice(-2000) });
       return;
     }
 
