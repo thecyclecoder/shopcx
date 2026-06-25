@@ -1,0 +1,1 @@
+- **Platform scorecard metrics engine + daily pulse** · verified 2026-06-25 · → [[../libraries/platform-scorecard]]
