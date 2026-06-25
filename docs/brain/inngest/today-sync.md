@@ -38,8 +38,8 @@ escalates real problems:
   [[../libraries/meta__graph-retry]]'s `isTransientGraphError` already retried
   4× with exponential backoff; when the whole retry budget exhausts during a
   Meta-side outage, the next 5-min cron run self-heals, so they must not
-  surface as open bugs. See [[../specs/today-sync-quiet-handled-meta-timeout-blips]]
-  + [[../specs/today-sync-quiet-all-retry-exhausted-meta-transients]].
+  surface as open bugs. See [[../archive.d/today-sync-quiet-all-retry-exhausted-meta-transients]]
+  (archived 2026-06-25).
 - Everything else (auth 190, permissions 200/10/803, disabled account, any
   other error) → `console.error`, which Vercel routes into the error feed for
   Control Tower to escalate.
