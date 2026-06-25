@@ -1,0 +1,1 @@
+- **Spec phase parser: skip Phase lines inside fenced code blocks** · verified 2026-06-25 · → [[../libraries/spec-drift]]
