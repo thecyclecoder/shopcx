@@ -1,0 +1,1 @@
+- **Pin @remotion/* exact versions + fail fast on Lambda version mismatch** · verified 2026-06-25 · → [[integrations/remotion-lambda]]
