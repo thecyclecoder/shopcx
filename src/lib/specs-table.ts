@@ -377,7 +377,7 @@ export async function stampPhaseShipped(
   workspaceId: string,
   slug: string,
   position: number,
-  provenance: { merge_sha: string; pr?: number | null },
+  provenance: { merge_sha: string | null; pr?: number | null },
 ): Promise<void> {
   const admin = createAdminClient();
   const { data: spec, error: sErr } = await admin
