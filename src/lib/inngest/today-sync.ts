@@ -87,7 +87,15 @@ export const todaySyncCron = inngest.createFunction(
           });
           totalDays += result.daysProcessed;
         } catch (err) {
-          console.error(`[Today Sync] Meta error for ${acct.meta_account_id}:`, err);
+          // Subcode 1504018 = "Your request timed out" — known-transient Meta
+          // backend blip. The 5-min cron cadence self-heals these on the next
+          // run, so log at warn and don't escalate to the Control Tower error
+          // feed. Real failures (auth 190, permissions 200/10/803, disabled
+          // account) still hit console.error and surface.
+          const subcode = (err as { metaSubcode?: number } | null)?.metaSubcode;
+          const isHandledTimeoutBlip = subcode === 1504018;
+          const log = isHandledTimeoutBlip ? console.warn : console.error;
+          log(`[Today Sync] Meta error for ${acct.meta_account_id}:`, err);
         }
       }
 
