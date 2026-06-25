@@ -1,4 +1,4 @@
-# Director lanes trust phase_states.pr (not status alone) + request-audit action
+# ✅ Director lanes trust phase_states.pr (not status alone) + request-audit action
 
 **Owner:** [[../functions/platform]]
 **Parent:** [[../specs/spec-status-db-driven]]
@@ -51,7 +51,8 @@ Cleanup: as the first use of the new action, request the audit on `agents-hub-ro
 - A director `spec-status` flip emitting `{phases:[{index:0, status:'shipped'}]}` without a paired `pr` is rejected with an explanatory error pointing at `request-audit`.
 
 ### Phase 2 (shipped) — request-audit action
-- Emitting `{type:'request-audit', slug:'agents-hub-role-inboxes', reason:'cleanup of director hand-flip on phase[5]'}` from a Platform director queues `audit-spec-shipped-state` for that slug.
-- `director_activity` carries the `requested_audit` row with the reason.
-- The audit completes and `spec_card_state.phase_states` reflects the audit's verdict — either phase[5] dropped (if the parser-fix shipped) or re-stamped with proper provenance.
-- Emitting `request-audit` on a spec whose `Owner:` isn't the requester's function is rejected as out-of-leash and logged.
+- In a Platform-director coach turn, emit `{type:'request-audit', slug:'agents-hub-role-inboxes', reason:'cleanup of director hand-flip on phase[5]'}` → expect an `agent_jobs` row with `kind='audit-spec-shipped-state'`, `spec_slug='agents-hub-role-inboxes'`, `status='queued'`, and `instructions` JSON carrying `requested_by:'director:platform'` + the reason.
+- After the action lands, `director_activity` carries a `requested_audit` row with `spec_slug='agents-hub-role-inboxes'` + the reason + `metadata.job_id` matching the queued audit job.
+- When the audit job runs to completion, `director_activity` carries a second `audit_spec_shipped_state_completed` row with per-phase `{prior_status, prior_pr, new_status, new_pr, new_merge_sha, evidence}` in `metadata.phases`; `spec_card_state.phase_states` reflects that verdict — a tagless ✅ phase either re-stamped with a real `{pr, merge_sha}` (when `spec_status_history` carries an `actor='merge:<sha>'` row and the SHA's squash subject resolves to a PR #), or regressed to `planned` with a `no merge:<sha> evidence` evidence string.
+- Emit `{type:'request-audit', slug:'<a-spec-owned-by-another-function>', reason:'…'}` from a Platform director → expect an `invalid_request_audit_action` row in `director_activity` carrying the leash rejection ("spec owner is X, not platform — out-of-leash") and NO `agent_jobs` row enqueued.
+- Emit `{type:'spec-status', slug:'<owned>', phases:[{index:0, status:'shipped'}], reason:'…'}` from a Platform director → expect an `invalid_spec_status_action` row in `director_activity` whose rejection message points at `request-audit` (the Phase-1 guard, re-verified end-to-end with the Phase-2 action live as the legitimate path).
