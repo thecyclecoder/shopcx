@@ -16,7 +16,6 @@ import { storefrontThemeStyle } from "../../../_lib/storefront-theme";
  * {domain}/links ONCE; this page stays current automatically (the poster
  * records every post + its image, this reads it). Mobile-first.
  */
-export const dynamicParams = true;
 
 const MAIN_SITE = "https://superfoodscompany.com";
 

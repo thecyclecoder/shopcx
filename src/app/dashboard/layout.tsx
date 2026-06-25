@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getActiveWorkspaceId, getUserWorkspaces } from "@/lib/workspace";
 import { WorkspaceProvider } from "@/lib/workspace-context";
@@ -13,6 +14,11 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // cacheComponents is ON (for the storefront's fast cached PDPs). The dashboard is owner-only + reads
+  // uncached data (auth/workspace/DB) at request time, so it must NOT prerender — connection() marks the
+  // whole subtree dynamic (the idiomatic replacement for the `force-dynamic` the box stripped), so child
+  // pages that read uncached data outside <Suspense> no longer break the build.
+  await connection();
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 

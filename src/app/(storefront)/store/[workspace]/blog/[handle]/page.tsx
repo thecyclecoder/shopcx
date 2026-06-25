@@ -36,7 +36,6 @@ function lazyifyHtml(html: string): string {
  * the middleware rewrite, and at /store/{ws}/blog/{handle} (noindex) for
  * admin preview.
  */
-export const dynamicParams = true;
 
 const MAIN_SITE = "https://superfoodscompany.com";
 

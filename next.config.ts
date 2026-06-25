@@ -1,10 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Cache Components (Next 16): enables the `'use cache'` directive so the
-  // PDP can cache per `?_sxv=<variantId>` arm. Without this the page reads
-  // searchParams and renders dynamically on every request, defeating the
-  // pdp-edge-served-experiments per-arm cache contract.
+  // Cache Components (Next 16): ON — the storefront NEEDS it. The PDP `'use cache'`-es per
+  // `?_sxv=<variantId>` arm so every experiment arm is its own edge-cached, single-digit-ms render
+  // (pdp-edge-served-variant-use-cache). The cost: every page prerenders, so any page that reads uncached
+  // data (DB/auth) OUTSIDE a <Suspense> fails the build. The storefront pages are written for it; the
+  // owner-only DASHBOARD pages are made dynamic by a <Suspense> boundary in dashboard/layout.tsx (they
+  // don't need caching, just to stream). Don't disable this — it's the fast-PDP contract.
   cacheComponents: true,
   // Prevent 308 trailing-slash redirects — Shopify app proxy follows 3xx redirects,
   // which breaks the proxy flow (redirects to storefront instead of proxying to backend)
