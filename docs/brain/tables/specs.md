@@ -28,6 +28,12 @@ The card row for every spec — title, summary, owner, parent, blocked_by, prior
 | `repair_signature` | `text?` | the box Repair-Agent's signature for a repair-authored spec (drives the board's 🔧 Repair source chip) |
 | `auto_build` | `boolean` | owner opt-out from [[../specs/spec-blockers]] auto-queue. Default `false` |
 | `milestone_id` | `uuid?` | typed FK → [[goal_milestones]]`(id)` `on delete set null` (constraint added by [[../specs/goals-milestones-tables-and-backfill]] Phase 1; populated by Phase 3 backfill). Null for standalone specs (function-mandate / regression / ad-hoc). Deleting a milestone unattaches its specs rather than orphaning them |
+| `last_merge_sha` | `text?` | the build merge commit SHA that shipped this card — compared to `VERCEL_GIT_COMMIT_SHA` for `deploying` vs `live`. ([[../specs/spec-fold-from-db-row]] Phase 2 expand step — moved from `spec_card_state.last_merge_sha`. Currently dual-written by the [[../libraries/spec-card-state]] mirror writers; the cutover that makes this the read-side canonical is [[../specs/retire-spec-card-state]]) |
+| `short_circuit` | `boolean?` | director-dismiss-park-and-short-circuit-spec — a shipped card closed CLEANLY without all phases shipping ("we changed our mind"). Paired with `short_circuit_reason`. NULL means "not short-circuited" ([[../specs/spec-fold-from-db-row]] Phase 2 expand step — moved from `spec_card_state.flags.short_circuit`) |
+| `short_circuit_reason` | `text?` | the director's reason captured at the moment of short-circuit — rendered as the card sub-line ([[../specs/spec-fold-from-db-row]] Phase 2 expand step — moved from `spec_card_state.flags.short_circuit_reason`) |
+| `vale_pass` | `boolean?` | spec-review-agent Phase 3 — Vale's quality verdict: `true` iff she ran the CHECKLIST and the spec passed (well-formed). A `vale_pass=true` spec is ready for Ada's disposition lane. Cleared on a status flip out of `in_review` ([[../specs/spec-fold-from-db-row]] Phase 2 expand step — moved from `spec_card_state.flags.vale_pass`) |
+| `ada_disposition` | `text?` | spec-review-agent Phase 3 — Ada's disposition record: `autonomous_same ｜ autonomous_downgrade ｜ pending_upgrade`. Cleared when the spec leaves `in_review` ([[../specs/spec-fold-from-db-row]] Phase 2 expand step — moved from `spec_card_state.flags.ada_disposition`) |
+| `merged_pr` | `integer?` | spec-status-phase-pr-provenance — the card-level shipping PR for a ONE-SHOT spec (no phases). Multi-phase specs record provenance per-phase in [[spec_phases]]`.pr` instead; this slot is for the no-phase shape only ([[../specs/spec-fold-from-db-row]] Phase 2 expand step — moved from `spec_card_state.flags.merged_pr`) |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | bumped every write · default `now()` |
 
@@ -55,6 +61,7 @@ The DB enforcement closes the [[../specs/spec-review-agent]] "shipped with 1 pha
 
 - `supabase/migrations/20260713120000_specs_and_spec_phases.sql` — initial tables + rollup function + triggers · apply: `scripts/apply-specs-tables-migration.ts` · verify: `scripts/_verify-specs-schema.ts`
 - `supabase/migrations/20260725130000_goals_and_goal_milestones.sql` — adds the `specs_milestone_id_fkey` FK constraint pointing `milestone_id` at [[goal_milestones]] · apply: `scripts/apply-goals-tables-migration.ts` · verify: `scripts/_verify-goals-schema.ts`
+- `supabase/migrations/20260725140000_specs_card_state_columns.sql` ([[../specs/spec-fold-from-db-row]] Phase 2 expand step) — adds + backfills the six post-retirement columns (`last_merge_sha`, `short_circuit`, `short_circuit_reason`, `vale_pass`, `ada_disposition`, `merged_pr`) carrying the surviving spec_card_state fields. The contract step ([[../specs/retire-spec-card-state]]) cuts readers over + drops the mirror table · apply: `scripts/apply-specs-card-state-columns-migration.ts`
 - One-time backfill from markdown ([[../specs/spec-body-table-and-backfill]] Phase 3): `scripts/backfill-specs-from-markdown.ts`
 
 ## Related

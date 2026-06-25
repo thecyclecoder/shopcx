@@ -184,7 +184,10 @@ export default async function RoadmapPage() {
   // status / critical / deferred / per-phase status all come from spec_card_state authoritatively.
   const [{ specs }, archive, filters] = await Promise.all([
     getRoadmap(workspaceId ?? undefined),
-    getArchive(),
+    // spec-fold-from-db-row Phase 2: pass the workspaceId so getArchive() reads folded specs from
+    // public.specs directly (the row is preserved at fold time, status='folded'). Falls back to the
+    // filesystem when no workspace is in scope.
+    getArchive(workspaceId ?? undefined),
     getRoadmapFilters(workspaceId ?? undefined),
   ]);
   const [jobsBySlug, folds, testRuns, humanResolvedBySlug] = workspaceId

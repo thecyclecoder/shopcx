@@ -262,7 +262,13 @@ async function upsertCardState(
     // flags.intended_status → specs.intended_status (cleared on disposition). The phase_states snapshot
     // remains spec_card_state-only — per-phase PR/merge_sha already dual-writes via
     // `applyMergedBuildEffects` ([[agent-jobs]]), so the typed `spec_phases` row stays canonical for
-    // phase progress. Best-effort + scoped: a 0-row UPDATE (no specs row yet) is silently fine.
+    // phase progress.
+    //
+    // spec-fold-from-db-row Phase 2 (expand step): the dual-write expanded to also cover the SURVIVING
+    // spec_card_state.flags that newly carry typed homes on specs — short_circuit / short_circuit_reason
+    // (director-dismiss-park-and-short-circuit-spec), vale_pass + ada_disposition (spec-review-agent),
+    // merged_pr (the one-shot card-level shipping PR), and last_merge_sha (the deploy-aware UI slot).
+    // Same best-effort + scoped contract: a 0-row UPDATE (no specs row yet) is silently fine.
     await dualWriteSpecRow(workspaceId, slug, patch);
 
     if (history && history.length) {
@@ -287,34 +293,48 @@ async function upsertCardState(
 
 /**
  * spec-authoring-writes-db-and-worker-materialize Phase 3 — dual-write helper. Map a spec_card_state
- * patch (status / flags subset) onto the typed `public.specs` columns so the future-canonical row stays
- * in sync with the mirror writes. Best-effort: a 0-row UPDATE (no specs row yet for this slug — a pre-
- * backfill / pre-author edge) is silently fine; the mirror is still the read-path until
+ * patch (status / flags subset / last_merge_sha) onto the typed `public.specs` columns so the future-
+ * canonical row stays in sync with the mirror writes. Best-effort: a 0-row UPDATE (no specs row yet for
+ * this slug — a pre-backfill / pre-author edge) is silently fine; the mirror is still the read-path until
  * [[../specs/spec-readers-from-db-retire-parser]] cuts readers over.
  *
- * Field mapping:
- *  - patch.status        → specs.status (the rollup trigger keeps phase progress consistent on the
- *                          NEXT phase write; in_review / folded are terminal-ish — the trigger leaves
- *                          them alone, so an explicit caller write is what flips out of them).
- *  - patch.flags.deferred → specs.deferred (the specs_deferred_rollup_trigger recomputes status to
- *                          'deferred' when set; un-setting restores the underlying phase rollup).
- *  - patch.flags.critical → specs.priority ('critical' / null — mirrors the markdown column shape).
- *  - patch.flags.intended_status → specs.intended_status (cleared on Ada's disposition;
- *                          'planned' / 'deferred' otherwise).
+ * Field mapping (spec-authoring-writes-db-and-worker-materialize Phase 3):
+ *  - patch.status                  → specs.status (the rollup trigger keeps phase progress consistent on
+ *                                    the NEXT phase write; in_review / folded are terminal-ish — the
+ *                                    trigger leaves them alone, so an explicit caller write is what flips
+ *                                    out of them).
+ *  - patch.flags.deferred          → specs.deferred (the specs_deferred_rollup_trigger recomputes status
+ *                                    to 'deferred' when set; un-setting restores the underlying phase
+ *                                    rollup).
+ *  - patch.flags.critical          → specs.priority ('critical' / null — mirrors the markdown column
+ *                                    shape).
+ *  - patch.flags.intended_status   → specs.intended_status (cleared on Ada's disposition;
+ *                                    'planned' / 'deferred' otherwise).
+ *
+ * spec-fold-from-db-row Phase 2 (expand step) — five more typed columns mirror the surviving flags:
+ *  - patch.last_merge_sha          → specs.last_merge_sha   (the deploy-aware UI slot).
+ *  - patch.flags.short_circuit         → specs.short_circuit         (boolean, paired with reason).
+ *  - patch.flags.short_circuit_reason  → specs.short_circuit_reason  (text; cleared when short_circuit=false).
+ *  - patch.flags.vale_pass         → specs.vale_pass         (Vale's CHECKLIST pass).
+ *  - patch.flags.ada_disposition   → specs.ada_disposition   ('autonomous_same' | 'autonomous_downgrade' |
+ *                                    'pending_upgrade'; cleared on dispose).
+ *  - patch.flags.merged_pr         → specs.merged_pr         (one-shot card-level shipping PR — multi-
+ *                                    phase specs use spec_phases.pr instead).
  *
  * A flag key whose value is `undefined` in the incoming flags object is treated as a CLEAR (writes null
- * for nullable columns, false for booleans) — this matches the spec_card_state writers' convention of
- * setting flags to `undefined` to consume them (e.g. applyAdaDisposition clearing intended_status on
- * dispose). A flag key absent from the patch is left untouched on the specs row.
+ * for nullable columns) — this matches the spec_card_state writers' convention of setting flags to
+ * `undefined` to consume them (e.g. applyAdaDisposition clearing intended_status on dispose). A flag key
+ * absent from the patch is left untouched on the specs row.
  */
 async function dualWriteSpecRow(
   workspaceId: string,
   slug: string,
-  patch: { status?: SpecStatus; flags?: SpecCardFlags },
+  patch: { status?: SpecStatus; flags?: SpecCardFlags; last_merge_sha?: string | null },
 ): Promise<void> {
   try {
     const updateFields: Record<string, unknown> = {};
     if (patch.status !== undefined) updateFields.status = patch.status;
+    if (patch.last_merge_sha !== undefined) updateFields.last_merge_sha = patch.last_merge_sha;
     if (patch.flags) {
       const f = patch.flags;
       if (Object.prototype.hasOwnProperty.call(f, "deferred")) {
@@ -326,6 +346,26 @@ async function dualWriteSpecRow(
       if (Object.prototype.hasOwnProperty.call(f, "intended_status")) {
         const v = f.intended_status;
         updateFields.intended_status = v === "planned" || v === "deferred" ? v : null;
+      }
+      // spec-fold-from-db-row Phase 2 (expand step) — five additional flag → typed-column mirrors.
+      if (Object.prototype.hasOwnProperty.call(f, "short_circuit")) {
+        updateFields.short_circuit = f.short_circuit === undefined ? null : !!f.short_circuit;
+      }
+      if (Object.prototype.hasOwnProperty.call(f, "short_circuit_reason")) {
+        const v = f.short_circuit_reason;
+        updateFields.short_circuit_reason = typeof v === "string" && v.length ? v : null;
+      }
+      if (Object.prototype.hasOwnProperty.call(f, "vale_pass")) {
+        updateFields.vale_pass = f.vale_pass === undefined ? null : !!f.vale_pass;
+      }
+      if (Object.prototype.hasOwnProperty.call(f, "ada_disposition")) {
+        const v = f.ada_disposition;
+        updateFields.ada_disposition =
+          v === "autonomous_same" || v === "autonomous_downgrade" || v === "pending_upgrade" ? v : null;
+      }
+      if (Object.prototype.hasOwnProperty.call(f, "merged_pr")) {
+        const v = f.merged_pr;
+        updateFields.merged_pr = typeof v === "number" && Number.isFinite(v) ? v : null;
       }
     }
     if (!Object.keys(updateFields).length) return;

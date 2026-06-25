@@ -725,9 +725,18 @@ function parseArchiveLine(line: string): ArchiveEntry | null {
 /**
  * Verified/retired features for the board's Archived section. Each is one entry shaped
  *   - **Title** · verified YYYY-MM-DD · → [[lifecycles/{slug}]]
- * Source of truth is docs/brain/archive.d/{slug}.md (one file per spec, fold-build-batching Phase 3):
- * read those directly so two parallel folds never collide on a shared file. Falls back to the
- * generated docs/brain/archive.md (e.g. if archive.d/ isn't bundled). Newest first, tie-broken by slug.
+ *
+ * spec-fold-from-db-row Phase 2 (2026-06-25): the LISTING now comes from `public.specs` where
+ * `status='folded'` — the folded row is the source of truth ([[spec-fold-from-db-row]] Phase 1 flipped
+ * the status; the row is PRESERVED on fold so this query renders the archive directly). The per-spec
+ * `docs/brain/archive.d/{slug}.md` file (still committed by the fold worker for the git-history-of-
+ * shipped-specs use case the [[spec-test-agent]] reads via `listArchivedSlugs`) is consulted ONLY as a
+ * best-effort LINK ENRICHMENT — it carries the fold-agent's analysis of where the durable knowledge
+ * lives (e.g. `→ [[lifecycles/ai-learning]]` vs the spec slug). Absent / unparseable archive.d entries
+ * fall back to `lifecycles/{slug}`. When no `workspaceId` is supplied (a script / cron with no workspace
+ * scope), we fall back to the pre-Phase-2 filesystem read for parity.
+ *
+ * Newest first, tie-broken by slug.
  */
 /** Build the archive index from its inputs (source-agnostic): prefer per-spec archive.d/ files, else archive.md. */
 function buildArchiveEntries(archiveD: { slug: string; raw: string }[], archiveMd: string | null): ArchiveEntry[] {
@@ -753,7 +762,55 @@ function buildArchiveEntries(archiveD: { slug: string; raw: string }[], archiveM
   return entries;
 }
 
-export async function getArchive(): Promise<ArchiveEntry[]> {
+/** Read the per-spec archive.d/ files into a slug → parsed-entry map for link enrichment. Best-effort:
+ *  an absent / unreadable directory yields an empty map. */
+async function loadArchiveDirEntries(): Promise<Map<string, ArchiveEntry>> {
+  const out = new Map<string, ArchiveEntry>();
+  try {
+    const files = (await fs.readdir(ARCHIVE_DIR)).filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md");
+    await Promise.all(
+      files.map(async (f) => {
+        const slug = f.replace(/\.md$/, "");
+        const raw = await fs.readFile(path.join(ARCHIVE_DIR, f), "utf8");
+        const line = raw.split("\n").find((l) => l.trim().startsWith("- "));
+        const entry = line ? parseArchiveLine(line) : null;
+        if (entry) out.set(slug, entry);
+      }),
+    );
+  } catch {
+    /* no archive.d/ — the DB row carries title + date directly, link defaults to lifecycles/{slug}. */
+  }
+  return out;
+}
+
+export async function getArchive(workspaceId?: string): Promise<ArchiveEntry[]> {
+  // spec-fold-from-db-row Phase 2: the LISTING comes from the DB row — every folded spec is one row
+  // with `status='folded'`, title, slug, and an updated_at that's the verified date. Workspace-scoped.
+  if (workspaceId) {
+    let folded: SpecRow[];
+    try {
+      folded = await listSpecsFromDb(workspaceId, { status: "folded" });
+    } catch {
+      folded = [];
+    }
+    // archive.d/ ENRICHMENT — preserves the fold-agent's chosen link target where available; absent
+    // entries fall back to lifecycles/{slug}. The presence/absence of archive.d/ never affects the
+    // LIST of folded specs — only the per-entry link.
+    const enrichment = await loadArchiveDirEntries();
+    const entries: ArchiveEntry[] = folded.map((row) => {
+      const enriched = enrichment.get(row.slug);
+      if (enriched) {
+        return { title: enriched.title || row.title, date: enriched.date || isoDate(row.updated_at), link: enriched.link, label: enriched.label };
+      }
+      const link = `lifecycles/${row.slug}`;
+      return { title: row.title, date: isoDate(row.updated_at), link, label: functionLabel(row.slug) };
+    });
+    entries.sort((a, b) => b.date.localeCompare(a.date) || a.link.localeCompare(b.link));
+    if (entries.length) return entries;
+    /* No folded rows yet — fall through to the filesystem path for backward compat (the very first
+       Phase 1 fold runs after this code deploys; before that, the only archive entries live on disk). */
+  }
+
   let archiveD: { slug: string; raw: string }[] = [];
   try {
     const files = (await fs.readdir(ARCHIVE_DIR)).filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md");
@@ -770,6 +827,11 @@ export async function getArchive(): Promise<ArchiveEntry[]> {
     /* no archive.md either */
   }
   return buildArchiveEntries(archiveD, archiveMd);
+}
+
+/** "2026-06-25T17:00:00.000Z" → "2026-06-25". */
+function isoDate(s: string): string {
+  return (s || "").slice(0, 10);
 }
 
 /**
