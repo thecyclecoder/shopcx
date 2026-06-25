@@ -211,8 +211,10 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
           <span className="block text-[11px] text-zinc-400">{action}</span>
           <span className="block truncate text-[12px] font-medium text-zinc-700 group-hover:text-indigo-600 dark:text-zinc-200 dark:group-hover:text-indigo-400">
             {lane.spec_slug}
-            {lane.phase && <span className="text-zinc-400 dark:text-zinc-500"> · {lane.phase}</span>}
           </span>
+          {lane.phase && (
+            <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-500">{lane.phase}</span>
+          )}
         </Link>
       )}
       {/* box-session-transparency Phase 2 — the lane's live TodoWrite mirror: a one-line current-step
