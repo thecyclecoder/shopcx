@@ -26,6 +26,7 @@ import {
   type VibeTag,
 } from "@/lib/ad-tool-config";
 import type { TranscriptWord } from "@/lib/ad-transcribe";
+import { version as REMOTION_LAMBDA_PKG_VERSION } from "@remotion/lambda/package.json";
 
 // ── Caption grouping (1-3 words, never split a phrasal verb) ─────────────────
 
@@ -461,6 +462,17 @@ function lambdaConfig() {
   const functionName = process.env.REMOTION_LAMBDA_FUNCTION_NAME;
   const serveUrl = process.env.REMOTION_LAMBDA_SERVE_URL;
   if (!functionName || !serveUrl) throw new Error("remotion_lambda_not_configured: set REMOTION_LAMBDA_FUNCTION_NAME + REMOTION_LAMBDA_SERVE_URL (run scripts/deploy-remotion-lambda.ts)");
+  // The deployed function name carries its Remotion version as a dashed suffix
+  // (`remotion-render-4-0-471-mem...`). If the locally-installed @remotion/lambda
+  // version drifts past the deployed function, every render fails inside Inngest
+  // with a version-mismatch error. Fail fast at startup instead — re-deploy.
+  const m = functionName.match(/-(\d+)-(\d+)-(\d+)-/);
+  if (m) {
+    const fnVersion = `${m[1]}.${m[2]}.${m[3]}`;
+    if (fnVersion !== REMOTION_LAMBDA_PKG_VERSION) {
+      throw new Error(`remotion_lambda_version_mismatch: pkg=${REMOTION_LAMBDA_PKG_VERSION} function=${fnVersion} — re-run scripts/deploy-remotion-lambda.ts`);
+    }
+  }
   return { region, functionName, serveUrl };
 }
 

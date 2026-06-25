@@ -42,6 +42,7 @@ Billed per render-second × memory. A ~16-22s 1080×1920 h264 is cheap; concurre
 
 - **Stale site** = forgot to re-run `deploySite` after editing `remotion/`.
 - **`remotion_lambda_not_configured`** = `REMOTION_LAMBDA_FUNCTION_NAME`/`SERVE_URL` unset.
+- **Version drift = `remotion_lambda_version_mismatch`.** The deployed function name carries its version as a dashed suffix (`remotion-render-4-0-471-mem...`); `lambdaConfig()` in `src/lib/ad-render.ts` reads the locally-installed `@remotion/lambda/package.json` version and throws `remotion_lambda_version_mismatch: pkg=X function=Y` at startup if they differ. The six `@remotion/*` deps in `package.json` are **pinned (no carets)** to stop `npm audit fix` from silently bumping them past the deployed function. Any intentional `@remotion/*` bump MUST be paired with: (1) re-running `npx tsx scripts/deploy-remotion-lambda.ts`, (2) re-setting `REMOTION_LAMBDA_FUNCTION_NAME` in Vercel + `.env.local` to the new function name printed by the script.
 - Whisper runs on Vercel, not Lambda — `OPENAI_API_KEY` must be in Vercel or captions come back empty (the assemble step backfills transcripts; it needs the key).
 
 ## Related

@@ -1,4 +1,4 @@
-# Pin @remotion/* exact versions + fail fast on Lambda version mismatch
+# ✅ Pin @remotion/* exact versions + fail fast on Lambda version mismatch
 
 **Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] · **Verdict:** real-bug
 **Repair-root-cause:** `package.json (drop carets on the six @remotion/* deps — bundler, cli, google-fonts, lambda, renderer, remotion — and pin to 4.0.471 to match the live lambda), src/lib/ad-render.ts (lambdaconfig() reads @remotion/lambda/package.json version and parses the 4-0-xxx suffix from remotion_lambda_function_name; throws remotion_lambda_version_mismatch: pkg=x function=y — re-run scripts/deploy-remotion-lambda.ts if they differ), docs/brain/integrations/remotion-lambda.md (add a gotchas bullet that any @remotion/* bump must be paired with re-running the deploy script + re-setting remotion_lambda_function_name in vercel).::real-bug`
@@ -11,10 +11,16 @@ After commit a5640766 (security-dep-upgrades) ran `npm audit fix --package-lock-
 
 **Likely target:** `package.json (drop carets on the six `@remotion/*` deps — bundler, cli, google-fonts, lambda, renderer, remotion — and pin to 4.0.471 to match the live Lambda), src/lib/ad-render.ts (`lambdaConfig()` reads `@remotion/lambda/package.json` version and parses the `4-0-XXX` suffix from `REMOTION_LAMBDA_FUNCTION_NAME`; throws `remotion_lambda_version_mismatch: pkg=X function=Y — re-run scripts/deploy-remotion-lambda.ts` if they differ), docs/brain/integrations/remotion-lambda.md (add a Gotchas bullet that any `@remotion/*` bump must be paired with re-running the deploy script + re-setting `REMOTION_LAMBDA_FUNCTION_NAME` in Vercel).`
 
-## Phase 1 — close it
+## ✅ Phase 1 — close it
 Scope from the problem above; land the fix + its brain page; gate on `npx tsc --noEmit`.
 
 ## Verification
-- Re-trigger the originating condition (signature `vercel:4be6412563688e4b`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.
+- In `package.json`, inspect the six `@remotion/*` deps (`bundler`, `cli`, `google-fonts`, `lambda`, `renderer`, top-level `remotion`) → expect every entry pinned to exact `4.0.471` (no caret).
+- In `package-lock.json`, grep `"node_modules/@remotion/lambda"` → expect `"version": "4.0.471"` (and same for the other five `@remotion/*` lockfile entries + `node_modules/remotion`).
+- Run `npx tsc --noEmit` → expect clean exit.
+- With `REMOTION_LAMBDA_FUNCTION_NAME=remotion-render-4-0-471-mem3008mb-disk10240mb-240sec` (matches the installed `@remotion/lambda` version), trigger any render path that calls `lambdaConfig()` (e.g. `renderStaticTo`, `renderVoSpineVideoTo`, `renderStillCompositionTo` with `REMOTION_RENDER_MODE=lambda`) → expect normal render, no version-mismatch throw.
+- Temporarily set `REMOTION_LAMBDA_FUNCTION_NAME=remotion-render-4-0-482-mem3008mb-disk10240mb-240sec` (a version that differs from the locally-installed `@remotion/lambda`) and call any render path that hits `lambdaConfig()` → expect throw `remotion_lambda_version_mismatch: pkg=4.0.471 function=4.0.482 — re-run scripts/deploy-remotion-lambda.ts` BEFORE any Lambda call goes out (not from inside Inngest at render time).
+- Re-trigger the originating condition (Control Tower signature `vercel:4be6412563688e4b`) → expect no new `error_events` row / `loop_alert` for it, and the Control Tower tile stays green.
+- In `docs/brain/integrations/remotion-lambda.md` → Gotchas section now carries the "Version drift = `remotion_lambda_version_mismatch`" bullet pairing any `@remotion/*` bump with re-running `scripts/deploy-remotion-lambda.ts` + re-setting `REMOTION_LAMBDA_FUNCTION_NAME`.
 
 > Authored by the box Repair Agent from Control Tower signature `vercel:4be6412563688e4b` (verdict: real-bug). Commission the build from the Control Tower / Roadmap board.
