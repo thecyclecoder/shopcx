@@ -1,11 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { SessionChecklist } from "@/components/agents/session-checklist";
+import type { SessionChecklistItem } from "@/lib/agent-jobs";
 
 // Worker observability (worker-grading-and-director-management Phase 3) — on a worker's profile page
 // (/dashboard/agents/[role]) the Director's view of this worker: a rollup-grade card (last-10 average +
 // trend, the signal she coaches on) + a live feed of its recently-CONCLUDED agent_jobs, each with the
 // grade she gave it. One fetch of /api/developer/agents/agent-grades?kind=… backs both.
+//
+// box-session-transparency Phase 3 — each row also surfaces the preserved session_note + the expandable
+// `<SessionChecklist>` (the live plan the agent ticked through), and links to the per-job permalink
+// (/dashboard/agents/sessions/[jobId]) for the full log_tail + verdict + grade reasoning. Pairs with the
+// grading loop so a human can review HOW the agent worked, not just its terminal status.
 
 interface RecentAction {
   id: string;
@@ -16,6 +24,9 @@ interface RecentAction {
   grade: number | null;
   reasoning: string | null;
   gradedBy: string | null;
+  // box-session-transparency Phase 3 — the preserved live-plan + last note.
+  sessionChecklist: SessionChecklistItem[] | null;
+  sessionNote: string | null;
 }
 interface Rollup {
   agentKind: string;
@@ -128,21 +139,39 @@ export function AgentGradePanel({ kind }: { kind: string }) {
 
       {/* The graded actions — each concluded job + the grade she gave it. */}
       <div>
-        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent actions</h3>
+        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent sessions</h3>
         {!recent.length ? (
           <p className="text-[12px] text-zinc-400">No concluded actions yet — they appear here with their grade as the worker runs.</p>
         ) : (
-          <ol className="space-y-1.5">
+          <ol className="space-y-2">
             {recent.map((a) => {
               const chip = gradeChip(a.grade, a.status);
               return (
-                <li key={a.id} className="flex items-start gap-2 text-[12px]">
-                  <span className="mt-0.5 whitespace-nowrap text-zinc-400">{timeAgo(a.createdAt)}</span>
-                  <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${chip.cls}`}>{chip.label}</span>
-                  <span className="min-w-0 text-zinc-700 dark:text-zinc-300">
-                    {a.specSlug && <span className="font-mono text-[11px] text-zinc-500">{a.specSlug}</span>}
-                    {a.reasoning && <span className="block text-zinc-500 dark:text-zinc-400">{a.reasoning}</span>}
-                  </span>
+                <li
+                  key={a.id}
+                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[12px] dark:border-zinc-800 dark:bg-zinc-900"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="whitespace-nowrap text-zinc-400">{timeAgo(a.createdAt)}</span>
+                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${chip.cls}`}>{chip.label}</span>
+                    {a.specSlug && (
+                      <span className="min-w-0 truncate font-mono text-[11px] text-zinc-500">{a.specSlug}</span>
+                    )}
+                    <Link
+                      href={`/dashboard/agents/sessions/${a.id}`}
+                      className="ml-auto shrink-0 text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                    >
+                      view session →
+                    </Link>
+                  </div>
+                  {/* Phase 3 — the preserved live-plan + the grader's reasoning, inline. The checklist
+                      is expandable; the grader's reasoning is the "why" behind the score. */}
+                  <SessionChecklist note={a.sessionNote} checklist={a.sessionChecklist} density="lane" />
+                  {a.reasoning && (
+                    <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                      <span className="font-medium text-zinc-600 dark:text-zinc-300">Grader:</span> {a.reasoning}
+                    </p>
+                  )}
                 </li>
               );
             })}
