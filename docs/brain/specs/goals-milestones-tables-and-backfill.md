@@ -48,3 +48,22 @@ The foundation step for the goal side of [[../goals/db-driven-specs]]. Stand up 
 - `public.specs.milestone_id` is populated for every spec whose `**Parent:**` line matches a parsed milestone; standalone specs keep `null`. The board's milestone view (a follow-up surface in [[goal-readers-from-db-retire-parsegoal]]) can already join specs to milestones via the FK.
 - No reader has been touched: `getGoals` / `getGoal` ([[../libraries/brain-roadmap]] L1004+) still read markdown — the cutover is owned by [[goal-readers-from-db-retire-parsegoal]]. Dual-write is acceptable here; readers stay markdown-first until then.
 - Brain pages: NEW [[../tables/goals]] + [[../tables/goal_milestones]] pages, NEW [[../libraries/goals-table]] page, NEW [[../recipes/backfill-goals-from-markdown]] page (per the CLAUDE.md hard rule); UPDATE [[spec-body-table-and-backfill]] [[../tables/specs]] page to note the `milestone_id` FK is now constrained.
+
+## Verification
+
+### Phase 1 — schema migration for `public.goals` + `public.goal_milestones`
+
+- On the build box, run `npx tsx scripts/apply-goals-tables-migration.ts` → expect `✓ applied 20260725120000_goals_and_goal_milestones.sql`, `✓ tables present: goal_milestones, goals`, `✓ functions present: goals_check_acyclic_parent, roll_up_goal_status, roll_up_milestone_status`.
+- On the build box, run `npx tsx scripts/_verify-goals-schema.ts` → expect every column from the spec contract (`id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, status, created_at, updated_at` on `public.goals`; `id, goal_id, position, title, body, status, created_at, updated_at` on `public.goal_milestones`); the unique indexes `goals_ws_slug` + `goal_milestones_goal_position`; the triggers `goals_touch_updated_at`, `goal_milestones_touch_updated_at`, `goals_check_acyclic_parent`, `goal_milestones_rollup_to_goal`; policies `goals_select`/`goals_service` + `goal_milestones_select`/`goal_milestones_service`. The deferred-FK line should print `specs.milestone_id FK present: no (expected — blocker not shipped)` until [[spec-body-table-and-backfill]] lands.
+- In `psql` against prod (read-only), `select count(*) from public.goals` and `from public.goal_milestones` → expect `0` (Phase 3's backfill is a separate PR).
+- In `psql`, attempt `update public.goals set parent_goal_id = id where id = (select id from public.goals limit 1)` (after a row exists) → expect `goals.parent_goal_id cycle:` exception. With two rows A,B: `update goals set parent_goal_id=B where id=A` then `update goals set parent_goal_id=A where id=B` → the second statement raises the cycle exception.
+- Run `npx tsc --noEmit` at the repo root → expect zero errors.
+
+### Deferred (covered by the follow-up migration once [[spec-body-table-and-backfill]] ships)
+
+- The `specs.milestone_id` FK constraint (`references public.goal_milestones(id) on delete set null`) is added by a short follow-up migration once `public.specs` exists. `scripts/_verify-goals-schema.ts` flips the deferred-FK line to `yes` once it lands.
+- The row-level trigger on `public.specs` (after update of `status` or `milestone_id`) that CALLS `roll_up_milestone_status` ships in the same follow-up.
+
+### Phase 2 + Phase 3
+
+- Covered by their own build PRs ([[../docs/brain/specs/spec-status-phase-pr-provenance]] — one phase per PR). This Phase 1 PR adds NO writer surface and NO backfill — only the schema + rollup machinery the later phases plug into.
