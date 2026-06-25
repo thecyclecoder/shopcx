@@ -4793,9 +4793,18 @@ async function setFoldRows(jobId: string, from: string, patch: Record<string, un
 }
 
 function foldBatchPrompt(slugs: string[]): string {
-  const slugList = slugs.map((s) => `- docs/brain/specs/${s}.md`).join("\n");
+  // spec-fold-from-db-row Phase 1: the spec BODY now lives in `public.specs` + `public.spec_phases`;
+  // the worker materializes each row to a gitignored `.box/spec-{slug}.md` (the same shape `build-spec`
+  // uses) and the fold-agent reads THAT copy. The legacy `docs/brain/specs/{slug}.md` is `git rm`'d
+  // when it exists (post-spec-readers-from-db-retire-parser, newly-authored specs have no .md at all —
+  // the rm is a no-op for them).
+  const slugList = slugs
+    .map((s) => `- ${s} — body materialized at \`.box/spec-${s}.md\` (read THIS, not docs/brain/specs/)`)
+    .join("\n");
   return [
     `BATCH FOLD-BUILD — fold these owner-verified, shipped specs into the brain and retire them, all in ONE branch. The owner has confirmed each works in production. This is DOCS-ONLY: do NOT rebuild or change any product code.`,
+    ``,
+    `Spec bodies come from \`public.specs\` + \`public.spec_phases\` (the DB row, per [[spec-fold-from-db-row]]). The worker materialized a read-only copy of each under \`.box/spec-{slug}.md\` (gitignored, regenerated each dispatch) — read those files; do NOT read \`docs/brain/specs/{slug}.md\` (it may not exist post-spec-readers-from-db-retire-parser).`,
     ``,
     `Specs to fold:`,
     slugList,
@@ -4804,15 +4813,15 @@ function foldBatchPrompt(slugs: string[]): string {
     `1. Confirm the spec's durable knowledge is already folded into its permanent brain homes (the relevant lifecycles/ table(s)/ libraries/ inngest/ integrations/ dashboard/ recipes/ pages, each with a "Status / open work" block where applicable). If anything is missing, fold it now and cross-link it (3-5 wikilinks, linked FROM at least one existing page).`,
     `2. Create docs/brain/archive.d/{slug}.md containing EXACTLY ONE line — the per-spec archive entry. archive.md is GENERATED from this directory, so NEVER hand-edit docs/brain/archive.md. Use exactly this shape:`,
     `     - **<the spec's real title>** · verified <today's date — run \`date +%F\`> · → [[lifecycles/<the feature's primary lifecycle or brain home slug>]]`,
-    `3. \`git rm docs/brain/specs/{slug}.md\` — git history is the immutable archive; a deleted spec is always \`git show\`-recoverable.`,
+    `3. If \`docs/brain/specs/{slug}.md\` exists, \`git rm docs/brain/specs/{slug}.md\` (git history + the DB row are the immutable archive). If it does NOT exist (newly-authored specs post-spec-readers-from-db-retire-parser have no .md), skip the rm — the DB row carries the body and the worker flips its status to \`folded\` after this PR opens.`,
     ``,
     `Then ONCE for the whole batch:`,
-    `4. Do NOT run brain-index.mjs, and do NOT modify docs/brain/archive.md or docs/brain/README.md. The board reads docs/brain/archive.d/ directly (getArchive), so committing the regenerated aggregates inside a fold PR is needless AND the #1 cause of fold PRs going Dirty — every fold re-edits the same archive.md/README lines, so a second fold conflicts the moment the first merges. Your PR should touch ONLY: the per-spec docs/brain/archive.d/{slug}.md file(s), the git-rm'd spec file(s), and any brain pages you folded into. The aggregates are refreshed out-of-band.`,
+    `4. Do NOT run brain-index.mjs, and do NOT modify docs/brain/archive.md or docs/brain/README.md. The board reads docs/brain/archive.d/ directly (getArchive), so committing the regenerated aggregates inside a fold PR is needless AND the #1 cause of fold PRs going Dirty — every fold re-edits the same archive.md/README lines, so a second fold conflicts the moment the first merges. Your PR should touch ONLY: the per-spec docs/brain/archive.d/{slug}.md file(s), any git-rm'd legacy spec file(s), and the brain pages you folded into. The aggregates are refreshed out-of-band.`,
     `5. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
     ``,
     `If you cannot determine where a spec's knowledge belongs (no obvious lifecycle/brain home), do NOT guess: still fold the others, and surface that one as a needs_input question naming the slug.`,
     ``,
-    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control); \`git rm\` to stage spec deletions is fine. Final message = ONLY one JSON object: {"status":"completed","summary":"folded N specs: …"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
+    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control); \`git rm\` to stage legacy spec deletions is fine. Final message = ONLY one JSON object: {"status":"completed","summary":"folded N specs: …"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
   ].join("\n");
 }
 
@@ -4843,6 +4852,59 @@ async function runFoldJob(job: Job) {
     return;
   }
 
+  // spec-fold-from-db-row Phase 1 guard: refuse to fold a spec whose `public.specs.status` is not
+  // `shipped`. The DB-trigger rollup (spec-body-table-and-backfill) ensures `shipped` ≡ every
+  // `spec_phases` row is shipped — this is the structural rail the goal protects. Any non-shipped
+  // slug is released back to `pending` (so the next dispatch picks it up only when its status
+  // genuinely settles) and logged. Already-folded rows are dropped silently (idempotent re-fold).
+  {
+    const { data: specRows } = await db
+      .from("specs")
+      .select("slug, status")
+      .eq("workspace_id", job.workspace_id)
+      .in("slug", slugs);
+    const statusBySlug = new Map<string, string>();
+    for (const r of (specRows ?? []) as { slug: string; status: string }[]) statusBySlug.set(r.slug, r.status);
+    const releaseable: string[] = [];
+    const allowed: string[] = [];
+    const alreadyFolded: string[] = [];
+    for (const slug of slugs) {
+      const st = statusBySlug.get(slug);
+      if (st === "shipped") {
+        allowed.push(slug);
+      } else if (st === "folded") {
+        alreadyFolded.push(slug);
+      } else {
+        // missing row OR non-shipped non-folded → release for a later batch when status settles.
+        releaseable.push(slug);
+      }
+    }
+    if (alreadyFolded.length) {
+      await db
+        .from("pending_folds")
+        .update({ status: "folded", updated_at: new Date().toISOString() })
+        .eq("job_id", job.id)
+        .in("spec_slug", alreadyFolded);
+      console.log(`${tag} dropped already-folded specs: ${alreadyFolded.join(", ")}`);
+    }
+    if (releaseable.length) {
+      await db
+        .from("pending_folds")
+        .update({ status: "pending", job_id: null, updated_at: new Date().toISOString() })
+        .eq("job_id", job.id)
+        .in("spec_slug", releaseable);
+      console.warn(`${tag} released non-shipped specs (status guard): ${releaseable.join(", ")}`);
+    }
+    slugs = allowed;
+    if (!slugs.length) {
+      await update(job.id, {
+        status: "completed",
+        log_tail: `nothing foldable — released ${releaseable.length} non-shipped + ${alreadyFolded.length} already-folded`,
+      });
+      return;
+    }
+  }
+
   sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]);
@@ -4857,6 +4919,29 @@ async function runFoldJob(job: Job) {
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
   }
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  // spec-fold-from-db-row Phase 1: materialize each shipped `public.specs` row into the worktree's
+  // gitignored `.box/spec-{slug}.md` so the fold-agent reads the DB row (same shape build-spec uses).
+  // The legacy `docs/brain/specs/{slug}.md` may or may not exist — the agent `git rm`s it only when
+  // present (newly-authored specs post-spec-readers-from-db-retire-parser have no .md at all).
+  {
+    const { materializeSpec } = await import("../src/lib/build-spec-materializer");
+    for (const slug of slugs) {
+      try {
+        await materializeSpec(job.workspace_id, slug, join(wt, ".box"));
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        await setFoldRows(job.id, "folding", { status: "pending", job_id: null });
+        await update(job.id, {
+          status: "failed",
+          error: `materializeSpec failed for ${slug}: ${why}`,
+          log_tail: `fold aborted — could not materialize ${slug} from DB row; no PR opened`,
+        });
+        sh("git", ["worktree", "remove", "--force", wt]);
+        return;
+      }
+    }
+  }
 
   try {
     const prompt = isResume
@@ -4900,6 +4985,14 @@ async function runFoldJob(job: Job) {
     if (!dirty) {
       // Nothing changed — likely already folded. Treat as done so specs don't loop.
       await setFoldRows(job.id, "folding", { status: "folded" });
+      // spec-fold-from-db-row Phase 1: flip the spec rows even when there was no new brain edit —
+      // the row is the live status surface now, so a re-fold that finds the brain already updated
+      // still needs to mark the spec `folded` (otherwise it loops as `shipped`-but-pending forever).
+      await db
+        .from("specs")
+        .update({ status: "folded", updated_at: new Date().toISOString() })
+        .eq("workspace_id", job.workspace_id)
+        .in("slug", slugs);
       // A fold can pause on needs_input → draft PR; un-draft it on a no-new-change resume (same gap as runJob).
       const pr = await ensurePr(branch!, slugs[0] || "fold", false);
       if (pr) {
@@ -4930,6 +5023,16 @@ async function runFoldJob(job: Job) {
     }
     await markReady(pr.number);
     await setFoldRows(job.id, "folding", { status: "folded" });
+    // spec-fold-from-db-row Phase 1: flip the spec row's live status to `folded`. The DB-trigger
+    // rollup (spec-body-table-and-backfill) leaves `folded` alone — it's terminal-ish — so a later
+    // phase-write can't quietly reset it. The row is PRESERVED: every other column (title, summary,
+    // owner, parent, blocked_by, milestone_id) stays so the board's archive view + audit history
+    // can render the folded card unchanged.
+    await db
+      .from("specs")
+      .update({ status: "folded", updated_at: new Date().toISOString() })
+      .eq("workspace_id", job.workspace_id)
+      .in("slug", slugs);
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
   } finally {
