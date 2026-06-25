@@ -127,8 +127,25 @@ export interface AgentJob {
   // post-merge step queues the next ⏳ phase (also chain_phases) on merge, until all phases ✅. Default
   // false (single-phase / non-chained builds). May be undefined on a pre-migration row read.
   chain_phases?: boolean;
+  // box-session-transparency Phase 1: the live TodoWrite mirror the shared `runBoxSession` runner streams
+  // onto every job row while a `claude -p` session is active — Phase 2 renders these on the box card so an
+  // active session is no longer a black box. NULL on a pre-migration job or a job that never produced a
+  // TodoWrite event. `session_note` is the single one-line current-step verb (the compact chip line);
+  // `session_checklist` is the full plan, ticked through as the agent works.
+  session_checklist?: SessionChecklistItem[] | null;
+  session_note?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** A single TodoWrite item streamed onto agent_jobs by the shared box-session runner ([[../specs/box-session-transparency]] Phase 1).
+ *  Shape mirrors what `scripts/builder-worker.ts → makeChecklistWriter` writes. `note` is the
+ *  one-line plain-English present-continuous verb (the TodoWrite `activeForm`) — what the agent is
+ *  doing + why — already trimmed/safe to render directly. */
+export interface SessionChecklistItem {
+  step: string;
+  status: "pending" | "in_progress" | "done";
+  note: string;
 }
 
 /**

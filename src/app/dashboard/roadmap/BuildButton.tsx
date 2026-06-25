@@ -6,6 +6,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { routedInboxHref } from "@/lib/agents/inbox";
 import type { AgentJob, JobStatus, PendingFold } from "@/lib/agent-jobs";
 import type { Phase, SpecStatus } from "@/lib/brain-roadmap";
+import { SessionChecklist } from "@/components/agents/session-checklist";
 
 const ACTIVE: JobStatus[] = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
 
@@ -344,6 +345,14 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
           </button>
         )}
       </div>
+      {/* box-session-transparency Phase 2 — the active session's live TodoWrite mirror (compact one-line
+          note + expand for the full checklist). Replaces the opaque "Building…" chip as the only signal
+          of what the session is doing right now. Shown only on ACTIVE jobs so a completed/failed card
+          doesn't carry a stale checklist; the runner streams these onto the job row, and the existing
+          4s poll above re-renders as the agent ticks through its todos. */}
+      {active && (job!.session_note || (job!.session_checklist && job!.session_checklist.length)) && (
+        <SessionChecklist note={job!.session_note} checklist={job!.session_checklist} />
+      )}
       {/* spec-blockers: a "🔒 Blocked by …" chip listing each prerequisite + its status. Shown whenever a
           prerequisite is still uncleared, on a not-yet-shipped spec. Cleared blockers render ✅. */}
       {blocked && specStatus !== "shipped" && (
