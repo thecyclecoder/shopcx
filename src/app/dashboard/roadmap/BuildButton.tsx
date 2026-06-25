@@ -118,9 +118,14 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   const blocked = uncleared.length > 0;
   const blockedTooltip = blocked ? `Build is blocked — ship first: ${uncleared.map((b) => b.slug).join(", ")}` : undefined;
 
+  // A build in `needs_approval` WITH an open PR is the informative "built, but gated" state: the code is
+  // written + the PR is up (often draft), it just needs the CEO to approve a migration/prod-script before it
+  // can merge. "Built · needs approval" says both — far less confusing than a bare "Built" pill on an
+  // un-merged, un-shipped phase. (Without a PR, the gate is pre-code, so keep plain "Needs approval".)
+  const chipText = job ? (job.status === "needs_approval" && job.pr_number ? "Built · needs approval" : LABEL[job.status]) : "";
   const chip = job ? (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${CHIP[job.status]}`}>
-      {LABEL[job.status]}
+      {chipText}
     </span>
   ) : null;
   const prLink = job?.pr_url ? (

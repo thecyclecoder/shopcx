@@ -267,6 +267,12 @@ export async function getPendingFolds(workspaceId: string): Promise<Record<strin
 }
 
 /** Latest job per spec for a workspace (newest wins) — drives the board's per-card status. */
+// The board card shows the spec's BUILD-pipeline state. Director/meta jobs (a spec-status flip, a security
+// review, a model-tier proposal) are NOT the spec's build — if one is the most recent job it must not MASK
+// the real build. (Observed: a `platform-director` job completed → the card read "Built" while the actual
+// build sat in needs_approval, so a CEO-gated migration was invisible.) The per-card picker skips them.
+const NON_CARD_JOB_KINDS: JobKind[] = ["platform-director", "security-review", "proposed-model-tier"];
+
 export async function getLatestJobsBySlug(workspaceId: string): Promise<Record<string, AgentJob>> {
   const admin = createAdminClient();
   const { data } = await admin
@@ -277,6 +283,7 @@ export async function getLatestJobsBySlug(workspaceId: string): Promise<Record<s
     .limit(500);
   const map: Record<string, AgentJob> = {};
   for (const j of (data ?? []) as AgentJob[]) {
+    if (NON_CARD_JOB_KINDS.includes(j.kind)) continue; // a director/meta job is not the spec's build state
     if (!map[j.spec_slug]) map[j.spec_slug] = j;
   }
   return map;
