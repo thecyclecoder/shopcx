@@ -1,0 +1,1 @@
+- **Error autonomy visible + reversible — the nightly error-autonomy rollup** · verified 2026-06-25 · → [[libraries/platform-director]]
