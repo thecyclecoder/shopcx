@@ -7,6 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { reconcileSpecDrift, fetchSpecRawFromMain, parseFixesLink } from "@/lib/spec-drift";
 import { markSpecCardMergeShipped, rollupPhaseStatus } from "@/lib/spec-card-state";
+import { stampPhaseShipped } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -704,28 +705,14 @@ export async function applyMergedBuildEffects(
     // trigger keeps `specs.status` consistent on each phase write — no app-side rollup needed here.
     if (shipped.size) {
       try {
-        const admin = createAdminClient();
-        const { data: specRow } = await admin
-          .from("specs")
-          .select("id")
-          .eq("workspace_id", workspaceId)
-          .eq("slug", slug)
-          .maybeSingle();
-        const specId = (specRow as { id: string } | null)?.id;
-        if (specId) {
-          await Promise.all(
-            [...shipped].map(async (idx) => {
-              await admin
-                .from("spec_phases")
-                .update({ status: "shipped", pr, merge_sha: sha, updated_at: new Date().toISOString() })
-                .eq("spec_id", specId)
-                .eq("position", idx + 1);
-            }),
-          );
-        }
+        // Stamp each shipped phase's PR/SHA provenance through the SDK — the only status-write path; the
+        // DB trigger rolls specs.status up from the phases. No raw PM SQL (pm-db-agent-toolkit invariant).
+        await Promise.all(
+          [...shipped].map((idx) => stampPhaseShipped(workspaceId, slug, idx + 1, { pr, merge_sha: sha })),
+        );
       } catch {
-        /* best-effort — spec_card_state.phase_states above is still the read-path; the row dual-write is
-           reconciled on the next author/edit pass via specs-table.upsertSpec. */
+        /* best-effort — spec_card_state.phase_states above is still a read-path; the row is reconciled
+           on the next author/edit pass via specs-table.upsertSpec. */
       }
     }
     if (rolled === "shipped") {
