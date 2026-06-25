@@ -10,7 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evalAgentKind, extractCronExpr, jobStuckSince, nextFiringAtOrAfter, parseCronExpr, type ActiveJob } from "./monitor";
+import { evalAgentKind, evalCron, extractCronExpr, firstScheduledFiringMs, jobStuckSince, nextFiringAtOrAfter, parseCronExpr, type ActiveJob } from "./monitor";
 import type { MonitoredLoop } from "./registry";
 
 test("extractCronExpr pulls the 5-field expression from expectedCadence", () => {
@@ -180,6 +180,115 @@ test("evalAgentKind still flags genuinely-stuck queued jobs after a long post-re
     const result = evalAgentKind(agentKindLoop, null, queued, "2026-06-25T11:45:00Z");
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "stuck_jobs");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+// ─── Observed-first-seen anchor for registered_not_firing grace ───
+// (control-tower-registered-not-firing-observed-anchor-grace spec, Phase 1)
+
+const fleetSpendGovernorLoop: MonitoredLoop = {
+  id: "fleet-spend-governor",
+  kind: "cron",
+  owner: "platform",
+  label: "Fleet spend governor",
+  description: "Reads each effective fleet_budgets row vs the fleet-cost rollup → escalates a lane/function over its ceiling.",
+  expectedCadence: "every ~30 min (10,40 * * * *)",
+  livenessWindowMs: 90 * 60_000,
+  // Hand-edited to early-midnight BEFORE the cron actually shipped — the originating false-page case.
+  registeredAt: "2026-06-25T00:00:00Z",
+};
+
+test("firstScheduledFiringMs without an observed anchor returns the computed first firing", () => {
+  // No firstObservedMs: same behavior as before — computes 00:10 (the first `10,40 * * * *` tick
+  // at-or-after registeredAt 00:00).
+  const ms = firstScheduledFiringMs(fleetSpendGovernorLoop);
+  assert.equal(ms, Date.parse("2026-06-25T00:10:00Z"));
+});
+
+test("firstScheduledFiringMs takes the MAX of computed-first-firing and the observed anchor", () => {
+  // The fleet-spend-governor case: registeredAt 00:00 hand-edited (cron computes 00:10), but the
+  // monitor first SAW the loop at 09:30 (the deploy actually landed that morning). The grace clock
+  // must anchor to the LATER value (09:30), not the hand-edited pre-existence one (00:10), so the
+  // 90-min window doesn't evaporate before the cron has had any chance to fire.
+  const firstObservedMs = Date.parse("2026-06-25T09:30:00Z");
+  const ms = firstScheduledFiringMs(fleetSpendGovernorLoop, firstObservedMs);
+  assert.equal(ms, firstObservedMs);
+});
+
+test("firstScheduledFiringMs ignores an observed anchor that's EARLIER than the computed first firing", () => {
+  // A first-seen older than the computed first firing means the loop has been registered for at
+  // least as long as registeredAt implies — keep the computed value, don't pull the grace back.
+  const firstObservedMs = Date.parse("2026-06-24T23:00:00Z");
+  const ms = firstScheduledFiringMs(fleetSpendGovernorLoop, firstObservedMs);
+  assert.equal(ms, Date.parse("2026-06-25T00:10:00Z"));
+});
+
+test("firstScheduledFiringMs falls back to the observed anchor when registeredAt is absent", () => {
+  // A loop without registeredAt (legacy crons) still gets a grace anchor from first-observed when
+  // available — the empirical anchor is itself a sufficient grace clock.
+  const legacy: MonitoredLoop = { ...fleetSpendGovernorLoop, registeredAt: undefined };
+  const firstObservedMs = Date.parse("2026-06-25T09:30:00Z");
+  assert.equal(firstScheduledFiringMs(legacy, firstObservedMs), firstObservedMs);
+  // No registeredAt + no observed ⇒ no grace clock (caller skips the registeredAt gate).
+  assert.equal(firstScheduledFiringMs(legacy), null);
+});
+
+test("evalCron HOLDS AMBER for fleet-spend-governor when registeredAt is hand-edited early but first_observed_at is recent", () => {
+  // The fleet-spend-governor false-page case end-to-end:
+  //   - registeredAt 2026-06-25T00:00:00Z (hand-edited early-midnight)
+  //   - cadence `10,40 * * * *` → computed first firing 2026-06-25T00:10:00Z
+  //   - livenessWindowMs 90 min
+  //   - first_observed_at 2026-06-25T09:30:00Z (the deploy actually landed mid-morning)
+  //   - watchdog has been alive 30h ⇒ monitorUptimeMs WOULD trip the deploy-independent gate
+  //   - 0 beats ever (latest=null, everBeatCount=0)
+  // "Now" is 2026-06-25T10:00:00Z — only 30 min since first_observed_at, well inside the 90-min
+  // grace. WITHOUT the observed-anchor fix: sinceFirstFiringMs = 10:00 − 00:10 = 9h50m > 90m,
+  // so the grace check fails and monitorUptimeMs > window flips the tile RED registered_not_firing.
+  // WITH the fix: max(00:10, 09:30) = 09:30, sinceFirstFiringMs = 30 min ≤ 90m, grace HOLDS → AMBER.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-06-25T10:00:00Z");
+  try {
+    const firstObservedMs = Date.parse("2026-06-25T09:30:00Z");
+    const monitorUptimeMs = 30 * 60 * 60_000; // 30h — would otherwise be enough to fire registered_not_firing
+    const result = evalCron(fleetSpendGovernorLoop, null, null, 0, false, monitorUptimeMs, firstObservedMs);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /awaiting first run/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron WITHOUT the observed anchor would still false-page fleet-spend-governor (regression guard)", () => {
+  // Same scenario as above WITHOUT firstObservedMs (firstObservedMs=null) — locks in that the
+  // observed-anchor fix is what's holding the grace. Pre-fix: 9h50m since computed first firing,
+  // well past the 90-min grace, so the deploy-independent monitorUptimeMs gate flips it RED.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-06-25T10:00:00Z");
+  try {
+    const monitorUptimeMs = 30 * 60 * 60_000;
+    const result = evalCron(fleetSpendGovernorLoop, null, null, 0, false, monitorUptimeMs, null);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "registered_not_firing");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron still flips RED for a genuinely-dead cron once the observed-anchor grace itself expires", () => {
+  // Same loop, but "now" is 24h after first_observed_at — well past the 90-min grace, watchdog alive
+  // 30h, 0 beats ever. The empirical anchor grants a fair window, not a free pass: a cron that's
+  // been observed registered for a full window and still hasn't beaten is the real registered_not_firing.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-06-26T09:30:00Z");
+  try {
+    const firstObservedMs = Date.parse("2026-06-25T09:30:00Z");
+    const monitorUptimeMs = 30 * 60 * 60_000;
+    const result = evalCron(fleetSpendGovernorLoop, null, null, 0, false, monitorUptimeMs, firstObservedMs);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "registered_not_firing");
   } finally {
     Date.now = realNow;
   }
