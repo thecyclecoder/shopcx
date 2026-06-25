@@ -1835,28 +1835,20 @@ async function resolveDbHealthSpecBody(
   return { error: "spec body empty and no carried finding to re-derive from" };
 }
 
-// Author the proposed fix spec to main + queue the build — the owner-gate, run on a db_health Build
-// resume. The spec body was pre-authored deterministically at detection time (carried on the job's
-// db_health_build action), so there's no LLM step. Mirrors the repair-agent owner-Build path.
-async function materializeDbHealthSpec(specSlug: string, specBody: string, signature: string): Promise<boolean> {
-  try {
-    // Final backstop (db-health-spec-body-robust): NEVER putFileMain an empty/phaseless spec. The caller
-    // already resolves + re-derives a non-empty body, so this should be unreachable — but a 0-byte commit
-    // is exactly the failure this spec exists to stop, so refuse it here too.
-    if (!specBody || !specBody.trim() || !/^#{2,3}\s+Phase/m.test(specBody)) {
-      console.warn(`[db-health] refusing to author empty/phaseless spec ${specSlug} (signature ${signature})`);
-      return false;
-    }
-    const put = await putFileMain(
-      `docs/brain/specs/${specSlug}.md`,
-      specBody,
-      `spec: ${specSlug} (from DB Health Agent signature ${signature})`,
-    );
-    return put.ok;
-  } catch (e) {
-    console.warn(`[db-health] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+// Validate the proposed fix spec body before the owner-gate authors it to the DB — run on a db_health
+// Build resume. The spec body was pre-authored deterministically at detection time (carried on the job's
+// db_health_build action). Post spec-pm-markdown-purge the spec lands ONLY in public.specs +
+// public.spec_phases (via the caller's markNewSpecInReview → authorSpecRowFromMarkdown); this guard just
+// refuses an empty/phaseless body so we never author a 0-byte spec row. No file write.
+function validateSpecBody(specSlug: string, specBody: string, signature: string): boolean {
+  // Final backstop (db-health-spec-body-robust): NEVER author an empty/phaseless spec. The caller already
+  // resolves + re-derives a non-empty body, so this should be unreachable — but an empty spec row is
+  // exactly the failure this guard exists to stop.
+  if (!specBody || !specBody.trim() || !/^#{2,3}\s+Phase/m.test(specBody)) {
+    console.warn(`[db-health] refusing to author empty/phaseless spec ${specSlug} (signature ${signature})`);
     return false;
   }
+  return true;
 }
 
 // Surface the top-N ranked findings as deduped proposals. Returns how many were newly enqueued.
@@ -2155,10 +2147,9 @@ async function runDbHealthJob(job: Job) {
         console.warn(`${tag} owner Build → empty spec body, re-derive failed: ${bodyResult.error}`);
         return;
       }
-      const wrote = await materializeDbHealthSpec(buildAction.spec_slug, bodyResult.body, signature);
-      if (!wrote) {
-        await update(job.id, { status: "needs_attention", error: "spec commit failed", log_tail: `owner Build → failed to author docs/brain/specs/${buildAction.spec_slug}.md`.slice(-2000) });
-        console.warn(`${tag} owner Build → spec commit failed`);
+      if (!validateSpecBody(buildAction.spec_slug, bodyResult.body, signature)) {
+        await update(job.id, { status: "needs_attention", error: "empty/phaseless spec body", log_tail: `owner Build → refused to author empty/phaseless spec ${buildAction.spec_slug} to public.specs`.slice(-2000) });
+        console.warn(`${tag} owner Build → empty/phaseless spec body`);
         return;
       }
       await markNewSpecInReview(job.workspace_id, buildAction.spec_slug, "planned", "db_health", `db-health fix spec authored (signature ${signature})`, bodyResult.body);
@@ -2231,10 +2222,9 @@ async function runCoverageRegisterJob(job: Job) {
         console.log(`${tag} owner ${what} → dedup: ${action.result}`);
         return;
       }
-      const wrote = await materializeDbHealthSpec(specSlug, specBody, signature);
-      if (!wrote) {
-        await update(job.id, { status: "needs_attention", error: "spec commit failed", pending_actions: job.pending_actions, log_tail: `owner ${what} → failed to author docs/brain/specs/${specSlug}.md`.slice(-2000) });
-        console.warn(`${tag} owner ${what} → spec commit failed`);
+      if (!validateSpecBody(specSlug, specBody, signature)) {
+        await update(job.id, { status: "needs_attention", error: "empty/phaseless spec body", pending_actions: job.pending_actions, log_tail: `owner ${what} → refused to author empty/phaseless spec ${specSlug} to public.specs`.slice(-2000) });
+        console.warn(`${tag} owner ${what} → empty/phaseless spec body`);
         return;
       }
       await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
@@ -2868,28 +2858,29 @@ async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string
   const { violations, scanned } = await lib.findMilestoneSequenceViolations(db);
   if (!violations.length) return scanned ? `sequence: ${scanned} dependent milestone spec(s), all ordered` : "sequence: nothing to reconcile";
 
+  const { getSpec } = await import("../src/lib/brain-roadmap");
   const resequenced: string[] = [];
   for (const v of violations) {
     try {
-      // 1) Apply the authored Blocked-by order — read the spec fresh from main (avoid clobbering a fs-lagged disk).
-      const path = `docs/brain/specs/${v.slug}.md`;
-      const get = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-      if (!get.ok) {
-        console.error(`${tag} sequence: cannot read ${path} (skipping ${v.slug})`);
+      // 1) Apply the authored Blocked-by order on the DB row (spec-pm-markdown-purge: blockers live in
+      //    public.specs.blocked_by — the spec-blockers gate reads the DB, not the .md). Merge the declared
+      //    blockers into the existing list (order-preserving union) and persist; skip the write on a no-op.
+      const got = await getSpec(v.slug);
+      if (!got) {
+        console.error(`${tag} sequence: no spec row for ${v.slug} (skipping)`);
         continue;
       }
-      const sha = (get.json as { sha?: string }).sha;
-      const md = Buffer.from(String((get.json as { content?: string }).content || "").replace(/\s/g, ""), "base64").toString("utf8");
-      const updated = lib.ensureBlockedByLine(md, v.declaredBlockers);
-      if (updated !== md) {
-        const put = await gh("PUT", `/repos/${REPO}/contents/${path}`, {
-          message: `spec: ${v.slug} — apply Blocked-by ${v.missingFromFile.join(", ")} (director sequence-reconcile)`,
-          content: Buffer.from(updated, "utf8").toString("base64"),
-          sha,
-          branch: "main",
-        });
-        if (!put.ok) {
-          console.error(`${tag} sequence: failed to write Blocked-by for ${v.slug} (skipping hold)`);
+      const existingBlockers = (got.card.blockedBy ?? []).map((b) => b.slug);
+      const merged = [...existingBlockers];
+      for (const b of v.declaredBlockers) if (!merged.includes(b)) merged.push(b);
+      if (merged.length !== existingBlockers.length) {
+        const { error: blkErr } = await db
+          .from("specs")
+          .update({ blocked_by: merged, updated_at: new Date().toISOString() })
+          .eq("workspace_id", job.workspace_id)
+          .eq("slug", v.slug);
+        if (blkErr) {
+          console.error(`${tag} sequence: failed to persist Blocked-by for ${v.slug} (skipping hold): ${blkErr.message}`);
           continue;
         }
       }
@@ -2932,7 +2923,7 @@ async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string
 // one spec's failure never blocks the rest. Returns a one-line summary for the standing-pass log.
 async function groomBoard(job: Job, tag: string): Promise<string> {
   const lib = await import("../src/lib/agents/platform-director");
-  const { deriveSpecStatus } = await import("../src/lib/brain-roadmap");
+  const { deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
 
   const candidates = await lib.findGroomCandidates(db);
@@ -3029,40 +3020,39 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           console.warn(`${tag} groom ${c.slug} → split INVALID (${valid.error}) → escalated to CEO`);
           continue;
         }
-        // Author the split cards first (create-only — never clobber an existing slug), then commit the
-        // closed-out parent LAST (the fold trigger). If a card commit fails, abort before touching the parent.
+        // Author the split cards first (create-only — never clobber an existing DB row), then close out
+        // the parent LAST (the fold trigger). spec-pm-markdown-purge: cards land ONLY in public.specs +
+        // public.spec_phases (markNewSpecInReview → authorSpecRowFromMarkdown); no .md write. If a card
+        // author fails, abort before touching the parent.
         const splits = parsed.splits ?? [];
         const authored: string[] = [];
         let failed = false;
         for (const s of splits) {
           const slug = String(s.slug);
-          const path = `docs/brain/specs/${slug}.md`;
-          const exists = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-          if (exists.ok) {
-            console.warn(`${tag} groom ${c.slug} → split card ${slug} already exists — skipping author`);
+          const exists = await getSpec(slug);
+          if (exists) {
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} already a spec row — skipping author`);
             authored.push(slug); // converged — treat as authored, don't clobber
             continue;
           }
-          const put = await putFileMain(path, String(s.markdown), `spec: ${slug} — split future phase from ${c.slug} (board-grooming)`);
-          if (!put.ok) {
+          try {
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split — split from ${c.slug}`, String(s.markdown));
+            authored.push(slug);
+          } catch (e) {
             failed = true;
-            console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} DB author failed: ${e instanceof Error ? e.message : String(e)}`);
             break;
           }
-          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split — split from ${c.slug}`, String(s.markdown));
-          authored.push(slug);
         }
         if (failed) {
-          console.warn(`${tag} groom ${c.slug} → split aborted (a card commit failed) — parent left intact`);
+          console.warn(`${tag} groom ${c.slug} → split aborted (a card author failed) — parent left intact`);
           continue;
         }
-        const parentPut = await putFileMain(
-          `docs/brain/specs/${c.slug}.md`,
-          String(parsed.parent_markdown),
-          `spec: close out ${c.slug} — split ${authored.length} future phase(s) into their own cards (board-grooming)`,
-        );
-        if (!parentPut.ok) {
-          console.warn(`${tag} groom ${c.slug} → parent close-out commit failed (status ${parentPut.status}) — cards authored: ${authored.join(", ")}`);
+        // Close out the parent on the DB (the fold trigger): flip its remaining phases ✅ on the canonical
+        // spec_phases table + enqueue the fold — the DB-driven equivalent of the old all-✅ parent .md write.
+        const closed = await closeOutSpecForFold(job.workspace_id, c.slug);
+        if (!closed.ok) {
+          console.warn(`${tag} groom ${c.slug} → parent close-out failed (${closed.error}) — cards authored: ${authored.join(", ")}`);
           continue;
         }
         split++;
@@ -3167,38 +3157,34 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           console.log(`${tag} groom ${c.slug} → author_followup_spec → authored ${authored.authoredSlug} + fold_now ${f.flippedPhases.length} phase(s)`);
           continue;
         }
-        // primary === "split"
+        // primary === "split" — spec-pm-markdown-purge: split cards land ONLY in the DB; parent close-out
+        // flips its phases ✅ on spec_phases + enqueues the fold. No .md writes.
         const splits = parsed.splits ?? [];
         const authoredSplits: string[] = [];
         let splitFailed = false;
         for (const s of splits) {
           const slug = String(s.slug);
-          const path = `docs/brain/specs/${slug}.md`;
-          const exists = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-          if (exists.ok) {
+          const exists = await getSpec(slug);
+          if (exists) {
             authoredSplits.push(slug);
             continue;
           }
-          const put = await putFileMain(path, String(s.markdown), `spec: ${slug} — split future phase from ${c.slug} (board-grooming, via author_followup_spec)`);
-          if (!put.ok) {
+          try {
+            await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split (via author_followup_spec) — split from ${c.slug}`, String(s.markdown));
+            authoredSplits.push(slug);
+          } catch (e) {
             splitFailed = true;
-            console.warn(`${tag} groom ${c.slug} → split card ${slug} commit failed (status ${put.status})`);
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} DB author failed: ${e instanceof Error ? e.message : String(e)}`);
             break;
           }
-          await markNewSpecInReview(job.workspace_id, slug, "planned", "director:platform", `groomed_split (via author_followup_spec) — split from ${c.slug}`, String(s.markdown));
-          authoredSplits.push(slug);
         }
         if (splitFailed) {
-          console.warn(`${tag} groom ${c.slug} → author_followup_spec/split aborted (a card commit failed) — followup ${authored.authoredSlug} authored, parent left intact`);
+          console.warn(`${tag} groom ${c.slug} → author_followup_spec/split aborted (a card author failed) — followup ${authored.authoredSlug} authored, parent left intact`);
           continue;
         }
-        const parentPut = await putFileMain(
-          `docs/brain/specs/${c.slug}.md`,
-          String(parsed.parent_markdown),
-          `spec: close out ${c.slug} — split ${authoredSplits.length} future phase(s) (board-grooming, via author_followup_spec)`,
-        );
-        if (!parentPut.ok) {
-          console.warn(`${tag} groom ${c.slug} → author_followup_spec/split parent close-out commit failed (status ${parentPut.status}) — splits authored: ${authoredSplits.join(", ")}`);
+        const closed = await closeOutSpecForFold(job.workspace_id, c.slug);
+        if (!closed.ok) {
+          console.warn(`${tag} groom ${c.slug} → author_followup_spec/split parent close-out failed (${closed.error}) — splits authored: ${authoredSplits.join(", ")}`);
           continue;
         }
         split++;
@@ -4015,22 +4001,23 @@ async function runDirectorBounceBackJob(job: Job) {
         const authoredSplits: string[] = [];
         for (const s of splits) {
           const sslug = String(s.slug);
-          const path = `docs/brain/specs/${sslug}.md`;
-          const exists = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-          if (exists.ok) {
+          // spec-pm-markdown-purge: split cards land ONLY in the DB; existence check is the spec row.
+          const exists = await getSpec(sslug);
+          if (exists) {
             authoredSplits.push(sslug);
             continue;
           }
-          const put = await putFileMain(path, String(s.markdown), `spec: ${sslug} — split future phase from ${slug} (bounce-back)`);
-          if (put.ok) {
+          try {
             await markNewSpecInReview(job.workspace_id, sslug, "planned", "director:platform", `bounce-back split — from ${slug}`, String(s.markdown));
             authoredSplits.push(sslug);
+          } catch (e) {
+            console.warn(`${tag} groom bounce-back ${slug} → split card ${sslug} DB author failed: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
-        const parentPut = await putFileMain(`docs/brain/specs/${slug}.md`, String(parsed.parent_markdown), `spec: close out ${slug} — split ${authoredSplits.length} future phase(s) (bounce-back)`);
-        if (!parentPut.ok) {
-          await emitDepthCapEscalation(`Tried author_followup_spec/split on bounce-back; parent close-out failed (HTTP ${parentPut.status})`);
-          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → split parent commit failed → depth-cap escalation`.slice(-2000) });
+        const closed = await closeOutSpecForFold(job.workspace_id, slug);
+        if (!closed.ok) {
+          await emitDepthCapEscalation(`Tried author_followup_spec/split on bounce-back; parent close-out failed (${closed.error})`);
+          await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → split parent close-out failed → depth-cap escalation`.slice(-2000) });
           return;
         }
         await recordDirectorActivity(db, { workspaceId: job.workspace_id, directorFunction: "platform", actionKind: "groomed_split", specSlug: slug, reason: reasoning, metadata: { groom_key: lib.groomKey(slug), split_slugs: authoredSplits, followup_slug: auth.authoredSlug, bounce_job_id: job.id, autonomous: true } });
@@ -4465,6 +4452,24 @@ async function markNewSpecInReview(
   }
 }
 
+// Close out a parent spec so it folds — the DB-driven fold trigger (post spec-pm-markdown-purge replaces
+// the old "rewrite the parent .md with every phase ✅" commit). Flips the parent's remaining phases to
+// shipped on the canonical `spec_phases` table (the DB trigger rolls `specs.status` → shipped) + enqueues
+// the fold via the same RPC `applyDirectorFoldNow` uses. The board-grooming SPLIT lanes call this AFTER
+// authoring the future-phase split cards.
+async function closeOutSpecForFold(workspaceId: string, slug: string): Promise<{ ok: boolean; error?: string; flipped: number[] }> {
+  let flipped: number[] = [];
+  try {
+    const { markRemainingPhasesShipped } = await import("../src/lib/specs-table");
+    flipped = await markRemainingPhasesShipped(workspaceId, slug);
+  } catch (e) {
+    return { ok: false, error: `markRemainingPhasesShipped failed: ${e instanceof Error ? e.message : String(e)}`, flipped };
+  }
+  const { error } = await db.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: slug, p_user: null });
+  if (error) return { ok: false, error: `enqueue_fold failed: ${error.message}`, flipped };
+  return { ok: true, flipped };
+}
+
 // Re-plan hygiene: record declined proposals as ❌ in the goal doc so re-plan never re-proposes them.
 // Best-effort append under a "## Declined branches" section (created if absent).
 async function recordDeclined(goalSlug: string, declined: ProposedSpec[]) {
@@ -4703,7 +4708,9 @@ async function runPlanJob(job: Job) {
       return;
     }
 
-    // Commit authored docs straight to main (specs/ + the goal doc only) so queued builds find them.
+    // spec-pm-markdown-purge: the planner sub-agent writes the authored specs into the worktree; the worker
+    // reads each and authors it to the DB ONLY (public.specs + public.spec_phases) — NO spec .md is committed
+    // to main. The goal doc is NOT a spec, so it still commits to main here (goal readers are a separate concern).
     const changed = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()
       .split("\n").map((l) => l.trim().split(/\s+/).pop() || "").filter(Boolean);
     const docFiles = changed.filter((f) => f.startsWith("docs/brain/specs/") || f === `docs/brain/goals/${goalSlug}.md`);
@@ -4711,19 +4718,20 @@ async function runPlanJob(job: Job) {
     for (const f of docFiles) {
       try {
         const content = readFileSync(join(wt, f), "utf8");
-        const r = await putFileMain(f, content, `plan: ${goalSlug} → ${f.replace("docs/brain/", "")}`);
-        if (r.ok) {
-          committed++;
+        if (f.startsWith("docs/brain/specs/")) {
           // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with the author's
           // intended_status=planned (the planner only proposes specs it wants built; the deferred call
-          // is Ada's, downstream of Vale).
-          if (f.startsWith("docs/brain/specs/")) {
-            const slug = f.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
-            await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`, content);
-          }
-        } else console.error(`${tag} commit failed for ${f}: ${r.status}`);
+          // is Ada's, downstream of Vale). DB-only — no .md commit.
+          const slug = f.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
+          await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`, content);
+          committed++;
+        } else {
+          const r = await putFileMain(f, content, `plan: ${goalSlug} → ${f.replace("docs/brain/", "")}`);
+          if (r.ok) committed++;
+          else console.error(`${tag} commit failed for ${f}: ${r.status}`);
+        }
       } catch (e) {
-        console.error(`${tag} read/commit ${f}: ${e instanceof Error ? e.message : e}`);
+        console.error(`${tag} author/commit ${f}: ${e instanceof Error ? e.message : e}`);
       }
     }
 
@@ -5536,13 +5544,16 @@ async function runSpecChatJob(job: Job) {
         return;
       }
       const content = readFileSync(join(wt, target), "utf8");
-      const put = await putFileMain(target, content, `verification-guides: generate test plan for ${slug} (box spec-chat)`);
-      if (!put.ok) {
-        await failTurn(`commit failed (${put.status})`, logTail);
+      // spec-pm-markdown-purge: re-author the DB row from the worktree body (adds ## Verification) — no .md.
+      try {
+        const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
+        await authorSpecRowFromMarkdown(job.workspace_id, slug, content, "planned", { intendedStatusSetBy: "spec-chat" });
+      } catch (e) {
+        await failTurn(`DB re-author failed: ${e instanceof Error ? e.message : String(e)}`, logTail);
         return;
       }
-      await update(job.id, { status: "completed", log_tail: `committed ## Verification to specs/${slug}.md` });
-      console.log(`${tag} ✓ verification committed`);
+      await update(job.id, { status: "completed", log_tail: `authored ## Verification to public.specs for ${slug}` });
+      console.log(`${tag} ✓ verification authored to DB`);
       return;
     }
 
@@ -5558,16 +5569,20 @@ async function runSpecChatJob(job: Job) {
     }
     const slug = written.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
     const content = readFileSync(join(wt, written), "utf8");
-    const put = await putFileMain(written, content, `spec: ${refineSlug ? "refine" : "create"} ${slug} (box spec-chat)`);
-    if (!put.ok) {
-      await failTurn(`commit failed (${put.status})`, logTail);
-      return;
-    }
     // spec-review-agent Phase 3 — a freshly-created spec from spec-chat (Sage) lands `in_review` with
     // intended_status=planned. A `refine` (a spec that already has a card row) leaves the existing flags
-    // intact — we don't re-park an in-progress/shipped spec back into review.
-    if (!refineSlug) {
-      await markNewSpecInReview(job.workspace_id, slug, "planned", "spec-chat", `authored via box spec-chat`, content);
+    // intact — we don't re-park an in-progress/shipped spec back into review, but we DO re-author its DB body.
+    // spec-pm-markdown-purge: the spec lands ONLY in public.specs + public.spec_phases — no .md commit.
+    try {
+      if (!refineSlug) {
+        await markNewSpecInReview(job.workspace_id, slug, "planned", "spec-chat", `authored via box spec-chat`, content);
+      } else {
+        const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
+        await authorSpecRowFromMarkdown(job.workspace_id, slug, content, "planned", { intendedStatusSetBy: "spec-chat" });
+      }
+    } catch (e) {
+      await failTurn(`DB author failed: ${e instanceof Error ? e.message : String(e)}`, logTail);
+      return;
     }
     // Flip the thread finalized + link the slug, store the session, clear thinking.
     await db.from("roadmap_chats").update({
@@ -5592,7 +5607,7 @@ async function runSpecChatJob(job: Job) {
       queued = !error;
     }
     await update(job.id, { status: "completed", log_tail: `finalized ${slug}${queued ? " + queued build" : ""}` });
-    console.log(`${tag} ✓ finalized → specs/${slug}.md${queued ? " (build queued)" : ""}`);
+    console.log(`${tag} ✓ finalized → public.specs/${slug}${queued ? " (build queued)" : ""}`);
   } finally {
     sh("git", ["worktree", "remove", "--force", wt]);
   }
@@ -6609,10 +6624,11 @@ async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: stri
   if (!rawSlug || !title) return "code-gap: no valid fix spec proposed (left diagnosis only)";
   const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
   if (!slug) return "code-gap: spec slug empty after sanitize";
-  const path = `docs/brain/specs/${slug}.md`;
   try {
-    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-    if (existing.ok) return `gap spec already tracked: ${path} (commission on Roadmap)`;
+    // spec-pm-markdown-purge: the gap-fix spec lives ONLY in public.specs. Find-or-skip on the DB row.
+    const { getSpec } = await import("../src/lib/brain-roadmap");
+    const existing = await getSpec(slug, workspaceId);
+    if (existing) return `gap spec already tracked: ${slug} (commission on Roadmap)`;
     const spec: GapSpec = {
       slug,
       title,
@@ -6621,18 +6637,14 @@ async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: stri
       target: typeof s.target === "string" ? s.target : undefined,
     };
     const markdown = migrationGapSpecMarkdown(spec, auditId, subId);
-    const put = await putFileMain(
-      path,
-      markdown,
-      `spec: ${slug} (from failed migration ${auditId} via migration-fix code-gap escalation)`,
-    );
-    if (put.ok) {
+    try {
       await markNewSpecInReview(workspaceId, slug, "planned", "migration-fix", `code-gap fix spec authored (audit ${auditId})`, markdown);
-      return `gap spec authored: ${path} (owner=retention) — commission on Roadmap`;
+    } catch (e) {
+      return `gap spec DB author failed: ${e instanceof Error ? e.message : String(e)}`;
     }
-    return `gap spec commit failed (${put.status})`;
+    return `gap spec authored: ${slug} (owner=retention) — commission on Roadmap`;
   } catch (e) {
-    return `gap spec commit failed: ${e instanceof Error ? e.message : String(e)}`;
+    return `gap spec author failed: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -6941,12 +6953,14 @@ async function runDeveloperMessageJob(job: Job) {
         try {
           if (a.type === "spec" && a.spec) {
             const slug = a.spec.slug;
-            const filePath = `docs/brain/specs/${slug}.md`;
             const content = String(a.spec.intent || ""); // the full markdown body parked on the proposal
             if (!content) { a.status = "failed"; a.result = "no spec content"; notes.push(`${a.summary} → failed (no content)`); continue; }
-            const put = await putFileMain(filePath, content, `spec: create ${slug} (developer message center)`);
-            if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
-            await markNewSpecInReview(job.workspace_id, slug, "planned", "developer-message-center", `authored via developer message center`, content);
+            // spec-pm-markdown-purge: author ONLY the DB row (public.specs + public.spec_phases) — no .md file.
+            try {
+              await markNewSpecInReview(job.workspace_id, slug, "planned", "developer-message-center", `authored via developer message center`, content);
+            } catch (e) {
+              a.status = "failed"; a.result = `DB author failed: ${e instanceof Error ? e.message : String(e)}`; notes.push(`${a.summary} → DB author failed`); continue;
+            }
             let queued = false;
             const wantBuild = !!(a.payload && (a.payload as { queueBuild?: boolean }).queueBuild);
             if (wantBuild) {
@@ -6961,8 +6975,8 @@ async function runDeveloperMessageJob(job: Job) {
               queued = !error;
             }
             a.status = "done";
-            a.result = `committed specs/${slug}.md${queued ? " + queued build" : ""}`;
-            notes.push(`Spec ${slug} → committed${queued ? " + build queued" : ""}`);
+            a.result = `authored ${slug} to public.specs${queued ? " + queued build" : ""}`;
+            notes.push(`Spec ${slug} → authored${queued ? " + build queued" : ""}`);
           } else if (a.cmd) {
             // db_mutation (type 'run_prod_script'): the worker runs the captured self-contained command
             // in the fresh worktree, holding prod creds. The model is NOT in the loop here.
@@ -7785,18 +7799,21 @@ async function runDirectorCoachJob(job: Job) {
             a.result = "coaching applied — injected into her future decisions";
             notes.push(`Coached: ${a.summary}`);
           } else if (a.type === "spec" && a.slug && a.content) {
+            // spec-pm-markdown-purge: author ONLY the DB row (public.specs + public.spec_phases) — no .md file.
             const slug = String(a.slug);
-            const put = await putFileMain(`docs/brain/specs/${slug}.md`, String(a.content), `spec: create ${slug} (director coaching)`);
-            if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
-            await markNewSpecInReview(job.workspace_id, slug, "planned", "director-coach", `authored via director coaching (${thread.director_function})`, String(a.content));
+            try {
+              await markNewSpecInReview(job.workspace_id, slug, "planned", "director-coach", `authored via director coaching (${thread.director_function})`, String(a.content));
+            } catch (e) {
+              a.status = "failed"; a.result = `DB author failed: ${e instanceof Error ? e.message : String(e)}`; notes.push(`${a.summary} → DB author failed`); continue;
+            }
             let queued = false;
             if (a.queueBuild === true) {
               const { error } = await db.from("agent_jobs").insert({ workspace_id: job.workspace_id, spec_slug: slug, kind: "build", status: "queued", instructions: "Created via director coaching", created_by: job.created_by });
               queued = !error;
             }
             a.status = "done";
-            a.result = `committed specs/${slug}.md${queued ? " + queued build" : ""}`;
-            notes.push(`Spec ${slug} → committed${queued ? " + build queued" : ""}`);
+            a.result = `authored ${slug} to public.specs${queued ? " + queued build" : ""}`;
+            notes.push(`Spec ${slug} → authored${queued ? " + build queued" : ""}`);
           } else if (a.type === "goal" && a.slug && a.title && a.outcome) {
             // Route through the sanctioned Phase-1 lifecycle (director-proposed-goals): proposeGoal renders the
             // proposed artifact + enqueues a proposed-goal job → the worker commits it + parks needs_approval →
@@ -8424,21 +8441,23 @@ async function hasActiveBuildForSlug(slug: string): Promise<{ active: boolean; r
   return { active: false };
 }
 
-// Fetch + parse a repair-authored spec from main: its Repair-root-cause key, the signatures it
-// already carries, plus the raw body + blob sha (so a grouping append can edit it in place).
-async function fetchRepairSpec(slug: string): Promise<{ body: string; sha: string; rootCause: string | null; signatures: string[] } | null> {
+// Fetch + parse a repair-authored spec from the DB (spec-pm-markdown-purge: the spec body lives in
+// public.specs + public.spec_phases, serialized back to markdown by getSpec): its Repair-root-cause key,
+// the signatures it already carries, plus the raw body (so a grouping append can re-author it).
+async function fetchRepairSpec(slug: string, workspaceId: string): Promise<{ body: string; rootCause: string | null; signatures: string[] } | null> {
   const { parseRepairSpecMeta } = await import("../src/lib/repair-agent");
-  const get = await gh("GET", `/repos/${REPO}/contents/docs/brain/specs/${slug}.md?ref=main`);
-  if (!get.ok) return null;
-  const j = get.json as { content?: string; sha?: string };
-  const body = Buffer.from(String(j.content || "").replace(/\s/g, ""), "base64").toString("utf8");
+  const { getSpec } = await import("../src/lib/brain-roadmap");
+  const got = await getSpec(slug, workspaceId);
+  if (!got) return null;
+  const body = got.raw;
   const meta = parseRepairSpecMeta(body);
-  return { body, sha: String(j.sha || ""), rootCause: meta.rootCause, signatures: meta.signatures };
+  return { body, rootCause: meta.rootCause, signatures: meta.signatures };
 }
 
 // Append a `Repair-signature:` line to an existing repair spec (root-cause grouping: one spec carries
-// N sibling signatures). No-op if it already carries this signature. Returns true on write.
-async function appendSignatureToSpec(slug: string, body: string, sha: string, signature: string): Promise<boolean> {
+// N sibling signatures) and re-author the DB row from the updated body. No-op if it already carries this
+// signature. Returns true on (no-op or) write. spec-pm-markdown-purge: no .md file is written.
+async function appendSignatureToSpec(slug: string, body: string, signature: string, workspaceId: string): Promise<boolean> {
   if (body.includes(`**Repair-signature:** \`${signature}\``)) return true; // already carried
   const line = `**Repair-signature:** \`${signature}\``;
   let next: string;
@@ -8452,13 +8471,14 @@ async function appendSignatureToSpec(slug: string, body: string, sha: string, si
   } else {
     next = `${body.trimEnd()}\n\n${line}\n`;
   }
-  const put = await gh("PUT", `/repos/${REPO}/contents/docs/brain/specs/${slug}.md`, {
-    message: `spec: ${slug} — group sibling Control Tower signature ${signature} (repair-agent dedup)`,
-    content: Buffer.from(next, "utf8").toString("base64"),
-    sha,
-    branch: "main",
-  });
-  return put.ok;
+  try {
+    const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
+    await authorSpecRowFromMarkdown(workspaceId, slug, next, "planned", { intendedStatusSetBy: "repair-agent" });
+    return true;
+  } catch (e) {
+    console.warn(`[repair] append-signature DB re-author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
 }
 
 // Author OR GROUP the fix spec on main (repair-agent-dedup Phase 1).
@@ -8477,7 +8497,6 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
   const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
   if (!slug) return null;
   const rootCause = rootCauseKey(typeof s.target === "string" ? s.target : "", verdict);
-  const path = `docs/brain/specs/${slug}.md`;
   try {
     // 1) Root-cause grouping: a sibling spec authored this cycle for the same cause → add this
     //    signature to IT (skip authoring a near-duplicate). Skip if rootCause is unknown (`?::…`).
@@ -8485,19 +8504,19 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
       const ledger = await repairLedger(REPAIR_RECENT_FIX_WINDOW_MS);
       const sibling = ledger.find((e) => e.rootCause === rootCause && e.authoredSlug && e.authoredSlug !== slug && e.signature !== signature);
       if (sibling?.authoredSlug) {
-        const spec = await fetchRepairSpec(sibling.authoredSlug);
+        const spec = await fetchRepairSpec(sibling.authoredSlug, workspaceId);
         if (spec) {
-          await appendSignatureToSpec(sibling.authoredSlug, spec.body, spec.sha, signature);
+          await appendSignatureToSpec(sibling.authoredSlug, spec.body, signature, workspaceId);
           return { slug: sibling.authoredSlug, alreadyExists: true, grouped: true, rootCause };
         }
       }
     }
 
     // 2) Same-slug convergence / author-new.
-    const existing = await fetchRepairSpec(slug);
+    const existing = await fetchRepairSpec(slug, workspaceId);
     if (existing) {
       // The slug already exists — ensure it carries THIS signature (a recurring failure converges).
-      await appendSignatureToSpec(slug, existing.body, existing.sha, signature);
+      await appendSignatureToSpec(slug, existing.body, signature, workspaceId);
       return { slug, alreadyExists: true, grouped: false, rootCause };
     }
     const markdown = repairSpecMarkdown(
@@ -8514,16 +8533,16 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
       verdict,
       rootCause,
     );
-    const put = await putFileMain(
-      path,
-      markdown,
-      `spec: ${slug} (from Control Tower signature ${signature} via repair-agent ${verdict})`,
-    );
-    if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "repair-agent", `repair-agent ${verdict} fix spec for signature ${signature}`, markdown);
+    // spec-pm-markdown-purge: author ONLY the DB row (public.specs + public.spec_phases) — no .md file.
+    try {
+      await markNewSpecInReview(workspaceId, slug, "planned", "repair-agent", `repair-agent ${verdict} fix spec for signature ${signature}`, markdown);
+    } catch (e) {
+      console.warn(`[repair] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
     return { slug, alreadyExists: false, grouped: false, rootCause };
   } catch (e) {
-    console.warn(`[repair] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[repair] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
@@ -8907,21 +8926,21 @@ async function authorRegressionFixSpec(raw: unknown, regressedSlug: string, sign
   if (!rawSlug || !title) return null;
   const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
   if (!slug) return null;
-  const path = `docs/brain/specs/${slug}.md`;
   try {
-    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-    if (existing.ok) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
+    // spec-pm-markdown-purge: existence + same-slug convergence checks the DB row; author ONLY the DB.
+    const { getSpec } = await import("../src/lib/brain-roadmap");
+    const existing = await getSpec(slug, workspaceId);
+    if (existing) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
     const markdown = regressionFixSpecMarkdown({ ...s, slug, title }, regressedSlug, signature);
-    const put = await putFileMain(
-      path,
-      markdown,
-      `spec: ${slug} — fix regression of ${regressedSlug} (regression-agent, signature ${signature})`,
-    );
-    if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "regression-agent", `regression-agent fix spec for ${regressedSlug} (signature ${signature})`, markdown);
+    try {
+      await markNewSpecInReview(workspaceId, slug, "planned", "regression-agent", `regression-agent fix spec for ${regressedSlug} (signature ${signature})`, markdown);
+    } catch (e) {
+      console.warn(`[regression] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
     return { slug, alreadyExists: false };
   } catch (e) {
-    console.warn(`[regression] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[regression] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
@@ -9302,17 +9321,21 @@ async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha:
   if (!rawSlug || !title) return null;
   const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
   if (!slug) return null;
-  const path = `docs/brain/specs/${slug}.md`;
   try {
-    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-    if (existing.ok) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
+    // spec-pm-markdown-purge: existence + same-slug convergence checks the DB row; author ONLY the DB.
+    const { getSpec } = await import("../src/lib/brain-roadmap");
+    const existing = await getSpec(slug, workspaceId);
+    if (existing) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
     const markdown = securityFixSpecMarkdown({ ...s, slug, title }, mergedSlug, mergeSha);
-    const put = await putFileMain(path, markdown, `spec: ${slug} — security fix for merged ${mergedSlug} (security-agent, commit ${mergeSha.slice(0, 12)})`);
-    if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent fix for merged ${mergedSlug}`, markdown);
+    try {
+      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent fix for merged ${mergedSlug}`, markdown);
+    } catch (e) {
+      console.warn(`[security] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
     return { slug, alreadyExists: false };
   } catch (e) {
-    console.warn(`[security] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[security] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
@@ -9399,19 +9422,33 @@ function depUpgradeSpecMarkdown(findings: DepFinding[], signature: string): stri
 async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
   const { SECURITY_DEP_UPGRADE_SLUG } = await import("../src/lib/security-agent");
   const slug = SECURITY_DEP_UPGRADE_SLUG;
-  const path = `docs/brain/specs/${slug}.md`;
   try {
-    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
+    // spec-pm-markdown-purge: the dep-upgrade spec lives ONLY in the DB. Find-or-update on the spec row.
+    const { getSpec } = await import("../src/lib/brain-roadmap");
+    const existing = await getSpec(slug, workspaceId);
     const markdown = depUpgradeSpecMarkdown(findings, signature);
-    const put = await putFileMain(path, markdown, `spec: ${slug} — ${findings.length} security dep upgrade(s) (security-agent dep-watch, sig ${signature})`);
-    if (!put.ok) return null;
-    // Refresh-only writes don't change the card state — only flag in_review on FIRST creation.
-    if (!existing.ok) {
-      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent dep-watch (sig ${signature})`, markdown);
+    if (existing) {
+      // Refresh-only: re-author the body so the advisory list stays current (no status/card-state change —
+      // authorSpecRowFromMarkdown preserves the live status when no `status` opt is passed).
+      try {
+        const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
+        await authorSpecRowFromMarkdown(workspaceId, slug, markdown, "planned", { intendedStatusSetBy: "security-agent" });
+      } catch (e) {
+        console.warn(`[security] dep-upgrade spec DB refresh failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      }
+    } else {
+      // First creation — flag in_review + author the row.
+      try {
+        await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent dep-watch (sig ${signature})`, markdown);
+      } catch (e) {
+        console.warn(`[security] dep-upgrade spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      }
     }
-    return { slug, alreadyExists: existing.ok };
+    return { slug, alreadyExists: !!existing };
   } catch (e) {
-    console.warn(`[security] dep-upgrade spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[security] dep-upgrade spec author failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
@@ -9717,7 +9754,6 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite, 
   if (!rawSlug || !title) return null;
   const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
   if (!slug) return null;
-  const path = `docs/brain/specs/${slug}.md`;
   const md = [
     `# ${title}`,
     ``,
@@ -9739,14 +9775,19 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite, 
     ``,
   ].join("\n");
   try {
-    const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-    if (existing.ok) return { slug, note: `spec already tracked: ${path} (commission on Roadmap)` };
-    const put = await putFileMain(path, md, `spec: ${slug} (from storefront-optimizer build-or-request)`);
-    if (!put.ok) return null;
-    await markNewSpecInReview(workspaceId, slug, "planned", "storefront-optimizer", `storefront-optimizer build-or-request for surface ${surface.product_id}:${surface.lander_type}:${surface.audience}`, md);
-    return { slug, note: `spec authored: ${path} (owner=growth) — commission on Roadmap` };
+    // spec-pm-markdown-purge: the spec lives ONLY in public.specs. Find-or-skip on the DB row.
+    const { getSpec } = await import("../src/lib/brain-roadmap");
+    const existing = await getSpec(slug, workspaceId);
+    if (existing) return { slug, note: `spec already tracked: ${slug} (commission on Roadmap)` };
+    try {
+      await markNewSpecInReview(workspaceId, slug, "planned", "storefront-optimizer", `storefront-optimizer build-or-request for surface ${surface.product_id}:${surface.lander_type}:${surface.audience}`, md);
+    } catch (e) {
+      console.warn(`[storefront-optimizer] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+    return { slug, note: `spec authored: ${slug} (owner=growth) — commission on Roadmap` };
   } catch (e) {
-    console.warn(`[storefront-optimizer] spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[storefront-optimizer] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
