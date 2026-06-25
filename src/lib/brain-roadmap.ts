@@ -1148,12 +1148,63 @@ export async function getFunction(slug: string, workspaceId?: string): Promise<{
   return { raw, card, group: functions.find((f) => f.fn === slug) ?? null };
 }
 
+/**
+ * goal-greenlight-button-and-author-writes-db Phase 3 — overlay the DB row's `status` onto the
+ * parsed-markdown GoalCard, so every reader (the goals board, /api/roadmap/plan, escortApprovedGoals,
+ * agents hub) decides off `public.goals.status` instead of the `**Status:**` markdown line. Until the
+ * Phase 4 mirror-md commit lands, the row IS the truth: a Greenlight click flips the row in <100ms
+ * and every surface sees it, no commit / deploy required.
+ *
+ * Transitional safety: a missing `goals` table (the [[goals-milestones-tables-and-backfill]]
+ * migration hasn't applied yet) or an empty backfill is swallowed — the markdown's parsed `status`
+ * stays. Folded rows are filtered (a declined goal is gone from the active board, mirroring the
+ * pre-cutover "Decline → delete .md" behavior).
+ */
+async function loadGoalStatusOverlay(workspaceId?: string): Promise<Map<string, GoalStatus | "folded">> {
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return new Map();
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from("goals")
+      .select("slug, status")
+      .eq("workspace_id", wsId);
+    if (error || !data) return new Map();
+    const out = new Map<string, GoalStatus | "folded">();
+    for (const r of data as { slug: string; status: GoalStatus | "folded" }[]) {
+      out.set(r.slug, r.status);
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
+/** Translate a goals-row status to GoalCard.status, or null when the row is folded (caller filters). */
+function dbGoalStatusToCardStatus(s: GoalStatus | "folded" | undefined): GoalStatus | null {
+  if (!s) return null;
+  if (s === "folded") return null;
+  return s;
+}
+
 export async function getGoals(workspaceId?: string): Promise<GoalCard[]> {
-  const [{ specs }, slugs] = await Promise.all([getRoadmap(workspaceId), listGoalSlugs()]);
+  const [{ specs }, slugs, statusOverlay] = await Promise.all([
+    getRoadmap(workspaceId),
+    listGoalSlugs(),
+    loadGoalStatusOverlay(workspaceId),
+  ]);
   const cards = await Promise.all(
     slugs.map(async (s) => parseGoal(s, await fs.readFile(path.join(GOALS_DIR, `${s}.md`), "utf8"), specs)),
   );
-  return cards.sort((a, b) => a.title.localeCompare(b.title));
+  const overlaid: GoalCard[] = [];
+  for (const card of cards) {
+    const row = statusOverlay.get(card.slug);
+    if (row === "folded") continue; // folded row = declined/archived; off the active board
+    const dbStatus = dbGoalStatusToCardStatus(row);
+    overlaid.push(dbStatus ? { ...card, status: dbStatus } : card);
+  }
+  return overlaid.sort((a, b) => a.title.localeCompare(b.title));
 }
 
 /** One goal: card (with rollup), raw markdown, and the resolved SpecCard for each linked milestone spec. */
@@ -1165,8 +1216,15 @@ export async function getGoal(slug: string, workspaceId?: string): Promise<{ raw
   } catch {
     return null;
   }
-  const { specs } = await getRoadmap(workspaceId);
-  const card = parseGoal(slug, raw, specs);
+  const [{ specs }, statusOverlay] = await Promise.all([
+    getRoadmap(workspaceId),
+    loadGoalStatusOverlay(workspaceId),
+  ]);
+  let card = parseGoal(slug, raw, specs);
+  const row = statusOverlay.get(slug);
+  if (row === "folded") return null;
+  const dbStatus = dbGoalStatusToCardStatus(row);
+  if (dbStatus) card = { ...card, status: dbStatus };
   const bySlug: Record<string, SpecCard> = {};
   for (const s of specs) bySlug[s.slug] = s;
   return { raw, card, specs: bySlug };
