@@ -6,6 +6,8 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { routedInboxHref } from "@/lib/agents/inbox";
 import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar } from "@/components/agents/persona-chip";
+import { SessionChecklist } from "@/components/agents/session-checklist";
+import type { SessionChecklistItem } from "@/lib/agent-jobs";
 
 // Live build-box view (build-box-status-view): box health + SHA, lane grid (what each lane is building
 // right now), queue depth, and a paused callout. Polls /api/roadmap/box every ~5s — phone-friendly,
@@ -22,6 +24,12 @@ interface LaneRow {
   phase?: string | null; // "Phase N" for a chained/per-phase build, else null (box-lane-show-phase)
   intent?: string | null; // director-coach lanes only: "ask" | "coach" (the CEO's button) — for the label
   account?: string | null; // which Round Robin Max account this lane is running on (box-lane-show-account)
+  // box-session-transparency Phase 2: the lane's live TodoWrite mirror — what its `claude -p` session is
+  // doing right now. session_note = the compact one-line verb shown on the lane card; session_checklist =
+  // the full plan, expand to see. Written by the shared `runBoxSession` runner, enriched into the lane by
+  // /api/roadmap/box. Null on a session that hasn't yet emitted a TodoWrite (or a pre-Phase-1 row).
+  session_note?: string | null;
+  session_checklist?: SessionChecklistItem[] | null;
 }
 interface AccountSlot {
   label: string;
@@ -207,6 +215,10 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
           </span>
         </Link>
       )}
+      {/* box-session-transparency Phase 2 — the lane's live TodoWrite mirror: a one-line current-step
+          verb + expand for the full checklist. Renders nothing until the runner streams its first
+          TodoWrite onto the row, so a freshly-claimed lane still reads cleanly. */}
+      <SessionChecklist note={lane.session_note} checklist={lane.session_checklist} density="lane" />
     </div>
   );
 }

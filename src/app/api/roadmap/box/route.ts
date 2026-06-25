@@ -14,6 +14,7 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap } from "@/lib/brain-roadmap";
+import type { SessionChecklistItem } from "@/lib/agent-jobs";
 
 
 interface LaneRow {
@@ -27,6 +28,11 @@ interface LaneRow {
   // For a director-coach lane only: the turn's intent (ask|coach), enriched from the job instructions
   // below so the box shows "Asking Ada" vs "Coaching Ada" by which button the CEO pushed.
   intent?: string | null;
+  // box-session-transparency Phase 2 — the lane's live TodoWrite mirror, enriched from the agent_jobs
+  // row below so a lane card can show what its session is doing RIGHT NOW (compact: the one-line note;
+  // expand: the full checklist). Phase 1's runner writes both onto the row; Phase 2 surfaces them here.
+  session_note?: string | null;
+  session_checklist?: SessionChecklistItem[] | null;
 }
 
 // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). Written by the worker's
@@ -126,6 +132,31 @@ export async function GET() {
         }
       }
       worker.lanes = worker.lanes.map((l) => (l.kind === "director-coach" && intentById.has(l.job_id) ? { ...l, intent: intentById.get(l.job_id) ?? null } : l));
+    }
+  }
+
+  // box-session-transparency Phase 2 — enrich every lane with the active session's live TodoWrite mirror
+  // (session_checklist + session_note) the runner streams onto its agent_jobs row, so each lane card can
+  // un-black-box what the session is doing right now. Same enrichment shape as the director-coach intent
+  // above. Best-effort: a missing row / NULL columns just leave the lane unenriched.
+  if (worker?.lanes?.length) {
+    const ids = worker.lanes.map((l) => l.job_id).filter(Boolean);
+    if (ids.length) {
+      const { data: cl } = await admin
+        .from("agent_jobs")
+        .select("id, session_checklist, session_note")
+        .in("id", ids);
+      const checklistById = new Map<string, SessionChecklistItem[] | null>();
+      const noteById = new Map<string, string | null>();
+      for (const j of (cl || []) as Array<{ id: string; session_checklist: SessionChecklistItem[] | null; session_note: string | null }>) {
+        checklistById.set(j.id, j.session_checklist ?? null);
+        noteById.set(j.id, j.session_note ?? null);
+      }
+      worker.lanes = worker.lanes.map((l) =>
+        checklistById.has(l.job_id) || noteById.has(l.job_id)
+          ? { ...l, session_checklist: checklistById.get(l.job_id) ?? null, session_note: noteById.get(l.job_id) ?? null }
+          : l,
+      );
     }
   }
 
