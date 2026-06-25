@@ -12,7 +12,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 |---|---|---|
 | `id` | `text` | PK · default `'box'` — one row per box |
 | `running_sha` | `text?` | short SHA (`git rev-parse --short HEAD`) the worker process is running, captured at boot |
-| `status` | `text` | `healthy` (default) ｜ `updating` (mid self-update, about to exit→restart) ｜ `needs_attention` (crash-loop guard tripped) |
+| `status` | `text` | `healthy` (default) ｜ `draining` (queued restart: far behind + busy → claiming paused, finishing in-flight lanes before the idle self-update) ｜ `updating` (mid self-update, about to exit→restart) ｜ `needs_attention` (crash-loop guard tripped) |
 | `active_builds` | `int` | lanes busy at the last tick (`active.size`) · `0` = idle |
 | `detail` | `text?` | last note: `self-update <from>→<to>`, crash-loop reason, … |
 | `build_lanes` | `int?` | total build/plan lanes (`MAX_CONCURRENT`) — the pool ceiling ([[../specs/build-box-status-view]]) |
@@ -34,7 +34,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 
 - **Health = recency, not just `status`.** A worker that died can't flip its own row to unhealthy, so the dashboard treats a `last_poll_at` older than ~90s (vs the ~5s `POLL_MS`) as down regardless of the stored `status`.
 - **Not workspace-scoped.** Unlike [[agent_jobs]], the box is global infra; the select policy is "any authenticated user" (`auth.uid() is not null`), not workspace membership.
-- **Self-update never runs mid-build.** The worker only checks `origin/main` when `active_builds === 0`; an in-flight lane keeps the old code until the lane clears (see [[../specs/worker-self-update]] § Safety).
+- **Self-update never runs mid-build — and a stale-but-busy box QUEUES a restart instead of force-killing.** The worker only resets/exits when `active_builds === 0`; an in-flight lane keeps the old code until it clears. When the box is far behind (`≥ FORCE_STALE_COMMITS`) AND busy, it no longer abandons in-flight builds — it sets the `worker_controls.drain_for_update` flag (`status='draining'`), stops claiming new work (incoming jobs queue), drains to idle, then self-updates on the fresh SHA. Same drain the "Queue restart" button triggers manually. NEVER kills a live session (see [[../specs/worker-self-update]] § Safety).
 
 ## Migration
 
