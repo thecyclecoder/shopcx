@@ -50,6 +50,33 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   const billingAttemptId = ordersRes.orders[0].id;
   const result = await appstleAttemptBilling(auth.workspaceId, billingAttemptId);
   if (!result.success) {
+    // Concurrent-billing race: Appstle is ALREADY charging this contract (its
+    // own scheduler beat us to it), so the customer's "Order now" intent is
+    // satisfied — the order will land. Treat as success, log the collision so
+    // analytics still see it, and skip the 502 path so the portal route doesn't
+    // spawn a portal-action-failed ticket for a benign race.
+    // See [[portal-order-now-billing-collision]] / Control Tower signature
+    // vercel:7b36a7f314c061ed.
+    if (/billing operation is already in progress/i.test(result.error || "")) {
+      const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+      if (customer) {
+        await logPortalAction({
+          workspaceId: auth.workspaceId, customerId: customer.id,
+          eventType: "portal.order_now",
+          summary: "Customer triggered immediate billing via portal (collided with in-flight Appstle charge — order already being processed)",
+          properties: { shopify_contract_id: String(contractId), billingAttemptId, collision: true },
+          createNote: true,
+        });
+      }
+      return jsonOk({
+        ok: true,
+        route,
+        contractId,
+        alreadyBilling: true,
+        message: "Your renewal is already being processed.",
+        patch: {},
+      });
+    }
     return handleAppstleError(new Error(result.error || "Billing failed"));
   }
 
