@@ -1,6 +1,6 @@
 # Error feed: drop the bare Inngest middleware step-error log from the Vercel feed
 
-**Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] (sibling of [[../specs/error-feed-drop-inngest-step-retry-throws]]) · **Verdict:** monitor-false-positive
+**Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]] (sibling of [[../archive.d/error-feed-drop-inngest-step-retry-throws]]) · **Verdict:** monitor-false-positive
 **Repair-root-cause:** `src/lib/control-tower/error-feed.ts (add isbareinngeststeperrormiddlewarelog helper + matching test in error-feed.test.ts) and src/app/api/webhooks/vercel-logs/route.ts (call it in iserror alongside isbarelifecycle / isabortedstreamnoise)::monitor-false-positive`
 **Repair-signature:** `vercel:b1daa612f563f5e9`
 
