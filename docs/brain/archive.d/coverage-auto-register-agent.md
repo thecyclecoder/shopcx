@@ -1,0 +1,1 @@
+- **Coverage auto-register agent — close Control Tower coverage gaps automatically** · verified 2026-06-25 · → [[../libraries/coverage-register-agent]]
