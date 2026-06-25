@@ -10,6 +10,7 @@
  * but are never rendered here.
  */
 import { notFound } from "next/navigation";
+import { cacheLife } from "next/cache";
 import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { renderPolicyMarkdown } from "../_lib/markdown";
@@ -62,6 +63,8 @@ async function loadPolicy(slug: string) {
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  "use cache";
+  cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
   const { slug } = await params;
   const policy = await loadPolicy(slug);
   if (!policy) return { title: "Policy not found" };
@@ -73,6 +76,8 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 }
 
 export default async function PolicyPage({ params }: PageProps) {
+  "use cache";
+  cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
   const { slug } = await params;
   if (!VALID_SLUGS.includes(slug as PolicySlug)) return notFound();
 
