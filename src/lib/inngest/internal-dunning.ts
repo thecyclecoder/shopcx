@@ -207,6 +207,15 @@ export async function closeInternalDunningOnSuccess(workspaceId: string, subscri
     .maybeSingle();
   if (!cycle) return;
   await updateDunningCycle(cycle.id as string, { status: "recovered", recovered_at: new Date().toISOString() });
+  // Clear the stale 'failed' flag on the subscription row too. Internal subs
+  // never fire the Appstle billing-success webhook that normally does this,
+  // so without it the portal change-date / change-frequency guards stay
+  // locked forever (escalated ticket efe0d2ad — Annmarie). Defence-in-depth
+  // with the renewal-success write so any path that closes the cycle clears
+  // the flag.
+  await admin.from("subscriptions")
+    .update({ last_payment_status: "succeeded", updated_at: new Date().toISOString() })
+    .eq("id", subscriptionId);
   await tagOpenTickets(workspaceId, customerId, "dunning:recovered");
   await logCustomerEvent({
     workspaceId, customerId, eventType: "payment.recovered", source: "internal_dunning",
