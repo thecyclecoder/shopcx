@@ -60,6 +60,13 @@ export interface SpecRow {
   status: SpecStatus;
   intended_status_set_by: string | null;
   repair_signature: string | null;
+  /** spec-authoring-writes-db-and-worker-materialize Phase 1 — when set, the spec is a regression-agent-
+   *  authored fix for this slug (mirrors the `**Regression-of:** [[<slug>]]` header line). */
+  regression_of_slug: string | null;
+  /** spec-authoring-writes-db-and-worker-materialize Phase 1 — the regression-agent's signature for this
+   *  fix (mirrors the `**Regression-signature:** `<sig>`` header line). Same-signature recurrences converge
+   *  on one spec, sibling to repair_signature. */
+  regression_signature: string | null;
   auto_build: boolean;
   milestone_id: string | null;
   created_at: string;
@@ -83,6 +90,10 @@ export interface SpecRowInput {
   status?: SpecStatus;
   intended_status_set_by?: string | null;
   repair_signature?: string | null;
+  /** When set, mirrors the regression-agent header `**Regression-of:** [[<slug>]]` (the regressed spec slug). */
+  regression_of_slug?: string | null;
+  /** When set, mirrors the regression-agent header `**Regression-signature:** `<sig>``. */
+  regression_signature?: string | null;
   auto_build?: boolean;
   milestone_id?: string | null;
 }
@@ -128,6 +139,8 @@ interface SpecRowDb {
   status: SpecStatus;
   intended_status_set_by: string | null;
   repair_signature: string | null;
+  regression_of_slug: string | null;
+  regression_signature: string | null;
   auto_build: boolean;
   milestone_id: string | null;
   created_at: string;
@@ -135,7 +148,7 @@ interface SpecRowDb {
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, auto_build, milestone_id, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, milestone_id, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, verification, created_at, updated_at";
 
@@ -155,6 +168,8 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     status: db.status,
     intended_status_set_by: db.intended_status_set_by,
     repair_signature: db.repair_signature,
+    regression_of_slug: db.regression_of_slug,
+    regression_signature: db.regression_signature,
     auto_build: db.auto_build,
     milestone_id: db.milestone_id,
     created_at: db.created_at,
@@ -252,6 +267,8 @@ export async function upsertSpec(
     intended_status: row.intended_status,
     intended_status_set_by: row.intended_status_set_by ?? null,
     repair_signature: row.repair_signature ?? null,
+    regression_of_slug: row.regression_of_slug ?? null,
+    regression_signature: row.regression_signature ?? null,
     auto_build: row.auto_build ?? false,
     milestone_id: row.milestone_id ?? null,
     updated_at: new Date().toISOString(),
