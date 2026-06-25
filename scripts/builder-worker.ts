@@ -2453,8 +2453,26 @@ async function runProposedGoalJob(job: Job) {
   const action = (job.pending_actions || []).find((a) => a.type === "greenlight_goal");
 
   // RESUME — the CEO decided on the greenlight action (approveRoadmapAction flipped it + resumed the job).
+  // goal-greenlight-button-and-author-writes-db Phase 3: the WRITE EFFECT is a `public.goals` row UPDATE
+  // via setGoalStatus, NOT a `**Status:**` markdown commit. The job lifecycle stays (the audit trail + the
+  // inbox surface), only the write effect changed — every reader (board, /api/roadmap/plan, escort, badge)
+  // now overlays goals.status from the row in brain-roadmap, so the proposed→greenlit flip is visible
+  // without a Vercel deploy. Markdown reconciliation is the Phase 4 mirror-goal-md job (separate worker step).
+  // Transitional fallback: while goals-milestones-tables-and-backfill is unmerged (no row exists yet), we
+  // fall back to the old markdown commit so a CEO decision still lands somewhere readers can see.
   if (action && (action.status === "approved" || action.status === "declined")) {
+    const { getGoal: getGoalRow, setGoalStatus } = await import("../src/lib/goals-table");
+    const goalRow = await getGoalRow(job.workspace_id, instr.slug).catch(() => null);
     if (action.status === "approved") {
+      if (goalRow) {
+        await setGoalStatus(goalRow.id, "greenlit", `ceo:proposed-goal:${job.id}`);
+        action.status = "done";
+        action.result = `greenlit ${instr.slug} (row update)`;
+        await update(job.id, { status: "completed", error: null, pending_actions: job.pending_actions, log_tail: `CEO greenlight → ${action.result}`.slice(-2000) });
+        console.log(`${tag} CEO greenlight → ${action.result}`);
+        return;
+      }
+      // Fallback (no row yet — goals table backfill hasn't shipped): flip the markdown.
       const { setGoalStatusLine } = await import("../src/lib/agents/goal-proposals");
       const get = await gh("GET", `/repos/${REPO}/contents/${goalPath}?ref=main`);
       if (!get.ok) {
@@ -2469,7 +2487,17 @@ async function runProposedGoalJob(job: Job) {
       await update(job.id, { status: put.ok ? "completed" : "needs_attention", error: put.ok ? null : "greenlight commit failed", pending_actions: job.pending_actions, log_tail: `CEO greenlight → ${action.result}`.slice(-2000) });
       console.log(`${tag} CEO greenlight → ${action.result}`);
     } else {
-      // Decline → archive: delete the inert proposed artifact (it was never greenlit). git history keeps it.
+      if (goalRow) {
+        // Decline absorbs into the `folded` enum (see /api/roadmap/goal/decline). The row stays for audit;
+        // every active-board reader filters folded so the goal disappears from surfaces just like before.
+        await setGoalStatus(goalRow.id, "folded", `ceo:proposed-goal:${job.id}`);
+        action.status = "done";
+        action.result = "declined by CEO — proposed goal folded";
+        await update(job.id, { status: "completed", error: "declined by owner", pending_actions: job.pending_actions, log_tail: `CEO decline → folded ${instr.slug} (row update)`.slice(-2000) });
+        console.log(`${tag} CEO decline → folded ${instr.slug} (row update)`);
+        return;
+      }
+      // Fallback: delete the inert proposed artifact (it was never greenlit). git history keeps it.
       const get = await gh("GET", `/repos/${REPO}/contents/${goalPath}?ref=main`);
       if (get.ok) {
         const sha = (get.json as { sha?: string }).sha;
