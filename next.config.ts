@@ -29,20 +29,19 @@ const nextConfig: NextConfig = {
   // Inngest render step dynamic-imports it to call AWS Lambda. Without this the
   // function throws "Cannot find package '@remotion/lambda'" at runtime.
   serverExternalPackages: ["@remotion/lambda", "@remotion/lambda-client", "ffmpeg-static"],
-  // The /dashboard/roadmap server component reads docs/brain (lifecycles, archive, goals, functions) at
-  // request time — the specs themselves come from Supabase now (spec-readers-from-db-retire-parser).
-  // Vercel's file tracer prunes files nothing imports, so include the brain markdown explicitly or the
-  // route renders empty on its own data in production.
+  // The /dashboard/roadmap server component reads docs/brain (lifecycles, archive, functions) at
+  // request time — specs AND goals come from Supabase now (spec-readers-from-db-retire-parser,
+  // goal-readers-from-db-retire-parsegoal). Vercel's file tracer prunes files nothing imports, so
+  // include the brain markdown explicitly or the route renders empty on its own data in production.
   outputFileTracingIncludes: {
-    // The goal/function layer reads docs/brain/{goals,functions} too — trace them into every
-    // roadmap route that resolves the taxonomy (board, map, spec/goal/function detail). Vercel
-    // prunes docs/brain otherwise. See docs/brain/specs/goal-decomposition-engine.md.
-    "/dashboard/roadmap": ["./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md", "./docs/brain/archive.d/**/*.md", "./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/[slug]": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/map": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/goals": ["./docs/brain/goals/**/*.md"],
-    "/dashboard/roadmap/goals/[slug]": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
-    "/dashboard/roadmap/functions/[slug]": ["./docs/brain/goals/**/*.md", "./docs/brain/functions/**/*.md"],
+    // The function layer still reads docs/brain/functions — trace it into every roadmap route that
+    // resolves the taxonomy (board, map, spec/goal/function detail). Goals no longer read markdown
+    // (goal-readers-from-db-retire-parsegoal). Vercel prunes docs/brain otherwise.
+    "/dashboard/roadmap": ["./docs/brain/lifecycles/**/*.md", "./docs/brain/archive.md", "./docs/brain/archive.d/**/*.md", "./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/[slug]": ["./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/map": ["./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/goals/[slug]": ["./docs/brain/functions/**/*.md"],
+    "/dashboard/roadmap/functions/[slug]": ["./docs/brain/functions/**/*.md"],
     // The Developer → Spec Tests page (spec-test-agent) reads archive.d to list shipped-unverified specs
     // (getRoadmap is DB-driven now — spec-readers-from-db-retire-parser; listArchivedSlugs still hits disk).
     "/dashboard/developer/spec-tests": ["./docs/brain/archive.d/**/*.md"],
