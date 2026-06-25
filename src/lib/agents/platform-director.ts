@@ -68,7 +68,7 @@ import {
   type RegressionInstructions,
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
-import { markSpecCardForReview, markSpecCardStatus, type SpecCardFlags } from "@/lib/spec-card-state";
+import { markSpecCardForReview, markSpecCardStatus, rollupPhaseStatus, type SpecCardFlags } from "@/lib/spec-card-state";
 import {
   driftSuspectPhases,
   isCardFullyShippedWithProvenance,
@@ -1095,8 +1095,16 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
       // non-owned slugs we escalate the drift so the spec's actual driver can act.
       if (card.status === "planned" || card.status === "in_progress") {
         lane = "status_drift";
-        const targetStatus: SpecStatus = latest.status === "merged" ? "shipped" : "in_progress";
-        reason = `Build of ${c.slug} is ${latest.status} but spec_card_state still ${card.status} — drift; flipping to ${targetStatus}.`;
+        // PHASE-AWARE (not "merged → shipped"): a multi-phase spec ships ONE phase per merge, so a merged
+        // build does NOT mean the whole spec shipped. Derive the target from the phase rollup — `shipped`
+        // only when EVERY phase is shipped; otherwise stay `in_progress`. A one-shot spec (no phases) keeps
+        // the old "merged = shipped". This was the bug that flipped a 1/N-phase spec to shipped and
+        // prematurely released its dependents (spec-body-table-and-backfill, 2026-06-25).
+        const phases = phaseStatesOf(card);
+        const rolled: SpecStatus = phases.length ? rollupPhaseStatus(phases) : "shipped";
+        const targetStatus: SpecStatus =
+          latest.status === "merged" ? (rolled === "planned" ? "in_progress" : rolled) : "in_progress";
+        reason = `Build of ${c.slug} is ${latest.status} but spec_card_state still ${card.status} — drift; flipping to ${targetStatus} (phase rollup).`;
         extra = { build_status: latest.status, prior_card_status: card.status, target_status: targetStatus, owner_scoped: ownerScoped };
       } else {
         // Card already past planned/in_progress — no drift to fix.
