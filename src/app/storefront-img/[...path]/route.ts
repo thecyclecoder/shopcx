@@ -23,10 +23,10 @@ import type { NextRequest } from "next/server";
  * single-digit ms without ever touching Supabase again.
  */
 
-export const runtime = "edge";
-// revalidate=false hints Next's Data Cache layer that the underlying
-// fetch result is long-lived; paired with CDN-Cache-Control, Vercel
-// also holds the Route Handler response at the edge.
+// No `runtime` pin: Next 16 cacheComponents disallows an explicit runtime, and the edge caching here is
+// done by the CDN-Cache-Control headers below (not the runtime) — so this runs on the default Node/Fluid
+// Compute runtime and the Vercel CDN still holds the response. revalidate hints Next's Data Cache that the
+// underlying fetch is long-lived; paired with CDN-Cache-Control, Vercel also holds the Route Handler response.
 export const revalidate = 31536000;
 
 const CLIENT_CACHE = "public, max-age=31536000, immutable";
