@@ -44,7 +44,7 @@ Per-job, per-turn **token metering** for the box agent fleet — the `claude -p`
 - **`$` only where a real bill exists.** Max-lane rows leave `usage_cost_cents` NULL on purpose — never read a 0/NULL as "free", read it as "subscription proxy, no per-token bill". The token columns are the real signal there.
 - **Multiple rows per job is normal**, not a dup — resumes / multi-turn lanes each write a row. Always aggregate by `job_id` (or higher) before reporting a per-job cost.
 - **A missing row is not a billing error.** Metering is best-effort: a `claude -p` run that emitted no parseable usage event, or whose write failed, simply has no row — the build still completed.
-- **Read-only downstream.** This table records + reports cost; it never throttles, parks, or kills a lane (that judgment is the [[../specs/fleet-spend-governor]]'s).
+- **Read-only downstream.** This table records + reports cost; it never throttles, parks, or kills a lane (that judgment is the [[../specs/fleet-spend-governor]]'s — its budget config lives in [[fleet_budgets]] via [[../libraries/fleet-spend-governor]]).
 
 ## Migration
 
@@ -52,4 +52,4 @@ Per-job, per-turn **token metering** for the box agent fleet — the `claude -p`
 
 ## Related
 
-[[agent_jobs]] · [[ai_token_usage]] · [[worker_heartbeats]] · [[../libraries/fleet-cost]] · [[../libraries/ai-usage]] · [[../specs/fleet-cost-metering]] · [[../specs/fleet-spend-governor]] · [[../specs/box-multi-account-failover]]
+[[agent_jobs]] · [[ai_token_usage]] · [[worker_heartbeats]] · [[fleet_budgets]] · [[../libraries/fleet-cost]] · [[../libraries/fleet-spend-governor]] · [[../libraries/ai-usage]] · [[../specs/fleet-cost-metering]] · [[../specs/fleet-spend-governor]] · [[../specs/box-multi-account-failover]]

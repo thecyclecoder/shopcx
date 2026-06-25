@@ -6,7 +6,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 220 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 221 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 85 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 293 |
@@ -269,6 +269,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/auth_otp_sessions]] — One-time-password sessions for customer portal / passwordless auth.
 - [[tables/dashboard_notifications]] — Generic notification system — macro_suggestion, pattern_review, knowledge_gap, fraud_alert, manual_action_needed, etc. Surfaced in the bell.
 - [[tables/escalation_gaps]] — Audit of cases where the AI escalated AND a manual signal said it shouldn't have — feedback loop for confidence tuning.
+- [[tables/fleet_budgets]] — Per-kind / per-function spend ceilings (tokens + `$` cents) for the box agent fleet. The supervisor's BUDGET config for the [[specs/fleet-spend-governor]] — surfaced guardrail, never silent cap.
 - [[tables/import_jobs]] — Background import jobs (Shopify/Gorgias/Klaviyo) with progress + status. UI shows a progress bar.
 - [[tables/iteration_actions]] — Iteration engine's autonomous-action ledger (audit/idempotency/reversal); engine append/update only (Phase 4c).
 - [[tables/iteration_policies]] — Iteration engine's versioned policy control surface; engine reads active version read-only, no active ⇒ zero autonomous actions (Phase 4c).
