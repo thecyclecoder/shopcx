@@ -1,0 +1,1 @@
+- **All spec readers from the DB — retire parser, overlay, reconciler, file-tracing** · verified 2026-06-25 · → [[../lifecycles/roadmap-build-console]]
