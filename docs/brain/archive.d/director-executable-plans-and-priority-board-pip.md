@@ -1,0 +1,1 @@
+- **Critical-spec board pip + set-from-board control** · verified 2026-06-25 · → [[../dashboard/roadmap]]
