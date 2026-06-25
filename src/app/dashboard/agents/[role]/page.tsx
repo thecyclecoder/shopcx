@@ -17,6 +17,7 @@ import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
 import { DirectorGradePanel } from "@/components/agents/director-grade-panel";
 import { DirectiveCard } from "@/components/agents/directive-card";
 import { RoleInbox, AutonomyToggle } from "@/components/agents/role-inbox";
+import DepartmentScorecardCard from "./DepartmentScorecardCard";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
 // `/dashboard/agents/[role]` — one page for every seat (CEO · a director slug · a
@@ -232,6 +233,9 @@ function ProfileCard({
         <RoleInbox role={d.slug} title={getPersona(d.slug, d.title).name} functionSlugs={functionSlugs} hideGrades />
       ) : (
         <div className="space-y-8">
+          {/* The Platform/DevOps Director owns the department scorecard — surface its daily-pulse KPIs at the
+              top of her Overview (was buried at /dashboard/agents/scorecard). platform-scorecard-on-profile. */}
+          {isPlatform && <DepartmentScorecardCard />}
           <div>
             <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Mandates</h2>
             <ResponsibilityList items={mandates} />
