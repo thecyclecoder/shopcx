@@ -4266,14 +4266,22 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   const changed = sh("git", ["diff", "--name-only", local, remote]).out;
   if (!BOX_RUNTIME_PATHS.test(changed)) return; // non-box drift → no restart, no drain
 
-  // Box-impacting change. Busy → QUEUE a restart (drain to idle; never kill a live session). Idle → now.
-  if (activeBuilds !== 0) {
-    await requestDrain(behind, activeBuilds, RUNNING_SHA);
-    return; // never reset/exit while a session is live — the drain takes us to idle first
+  // DEFER TO A SUSTAINED IDLE (self-restart-defers-to-idle): never interrupt an in-flight workload. An
+  // AUTOMATIC box-impacting self-update fires ONLY when nothing is active AND nothing is queued — each build
+  // already gets fresh code through its own worktree, so the worker process can wait for a real lull (ONE
+  // restart at the end of a cascade, not one per spec that touches src/lib). A MANUAL "Queue restart"
+  // (worker_controls.drain_for_update) still restarts at idle regardless of the queue — that's its purpose.
+  if (activeBuilds !== 0) return; // active build → wait, don't restart
+  const { draining: manualDrain } = await readDrainControl();
+  if (!manualDrain) {
+    try {
+      const { count } = await db.from("agent_jobs").select("id", { count: "exact", head: true }).in("status", ["queued", "queued_resume"]);
+      if ((count ?? 0) > 0) { console.log(`[self-update] box-impacting change, but ${count} job(s) queued — deferring restart until a sustained idle`); return; }
+    } catch { /* count failed — fall through; better to update than to wedge behind forever */ }
   }
 
   const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
-  console.log(`[self-update] idle + box-impacting change (${behind} behind, ${fromTo}) — updating worker code`);
+  console.log(`[self-update] ${manualDrain ? "manual drain reached idle" : "sustained idle"} + box-impacting change (${behind} behind, ${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
   const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
 
