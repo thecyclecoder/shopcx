@@ -1,0 +1,1 @@
+- **Active-directive card on the Agents hub** · verified 2026-06-25 · → [[../dashboard/agents]]
