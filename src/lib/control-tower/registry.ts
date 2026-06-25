@@ -480,6 +480,21 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   },
   // ─ Every-30-min crons (window ~90 min) ─
   { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
+  {
+    // fleet-spend-governor spec, Phase 2: the SUPERVISOR pass on the metered-cost proxy
+    // (fleet-cost). Reads each effective fleet_budgets row vs. rollupFleetCost() and
+    // ESCALATES on overrun via approval-router (a live+autonomous director, else CEO inbox)
+    // + a director_activity row. Loop-guarded (one open breach per lane); NEVER throttles.
+    // registeredAt graces the first-tick window (newcron-grace).
+    id: "fleet-spend-governor",
+    kind: "cron",
+    owner: "platform",
+    label: "Fleet spend governor",
+    description: "Reads each effective fleet_budgets row vs. the fleet-cost rollup → escalates a lane/function over its ceiling (loop-guarded, never auto-throttles).",
+    expectedCadence: "every ~30 min (10,40 * * * *)",
+    livenessWindowMs: 90 * MIN,
+    registeredAt: "2026-06-25T00:00:00Z",
+  },
   // ─ Hourly crons (window ~2h) ─
   { id: "dunning-payday-retry-cron", kind: "cron", owner: "retention", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR, outputAssertion: "stuck-dunning" },
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },

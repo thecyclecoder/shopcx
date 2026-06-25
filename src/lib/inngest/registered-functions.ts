@@ -124,6 +124,7 @@ import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
 import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
+import { fleetSpendGovernorCron } from "@/lib/inngest/fleet-spend-governor";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
 import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 import { loopHeartbeatsPrune } from "@/lib/inngest/loop-heartbeats-prune";
@@ -266,6 +267,7 @@ export const registeredInngestFunctions = [
   acquisitionResearchCadenceManual,
   controlTowerMonitor,
   specDriftReconcileCron,
+  fleetSpendGovernorCron,
   inngestFailureCapture,
   supabaseLogPollCron,
   loopHeartbeatsPrune,
