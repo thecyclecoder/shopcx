@@ -1,0 +1,1 @@
+- **Spec authoring writes to the DB — worker materializes for Bo** · verified 2026-06-25 · → [[../lifecycles/roadmap-build-console]]
