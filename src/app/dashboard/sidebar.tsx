@@ -157,6 +157,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/developer/messages", label: "Message Center", icon: "M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" },
       { href: "/dashboard/developer/spec-tests", label: "Spec Tests", icon: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" },
       { href: "/dashboard/developer/spec-tests/human-queue", label: "Human-test queue", icon: "M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" },
+      { href: "/dashboard/developer/regressions", label: "Regressions", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z", ownerOnly: true },
       { href: "/dashboard/brain", label: "Brain", icon: ICONS.knowledge },
       { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
     ],
@@ -193,7 +194,8 @@ export default function Sidebar({
   const [rejectedCount, setRejectedCount] = useState(0); // "Rejected → me" pile
   const [branchesCount, setBranchesCount] = useState(0); // open claude/* PRs
   const [improveWaitingCount, setImproveWaitingCount] = useState(0); // Improve sessions waiting on you
-  const [humanTestCount, setHumanTestCount] = useState(0); // spec-test human checks + regressions waiting on you (owner)
+  const [humanTestCount, setHumanTestCount] = useState(0); // spec-test human checks waiting on you (owner)
+  const [regressionCount, setRegressionCount] = useState(0); // shipped specs failing their own spec-test (owner)
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -267,11 +269,17 @@ export default function Sidebar({
           .then(d => { if (d?.total != null) setBranchesCount(d.total); })
           .catch(() => {});
       }
-      // Spec-test human-test queue: needs-human checks + regressions waiting on the owner.
+      // Spec-test human-test queue + regressions — both surfaced from the same endpoint, split into
+      // two badges: needs-human checks (Human-test queue) vs shipped specs failing their own spec-test (Regressions).
       if (workspace.role === "owner") {
         fetch(`/api/developer/spec-test/human-queue`)
           .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.counts) setHumanTestCount((d.counts.waiting || 0) + (d.counts.regressions || 0)); })
+          .then(d => {
+            if (d?.counts) {
+              setHumanTestCount(d.counts.waiting || 0);
+              setRegressionCount(d.counts.regressions || 0);
+            }
+          })
           .catch(() => {});
       }
     };
@@ -458,6 +466,11 @@ export default function Sidebar({
                           {item.href === "/dashboard/developer/spec-tests/human-queue" && humanTestCount > 0 && (
                             <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
                               {humanTestCount > 99 ? "99+" : humanTestCount}
+                            </span>
+                          )}
+                          {item.href === "/dashboard/developer/regressions" && regressionCount > 0 && (
+                            <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-rose-600 dark:bg-rose-900/30 dark:text-rose-400">
+                              {regressionCount > 99 ? "99+" : regressionCount}
                             </span>
                           )}
                         </Link>

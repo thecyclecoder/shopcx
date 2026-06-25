@@ -7,69 +7,20 @@
  * (visual/UX or prod-mutating) as `needs_human`. This page aggregates every `needs_human` check across
  * the latest run of every shipped-but-unverified spec — the parts only the owner can do — so they do
  * only those, mark each tested, and clear the queue before the Verified & archive gate. Regressions
- * (a shipped spec that FAILED its own spec-test) surface loudly at the top with a one-click
- * "Propose fix spec" route into box-spec-chat. Read-only over /api/developer/spec-test/human-queue;
- * the owner's resolutions are the only writes. Polls every ~8s + revalidates on focus.
+ * (a shipped spec that FAILED its own spec-test) live on their own page at /dashboard/developer/regressions.
+ * Read-only over /api/developer/spec-test/human-queue; the owner's resolutions are the only writes.
+ * Polls every ~8s + revalidates on focus.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import ProposeFixButton from "../ProposeFixButton";
-
-type Resolution = "verified" | "failed" | "dismissed";
-
-interface QueueItem {
-  slug: string;
-  title: string;
-  text: string;
-  evidence?: string;
-  check_key: string;
-  run_at: string;
-  resolution: Resolution | null;
-  resolved_at: string | null;
-  note: string | null;
-}
-interface Regression {
-  slug: string;
-  title: string;
-  run_at: string;
-  agent_verdict: string;
-  failing: { text: string; evidence?: string; check_key: string }[];
-}
-interface QueueData {
-  items: QueueItem[];
-  regressions: Regression[];
-  counts: { waiting: number; resolved: number; regressions: number };
-}
+import { Evidence, relativeTime, type Resolution, type QueueItem, type QueueData } from "../shared";
 
 const RESOLUTION_LABEL: Record<Resolution, string> = {
   verified: "✓ Tested — works",
   failed: "✗ Tested — broken",
   dismissed: "Dismissed — N/A",
 };
-
-function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.round(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
-
-function Evidence({ text }: { text: string }) {
-  return (
-    <details className="mt-0.5">
-      <summary className="cursor-pointer select-none text-[11px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300">
-        evidence
-      </summary>
-      <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-zinc-50 p-1.5 text-[11px] text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-400">
-        {text}
-      </pre>
-    </details>
-  );
-}
 
 export default function HumanTestQueuePage() {
   const [data, setData] = useState<QueueData | null>(null);
@@ -134,7 +85,6 @@ export default function HumanTestQueuePage() {
   );
 
   const items = data?.items ?? [];
-  const regressions = data?.regressions ?? [];
   const waiting = items.filter((i) => i.resolution === null);
   const done = items.filter((i) => i.resolution !== null);
 
@@ -166,62 +116,6 @@ export default function HumanTestQueuePage() {
         <p className="text-sm text-zinc-400">Loading…</p>
       ) : (
         <div className="space-y-6">
-          {/* Regressions — high-signal: a shipped spec failing its own verification. Surface loudly. */}
-          {regressions.length > 0 && (
-            <section className="space-y-2">
-              <div className="flex items-baseline gap-2">
-                <h2 className="text-sm font-semibold text-rose-700 dark:text-rose-400">⚠️ Regressions</h2>
-                <span className="text-xs tabular-nums text-rose-400">{regressions.length}</span>
-                <span className="text-xs text-zinc-400">· shipped but failing its own spec-test</span>
-              </div>
-              <div className="space-y-2">
-                {regressions.map((r) => (
-                  <div
-                    key={r.slug}
-                    className="rounded-lg border border-rose-200 bg-rose-50/60 px-4 py-3 dark:border-rose-900/50 dark:bg-rose-950/20"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <Link
-                        href={`/dashboard/roadmap/${r.slug}`}
-                        className="text-sm font-medium text-rose-800 hover:underline dark:text-rose-300"
-                      >
-                        {r.title}
-                      </Link>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] tabular-nums text-zinc-400">{relativeTime(r.run_at)}</span>
-                        <ProposeFixButton slug={r.slug} compact />
-                      </div>
-                    </div>
-                    {r.failing.length > 0 && (
-                      <ul className="mt-2 space-y-1.5">
-                        {r.failing.map((f, i) => (
-                          <li key={i} className="text-xs">
-                            <div className="flex items-start gap-1.5">
-                              <span className="mt-0.5 flex-shrink-0 font-medium text-rose-600 dark:text-rose-400">✗</span>
-                              <div className="min-w-0 flex-1">
-                                <span className="text-zinc-700 dark:text-zinc-300">{f.text}</span>
-                                {f.evidence && <Evidence text={f.evidence} />}
-                              </div>
-                              <button
-                                type="button"
-                                disabled={busy.has(`${r.slug}:${f.check_key}`)}
-                                onClick={() => resolve({ slug: r.slug, check_key: f.check_key, text: f.text }, "dismissed")}
-                                className="shrink-0 rounded border border-rose-200 px-2 py-0.5 text-[11px] font-medium text-rose-600 hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900/50 dark:text-rose-300 dark:hover:bg-rose-900/30"
-                                title="Not a real regression (false positive / acknowledged) — clears it from this list"
-                              >
-                                {busy.has(`${r.slug}:${f.check_key}`) ? "…" : "Dismiss"}
-                              </button>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
           {/* Needs human testing — the waiting pile. */}
           <section className="space-y-2">
             <div className="flex items-baseline gap-2">
