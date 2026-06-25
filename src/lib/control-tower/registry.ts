@@ -475,6 +475,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
   { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
   // ─ Daily crons (window ~26h) ─
+  {
+    id: "acquisition-research-cadence-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "acquisition-research-cadence-cron",
+    description: "Auto-proposed monitored loop for the acquisition-research-cadence-cron cron (daily (0 10 * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "daily (0 10 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-06-25T14:30:03.155Z",
+  },
   { id: "amazon-daily-sync", kind: "cron", owner: "growth", label: "Amazon daily sync", description: "Daily sync of the last 3 days of Amazon orders/spend.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "tickets-auto-archive", kind: "cron", owner: "cs", label: "Tickets auto-archive", description: "Archives stale resolved tickets.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "auto-blog-generate", kind: "cron", owner: "cmo", label: "Auto blog generator", description: "Daily SEO blog/content generation pass.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR },
