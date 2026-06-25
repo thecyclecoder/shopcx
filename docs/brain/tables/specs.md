@@ -27,7 +27,7 @@ The card row for every spec — title, summary, owner, parent, blocked_by, prior
 | `intended_status_set_by` | `text?` | who set `intended_status` (Slack disposition flow) |
 | `repair_signature` | `text?` | the box Repair-Agent's signature for a repair-authored spec (drives the board's 🔧 Repair source chip) |
 | `auto_build` | `boolean` | owner opt-out from [[../specs/spec-blockers]] auto-queue. Default `false` |
-| `milestone_id` | `uuid?` | typed FK → `goal_milestones(id)` (set by [[../specs/goals-milestones-tables-and-backfill]]). Null for standalone specs |
+| `milestone_id` | `uuid?` | typed FK → [[goal_milestones]]`(id)` `on delete set null` (constraint added by [[../specs/goals-milestones-tables-and-backfill]] Phase 1; populated by Phase 3 backfill). Null for standalone specs (function-mandate / regression / ad-hoc). Deleting a milestone unattaches its specs rather than orphaning them |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | bumped every write · default `now()` |
 
@@ -54,6 +54,7 @@ The DB enforcement closes the [[../specs/spec-review-agent]] "shipped with 1 pha
 ## Migration
 
 - `supabase/migrations/20260713120000_specs_and_spec_phases.sql` — initial tables + rollup function + triggers · apply: `scripts/apply-specs-tables-migration.ts` · verify: `scripts/_verify-specs-schema.ts`
+- `supabase/migrations/20260725130000_goals_and_goal_milestones.sql` — adds the `specs_milestone_id_fkey` FK constraint pointing `milestone_id` at [[goal_milestones]] · apply: `scripts/apply-goals-tables-migration.ts` · verify: `scripts/_verify-goals-schema.ts`
 - One-time backfill from markdown ([[../specs/spec-body-table-and-backfill]] Phase 3): `scripts/backfill-specs-from-markdown.ts`
 
 ## Related
