@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 import { getPageData } from "../../../_lib/page-data";
 
-export const runtime = "nodejs";
+// No `runtime` pin — Next 16 cacheComponents disallows it; next/og renders on the default runtime.
 export const contentType = "image/png";
 export const size = { width: 1200, height: 630 };
 export const alt = "Product";
