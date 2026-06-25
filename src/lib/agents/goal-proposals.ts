@@ -30,7 +30,7 @@
  * · docs/brain/libraries/goal-proposals.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { upsertGoal, type GoalMilestoneInput } from "@/lib/goals-table";
+import { upsertGoal, getGoal, type GoalMilestoneInput } from "@/lib/goals-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -208,14 +208,9 @@ export async function proposeGoal(
   // markdown-side clobber refusal). A row that's already greenlit/complete must not be reset to `proposed`
   // by a stray re-proposal — the lifecycle is propose → greenlight, not propose → reset.
   try {
-    const { data: existing } = await admin
-      .from("goals")
-      .select("id, status")
-      .eq("workspace_id", workspaceId)
-      .eq("slug", input.slug)
-      .maybeSingle();
-    if (existing && (existing as { status?: string }).status && (existing as { status?: string }).status !== "proposed") {
-      return { ok: false, error: `goal ${input.slug} already exists (status ${(existing as { status?: string }).status}) — refusing to re-propose` };
+    const existing = await getGoal(workspaceId, input.slug);
+    if (existing && existing.status && existing.status !== "proposed") {
+      return { ok: false, error: `goal ${input.slug} already exists (status ${existing.status}) — refusing to re-propose` };
     }
     await upsertGoal(
       workspaceId,
