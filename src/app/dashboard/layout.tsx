@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getActiveWorkspaceId, getUserWorkspaces } from "@/lib/workspace";
@@ -8,11 +9,19 @@ import ImportProgressBar from "@/components/import-progress-bar";
 import PatternReviewBanner from "@/components/pattern-review-banner";
 import PullToRefresh from "@/components/pull-to-refresh";
 
-export default async function DashboardLayout({
+export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  return (
+    <Suspense fallback={null}>
+      <DashboardLayoutInner>{children}</DashboardLayoutInner>
+    </Suspense>
+  );
+}
+
+async function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
