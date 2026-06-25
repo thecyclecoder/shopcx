@@ -1,0 +1,1 @@
+- **Control Tower cron grace clock should start at next scheduled firing, not at registeredAt** · verified 2026-06-25 · → [[libraries/control-tower]]
