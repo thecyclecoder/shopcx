@@ -15,6 +15,7 @@ import {
   isValidGoalSlug,
   buildProposedGoalMarkdown,
   setGoalStatusLine,
+  extractDecompositionMilestones,
 } from "./goal-proposals";
 import { deriveGoalStatus, parseGoal } from "../brain-roadmap";
 
@@ -65,6 +66,64 @@ test("setGoalStatusLine inserts a Status line into a legacy goal that lacks one"
   const legacy = "# Legacy goal\n\n**Outcome:** ship it\n\n## Decomposition\n- M0\n";
   const next = setGoalStatusLine(legacy, "greenlit");
   assert.match(next, /\*\*Status:\*\* greenlit/);
+});
+
+test("extractDecompositionMilestones: default placeholder body → zero milestones (Pia decomposes)", () => {
+  const md = buildProposedGoalMarkdown({
+    proposerFunction: "platform",
+    ownerFunction: "platform",
+    slug: "x",
+    title: "T",
+    outcome: "do it",
+  });
+  assert.deepEqual(extractDecompositionMilestones(md), []);
+});
+
+test("extractDecompositionMilestones: parses Decomposition bullets into position/title/body", () => {
+  const md = [
+    "# T",
+    "",
+    "**Status:** proposed",
+    "",
+    "## Decomposition",
+    "",
+    "- **M1 — First milestone.** First-mile detail.",
+    "  Extra wrap line for M1.",
+    "- **M2 — Second milestone.**",
+    "- Third item without bold M-id",
+    "",
+    "## Ownership & mirrors",
+    "Owner: [[../functions/platform]].",
+  ].join("\n");
+  const out = extractDecompositionMilestones(md);
+  assert.equal(out.length, 3);
+  assert.deepEqual(
+    out.map((m) => ({ position: m.position, title: m.title })),
+    [
+      { position: 1, title: "M1 — First milestone" },
+      { position: 2, title: "M2 — Second milestone" },
+      { position: 3, title: "Third item without bold M-id" },
+    ],
+  );
+  // The body lines under M1 are captured; M2/M3 have no body.
+  assert.match(out[0].body ?? "", /Extra wrap line for M1/);
+  assert.equal(out[1].body, null);
+  assert.equal(out[2].body, null);
+});
+
+test("extractDecompositionMilestones: ignores bullets outside the Decomposition section", () => {
+  const md = [
+    "# T",
+    "",
+    "## Ownership & mirrors",
+    "- not a milestone",
+    "",
+    "## Decomposition",
+    "- **M1 — Only this counts.**",
+  ].join("\n");
+  const out = extractDecompositionMilestones(md);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].title, "M1 — Only this counts");
 });
 
 test("deriveGoalStatus: explicit marker wins; legacy infers greenlit/complete from pct", () => {
