@@ -47,3 +47,27 @@ Cut every spec-CREATION surface off `git commit docs/brain/specs/{slug}.md` and 
 - The `kind='mirror-spec-md'` lane appears on the box worker's lane list and commits each authored/edited spec to `main` as `docs/brain/specs/{slug}.md` — keeping the markdown-first readers ([[../libraries/brain-roadmap]] `parseSpec`) green. The commit is idempotent across re-saves.
 - [[spec-review-agent|Vale]]'s in_review→planned/deferred verdicts are pure DB writes; `spec_status_history` still records the audit row per transition (no regression of the existing audit ledger).
 - Brain pages: NEW [[../libraries/build-spec-materializer]] page, UPDATE [[../libraries/spec-card-state]] to note `flags.intended_status` is superseded by `specs.intended_status`, UPDATE [[spec-review-agent]] Phase 3 to point at `specs.status` as the canonical write surface, UPDATE [[spec-status-phase-pr-provenance]] to note the `spec_phases` row is the canonical phase-PR provenance surface (mirror retained until [[spec-readers-from-db-retire-parser]]).
+
+## Verification
+
+Phase 1 (dual-write at every author surface — this PR):
+- Apply `supabase/migrations/20260725120000_specs_regression_columns.sql` (or run `npx tsx scripts/apply-specs-regression-columns-migration.ts`) → expect `public.specs.regression_of_slug text` + `public.specs.regression_signature text` present.
+- Author a fresh spec via the planner: queue a `kind='plan'` job for a stub goal in dev, approve a branch on the proposed tree, let the worker resume → expect the `claude/plan-*` resume to commit `docs/brain/specs/{slug}.md` to `main` AND insert a `public.specs` row with `status='in_review'` + `intended_status='planned'` + matching N `public.spec_phases` rows ordered by `position`.
+- Re-fire the same planner with the same spec body (no markdown change) → expect the `upsertSpec` re-write is idempotent: no `spec_phases` row count change, the existing `(spec_id, position)` rows keep their `id + pr + merge_sha` (the read-modify-write of phases by position is deterministic).
+- Trigger the regression-agent on a known regression of a shipped spec → expect the authored fix spec lands `docs/brain/specs/{slug}.md` AND `public.specs` row carries `regression_of_slug = '<regressed-slug>'` + `regression_signature = '<sig>'` (the typed columns).
+- Run the repair-agent on a Control Tower signature it hasn't seen → expect the authored fix spec lands AND `public.specs.repair_signature = '<sig>'` (the existing column, written via the same `upsertSpec`).
+- A spec-chat finalize that creates a new spec → expect both the `.md` commit AND a `public.specs` + `public.spec_phases` row appear with `intended_status_set_by='spec-chat'`.
+- `select count(*) from public.specs where slug = '<authored-slug>'` after each surface fires = `1` (UPSERT by `(workspace_id, slug)` — no duplicates).
+- `npx tsc --noEmit` is clean on this PR.
+
+Phase 2 (worker materializes the row for Bo — this PR):
+- Queue a kind='build' job in dev for an existing spec slug with a `public.specs` row → before claude runs, expect the worktree to carry `.box/spec-{slug}.md` rendered from the DB (not `docs/brain/specs/{slug}.md`), and the build-spec prompt to point at `.box/spec-{slug}.md` (`grep "Use the build-spec skill to implement the spec at .box/" scripts/builder-worker.ts` → match).
+- The materialized file contains `# {title}` (NO ⏳/🚧/✅ on the H1), the `**Owner:** [[../functions/{owner}]] · **Parent:** {parent}` metadata line, `**Blocked-by:**` when set, the summary paragraph, then `## {phase.title}` headings (NO emoji) followed by the phase body in `position` order.
+- `.box/` is in `.gitignore` — `git status` on the worktree mid-build shows no `.box/spec-*.md` entry; `git add -A` doesn't commit it.
+- A spec whose `public.specs` row was deleted (or never authored) → `runBuildJob` flips the job `failed` with `cannot materialize spec {slug} from DB — materializeSpec: no specs row …`, no PR opened.
+- A spec materialized to an empty / phaseless body → `runBuildJob` flips the job `failed` with `materialized spec {slug} is empty / 0-byte` (or `has no "## Phase" / "### Phase" section`), no PR opened.
+- Merge a build PR that ships P1 of a multi-phase spec → `select status, pr, merge_sha from public.spec_phases where spec_id=(select id from specs where slug='<slug>') and position=1` → `('shipped', <PR#>, '<sha>')`, AND `spec_card_state.phase_states[0].{status,pr,merge_sha}` carries the SAME values (double-write).
+- Tap Build on a spec whose `specs.status='in_review'` → `queueRoadmapBuild` returns `409 spec is in review — not approved to build yet` (the hard-stop reads `public.specs.status` directly via [[../libraries/specs-table]] `getSpec` — flip the row to `planned` to unblock).
+- `npx tsc --noEmit` is clean on this PR.
+
+Phase 3-4 follow this PR — verification for those will land with their respective phases.

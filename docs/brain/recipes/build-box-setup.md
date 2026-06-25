@@ -7,9 +7,25 @@ The box that runs autonomous spec builds on the **Max subscription** for the [[.
 - **Hetzner CCX33** — Ubuntu 26.04, 8 vCPU, 30 GiB RAM, name `claude-server`. Public IPv4 `178.156.246.235` (firewalled), tailnet IP `100.75.99.7`.
 - Runs `systemd` service **`shopcx-builder`** = `scripts/builder-worker.ts`, which polls [[../tables/agent_jobs]], claims a job via `claim_agent_job()`, runs `claude -p` (Max), tsc-gates, and opens a `claude/*` PR. See [[../dashboard/branches]] to merge.
 
+## Access (SSH) — how to get on the box
+
+**You always forget this — it lives here now.** The box is Tailscale-only. SSH lands as **root**, but the worker + every build run as the **`builder`** user, so drop into that user to inspect anything:
+
+```bash
+ssh root@claude-server     # host alias in ~/.ssh/config · tailnet claude-server.tail298416.ts.net / 100.75.99.7
+sudo -iu builder           # become the worker user — EVERYTHING lives under /home/builder
+```
+
+As `builder`:
+- **Repo (the worker's OWN checkout):** `~/shopcx` (`/home/builder/shopcx`) — the SHA the dashboard/heartbeat reports (`git -C ~/shopcx rev-parse --short HEAD`).
+- **Build worktrees:** `~/builds/<job-id>` — one per in-flight build; **the dir name IS `agent_jobs.id`**. A running `claude` whose `cwd` is a `~/builds/<id>` that has **no row in `agent_jobs`** is a ZOMBIE (deleted job, process still alive) — safe to `kill <pid>` that PID *only*.
+- **Max creds:** `~/.claude` (the round-robin login config dirs).
+
+Service ops (as **root**): `systemctl {status,restart,stop} shopcx-builder` · live logs `journalctl -u shopcx-builder -f`. List build sessions + their worktrees: `for p in $(pgrep -f claude); do echo "$p $(readlink /proc/$p/cwd)"; done`. (Service `User=builder`; a hard `systemctl restart` orphans in-flight builds — prefer the dashboard "Queue restart" which drains first.)
+
 ## Core invariants
 
-- **Max billing.** Builds run `env -u ANTHROPIC_API_KEY claude -p …`. The box must have **no `ANTHROPIC_API_KEY`** in the environment — `/root/shopcx/.env.local` keeps it commented out. Claude is logged in as the **Max** account (`dylan@superfoodscompany.com`); creds live in `/root/.claude`. Verify: claude.ai/settings/usage moves, the API console stays flat.
+- **Max billing.** Builds run `env -u ANTHROPIC_API_KEY claude -p …`. The box must have **no `ANTHROPIC_API_KEY`** in the environment — `/home/builder/shopcx/.env.local` keeps it commented out. Claude is logged in as the **Max** account (`dylan@superfoodscompany.com`); creds live in `/home/builder/.claude`. Verify: claude.ai/settings/usage moves, the API console stays flat.
 - **No inbound.** The box only reaches *out* (to Supabase + GitHub). Public SSH (:22) is firewalled; the trigger is a DB row the worker polls, never an HTTP call in.
 - **One worker.** Only the `shopcx-builder` service runs the worker (don't also start a `nohup` copy).
 
