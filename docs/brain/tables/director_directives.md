@@ -1,6 +1,6 @@
 # tables/director_directives
 
-A director's **active directive** — a plan the CEO hands it via the coaching seat's `plan` intent ([[../specs/director-executable-plans-and-priority]]), CEO-approved, that the standing pass runs FIRST (before routine lanes) and which can GATE the build queue until a named spec ships. One active directive per `(workspace_id, director_function)` (partial unique index `director_directives_one_active`).
+A director's **active directive** — a plan the CEO hands it via the coaching seat's `plan` intent ([[../libraries/platform-director]]), CEO-approved, that the standing pass runs FIRST (before routine lanes) and which can GATE the build queue until a named spec ships. One active directive per `(workspace_id, director_function)` (partial unique index `director_directives_one_active`).
 
 **Migration:** `supabase/migrations/20260706160000_director_directives.sql` · **Lib:** [[../libraries/director-directives]]
 

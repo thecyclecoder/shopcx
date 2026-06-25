@@ -1,0 +1,1 @@
+- **Ada executes CEO plans + a critical-spec priority lane** · verified 2026-06-25 · → [[../libraries/platform-director]]

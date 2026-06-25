@@ -45,6 +45,7 @@ Under a spec's H1, one-per-concept bold metadata lines, each resolving `[[wikili
 - `**Parent:** {mandate or goal milestone}` → `parent`.
 - `**Repair-signature:** \`…\`` → `repairSignature` (boolean; box-Repair-Agent-authored specs only). Drives the board's "🔧 Repair" source chip via [[#Key exports|getRoadmapFilters]].
 - **`**Blocked-by:** [[spec-a]], [[spec-b]]`** → `blockedBy` (spec-blockers). Each `[[…]]` resolves to a spec slug (last path segment, alias/`.md` stripped, de-duped). Parsed exactly like Owner/Parent.
+- **`**Priority:** critical`** → `flags.critical` (boolean; line-anchored marker). A spec carrying this metadata is prioritized in build queues ahead of normal Planned specs. Set by Ada via a `spec-edit` card or a CEO-approved directive's `criticalSpecs` list. Orthogonal to phase progress: a `critical` spec can be in any phase. The `spec-status` card auto-applies this field (no CEO inbox approval).
 
 ## `blockedBy` — build prerequisites ([[../specs/spec-blockers]])
 
