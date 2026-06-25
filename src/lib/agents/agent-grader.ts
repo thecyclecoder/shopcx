@@ -73,6 +73,12 @@ const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "needs_attention"]
 
 /** The standing performance window — last N graded jobs per worker (the spec's locked config). */
 export const ROLLUP_WINDOW = 10;
+
+/** A worker is "proven" once its last-ROLLUP_WINDOW average is ≥ this — it then gets graded WAY less often
+ *  (only a small spot-check of its successes) so the grading budget flows to unproven/struggling workers. */
+export const PROVEN_AVG = 9;
+/** How often a PROVEN worker's successes still get spot-checked (≈1 in 5 beats). Its FAILURES always grade. */
+export const GRADE_PROVEN_SAMPLE = 0.2;
 /** Batched grading cadence (the spec's locked config): grade when ≥ BATCH_MIN ungraded concluded jobs
  *  have accumulated, OR a BATCH_FALLBACK_MS fallback once any are ungraded — keeps the LLM cost bounded
  *  (one session per batch, not one per job). */
@@ -113,6 +119,9 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   "product-seed": { name: "Sol", criteria: "product correctly seeded · page built · orderable" },
   "spec-chat": { name: "Sage", criteria: "accurate, grounded answers · correct spec edits · read-only honored" },
   "dev-ask": { name: "Dex", criteria: "accurate, grounded answers · correct spec edits · read-only honored" },
+  "security-review": { name: "Vault", criteria: "real vulnerabilities caught (not noise) · correct severity · no false-positives on safe diffs · a sound, actionable fix when flagged · produced a parseable verdict" },
+  "triage-escalations": { name: "Triage", criteria: "correct disposition per escalation (route vs dismiss vs needs-human) · no real blocker missed · no false escalations · sound rationale" },
+  "ticket-improve": { name: "Tilly", criteria: "the ticket genuinely improved (clearer, correctly categorized/tagged) · no meaning changed · customer voice preserved" },
 };
 
 /** The agent_jobs `kind`s the worker grader scores (rubric-backed). */
@@ -370,33 +379,56 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
  * out a spot-check of a quieter one. Un-selected jobs stay ungraded and ride a later beat. Math.random is
  * fine here (this is library code, not a workflow script).
  */
-function selectGradingBatch(pool: UngradedJob[], cap: number): UngradedJob[] {
-  const failures = pool.filter((j) => FAILED_JOB_STATUSES.has(j.status));
-  const successes = pool.filter((j) => !FAILED_JOB_STATUSES.has(j.status));
-  // Failures newest-first (a recent regression matters most), capped.
-  failures.sort((a, b) => b.created_at.localeCompare(a.created_at));
-  const chosen = failures.slice(0, cap);
-  let room = cap - chosen.length;
-  if (room <= 0) return chosen;
-
-  // Group the remaining slots across workers: shuffle each kind's successes, then round-robin one per kind.
+function selectGradingBatch(pool: UngradedJob[], cap: number, provenKinds: Set<string> = new Set()): UngradedJob[] {
+  if (pool.length <= cap) return pool;
+  const chosen: UngradedJob[] = [];
+  const taken = new Set<string>();
+  const isFail = (j: UngradedJob) => FAILED_JOB_STATUSES.has(j.status);
+  // Group by kind; within a kind, failures first (high-signal), then newest-first.
   const byKind = new Map<string, UngradedJob[]>();
-  for (const j of successes) {
+  for (const j of pool) {
     const list = byKind.get(j.kind) ?? [];
     list.push(j);
     byKind.set(j.kind, list);
   }
-  for (const list of byKind.values()) list.sort(() => Math.random() - 0.5);
-  const queues = Array.from(byKind.values());
+  for (const list of byKind.values()) {
+    list.sort((a, b) => (isFail(b) ? 1 : 0) - (isFail(a) ? 1 : 0) || b.created_at.localeCompare(a.created_at));
+  }
+  // COVERAGE PASS (worker-grading-coverage): grade ONE job from EVERY active kind first, so each worker gets
+  // graded each beat. The old order (all failures first, then a round-robin of the leftover room) let noisy,
+  // high-failure kinds (spec-test/build) eat the whole cap and STARVE quiet, success-heavy workers — that's
+  // why Remi (regression) had 0 grades despite a long-standing rubric, and Vault (security) was never graded.
+  // A PROVEN worker (≥ PROVEN_AVG rollup) is THROTTLED here — its top job is taken only GRADE_PROVEN_SAMPLE of
+  // the time UNLESS that top job is a FAILURE (a slip from a 9-avg worker is exactly what we must catch). So a
+  // proven worker is graded way less often, freeing the budget for unproven/struggling workers.
+  const queues = Array.from(byKind.entries());
+  queues.sort(() => Math.random() - 0.5);
+  for (const [kind, q] of queues) {
+    if (chosen.length >= cap) break;
+    const top = q[0];
+    if (!top) continue;
+    if (provenKinds.has(kind) && !isFail(top) && Math.random() >= GRADE_PROVEN_SAMPLE) continue; // throttle the proven worker's successes
+    q.shift();
+    chosen.push(top);
+    taken.add(top.id);
+  }
+  // FAILURE FILL: every remaining failure, newest-first (a worker mistake is always worth learning from —
+  // including a proven worker's, which is the signal that may end its "proven" status).
+  const failures = pool.filter((j) => !taken.has(j.id) && isFail(j)).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  for (const f of failures) { if (chosen.length >= cap) break; chosen.push(f); taken.add(f.id); }
+  // ROUND-ROBIN FILL: remaining successes, one per kind — but SKIP proven kinds (already throttled above), so
+  // their reliably-good successes don't soak up spot-check budget meant for the rest.
+  const rq = Array.from(byKind.entries()).filter(([k, q]) => !provenKinds.has(k) && q.length).map(([, q]) => q);
   let progressed = true;
-  while (room > 0 && progressed) {
+  while (chosen.length < cap && progressed) {
     progressed = false;
-    for (const q of queues) {
-      if (!q.length) continue;
-      chosen.push(q.shift() as UngradedJob);
-      room--;
+    for (const q of rq) {
+      const j = q.shift();
+      if (!j || taken.has(j.id)) continue;
+      chosen.push(j);
+      taken.add(j.id);
       progressed = true;
-      if (room <= 0) break;
+      if (chosen.length >= cap) break;
     }
   }
   return chosen;
@@ -445,9 +477,16 @@ export async function gradeConcludedAgentActions(opts: { workspaceId: string; ad
 
   try {
     const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
-    // Bounded session: ≤ GRADE_BATCH_CAP jobs, failures first then a fair sample (keeps a chatty worker
-    // from jamming the run); the rest stay ungraded for a later beat.
-    const batch = selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP);
+    // A PROVEN worker (≥ PROVEN_AVG over a full window) is graded way less often — compute which kinds in the
+    // pool are proven so selectGradingBatch can throttle them and spend the budget on unproven/struggling ones.
+    const proven = new Set<string>();
+    for (const kind of new Set(pool.map((j) => j.kind))) {
+      const r = await computeAgentRollup(admin, opts.workspaceId, kind);
+      if (r.count >= ROLLUP_WINDOW && (r.average ?? 0) >= PROVEN_AVG) proven.add(kind);
+    }
+    // Bounded session: ≤ GRADE_BATCH_CAP jobs — a coverage pass (every active worker), then failures, then a
+    // fair sample, with proven workers throttled; the rest stay ungraded for a later beat.
+    const batch = selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, proven);
     for (const j of batch) {
       considered++;
       const r = await gradeAgentAction({ agentJobId: j.id, admin });
