@@ -17,9 +17,12 @@
  * `complete`, else the stored `goals.status`. The goal `body` is the only thing `getGoal().raw` carries
  * (the detail page renders it; residual `[[spec]]` wikilinks in it still feed membership filters).
  *
- * The project-tracks header (`## Active project …` in `specs/README.md`) + the functions/archive readers
- * below are NOT in this phase's scope — they stay file-backed. `next.config.ts` still traces the
- * functions/archive markdown into the roadmap routes (the goals markdown is no longer read).
+ * spec-pm-markdown-purge (2026-06-25): every per-spec + per-goal markdown file under docs/brain/specs/
+ * and docs/brain/goals/ is DELETED — the DB is the sole source. The old `readSpecs()`/`buildSpecCards()`/
+ * `readTracks()`/`parseTracks()` (the `## Active project …` tracks header) + the `tracks` field on
+ * RoadmapData are GONE; `getRoadmap` returns `{ specs }` only. The functions/archive readers below stay
+ * file-backed (functions/ + archive.d/ are permanent brain). `next.config.ts` still traces the
+ * functions/archive markdown into the roadmap routes (the specs + goals markdown is no longer read).
  */
 import { promises as fs } from "fs";
 import path from "path";
@@ -90,19 +93,10 @@ export interface SpecCard {
   shippedPr?: number | null;
 }
 
-export interface ProjectTrack {
-  title: string;
-  status: Phase;
-  why: string;
-  specSlugs: string[];
-}
-
 export interface RoadmapData {
-  tracks: ProjectTrack[];
   specs: SpecCard[];
 }
 
-const SPECS_DIR = path.join(process.cwd(), "docs", "brain", "specs");
 const ARCHIVE_FILE = path.join(process.cwd(), "docs", "brain", "archive.md");
 const ARCHIVE_DIR = path.join(process.cwd(), "docs", "brain", "archive.d");
 
@@ -335,66 +329,6 @@ function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCa
     // never permanently blocks.
     return { slug: b.slug, title: b.slug, status: "shipped" as Phase, cleared: true };
   });
-}
-
-function parseTracks(raw: string): ProjectTrack[] {
-  const lines = raw.split("\n");
-  const tracks: ProjectTrack[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^##\s+(Active project.*)/);
-    if (!m) continue;
-    const title = cleanInline(m[1]);
-    const status = statusFromText(lines[i]) ?? "planned";
-    let why = "";
-    const specSlugs: string[] = [];
-    for (let j = i + 1; j < lines.length && !lines[j].startsWith("## "); j++) {
-      const t = lines[j].trim();
-      const sm = t.match(/\*\*(?:Spec|Lifecycle):\*\*\s*(.*)/);
-      if (sm) {
-        for (const wl of sm[1].matchAll(/\[\[([^\]|]+)/g)) specSlugs.push(wl[1].replace(/^\.\.\//, ""));
-      }
-      const wm = t.match(/\*\*Why this matters:\*\*\s*(.*)/);
-      if (wm && !why) why = cleanInline(wm[1]);
-    }
-    tracks.push({ title, status, why, specSlugs });
-  }
-  return tracks;
-}
-
-/** Parse + resolve + sort a slug→raw map into board-ready cards (source-agnostic: git or fs). */
-function buildSpecCards(rawBySlug: Map<string, string>): SpecCard[] {
-  const cards = [...rawBySlug.entries()].map(([slug, raw]) => parseSpec(slug, raw));
-  // Resolve every spec's Blocked-by slugs against the live set, so the board + the enqueue gate share one
-  // source of truth for cleared/uncleared (spec-blockers). A blocker not in this map = archived/folded ⇒ cleared.
-  const bySlug = new Map(cards.map((c) => [c.slug, c]));
-  for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug);
-  // newest-feeling first: in-progress, then in-review (awaiting approval), then planned, then shipped, then deferred (parked); stable by title
-  const rank: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
-  return cards.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
-}
-
-async function readSpecs(): Promise<SpecCard[]> {
-  let files: string[];
-  try {
-    files = await fs.readdir(SPECS_DIR);
-  } catch {
-    return [];
-  }
-  const rawBySlug = new Map<string, string>();
-  await Promise.all(
-    files
-      .filter((f) => f.endsWith(".md") && f !== "README.md")
-      .map(async (f) => rawBySlug.set(f.replace(/\.md$/, ""), await fs.readFile(path.join(SPECS_DIR, f), "utf8"))),
-  );
-  return buildSpecCards(rawBySlug);
-}
-
-async function readTracks(): Promise<ProjectTrack[]> {
-  try {
-    return parseTracks(await fs.readFile(path.join(SPECS_DIR, "README.md"), "utf8"));
-  } catch {
-    return [];
-  }
 }
 
 /**
@@ -650,8 +584,7 @@ export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
   // No workspace → empty board. We fail loud (empty result, no markdown fallback) so an outage is visible
   // rather than papered over with a stale disk parse. spec-readers-from-db-retire-parser safety rail.
   const specs = wsId ? await readSpecsFromDb(wsId) : [];
-  const tracks = await readTracks();
-  return { specs, tracks };
+  return { specs };
 }
 
 /** Slugs of every boardable spec — DB-driven (no fs read). Used to resolve [[wikilinks]] to detail pages. */

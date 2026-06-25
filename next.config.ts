@@ -50,10 +50,7 @@ const nextConfig: NextConfig = {
     // The authoring chat injects the brain index (getBrainTree → walks docs/brain) into
     // its Opus system prompt for grounding; trace the markdown into its bundle.
     "/api/roadmap/chat": ["./docs/brain/**/*.md"],
-    // The interactions handler builds the App Home roadmap view (slack-home → getRoadmap) after a
-    // queued build, so it reads the brain specs too. See docs/brain/specs/slack-roadmap-home.md.
-    "/api/slack/interactions": ["./docs/brain/specs/**/*.md"],
-    // slack-roadmap-notify reads specs; brain-index-refresh regenerates archive.md (← archive.d/) and
+    // brain-index-refresh regenerates archive.md (← archive.d/) and
     // the README folder counts (← the whole tree), so the cron bundle needs all of docs/brain.
     // The creative-finder-video pipeline spawns the bundled ffmpeg-static binary; Vercel's tracer
     // prunes the binary file otherwise, so include it explicitly (see creative-finder-video.md).
