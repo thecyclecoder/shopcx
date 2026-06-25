@@ -7,6 +7,7 @@ import { getPersona } from "@/lib/agents/personas";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { OrgTree } from "@/components/agents/org-tree";
 import { BoardChannel } from "@/components/agents/board-channel";
+import { DirectiveCard } from "@/components/agents/directive-card";
 
 // Agents hub (agents-hub-role-inboxes spec; IA refactor) — the owner-only org-chart surface.
 // Left: CEO → Directors, read from functions/+goals/ via brain-roadmap; each row LINKS to that
@@ -179,6 +180,12 @@ export default function AgentsPage() {
         The org chart — CEO · Directors · Agents — read live from the brain. Pick a seat to open its profile + inbox;
         the shared #directors board is the team channel below.
       </p>
+
+      {/* director-executable-plans-and-priority-hub-pip Phase 1 — the always-visible card for the platform
+          director's ONE active directive (if any). Mirrors how the standing pass already headlines it. */}
+      <div className="mb-5">
+        <DirectiveCard functionSlug="platform" title="Ada" />
+      </div>
 
       {loading && !org ? (
         <div className="py-12 text-center text-sm text-zinc-400">Loading the org chart…</div>

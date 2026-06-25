@@ -1,10 +1,15 @@
-# Active-directive card on the Agents hub
+# Active-directive card on the Agents hub ✅
 
 **Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — extends the coaching seat ([[director-proposed-goals]] pattern) + the standing pass under [[../goals/devops-director]]
 
-## Phase 1 — a dedicated directive card on the Agents hub / her profile
+## Phase 1 ✅ — a dedicated directive card on the Agents hub / her profile
 - Render a dedicated card for the one `active` [[../tables/director_directives]] row on the [[../dashboard/agents|Agents hub]] / the platform director's profile: the directive summary, its steps, the `gate_builds_until` spec (with a "builds GATED until Y ships" badge), and a clear/complete affordance. Mirrors how the directive already headlines the standing pass.
 - Surfacing already exists via the standing-pass note + the daily board-watch note + the chat; this is the dedicated, always-visible hub surface.
+- **Landed:** `src/components/agents/directive-card.tsx` renders the card; mounted on `/dashboard/agents` (top, above the org/inbox views) and on `/dashboard/agents/platform` (top, below her persona header — visible across every section tab). Data + clear backed by `GET /api/director/directive?function=platform` + `POST { id, action:"clear" }` (owner-gated), which uses the new `clearDirective(admin, workspaceId, id)` in [[../libraries/director-directives]] (flips the row to `cleared` + logs a `directive_cleared` [[../tables/director_activity]] row). The card is absent when there's no `active` row — silent first paint, no flicker.
 
 ### Verification
-- With an `active` directive present, `/dashboard/agents` (or the platform profile) shows a directive card naming the directive + its gate; with no active directive the card is absent. `npx tsc --noEmit` clean.
+- On `/dashboard/agents` (workspace owner, an `active` [[../tables/director_directives]] row exists for `director_function='platform'`) → expect a directive card at the top of the page naming the directive summary, listing its `steps[]` as a numbered list, and — if `gate_builds_until` is set — showing a "builds GATED until `<slug>` ships" badge. With NO `active` row, expect the card to be ABSENT (no empty-state box, no flicker).
+- On `/dashboard/agents/platform` (Ada's profile, with an `active` directive) → expect the same card to render between her persona header and the section content, visible on every `?s=` tab (overview / grades / coach / activity / autonomy / inbox).
+- On the directive card, click **Clear** + confirm → expect the card to disappear (the row's `status` flips `active`→`cleared`, the gate lifts on the next pass), and a `directive_cleared` row to appear in `director_activity` for `director_function='platform'`. A second tap on the now-absent card should not be possible — there's nothing to clear.
+- `GET /api/director/directive?function=platform` as a non-owner → expect 403; with no `workspace_id` cookie → expect 400. `POST { action:"clear", id:"<known active id>" }` as owner → expect 200 `{ ok:true, cleared:true }`; as non-owner → 403; on an already-cleared id → 409.
+- `npx tsc --noEmit` clean.
