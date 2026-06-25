@@ -476,6 +476,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Auto-proposed monitored loop for the spec-review-cron cron (every 15 min (*/15 * * * *)). Confirm the owner-function + cadence/window.",
     expectedCadence: "every 15 min (*/15 * * * *)",
     livenessWindowMs: 1 * HOUR,
+    registeredAt: "2026-06-25T15:56:34Z",
   },
   // ─ Every-30-min crons (window ~90 min) ─
   { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
