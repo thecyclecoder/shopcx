@@ -3,7 +3,6 @@ import { getFunctionMap, type SpecStatus, type SpecCard } from "@/lib/brain-road
 import { getActiveWorkspaceId } from "@/lib/workspace";
 
 // Reads docs/brain/specs at request time — always reflects the live brain.
-export const dynamic = "force-dynamic";
 
 const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",

@@ -15,7 +15,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * client off the active workspace (RLS on `posts` is service-role only).
  */
 
-export const dynamic = "force-dynamic";
 
 const GROUPING_LABELS: Record<string, string> = {
   recipes: "Recipes",

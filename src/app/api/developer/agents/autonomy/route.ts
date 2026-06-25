@@ -15,7 +15,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listFunctionSlugs } from "@/lib/brain-roadmap";
 
-export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   const supabase = await createClient();

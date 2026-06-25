@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { renderBrainDoc } from "@/lib/brain-tree";
 
-export const dynamic = "force-dynamic";
 
 export default async function BrainDoc({ params }: { params: Promise<{ slug: string[] }> }) {
   const { slug } = await params;

@@ -15,7 +15,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getModelTier } from "@/lib/agent-model-tiers";
 import { MODEL_TIER_PROPOSAL_KIND } from "@/lib/agent-jobs";
 
-export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const supabase = await createClient();

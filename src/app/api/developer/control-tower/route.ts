@@ -21,7 +21,6 @@ import { getDbHealthPanel } from "@/lib/control-tower/db-health";
 import { getOpenCoverageRegistrations } from "@/lib/coverage-register-agent";
 import { getClaudeHealth } from "@/lib/claude-health";
 
-export const dynamic = "force-dynamic";
 
 export async function GET() {
   const supabase = await createClient();

@@ -1,7 +1,6 @@
 import { getBrainTree } from "@/lib/brain-tree";
 import BrainNav from "./BrainNav";
 
-export const dynamic = "force-dynamic";
 
 export default async function BrainLayout({ children }: { children: React.ReactNode }) {
   const { folders } = await getBrainTree();

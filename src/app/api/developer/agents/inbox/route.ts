@@ -23,7 +23,6 @@ import { loadAutonomyMap, isAutoApprover, CEO } from "@/lib/agents/approval-rout
 import { inlineApproveActions, type ApprovalJobRow } from "@/lib/agents/approval-inbox";
 import { laneForBounceBack } from "@/lib/agents/director-bounce-back";
 
-export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const supabase = await createClient();

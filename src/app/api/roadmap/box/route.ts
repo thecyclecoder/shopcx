@@ -15,7 +15,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap } from "@/lib/brain-roadmap";
 
-export const dynamic = "force-dynamic";
 
 interface LaneRow {
   kind: string;

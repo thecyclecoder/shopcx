@@ -7,7 +7,6 @@ import TestNowButton from "./TestNowButton";
 import ProposeFixButton from "./ProposeFixButton";
 
 // Reads docs/brain/specs at request time + the latest spec_test_runs — always live.
-export const dynamic = "force-dynamic";
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();

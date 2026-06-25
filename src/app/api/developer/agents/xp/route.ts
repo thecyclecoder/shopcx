@@ -15,7 +15,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getDirectorXp } from "@/lib/agents/director-xp";
 
-export const dynamic = "force-dynamic";
 
 export async function GET() {
   const supabase = await createClient();

@@ -14,7 +14,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAgentCoachingHistory } from "@/lib/agents/agent-instructions";
 
-export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const kind = new URL(req.url).searchParams.get("kind");

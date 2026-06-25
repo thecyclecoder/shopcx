@@ -21,7 +21,6 @@ import { createThread, loadThread, markThreadThinking, setActionDecision, listRe
 import { getSlackToken, postMessage, updateMessage } from "@/lib/slack";
 import { buildAdaResolvedCard } from "@/lib/slack-ada";
 
-export const dynamic = "force-dynamic";
 
 const DIRECTOR = "platform"; // the only live director today
 

@@ -20,7 +20,6 @@ import { buildExperimentManifest, EXPERIMENT_MANIFEST_TAG } from "@/lib/storefro
  * Public (under the `/api/storefront` public prefix) — it only exposes variant ids
  * + holdout, already inferable from the served HTML.
  */
-export const dynamic = "force-dynamic";
 
 const getCachedManifest = unstable_cache(
   async () => buildExperimentManifest(createAdminClient()),

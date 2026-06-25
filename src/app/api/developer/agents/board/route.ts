@@ -19,7 +19,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getDirectorBoard, routeBoardReply, enrichAwaiting } from "@/lib/agents/director-board";
 import { threadMessages, type BoardPayload } from "@/lib/agents/board";
 
-export const dynamic = "force-dynamic";
 
 async function requireOwner() {
   const supabase = await createClient();

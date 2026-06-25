@@ -4,7 +4,6 @@ import { getActiveWorkspaceId } from "@/lib/workspace";
 import { GoalStatusBadge } from "./GoalStatusBadge";
 
 // Reads docs/brain/goals + specs at request time — always reflects the live brain.
-export const dynamic = "force-dynamic";
 
 function RollupBar({ pct }: { pct: number }) {
   return (

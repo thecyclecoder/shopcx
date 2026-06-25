@@ -24,7 +24,6 @@ import {
 } from "@/lib/spec-test-runs";
 import { reflectSpecGreenChecks } from "@/lib/spec-green-writeback";
 
-export const dynamic = "force-dynamic";
 
 const isSlug = (s: unknown): s is string => typeof s === "string" && /^[a-z0-9-]+$/i.test(s);
 

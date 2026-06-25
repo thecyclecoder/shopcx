@@ -13,7 +13,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getOrgChart } from "@/lib/agents/org-chart";
 
-export const dynamic = "force-dynamic";
 
 export async function GET() {
   const supabase = await createClient();

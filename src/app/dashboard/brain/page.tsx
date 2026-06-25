@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { getBrainTree } from "@/lib/brain-tree";
 
-export const dynamic = "force-dynamic";
 
 const ORDER: Record<string, number> = {
   "(root)": 0, lifecycles: 1, dashboard: 2, tables: 3, libraries: 4,
