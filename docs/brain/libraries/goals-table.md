@@ -46,7 +46,8 @@ supabase-js has no transaction surface, so `upsertGoal` is a sequence (UPSERT go
 ## Callers
 
 - **[[../recipes/backfill-goals-from-markdown]]** (`scripts/backfill-goals-from-markdown.ts`) — runs [[brain-roadmap]] `parseGoal` ONE LAST TIME over `docs/brain/goals/*.md` and upserts the rows.
-- **[[../specs/goal-greenlight-button-and-author-writes-db]]** — the future CEO-facing surface that calls `setGoalStatus`.
+- **`/api/roadmap/goal/greenlight` · `/ungreenlight` · `/decline`** ([[../specs/goal-greenlight-button-and-author-writes-db]] Phase 1) — the CEO's one-click DB-flag routes. `greenlight` flips `proposed → greenlit` via `setGoalStatus`, `ungreenlight` reverses (while `goal_milestones.status` is all `planned`), and `decline` flips `proposed → folded`. Each is CEO-only (gated on `workspace_members.role='owner'`) and writes one [[../tables/director_activity]] row (`greenlit_goal` / `ungreenlit_goal` / `declined_goal`) for audit.
+- **`<GreenlightButton>`** (`src/app/dashboard/roadmap/goals/GreenlightButton.tsx`) — the client component on the goal card list + detail page that posts to those routes. Hides itself for non-owner viewers; the route enforces CEO-only server-side too.
 - **[[../specs/goal-readers-from-db-retire-parsegoal]]** — the future cutover that swaps `getGoals` / `getGoal` ([[brain-roadmap|L1004]]) to read FROM here instead of markdown.
 
 ## Gotchas
