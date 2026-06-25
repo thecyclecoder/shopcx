@@ -87,14 +87,21 @@ export const todaySyncCron = inngest.createFunction(
           });
           totalDays += result.daysProcessed;
         } catch (err) {
-          // Subcode 1504018 = "Your request timed out" — known-transient Meta
-          // backend blip. The 5-min cron cadence self-heals these on the next
-          // run, so log at warn and don't escalate to the Control Tower error
-          // feed. Real failures (auth 190, permissions 200/10/803, disabled
-          // account) still hit console.error and surface.
-          const subcode = (err as { metaSubcode?: number } | null)?.metaSubcode;
-          const isHandledTimeoutBlip = subcode === 1504018;
-          const log = isHandledTimeoutBlip ? console.warn : console.error;
+          // Graph errors that graph-retry.ts already classified as transient
+          // (code 1/2 "unknown, retry later" / "Service temporarily unavailable",
+          // or the original 1504018 "Your request timed out" subcode) are
+          // known-transient Meta backend blips. The 5-min cron cadence
+          // self-heals these on the next run, so log at warn and don't escalate
+          // to the Control Tower error feed. Real failures (auth 190,
+          // permissions 200/10/803, disabled account) still hit console.error
+          // and surface. Mirrors isTransientGraphError in
+          // src/lib/meta/graph-retry.ts.
+          const metaErr = err as { metaCode?: number; metaSubcode?: number } | null;
+          const isHandledTransient =
+            metaErr?.metaCode === 1 ||
+            metaErr?.metaCode === 2 ||
+            metaErr?.metaSubcode === 1504018;
+          const log = isHandledTransient ? console.warn : console.error;
           log(`[Today Sync] Meta error for ${acct.meta_account_id}:`, err);
         }
       }
