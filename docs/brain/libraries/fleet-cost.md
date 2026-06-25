@@ -39,7 +39,7 @@ async function rollupFleetCost(opts?: FleetCostRollupOpts): Promise<FleetCostRol
 ## Callers
 
 - **Writer:** `scripts/builder-worker.ts` — `meterAgentJob()` calls `recordAgentJobCost()` after every `claude -p` turn (`runClaude` → `extractClaudeUsage`), keyed to the job + its Max account / config-dir.
-- **Reader:** the [[../specs/fleet-spend-governor]] (budget supervision) + [[../specs/platform-department-scorecard]] spend KPI call `rollupFleetCost()`.
+- **Reader:** the [[../specs/fleet-spend-governor]] (budget supervision — see [[fleet-spend-governor]] for the [[../tables/fleet_budgets]] config surface) + [[../specs/platform-department-scorecard]] spend KPI call `rollupFleetCost()`.
 
 ## Gotchas
 
@@ -49,4 +49,4 @@ async function rollupFleetCost(opts?: FleetCostRollupOpts): Promise<FleetCostRol
 
 ## Related
 
-[[../tables/agent_job_costs]] · [[ai-usage]] · [[../tables/ai_token_usage]] · [[control-tower]] · [[../specs/fleet-cost-metering]] · [[../specs/fleet-spend-governor]] · [[../specs/platform-department-scorecard]]
+[[../tables/agent_job_costs]] · [[ai-usage]] · [[../tables/ai_token_usage]] · [[control-tower]] · [[fleet-spend-governor]] · [[../tables/fleet_budgets]] · [[../specs/fleet-cost-metering]] · [[../specs/fleet-spend-governor]] · [[../specs/platform-department-scorecard]]

@@ -9,12 +9,15 @@ The goal's success metric requires "fleet spend is **budgeted + visible** on the
 Per the supervisable-autonomy north star ([[../operational-rules]] § North star), an autonomous tool that hits a guardrail **escalates, it does not execute around it**. Spend is the bounded proxy; the objective (a healthy, affordable fleet) is the director's. So this governor never auto-throttles or kills a lane behind the owner's back — an over-budget trend routes **up** the org chart to the supervisor, who decides. Budgets are surfaced guardrails, not silent kill-switches.
 
 ## Phase 1 — budgets
-- ⏳ planned
+- ✅ shipped
 - A budget config — a new `fleet_budgets` table (or a config block) — keyed per `agent_jobs.kind` and/or per `owner_function`, expressing a ceiling in the [[fleet-cost-metering]] units (token / usage-window per day or week, plus `$` where API-billed). Sensible defaults seeded; owner-editable.
 - Brain: new `tables/fleet_budgets` + `libraries/fleet-spend-governor`.
 
 ### Verification — Phase 1
-- A `fleet_budgets` row exists per active lane/function with a default ceiling; editing one persists and reads back.
+- After applying `scripts/apply-fleet-budgets-migration.ts`, `select count(*) from public.fleet_budgets where workspace_id is null` returns **21** (16 per-kind defaults + 5 per-function envelopes — the 16 agent-kind lanes registered in `MONITORED_LOOPS` + the platform/cs/cmo/growth/retention functions).
+- The `fleet_budgets_scope_xor` constraint rejects any insert with both `kind` and `owner_function` set, and any insert with neither — `select` exactly one is set per seeded row.
+- From a Node REPL: `upsertFleetBudget({ kind: 'build', tokenCeiling: 300_000_000 })` then `getEffectiveBudget(null, 'kind', 'build')` returns the updated row (`tokenCeiling === 300000000`); deleting the row falls back to the seeded global default on the next `getEffectiveBudget` call.
+- `update public.fleet_budgets set notes='edit' where kind='build' and workspace_id is null` bumps `updated_at` (trigger `fleet_budgets_touch_updated_at`).
 
 ## Phase 2 — track spend-to-budget + escalate on overrun
 - ⏳ planned
