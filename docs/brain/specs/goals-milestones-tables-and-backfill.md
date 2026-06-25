@@ -60,3 +60,24 @@ The foundation step for the goal side of [[../goals/db-driven-specs]]. Stand up 
 - Goal rollup (proposed never auto-greenlights): seed a `proposed` goal G with one milestone M; set `M.status='complete'` → expect `G.status` to stay `proposed` (the rail; only the CEO greenlight button moves `proposed → greenlit`).
 - Milestone rollup: seed a milestone M with one `specs` row S (`milestone_id=M`, `status='planned'`). Expect `M.status='planned'`. Set `S.status='in_progress'` (via the [[spec_phases]] rollup or directly) → expect `M.status='in_progress'`. Set `S.status='shipped'` → expect `M.status='complete'`.
 - FK behavior: DELETE a `goal_milestones` row that has a spec attached → expect the spec to survive with `milestone_id` reset to null (the standalone-spec shape).
+
+## Verification (Phase 2)
+
+- `npx tsc --noEmit` → exit 0; `src/lib/goals-table.ts` exports `getGoal`, `listGoals`, `upsertGoal`, `setGoalStatus`, `setMilestoneStatus`, `attachSpecToMilestone` and the types `GoalRow`, `MilestoneRow`, `GoalWithMilestones`, `GoalInput`, `MilestoneInput`, `GoalStatus`, `MilestoneStatus`, `ListGoalsFilter`.
+- Status-preserving UPSERT: from a Node REPL / one-off script — `upsertGoal(ws, { slug: 'temp', title: 't', body: 'b', owner: 'platform', status: 'proposed' }, [])` → row created `proposed`. Then `setGoalStatus(id, 'greenlit', 'ceo')`. Then `upsertGoal(ws, { slug: 'temp', title: 't', body: 'b changed', owner: 'platform', status: 'proposed' }, [])` again → expect the row's status to remain `greenlit` (the re-upsert must NOT clobber the CEO greenlight).
+- Milestone id preservation: `upsertGoal(ws, goal, [{title: 'M1 — a'}, {title: 'M2 — b'}])` → record both milestone ids. `upsertGoal(ws, goal, [{title: 'M1 — a renamed'}, {title: 'M2 — b'}])` → expect M1's id to be UNCHANGED (renames preserve id by position).
+- Milestone drop: `upsertGoal(ws, goal, [{title: 'M1 — a'}])` (was 2) → expect the M2 row to be DELETED; any `specs.milestone_id` pointing at M2 reset to null (the `on delete set null` FK).
+- `attachSpecToMilestone(specId, milestoneId)` writes `specs.milestone_id`; passing `null` detaches. The `specs_milestone_rollup` trigger fires the rollup on BOTH the old + the new milestone.
+
+## Verification (Phase 3)
+
+- `npx tsx scripts/backfill-goals-from-markdown.ts` (dry run) → prints `Parsed N goal markdown file(s)` for each file in `docs/brain/goals/*.md` and per-workspace `would upsert ...` lines; no rows written.
+- `npx tsx scripts/backfill-goals-from-markdown.ts --apply` → for every workspace prints per-goal `backfilled {slug}: {N} milestones, status={X}, {M} specs attached`. Post-apply: `✓ no backwards drift` (the markdown-vs-DB parity check) or a flagged list of slugs requiring human review.
+- Coverage: `SELECT COUNT(*) FROM goals WHERE workspace_id = $ws` equals the count of `docs/brain/goals/*.md` files (minus README.md). For every goal slug, `SELECT COUNT(*) FROM goal_milestones WHERE goal_id = (SELECT id FROM goals WHERE slug = $slug)` matches the parsed milestone count printed by the script.
+- Spot-checks:
+  - `db-driven-specs` (top-level CEO goal): `goals.status='greenlit'`, `parent_goal_id` set to the `ceo-mode` goal's id, 5 `goal_milestones` rows (M1…M5), and all M1…M4 specs attached via `specs.milestone_id` pointing at the right milestone (this Phase 1 spec attached to M5).
+  - A SubGoal candidate (e.g. `storefront-optimizer`): `parent_goal_id` set to `ceo-mode`'s id (from `Reports to: [[ceo-mode]]`).
+  - A still-proposed goal: `goals.status='proposed'`; running the backfill again leaves it `proposed` (no auto-greenlight).
+- Idempotence: re-run `--apply` → expect every per-goal line to print and NO row changes (existing rows match incoming inputs; `specs.milestone_id` is only set when currently null AND the match is unambiguous).
+- Standalone specs: a function-mandate spec (e.g. one whose `**Parent:**` references a function rather than a goal milestone) keeps `milestone_id=null` after the run. Count: `SELECT COUNT(*) FROM specs WHERE workspace_id=$ws AND milestone_id IS NULL` is non-zero for these specs.
+- No reader cutover: `getGoals` / `getGoal` ([[../libraries/brain-roadmap]] L1004+) still read `docs/brain/goals/*.md` (untouched); the board still renders from markdown.
