@@ -144,6 +144,32 @@ export function isBareLifecycle(message: string): boolean {
 }
 
 /**
+ * Inngest's built-in `LoggerMiddleware` "step error" log line — drop before signature
+ * grouping ([[../specs/error-feed-drop-bare-inngest-step-error-middleware-log]]).
+ *
+ * The Inngest SDK's `LoggerMiddleware.onStepError` fires on EVERY step throw (transient
+ * + final) with `proxyLogger.error({ err: arg.error }, 'Inngest step error')`. The
+ * actual error object lives in the JSON `err` context — Vercel's drain serializes only
+ * the bare Pino `msg` field, so what reaches us is the literal label `"Inngest step
+ * error"` with no error body. Terminal failures are already authoritatively captured on
+ * `source='inngest'` by inngest-failure-capture.ts (triggers on
+ * `inngest/function.failed`), so the bare middleware log on `/api/inngest` is duplicate
+ * noise on a healthy retry loop — minting a fresh OPEN incident for it pages Platform
+ * owners on a function that already self-heals (Control Tower `vercel:b1daa612f563f5e9`).
+ *
+ * `true` ONLY for path `/api/inngest` + the exact bare `"Inngest step error"` message.
+ * A log with the same label but additional body (a real stack/detail Vercel managed to
+ * surface) is NOT bare and is still captured.
+ */
+export function isBareInngestStepErrorMiddlewareLog(
+  message: string,
+  path: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  return (message ?? "").trim() === "Inngest step error";
+}
+
+/**
  * Inngest TRANSPORT-layer failure noise — the inngest companion to `isBareLifecycle` /
  * `isAbortedStreamNoise`, factored here so the capture path can reuse it
  * ([[../specs/error-feed-drop-inngest-transport-http-unreachable]]).

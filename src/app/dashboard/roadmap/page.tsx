@@ -16,6 +16,7 @@ import { AgentTestedStamp, TestChip } from "../developer/spec-tests/SpecTestView
 // The board reads docs/brain/specs at request time — always reflect the live brain.
 
 const COLUMNS: { key: SpecStatus; label: string }[] = [
+  { key: "in_review", label: "In Review" },
   { key: "planned", label: "Planned" },
   { key: "in_progress", label: "In progress" },
   // "Shipped" = built + deployed but NOT yet owner-verified in prod. Verifying folds + archives the
@@ -29,6 +30,7 @@ const COLUMNS: { key: SpecStatus; label: string }[] = [
 const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
+  in_review: "bg-slate-400",
   shipped: "bg-emerald-500",
   deferred: "bg-slate-400",
   rejected: "bg-rose-400",
@@ -37,6 +39,7 @@ const DOT: Record<SpecStatus, string> = {
 const HEADER_ACCENT: Record<SpecStatus, string> = {
   planned: "text-zinc-500",
   in_progress: "text-amber-600",
+  in_review: "text-slate-500",
   shipped: "text-emerald-600",
   deferred: "text-slate-500",
   rejected: "text-rose-600",

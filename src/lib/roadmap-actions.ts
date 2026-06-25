@@ -99,6 +99,18 @@ export async function queueRoadmapBuild(
 
   let instructions = typeof opts.instructions === "string" && opts.instructions.trim() ? opts.instructions : null;
 
+  // review-agent Phase 1 — in_review hard-stop: a spec parked in the `in_review` column is awaiting owner
+  // approval and is NOT cleared to build. This is THE guardrail — every build path (BuildButton, Slack
+  // `/build`, the planner, the autonomous chain) routes through this enqueue chokepoint, so an in_review
+  // spec can't be built by ANY caller. Verify/fold (handled above) is exempt; it retires an already-shipped
+  // spec, not a build. The owner approves the spec out of in_review (→ planned) before it's buildable.
+  {
+    const reviewSpec = await getSpec(slug, workspaceId);
+    if (reviewSpec?.card.status === "in_review") {
+      return { ok: false, status: 409, error: "spec is in review — not approved to build yet" };
+    }
+  }
+
   // "Build all phases" (build-all-phases-chain Phase 1): queue the spec's FIRST ⏳ phase, tagged
   // chain_phases so the post-merge step (reconcileMergedJobs → queueNextChainedPhase) auto-queues the next
   // ⏳ phase once this one merges (composing with auto-ship-pipeline auto-merge), chaining to all-✅ with no

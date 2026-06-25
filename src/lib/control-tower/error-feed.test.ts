@@ -13,6 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
@@ -211,4 +212,41 @@ test("isTransientSupabaseLogNoise never treats auth errors as transient", () => 
 test("isTransientSupabaseLogNoise returns false on empty postgres message", () => {
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "" }), false);
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: null }), false);
+});
+
+// ── isBareInngestStepErrorMiddlewareLog (error-feed-drop-bare-inngest-step-error-middleware-log) ──
+// The Inngest SDK's LoggerMiddleware.onStepError fires on every step throw with
+// `proxyLogger.error({ err: arg.error }, 'Inngest step error')`. Vercel's drain serializes only
+// the bare Pino msg field, so what reaches our ingester is the literal label with no body.
+// Terminal failures are already captured on source='inngest' by inngest-failure-capture.ts —
+// the bare middleware log on /api/inngest is duplicate noise that opened Control Tower
+// signature `vercel:b1daa612f563f5e9`.
+
+test("isBareInngestStepErrorMiddlewareLog drops the exact bare label on /api/inngest", () => {
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest step error", "/api/inngest"), true);
+  assert.equal(isBareInngestStepErrorMiddlewareLog("  Inngest step error  ", "/api/inngest"), true);
+});
+
+test("isBareInngestStepErrorMiddlewareLog KEEPS the same label on a different path", () => {
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest step error", "/api/other"), false);
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest step error", null), false);
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest step error", undefined), false);
+});
+
+test("isBareInngestStepErrorMiddlewareLog KEEPS a non-bare message on /api/inngest (real body)", () => {
+  // Same label PLUS additional detail Vercel managed to surface ⇒ not bare, still captured.
+  assert.equal(
+    isBareInngestStepErrorMiddlewareLog("Inngest step error: TypeError: x is undefined", "/api/inngest"),
+    false,
+  );
+  // An unrelated message on /api/inngest is also kept.
+  assert.equal(
+    isBareInngestStepErrorMiddlewareLog("Task timed out after 10s", "/api/inngest"),
+    false,
+  );
+});
+
+test("isBareInngestStepErrorMiddlewareLog returns false on empty / nullish input", () => {
+  assert.equal(isBareInngestStepErrorMiddlewareLog("", "/api/inngest"), false);
+  assert.equal(isBareInngestStepErrorMiddlewareLog("   ", "/api/inngest"), false);
 });
