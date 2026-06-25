@@ -1,0 +1,1 @@
+- **Daily digest — one Slack post/day to #daily-digest** · verified 2026-06-25 · → [[../inngest/daily-digest-cron]]
