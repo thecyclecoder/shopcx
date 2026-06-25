@@ -54,4 +54,4 @@ Phase 3 of the spec replaces ad-hoc enum lists in `src/lib/agents/` (every place
 - **Best-effort by design.** A failed read on any sub-source returns the empty shape — the coach turn must never block on a transient DB hiccup.
 
 ## Related
-[[../specs/director-coach-canonical-box-snapshot]] · [[../tables/agent_jobs]] · [[../tables/director_directives]] · [[../tables/director_activity]] · [[../tables/spec_card_state]] · [[director-directives]] · [[platform-director]] · [[../specs/director-executable-plans-and-priority]] · [[../specs/no-parked-specs-auto-route-needs-attention]]
+[[../specs/director-coach-canonical-box-snapshot]] · [[../tables/agent_jobs]] · [[../tables/director_directives]] · [[../tables/director_activity]] · [[../tables/spec_card_state]] · [[director-directives]] · [[platform-director]] · [[../specs/no-parked-specs-auto-route-needs-attention]]

@@ -1,6 +1,6 @@
 # libraries/director-directives
 
-The **active-directive** store + build-gate ([[../specs/director-executable-plans-and-priority]]). A directive is a CEO-handed plan (via the coaching seat's `plan` intent) that the director's standing pass runs FIRST and which can pause the build queue until a fix ships.
+The **active-directive** store + build-gate ([[../libraries/platform-director]]). A directive is a CEO-handed plan (via the coaching seat's `plan` intent) that the director's standing pass runs FIRST and which can pause the build queue until a fix ships.
 
 **File:** `src/lib/agents/director-directives.ts` · **Table:** [[../tables/director_directives]]
 
