@@ -1,6 +1,6 @@
 # libraries/platform-scorecard
 
-The **department-level KPI aggregation engine** behind the [[../goals/platform-department-scorecard|Platform Department Scorecard]] ([[../specs/platform-scorecard-engine]] Phases 1–2; milestone (a) Daily pulse). Where [[director-xp]] / [[director-recap]] compute **per-director** gamification/EOD counts and [[meta__scorecards]] is the **ad** domain, this engine rolls the platform's own truth up to a **department KPI that trends over time**: each KPI computed over a **trailing window** with a **prior equal-length window delta** (mirroring the [[meta__scorecards]] window model), upserted into [[../tables/platform_scorecard_snapshots]].
+The **department-level KPI aggregation engine** behind the [[../goals/platform-department-scorecard|Platform Department Scorecard]] ([[../archive.d/platform-scorecard-engine]] Phases 1–2; milestone (a) Daily pulse). Where [[director-xp]] / [[director-recap]] compute **per-director** gamification/EOD counts and [[meta__scorecards]] is the **ad** domain, this engine rolls the platform's own truth up to a **department KPI that trends over time**: each KPI computed over a **trailing window** with a **prior equal-length window delta** (mirroring the [[meta__scorecards]] window model), upserted into [[../tables/platform_scorecard_snapshots]].
 
 **File:** `src/lib/agents/platform-scorecard.ts` (server-only — `createAdminClient` + [[brain-roadmap]] fs reads, like [[director-xp]] / [[director-recap]]).
 
@@ -64,4 +64,4 @@ The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-plat
 
 ## Related
 
-[[../specs/platform-scorecard-engine]] · [[../specs/regression-backlog-reconciliation-scorecard]] · [[../goals/platform-department-scorecard]] · [[../tables/platform_scorecard_snapshots]] · [[../inngest/platform-director-cron]] · [[meta__scorecards]] · [[director-xp]] · [[director-recap]] · [[control-tower]] · [[../operational-rules]]
+[[../archive.d/platform-scorecard-engine]] · [[../specs/regression-backlog-reconciliation-scorecard]] · [[../goals/platform-department-scorecard]] · [[../tables/platform_scorecard_snapshots]] · [[../inngest/platform-director-cron]] · [[meta__scorecards]] · [[director-xp]] · [[director-recap]] · [[control-tower]] · [[../operational-rules]]

@@ -1,6 +1,6 @@
 # platform_scorecard_snapshots
 
-The **Platform Department Scorecard** trend store — one row per `(workspace_id, metric_key, cadence, snapshot_date)` holding the as-of value of one department KPI for one cadence's trailing window, with the prior equal-length window's value + the % delta for the trend arrow ([[../specs/platform-scorecard-engine]] Phase 1; milestone (a) of [[../goals/platform-department-scorecard]]). The shared aggregation substrate behind the whole scorecard goal: the data already exists ([[director_activity]] · [[agent_jobs]] · [[error_events]] · [[loop_alerts]] · [[approval_decisions]] + the grade tables) but nothing rolled it up to a KPI that **trends over time** — this table is that roll-up. Mirrors the [[iteration_scorecards_daily]] window model one level up (department, not ad).
+The **Platform Department Scorecard** trend store — one row per `(workspace_id, metric_key, cadence, snapshot_date)` holding the as-of value of one department KPI for one cadence's trailing window, with the prior equal-length window's value + the % delta for the trend arrow ([[../archive.d/platform-scorecard-engine]] Phase 1; milestone (a) of [[../goals/platform-department-scorecard]]). The shared aggregation substrate behind the whole scorecard goal: the data already exists ([[director_activity]] · [[agent_jobs]] · [[error_events]] · [[loop_alerts]] · [[approval_decisions]] + the grade tables) but nothing rolled it up to a KPI that **trends over time** — this table is that roll-up. Mirrors the [[iteration_scorecards_daily]] window model one level up (department, not ad).
 
 Written **only** by [[../libraries/platform-scorecard]] `computePlatformScorecard` (the engine is the sole writer); read by the scorecard page ([[../specs/platform-scorecard-surface]]) — downstream readers read **this** table, never the raw source tables ("read metrics from the scorecard" invariant from [[../libraries/meta__scorecards]]).
 
@@ -45,4 +45,4 @@ Mirrors [[director_decision_grades]] / [[agent_action_grades]]: any **authentica
 
 ---
 
-[[../README]] · [[../libraries/platform-scorecard]] · [[../inngest/platform-director-cron]] · [[../specs/platform-scorecard-engine]] · [[../goals/platform-department-scorecard]] · [[../../CLAUDE]]
+[[../README]] · [[../libraries/platform-scorecard]] · [[../inngest/platform-director-cron]] · [[../archive.d/platform-scorecard-engine]] · [[../goals/platform-department-scorecard]] · [[../../CLAUDE]]

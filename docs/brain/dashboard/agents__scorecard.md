@@ -16,7 +16,7 @@ The owner-only **Platform Department Scorecard** surface — milestone (d) of th
 - `GET /api/developer/agents/scorecard` (`src/app/api/developer/agents/scorecard/route.ts`) — owner-gated (`workspace_members.role='owner'`, 403 otherwise — mirrors every [[agents|Agents hub]] API). Reads **only** [[../tables/platform_scorecard_snapshots]] (the "read from the scorecard, never the raw tables" invariant from [[../libraries/meta__scorecards]]). Two modes:
   - default → `{ daily, weekly, monthly }`, the latest snapshot per `(metric_key, cadence)` with `value`, `prior_value`, `delta_pct`, `unit`, `window_days`, `snapshot_date`, `detail`.
   - `?metric=KEY&cadence=daily|weekly|monthly` → that metric's `history` (chronological, oldest → newest, up to 60 points) — the sparkline series.
-- The snapshot store is written **only** by [[../libraries/platform-scorecard]] `computePlatformScorecard` ([[../specs/platform-scorecard-engine]]) on the [[../inngest/platform-director-cron]] standing pass. This page is purely a reader; missing upstream data → "no data yet".
+- The snapshot store is written **only** by [[../libraries/platform-scorecard]] `computePlatformScorecard` ([[../archive.d/platform-scorecard-engine]]) on the [[../inngest/platform-director-cron]] standing pass. This page is purely a reader; missing upstream data → "no data yet".
 - The page's display config (label + polarity per metric) lives in [[../libraries/platform-scorecard-display]] — declarative, no migration to add a tile.
 
 ## Permissions
@@ -41,7 +41,7 @@ Owner-only — both the page (client `role` guard) and the API (`workspace_membe
 
 - [[../specs/platform-scorecard-surface]] — this spec
 - [[../specs/regression-backlog-reconciliation-scorecard]] — the two regression tiles (daily `regressions` + weekly `regression_coverage_pct`) + the dedicated board-watch line
-- [[../specs/platform-scorecard-engine]] / [[../specs/platform-scorecard-weekly]] / [[../specs/platform-scorecard-monthly]] — the engines that fill the snapshot store
+- [[../archive.d/platform-scorecard-engine]] / [[../specs/platform-scorecard-weekly]] / [[../specs/platform-scorecard-monthly]] — the engines that fill the snapshot store
 - [[../tables/platform_scorecard_snapshots]] · [[../libraries/platform-scorecard]] · [[../libraries/platform-scorecard-display]]
 - [[../libraries/platform-director]] `postPlatformWatchUpdate` — the board-watch line consumer
 - [[../libraries/director-recap]] — the EOD recap deep-link consumer
