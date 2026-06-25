@@ -1,0 +1,1 @@
+- **Today Sync — quiet ALL retry-exhausted Meta transients, not just subcode 1504018** · verified 2026-06-25 · → [[../inngest/today-sync]]
