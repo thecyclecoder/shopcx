@@ -45,7 +45,6 @@ import {
  * assigned arm emits client-side from the `sx_variant` cookie (the pixel),
  * internal/bot excluded.
  */
-export const revalidate = 3600;
 export const dynamicParams = true;
 
 /**

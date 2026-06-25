@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { cacheLife } from "next/cache";
 import type { Metadata } from "next";
 
 import { getBlogWorkspaceBySlug } from "../../../_lib/blog-data";
@@ -15,7 +16,6 @@ import { storefrontThemeStyle } from "../../../_lib/storefront-theme";
  * {domain}/links ONCE; this page stays current automatically (the poster
  * records every post + its image, this reads it). Mobile-first.
  */
-export const revalidate = 300;
 export const dynamicParams = true;
 
 const MAIN_SITE = "https://superfoodscompany.com";
@@ -34,6 +34,9 @@ export async function generateMetadata({ params }: { params: Promise<{ workspace
 }
 
 export default async function LinksPage({ params }: { params: Promise<{ workspace: string }> }) {
+  "use cache";
+  cacheLife({ stale: 300, revalidate: 300, expire: 300 });
+
   const { workspace } = await params;
   const ws = await getBlogWorkspaceBySlug(workspace);
   if (!ws) notFound();
