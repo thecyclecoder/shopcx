@@ -33,10 +33,19 @@ export type DirectorActionKind =
   | "deploy_unsure" // a deploy's post-deploy signal was ambiguous → escalate, never auto-act.
   // deploy-health-rollback-guardian Phase 2 — Reva acts on `regressed`.
   | "deploy_rolled_back" // a regressed deploy was auto-reverted to the prior good build (+ escalated to the CEO).
-  // spec-review-agent Phase 2 — Vale stamps one per in_review spec it processes.
-  | "spec_review_approved" // sound + needed now → spec flipped from in_review to planned.
-  | "spec_review_deferred" // sound but parked per the spec's own directive → flipped to deferred + flags.deferred set.
-  | "spec_review_needs_fix"; // checklist failed (mangled phases / missing owner / parent / verification / blockers / db-companion) — diagnosis recorded; spec stays in_review.
+  // spec-review-agent Phase 2 — Vale stamps one per in_review spec it processes (LEGACY Phase-2 vocabulary
+  // kept for ledger continuity — `spec_review_approved`/`spec_review_deferred` are no longer emitted by
+  // the live writer; the Phase 3 narrow-to-quality replaces them with `spec_review_passed`).
+  | "spec_review_approved" // (legacy) sound + needed now → spec flipped from in_review to planned.
+  | "spec_review_deferred" // (legacy) sound but parked per the spec's own directive → flipped to deferred + flags.deferred set.
+  | "spec_review_needs_fix" // checklist failed (mangled phases / missing owner / parent / verification / blockers / db-companion) — diagnosis recorded; spec stays in_review.
+  // spec-review-agent Phase 3 — Vale narrowed to QUALITY ONLY; one verdict per in_review spec.
+  | "spec_review_passed" // well-formed (CHECKLIST cleared) → flags.vale_pass=true; spec stays in_review for Ada's disposition lane.
+  // spec-review-agent Phase 3 — Ada's director-disposition lane (autonomous, with asymmetric check vs the
+  // author's `flags.intended_status`). One row per Vale-passed spec she disposes.
+  | "spec_dispose_same" // suggestion == decision (planned→planned OR deferred→deferred) — autonomous flip, applied silently.
+  | "spec_dispose_downgrade" // author suggested `planned`, Ada deferred — autonomous flip + a CEO notification (one-click override to planned).
+  | "spec_dispose_upgrade_proposed"; // author suggested `deferred`, Ada wants `planned` — GATED, parks a CEO approval card (Planned / Deferred + reason).
 
 export interface DirectorActivityInput {
   workspaceId: string;

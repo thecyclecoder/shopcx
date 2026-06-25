@@ -68,7 +68,7 @@ import {
   type RegressionInstructions,
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
-import { markSpecCardStatus, type SpecCardFlags } from "@/lib/spec-card-state";
+import { markSpecCardForReview, markSpecCardStatus, type SpecCardFlags } from "@/lib/spec-card-state";
 import {
   driftSuspectPhases,
   isCardFullyShippedWithProvenance,
@@ -3800,6 +3800,20 @@ export async function applyDirectorAuthorFollowup(
   const put = await commit(path, String(followup.content ?? ""), message);
   if (!put.ok && !put.existed) return { ok: false, error: `followup spec commit failed${put.status ? ` (status ${put.status})` : ""}`, authoredSlug: slug, existed: false };
 
+  // spec-review-agent Phase 3 — a director-authored followup is a freshly-created spec; mark its card
+  // `in_review` with `flags.intended_status='planned'` (the director only authors followups she wants
+  // built). Skip on `existed` (re-author over an already-tracked spec — its card state is whatever the
+  // original author left it). Best-effort: a mirror-write failure is swallowed (caller's `ok` doesn't gate on this).
+  if (!put.existed) {
+    try {
+      await markSpecCardForReview(workspaceId, slug, "planned", {
+        actor: `director:${PLATFORM}`,
+        reason: `${lane}: author_followup_spec — intended planned (director-authored followup)`,
+      });
+    } catch (e) {
+      console.warn(`[platform-director] markSpecCardForReview failed for followup ${slug}:`, e instanceof Error ? e.message : e);
+    }
+  }
   const ledger = laneLedgerKey(lane, candidate.slug, candidate.signature);
   const actionKind = lane === "groom" ? "groomed_authored_spec" : lane === "init" ? "init_authored_spec" : "repair_authored_spec";
   const metadata: Record<string, unknown> = {

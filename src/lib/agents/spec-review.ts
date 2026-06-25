@@ -3,10 +3,18 @@
  *
  * **Vale** reviews every newly-authored spec while it sits in the `in_review` column (status that sits
  * BEFORE `planned`, the hard-stop the build pipeline refuses to dispatch). One pass per cadence reads each
- * `in_review` spec against the authoring CHECKLIST and emits a verdict per spec: `approve` (sound + needed
- * now → flip status to `planned`), `defer` (sound but parked — flag `flags.deferred` + flip status to
- * `deferred`), or `needs_fix` (malformed — record the diagnosis as a director_activity row so the CEO sees
- * the defect; the spec stays in `in_review` until the corrections land).
+ * `in_review` spec against the authoring CHECKLIST and emits ONE quality verdict per spec:
+ *
+ *   - `pass`       — the spec is well-formed (CHECKLIST clears). Sets `flags.vale_pass=true` on the card;
+ *                    the spec stays in `in_review` to enter Ada's **director-disposition lane** (Phase 3).
+ *   - `needs_fix`  — the spec is malformed. The defects surface as a `director_activity` row so the CEO
+ *                    sees the diagnosis; the spec stays in `in_review` until the corrections land.
+ *
+ * Phase 3 (governance: author proposes · Vale checks quality · the DIRECTOR disposes) narrowed Vale to
+ * QUALITY ONLY — she no longer decides planned/deferred. The `approve`/`defer` legs that lived on Vale in
+ * Phase 2 belong to Ada now. The legacy verdict strings still parse for back-compat (a Vale pass that
+ * arrives as the old `approve` is auto-routed as `pass`; a legacy `defer` is treated as `pass` since
+ * the deferred/planned call is no longer Vale's).
  *
  * The actual review reasoning runs on the box as a `claude -p` pass (`runSpecReviewJob` in
  * `scripts/builder-worker.ts`); this module holds the typed verdict-applier the worker calls + the
@@ -15,16 +23,18 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   effectiveStatusFromState,
-  markSpecCardDeferred,
-  markSpecCardStatus,
+  markSpecCardValePassed,
   type SpecCardFlags,
 } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-/** Vale's per-spec verdict. The shape the worker hands to `applySpecReviewDecision`. */
-export type SpecReviewVerdict = "approve" | "defer" | "needs_fix";
+/**
+ * Vale's per-spec quality verdict (Phase 3 — narrowed). `pass` = well-formed (Ada's disposition lane
+ * picks it up next); `needs_fix` = malformed (the diagnosis surfaces; the spec stays in_review).
+ */
+export type SpecReviewVerdict = "pass" | "needs_fix";
 
 export interface SpecReviewDecision {
   slug: string;
@@ -37,8 +47,13 @@ export interface SpecReviewDecision {
 
 /**
  * `(workspaceId, slug)` pairs in `in_review` for one workspace — Vale's queue per pass. Reads from
- * `spec_card_state` (the source of truth post-spec-status-db-driven). Empty if the row is missing — a
- * spec that has never had a card-state row written is treated as `planned` (its markdown default).
+ * `spec_card_state` (the source of truth post-spec-status-db-driven). A spec that has never had a
+ * card-state row written is treated as `planned` (its markdown default).
+ *
+ * Phase 3: this queue is the FULL `in_review` pool — Vale checks quality on every spec, EVEN ones already
+ * carrying `flags.vale_pass=true`. The dedup is in the worker (a `vale_pass` spec is included in the prompt
+ * only when the spec markdown has changed since the prior pass) — but a fresh selectInReviewSpecs caller
+ * (Ada's disposition lane) reads `flags.vale_pass` directly off the row to skip its own re-check.
  */
 export async function selectInReviewSpecs(admin: Admin, workspaceId: string): Promise<string[]> {
   const { data, error } = await admin
@@ -99,36 +114,39 @@ export async function enqueueSpecReviewIfDue(
 }
 
 /**
- * Apply ONE Vale decision to spec_card_state + record the audit trail. Approve flips to `planned`; defer
- * sets `flags.deferred` (which wins over status for display via `effectiveStatusFromState`) + a status
- * flip to `deferred` so the rollup is consistent; needs_fix leaves the spec in `in_review` and records the
- * defects as a director_activity row (the CEO sees the diagnosis on the activity feed).
+ * Apply ONE Vale quality decision to spec_card_state + record the audit trail (Phase 3).
+ *
+ *   - `pass` sets `flags.vale_pass=true` (the spec stays in `in_review` for Ada's disposition lane);
+ *   - `needs_fix` leaves the row untouched but records the defects as a director_activity row.
  *
  * Best-effort + idempotent — re-running with the same verdict produces the same end state.
+ *
+ * Back-compat: a legacy Phase-2 verdict (`approve` / `defer`) auto-routes as `pass` (the disposition is
+ * Ada's call now). The director_activity action_kind reflects the live Phase-3 vocabulary so the audit
+ * ledger doesn't carry orphaned legacy strings.
  */
 export async function applySpecReviewDecision(
   workspaceId: string,
-  decision: SpecReviewDecision,
+  decision: SpecReviewDecision | { slug: string; verdict: string; reason: string; defects?: string[] },
 ): Promise<{ ok: boolean; reason?: string; applied?: SpecReviewVerdict }> {
   const admin = createAdminClient();
   const reason = (decision.reason || "").slice(0, 1000);
   const actor = "spec-review";
-  const action_kind =
-    decision.verdict === "approve"
-      ? "spec_review_approved"
-      : decision.verdict === "defer"
-        ? "spec_review_deferred"
-        : "spec_review_needs_fix";
+  // Back-compat: a Phase-2 approve/defer arrives here from a stale skill prompt; treat both as `pass`
+  // (the disposition is Ada's call now; Vale only decides quality).
+  const verdict: SpecReviewVerdict =
+    decision.verdict === "needs_fix"
+      ? "needs_fix"
+      : decision.verdict === "pass" || decision.verdict === "approve" || decision.verdict === "defer"
+        ? "pass"
+        : "needs_fix"; // unknown verdict → safest is no-op-of-state + diagnosis surfaced
+  const action_kind = verdict === "pass" ? "spec_review_passed" : "spec_review_needs_fix";
   try {
-    if (decision.verdict === "approve") {
-      await markSpecCardStatus(workspaceId, decision.slug, "planned", undefined, { actor, reason });
-    } else if (decision.verdict === "defer") {
-      // Flip status + set the deferred flag so display + rollup agree.
-      await markSpecCardStatus(workspaceId, decision.slug, "deferred", undefined, { actor, reason });
-      await markSpecCardDeferred(workspaceId, decision.slug, true, { actor, reason });
+    if (verdict === "pass") {
+      await markSpecCardValePassed(workspaceId, decision.slug, { actor, reason });
     }
-    // needs_fix leaves the spec in_review (the build hard-stop keeps holding). The defect surfaces via
-    // the director_activity row so the CEO sees what Vale flagged.
+    // needs_fix leaves the spec in_review (the build hard-stop holds). The defect surfaces via the
+    // director_activity row so the CEO sees what Vale flagged.
     await recordDirectorActivity(admin, {
       workspaceId,
       directorFunction: "platform",
@@ -137,10 +155,10 @@ export async function applySpecReviewDecision(
       reason,
       metadata: { defects: decision.defects ?? [] },
     });
-    return { ok: true, applied: decision.verdict };
+    return { ok: true, applied: verdict };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[spec-review] apply ${decision.verdict} for ${decision.slug} failed:`, msg);
+    console.warn(`[spec-review] apply ${verdict} for ${decision.slug} failed:`, msg);
     return { ok: false, reason: msg };
   }
 }

@@ -57,6 +57,29 @@ export interface SpecCardFlags {
    * only (the board reads it for the card's "✓ #PR" chip). Paired with `last_merge_sha` (already set).
    */
   merged_pr?: number;
+  /**
+   * spec-review-agent Phase 3 — the AUTHOR'S intended destination at spec creation: where they'd like
+   * the spec to land once Vale clears it. A SUGGESTION, not binding — Ada (the director) disposes, with
+   * an asymmetric check vs this signal (same → autonomous, UPGRADE → CEO-gated, DOWNGRADE → autonomous
+   * + notify). Captured by every spec-creation surface on first write of the card row (planner,
+   * triage, fix-spec builders, director split/author, Ada/coach). Lives on the DB, NEVER in the
+   * markdown — "the database is the spec." Cleared once disposition completes (the spec leaves in_review).
+   */
+  intended_status?: "planned" | "deferred";
+  /**
+   * spec-review-agent Phase 3 — Vale's quality verdict on this spec: `true` iff she ran the CHECKLIST
+   * and the spec passed (well-formed). A `vale_pass=true` spec is ready for Ada's disposition lane;
+   * a missing/`false` flag (or `vale_pass` set after a needs_fix bounce) means Ada must not dispose yet.
+   * Cleared on a status flip out of in_review (the disposition has landed, the flag is consumed).
+   */
+  vale_pass?: boolean;
+  /**
+   * spec-review-agent Phase 3 — Ada's disposition record (per-spec, one shot). Set when she autonomously
+   * applies a decision OR when she opens a gated proposal to the CEO. The board reads this to know that
+   * the disposition lane has already touched a Vale-passed spec and the same Ada pass should NOT re-touch
+   * it (dedupe). Cleared when the spec leaves in_review (the lane is consumed).
+   */
+  ada_disposition?: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade";
   [k: string]: boolean | string | number | undefined;
 }
 
@@ -376,6 +399,94 @@ export async function markSpecCardMergeShipped(
 /** Set/clear the `blocked` transient flag (spec-blockers — a spec gated behind an uncleared prerequisite). */
 export async function markSpecCardBlocked(workspaceId: string, slug: string, blocked: boolean): Promise<void> {
   await upsertCardState(workspaceId, slug, { flags: { blocked } });
+}
+
+/**
+ * spec-review-agent Phase 3 — the spec-creation entry point. Sets the card to `in_review` (the build
+ * pipeline refuses it until cleared) AND records the AUTHOR'S intended destination (`planned` or
+ * `deferred`) on `flags.intended_status` — a SUGGESTION the director (Ada) uses for her disposition lane,
+ * never binding. Idempotent: re-calling on an already-`in_review` row leaves the existing
+ * `intended_status` intact when the caller passes the same value, and audits a status transition only on a
+ * net change. Every NEWLY-authored spec-creation surface (planner, triage, fix-spec builders, director
+ * split/author, Ada/coach) should call this immediately after committing the spec markdown.
+ */
+export async function markSpecCardForReview(
+  workspaceId: string,
+  slug: string,
+  intendedStatus: "planned" | "deferred",
+  audit: { actor: string; reason?: string },
+): Promise<void> {
+  await upsertCardState(
+    workspaceId,
+    slug,
+    { status: "in_review", flags: { intended_status: intendedStatus } },
+    [{ field: "status", actor: audit.actor, reason: audit.reason ?? `spec authored — intended_status=${intendedStatus}` }],
+  );
+}
+
+/**
+ * spec-review-agent Phase 3 — Vale's quality verdict (pass leg): record that she walked the CHECKLIST
+ * and the spec is well-formed. Sets `flags.vale_pass=true` so Ada's disposition lane can pick it up.
+ * Does NOT flip the status — a passed spec stays in `in_review` until Ada (or, on UPGRADE, the CEO)
+ * disposes it. The bounce leg (`needs_fix`) doesn't touch this flag; it surfaces via `director_activity`.
+ */
+export async function markSpecCardValePassed(
+  workspaceId: string,
+  slug: string,
+  audit: { actor: string; reason?: string },
+): Promise<void> {
+  await upsertCardState(workspaceId, slug, { flags: { vale_pass: true } }, [
+    { field: "status", actor: audit.actor, reason: audit.reason ?? "vale: pass (quality check cleared)" },
+  ]);
+}
+
+/**
+ * spec-review-agent Phase 3 — Ada's disposition: flip a Vale-passed `in_review` spec to its final
+ * column (`planned` or `deferred`) and CONSUME the disposition flags (clear `intended_status`,
+ * `vale_pass`, `ada_disposition` so the same lane can't re-touch it). Records who/what on the audit
+ * ledger. The `kind` records the asymmetric branch: same → autonomous_same, downgrade → autonomous_downgrade.
+ * UPGRADE (gated) does NOT call this directly — it parks `flags.ada_disposition='pending_upgrade'` and
+ * the CEO's pick resolves it (via the standard `markSpecCardStatus` / `markSpecCardDeferred` writers).
+ */
+export async function applyAdaDisposition(
+  workspaceId: string,
+  slug: string,
+  decision: "planned" | "deferred",
+  kind: "autonomous_same" | "autonomous_downgrade",
+  audit: { actor: string; reason?: string },
+): Promise<void> {
+  // For 'deferred' we mirror the spec-review Phase-2 writer (status='deferred' + flags.deferred=true)
+  // so display + rollup agree; un-deferring restores the underlying phase progress via flags.deferred=false.
+  const status: SpecStatus = decision;
+  const patch: { status?: SpecStatus; flags?: SpecCardFlags } = {
+    status,
+    flags: {
+      intended_status: undefined,
+      vale_pass: undefined,
+      ada_disposition: undefined,
+      deferred: decision === "deferred",
+    },
+  };
+  await upsertCardState(workspaceId, slug, patch, [
+    { field: "status", actor: audit.actor, reason: audit.reason ?? `ada: ${kind} → ${decision}` },
+    { field: "deferred", actor: audit.actor, reason: audit.reason ?? `ada: ${kind} → ${decision}` },
+  ]);
+}
+
+/**
+ * spec-review-agent Phase 3 — Ada parks an UPGRADE pending the CEO's approval (suggestion=`deferred`,
+ * she wants `planned`). The spec stays in `in_review`; `flags.ada_disposition='pending_upgrade'`
+ * dedupes the lane (the next sweep skips it). The CEO's pick resolves to either `applyAdaDisposition`
+ * (build it now) or markSpecCardDeferred (park it).
+ */
+export async function markSpecCardPendingUpgrade(
+  workspaceId: string,
+  slug: string,
+  audit: { actor: string; reason?: string },
+): Promise<void> {
+  await upsertCardState(workspaceId, slug, { flags: { ada_disposition: "pending_upgrade" } }, [
+    { field: "status", actor: audit.actor, reason: audit.reason ?? "ada: parking UPGRADE for CEO approval" },
+  ]);
 }
 
 /**
