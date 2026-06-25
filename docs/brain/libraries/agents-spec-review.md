@@ -52,7 +52,19 @@ The agent stamps one of these `action_kind` values per spec ([[../tables/directo
 
 - `src/lib/inngest/spec-review-cron.ts` — the 15-min periodic enqueuer.
 - `scripts/builder-worker.ts` → `runSpecReviewJob` — claims the queued job, runs Vale on Max, applies every decision through `applySpecReviewDecision`, then runs Ada's disposition sweep ([[agents-spec-dispose]]) inline so a pass + dispose lands in one cron tick.
-- (Future) on-demand send-back from the CEO via [[../specs/spec-review-agent]] Phase 4.
+
+## Phase 4 — back-to-review (the shared mandate)
+
+[[../specs/spec-review-agent]] Phase 4 generalized the in_review lane: any agent that spots a malformed/off spec mid-flight flips the card back to `in_review` via [[spec-card-state]]'s `markSpecCardBackToReview` writer, so it returns to Vale's queue. The build pipeline refuses to dispatch an in_review spec — that's the whole point: don't build around a broken spec.
+
+The mandate applies to:
+- **Vale** (here) — a `needs_fix` verdict KEEPS the spec in `in_review` (no flip needed, but the same lane is enforced).
+- **Bo** (the build skill) — `.claude/skills/build-spec/SKILL.md` extends the empty/phaseless surface to ALL CHECKLIST defects: stop and surface `needs_input`, and the worker (or operator) flips the card back to `in_review` rather than patching it inline.
+- **Ada** (her chat-surface `spec-status` action) — emit `{type:'spec-status', slug, status:'in_review', reason}` to send a spec back to in_review (`applySpecStatusActionInline` in `scripts/builder-worker.ts` routes it through `markSpecCardBackToReview`).
+- **Repair / Regression** — when authoring a fix that'd extend an existing spec, if that spec is malformed the verdict is `needs-human` with the diagnosis; never silently patch a malformed parent.
+- **The CEO board control** — `POST /api/roadmap/status` accepts `status:'in_review'` (segment in `src/app/dashboard/roadmap/StatusControl.tsx`). Routes through `markSpecCardBackToReview` + records a `spec_sent_back_to_review` `director_activity` row with `actor=owner:{user_id}`.
+
+Every back-to-review write records a `director_activity` row with `action_kind='spec_sent_back_to_review'` so the CEO sees who sent it back and why.
 
 ## Brain links
 

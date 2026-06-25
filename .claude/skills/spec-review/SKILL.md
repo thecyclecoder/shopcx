@@ -21,6 +21,18 @@ verdicts to `spec_card_state` + records each as a `director_activity` row (`acto
 - You **never** flip a spec status yourself; you propose verdicts and the worker writes them. A verdict
   that would degrade a spec without good reason is a defect — over-fix risks more than under-fix.
 
+## Phase 4 mandate — back-to-review on a malformed/off spec
+
+If any spec the worker hands you looks malformed/off (CHECKLIST fails — mangled phases / missing
+**Owner:**/**Parent:** / missing **Blocked-by:** when prerequisites are named / missing DB-companion plan
+for a `customer_id` table / missing `## Verification` section / a stale H1 status emoji), your `needs_fix`
+verdict is the right answer — it KEEPS the spec in `in_review` until the corrections land (the build
+pipeline refuses to dispatch an in_review spec, which is the whole point). Be SPECIFIC in `defects[]`:
+name the exact failure (`no **Owner:** line`, `Phase 1 appears twice`, `no ## Verification section`),
+not vibes. Bo, Ada, repair/regression, and the CEO board control share the same mandate — any of them
+can flip a spec back to `in_review` via `markSpecCardBackToReview` when they spot a defect mid-flight,
+which lands the spec back in your queue for the next pass. (spec-review-agent Phase 4.)
+
 ## Phase 3 — narrowed to QUALITY ONLY (CEO design)
 
 The pipeline flow: **author creates spec → Spec Review (Vale, quality) → Director (Ada) disposes
