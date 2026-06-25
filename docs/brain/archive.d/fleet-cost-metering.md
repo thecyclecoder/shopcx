@@ -1,0 +1,1 @@
+- **Fleet Cost Metering** · verified 2026-06-25 · → [[tables/agent_job_costs]]
