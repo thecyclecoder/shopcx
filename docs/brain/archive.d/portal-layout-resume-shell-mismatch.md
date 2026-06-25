@@ -1,0 +1,1 @@
+- **Fix portal layout resume mismatch — wrap portal layout in a host element so metadata boundary doesn't collide with the page root** · verified 2026-06-25 · → [[operational-rules]]
