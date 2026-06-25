@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { cacheLife } from "next/cache";
 import type { Metadata } from "next";
 
 import {
@@ -26,7 +27,6 @@ import { StorefrontFooter } from "../../../_components/StorefrontFooter";
  * The page renders every published post into the initial HTML (crawler +
  * LLM friendly); the header topic tabs filter client-side via ?topic=.
  */
-export const revalidate = 3600;
 export const dynamicParams = true;
 
 const MAIN_SITE = "https://superfoodscompany.com";
@@ -74,6 +74,9 @@ export default async function BlogIndexPage({
 }: {
   params: Promise<{ workspace: string }>;
 }) {
+  "use cache";
+  cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
+
   const { workspace } = await params;
   const ws = await getBlogWorkspaceBySlug(workspace);
   if (!ws) notFound();

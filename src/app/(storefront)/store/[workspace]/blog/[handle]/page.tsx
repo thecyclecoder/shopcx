@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { cacheLife } from "next/cache";
 import type { Metadata } from "next";
 
 import {
@@ -35,7 +36,6 @@ function lazyifyHtml(html: string): string {
  * the middleware rewrite, and at /store/{ws}/blog/{handle} (noindex) for
  * admin preview.
  */
-export const revalidate = 3600;
 export const dynamicParams = true;
 
 const MAIN_SITE = "https://superfoodscompany.com";
@@ -111,6 +111,9 @@ export default async function BlogPostPage({
 }: {
   params: Promise<{ workspace: string; handle: string }>;
 }) {
+  "use cache";
+  cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
+
   const { workspace, handle } = await params;
   const ws = await getBlogWorkspaceBySlug(workspace);
   if (!ws) notFound();

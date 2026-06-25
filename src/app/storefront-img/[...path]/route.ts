@@ -23,12 +23,6 @@ import type { NextRequest } from "next/server";
  * single-digit ms without ever touching Supabase again.
  */
 
-export const runtime = "edge";
-// revalidate=false hints Next's Data Cache layer that the underlying
-// fetch result is long-lived; paired with CDN-Cache-Control, Vercel
-// also holds the Route Handler response at the edge.
-export const revalidate = 31536000;
-
 const CLIENT_CACHE = "public, max-age=31536000, immutable";
 const EDGE_CACHE = "public, max-age=31536000, immutable";
 
