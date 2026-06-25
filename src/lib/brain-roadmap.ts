@@ -18,6 +18,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { listGoals as listGoalsFromDb, getGoal as getGoalRowFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
@@ -1290,6 +1291,209 @@ export async function getGoal(slug: string, workspaceId?: string): Promise<{ raw
   const bySlug: Record<string, SpecCard> = {};
   for (const s of specs) bySlug[s.slug] = s;
   return { raw, card, specs: bySlug };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DB-first goal readers (goal-readers-from-db-retire-parsegoal Phase 1)
+//
+// These mirror the spec-side readers introduced in
+// [[spec-readers-from-db-retire-parser]]: read `public.goals` + `public.goal_milestones` (joined
+// by `goals-table.listGoals` / `getGoal`) and shape them into the same `GoalCard` / return type
+// every existing markdown consumer compiles against. The GoalCard shape is stable — only the
+// SOURCE flips. Phase 2 swaps every reader surface from the markdown `getGoals`/`getGoal` to
+// these; Phase 3 deletes the markdown parser + the loadGoalStatusOverlay shim.
+//
+// Per-milestone progress: each `goal_milestones.id` is matched against `specs.milestone_id` to
+// resolve its child specs (the per-spec `parent` text is NOT consulted — milestone_id is the
+// canonical link now). For the `getGoalFromDb` `specs` field we additionally include any spec
+// whose `parent` text references the goal (slug/title/milestone) but whose `milestone_id IS
+// NULL` — the legacy / standalone bucket the spec calls out. The rollup % matches the markdown
+// path: each milestone's completion is the avg of its linked specs' completion (fallback to
+// the milestone's own status when no specs are linked); the goal's pct is the mean over
+// milestones × 100.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Map a DB `goal_milestones.status` (planned|in_progress|complete) → the `Phase` enum the
+ *  GoalCard.milestone surface uses (planned|in_progress|shipped|rejected). `complete` → shipped. */
+function dbMilestoneStatusToPhase(s: GoalMilestoneRow["status"]): Phase {
+  if (s === "complete") return "shipped";
+  if (s === "in_progress") return "in_progress";
+  return "planned";
+}
+
+/** Coerce a DB `goals.status` (proposed|greenlit|complete|folded) to the GoalCard `GoalStatus`
+ *  surface (proposed|greenlit|complete). Folded rows are filtered by the caller (a folded goal
+ *  is off the active board, mirroring the pre-cutover `Decline → delete .md` behavior). */
+function dbGoalRowStatusToCard(s: GoalRow["status"]): GoalStatus | null {
+  if (s === "folded") return null;
+  return s;
+}
+
+/** Lift "M1" / "M2" / … out of a milestone title like "M1 — Lever-importance model". Matches the
+ *  shape the backfill writes (`backfill-goals-from-markdown.ts`: `title: card.milestone.id ? id +
+ *  " — " + name : name`) and what `parseGoal`'s regex `/^\*\*\s*(M\d+)\b/` produced. Empty
+ *  string when the title carries no Mn marker (matches `parseGoal`). */
+function milestoneIdFromTitle(title: string): string {
+  const m = title.match(/^\s*(M\d+)\b/);
+  return m ? m[1] : "";
+}
+
+/** Strip a leading "M1 — " prefix from a milestone title to recover the bare name (the value the
+ *  markdown `parseGoal` stored on `Milestone.name`). */
+function milestoneNameFromTitle(title: string): string {
+  return cleanInline(title.replace(/^\s*M\d+\s*[—–-]\s*/, ""));
+}
+
+/** Build the GoalCard.milestones array for a DB row, given a pre-built `milestone_id → SpecCard[]`
+ *  index. Each milestone's `completion` is the avg of its linked specs' completion (fallback to
+ *  the milestone's own status — complete=1, in_progress=0.5, planned=0 — when no specs link).
+ *  Returned alongside the totals the caller needs for `pct` + `linkedSpecCount`. */
+function buildGoalMilestones(
+  rows: GoalMilestoneRow[],
+  specsByMilestone: Map<string, SpecCard[]>,
+): { milestones: Milestone[]; pct: number; linkedSpecCount: number } {
+  const milestones: Milestone[] = rows.map((m) => {
+    const linked = specsByMilestone.get(m.id) ?? [];
+    const completions = linked.map(specCompletion);
+    const status = dbMilestoneStatusToPhase(m.status);
+    const completion = completions.length
+      ? completions.reduce((a, b) => a + b, 0) / completions.length
+      : status === "shipped"
+        ? 1
+        : status === "in_progress"
+          ? 0.5
+          : 0;
+    return {
+      id: milestoneIdFromTitle(m.title),
+      name: milestoneNameFromTitle(m.title),
+      status,
+      metric: undefined,
+      specSlugs: linked.map((s) => s.slug),
+      completion,
+    };
+  });
+  const linkedSpecCount = milestones.reduce((acc, m) => acc + m.specSlugs.length, 0);
+  const pct = milestones.length
+    ? Math.round((milestones.reduce((a, m) => a + m.completion, 0) / milestones.length) * 100)
+    : 0;
+  return { milestones, pct, linkedSpecCount };
+}
+
+/** Shape a DB GoalRow into a GoalCard, using a pre-built `milestone_id → SpecCard[]` index for
+ *  per-milestone rollup. The caller filters folded rows before calling (they're off the board). */
+function dbRowToGoalCard(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>): GoalCard {
+  const { milestones, pct, linkedSpecCount } = buildGoalMilestones(row.milestones, specsByMilestone);
+  return {
+    slug: row.slug,
+    title: row.title,
+    outcome: row.outcome ?? "",
+    successMetric: row.success_metric ?? "",
+    target: "", // `goals` row carries no `target` column; the markdown shape was rarely populated.
+    owner: row.owner || undefined,
+    status: (dbGoalRowStatusToCard(row.status) ?? "greenlit") as GoalStatus,
+    proposedBy: row.proposer_function ?? undefined,
+    milestones,
+    pct,
+    linkedSpecCount,
+  };
+}
+
+/** Build a `milestone_id → SpecCard[]` index by walking the workspace's spec ROWS once (the
+ *  SpecCard surface drops `milestone_id`, but we already have the rows from `listSpecsFromDb` in
+ *  the DB-first path). Returns the index plus the SpecCard array (re-built from the same rows so
+ *  consumers stay on the canonical shape). */
+async function readSpecsAndMilestoneIndex(workspaceId: string): Promise<{
+  specs: SpecCard[];
+  specsByMilestone: Map<string, SpecCard[]>;
+  specRowBySlug: Map<string, SpecRow>;
+}> {
+  const rows = (await listSpecsFromDb(workspaceId)).filter((r) => isBoardableStatus(r.status));
+  const cards = rows.map(dbRowToSpecCard);
+  const bySlug = new Map(cards.map((c) => [c.slug, c]));
+  for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug);
+  // milestone_id → SpecCard[] (only specs that ARE attached to a milestone; standalone specs are
+  // un-grouped here and surface via the parent-text fallback in `getGoalFromDb`).
+  const specsByMilestone = new Map<string, SpecCard[]>();
+  const specRowBySlug = new Map<string, SpecRow>();
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    specRowBySlug.set(r.slug, r);
+    if (!r.milestone_id) continue;
+    const list = specsByMilestone.get(r.milestone_id) ?? [];
+    list.push(cards[i]);
+    specsByMilestone.set(r.milestone_id, list);
+  }
+  return { specs: cards, specsByMilestone, specRowBySlug };
+}
+
+/**
+ * Every goal in a workspace, DB-first. Folded goals are filtered (off the active board, matching
+ * the markdown-path behavior `Decline → delete .md`). Sorted by title for the same order the
+ * existing `getGoals` returns. The legacy no-arg call site uses `resolveDefaultWorkspaceId()`.
+ */
+export async function getGoalsFromDb(workspaceId?: string): Promise<GoalCard[]> {
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return [];
+  const [goalRows, { specsByMilestone }] = await Promise.all([
+    listGoalsFromDb(wsId),
+    readSpecsAndMilestoneIndex(wsId),
+  ]);
+  const cards: GoalCard[] = [];
+  for (const row of goalRows) {
+    if (row.status === "folded") continue; // off the active board
+    cards.push(dbRowToGoalCard(row, specsByMilestone));
+  }
+  return cards.sort((a, b) => a.title.localeCompare(b.title));
+}
+
+/**
+ * One goal, DB-first. Returns `{ raw, card, specs }` matching the existing markdown `getGoal` so
+ * Phase 2 callers swap in place. `raw` is the `goals.body` column (the backfill stores the FULL
+ * markdown so callers like the goal detail page can render via `marked.parse` without disk I/O).
+ * The `specs` map covers (a) every spec attached to one of this goal's milestones via
+ * `specs.milestone_id`, plus (b) any spec whose `parent` text references the goal but has
+ * `milestone_id IS NULL` (the legacy / standalone bucket the spec calls out). Folded goal → null.
+ */
+export async function getGoalFromDb(
+  slug: string,
+  workspaceId?: string,
+): Promise<{ raw: string; card: GoalCard; specs: Record<string, SpecCard> } | null> {
+  if (!/^[a-z0-9-]+$/i.test(slug)) return null;
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return null;
+  const [row, { specs, specsByMilestone, specRowBySlug }] = await Promise.all([
+    getGoalRowFromDb(wsId, slug),
+    readSpecsAndMilestoneIndex(wsId),
+  ]);
+  if (!row || row.status === "folded") return null;
+
+  const card = dbRowToGoalCard(row, specsByMilestone);
+
+  // Resolve the `specs` map: every spec attached to one of this goal's milestones, PLUS any
+  // standalone spec whose `parent` text references this goal (slug / title / milestone name) but
+  // whose `milestone_id IS NULL` (the legacy bucket the spec calls out).
+  const goalForMatch = { slug: row.slug, title: row.title, milestoneNames: card.milestones.map((m) => m.name).filter(Boolean) };
+  const bySlug: Record<string, SpecCard> = {};
+  for (const m of row.milestones) {
+    for (const s of specsByMilestone.get(m.id) ?? []) bySlug[s.slug] = s;
+  }
+  for (const s of specs) {
+    if (bySlug[s.slug]) continue;
+    const r = specRowBySlug.get(s.slug);
+    if (!r || r.milestone_id) continue; // attached specs already covered above
+    if (parentReferencesGoal(s.parent, goalForMatch)) bySlug[s.slug] = s;
+  }
+
+  return { raw: row.body ?? "", card, specs: bySlug };
+}
+
+/** Slugs of every non-folded goal in a workspace, DB-first. The no-arg call site uses
+ *  `resolveDefaultWorkspaceId()` to match the legacy `listGoalSlugs()` shape. */
+export async function listGoalSlugsFromDb(workspaceId?: string): Promise<string[]> {
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return [];
+  const rows = await listGoalsFromDb(wsId);
+  return rows.filter((r) => r.status !== "folded").map((r) => r.slug).sort();
 }
 
 // ── Roadmap board filters: goal-membership + per-spec source (roadmap-goal-and-source-filters) ──
