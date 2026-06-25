@@ -1,0 +1,1 @@
+- **Board grooming — the director moves the project-management board** · verified 2026-06-25 · → [[../goals/devops-director]]
