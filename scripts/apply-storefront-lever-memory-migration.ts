@@ -8,7 +8,12 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 import { pgClient } from "./_bootstrap";
 
-const MIGRATIONS = ["20260624120000_storefront_levers.sql"];
+const MIGRATIONS = [
+  "20260624120000_storefront_levers.sql",
+  // Schema-drift fix: live storefront_lever_importance was missing seeded_from
+  // because the original migration uses CREATE TABLE IF NOT EXISTS.
+  "20260712120000_storefront_lever_importance_seeded_from.sql",
+];
 
 async function main() {
   const c = pgClient();
