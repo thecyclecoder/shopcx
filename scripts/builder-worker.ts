@@ -83,6 +83,10 @@ const MAX_SPEC_TEST = 3; // read-only QC runs — bumped 1→3 so a backlog re-s
 // One spec-test pass reads the spec + runs the box QA toolkit (tsc can be slow). Minutes, not the
 // 90-min seed ceiling — give it a build-sized ceiling so a tsc + a few probes never get cut short.
 const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
+// Spec-review (Vale) — the in_review queue reviewer ([[docs/brain/specs/spec-review-agent]]). A single
+// `claude -p` pass walks every in_review spec and emits one verdict per spec (approve/defer/needs_fix).
+// Read-only against repo/DB. Minutes, like the other supervisory passes (repair/regression/spec-test).
+const SPEC_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // Migration-fix jobs (migration-fix-agent) run in their OWN concurrency-1 lane: a top-level Max
 // `claude -p` (migration-fix skill) that DIAGNOSES a failed migration_audits row read-only and PROPOSES
 // the judgment fixes auto-heal punts; prod billing mutations are GATED (executed by the worker via
@@ -298,7 +302,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
+  kind: "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -5757,6 +5761,127 @@ async function runSpecTestJob(job: Job) {
   }
 }
 
+// ── Box-hosted spec-review agent (Vale) ─────────────────────────────────────
+// A kind='spec-review' job is enqueued by the spec-review-cron whenever ≥1 spec is parked in `in_review`.
+// Vale reads every in_review spec against the authoring CHECKLIST and emits one verdict per spec:
+// approve (sound + needed now → planned), defer (sound but parked → deferred + flags.deferred),
+// or needs_fix (malformed — the diagnosis surfaces on director_activity, the spec stays in_review).
+// Read-only on Max (no API key, web search on); the worker is the only component that mutates state.
+// Implements docs/brain/specs/spec-review-agent.md Phase 2.
+async function runSpecReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+  const base = sessionId ? ["--resume", sessionId] : [];
+  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
+  const r = await shAsync("claude", args, { cwd, env, timeout: SPEC_REVIEW_TIMEOUT_MS });
+  let session = sessionId;
+  let resultText = "";
+  let isError = r.code !== 0;
+  let usage: RunUsage = null;
+  let model: string | null = null;
+  try {
+    const obj = JSON.parse((r.out || "").trim());
+    session = obj.session_id || session;
+    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
+    isError = isError || obj.is_error === true;
+    const ex = extractClaudeUsage(obj as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
+  } catch {
+    resultText = (r.out || "") + (r.err || "");
+  }
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+}
+
+interface SpecReviewDecisionJson {
+  slug: string;
+  verdict: "approve" | "defer" | "needs_fix";
+  reason: string;
+  defects?: string[];
+}
+
+async function runSpecReviewJob(job: Job) {
+  const tag = `[spec-review:${job.id.slice(0, 8)}]`;
+  const { selectInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
+  const a = await admin();
+  const pending = await selectInReviewSpecs(a, job.workspace_id);
+  if (!pending.length) {
+    await update(job.id, { status: "completed", log_tail: "no in_review specs to review" });
+    console.log(`${tag} no in_review specs — done`);
+    return;
+  }
+  console.log(`${tag} reviewing ${pending.length} in_review spec(s): ${pending.join(", ")}`);
+
+  try {
+    const prompt = [
+      `You are Vale, the box's Spec-Review agent — the meticulous reviewer who guards the build pipeline. Use the spec-review skill (cwd is the repo root). You are on Max (no ANTHROPIC_API_KEY, web search on), read-only against the repo + DB. The WORKER (deterministic Node) is the only component that mutates state — you investigate and emit verdicts.`,
+      ``,
+      `THE QUEUE — ${pending.length} spec(s) parked in_review awaiting your review:`,
+      pending.map((s) => `  • docs/brain/specs/${s}.md`).join("\n"),
+      ``,
+      `For EACH spec, read the markdown + check it against this CHECKLIST:`,
+      `  • H1 + content-only — no status markers (no leading ⏳/🚧/✅/❌ on the H1; status is DB-driven now, never in the markdown).`,
+      `  • Exactly one well-formed phase sequence — no duplicate or mangled phase numbers (a "P1/P2/P1/P2" shape is a defect).`,
+      `  • A real **Owner:** [[../functions/{slug}]] line (the DRI) pointing at a real functions/ doc.`,
+      `  • A real **Parent:** (a mandate or goal milestone) — no orphan specs.`,
+      `  • A **Blocked-by:** [[…]] line IFF the spec actually has prerequisites (absence is fine when there are none).`,
+      `  • A DB-companion plan if the spec adds a customer-referenced table (the CLAUDE.md hard rule — a Sonnet data tool must be wired in sonnet-orchestrator-v2.ts).`,
+      `  • A **Verification** section (## Verification block) so the spec-test agent can grade it later.`,
+      ``,
+      `Then route each spec with ONE verdict:`,
+      `  • approve — the checklist passes AND the spec is needed now (no "deferred / not needed now" directive in its own body). The worker flips its status from in_review → planned.`,
+      `  • defer — the checklist passes BUT the spec's own body says "park this / not needed now / deferred". The worker flips its status to deferred + sets flags.deferred.`,
+      `  • needs_fix — the checklist FAILS (mangled phases / missing Owner / missing Parent / no Verification / missing Blocked-by when prerequisites exist / customer-referenced table with no Sonnet data tool). The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Be SPECIFIC in defects — name the missing field / the mangled phase numbers.`,
+      ``,
+      `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating script. Your final message is ONE JSON object, no prose before/after (if fenced, the JSON is the last thing in the message):`,
+      `  {"status":"completed","decisions":[{"slug":"…","verdict":"approve|defer|needs_fix","reason":"<one plain-text sentence>","defects":["…"]}]}`,
+      `  {"status":"error","error":"<why you cannot proceed>"}`,
+      ``,
+      `Every slug in the queue MUST appear in decisions[]. needs_fix.defects MUST list the specific checklist failures (no defects → not a needs_fix).`,
+    ].join("\n");
+
+    const { session, resultText, isError, raw, usage, model } = await runSpecReviewClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<{ status?: string; error?: string; decisions?: SpecReviewDecisionJson[] }>(resultText);
+    if (parsed?.status === "error") {
+      await update(job.id, { status: "needs_attention", error: `spec-review error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} agent reported error: ${parsed.error}`);
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.decisions)) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "spec-review produced no parseable decisions", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable decisions`);
+      return;
+    }
+
+    const queuedSet = new Set(pending);
+    let approved = 0;
+    let deferred = 0;
+    let needsFix = 0;
+    const skipped: string[] = [];
+    for (const d of parsed.decisions) {
+      if (!d || typeof d.slug !== "string" || !queuedSet.has(d.slug)) { skipped.push(d?.slug ?? "(no-slug)"); continue; }
+      const verdict = d.verdict === "approve" || d.verdict === "defer" || d.verdict === "needs_fix" ? d.verdict : null;
+      if (!verdict) { skipped.push(d.slug); continue; }
+      const reason = String(d.reason || "").slice(0, 1000);
+      const defects = Array.isArray(d.defects) ? d.defects.map((x) => String(x).slice(0, 300)).slice(0, 20) : [];
+      await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects });
+      if (verdict === "approve") approved++;
+      else if (verdict === "defer") deferred++;
+      else needsFix++;
+    }
+    const tail = `reviewed ${parsed.decisions.length}/${pending.length} — ✅${approved} ⏸${deferred} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ✓ ${tail}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 // ── Box-hosted migration-fix agent (migration-fix-agent) ─────────────────────
 // A kind='migration-fix' job is fired by the EVENT hook in src/lib/migration-audit.ts the moment a
 // migration_audits row transitions to `failed` (NOT a cron). Like ticket-improve/triage it runs a
@@ -9745,6 +9870,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   if (job.kind === "spec-test") return runSpecTestJob(job);
+  if (job.kind === "spec-review") return runSpecReviewJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
