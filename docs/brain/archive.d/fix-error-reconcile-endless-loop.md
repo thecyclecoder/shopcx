@@ -1,0 +1,1 @@
+- **Fix the error-reconcile endless loop** · verified 2026-06-25 · → [[libraries/platform-director]]
