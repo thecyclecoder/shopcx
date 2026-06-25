@@ -805,7 +805,10 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
       actionKind: "escorted_fix",
       specSlug: card.slug,
       reason: `Escorting authored fix spec: queued ${card.slug}${retry ? ` (re-attempt #${state.failedCount + 1})` : ""} — building the bug fix.`,
-      metadata: { spec_slug: card.slug, kind: "fix", retry, autonomous: true },
+      // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1: stamp the
+      // OWNING function so the daily watch + audit ledger can see when the keystone is covering for a
+      // department whose own director isn't live yet (director_function = me, owner_function = theirs).
+      metadata: { spec_slug: card.slug, kind: "fix", retry, owner_function: card.owner ?? null, autonomous: true },
     });
   }
 
@@ -2558,6 +2561,26 @@ export function ensureBlockedByLine(md: string, blockers: string[]): string {
 // approved_approval / escorted_goal / escalated activity already rolls into the standup). Dormant until
 // Platform is live+autonomous, exactly like the escort + the approval enqueuer.
 
+/**
+ * Activity action_kinds that count as "drove a spec" for the cross-dept rollup
+ * (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1). Includes every
+ * lane that ESCORTS/INITIATES/GROOMS a spec it drives — NOT `escalated` (the opposite of covering), NOT
+ * the repair-dismissal kinds (no spec owner), NOT `approved_approval` (an approval is a leash decision,
+ * not a drive of a spec on the board). Each row stamps `metadata.owner_function` at write-time; if that
+ * field is non-platform, the row counts as a cross-dept drive.
+ */
+export const CROSS_DEPT_DRIVE_KINDS: ReadonlySet<string> = new Set([
+  "escorted_fix",
+  "escorted_init",
+  "groomed_continue",
+  "groomed_split",
+  "groomed_fold_now",
+  "groomed_authored_spec",
+  "groomed_dismissed",
+  "init_authored_spec",
+  "init_dismissed",
+]);
+
 /** Platform's Control-Tower health, collapsed from the snapshot's platform department rollup. */
 export interface PlatformHealth {
   /** worst-of color across platform-owned loops. */
@@ -2594,6 +2617,14 @@ export interface PlatformWatchActivity {
   needsAttentionOldestHours: number;
   /** recoverable parked items the director re-ran today (triaged_needs_attention action=rerun) — the day's triage. */
   triagedReran: number;
+  // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1 — the cross-dept
+  // KPI: drives of a spec OWNED by another department (a not-yet-live director), so the daily watch + the
+  // Platform Department Scorecard can see the keystone covering for them. `crossDeptByOwner` is the per-owner
+  // breakdown the watch line names; `crossDeptDrives` is the rollup sum.
+  /** total drives today where the spec's owning function is non-platform (the keystone-cover count). */
+  crossDeptDrives: number;
+  /** per-owner breakdown of cross-dept drives today (e.g. `{cs:2, growth:1}`) for the watch line. */
+  crossDeptByOwner: Record<string, number>;
 }
 
 /** The health half of the watch line — "all N platform loops green" / "K red (…)" / "X/N green, M degraded". */
@@ -2643,6 +2674,21 @@ function platformNeedsAttentionLine(a: PlatformWatchActivity): string | null {
   return parts.join("; ") || null;
 }
 
+/**
+ * The keystone-cover line (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+ * Phase 1) — "Drove N specs for other departments (owner: K, owner: J)" on any day she escorted/initiated/groomed
+ * a spec OWNED by another function (a not-yet-live director). Only rendered on a day she covered ≥1 cross-dept
+ * spec; otherwise omitted so quiet days stay tidy. Per-owner breakdown sorted by count desc → name asc for stable
+ * formatting. Caps the named-owner list at 4 with a "+K more" tail to keep the post readable.
+ */
+function platformCrossDeptLine(a: PlatformWatchActivity): string | null {
+  if (!a.crossDeptDrives) return null;
+  const owners = Object.entries(a.crossDeptByOwner).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const shown = owners.slice(0, 4).map(([owner, n]) => `${owner}: ${n}`).join(", ");
+  const more = owners.length > 4 ? `, +${owners.length - 4} more` : "";
+  return `Drove ${a.crossDeptDrives} spec${a.crossDeptDrives === 1 ? "" : "s"} for other departments (${shown}${more}).`;
+}
+
 /** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
 export function composePlatformWatchBody(
   health: PlatformHealth,
@@ -2653,12 +2699,16 @@ export function composePlatformWatchBody(
   const persona = getPersona(PLATFORM);
   const repairLine = platformRepairReviewLine(activity);
   const parkedLine = platformNeedsAttentionLine(activity);
+  // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1 — the
+  // keystone-cover line, so a day she escorted/initiated/groomed a CS/Growth/etc spec is visible
+  // on the board (the "drove N for other departments" sentence). Null on a day with zero cross-dept work.
+  const crossDeptLine = platformCrossDeptLine(activity);
   const scorecard = scorecardLine ? ` ${scorecardLine}.` : "";
   // regression-backlog-reconciliation-scorecard Phase 1 — the D/F/R/E + coverage line, dedicated so the
   // regression flow is visible at a glance instead of buried in the Scorecard headline. Reads the snapshot
   // store via composeRegressionWatchLine ("read from the scorecard, never the raw tables").
   const regressions = regressionLine ? ` ${regressionLine}.` : "";
-  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}${scorecard}${regressions}`;
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}${crossDeptLine ? ` ${crossDeptLine}` : ""}${scorecard}${regressions}`;
 }
 
 /**
@@ -2761,7 +2811,7 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
     .eq("director_function", PLATFORM)
     .gte("created_at", dayStart)
     .lt("created_at", dayEnd);
-  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, dismissedParks: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0, needsAttention: 0, needsAttentionOldestHours: 0, triagedReran: 0 };
+  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, dismissedParks: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0, needsAttention: 0, needsAttentionOldestHours: 0, triagedReran: 0, crossDeptDrives: 0, crossDeptByOwner: {} };
   for (const r of (activityRows ?? []) as { action_kind: string; metadata: Record<string, unknown> | null }[]) {
     const repairEscalation = r.action_kind === "escalated" && r.metadata?.["escalation_kind"] === "repair_dismissal_suspect";
     if (r.action_kind === "approved_approval") activity.squashed++;
@@ -2781,6 +2831,18 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
     }
     // Phase 3 — the day's needs_attention triage: how many recoverable parked items the director re-ran.
     if (r.action_kind === "triaged_needs_attention" && r.metadata?.["action"] === "rerun") activity.triagedReran++;
+    // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1 — count any
+    // "drove a spec" action where the OWNING function is non-platform: the keystone covering for a
+    // not-yet-live director. Filters on action_kind (init/fix/groom lanes only) so an `escalated` row that
+    // happens to carry a stamped owner doesn't double-count as a "drive" — escalation is the OPPOSITE of
+    // covering. Each row counts once; the per-owner breakdown is what the watch line names.
+    if (CROSS_DEPT_DRIVE_KINDS.has(String(r.action_kind))) {
+      const ownerFn = typeof r.metadata?.["owner_function"] === "string" ? (r.metadata["owner_function"] as string) : null;
+      if (ownerFn && ownerFn !== PLATFORM) {
+        activity.crossDeptDrives++;
+        activity.crossDeptByOwner[ownerFn] = (activity.crossDeptByOwner[ownerFn] ?? 0) + 1;
+      }
+    }
   }
 
   // needs-attention KPI (Phase 3) — the open parked-work snapshot (count + oldest age), scoped to the items
@@ -3695,6 +3757,9 @@ export async function applyDirectorFoldNow(
       groom_key: groomKey(c.slug),
       flipped_phases: flippedPhases,
       remaining_phase_titles: c.remainingPhases,
+      // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+      // Phase 1) — the OWNING function, so the watch line can count the keystone covering cross-dept work.
+      owner_function: c.owner ?? null,
       autonomous: true,
     },
   });
@@ -3724,7 +3789,7 @@ export async function applyDirectorAuthorFollowup(
   admin: Admin,
   workspaceId: string,
   lane: DirectorLane,
-  candidate: { slug: string | null; signature?: string; jobId?: string },
+  candidate: { slug: string | null; signature?: string; jobId?: string; owner?: string | null },
   followup: FollowupSpec,
   reason: string,
   commit: FollowupSpecCommitter,
@@ -3746,6 +3811,10 @@ export async function applyDirectorAuthorFollowup(
     existed: put.existed === true,
     autonomous: true,
   };
+  // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1: when the lane
+  // knows the candidate spec's OWNING function (groom/init pass it; repair-dismissal has no spec owner),
+  // stamp it so the daily watch can count cross-dept drives (the keystone covering a not-yet-live director).
+  if (candidate.owner !== undefined) metadata.owner_function = candidate.owner ?? null;
   // Repair-dismissal lane: also carry repair_job_id so alreadyReviewedDismissal (job-id keyed) dedups it.
   if (lane === "repair-dismissal" && candidate.jobId) metadata.repair_job_id = candidate.jobId;
   if (lane === "repair-dismissal" && candidate.signature) metadata.signature = candidate.signature;
@@ -3772,18 +3841,23 @@ export async function applyDirectorDismissCandidate(
   admin: Admin,
   workspaceId: string,
   lane: DirectorLane,
-  candidate: { slug: string | null; signature?: string },
+  candidate: { slug: string | null; signature?: string; owner?: string | null },
   reason: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const ledger = laneLedgerKey(lane, candidate.slug, candidate.signature);
   const actionKind = lane === "groom" ? "groomed_dismissed" : lane === "init" ? "init_dismissed" : "repair_dismissed";
+  const metadata: Record<string, unknown> = { [ledger.name]: ledger.value, autonomous: true };
+  // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1: stamp the
+  // OWNING function when the lane knows it (groom/init pass it) so the daily watch's cross-dept count
+  // covers the dismiss disposition too — every drive of a cross-dept spec leaves an owner-stamped row.
+  if (candidate.owner !== undefined) metadata.owner_function = candidate.owner ?? null;
   const r = await recordDirectorActivity(admin, {
     workspaceId,
     directorFunction: PLATFORM,
     actionKind,
     specSlug: candidate.slug ?? null,
     reason,
-    metadata: { [ledger.name]: ledger.value, autonomous: true },
+    metadata,
   });
   return { ok: r.recorded, error: r.reason };
 }
