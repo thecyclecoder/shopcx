@@ -3139,7 +3139,6 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           { slug: c.slug, owner: c.owner ?? null },
           parsed.followup ?? {},
           reasoning || `Investigation surfaced a code-level root cause — authored a followup spec.`,
-          followupCommit,
         );
         if (!authored.ok) {
           console.warn(`${tag} groom ${c.slug} → author_followup_spec commit failed: ${authored.error}`);
@@ -3399,7 +3398,6 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           { slug: c.slug, owner: c.owner ?? null },
           parsed.followup ?? {},
           reasoning || `Right scope is a different spec — authored the followup and dismissed this candidate.`,
-          followupCommit,
         );
         if (!authored.ok) {
           console.warn(`${tag} init ${c.slug} → author_followup_spec commit failed: ${authored.error}`);
@@ -3631,7 +3629,6 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
           { slug: null, signature: c.signature, jobId: c.jobId },
           parsed.followup ?? {},
           reasoning || `Independent root-cause: ${c.signature} is a real bug in our code. Authored a fix spec; left the Control Tower item open for the fix build to retire.`,
-          followupCommit,
         );
         if (!authored.ok) {
           console.warn(`${tag} repair-supervise ${c.signature} → author_followup_spec commit failed: ${authored.error}`);
@@ -3968,7 +3965,7 @@ async function runDirectorBounceBackJob(job: Job) {
             await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → primary INVALID → depth-cap escalation`.slice(-2000) });
             return;
           }
-          const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "groom", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`, followupCommit);
+          const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "groom", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`);
           if (!auth.ok) {
             await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
             await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → followup commit failed → depth-cap escalation`.slice(-2000) });
@@ -3991,7 +3988,7 @@ async function runDirectorBounceBackJob(job: Job) {
           await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → split INVALID → depth-cap escalation`.slice(-2000) });
           return;
         }
-        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "groom", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`, followupCommit);
+        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "groom", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`);
         if (!auth.ok) {
           await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
           await update(job.id, { status: "completed", log_tail: `groom bounce-back ${slug} → followup commit failed → depth-cap escalation`.slice(-2000) });
@@ -4096,7 +4093,7 @@ async function runDirectorBounceBackJob(job: Job) {
           await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → followup INVALID → depth-cap escalation`.slice(-2000) });
           return;
         }
-        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "init", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`, followupCommit);
+        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "init", { slug }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup.`);
         if (!auth.ok) {
           await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
           await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → followup commit failed → depth-cap escalation`.slice(-2000) });
@@ -4173,7 +4170,7 @@ async function runDirectorBounceBackJob(job: Job) {
           await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → followup INVALID → depth-cap escalation`.slice(-2000) });
           return;
         }
-        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "repair-dismissal", { slug: null, signature, jobId: repairJobId }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup fix.`, followupCommit);
+        const auth = await lib.applyDirectorAuthorFollowup(db, job.workspace_id, "repair-dismissal", { slug: null, signature, jobId: repairJobId }, parsed.followup ?? {}, reasoning || `Bounce-back authored followup fix.`);
         if (!auth.ok) {
           await emitDepthCapEscalation(`Tried author_followup_spec on bounce-back; commit failed: ${auth.error}`);
           await update(job.id, { status: "completed", log_tail: `repair bounce-back ${signature} → followup commit failed → depth-cap escalation`.slice(-2000) });
@@ -4380,17 +4377,6 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
     done.push(`${a.summary} → ${a.status}`);
   }
   return { actions, summary: done.join("; ") };
-}
-
-// FollowupSpecCommitter adapter wrapping putFileMain — the director-judgment-lanes lib helper
-// (applyDirectorAuthorFollowup) calls this to commit the new followup spec without reaching into
-// the worker's gh helpers. Treats "file already on main" as `existed: true` (a convergent re-author,
-// not a failure), so the activity row still lands and the lane records the action.
-async function followupCommit(filePath: string, content: string, message: string): Promise<{ ok: boolean; existed?: boolean; status?: number }> {
-  const exists = await gh("GET", `/repos/${REPO}/contents/${filePath}?ref=main`);
-  if (exists.ok) return { ok: true, existed: true };
-  const put = await putFileMain(filePath, content, message);
-  return { ok: put.ok, status: put.status };
 }
 
 // Commit a single file straight to main via the GitHub Contents API — the chat/finalize authoring
@@ -7834,18 +7820,27 @@ async function runDirectorCoachJob(job: Job) {
             a.result = `proposed goal ${a.slug} → committed + surfaced for your greenlight`;
             notes.push(`Goal ${a.slug} → proposed (awaiting your greenlight)`);
           } else if (a.type === "spec-edit" && a.slug && a.content) {
-            // Modify an EXISTING spec (never create — the worktree is on origin/main, so check it's there).
+            // Modify an EXISTING spec (never create). spec-pm-markdown-purge: specs live in public.specs,
+            // not as `.md` files on main — existence is the DB spec row, and the edit re-authors that row
+            // (authorSpecRowFromMarkdown UPSERTs by (workspace_id, slug); status opt omitted PRESERVES the
+            // live status). No .md write.
             const slug = String(a.slug);
-            if (!existsSync(join(wt, `docs/brain/specs/${slug}.md`))) {
+            const { getSpec } = await import("../src/lib/brain-roadmap");
+            const existing = await getSpec(slug, job.workspace_id);
+            if (!existing) {
               a.status = "failed";
-              a.result = `specs/${slug}.md doesn't exist — spec-edit only modifies existing specs`;
+              a.result = `spec ${slug} doesn't exist — spec-edit only modifies existing specs`;
               notes.push(`${a.summary} → no such spec`);
               continue;
             }
-            const put = await putFileMain(`docs/brain/specs/${slug}.md`, String(a.content), `spec: update ${slug} (director edit)`);
-            if (!put.ok) { a.status = "failed"; a.result = `commit failed ${put.status}`; notes.push(`${a.summary} → commit failed`); continue; }
+            try {
+              const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
+              await authorSpecRowFromMarkdown(job.workspace_id, slug, String(a.content), "planned", { intendedStatusSetBy: `director:${thread.director_function}` });
+            } catch (e) {
+              a.status = "failed"; a.result = `DB re-author failed: ${e instanceof Error ? e.message : String(e)}`; notes.push(`${a.summary} → DB re-author failed`); continue;
+            }
             a.status = "done";
-            a.result = `updated specs/${slug}.md`;
+            a.result = `updated spec ${slug} in public.specs`;
             notes.push(`Spec ${slug} → updated`);
           } else if (a.type === "directive" && a.summary) {
             // The CEO greenlit a PLAN → make it the active directive (director-executable-plans-and-priority).
