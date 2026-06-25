@@ -13,6 +13,7 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CheckoutClient } from "./_components/CheckoutClient";
@@ -21,6 +22,7 @@ import { getStorefrontMetadata } from "../_lib/storefront-metadata";
 import { ensureFreeGifts, type CartLineLike } from "@/lib/cart-gifts";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
+  await connection();
   const params = await searchParams;
   const cookieToken = (await cookies()).get("cart")?.value;
   const token = params.token || cookieToken;
@@ -41,6 +43,7 @@ interface PageProps {
 
 
 export default async function CheckoutPage({ searchParams }: PageProps) {
+  await connection();
   const params = await searchParams;
   const cookieToken = (await cookies()).get("cart")?.value;
   const token = params.token || cookieToken;

@@ -11,6 +11,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notFound } from "next/navigation";
+import { connection } from "next/server";
 import type { Metadata } from "next";
 import ClientErrorReporter from "@/components/ClientErrorReporter";
 
@@ -20,6 +21,7 @@ import ClientErrorReporter from "@/components/ClientErrorReporter";
  * generic ShopCX root metadata. noindex: the portal is a logged-in account surface.
  */
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  await connection();
   const { slug } = await params;
   const admin = createAdminClient();
   const { data: ws } = await admin

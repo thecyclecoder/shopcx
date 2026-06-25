@@ -1,11 +1,13 @@
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
+import { connection } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import Link from "next/link";
 import type { Metadata } from "next";
 import ArticleFeedback from "./article-feedback";
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string; articleSlug: string }> }): Promise<Metadata> {
+  await connection();
   const { slug, articleSlug } = await params;
   const admin = createAdminClient();
 
