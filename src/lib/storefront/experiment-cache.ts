@@ -48,7 +48,11 @@ export async function republishExperimentManifest(admin: Admin, productIds: stri
   }
 
   // Purge the affected products' PDP renders (each variant-keyed entry) so the new
-  // hero/arm serves immediately instead of waiting out the ISR window.
+  // hero/arm serves immediately instead of waiting out the ISR window. The
+  // `storefront-experiment:<workspaceId>:<productId>` tag is set inside the PDP's
+  // `'use cache'` helper (pdp-edge-served-variant-use-cache) — it invalidates EVERY
+  // `?_sxv=<variantId>` cache entry for the product in one call, which the
+  // path-level revalidatePath doesn't always reach (argument-keyed cache entries).
   if (productIds.length) {
     try {
       const { data: products } = await admin
@@ -64,6 +68,11 @@ export async function republishExperimentManifest(admin: Admin, productIds: stri
         (workspaces ?? []).map((w) => [w.id as string, (w.storefront_slug as string | null) ?? null]),
       );
       for (const p of products ?? []) {
+        try {
+          revalidateTag(`storefront-experiment:${p.workspace_id as string}:${p.id as string}`, "max");
+        } catch {
+          /* not in a Next server context */
+        }
         const slug = slugByWs.get(p.workspace_id as string);
         if (!slug || !p.handle) continue;
         try {
