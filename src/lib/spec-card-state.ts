@@ -490,6 +490,45 @@ export async function markSpecCardPendingUpgrade(
 }
 
 /**
+ * spec-review-agent Phase 4 — the SHARED back-to-review writer. Any agent that spots a malformed/off
+ * spec (Vale on a re-check, Bo refusing to build on an empty/phaseless body, Ada's `spec-status` action,
+ * repair/regression noticing an authored spec doesn't pass the CHECKLIST, the CEO via the board control)
+ * flips the card back to `in_review` so it returns to Vale's queue — the build pipeline refuses to
+ * dispatch an in_review spec, which is the whole point (don't build around a broken spec).
+ *
+ * Consumes the prior disposition lane's signals: `vale_pass`, `ada_disposition`, `intended_status` are
+ * cleared so the next Vale pass + Ada dispose start from scratch (a re-author may genuinely change what
+ * the author intended, and the prior Vale verdict is stale once the file changed). Idempotent: re-calling
+ * on an already-in_review row leaves it in_review and re-audits.
+ *
+ * Best-effort + audited via `spec_status_history`. The CALLER is responsible for recording the matching
+ * `director_activity` row (`spec_sent_back_to_review`) with their actor — that side carries the diagnosis
+ * the CEO reads (which check failed, who sent it back, what to fix).
+ */
+export async function markSpecCardBackToReview(
+  workspaceId: string,
+  slug: string,
+  audit: { actor: string; reason?: string },
+): Promise<void> {
+  await upsertCardState(
+    workspaceId,
+    slug,
+    {
+      status: "in_review",
+      flags: {
+        vale_pass: undefined,
+        ada_disposition: undefined,
+        intended_status: undefined,
+        deferred: false,
+      },
+    },
+    [
+      { field: "status", actor: audit.actor, reason: audit.reason ?? "sent back to in_review (malformed/off — re-review needed)" },
+    ],
+  );
+}
+
+/**
  * director-dismiss-park-and-short-circuit-spec Phase 2: set/clear the **short-circuit** marker on a card.
  * Pairs with the status flip to `shipped` (which the caller writes via `markSpecCardStatus` in the same
  * action). The board reads `flags.short_circuit` + `flags.short_circuit_reason` to render the card as

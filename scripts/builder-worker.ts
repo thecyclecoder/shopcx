@@ -6788,8 +6788,46 @@ async function applySpecStatusActionInline(
     return { summary: `Status flip rejected (${slug || "no slug"}): ${detail}` };
   };
   if (!slug || !reason) return logInvalid("slug and reason are required");
-  // Validate payload shape (statuses + phase shape) up front.
+  // spec-review-agent Phase 4 — `status:'in_review'` is the SEND-BACK fast-path (Ada spots a malformed/off
+  // spec mid-flight). Routes through markSpecCardBackToReview (clears vale_pass / ada_disposition /
+  // intended_status so the next Vale + Ada pass start clean) + a `spec_sent_back_to_review` activity row
+  // carrying her function as actor. Owner-leash check on the markdown still applies (an owner-less spec
+  // is out-of-leash), but the merge-provenance refusal that gates `shipped` doesn't (we're moving
+  // BACKWARDS to the queue, not claiming a phase shipped).
   const statusRaw = typeof raw.status === "string" ? raw.status.toLowerCase() : "";
+  if (statusRaw === "in_review") {
+    const cs = await import("../src/lib/spec-card-state");
+    const states = await cs.getSpecCardStates(workspaceId);
+    const existing = states[slug];
+    const specPath = join(wt, `docs/brain/specs/${slug}.md`);
+    const mdExists = existsSync(specPath);
+    if (!existing && !mdExists) return logInvalid("spec not found in spec_card_state or docs/brain/specs/");
+    let owner: string | undefined;
+    if (mdExists) {
+      try {
+        const md = readFileSync(specPath, "utf8");
+        const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
+        if (m) owner = m[1].replace(/^.*\//, "").trim();
+      } catch { /* fall through to leash rejection */ }
+    }
+    if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
+    if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
+    try {
+      await cs.markSpecCardBackToReview(workspaceId, slug, { actor: `director:${directorFunction}`, reason });
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId,
+        directorFunction,
+        actionKind: "spec_sent_back_to_review",
+        specSlug: slug,
+        reason,
+        metadata: { auto_applied: true, source: "director-spec-status" },
+      });
+    } catch (e) {
+      return logInvalid(`back-to-review write failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return { summary: `Sent ${slug} back to in_review: ${reason}` };
+  }
   const status = statusRaw === "planned" || statusRaw === "in_progress" || statusRaw === "shipped" || statusRaw === "rejected" ? statusRaw : undefined;
   const phasesIn = Array.isArray(raw.phases) ? raw.phases : [];
   const phases: { index: number; status: "planned" | "in_progress" | "shipped" | "rejected" }[] = [];
@@ -7277,8 +7315,8 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — for the INTENT: PLAN case (the CEO hands you a plan to execute). On approval it becomes your ONE active directive (runs FIRST, before routine) AND the worker acts immediately: it QUEUES the gate spec + every \`criticalSpecs\` build right now (no waiting for the init cadence), marks them \`**Priority:** critical\`, and CANCELS any parked \`holdBuilds\` (out-of-order builds to clear). \`gateBuildsUntil\` pauses ROUTINE builds until that spec ships (priority/critical builds still run; auto-lifts on ship). A directive re-prioritizes, never authorizes destructive work or a new goal.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"model_tier","summary":"<agent + tier change in one line>","targetKind":"<agent kind, e.g. fold>","tier":"<haiku|sonnet|opus, or null to clear to the Max default>","rollup":<the cited grade rollup 0-10, or omit>,"evidence":"<why — the grade slip / speed + 5-hr-window pressure>"}]}`,
   `  — when an agent's MODEL should change (box-agent-model-tiers): its grade rollup slipped on a small model, or a mechanical high-volume agent is burning the 5-hour usage window. You PROPOSE the tier; on the CEO's approval the worker routes it to the agent's SUPERVISOR (a worker's change → its director, a director's → the CEO), and on that approval the registry updates instantly (reversible — flip it back). A live+autonomous director may auto-apply a one-tier bump for a worker whose rollup is <7. Cite the rollup as the evidence.`,
-  `{"status":"replied","reply":"<acknowledge the flip in chat — no approval card is rendered>","pending_actions":[{"type":"spec-status","summary":"<one-line why>","slug":"<existing-spec-slug>","status":"<planned|in_progress|shipped|rejected>","phases":[{"index":0,"status":"shipped"}],"critical":true,"deferred":false,"shortCircuit":false,"reason":"<written to spec_status_history>"}]}`,
-  `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:** / shortCircuit). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred/shortCircuit). \`phases[].index\` is 0-based and validated against the markdown's phase count. **shortCircuit:true** closes a spec CLEANLY without all phases shipping ("we changed our mind, this isn't needed anymore") — required \`reason\`, must be paired with \`status:'shipped'\` (or omitted — it auto-forces shipped), SKIPS the fold-build, and the roadmap renders the card as "shipped + short-circuited — <reason>". The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
+  `{"status":"replied","reply":"<acknowledge the flip in chat — no approval card is rendered>","pending_actions":[{"type":"spec-status","summary":"<one-line why>","slug":"<existing-spec-slug>","status":"<planned|in_progress|shipped|rejected|in_review>","phases":[{"index":0,"status":"shipped"}],"critical":true,"deferred":false,"shortCircuit":false,"reason":"<written to spec_status_history>"}]}`,
+  `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:** / shortCircuit). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred/shortCircuit). \`phases[].index\` is 0-based and validated against the markdown's phase count. **shortCircuit:true** closes a spec CLEANLY without all phases shipping ("we changed our mind, this isn't needed anymore") — required \`reason\`, must be paired with \`status:'shipped'\` (or omitted — it auto-forces shipped), SKIPS the fold-build, and the roadmap renders the card as "shipped + short-circuited — <reason>". **status:'in_review'** is the spec-review-agent Phase 4 SEND-BACK: a malformed/off spec (mangled phases, missing Owner/Parent, missing Verification, a customer_id table with no DB-companion) goes back to Vale's queue (the build pipeline refuses an in_review spec, which is the whole point — don't build around a broken spec). The writer clears the prior \`vale_pass\`/\`ada_disposition\`/\`intended_status\` flags so the next Vale + dispose pass start clean; pair with a one-line reason naming the defect. The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
   `{"status":"replied","reply":"<acknowledge the dismiss in chat — no approval card is rendered>","pending_actions":[{"type":"dismiss-park","summary":"<one-line why>","jobId":"<agent_jobs.id of the parked row>","reason":"<written to director_activity>"}]}`,
   `  — when a PARKED \`agent_jobs\` row (status=\`needs_attention\`) you own is genuinely not worth pursuing (the underlying work is being short-circuited, a prereq won't be supplied, the park is stale and not auto-routable). **AUTO-APPLIED — no CEO approval, no inbox card.** Flips \`agent_jobs.status='dismissed'\`, stamps \`needs_attention_class='dismissed_by_director'\`, and writes a \`dismissed_park\` director_activity row carrying your reason + the original park's class + the underlying spec slug. Owner-only: the parked job's underlying spec slug must resolve to a spec whose \`Owner: [[../functions/{fn}]]\` matches your function; a dismiss on someone else's job is rejected as out-of-leash. Reversible: the CEO clicks Re-open from the activity feed and the job flips back to \`needs_attention\` (a wrongly-dismissed park is one tap away from re-routing). Use this for parks the [[no-parked-specs-auto-route-needs-attention]] router can't help with (no shipped target to fold to, no real_blocker to spec around — the blocker is "we changed our mind").`,
   `{"status":"replied","reply":"<acknowledge the audit request in chat — no approval card is rendered>","pending_actions":[{"type":"request-audit","summary":"<one-line why>","slug":"<existing-spec-slug>","reason":"<drift suspect | hand-flip cleanup | missing provenance — written to director_activity>"}]}`,
@@ -7926,6 +7964,8 @@ function repairPrompt(brief: string): string {
     ``,
     `For any spec verdict, propose owner + parent (no orphan specs). Default owner "[[../functions/platform]]" and parent "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]" unless a more specific function clearly owns the implicated system. The spec must be a SINGLE phase scoped to a ~30-min build.`,
     ``,
+    `⭐ MALFORMED SPEC mandate (spec-review-agent Phase 4) — if an EXISTING spec you'd extend (a parent, a Blocked-by: link, a sibling root-cause spec you'd group onto) is malformed/off the CHECKLIST (mangled phase numbering, missing **Owner:**/**Parent:**, missing **Verification** section, a customer_id table with no DB-companion plan, a stale H1 status emoji), do NOT build around it: surface "needs-human" with a one-line note ("[[<slug>]] is malformed — <what's off>; should be flipped back to in_review via markSpecCardBackToReview before this fix can hang off it"). Never silently patch a malformed spec inline; the in_review flip is what gets it back into Vale's queue.`,
+    ``,
     `Final message = ONLY one JSON object:`,
     `  {"status":"real-bug"|"monitor-false-positive"|"foreign-app-noise","diagnosis":"<plain text: the root cause + what the fix does>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"...","intent":"<one paragraph>","problem":"<concrete, grounded in the signature + the code you traced>","target":"src/lib/<the file/fn to fix>"}}`,
     `  {"status":"transient","reason":"<why this is a genuine wait/transient with no code fix>"}`,
@@ -8434,6 +8474,8 @@ function regressionPrompt(brief: string): string {
     ``,
     `⭐ BUILD-WIDE SWEEP — when the regression is a BUILD-TIME / CONFIG break (a compile-time failure: an incompatible route-segment config, a renamed/removed framework API, a bad import, a lint/type gate), the deploy fails FAST on the FIRST offending file — but identical offenders elsewhere SURVIVE and become the next deploy break. So before authoring the fix, GREP THE WHOLE REPO for EVERY occurrence of the offending construct, not just the file named in the error, and scope the spec to fix ALL of them in one pass (list each path in the spec). Example that bit us: \`export const runtime\` lives in \`route.ts\` AND \`page.tsx\`/\`layout.tsx\`/\`opengraph-image.tsx\` — fixing only the named route.ts left opengraph-image.tsx breaking the very next build. A one-file patch that just moves the break to the next file is NOT a real fix.`,
     `For "real-regression", default owner "[[../functions/platform]]" and parent "extends [[../specs/regression-agent]]" unless a more specific function clearly owns the regressed system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build (a repo-wide sweep of one mechanical pattern still counts as one phase). Provide the verification bullets that must hold again (reuse the regressed spec's failing checks), and for a build-time break add a bullet that the FULL build/compile passes (no remaining occurrences).`,
+    ``,
+    `⭐ MALFORMED SPEC mandate (spec-review-agent Phase 4) — if the spec you're reviewing the regression of (or any spec you'd extend a Blocked-by: line from) is itself malformed/off the CHECKLIST (mangled phase numbering, missing **Owner:**/**Parent:**, missing **Verification** section, a customer_id table with no DB-companion plan, a stale H1 status emoji), do NOT build around it: surface "needs-human" with a one-line note ("[[<slug>]] is malformed — <what's off>; the worker should send it back to in_review via markSpecCardBackToReview before the regression chain can extend it"). Never patch a malformed spec inline while authoring a fix.`,
     ``,
     `Final message = ONLY one JSON object:`,
     `  {"status":"real-regression","review":"<plain text: what regressed + the offending change + the fix>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/regression-agent]]","intent":"<one paragraph>","what_regressed":"<the ✅ behaviour that broke>","offending_change":"<the change/merge that broke it>","fix":"<what to change to restore it>","verification":["<bullet that must hold again>","..."]}}`,

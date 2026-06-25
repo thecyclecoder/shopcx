@@ -15,7 +15,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
-import { getSpecCardStates, markSpecCardStatus, markSpecCardShortCircuit, rollupPhaseStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
+import { getSpecCardStates, markSpecCardStatus, markSpecCardShortCircuit, markSpecCardBackToReview, rollupPhaseStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { slug?: unknown; status?: unknown; phaseIndex?: unknown };
@@ -23,8 +24,16 @@ export async function POST(request: Request) {
   if (typeof slug !== "string" || !/^[a-z0-9-]+$/i.test(slug)) {
     return NextResponse.json({ error: "bad slug" }, { status: 400 });
   }
-  if (status !== "planned" && status !== "in_progress" && status !== "shipped" && status !== "rejected") {
+  // spec-review-agent Phase 4 — accept `in_review` as a CEO board control (the "send this spec back to
+  // Vale's queue" action for a malformed/off spec). Routed through markSpecCardBackToReview, which
+  // consumes the prior vale_pass / ada_disposition / intended_status signals so the next Vale + Ada pass
+  // start clean.
+  if (status !== "planned" && status !== "in_progress" && status !== "shipped" && status !== "rejected" && status !== "in_review") {
     return NextResponse.json({ error: "bad status" }, { status: 400 });
+  }
+  if (status === "in_review" && typeof body.phaseIndex === "number") {
+    // A phase doesn't HAVE an in_review status — it's a spec-level lane only.
+    return NextResponse.json({ error: "in_review is a card-level status, not a phase status" }, { status: 400 });
   }
   const newPhaseStatus = status as Phase;
 
@@ -56,6 +65,27 @@ export async function POST(request: Request) {
   // already has the DB overlay applied). Keeps phase_states stable across writers.
   const states = await getSpecCardStates(workspaceId);
   const existing = states[slug];
+
+  // spec-review-agent Phase 4 — the CEO board control fast-path. Status='in_review' routes through the
+  // shared back-to-review writer (clears vale_pass / ada_disposition / intended_status so the next Vale +
+  // Ada pass start clean) + a director_activity row carrying the CEO's actor.
+  if (status === "in_review") {
+    await markSpecCardBackToReview(workspaceId, slug, { actor: `owner:${user.id}`, reason: "CEO sent spec back to in_review via the board control" });
+    try {
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "ceo",
+        actionKind: "spec_sent_back_to_review",
+        specSlug: slug,
+        reason: "CEO sent spec back to in_review via the board control (malformed/off — needs Vale re-check)",
+        metadata: { source: "board_control" },
+      });
+    } catch {
+      /* best-effort audit — never fail the status write on the activity row */
+    }
+    return NextResponse.json({ ok: true, status: "in_review" });
+  }
+
   const phaseStates: SpecCardPhaseState[] = (existing?.phase_states && existing.phase_states.length)
     ? [...existing.phase_states]
     : spec.card.phases.map((p, i) => ({ index: i, title: p.title, status: p.status as Phase }));

@@ -45,7 +45,11 @@ export type DirectorActionKind =
   // author's `flags.intended_status`). One row per Vale-passed spec she disposes.
   | "spec_dispose_same" // suggestion == decision (planned→planned OR deferred→deferred) — autonomous flip, applied silently.
   | "spec_dispose_downgrade" // author suggested `planned`, Ada deferred — autonomous flip + a CEO notification (one-click override to planned).
-  | "spec_dispose_upgrade_proposed"; // author suggested `deferred`, Ada wants `planned` — GATED, parks a CEO approval card (Planned / Deferred + reason).
+  | "spec_dispose_upgrade_proposed" // author suggested `deferred`, Ada wants `planned` — GATED, parks a CEO approval card (Planned / Deferred + reason).
+  // spec-review-agent Phase 4 — any agent (Vale on re-check, Bo, Ada, repair/regression, the CEO via the
+  // board control) that flips a malformed/off spec BACK to `in_review` so it returns to Vale's queue.
+  // The `actor` on the row records WHO sent it back; the `reason` records WHAT was off.
+  | "spec_sent_back_to_review"; // a malformed/off spec was returned to the in_review column; the build pipeline refuses to dispatch it until Vale clears it again.
 
 export interface DirectorActivityInput {
   workspaceId: string;
