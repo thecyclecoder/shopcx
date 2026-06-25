@@ -1,0 +1,1 @@
+- **Register monitored loop: acquisition-research-cadence-cron** · verified 2026-06-25 · → [[../libraries/control-tower]]
