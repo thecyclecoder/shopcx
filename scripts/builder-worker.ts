@@ -2472,20 +2472,12 @@ async function runProposedGoalJob(job: Job) {
         console.log(`${tag} CEO greenlight → ${action.result}`);
         return;
       }
-      // Fallback (no row yet — goals table backfill hasn't shipped): flip the markdown.
-      const { setGoalStatusLine } = await import("../src/lib/agents/goal-proposals");
-      const get = await gh("GET", `/repos/${REPO}/contents/${goalPath}?ref=main`);
-      if (!get.ok) {
-        await update(job.id, { status: "needs_attention", error: `greenlit goal ${instr.slug} not found on main`, pending_actions: job.pending_actions, log_tail: `greenlight → ${goalPath} missing on main`.slice(-2000) });
-        console.warn(`${tag} greenlight → ${goalPath} missing on main`);
-        return;
-      }
-      const md = Buffer.from(String((get.json as { content?: string }).content || "").replace(/\s/g, ""), "base64").toString("utf8");
-      const put = await putFileMain(goalPath, setGoalStatusLine(md, "greenlit"), `goal: greenlight ${instr.slug} (CEO-approved)`);
-      action.status = put.ok ? "done" : "failed";
-      action.result = put.ok ? `greenlit ${instr.slug}` : "failed to flip Status to greenlit";
-      await update(job.id, { status: put.ok ? "completed" : "needs_attention", error: put.ok ? null : "greenlight commit failed", pending_actions: job.pending_actions, log_tail: `CEO greenlight → ${action.result}`.slice(-2000) });
-      console.log(`${tag} CEO greenlight → ${action.result}`);
+      // No goals row to flip. Since goal-readers-from-db-retire-parsegoal, the roadmap readers read
+      // `public.goals` ONLY — a markdown `**Status:**` flip is invisible to every surface, so there's no
+      // safe fallback. proposeGoal writes the row up front, so a missing row here is an anomaly worth a
+      // human look rather than a silent markdown commit nobody reads.
+      await update(job.id, { status: "needs_attention", error: `greenlight ${instr.slug}: no public.goals row to flip (readers are DB-only)`, pending_actions: job.pending_actions, log_tail: `greenlight → no goals row for ${instr.slug}`.slice(-2000) });
+      console.warn(`${tag} greenlight → no goals row for ${instr.slug} (DB-only readers)`);
     } else {
       if (goalRow) {
         // Decline absorbs into the `folded` enum (see /api/roadmap/goal/decline). The row stays for audit;

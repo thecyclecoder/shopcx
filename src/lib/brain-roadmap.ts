@@ -9,15 +9,22 @@
  * a handful of consumers compile) but are NO LONGER on the `getRoadmap` / `getSpec` /
  * `listSpecSlugs` paths; Phase 3 retires them.
  *
- * The project-tracks header (`## Active project …` in `specs/README.md`) + the goals/functions/
- * archive readers below are NOT in this phase's scope — they stay file-backed until
- * [[goal-readers-from-db-retire-parsegoal]] cuts over. That's why `next.config.ts` still traces
- * the goals/functions/archive markdown into the roadmap routes — Phase 4 only drops the
- * specs entries from outputFileTracingIncludes.
+ * goal-readers-from-db-retire-parsegoal (2026-06-25): every GOAL read now comes from `public.goals` +
+ * `public.goal_milestones` via `getGoals` / `getGoal` / `getRoadmapFilters` / `listGoalSlugs` (mapping a
+ * `GoalRow` → `GoalCard`); the markdown goal parser + its status deriver + the transitional status overlay
+ * are RETIRED. A goal's milestone completion + rollup % is computed from its linked specs
+ * (`specs.milestone_id` join), and its overall status is DERIVED — `complete` iff every milestone rolled up
+ * `complete`, else the stored `goals.status`. The goal `body` is the only thing `getGoal().raw` carries
+ * (the detail page renders it; residual `[[spec]]` wikilinks in it still feed membership filters).
+ *
+ * The project-tracks header (`## Active project …` in `specs/README.md`) + the functions/archive readers
+ * below are NOT in this phase's scope — they stay file-backed. `next.config.ts` still traces the
+ * functions/archive markdown into the roadmap routes (the goals markdown is no longer read).
  */
 import { promises as fs } from "fs";
 import path from "path";
-import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
@@ -931,7 +938,6 @@ export async function getSpecBlockers(slug: string): Promise<SpecCard["blockedBy
 // ══════════════════════════════════════════════════════════════════════════
 
 const FUNCTIONS_DIR = path.join(process.cwd(), "docs", "brain", "functions");
-const GOALS_DIR = path.join(process.cwd(), "docs", "brain", "goals");
 
 /** A perpetual charter (### heading under "## Mandates") a function owns — metric-tracked, never %-complete. */
 export interface Mandate {
@@ -980,17 +986,6 @@ export interface GoalCard {
   milestones: Milestone[];
   pct: number; // 0..100 rollup of milestone completion
   linkedSpecCount: number; // resolvable specs across milestones
-}
-
-/** Derive a goal's lifecycle state from its `**Status:**` line (if any) + its rollup %. An explicit
- * marker always wins; with no marker a legacy goal is `complete` at 100%, else `greenlit` (active). Only an
- * explicit `Status: proposed` yields `proposed` — so a proposed 0% goal never collides with an active 0% one. */
-export function deriveGoalStatus(rawStatus: string, pct: number): GoalStatus {
-  const s = rawStatus.trim().toLowerCase();
-  if (s.startsWith("propose")) return "proposed";
-  if (s.startsWith("complete") || s.startsWith("done") || s.startsWith("shipped")) return "complete";
-  if (s.startsWith("greenlit") || s.startsWith("greenlight") || s === "active" || s.startsWith("in progress") || s.startsWith("in_progress")) return "greenlit";
-  return pct >= 100 ? "complete" : "greenlit"; // no explicit marker ⇒ legacy CEO goal (active)
 }
 
 /** How "done" a spec is, 0..1: shipped status ⇒ 1; else shipped phases / non-cut phases. */
@@ -1067,106 +1062,117 @@ export function parseFunction(slug: string, raw: string): FunctionCard {
   return { slug, title, summary: firstParagraph(lines), mandates, goalSlugs };
 }
 
-/** Build a slug → completion lookup once for rollups. */
-function completionMap(specs: SpecCard[]): Map<string, number> {
-  const m = new Map<string, number>();
-  for (const s of specs) m.set(s.slug, specCompletion(s));
-  return m;
+// ──────────────────────────────────────────────────────────────────────────────
+// DB-first goal readers (goal-readers-from-db-retire-parsegoal)
+//
+// Goals now live in `public.goals` + `public.goal_milestones` (relational rows), with child specs in
+// `public.specs` (milestone_id FK). These readers map a `GoalRow` (+ its joined milestones) into the same
+// `GoalCard` the old markdown reader produced — the page/agent surfaces are unchanged. The DB row IS the
+// truth: the markdown goal parser, its status deriver, and the transitional status overlay are RETIRED.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** A goals-row status maps 1:1 to GoalCard.status for the non-folded states. Folded is caller-filtered
+ *  (a folded goal is gone from the active board / returns null from getGoal). */
+function dbGoalRowStatus(status: GoalRow["status"]): GoalStatus {
+  if (status === "complete") return "complete";
+  if (status === "proposed") return "proposed";
+  return "greenlit"; // greenlit (and the never-surfaced folded, which callers filter first)
 }
 
-export function parseGoal(slug: string, raw: string, specs: SpecCard[] = []): GoalCard {
-  const lines = raw.split("\n");
-  const titleLine = lines.find((l) => l.startsWith("# "));
-  const title = titleLine ? cleanInline(titleLine.slice(2)) : functionLabel(slug);
-
-  const meta = (label: string): string => {
-    const re = new RegExp(`\\*\\*${label}:\\*\\*\\s*(.+)`, "i");
-    for (const l of lines) {
-      const m = l.match(re);
-      if (m) return cleanInline(m[1]);
-    }
-    return "";
-  };
-
-  // Owner (the DRI function) from the `Owner: [[../functions/x]]` line under "## Ownership & mirrors" —
-  // bold or plain, anywhere in the doc. This is the canonical goal→function link (the function doc's
-  // "Owned goals" prose list isn't reliably wikilinked); the Platform/DevOps Director escort selects the
-  // goals it owns by this (platform-director-agent Phase 2).
-  let owner: string | undefined;
-  for (const l of lines) {
-    const m = l.match(/(?:\*\*)?Owner:?(?:\*\*)?\s*\[\[([^\]|]+)/i);
-    if (m) {
-      owner = m[1].trim().replace(/^.*\//, "").replace(/\.md$/, "");
-      break;
-    }
+/** Pull a `**Target:**` line out of a goal's body (the markdown detail), or "" when absent — the one
+ *  GoalCard field that has no first-class column on `public.goals`. */
+function targetFromBody(body: string): string {
+  for (const l of body.split("\n")) {
+    const m = l.match(/\*\*Target:\*\*\s*(.+)/i);
+    if (m) return cleanInline(m[1]);
   }
+  return "";
+}
 
-  // Proposed-by (director-proposed-goals): the function slug that AUTHORED this goal as a proposal. Present
-  // only on a director-proposed artifact; absent on a CEO-authored goal. Drives the hub's proposer badge.
-  let proposedBy: string | undefined;
-  for (const l of lines) {
-    const m = l.match(/\*\*Proposed-by:\*\*\s*\[\[([^\]|]+)/i);
-    if (m) {
-      proposedBy = m[1].trim().replace(/^.*\//, "").replace(/\.md$/, "");
-      break;
-    }
-  }
-
-  // Milestones: top-level "- " bullets under "## Decomposition", each with its trailing lines.
-  const decomp = sectionLines(lines, /^##\s+Decomposition/i);
-  const milestones: Milestone[] = [];
-  let block: string[] = [];
-  const flush = () => {
-    if (!block.length) return;
-    const text = block.join("\n");
-    const idm = text.match(/\*\*\s*(M\d+)\b/);
-    const namem = text.match(/\*\*\s*(?:M\d+\s*[—–-]\s*)?([^*]+?)\.?\s*\*\*/);
-    const metricm = text.match(/\*\*Metric:\*\*\s*([^\n]+)/i);
-    const specSlugs = [...new Set(specWikilinks(text))];
-    milestones.push({
-      id: idm ? idm[1] : "",
-      name: cleanInline(namem ? namem[1] : text.split("\n")[0].replace(/^[-*]\s*/, "")),
-      status: statusFromText(text) ?? "planned",
-      metric: metricm ? cleanInline(metricm[1]) : undefined,
-      specSlugs,
-      completion: 0,
-    });
-    block = [];
-  };
-  for (const l of decomp) {
-    if (/^[-*]\s/.test(l)) {
-      flush();
-      block = [l];
-    } else if (block.length) {
-      block.push(l);
-    }
-  }
-  flush();
-
-  // Rollup: each milestone's completion = avg of its linked specs' completion; if none linked,
-  // fall back to its own emoji (shipped ⇒ 1). Goal % = mean of milestone completions.
-  const comp = completionMap(specs);
-  let linkedSpecCount = 0;
-  for (const m of milestones) {
-    const resolved = m.specSlugs.map((s) => comp.get(s)).filter((v): v is number => v != null);
-    linkedSpecCount += resolved.length;
-    m.completion = resolved.length ? resolved.reduce((a, b) => a + b, 0) / resolved.length : m.status === "shipped" ? 1 : 0;
-  }
-  const pct = milestones.length ? Math.round((milestones.reduce((a, m) => a + m.completion, 0) / milestones.length) * 100) : 0;
-
+/**
+ * Map one milestone row → a `Milestone` card, computing `completion` (0..1) from its linked specs (the
+ * same shape the old reader produced): the mean of each linked spec's `specCompletion`. With no linked
+ * specs the milestone falls back to its own rolled-up status (`complete` ⇒ 1, else 0) — mirroring the old
+ * "shipped emoji ⇒ 1, else 0" fallback. `status` is a `Phase` projection of the milestone's DB rollup
+ * status (`complete` → shipped, `in_progress` → in_progress, else planned).
+ */
+function milestoneRowToCard(m: GoalMilestoneRow, linked: SpecCard[]): Milestone {
+  const status: Phase = m.status === "complete" ? "shipped" : m.status === "in_progress" ? "in_progress" : "planned";
+  const completion = linked.length
+    ? linked.reduce((a, s) => a + specCompletion(s), 0) / linked.length
+    : m.status === "complete"
+      ? 1
+      : 0;
+  // Milestone title carries the human label (and any `M1 — ` prefix) — surface it as the card name. Its
+  // body may contain a `**Metric:**` line + spec wikilinks (used by getRoadmapFilters membership).
+  const specSlugs = [...new Set(specWikilinks(`${m.title}\n${m.body ?? ""}`))];
+  const metricm = (m.body ?? "").match(/\*\*Metric:\*\*\s*([^\n]+)/i);
   return {
-    slug,
-    title,
-    outcome: meta("Outcome"),
-    successMetric: meta("Success metric"),
-    target: meta("Target"),
-    owner,
-    status: deriveGoalStatus(meta("Status"), pct),
-    proposedBy,
+    id: (m.title.match(/^\s*\*{0,2}\s*(M\d+)\b/) || [])[1] ?? "",
+    name: cleanInline(m.title),
+    status,
+    metric: metricm ? cleanInline(metricm[1]) : undefined,
+    specSlugs,
+    completion,
+  };
+}
+
+/**
+ * Build a `GoalCard` from a `GoalRow` (+ its joined milestones) by reading each milestone's linked specs
+ * from the spec set passed in (the same `getRoadmap().specs` the board uses, keyed by milestone id). `pct`
+ * is the mean of milestone completion ×100; `linkedSpecCount` is the total resolvable specs across the
+ * goal's milestones. Status is DERIVED, not read blindly: a goal whose milestones ALL complete is
+ * `complete` regardless of the stored value — completion is inferred from children.
+ */
+function goalRowToCard(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>): GoalCard {
+  let linkedSpecCount = 0;
+  const milestones = row.milestones.map((m) => {
+    const linked = specsByMilestone.get(m.id) ?? [];
+    linkedSpecCount += linked.length;
+    return milestoneRowToCard(m, linked);
+  });
+  const pct = milestones.length
+    ? Math.round((milestones.reduce((a, m) => a + m.completion, 0) / milestones.length) * 100)
+    : 0;
+  // DERIVED status: a goal with milestones that ALL roll up `complete` IS complete (inferred from
+  // children); otherwise the stored row status (proposed | greenlit). Never trust a stored `complete`
+  // over the children — and never invent `complete` for a goal with zero milestones.
+  const allComplete = milestones.length > 0 && row.milestones.every((m) => m.status === "complete");
+  const status: GoalStatus = allComplete ? "complete" : dbGoalRowStatus(row.status);
+  return {
+    slug: row.slug,
+    title: row.title,
+    outcome: row.outcome ?? "",
+    successMetric: row.success_metric ?? "",
+    target: targetFromBody(row.body),
+    owner: row.owner || undefined,
+    status,
+    proposedBy: row.proposer_function || undefined,
     milestones,
     pct,
     linkedSpecCount,
   };
+}
+
+/** Resolve each milestone of a goal to its linked SpecCards, keyed by milestone id. Reads child specs via
+ *  the specs-table SDK (`specsForMilestone`) and maps them to SpecCards from the already-loaded board set
+ *  (so completion mirrors the board exactly), falling back to a fresh DB read for any not on the board. */
+async function specsByMilestoneForGoals(workspaceId: string, goals: GoalRow[], board: SpecCard[]): Promise<Map<string, SpecCard[]>> {
+  const bySlug = new Map(board.map((c) => [c.slug, c]));
+  const out = new Map<string, SpecCard[]>();
+  const milestoneIds = goals.flatMap((g) => g.milestones.map((m) => m.id));
+  await Promise.all(
+    milestoneIds.map(async (mid) => {
+      const rows = await specsForMilestone(workspaceId, mid);
+      // Prefer the board's already-resolved SpecCard (carries blocker resolution + card-state overlay);
+      // fall back to a fresh map of the raw row for any spec not boardable (e.g. folded — excluded above).
+      const cards = rows
+        .filter((r) => isBoardableStatus(r.status))
+        .map((r) => bySlug.get(r.slug) ?? dbRowToSpecCard(r));
+      out.set(mid, cards);
+    }),
+  );
+  return out;
 }
 
 async function readMdSlugs(dir: string): Promise<string[]> {
@@ -1180,8 +1186,18 @@ async function readMdSlugs(dir: string): Promise<string[]> {
 export async function listFunctionSlugs(): Promise<string[]> {
   return readMdSlugs(FUNCTIONS_DIR);
 }
+
+/** Slugs of every active goal — DB-driven (no fs read). Folded goals are off the active board, so they're
+ *  filtered out. No-arg callers resolve the single-tenant workspace via the shim. */
 export async function listGoalSlugs(): Promise<string[]> {
-  return readMdSlugs(GOALS_DIR);
+  const wsId = await resolveDefaultWorkspaceId();
+  if (!wsId) return [];
+  try {
+    const rows = await listGoalsFromDb(wsId);
+    return rows.filter((g) => g.status !== "folded").map((g) => g.slug);
+  } catch {
+    return [];
+  }
 }
 
 export async function getFunctions(): Promise<FunctionCard[]> {
@@ -1211,85 +1227,43 @@ export async function getFunction(slug: string, workspaceId?: string): Promise<{
 }
 
 /**
- * goal-greenlight-button-and-author-writes-db Phase 3 — overlay the DB row's `status` onto the
- * parsed-markdown GoalCard, so every reader (the goals board, /api/roadmap/plan, escortApprovedGoals,
- * agents hub) decides off `public.goals.status` instead of the `**Status:**` markdown line. Until the
- * Phase 4 mirror-md commit lands, the row IS the truth: a Greenlight click flips the row in <100ms
- * and every surface sees it, no commit / deploy required.
- *
- * Transitional safety: a missing `goals` table (the [[goals-milestones-tables-and-backfill]]
- * migration hasn't applied yet) or an empty backfill is swallowed — the markdown's parsed `status`
- * stays. Folded rows are filtered (a declined goal is gone from the active board, mirroring the
- * pre-cutover "Decline → delete .md" behavior).
+ * Every active goal as a `GoalCard`, read from `public.goals` + `public.goal_milestones` (the DB is the
+ * full source — goal-readers-from-db-retire-parsegoal). Folded goals are dropped (declined/archived — off
+ * the active board). Each goal's milestone completion + rollup % is computed from its linked specs (the
+ * same `getRoadmap().specs` board set, joined by `specs.milestone_id`). Sorted by title (parity with the
+ * old markdown reader).
  */
-async function loadGoalStatusOverlay(workspaceId?: string): Promise<Map<string, GoalStatus | "folded">> {
-  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
-  if (!wsId) return new Map();
-  try {
-    const { createAdminClient } = await import("@/lib/supabase/admin");
-    const admin = createAdminClient();
-    const { data, error } = await admin
-      .from("goals")
-      .select("slug, status")
-      .eq("workspace_id", wsId);
-    if (error || !data) return new Map();
-    const out = new Map<string, GoalStatus | "folded">();
-    for (const r of data as { slug: string; status: GoalStatus | "folded" }[]) {
-      out.set(r.slug, r.status);
-    }
-    return out;
-  } catch {
-    return new Map();
-  }
-}
-
-/** Translate a goals-row status to GoalCard.status, or null when the row is folded (caller filters). */
-function dbGoalStatusToCardStatus(s: GoalStatus | "folded" | undefined): GoalStatus | null {
-  if (!s) return null;
-  if (s === "folded") return null;
-  return s;
-}
-
 export async function getGoals(workspaceId?: string): Promise<GoalCard[]> {
-  const [{ specs }, slugs, statusOverlay] = await Promise.all([
-    getRoadmap(workspaceId),
-    listGoalSlugs(),
-    loadGoalStatusOverlay(workspaceId),
-  ]);
-  const cards = await Promise.all(
-    slugs.map(async (s) => parseGoal(s, await fs.readFile(path.join(GOALS_DIR, `${s}.md`), "utf8"), specs)),
-  );
-  const overlaid: GoalCard[] = [];
-  for (const card of cards) {
-    const row = statusOverlay.get(card.slug);
-    if (row === "folded") continue; // folded row = declined/archived; off the active board
-    const dbStatus = dbGoalStatusToCardStatus(row);
-    overlaid.push(dbStatus ? { ...card, status: dbStatus } : card);
-  }
-  return overlaid.sort((a, b) => a.title.localeCompare(b.title));
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return [];
+  const [{ specs }, rows] = await Promise.all([getRoadmap(wsId), listGoalsFromDb(wsId)]);
+  const active = rows.filter((g) => g.status !== "folded");
+  if (!active.length) return [];
+  const specsByMilestone = await specsByMilestoneForGoals(wsId, active, specs);
+  return active
+    .map((row) => goalRowToCard(row, specsByMilestone))
+    .sort((a, b) => a.title.localeCompare(b.title));
 }
 
-/** One goal: card (with rollup), raw markdown, and the resolved SpecCard for each linked milestone spec. */
+/**
+ * One goal: its card (with rollup), raw markdown (now the goal's DB `body` — the detail page renders it),
+ * and the resolved SpecCard for each spec linked to the goal's milestones, keyed by slug. Folded → null
+ * (declined/archived). No fs read, no markdown parse.
+ */
 export async function getGoal(slug: string, workspaceId?: string): Promise<{ raw: string; card: GoalCard; specs: Record<string, SpecCard> } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
-  let raw: string;
-  try {
-    raw = await fs.readFile(path.join(GOALS_DIR, `${slug}.md`), "utf8");
-  } catch {
-    return null;
-  }
-  const [{ specs }, statusOverlay] = await Promise.all([
-    getRoadmap(workspaceId),
-    loadGoalStatusOverlay(workspaceId),
-  ]);
-  let card = parseGoal(slug, raw, specs);
-  const row = statusOverlay.get(slug);
-  if (row === "folded") return null;
-  const dbStatus = dbGoalStatusToCardStatus(row);
-  if (dbStatus) card = { ...card, status: dbStatus };
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return null;
+  const row = await getGoalFromDbRow(wsId, slug);
+  if (!row || row.status === "folded") return null;
+  const { specs } = await getRoadmap(wsId);
+  const specsByMilestone = await specsByMilestoneForGoals(wsId, [row], specs);
+  const card = goalRowToCard(row, specsByMilestone);
+  // The linked specs for THIS goal (across its milestones), keyed by slug — same shape the detail page
+  // consumed when it filtered getRoadmap's specs to the goal.
   const bySlug: Record<string, SpecCard> = {};
-  for (const s of specs) bySlug[s.slug] = s;
-  return { raw, card, specs: bySlug };
+  for (const list of specsByMilestone.values()) for (const s of list) bySlug[s.slug] = s;
+  return { raw: row.body, card, specs: bySlug };
 }
 
 // ── Roadmap board filters: goal-membership + per-spec source (roadmap-goal-and-source-filters) ──
@@ -1298,7 +1272,7 @@ export async function getGoal(slug: string, workspaceId?: string): Promise<{ raw
 export type SpecSource = "repair" | "goal" | "manual";
 
 export interface RoadmapFilterData {
-  /** Dropdown options — every docs/brain/goals/*.md, by title. */
+  /** Dropdown options — every active goal (public.goals row), by title. */
   goals: { slug: string; title: string }[];
   /** spec slug → goal slugs it belongs to (goal-doc wikilinks ∪ parent-match). Empty array = no goal. */
   goalsBySpec: Record<string, string[]>;
@@ -1319,34 +1293,40 @@ function parentReferencesGoal(parent: string | undefined, goal: { slug: string; 
 }
 
 /**
- * Resolve goal→spec membership + per-spec source for the roadmap board's filters, once per render.
- * Membership = the union of (a) each goal doc's [[spec-slug]] wikilinks (the reliable planner signal) and
- * (b) specs whose **Parent:** references the goal (its slug, title, or a milestone). Source = 🔧 repair if
- * the spec carries a **Repair-signature:** line, else 🎯 goal if it's wikilinked from a goal doc (the
- * planner/goal-milestone signal — wikilink only, not parent-match), else ✋ manual. No schema change.
+ * Resolve goal→spec membership + per-spec source for the roadmap board's filters, once per render. Goals
+ * are read from `public.goals` (goal-readers-from-db-retire-parsegoal). Membership = the union of (a) the
+ * specs ATTACHED to one of the goal's milestones (`specs.milestone_id` join — the strong, DB-native
+ * planner signal that replaced goal-doc wikilinks) ∪ any residual `[[spec-slug]]` wikilinks left in the
+ * goal's `body`, and (b) specs whose **Parent:** references the goal (its slug, title, or a milestone).
+ * Source = 🔧 repair if the spec carries a Repair-signature, else 🎯 goal if it's attached/wikilinked (the
+ * planner/goal-milestone signal — not parent-match alone), else ✋ manual.
  */
 export async function getRoadmapFilters(workspaceId?: string): Promise<RoadmapFilterData> {
-  const [{ specs }, goalSlugs] = await Promise.all([getRoadmap(workspaceId), listGoalSlugs()]);
-  const goalDocs = await Promise.all(
-    goalSlugs.map(async (slug) => {
-      const raw = await fs.readFile(path.join(GOALS_DIR, `${slug}.md`), "utf8");
-      const card = parseGoal(slug, raw, specs);
-      return {
-        slug,
-        title: card.title,
-        // Every spec the goal doc wikilinks anywhere (milestones + prose) — the primary membership signal.
-        wikilinked: new Set(specWikilinks(raw)),
-        milestoneNames: card.milestones.map((m) => m.name).filter(Boolean),
-      };
-    }),
-  );
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return { goals: [], goalsBySpec: {}, sourceBySpec: {} };
+  const [{ specs }, rows] = await Promise.all([getRoadmap(wsId), listGoalsFromDb(wsId)]);
+  const active = rows.filter((g) => g.status !== "folded");
+  const specsByMilestone = await specsByMilestoneForGoals(wsId, active, specs);
+  const goalDocs = active.map((row) => {
+    // Strong signal: every spec attached to one of the goal's milestones (specs.milestone_id) PLUS any
+    // residual [[spec-slug]] wikilinks still in the goal body. This union is the "goal" source set.
+    const attached = new Set<string>();
+    for (const m of row.milestones) for (const s of specsByMilestone.get(m.id) ?? []) attached.add(s.slug);
+    for (const s of specWikilinks(row.body)) attached.add(s);
+    return {
+      slug: row.slug,
+      title: row.title,
+      linked: attached,
+      milestoneNames: row.milestones.map((m) => cleanInline(m.title)).filter(Boolean),
+    };
+  });
 
   const goalsBySpec: Record<string, string[]> = {};
   const sourceBySpec: Record<string, SpecSource> = {};
   for (const spec of specs) {
-    const linkedGoals = goalDocs.filter((g) => g.wikilinked.has(spec.slug));
+    const linkedGoals = goalDocs.filter((g) => g.linked.has(spec.slug));
     const memberGoals = goalDocs.filter(
-      (g) => g.wikilinked.has(spec.slug) || parentReferencesGoal(spec.parent, g),
+      (g) => g.linked.has(spec.slug) || parentReferencesGoal(spec.parent, g),
     );
     goalsBySpec[spec.slug] = memberGoals.map((g) => g.slug);
     sourceBySpec[spec.slug] = spec.repairSignature ? "repair" : linkedGoals.length ? "goal" : "manual";

@@ -11,22 +11,20 @@
  *      then enqueues a `proposed-goal` agent_jobs row (no GitHub commit from this code path — the box worker
  *      owns the transitional mirror commit, exactly like db_health/coverage-register).
  *   2. The box worker's `runProposedGoalJob` commits the mirror artifact `docs/brain/goals/{slug}.md` with
- *      `**Status:** proposed` (an inert artifact — the escort skips it, Pia doesn't decompose it) so the
- *      markdown-first readers ([[../libraries/brain-roadmap]] `parseGoal`) stay green until the reader
- *      cutover, and parks the job `needs_approval` with ONE `greenlight_goal` action. It writes a
- *      `proposed_goal` director_activity row.
+ *      `**Status:** proposed` (an inert artifact — the escort skips it, Pia doesn't decompose it) for the
+ *      git-history record, and parks the job `needs_approval` with ONE `greenlight_goal` action. It writes
+ *      a `proposed_goal` director_activity row. The roadmap readers themselves no longer read this
+ *      markdown — they read `public.goals` directly (goal-readers-from-db-retire-parsegoal).
  *   3. The approval-routing-engine reconciler surfaces it as an Approval Request. Goals NEVER route to a
  *      director — `proposed-goal` is deliberately absent from approval-inbox's KIND_TO_FUNCTION, so
  *      `resolveApprover` falls through to the CEO even when the proposing director is live + autonomous.
- *   4. On CEO greenlight the worker flips the row via `setGoalStatus(goalId, 'greenlit')` (Phase 3 — the
- *      RESUME path); on decline it flips the row to `folded` (the active board filters folded rows). The
- *      `setGoalStatusLine` markdown flip + the inert-artifact delete remain as the transitional fallback
- *      while a row may not yet exist (the [[../specs/goals-milestones-tables-and-backfill]] migration is
- *      WIP). A director never greenlights any goal — its own or another's.
+ *   4. On CEO greenlight the worker flips the row via `setGoalStatus(goalId, 'greenlit')` (the RESUME
+ *      path); on decline it flips the row to `folded` (the active board filters folded rows). The DB row is
+ *      authoritative for every reader. A director never greenlights any goal — its own or another's.
  *
- * This module is the PURE side (markdown render + status flip + the self-function scope check + the
- * decomposition-block milestone extractor) plus the enqueuer; the GitHub mirror commit lives in
- * `scripts/builder-worker.ts` `runProposedGoalJob`.
+ * This module is the PURE side (markdown render + the self-function scope check + the decomposition-block
+ * milestone extractor) plus the enqueuer; the GitHub mirror commit lives in `scripts/builder-worker.ts`
+ * `runProposedGoalJob`.
  *
  * See docs/brain/specs/director-proposed-goals.md · docs/brain/specs/goal-greenlight-button-and-author-writes-db.md
  * · docs/brain/libraries/goal-proposals.md.
@@ -119,29 +117,6 @@ export function buildProposedGoalMarkdown(input: ProposeGoalInput): string {
 }
 
 /**
- * Flip the `**Status:**` line of an existing goal markdown to `status` (e.g. proposed → greenlit on the CEO's
- * greenlight). Replaces the first `**Status:**` line in place; if the doc has none (a legacy CEO goal), inserts
- * one right under the H1. Pure — returns the new markdown.
- */
-export function setGoalStatusLine(raw: string, status: GoalStatusLiteral): string {
-  const lines = raw.split("\n");
-  const idx = lines.findIndex((l) => /^\s*\*\*Status:\*\*/i.test(l));
-  if (idx >= 0) {
-    lines[idx] = `**Status:** ${status}`;
-    return lines.join("\n");
-  }
-  const h1 = lines.findIndex((l) => l.startsWith("# "));
-  if (h1 >= 0) {
-    lines.splice(h1 + 1, 0, "", `**Status:** ${status}`);
-    return lines.join("\n");
-  }
-  return `**Status:** ${status}\n\n${raw}`;
-}
-
-/** The status values the flip helper accepts (the GoalStatus union, kept local to avoid a cross-import cycle). */
-export type GoalStatusLiteral = "proposed" | "greenlit" | "complete";
-
-/**
  * Pull the top-level `- ` bullets out of the artifact's `## Decomposition` block as `goal_milestones`
  * rows. Each bullet becomes one milestone: position is the bullet order (1-indexed); title is the bullet's
  * first non-empty text, lightly cleaned (strip the leading `**M1 — ` / `**` markers + a trailing period);
@@ -149,9 +124,8 @@ export type GoalStatusLiteral = "proposed" | "greenlit" | "complete";
  * inside `## Decomposition`, or that fall before the first bullet, are ignored. Returns `[]` for the
  * default placeholder body (`_Awaiting CEO greenlight — Pia decomposes…_`) — Pia owns decomposition then.
  *
- * Pure — no DB / fs access. Mirrors the milestone slicer [[../libraries/brain-roadmap]] `parseGoal` uses
- * (kept here as a tiny standalone fn so the proposer code path avoids a cross-import into the heavier
- * brain-roadmap parser).
+ * Pure — no DB / fs access. A tiny standalone slicer kept on the proposer code path so it avoids a
+ * cross-import into the heavier brain-roadmap module.
  */
 export function extractDecompositionMilestones(artifact: string): GoalMilestoneInput[] {
   const lines = artifact.split("\n");
