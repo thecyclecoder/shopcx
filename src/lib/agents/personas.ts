@@ -127,6 +127,13 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
+  "spec-review": {
+    key: "spec-review", name: "Vale", role: "Spec Review", emoji: "🔍",
+    personality: "The quality gate ahead of the build pipeline — reviews every new (or flagged) spec against the authoring guidelines, fixes malformed ones (mangled phases, missing owner/parent/blockers), and routes it to planned or deferred. Nothing builds until Vale clears it.",
+    mascotId: "default", avatarUrl: `${AV}vale-spec-review.jpg?v=4`,
+    chip: "bg-violet-100 text-violet-800 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-900/40",
+    dot: "bg-violet-500", ring: "bg-violet-50 dark:bg-violet-900/20", accent: "text-violet-600 dark:text-violet-400",
+  },
   "spec-drift": {
     key: "spec-drift", name: "Reese", role: "Spec Drift", emoji: "🔄",
     personality: "The DB-vs-code backstop — for every phase the DB marks shipped, checks its code is actually on main, and surfaces a bad/reverted merge for the director to escalate.",
@@ -242,6 +249,11 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Give every merged diff an autonomous security pass (injection / secret-leak / authz / RLS)",
     "Classify each finding (real-vuln / needs-human / false-positive); escalate, never auto-mutate",
     "Watch dependencies for CVEs; author the upgrade-fix spec for owner-gated Build",
+  ],
+  "spec-review": [
+    "Review every spec that enters In Review (newly authored, or flagged back by anyone) against the authoring guidelines",
+    "Fix malformed specs in place — mangled phases, missing/wrong Owner+Parent, missing Blocked-by, no DB-companion plan",
+    "Route each reviewed spec to Planned (sound + needed now) or Deferred (parked) — nothing builds until it's cleared",
   ],
   db_health: [
     "Watch slow queries + table growth across the schema",

@@ -120,6 +120,7 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   "spec-chat": { name: "Sage", criteria: "accurate, grounded answers · correct spec edits · read-only honored" },
   "dev-ask": { name: "Dex", criteria: "accurate, grounded answers · correct spec edits · read-only honored" },
   "security-review": { name: "Vault", criteria: "real vulnerabilities caught (not noise) · correct severity · no false-positives on safe diffs · a sound, actionable fix when flagged · produced a parseable verdict" },
+  "spec-review": { name: "Vale", criteria: "caught real spec defects (mangled phases / missing owner+parent / blockers / DB-companion) · correct planned-vs-deferred routing · the in-place fixes it made are sound + didn't change intent · didn't pass a malformed spec through" },
   "triage-escalations": { name: "Triage", criteria: "correct disposition per escalation (route vs dismiss vs needs-human) · no real blocker missed · no false escalations · sound rationale" },
   "ticket-improve": { name: "Tilly", criteria: "the ticket genuinely improved (clearer, correctly categorized/tagged) · no meaning changed · customer voice preserved" },
 };
