@@ -18,7 +18,11 @@ export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 // (director-drives-all-specs-and-deferred-status Phase 1): a spec the board parks in its OWN column,
 // excluded by every auto-build lane until the CEO un-defers it. Phases themselves are never `deferred`
 // (no phase emoji maps to it) — only a SpecCard is, so `SpecPhase.status` + `counts` stay `Phase`.
-export type SpecStatus = Phase | "deferred";
+// `in_review` (spec-review-agent): a NEWLY authored spec lands here — BEFORE `planned` — and can NEVER be
+// built until the Spec-Review agent (Vale) checks it against the authoring guidelines and moves it to
+// `planned` or `deferred`. Its own first column on the board. Like `deferred`, it's a SpecCard status only
+// (phases stay `Phase`).
+export type SpecStatus = Phase | "deferred" | "in_review";
 
 export interface SpecPhase {
   title: string;
@@ -305,8 +309,8 @@ function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCa
   return card.blockedBy.map((b) => {
     const target = bySlug.get(b.slug);
     if (target) {
-      // A deferred prerequisite hasn't shipped → still blocking; show it as ⏳ (the chip cares shipped-or-not).
-      const status: Phase = target.status === "deferred" ? "planned" : target.status;
+      // A deferred / in-review prerequisite hasn't shipped → still blocking; show it as ⏳ (the chip cares shipped-or-not).
+      const status: Phase = target.status === "deferred" || target.status === "in_review" ? "planned" : target.status;
       return { slug: b.slug, title: target.title, status, cleared: target.status === "shipped" };
     }
     // Not a live spec → archived/folded (the prereq shipped + was retired into the brain) or a dangling
@@ -347,8 +351,8 @@ function buildSpecCards(rawBySlug: Map<string, string>): SpecCard[] {
   // source of truth for cleared/uncleared (spec-blockers). A blocker not in this map = archived/folded ⇒ cleared.
   const bySlug = new Map(cards.map((c) => [c.slug, c]));
   for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug);
-  // newest-feeling first: in-progress, then planned, then shipped, then deferred (parked); stable by title
-  const rank: Record<SpecStatus, number> = { in_progress: 0, planned: 1, shipped: 2, deferred: 3, rejected: 4 };
+  // newest-feeling first: in-progress, then in-review (awaiting approval), then planned, then shipped, then deferred (parked); stable by title
+  const rank: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
   return cards.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
 }
 
@@ -461,7 +465,7 @@ export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
   const cardStates = await getSpecCardStates(wsId);
   const overlaid = specs.map((s) => overlayDbStateOnSpec(s, cardStates[s.slug]));
   // Re-sort because overlay can change a spec's status (e.g. a deferred-by-DB card moves columns).
-  const rank: Record<SpecStatus, number> = { in_progress: 0, planned: 1, shipped: 2, deferred: 3, rejected: 4 };
+  const rank: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
   overlaid.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
   return { specs: overlaid, tracks };
 }
@@ -532,7 +536,7 @@ export async function getFunctionMap(workspaceId?: string): Promise<FunctionMap>
   const functions: FunctionGroup[] = [...byFn.entries()]
     .sort((a, b) => ord(a[0]) - ord(b[0]) || a[0].localeCompare(b[0]))
     .map(([fn, list]) => {
-      const counts: Record<SpecStatus, number> = { planned: 0, in_progress: 0, shipped: 0, deferred: 0, rejected: 0 };
+      const counts: Record<SpecStatus, number> = { planned: 0, in_progress: 0, in_review: 0, shipped: 0, deferred: 0, rejected: 0 };
       for (const s of list) counts[s.status]++;
       const pmap = new Map<string, SpecCard[]>();
       for (const s of list) {
@@ -541,7 +545,7 @@ export async function getFunctionMap(workspaceId?: string): Promise<FunctionMap>
         arr.push(s);
         pmap.set(key, arr);
       }
-      const rank: Record<SpecStatus, number> = { in_progress: 0, planned: 1, shipped: 2, deferred: 3, rejected: 4 };
+      const rank: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
       const groups: ParentGroup[] = [...pmap.entries()]
         .map(([parent, ss]) => ({ parent, label: parentLabel(parent), specs: ss.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title)) }))
         .sort((a, b) => a.label.localeCompare(b.label));

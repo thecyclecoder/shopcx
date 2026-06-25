@@ -7,12 +7,13 @@ import { getActiveWorkspaceId } from "@/lib/workspace";
 const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
+  in_review: "bg-slate-400",
   shipped: "bg-emerald-500",
   deferred: "bg-slate-400",
   rejected: "bg-rose-400",
 };
-const COUNT_ORDER: SpecStatus[] = ["in_progress", "planned", "shipped", "deferred", "rejected"];
-const COUNT_LABEL: Record<SpecStatus, string> = { in_progress: "in progress", planned: "planned", shipped: "shipped", deferred: "deferred", rejected: "cut" };
+const COUNT_ORDER: SpecStatus[] = ["in_progress", "in_review", "planned", "shipped", "deferred", "rejected"];
+const COUNT_LABEL: Record<SpecStatus, string> = { in_progress: "in progress", in_review: "in review", planned: "planned", shipped: "shipped", deferred: "deferred", rejected: "cut" };
 
 function CountPills({ counts }: { counts: Record<SpecStatus, number> }) {
   const items = COUNT_ORDER.filter((k) => counts[k] > 0);

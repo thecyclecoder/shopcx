@@ -20,10 +20,11 @@ import PhaseList from "../PhaseList";
 import VerificationCard from "../VerificationCard";
 
 
-const STATUS_LABEL: Record<SpecStatus, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", deferred: "Deferred", rejected: "Cut" };
+const STATUS_LABEL: Record<SpecStatus, string> = { planned: "Planned", in_progress: "In progress", in_review: "In Review", shipped: "Shipped", deferred: "Deferred", rejected: "Cut" };
 const STATUS_BADGE: Record<SpecStatus, string> = {
   planned: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
   in_progress: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+  in_review: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
   shipped: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   deferred: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
   rejected: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
