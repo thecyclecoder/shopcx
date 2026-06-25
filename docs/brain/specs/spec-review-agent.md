@@ -25,9 +25,21 @@ Column flow: **In Review → Planned / Deferred → (build) → In progress → 
 - Verdict per spec: **approve → planned** (sound + needed now), **defer** (sound but parked — set flags.deferred, status to deferred per the spec's own "not needed now" directive), or **fix** (malformed — author the corrections directly: restructure mangled phases, add the missing owner/parent/blockers, then move to planned). Records a director_activity + a spec_status_history row (actor=spec-review).
 - Graded by the grader loop (add a `spec-review` rubric — Vale: "caught real spec defects · correct planned/deferred routing · the fixes it made are sound").
 
-## Phase 3 — review on demand + surface
-- The CEO (or Ada) can send a built/weird spec back to `in_review` for Vale to fix (the mangled-phases recovery).
-- Board: the In Review card shows Vale's pending review state; fold this spec when shipped.
+## Phase 3 — governance: author proposes, Vale checks quality, the DIRECTOR disposes (CEO design)
+
+The pipeline flow: **author creates spec → Spec Review (Vale, quality) → Director (Ada) decides Planned vs Deferred → Build → Security → Test → Fold.** An author only PROPOSES; a director DISPOSES.
+
+- **Author's intended destination (a suggestion, not binding):** every spec-creation surface captures the author's intended destination — `planned` or `deferred` — as a DB flag `spec_card_state.flags.intended_status` (NOT hardcoded markdown). It's a signal for the director, nothing more. (Implement across ALL creation surfaces: planner, triage, fix-spec builders, director split/author, Ada/coach.)
+- **Vale narrows to QUALITY ONLY:** `needs_fix` (malformed → fix in place or bounce; stays in_review) or `pass` (well-formed). Vale NO LONGER decides planned/deferred. A Vale-`pass` spec enters the **director-disposition lane**.
+- **Ada disposes (autonomous, with an asymmetric check vs the author's suggestion):**
+  - suggestion == decision (planned→planned, deferred→deferred): autonomous, apply silently.
+  - **UPGRADE** — author suggested `deferred`, Ada wants `planned` (spend build resources the author didn't think were needed now): **GATED — one-click CEO approval.** A 2-button inbox card (Planned / Deferred) + Ada's reason WHY. The spec holds until the CEO picks. (She is spending more than proposed → the CEO confirms.)
+  - **DOWNGRADE** — author suggested `planned`, Ada defers it: **AUTONOMOUS — no approval**, but send the CEO a NOTIFICATION: "I moved this to deferred for now — want it built now? [Build now → planned]" + a short note WHY. One-click override to planned.
+- **Vale → Ada escalation:** if a spec is genuinely ambiguous on quality, Vale surfaces it; the disposition ambiguity is Ada's call (above), and her own uncertainty escalates to the CEO via the UPGRADE/DOWNGRADE cards.
+
+## Phase 4 — agents can send a spec back to In Review + surface
+- Every agent that might spot a malformed/off spec — **Ada** (her `spec-status` action), **Bo** (build), **Vale**, **repair/regression**, the **CEO** (a board control) — gets a one-line mandate note: "if a spec looks malformed/off, flip its status to `in_review` (the DB status, via spec-status / the worker) — do NOT build around it." It's a DB flag, never a markdown marker.
+- Board: the In Review card shows Vale's pending review state; the director-disposition card shows Ada's pending Planned/Deferred call. Fold this spec when shipped.
 
 ## Verification
 - A newly authored spec appears in the **In Review** column, not Planned. Clicking Build on it is refused.
