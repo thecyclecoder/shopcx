@@ -1,0 +1,1 @@
+- **Suppress normalized 'would_remove_last_item' at both portal layers (ticket-create + triage), like insufficient_points** · verified 2026-06-25 · → [[../lifecycles/customer-portal]]
