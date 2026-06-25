@@ -1,16 +1,23 @@
 /**
- * Brain roadmap parser — reads docs/brain/specs/*.md + specs/README.md and turns
- * the ⏳ / 🚧 / ✅ phase emojis into structured data for the /dashboard/roadmap board.
+ * Brain roadmap reader — the source of truth for SpecCard rendering on the /dashboard/roadmap
+ * board, the spec detail page, the Slack roadmap surfaces, and every script/agent that asks
+ * "what's the state of spec X."
  *
- * The markdown IS the source of truth (per docs/brain/project-management.md), so this
- * never drifts: editing a spec updates the board, and a build flipping a phase emoji
- * shows up here. No DB. Read-only at request time.
+ * spec-readers-from-db-retire-parser Phase 1 (2026-06-25): every SPEC read now comes from
+ * `public.specs` + `public.spec_phases` via `readSpecsFromDb(workspaceId)` — the DB row IS the
+ * truth. `parseSpec` + `overlayDbStateOnSpec` + `mergePhaseStates` still live in this file (so
+ * a handful of consumers compile) but are NO LONGER on the `getRoadmap` / `getSpec` /
+ * `listSpecSlugs` paths; Phase 3 retires them.
  *
- * Vercel: docs/brain/** is traced into the function bundle via outputFileTracingIncludes
- * in next.config.ts (the "/dashboard/roadmap" entry).
+ * The project-tracks header (`## Active project …` in `specs/README.md`) + the goals/functions/
+ * archive readers below are NOT in this phase's scope — they stay file-backed until
+ * [[goal-readers-from-db-retire-parsegoal]] cuts over. That's why `next.config.ts` still traces
+ * the goals/functions/archive markdown into the roadmap routes — Phase 4 only drops the
+ * specs entries from outputFileTracingIncludes.
  */
 import { promises as fs } from "fs";
 import path from "path";
+import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
@@ -431,17 +438,11 @@ function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/
 }
 
 /**
- * Read every spec from disk + (optionally) overlay the DB mirror so status / critical / deferred / phases
- * reflect live PM truth. Pass the active workspaceId to get DB-driven status (the spec-status-db-driven
- * default for boardable surfaces); call with no arg to get markdown-only (legacy, used by agents/scripts
- * with no workspace context). Tracks parse the README + are stable across both modes.
- */
-/**
- * The (effectively single-tenant) build-console workspace to overlay spec_card_state from when a caller
- * doesn't pass one — the same "ride the latest agent_jobs row, fall back to the oldest workspace" rule the
- * director/repair/security agents use. spec-status-db-driven: status is DB-driven, so EVERY getRoadmap()
- * caller (the director's grooming/escort, scorecards, recaps, XP) must overlay the DB — not just the board.
- * Without this, no-arg callers read markdown-only phase status, which Phase 3's strip degraded to all-planned.
+ * The (effectively single-tenant) build-console workspace to resolve when a caller doesn't pass one — the
+ * same "ride the latest agent_jobs row, fall back to the oldest workspace" rule the director/repair/security
+ * agents use. spec-readers-from-db-retire-parser Phase 1: the SOLE source of spec rows is the DB, so every
+ * getRoadmap/getSpec/listSpecSlugs caller needs a workspaceId. No-arg callers (org-chart at startup, the
+ * legacy scripts/agents that haven't been retargeted yet) use this shim to pick the single-tenant workspace.
  */
 async function resolveDefaultWorkspaceId(): Promise<string | null> {
   try {
@@ -457,27 +458,171 @@ async function resolveDefaultWorkspaceId(): Promise<string | null> {
   }
 }
 
-export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
-  const [specs, tracks] = await Promise.all([readSpecs(), readTracks()]);
-  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
-  if (!wsId) return { specs, tracks }; // no workspace at all → markdown-only fallback
-  const { getSpecCardStates } = await import("@/lib/spec-card-state");
-  const cardStates = await getSpecCardStates(wsId);
-  const overlaid = specs.map((s) => overlayDbStateOnSpec(s, cardStates[s.slug]));
-  // Re-sort because overlay can change a spec's status (e.g. a deferred-by-DB card moves columns).
-  const rank: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
-  overlaid.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title));
-  return { specs: overlaid, tracks };
+// ──────────────────────────────────────────────────────────────────────────────
+// DB-first readers (spec-readers-from-db-retire-parser Phase 1)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** A `public.specs` row carries an extra `folded` status not present on the SpecCard surface — folded
+ *  specs are archived and never show on the board. Filter them out of the spec set. */
+function isBoardableStatus(status: SpecRow["status"]): boolean {
+  return status !== "folded";
 }
 
-/** Slugs of every spec file (no README). Used to resolve [[wikilinks]] to detail pages. */
-export async function listSpecSlugs(): Promise<string[]> {
+/** Coerce the DB status enum (which adds `folded` over the SpecCard surface) to a `SpecStatus`. Folded is
+ *  caller-filtered before this; this is for the boardable rows only. */
+function dbStatusToSpecStatus(status: SpecRow["status"]): SpecStatus {
+  if (status === "folded") return "shipped";
+  return status;
+}
+
+/** Build a SpecCard from one DB row + its joined `spec_phases`. The phases keep their stable id-by-position
+ *  ordering from the join (specs-table.listSpecs sorts ASC by position). PR/merge_sha provenance flows
+ *  through to the per-phase chip ([[spec-status-phase-pr-provenance]]). */
+function dbRowToSpecCard(row: SpecRow): SpecCard {
+  const phases: SpecPhase[] = row.phases.map((p: SpecPhaseRow) => ({
+    title: p.title,
+    status: p.status,
+    pr: p.pr ?? null,
+    merge_sha: p.merge_sha ?? null,
+  }));
+  const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
+  for (const p of phases) counts[p.status]++;
+  return {
+    slug: row.slug,
+    title: row.title,
+    status: dbStatusToSpecStatus(row.status),
+    critical: row.priority === "critical" ? true : undefined,
+    summary: row.summary ?? "",
+    phases,
+    counts,
+    owner: row.owner || undefined,
+    parent: row.parent || undefined,
+    // blockedBy slugs come in raw; resolveBlockedBy fills title/status/cleared against the full set below.
+    blockedBy: (row.blocked_by ?? []).map((slug) => ({ slug, title: slug, status: "planned" as Phase, cleared: false })),
+    // tri-state on the SpecCard (undefined=eligible default, true=eligible, false=opted-out). The DB
+    // boolean column lost the "no marker = default" distinction in the M1 backfill — mirror the current
+    // dominant repo state (zero opt-outs) by mapping true→true and false→undefined so the default-eligible
+    // semantics consumers rely on (`card.autoBuild !== false`) keep working.
+    autoBuild: row.auto_build ? true : undefined,
+    repairSignature: !!row.repair_signature,
+  };
+}
+
+/** Overlay the transient `spec_card_state.flags` signals onto a card: short_circuit / short_circuit_reason
+ *  (director-dismiss-park-and-short-circuit-spec) and one-shot `flags.merged_pr` (the card-level shipping PR
+ *  for a no-phase spec — spec-status-phase-pr-provenance). These aren't on `public.specs` yet, so we
+ *  surface them here. Per-phase PR/merge_sha provenance now lives on `spec_phases` directly (see
+ *  dbRowToSpecCard) — no overlay needed. */
+function overlayCardFlags(card: SpecCard, state: import("@/lib/spec-card-state").SpecCardState | undefined): SpecCard {
+  if (!state) return card;
+  const rawScReason = state.flags?.short_circuit_reason;
+  const shortCircuited = state.flags?.short_circuit === true ? true : undefined;
+  const shortCircuitReason = typeof rawScReason === "string" && rawScReason ? rawScReason : undefined;
+  const flagsMergedPr = state.flags?.merged_pr;
+  const shippedPr = typeof flagsMergedPr === "number" ? flagsMergedPr : null;
+  return { ...card, shortCircuited, shortCircuitReason, shippedPr };
+}
+
+const SPEC_RANK: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
+
+/** Read every boardable spec from `public.specs` + `public.spec_phases` for a workspace, build SpecCards,
+ *  resolve Blocked-by slugs against the live set, and (when card-state rows exist) overlay the transient
+ *  short-circuit / one-shot-PR flags. This REPLACES the old `readSpecs()` (parseSpec across the .md files).
+ *  Sorted by board column then title — the same order callers used to get from the markdown reader. */
+async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
+  const rows = (await listSpecsFromDb(workspaceId)).filter((r) => isBoardableStatus(r.status));
+  const cards = rows.map(dbRowToSpecCard);
+  const bySlug = new Map(cards.map((c) => [c.slug, c]));
+  for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug);
+  // Card-state overlay (short_circuit / merged_pr) — best-effort. A missing table / read error leaves cards
+  // un-overlaid (the canonical row already carries the truth for everything else).
   try {
-    const files = await fs.readdir(SPECS_DIR);
-    return files.filter((f) => f.endsWith(".md") && f !== "README.md").map((f) => f.replace(/\.md$/, ""));
+    const { getSpecCardStates } = await import("@/lib/spec-card-state");
+    const states = await getSpecCardStates(workspaceId);
+    for (let i = 0; i < cards.length; i++) cards[i] = overlayCardFlags(cards[i], states[cards[i].slug]);
   } catch {
-    return [];
+    /* best-effort overlay — the DB row is authoritative for everything else. */
   }
+  return cards.sort((a, b) => SPEC_RANK[a.status] - SPEC_RANK[b.status] || a.title.localeCompare(b.title));
+}
+
+/** Serialize a DB SpecRow back to a markdown blob with the same shape parseSpec/extractSpecSection/
+ *  parseRepairSpecMeta/parseFixesLink/parseGoalSpecBlockers/buildSpecModal expect — preserves the H1, the
+ *  metadata header lines (Owner / Parent / Blocked-by / Priority / Deferred / Auto-build /
+ *  Repair-signature / Regression-of / Regression-signature), the summary paragraph, one `## Phase N — …`
+ *  block per phase with the stored body, and (when any phase has verification) a single concatenated
+ *  `## Verification` section. The reconstruction lets every downstream consumer that reads `getSpec().raw`
+ *  keep compiling AND parsing — even though the source is now the DB, not the .md. */
+function serializeSpecRowToMarkdown(row: SpecRow): string {
+  const out: string[] = [];
+  out.push(`# ${row.title}`);
+  out.push("");
+  const headerBits: string[] = [];
+  if (row.owner) headerBits.push(`**Owner:** [[../functions/${row.owner}]]`);
+  if (row.parent) headerBits.push(`**Parent:** ${row.parent}`);
+  if (headerBits.length) out.push(headerBits.join(" · "));
+  if (row.blocked_by && row.blocked_by.length) {
+    out.push(`**Blocked-by:** ${row.blocked_by.map((s) => `[[${s}]]`).join(", ")}`);
+  }
+  if (row.priority === "critical") out.push("**Priority:** critical");
+  if (row.deferred) out.push("**Deferred:** parked");
+  if (row.auto_build) out.push("**Auto-build:** on");
+  if (row.repair_signature) out.push(`**Repair-signature:** \`${row.repair_signature}\``);
+  if (row.regression_of_slug) out.push(`**Regression-of:** [[${row.regression_of_slug}]]`);
+  if (row.regression_signature) out.push(`**Regression-signature:** \`${row.regression_signature}\``);
+  out.push("");
+  if (row.summary && row.summary.trim()) {
+    out.push(row.summary.trim());
+    out.push("");
+  }
+  // Phases (the DB orders them ASC by position via the join). Stored body is markdown-as-text; emit a
+  // `## Phase N — {title}` heading and the body verbatim.
+  const phases = row.phases.slice().sort((a, b) => a.position - b.position);
+  for (const p of phases) {
+    out.push(`## Phase ${p.position} — ${p.title}`);
+    out.push("");
+    if (p.body && p.body.trim()) {
+      out.push(p.body.trim());
+      out.push("");
+    }
+  }
+  // Concatenate per-phase verification (`spec_phases.verification`) into a single `## Verification` block —
+  // the shape extractSpecSection/parseVerificationBullets expects. When more than one phase carries a
+  // verification block, prefix each with a `**Phase N:**` label so the order survives.
+  const withVerification = phases.filter((p) => p.verification && p.verification.trim());
+  if (withVerification.length) {
+    out.push("## Verification");
+    out.push("");
+    if (withVerification.length === 1) {
+      out.push(withVerification[0].verification!.trim());
+      out.push("");
+    } else {
+      for (const p of withVerification) {
+        out.push(`**Phase ${p.position}:**`);
+        out.push("");
+        out.push(p.verification!.trim());
+        out.push("");
+      }
+    }
+  }
+  return out.join("\n");
+}
+
+export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  // No workspace → empty board. We fail loud (empty result, no markdown fallback) so an outage is visible
+  // rather than papered over with a stale disk parse. spec-readers-from-db-retire-parser safety rail.
+  const specs = wsId ? await readSpecsFromDb(wsId) : [];
+  const tracks = await readTracks();
+  return { specs, tracks };
+}
+
+/** Slugs of every boardable spec — DB-driven (no fs read). Used to resolve [[wikilinks]] to detail pages. */
+export async function listSpecSlugs(): Promise<string[]> {
+  const wsId = await resolveDefaultWorkspaceId();
+  if (!wsId) return [];
+  const rows = await listSpecsFromDb(wsId);
+  return rows.filter((r) => isBoardableStatus(r.status)).map((r) => r.slug);
 }
 
 // ── Taxonomy map: Function → (Mandate | Goal) → Spec ──
@@ -683,25 +828,27 @@ export function deriveSpecStatus(raw: string): SpecStatus {
 
 export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
-  let raw: string;
-  try {
-    raw = await fs.readFile(path.join(SPECS_DIR, `${slug}.md`), "utf8");
-  } catch {
-    return null;
-  }
-  let card = parseSpec(slug, raw);
-  // Resolve Blocked-by against the live spec set so the detail page's BuildButton sees the same
+  const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
+  if (!wsId) return null;
+  // spec-readers-from-db-retire-parser Phase 1: ONE SQL query for the card + reconstruct raw from the row.
+  // No fs read, no parseSpec. Folded specs are archive territory — return null (matches the old
+  // "file gone from disk" shape that the fold worker produced).
+  const row = await getSpecFromDb(wsId, slug);
+  if (!row || !isBoardableStatus(row.status)) return null;
+  let card = dbRowToSpecCard(row);
+  // Resolve Blocked-by against the live workspace set so the detail page's BuildButton sees the same
   // cleared/uncleared state as the board (spec-blockers).
-  const specs = await readSpecs();
+  const specs = await readSpecsFromDb(wsId);
   card.blockedBy = resolveBlockedBy(card, new Map(specs.map((c) => [c.slug, c])));
-  // spec-status-db-driven Phase 1: overlay DB-authoritative status / critical / deferred when the caller
-  // has workspace context (boardable surfaces) — markdown-only otherwise (agent helpers, scripts).
-  if (workspaceId) {
+  // Card-state overlay for the transient short-circuit / one-shot-PR flags that aren't on `public.specs`.
+  try {
     const { getSpecCardStates } = await import("@/lib/spec-card-state");
-    const cardStates = await getSpecCardStates(workspaceId);
-    card = overlayDbStateOnSpec(card, cardStates[slug]);
+    const cardStates = await getSpecCardStates(wsId);
+    card = overlayCardFlags(card, cardStates[slug]);
+  } catch {
+    /* best-effort overlay — the canonical row is still correct without it. */
   }
-  return { raw, card };
+  return { raw: serializeSpecRowToMarkdown(row), card };
 }
 
 /**
