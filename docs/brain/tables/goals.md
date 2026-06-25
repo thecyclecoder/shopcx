@@ -24,7 +24,7 @@ Goals are now read from this table by [[../libraries/brain-roadmap]] `getGoals` 
 | `owner` | `text` | function slug (DRI) — `growth ｜ cmo ｜ retention ｜ cfo ｜ logistics ｜ cs ｜ platform` (free-text for now) |
 | `proposer_function` | `text?` | the **Proposed-by:** function — set by [[../specs/director-proposed-goals]] when a director authored the goal; null for CEO-authored goals |
 | `parent_goal_id` | `uuid?` | self-ref → `goals(id)` on delete cascade. **NULLABLE** — a SubGoal is just a goal with a parent (CEO-locked design contract) |
-| `status` | `text` | `proposed ｜ greenlit ｜ complete ｜ folded` · CHECK-constrained · default `proposed`. **Trigger-maintained**: `greenlit → complete` rolls up automatically when every milestone is `complete`; `proposed → greenlit` is the CEO-only path ([[../specs/goal-greenlight-button-and-author-writes-db]]) |
+| `status` | `text` | `proposed ｜ greenlit ｜ complete ｜ folded` · CHECK-constrained · default `proposed`. Holds the CEO-greenlight INPUT (`proposed → greenlit` is the CEO-only path, [[../specs/goal-greenlight-button-and-author-writes-db]]; `* → folded` is the fold worker). `complete` is DERIVED by the reader — see Derived status |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | bumped every write · default `now()` |
 
@@ -38,13 +38,13 @@ Goals are now read from this table by [[../libraries/brain-roadmap]] `getGoals` 
 - `goals_parent_idx` — `parent_goal_id` (partial: `where parent_goal_id is not null`). The board's nested-goal render joins on this.
 - `goals_ws_status_idx` — `(workspace_id, status)`. The Roadmap filters by status.
 
-## Rolled-up status
+## Derived status
 
-`goals.status` is maintained by the `goal_milestones_rollup` trigger on [[goal_milestones]] — `public.roll_up_goal_status(goal_id)`:
+`goals.status` is no longer trigger-maintained — the `goal_milestones_rollup` trigger + `roll_up_goal_status` were dropped in `derive-rollup-status` P3 (migration `20260725160000`). The stored column holds only the explicit greenlight INPUT (`proposed` / `greenlit` / `folded`); the `complete` state is DERIVED by [[../libraries/brain-roadmap]] `goalRowToCard`:
 
-- `proposed` + `folded` are terminal-ish for the rollup: only an explicit write moves them out. **A proposed goal NEVER auto-flips to `complete`** — the proposed → greenlit step is the CEO-only path ([[../specs/goal-greenlight-button-and-author-writes-db]]); silently completing a non-greenlit goal would be a rail break.
-- A `greenlit` goal with every milestone `complete` → `complete`.
-- Otherwise `greenlit` (in-progress or planned milestones don't move the goal off `greenlit`).
+- **A proposed goal NEVER surfaces as `complete`** — the proposed → greenlit step is the CEO-only path ([[../specs/goal-greenlight-button-and-author-writes-db]]); a non-greenlit goal completing would be a rail break, so the deriver only flips a `greenlit` goal.
+- A `greenlit` goal whose milestones ALL roll up complete (each linked-spec completion ≥ 1) → surfaced as `complete`.
+- Otherwise the stored status (`proposed` / `greenlit`). A goal with zero milestones is never `complete`.
 
 ## Parent cycle protection
 
@@ -59,6 +59,7 @@ Goals are now read from this table by [[../libraries/brain-roadmap]] `getGoals` 
 ## Migration
 
 - `supabase/migrations/20260725130000_goals_and_goal_milestones.sql` — initial tables + rollup function + triggers + parent-cycle guard · apply: `scripts/apply-goals-tables-migration.ts` · verify: `scripts/_verify-goals-schema.ts`
+- `supabase/migrations/20260725160000_drop_rollup_triggers_and_milestone_status.sql` — `derive-rollup-status` P3: dropped the rollup triggers + functions (the parent-cycle guard is kept) so `goals.status` is no longer auto-written; `complete` is derived by the reader
 
 ## Related
 

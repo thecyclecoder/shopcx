@@ -1054,18 +1054,16 @@ function targetFromBody(body: string): string {
 
 /**
  * Map one milestone row → a `Milestone` card, computing `completion` (0..1) from its linked specs (the
- * same shape the old reader produced): the mean of each linked spec's `specCompletion`. With no linked
- * specs the milestone falls back to its own rolled-up status (`complete` ⇒ 1, else 0) — mirroring the old
- * "shipped emoji ⇒ 1, else 0" fallback. `status` is a `Phase` projection of the milestone's DB rollup
- * status (`complete` → shipped, `in_progress` → in_progress, else planned).
+ * same shape the old reader produced): the mean of each linked spec's `specCompletion`. With NO linked
+ * specs a milestone is `planned` with completion `0` — there is nothing to roll up (milestone status is
+ * purely DERIVED from children now that `goal_milestones.status` is dropped). `status` is DERIVED from
+ * that same completion: all linked specs done ⇒ shipped, any progress ⇒ in_progress, else planned.
  */
 function milestoneRowToCard(m: GoalMilestoneRow, linked: SpecCard[]): Milestone {
-  const status: Phase = m.status === "complete" ? "shipped" : m.status === "in_progress" ? "in_progress" : "planned";
   const completion = linked.length
     ? linked.reduce((a, s) => a + specCompletion(s), 0) / linked.length
-    : m.status === "complete"
-      ? 1
-      : 0;
+    : 0;
+  const status: Phase = completion >= 1 ? "shipped" : completion > 0 ? "in_progress" : "planned";
   // Milestone title carries the human label (and any `M1 — ` prefix) — surface it as the card name. Its
   // body may contain a `**Metric:**` line + spec wikilinks (used by getRoadmapFilters membership).
   const specSlugs = [...new Set(specWikilinks(`${m.title}\n${m.body ?? ""}`))];
@@ -1097,10 +1095,10 @@ function goalRowToCard(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>):
   const pct = milestones.length
     ? Math.round((milestones.reduce((a, m) => a + m.completion, 0) / milestones.length) * 100)
     : 0;
-  // DERIVED status: a goal with milestones that ALL roll up `complete` IS complete (inferred from
-  // children); otherwise the stored row status (proposed | greenlit). Never trust a stored `complete`
-  // over the children — and never invent `complete` for a goal with zero milestones.
-  const allComplete = milestones.length > 0 && row.milestones.every((m) => m.status === "complete");
+  // DERIVED status: a goal whose milestones ALL roll up complete (completion ≥ 1, inferred from children)
+  // IS complete; otherwise the stored row status (proposed | greenlit). Completion comes from the linked
+  // specs — never invent `complete` for a goal with zero milestones or a milestone with no linked specs.
+  const allComplete = milestones.length > 0 && milestones.every((m) => m.completion >= 1);
   const status: GoalStatus = allComplete ? "complete" : dbGoalRowStatus(row.status);
   return {
     slug: row.slug,

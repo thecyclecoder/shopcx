@@ -9,14 +9,14 @@
  * ([[../recipes/backfill-goals-from-markdown]]) fills the rows.
  *
  * Key invariants:
- *  - `goal_milestones.status` is rolled up FROM `public.specs.status` by the DB trigger
- *    `specs_milestone_rollup` (NOT in app code). Any child spec in_progress → milestone in_progress;
- *    all child specs shipped|folded → milestone complete; else planned.
- *  - `goals.status` is rolled up FROM `goal_milestones.status` by `goal_milestones_rollup`. A
- *    `proposed` or `folded` goal is terminal-ish — the rollup leaves it alone. Only a `greenlit` goal
- *    auto-flips to `complete` when every milestone is `complete`; **a proposed goal NEVER auto-flips**
- *    (the proposed → greenlit step is the CEO-only path in
- *    [[../specs/goal-greenlight-button-and-author-writes-db]]).
+ *  - Milestone completion is PURELY DERIVED from child specs — there is NO `goal_milestones.status`
+ *    column. The rollup trigger that used to maintain it was dropped (derive-rollup-status P3): a
+ *    milestone is complete iff every linked spec is shipped|folded, in_progress if any has progress, else
+ *    planned. The deriver lives in [[brain-roadmap]] `milestoneRowToCard`.
+ *  - `goals.status` holds the CEO-greenlight input (`proposed` / `greenlit` / `folded`); the `complete`
+ *    state is DERIVED by the reader (`goalRowToCard`) when every milestone rolls up complete. There is no
+ *    longer a DB rollup trigger writing it — the proposed → greenlit step is the CEO-only path in
+ *    [[../specs/goal-greenlight-button-and-author-writes-db]].
  *  - `goal_milestones.id` is STABLE across reorders + retitles — the `upsertGoal` REPLACE-by-position
  *    rule preserves ids so [[../tables/specs]] `milestone_id` FKs don't silently unattach (the FK is
  *    `on delete set null`; a destroy+recreate would null every child spec's link).
@@ -31,16 +31,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 /** The full enum the `goals.status` column accepts (CHECK-constrained in migration). */
 export type GoalRowStatus = "proposed" | "greenlit" | "complete" | "folded";
 
-/** The full enum the `goal_milestones.status` column accepts (CHECK-constrained in migration). */
-export type MilestoneRowStatus = "planned" | "in_progress" | "complete";
-
 export interface GoalMilestoneRow {
   id: string;
   goal_id: string;
   position: number;
   title: string;
   body: string | null;
-  status: MilestoneRowStatus;
   created_at: string;
   updated_at: string;
 }
@@ -72,8 +68,8 @@ export interface GoalRowInput {
   owner: string;
   proposer_function?: string | null;
   parent_goal_id?: string | null;
-  /** Optional explicit status. The DB trigger rolls this from greenlit → complete when every milestone
-   *  completes — don't pass `complete` for a still-proposed goal (the rail rejects it via terminal-ish). */
+  /** Optional explicit greenlight status (`proposed` / `greenlit` / `folded`). `complete` is DERIVED by
+   *  the reader when every milestone rolls up complete — don't write it here for a still-proposed goal. */
   status?: GoalRowStatus;
 }
 
@@ -82,7 +78,6 @@ export interface GoalMilestoneInput {
   position: number;
   title: string;
   body: string | null;
-  status?: MilestoneRowStatus;
 }
 
 export interface UpsertGoalResult {
@@ -117,7 +112,7 @@ interface GoalRowDb {
 
 const GOAL_COLUMNS =
   "id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, status, created_at, updated_at";
-const MILESTONE_COLUMNS = "id, goal_id, position, title, body, status, created_at, updated_at";
+const MILESTONE_COLUMNS = "id, goal_id, position, title, body, created_at, updated_at";
 
 function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
   return {
@@ -205,12 +200,12 @@ export async function listGoals(workspaceId: string, filter: ListGoalsFilter = {
  *   - new positions are INSERTED
  *   - vanished positions are DELETED
  *
- * The DB triggers `specs_milestone_rollup` + `goal_milestones_rollup` keep statuses consistent on each
- * write. Re-running on an unchanged input is idempotent.
+ * Milestone + goal completion is DERIVED by the readers from child specs (no rollup column / trigger),
+ * so this writer only persists structure (titles, bodies, positions). Re-running on unchanged input is
+ * idempotent.
  *
- * Not atomic across parent + child writes (supabase-js has no transaction surface). The rollup triggers
- * are the only consistency rail — a partial failure leaves the goal row in place with whatever milestone
- * subset succeeded, and re-running converges.
+ * Not atomic across parent + child writes (supabase-js has no transaction surface) — a partial failure
+ * leaves the goal row in place with whatever milestone subset succeeded, and re-running converges.
  */
 export async function upsertGoal(
   workspaceId: string,
@@ -271,7 +266,6 @@ export async function upsertGoal(
         body: m.body,
         updated_at: new Date().toISOString(),
       };
-      if (m.status !== undefined) updateRow.status = m.status;
       const { error: uErr } = await admin.from("goal_milestones").update(updateRow).eq("id", existing.id);
       if (uErr) throw uErr;
       milestoneIds[m.position] = existing.id;
@@ -282,7 +276,6 @@ export async function upsertGoal(
         title: m.title,
         body: m.body,
       };
-      if (m.status !== undefined) insertRow.status = m.status;
       const { data: inserted, error: iErr } = await admin
         .from("goal_milestones")
         .insert(insertRow)
@@ -322,23 +315,9 @@ export async function setGoalStatus(
 }
 
 /**
- * Set a milestone's status directly. Rarely needed — the `specs_milestone_rollup` trigger keeps the
- * milestone in sync with its child specs automatically. Exposed for manual overrides (e.g. flipping a
- * milestone to `planned` after lifting all its specs into a new milestone before any rollup fires).
- */
-export async function setMilestoneStatus(milestoneId: string, status: MilestoneRowStatus): Promise<void> {
-  const admin = createAdminClient();
-  const { error } = await admin
-    .from("goal_milestones")
-    .update({ status, updated_at: new Date().toISOString() })
-    .eq("id", milestoneId);
-  if (error) throw error;
-}
-
-/**
  * Attach a spec to a milestone (the planner uses this when a leaf lands). A single UPDATE on
- * `public.specs.milestone_id` — the `specs_milestone_rollup` trigger rolls up the new milestone (and the
- * old one when it changed). Pass `null` to DETACH (turn the spec into a standalone fix / regression).
+ * `public.specs.milestone_id`. Milestone completion is DERIVED from its linked specs at read time, so no
+ * rollup fires on this write. Pass `null` to DETACH (turn the spec into a standalone fix / regression).
  */
 export async function attachSpecToMilestone(specId: string, milestoneId: string | null): Promise<void> {
   const admin = createAdminClient();

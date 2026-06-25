@@ -17,6 +17,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getGoal, setGoalStatus } from "@/lib/goals-table";
+import { getGoals } from "@/lib/brain-roadmap";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
 export async function POST(request: Request) {
@@ -59,12 +60,14 @@ export async function POST(request: Request) {
   }
 
   // The safety rail: once any child milestone advances past `planned`, the goal is pinned forward.
-  // This refuses to revert the moment progress has landed (any in_progress or complete milestone).
-  const movedMilestone = goal.milestones.find((m) => m.status !== "planned");
+  // Milestone progress is DERIVED from child specs (no rollup column), so read it off the GoalCard the
+  // roadmap deriver produces — a milestone with completion > 0 (status not "planned") has progress landed.
+  const card = (await getGoals(workspaceId)).find((g) => g.slug === slug);
+  const movedMilestone = card?.milestones.find((m) => m.status !== "planned" || m.completion > 0);
   if (movedMilestone) {
     return NextResponse.json(
       {
-        error: `goal "${slug}" has progress on milestone "${movedMilestone.title}" (${movedMilestone.status}) — refuse to revert`,
+        error: `goal "${slug}" has progress on milestone "${movedMilestone.name}" (${movedMilestone.status}) — refuse to revert`,
       },
       { status: 409 },
     );

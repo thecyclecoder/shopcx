@@ -23,7 +23,7 @@ The card row for every spec — title, summary, owner, parent, blocked_by, prior
 | `priority` | `text?` | `critical` or null — the **Priority:** flag (today on `spec_card_state.flags.critical`) |
 | `deferred` | `boolean` | the **Deferred:** parked flag (today on `spec_card_state.flags.deferred`) — wins over phase rollup |
 | `intended_status` | `text?` | `planned ｜ deferred` — the [[../specs/spec-review-agent]] disposition lane suggestion |
-| `status` | `text` | rolled-up overall status — `in_review ｜ planned ｜ in_progress ｜ shipped ｜ deferred ｜ folded`. CHECK-constrained. **Trigger-maintained**: a direct write contradicting the phases is corrected on the next `spec_phases` write |
+| `status` | `text` | `in_review ｜ planned ｜ in_progress ｜ shipped ｜ deferred ｜ folded`. CHECK-constrained. Holds the EXPLICIT lifecycle override (`in_review` / `deferred` / `folded`) — NOT derivable. The planned/in_progress/shipped axis is DERIVED from `spec_phases` by the readers (no trigger); any stale rollup value the column still carries is ignored — see Derived status |
 | `intended_status_set_by` | `text?` | who set `intended_status` (Slack disposition flow) |
 | `repair_signature` | `text?` | the box Repair-Agent's signature for a repair-authored spec (drives the board's 🔧 Repair source chip) |
 | `auto_build` | `boolean` | owner opt-out from [[../specs/spec-blockers]] auto-queue. Default `false` |
@@ -41,15 +41,15 @@ The card row for every spec — title, summary, owner, parent, blocked_by, prior
 
 `specs_ws_slug` — a **unique index** on `(workspace_id, slug)`. The backfill and every future writer go through this `onConflict` key (insert on first write, update on repeat).
 
-## Rolled-up status
+## Derived status
 
-`specs.status` is maintained by a row-level trigger (`spec_phases_rollup`) on [[spec_phases]] and a column trigger (`specs_deferred_rollup`) on this table — both call `public.roll_up_spec_status(spec_id)`. Same rule [[../libraries/brain-roadmap]] `deriveStatus` / [[../libraries/spec-card-state]] `rollupPhaseStatus` enforce in app code today:
+`specs.status` is no longer trigger-maintained — the `spec_phases_rollup` trigger on [[spec_phases]], the `specs_deferred_rollup` column trigger on this table, and `roll_up_spec_status` were all dropped in `derive-rollup-status` P3 (migration `20260725160000`). The stored column now holds ONLY the explicit lifecycle overrides (`in_review` / `deferred` / `folded`); the planned/in_progress/shipped axis is DERIVED at read time by [[../libraries/brain-roadmap]] `deriveStatus` / `rollupPhaseStatus`:
 
-- `in_review` and `folded` are terminal-ish: the rollup never overwrites them (the disposition + the fold worker move them out explicitly).
+- `in_review` and `folded` are terminal: the deriver returns them as-is (the disposition + the fold worker set them explicitly).
 - `deferred=true` wins over phase progress.
 - Otherwise: any phase `in_progress` or any `shipped` (but not all) → `in_progress`; all (ignoring `rejected`) `shipped` → `shipped`; no phases → `planned`.
 
-The DB enforcement closes the [[../specs/spec-review-agent]] "shipped with 1 phase" class of bug — impossible to commit `specs.status='shipped'` with non-shipped phases.
+Because the deriver always prefers the phase rollup, a stale `shipped` written while a phase is still `planned` is never displayed — closing the [[../specs/spec-review-agent]] "shipped with 1 phase" class at READ time rather than via a DB write constraint.
 
 ## Reads / writes
 
@@ -61,6 +61,7 @@ The DB enforcement closes the [[../specs/spec-review-agent]] "shipped with 1 pha
 
 - `supabase/migrations/20260713120000_specs_and_spec_phases.sql` — initial tables + rollup function + triggers · apply: `scripts/apply-specs-tables-migration.ts` · verify: `scripts/_verify-specs-schema.ts`
 - `supabase/migrations/20260725130000_goals_and_goal_milestones.sql` — adds the `specs_milestone_id_fkey` FK constraint pointing `milestone_id` at [[goal_milestones]] · apply: `scripts/apply-goals-tables-migration.ts` · verify: `scripts/_verify-goals-schema.ts`
+- `supabase/migrations/20260725160000_drop_rollup_triggers_and_milestone_status.sql` — `derive-rollup-status` P3: dropped `spec_phases_rollup` + `specs_deferred_rollup` + `roll_up_spec_status` so `specs.status` is no longer auto-written; status is derived by the readers
 - `supabase/migrations/20260725140000_specs_card_state_columns.sql` ([[../specs/spec-fold-from-db-row]] Phase 2 expand step) — adds + backfills the six post-retirement columns (`last_merge_sha`, `short_circuit`, `short_circuit_reason`, `vale_pass`, `ada_disposition`, `merged_pr`) carrying the surviving spec_card_state fields. The contract step ([[../specs/retire-spec-card-state]]) cuts readers over + drops the mirror table · apply: `scripts/apply-specs-card-state-columns-migration.ts`
 - One-time backfill from markdown ([[../specs/spec-body-table-and-backfill]] Phase 3): `scripts/backfill-specs-from-markdown.ts`
 

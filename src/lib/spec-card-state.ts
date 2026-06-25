@@ -299,13 +299,11 @@ async function upsertCardState(
  * [[../specs/spec-readers-from-db-retire-parser]] cuts readers over.
  *
  * Field mapping (spec-authoring-writes-db-and-worker-materialize Phase 3):
- *  - patch.status                  → specs.status (the rollup trigger keeps phase progress consistent on
- *                                    the NEXT phase write; in_review / folded are terminal-ish — the
- *                                    trigger leaves them alone, so an explicit caller write is what flips
- *                                    out of them).
- *  - patch.flags.deferred          → specs.deferred (the specs_deferred_rollup_trigger recomputes status
- *                                    to 'deferred' when set; un-setting restores the underlying phase
- *                                    rollup).
+ *  - patch.status                  → specs.status (holds the EXPLICIT in_review / folded / deferred
+ *                                    lifecycle overrides; phase progress is DERIVED at read time, not
+ *                                    rolled into this column — the rollup trigger was dropped).
+ *  - patch.flags.deferred          → specs.deferred (the readers project this to a 'deferred' status when
+ *                                    set; un-setting restores the underlying phase rollup at read time).
  *  - patch.flags.critical          → specs.priority ('critical' / null — mirrors the markdown column
  *                                    shape).
  *  - patch.flags.intended_status   → specs.intended_status (cleared on Ada's disposition;

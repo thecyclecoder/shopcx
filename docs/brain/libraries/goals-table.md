@@ -10,10 +10,9 @@ The canonical read/write surface for the DB-resident goal hierarchy — [[../tab
 
 ## Types
 
-- **`GoalRowStatus`** = `'proposed' ｜ 'greenlit' ｜ 'complete' ｜ 'folded'` — the `goals.status` enum (CHECK-constrained in the migration). `folded` is added here (the existing [[brain-roadmap]] `GoalStatus` type stays narrower until [[../specs/goal-readers-from-db-retire-parsegoal]] retires it).
-- **`MilestoneRowStatus`** = `'planned' ｜ 'in_progress' ｜ 'complete'` — the `goal_milestones.status` enum.
+- **`GoalRowStatus`** = `'proposed' ｜ 'greenlit' ｜ 'complete' ｜ 'folded'` — the `goals.status` enum (CHECK-constrained in the migration). `folded` is added here (the existing [[brain-roadmap]] `GoalStatus` type stays narrower until [[../specs/goal-readers-from-db-retire-parsegoal]] retires it). The column holds the greenlight INPUT; `complete` is derived by the reader.
 - **`GoalRow`** — `{ id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, status, created_at, updated_at, milestones: GoalMilestoneRow[] }`.
-- **`GoalMilestoneRow`** — `{ id, goal_id, position, title, body, status, created_at, updated_at }`. `position` is 1-indexed; `id` is STABLE across reorders.
+- **`GoalMilestoneRow`** — `{ id, goal_id, position, title, body, created_at, updated_at }`. No `status` field — milestone completion is DERIVED from child specs by the readers (`goal_milestones.status` was dropped in `derive-rollup-status` P3). `position` is 1-indexed; `id` is STABLE across reorders.
 - **`GoalRowInput`** / **`GoalMilestoneInput`** — the writable field sets `upsertGoal` accepts.
 
 ## Exports
@@ -24,16 +23,15 @@ The canonical read/write surface for the DB-resident goal hierarchy — [[../tab
   - matching `(goal_id, position)` rows are UPDATED in place — **preserving the stable `id`** so [[../tables/specs]] `milestone_id` FKs survive a reorder / retitle
   - new positions INSERT
   - vanished positions DELETE
-  - the rollup triggers keep `goals.status` + `goal_milestones.status` consistent after every write
-- **`setGoalStatus(goalId, status, actor)`** — the explicit status write surface, the CEO-greenlight entry point for [[../specs/goal-greenlight-button-and-author-writes-db]]. The DB CHECK enforces the enum; the rollup handles eventual `greenlit → complete` once every milestone lands. Use this for explicit flips: `proposed → greenlit` (CEO), `* → folded` (fold worker). `actor` is recorded on `updated_at` only — the audit-grade trail lives in a future history table.
-- **`setMilestoneStatus(milestoneId, status)`** — rare; the trigger usually keeps a milestone in sync with its child specs. Exposed for manual overrides (e.g. flipping back to `planned` after lifting every spec).
-- **`attachSpecToMilestone(specId, milestoneId)`** — a single `UPDATE specs SET milestone_id=…`. The `specs_milestone_rollup` trigger rolls up both the new and old milestone. Pass `null` to detach (a standalone spec).
+  - the writer only persists STRUCTURE (titles, bodies, positions); milestone + goal completion is derived by the readers, so nothing rolls up on the write
+- **`setGoalStatus(goalId, status, actor)`** — the explicit status write surface, the CEO-greenlight entry point for [[../specs/goal-greenlight-button-and-author-writes-db]]. The DB CHECK enforces the enum. Use this for explicit flips: `proposed → greenlit` (CEO), `* → folded` (fold worker). `complete` is DERIVED by the reader, not written here. `actor` is recorded on `updated_at` only — the audit-grade trail lives in a future history table.
+- **`attachSpecToMilestone(specId, milestoneId)`** — a single `UPDATE specs SET milestone_id=…`. Milestone completion is derived from its linked specs at read time, so no rollup fires. Pass `null` to detach (a standalone spec).
 
 All writers route through `createAdminClient()` (service-role; the RLS policies `goals_service` / `goal_milestones_service` grant full access). No client-side writes.
 
 ## The CEO-greenlight rail
 
-`goals.status` ROLLS UP via the `goal_milestones_rollup` trigger BUT a **proposed** or **folded** goal is terminal-ish for the rollup — it never auto-flips. A `proposed` goal can ONLY become `greenlit` via an explicit `setGoalStatus(id, 'greenlit', actor)` write (the CEO's call in [[../specs/goal-greenlight-button-and-author-writes-db]]). The rollup then takes over and ships the goal to `complete` once every milestone is complete. This guards the [[../goals/db-driven-specs]] outcome — "the CEO literally had no surface to approve the goal" — at the DB rail rather than in app code.
+`goals.status` holds the greenlight INPUT (`proposed` / `greenlit` / `folded`); the `complete` state is DERIVED by the reader ([[brain-roadmap]] `goalRowToCard`) — there is no rollup trigger anymore. A `proposed` goal can ONLY become `greenlit` via an explicit `setGoalStatus(id, 'greenlit', actor)` write (the CEO's call in [[../specs/goal-greenlight-button-and-author-writes-db]]); the reader then surfaces a `greenlit` goal as `complete` once every milestone is complete (each linked-spec completion ≥ 1), but a `proposed` goal NEVER surfaces complete. This guards the [[../goals/db-driven-specs]] outcome — "the CEO literally had no surface to approve the goal" — at the read rail.
 
 ## Parent cycle protection
 
@@ -41,18 +39,18 @@ All writers route through `createAdminClient()` (service-role; the RLS policies 
 
 ## Not atomic across parent + children
 
-supabase-js has no transaction surface, so `upsertGoal` is a sequence (UPSERT goals, then DELETE / UPDATE / INSERT goal_milestones). The rollup triggers keep statuses consistent after each write, and re-running the same call is idempotent (position-keyed REPLACE is deterministic). Callers requiring true atomicity must compose at the SQL layer.
+supabase-js has no transaction surface, so `upsertGoal` is a sequence (UPSERT goals, then DELETE / UPDATE / INSERT goal_milestones). It writes only structure; completion is derived at read time, so there's no rollup to keep consistent — and re-running the same call is idempotent (position-keyed REPLACE is deterministic). Callers requiring true atomicity must compose at the SQL layer.
 
 ## Callers
 
 - **[[../recipes/backfill-goals-from-markdown]]** (`scripts/backfill-goals-from-markdown.ts`) — ran the legacy [[brain-roadmap]] `parseGoal` once over `docs/brain/goals/*.md` and upserted the rows (backfill complete).
-- **`/api/roadmap/goal/greenlight` · `/ungreenlight` · `/decline`** ([[../specs/goal-greenlight-button-and-author-writes-db]] Phase 1) — the CEO's one-click DB-flag routes. `greenlight` flips `proposed → greenlit` via `setGoalStatus`, `ungreenlight` reverses (while `goal_milestones.status` is all `planned`), and `decline` flips `proposed → folded`. Each is CEO-only (gated on `workspace_members.role='owner'`) and writes one [[../tables/director_activity]] row (`greenlit_goal` / `ungreenlit_goal` / `declined_goal`) for audit.
+- **`/api/roadmap/goal/greenlight` · `/ungreenlight` · `/decline`** ([[../specs/goal-greenlight-button-and-author-writes-db]] Phase 1) — the CEO's one-click DB-flag routes. `greenlight` flips `proposed → greenlit` via `setGoalStatus`, `ungreenlight` reverses (refusing once any milestone has DERIVED progress — read off the `getGoals` GoalCard, no `goal_milestones.status` column anymore), and `decline` flips `proposed → folded`. Each is CEO-only (gated on `workspace_members.role='owner'`) and writes one [[../tables/director_activity]] row (`greenlit_goal` / `ungreenlit_goal` / `declined_goal`) for audit.
 - **`<GreenlightButton>`** (`src/app/dashboard/roadmap/goals/GreenlightButton.tsx`) — the client component on the goal card list + detail page that posts to those routes. Hides itself for non-owner viewers; the route enforces CEO-only server-side too.
 - **[[../specs/goal-readers-from-db-retire-parsegoal]]** (Phase 2) — completed cutover. `getGoals` / `getGoal` ([[brain-roadmap]]) now read FROM these tables instead of markdown.
 
 ## Gotchas
 
-- **The proposed-goal rail.** `setGoalStatus(id, 'complete', ...)` on a `proposed` goal is allowed by the CHECK but the rollup will never get there on its own — that's deliberate: the CEO has to greenlight first ([[../specs/goal-greenlight-button-and-author-writes-db]]).
+- **The proposed-goal rail.** `setGoalStatus(id, 'complete', ...)` on a `proposed` goal is allowed by the CHECK but the reader never DERIVES `complete` for a non-greenlit goal — that's deliberate: the CEO has to greenlight first ([[../specs/goal-greenlight-button-and-author-writes-db]]).
 - **`upsertGoal` preserves milestone ids.** Matching `(goal_id, position)` rows are UPDATED, not replaced — so a [[../tables/specs]] `milestone_id` FK pointing at a milestone survives a retitle. A destroy+recreate would silently unattach every child spec (the FK is `on delete set null`).
 - **A subgoal is just a goal with `parent_goal_id`.** Not a separate table — the CEO-locked design contract. Reassignment is one UPDATE; cycles rejected at the rail.
 

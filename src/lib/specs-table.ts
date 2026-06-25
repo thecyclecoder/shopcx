@@ -9,10 +9,11 @@
  * fills the rows.
  *
  * Key invariants:
- *  - `specs.status` is rolled up FROM `spec_phases` by the DB trigger `spec_phases_rollup` (NOT in app
- *    code). It's impossible to commit `specs.status='shipped'` while a phase is still `planned` — the
- *    [[../specs/spec-review-agent]] "shipped with 1 phase" class. `in_review` and `folded` are terminal-ish
- *    (the rollup leaves them alone until an explicit flip clears them).
+ *  - Spec status is DERIVED from `spec_phases` by the READERS ([[brain-roadmap]] `rollupPhaseStatus` /
+ *    `deriveStatus`), not by a DB trigger — the `spec_phases_rollup` trigger was dropped
+ *    (derive-rollup-status P3). The stored `specs.status` column is kept only for the EXPLICIT lifecycle
+ *    overrides `in_review` / `deferred` / `folded` (not derivable); any stale rollup value it still carries
+ *    is ignored by the deriving readers, which always prefer the phase rollup.
  *  - `spec_phases.id` is STABLE across moves — `movePhase(phaseId, newSpecId, newPosition)` is a SINGLE
  *    UPDATE that preserves the id + pr + merge_sha + created_at, so a phase's PR provenance chain
  *    ([[../specs/spec-status-phase-pr-provenance]]) survives a lift between specs.
@@ -241,12 +242,13 @@ export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {
  *   - matching positions are UPDATED in place (preserving id + pr/merge_sha unless explicitly overridden)
  *   - new positions are INSERTED (with optional pr/merge_sha if supplied)
  *   - vanished positions are DELETED
- * The DB trigger `spec_phases_rollup` rolls `specs.status` up from the resulting phase set after each
- * write (terminal-ish `in_review`/`folded` are left alone — only an explicit flip clears them).
+ * Spec status is DERIVED from the resulting phase set by the readers (`rollupPhaseStatus`), not written
+ * here — there is no `spec_phases_rollup` trigger anymore. This writer only persists structure; the
+ * explicit `in_review`/`folded`/`deferred` lifecycle states come from their own writers (`upsertSpec`,
+ * fold, deferred toggle).
  *
- * Not atomic across the parent + child writes (supabase-js has no transaction surface). The trigger
- * keeps status consistent on EACH write, and re-running the same `upsertSpec` is idempotent (the
- * read-modify-write of phases by position is deterministic).
+ * Not atomic across the parent + child writes (supabase-js has no transaction surface). Re-running the
+ * same `upsertSpec` is idempotent (the read-modify-write of phases by position is deterministic).
  */
 export async function upsertSpec(
   workspaceId: string,

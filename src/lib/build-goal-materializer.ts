@@ -60,6 +60,19 @@ export async function materializeGoal(workspaceId: string, slug: string, dir: st
 }
 
 /**
+ * Derive a milestone's completion label from its child specs — `goal_milestones.status` was dropped
+ * (derive-rollup-status P3), so milestone status is DERIVED, mirroring the retired rollup: every child
+ * spec shipped|folded ⇒ complete; any in_progress (or some-but-not-all done) ⇒ in_progress; else planned.
+ */
+function deriveMilestoneStatus(specs: SpecRow[]): "planned" | "in_progress" | "complete" {
+  if (!specs.length) return "planned";
+  const done = specs.filter((s) => s.status === "shipped" || s.status === "folded").length;
+  if (done === specs.length) return "complete";
+  if (done > 0 || specs.some((s) => s.status === "in_progress")) return "in_progress";
+  return "planned";
+}
+
+/**
  * Pure renderer (no I/O) — joins a `goals` row + its `goal_milestones` + the joined child `specs` into
  * the goal-narrative markdown the fold-agent reads. Exported so tests / the brain page can show the
  * exact shape without disk. NO status emoji on the H1 (status is DB-driven, mirroring `renderSpecRow`).
@@ -87,7 +100,7 @@ export function renderGoalRow(row: GoalRow, milestones: MaterializedMilestone[])
   if (milestones.length) {
     parts.push("## Decomposition", "");
     for (const { milestone, specs } of milestones) {
-      parts.push(`### ${milestone.title}  _(${milestone.status})_`);
+      parts.push(`### ${milestone.title}  _(${deriveMilestoneStatus(specs)})_`);
       if (milestone.body && milestone.body.trim()) parts.push(milestone.body.trim());
       if (specs.length) {
         parts.push("");

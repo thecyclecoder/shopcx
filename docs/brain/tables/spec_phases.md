@@ -28,19 +28,18 @@ ONE ROW PER PHASE of every spec — the body content (`title`, `body`), the life
 
 `spec_phases_spec_position` — a **unique index** on `(spec_id, position)`. The backfill replaces phases under the same `spec_id` keyed by position; `movePhase` ([[../libraries/specs-table]]) renumbers position on the destination.
 
-## Trigger — `spec_phases_rollup`
+## Status derives from phases (no trigger)
 
-After insert / update / delete on this table, `public.roll_up_spec_status(spec_id)` recomputes the parent `specs.status`. Same rule [[../libraries/brain-roadmap]] `deriveStatus` enforces in app code; **DB-enforced** here so a direct write that contradicts the phases is corrected on the next phase write. A `movePhase` UPDATE that changes `spec_id` fires the rollup on BOTH the old + the new spec.
-
-**Hard rail:** if this trigger is ever dropped, the [[../specs/spec-review-agent]] "shipped with 1 phase" class of bug returns instantly — `specs.status` could be stuck at `shipped` while a phase is still `planned`.
+The parent spec's planned/in_progress/shipped status is DERIVED from this table by the readers ([[../libraries/brain-roadmap]] `deriveStatus` / `rollupPhaseStatus`). The old `spec_phases_rollup` trigger + `roll_up_spec_status` were dropped in `derive-rollup-status` P3 (migration `20260725160000`) — `specs.status` is no longer auto-written from a phase change. Because the deriver always recomputes from the live phase set, the [[../specs/spec-review-agent]] "shipped with 1 phase" bug can't surface: a stale `specs.status='shipped'` is ignored when a phase is still `planned`.
 
 ## Provenance preservation (movePhase)
 
-The lift-a-phase primitive `movePhase(phaseId, newSpecId, newPosition)` is a single UPDATE that preserves `id`, `pr`, `merge_sha`, and `created_at`. The trigger fires the rollup on the source (likely drops `shipped`→`in_progress`) and on the destination (picks the phase up).
+The lift-a-phase primitive `movePhase(phaseId, newSpecId, newPosition)` is a single UPDATE that preserves `id`, `pr`, `merge_sha`, and `created_at`. No rollup fires — the readers recompute both the source spec (likely drops `shipped`→`in_progress`) and the destination spec from their phase sets at read time.
 
 ## Migration
 
 - `supabase/migrations/20260713120000_specs_and_spec_phases.sql` — initial table + rollup trigger · apply: `scripts/apply-specs-tables-migration.ts` · verify: `scripts/_verify-specs-schema.ts`
+- `supabase/migrations/20260725160000_drop_rollup_triggers_and_milestone_status.sql` — `derive-rollup-status` P3: dropped `spec_phases_rollup` + `roll_up_spec_status`; status now derives at read time
 - One-time backfill from markdown ([[../specs/spec-body-table-and-backfill]] Phase 3): `scripts/backfill-specs-from-markdown.ts`
 
 ## Related
