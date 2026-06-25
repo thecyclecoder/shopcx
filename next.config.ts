@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Cache Components (Next 16): enables the `'use cache'` directive so the
+  // PDP can cache per `?_sxv=<variantId>` arm. Without this the page reads
+  // searchParams and renders dynamically on every request, defeating the
+  // pdp-edge-served-experiments per-arm cache contract.
+  cacheComponents: true,
   // Prevent 308 trailing-slash redirects — Shopify app proxy follows 3xx redirects,
   // which breaks the proxy flow (redirects to storefront instead of proxying to backend)
   skipTrailingSlashRedirect: true,
