@@ -10053,23 +10053,43 @@ async function dispatchJob(job: Job) {
   // Force (-sfn) so a leftover/broken link from a prior run is always replaced.
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
 
-  // db-health-spec-body-robust (Phase 1): refuse to build a 0-byte / phaseless spec — belt-and-suspenders
-  // against ANY empty spec reaching the builder (db-health or otherwise). It must FAIL loudly, never run
-  // claude on an empty file and silently merge an empty PR. Resumes are exempt: the spec was validated on
-  // the first pass and branch WIP already exists.
-  if (!isResume) {
-    const specPath = join(wt, "docs/brain/specs", `${slug}.md`);
+  // spec-authoring-writes-db-and-worker-materialize Phase 2: Bo reads the SPEC ROW, not the markdown.
+  // Materialize `public.specs` + `public.spec_phases` to a temp `${wt}/.box/spec-${slug}.md` and hand the
+  // build-spec skill that path. (Re-)materialized on both fresh + resume runs — the worktree is wiped at the
+  // top of every dispatch, and the row may have been edited between rounds. The .box/ directory is gitignored
+  // so `git add -A` skips it.
+  //
+  // db-health-spec-body-robust (Phase 1): refuse to build a 0-byte / phaseless materialized body —
+  // belt-and-suspenders against ANY empty spec reaching the builder (db-health or otherwise). It must FAIL
+  // loudly, never run claude on an empty file and silently merge an empty PR.
+  const materializedRelPath = `.box/spec-${slug}.md`;
+  {
+    const { materializeSpec } = await import("../src/lib/build-spec-materializer");
     let specText = "";
-    try { specText = readFileSync(specPath, "utf8"); } catch { /* missing → treated as empty below */ }
-    if (!specText.trim() || !/^#{2,3}\s+Phase/m.test(specText)) {
-      const why = !specText.trim() ? "is empty / 0-byte / missing" : 'has no "## Phase" / "### Phase" section';
+    try {
+      const written = await materializeSpec(job.workspace_id, slug, join(wt, ".box"));
+      specText = readFileSync(written, "utf8");
+    } catch (e) {
+      const why = `materializeSpec failed: ${e instanceof Error ? e.message : String(e)}`;
       await update(job.id, {
         status: "failed",
-        error: `spec docs/brain/specs/${slug}.md ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
-        log_tail: `build aborted — docs/brain/specs/${slug}.md ${why}; no PR opened`,
+        error: `cannot materialize spec ${slug} from DB — ${why}`,
+        log_tail: `build aborted — ${why}; no PR opened`,
       });
-      console.error(`${tag} ${why} spec → failed (no silent empty merge)`);
-      chosenAccount.inFlight--; // release the round-robin slot we took above (we return before the try/finally)
+      console.error(`${tag} ${why} → failed (no silent empty merge)`);
+      chosenAccount.inFlight--;
+      sh("git", ["worktree", "remove", "--force", wt]);
+      return;
+    }
+    if (!specText.trim() || !/^#{2,3}\s+Phase/m.test(specText)) {
+      const why = !specText.trim() ? "is empty / 0-byte" : 'has no "## Phase" / "### Phase" section';
+      await update(job.id, {
+        status: "failed",
+        error: `materialized spec ${slug} ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
+        log_tail: `build aborted — materialized ${slug} ${why}; no PR opened`,
+      });
+      console.error(`${tag} materialized ${why} spec → failed (no silent empty merge)`);
+      chosenAccount.inFlight--;
       sh("git", ["worktree", "remove", "--force", wt]);
       return;
     }
@@ -10106,10 +10126,12 @@ async function dispatchJob(job: Job) {
 
     // `isResume && sessionId`: a started-fresh run (owning account was capped → sessionId cleared) has no
     // prior session to "continue", so it uses the FRESH prompt and re-reads the spec from the branch WIP.
+    // spec-authoring-writes-db-and-worker-materialize Phase 2: the spec body comes from the DB row; the
+    // file Bo reads is a worker-materialized copy under `.box/` (gitignored, regenerated each dispatch).
     const prompt = isResume && sessionId
-      ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing docs/brain/specs/${slug}.md and finish. Same rules and the same final JSON output protocol as before.`
+      ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing ${materializedRelPath} (the spec body comes from the DB row; this file is a worker-materialized copy) and finish. Same rules and the same final JSON output protocol as before.`
       : [
-          `Use the build-spec skill to implement the spec at docs/brain/specs/${slug}.md (cwd is the repo root).`,
+          `Use the build-spec skill to implement the spec at ${materializedRelPath} (cwd is the repo root). The spec body comes from the DB row (public.specs + public.spec_phases); the file you read is a worker-materialized copy.`,
           `⭐ PRE-FLIGHT STATE CHECK (mandate — do this FIRST, before writing any code or running any build tool): inspect the actual REPO STATE (git log, grep, file contents, existing migrations, open PRs) and determine, per phase, what is ALREADY BUILT on main. Mark satisfied phases DONE and SKIP them — build ONLY the unbuilt delta. If EVERY phase is already on main, make NO edits and return {"status":"completed","no_changes_reason":"already built — <which phases/files are on main>"} (the worker reconciles the board status from that). Judge "built" by the CODE ON MAIN — NOT by any ⏳/✅ in the markdown: spec status is DB-driven now, the .md carries no status. Never rebuild work that's already shipped. You build ONE phase (the first unbuilt one) per run; when your PR merges, the worker tags THAT phase shipped in the DB with your PR # + merge SHA (phase-pr-provenance) — you don't touch status yourself. A one-shot/single-phase spec is the whole thing in one PR.`,
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,

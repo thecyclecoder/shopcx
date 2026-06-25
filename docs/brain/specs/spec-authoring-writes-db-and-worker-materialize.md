@@ -60,4 +60,14 @@ Phase 1 (dual-write at every author surface — this PR):
 - `select count(*) from public.specs where slug = '<authored-slug>'` after each surface fires = `1` (UPSERT by `(workspace_id, slug)` — no duplicates).
 - `npx tsc --noEmit` is clean on this PR.
 
-Phase 2-4 follow this PR — verification for those will land with their respective phases.
+Phase 2 (worker materializes the row for Bo — this PR):
+- Queue a kind='build' job in dev for an existing spec slug with a `public.specs` row → before claude runs, expect the worktree to carry `.box/spec-{slug}.md` rendered from the DB (not `docs/brain/specs/{slug}.md`), and the build-spec prompt to point at `.box/spec-{slug}.md` (`grep "Use the build-spec skill to implement the spec at .box/" scripts/builder-worker.ts` → match).
+- The materialized file contains `# {title}` (NO ⏳/🚧/✅ on the H1), the `**Owner:** [[../functions/{owner}]] · **Parent:** {parent}` metadata line, `**Blocked-by:**` when set, the summary paragraph, then `## {phase.title}` headings (NO emoji) followed by the phase body in `position` order.
+- `.box/` is in `.gitignore` — `git status` on the worktree mid-build shows no `.box/spec-*.md` entry; `git add -A` doesn't commit it.
+- A spec whose `public.specs` row was deleted (or never authored) → `runBuildJob` flips the job `failed` with `cannot materialize spec {slug} from DB — materializeSpec: no specs row …`, no PR opened.
+- A spec materialized to an empty / phaseless body → `runBuildJob` flips the job `failed` with `materialized spec {slug} is empty / 0-byte` (or `has no "## Phase" / "### Phase" section`), no PR opened.
+- Merge a build PR that ships P1 of a multi-phase spec → `select status, pr, merge_sha from public.spec_phases where spec_id=(select id from specs where slug='<slug>') and position=1` → `('shipped', <PR#>, '<sha>')`, AND `spec_card_state.phase_states[0].{status,pr,merge_sha}` carries the SAME values (double-write).
+- Tap Build on a spec whose `specs.status='in_review'` → `queueRoadmapBuild` returns `409 spec is in review — not approved to build yet` (the hard-stop reads `public.specs.status` directly via [[../libraries/specs-table]] `getSpec` — flip the row to `planned` to unblock).
+- `npx tsc --noEmit` is clean on this PR.
+
+Phase 3-4 follow this PR — verification for those will land with their respective phases.
