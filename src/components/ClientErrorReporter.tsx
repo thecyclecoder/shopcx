@@ -23,7 +23,6 @@
  */
 
 import { Component, useEffect, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
 import {
   classifySurface,
   installWindowErrorReporter,
@@ -62,10 +61,12 @@ class ReporterBoundary extends Component<
 }
 
 export default function ClientErrorReporter({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
-  // Read the surface from the LIVE path at error time (the storefront SPA navigates).
+  // NO usePathname() — it's a dynamic API, and reading it during prerender breaks cacheComponents for EVERY
+  // page that includes this shared layout component (the storefront layout → policies/store/blog/etc.). We
+  // only ever need the path CLIENT-side: getSurface runs in the error handler + the mount heartbeat, where
+  // `window` exists. So read window.location.pathname live; the server-side branch is never reached.
   const getSurface = () =>
-    classifySurface(typeof window !== "undefined" ? window.location.pathname : pathname);
+    classifySurface(typeof window !== "undefined" ? window.location.pathname : "/");
 
   useEffect(() => {
     const cleanup = installWindowErrorReporter(getSurface);
