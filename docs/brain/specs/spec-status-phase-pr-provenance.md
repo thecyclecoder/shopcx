@@ -45,7 +45,10 @@ The whole point is the autonomous loop keeps humming, so every box agent that re
 This closes the loop that was breaking: prose-only multi-phase specs no longer get stuck `planned`, the director stops re-grooming shipped work, and "what shipped" is provable from the PR tags.
 
 ## Verification
-- Every shipped phase in `spec_card_state` carries a `pr` + `merge_sha`; clicking it opens the PR.
-- `no-parked-specs-auto-route-needs-attention` shows the correct N-of-M (the phases its merged PR(s) actually shipped), not all-planned and not all-shipped.
-- A NEW multi-phase spec: P1 build merges → only P1 tagged shipped (with its PR); P2 still planned until its own build merges.
-- A one-shot spec's single merged build → spec shipped, card carries the PR/SHA.
+- On `/dashboard/roadmap/{slug}` for a multi-phase spec whose phase merged after Phase 1 shipped, expand "N phases" → expect each shipped phase to render a `#<PR>` link in emerald next to its row, which opens that PR's GitHub page in a new tab (and the tooltip shows `Shipped by PR #N (sha7)`).
+- On `/dashboard/roadmap` board, scroll to a shipped one-shot spec (no `## Phase` sections) → expect the `shipped · live`/`shipped · deploying` chip to be accompanied by an emerald `#<PR>` pill linking to its shipping PR.
+- On `/dashboard/roadmap/{slug}` for the same one-shot spec → expect the same `#<PR>` pill in the status row of the sidebar.
+- On the build box, run `npx tsx scripts/backfill-phase-pr-provenance.ts` (dry run) → expect a per-workspace log listing each live spec with merged builds, the count of attributed merges per phase, and a trailing `(dry run — N card(s) would change)`. Re-run with `--apply` → expect `✓ backfill applied — N card(s) updated` and each affected `spec_card_state.phase_states[i]` row in the DB now carries `{status:'shipped', pr, merge_sha}` for the attributed phase.
+- After a NEW build PR for a multi-phase spec merges on `main`, query the DB: `select phase_states from spec_card_state where spec_slug='<slug>'` → expect ONLY the shipped phase index to have flipped `shipped` with `pr` + `merge_sha` set; the other planned phases stay `planned` with no provenance.
+- After a one-shot spec's only build PR merges on `main`, query: `select status, flags, last_merge_sha from spec_card_state where spec_slug='<slug>'` → expect `status='shipped'`, `flags->>'merged_pr'` = that PR #, `last_merge_sha` = the merge SHA.
+- Open `no-parked-specs-auto-route-needs-attention` on the board → expect its phase row to reflect the actual N-of-M (phases its merged PR(s) shipped are ✅ with their `#PR` chips; the remaining prose phases stay ⏳), not all-planned and not all-shipped.

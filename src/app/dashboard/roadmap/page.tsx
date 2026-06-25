@@ -111,8 +111,21 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
         </h3>
       </Link>
       {deploy && (
-        <div className="mt-1.5">
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <DeployChip state={deploy} />
+          {/* spec-status-phase-pr-provenance Phase 3: one-shot specs (no phases) carry their shipping PR
+              at the card level (flags.merged_pr → shippedPr). Link to the PR so a shipped card is provable. */}
+          {spec.phases.length === 0 && spec.shippedPr && (
+            <a
+              href={`https://github.com/thecyclecoder/shopcx/pull/${spec.shippedPr}`}
+              target="_blank"
+              rel="noreferrer"
+              title={`Shipped by PR #${spec.shippedPr}`}
+              className="inline-flex items-center rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-300 dark:hover:bg-emerald-950/50"
+            >
+              #{spec.shippedPr}
+            </a>
+          )}
         </div>
       )}
       {/* director-dismiss-park-and-short-circuit-spec Phase 2 — render a shipped card that was closed

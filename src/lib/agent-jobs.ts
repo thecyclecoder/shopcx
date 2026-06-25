@@ -672,6 +672,7 @@ export async function applyMergedBuildEffects(
       status: rolled,
       mergeSha: sha,
       phaseStates,
+      prNumber: pr,
     });
     if (rolled === "shipped") {
       await enqueueSpecTestIfDue(workspaceId, slug, "shipped");

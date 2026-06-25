@@ -50,7 +50,14 @@ export interface SpecCardFlags {
   short_circuit?: boolean;
   /** The director's reason for the short-circuit — rendered as the card sub-line. Paired with `short_circuit=true`. */
   short_circuit_reason?: string;
-  [k: string]: boolean | string | undefined;
+  /**
+   * spec-status-phase-pr-provenance Phase 1 — the card-level shipping PR for a **one-shot spec** (a spec
+   * with zero `## Phase` sections, where the whole spec ships in ONE PR). Multi-phase specs record the
+   * provenance per-phase in `phase_states[i].{pr,merge_sha}` instead; this slot is for the no-phase shape
+   * only (the board reads it for the card's "✓ #PR" chip). Paired with `last_merge_sha` (already set).
+   */
+  merged_pr?: number;
+  [k: string]: boolean | string | number | undefined;
 }
 
 export interface SpecCardState {
@@ -88,12 +95,25 @@ export function rollupPhaseStatus(phaseStates: SpecCardPhaseState[]): Phase {
  * and neither stale source ever regresses a phase. The board's overall column already uses resolveBoardStatus;
  * this is the same DB-first treatment for the per-phase checkmarks (fixes phases reading stale during a build).
  */
-export function mergePhaseStates<T extends { status: Phase }>(markdownPhases: T[], state: SpecCardState | undefined): T[] {
+export function mergePhaseStates<T extends { status: Phase; pr?: number | null; merge_sha?: string | null }>(
+  markdownPhases: T[],
+  state: SpecCardState | undefined,
+): T[] {
   if (!state?.phase_states?.length) return markdownPhases;
-  const byIndex = new Map(state.phase_states.map((p) => [p.index, p.status]));
+  const byIndex = new Map(state.phase_states.map((p) => [p.index, p]));
   return markdownPhases.map((p, i) => {
-    const dbStatus = byIndex.get(i);
-    return dbStatus !== undefined && PHASE_RANK[dbStatus] > PHASE_RANK[p.status] ? { ...p, status: dbStatus } : p;
+    const db = byIndex.get(i);
+    if (!db) return p;
+    // spec-status-phase-pr-provenance Phase 3: when the DB phase is at/ahead of the markdown, also surface
+    // the PR + merge_sha provenance so callers (PhaseList, spec-detail) can render the per-phase PR chip.
+    if (PHASE_RANK[db.status] > PHASE_RANK[p.status]) {
+      return { ...p, status: db.status, pr: db.pr ?? null, merge_sha: db.merge_sha ?? null };
+    }
+    // Status matches — still pull provenance forward (markdown carries none).
+    if (db.status === p.status && (db.pr || db.merge_sha)) {
+      return { ...p, pr: db.pr ?? null, merge_sha: db.merge_sha ?? null };
+    }
+    return p;
   });
 }
 
@@ -323,7 +343,7 @@ export async function markSpecCardDeferred(
 export async function markSpecCardMergeShipped(
   workspaceId: string,
   slug: string,
-  opts: { status: SpecStatus; mergeSha: string | null; phaseStates?: SpecCardPhaseState[] },
+  opts: { status: SpecStatus; mergeSha: string | null; phaseStates?: SpecCardPhaseState[]; prNumber?: number | null },
 ): Promise<void> {
   const status = opts.phaseStates && opts.phaseStates.length ? rollupPhaseStatus(opts.phaseStates) : opts.status;
   const actor = `merge:${opts.mergeSha ?? ""}`;
@@ -332,6 +352,14 @@ export async function markSpecCardMergeShipped(
     { field: "status", actor, reason: "build merged on main" },
     ...phaseIndices.map((i) => ({ field: "phase" as const, phaseIndex: i, actor, reason: "build merged on main" })),
   ];
+  // spec-status-phase-pr-provenance Phase 1: a **one-shot spec** (no `## Phase` sections) has no per-phase
+  // slot to carry the shipping PR — so record it at the CARD level via `flags.merged_pr` (alongside
+  // `last_merge_sha`). Multi-phase specs tag their phases directly in `phase_states[i].pr`, so the
+  // card-level slot is set only when there are no phases.
+  const cardFlags: SpecCardFlags = { deploy_pending: true };
+  if (opts.prNumber && (!opts.phaseStates || opts.phaseStates.length === 0)) {
+    cardFlags.merged_pr = opts.prNumber;
+  }
   await upsertCardState(
     workspaceId,
     slug,
@@ -339,7 +367,7 @@ export async function markSpecCardMergeShipped(
       status,
       phase_states: opts.phaseStates,
       last_merge_sha: opts.mergeSha,
-      flags: { deploy_pending: true },
+      flags: cardFlags,
     },
     history,
   );
