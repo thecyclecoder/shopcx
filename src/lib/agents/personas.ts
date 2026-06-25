@@ -10,6 +10,12 @@
  *
  * Photos live in the public `agent-avatars` Supabase bucket (crafted via Nano Banana Pro);
  * `avatarUrl` is the real headshot, `mascotId` the inline-SVG fallback when no photo.
+ *
+ * ⭐ AVATAR STYLE (every gen MUST match the cast): a PHOTOREALISTIC corporate headshot PHOTOGRAPH — tight
+ * CLOSE CROP (head + shoulders only, filling the frame), a real-looking person, studio portrait lighting,
+ * plain neutral soft background, looking at camera (think a real LinkedIn headshot). NEVER a cartoon /
+ * illustration / 3D render / stylized art, and NO props or gimmicks. Bump the `?v=N` on `avatarUrl` when
+ * you replace a photo so clients re-fetch.
  * Pure config (no server imports) → safe to import from client components.
  */
 
@@ -130,7 +136,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   "spec-review": {
     key: "spec-review", name: "Vale", role: "Spec Review", emoji: "🔍",
     personality: "The quality gate ahead of the build pipeline — reviews every new (or flagged) spec against the authoring guidelines, fixes malformed ones (mangled phases, missing owner/parent/blockers), and routes it to planned or deferred. Nothing builds until Vale clears it.",
-    mascotId: "default", avatarUrl: `${AV}vale-spec-review.jpg?v=4`,
+    mascotId: "default", avatarUrl: `${AV}vale-spec-review.jpg?v=5`,
     chip: "bg-violet-100 text-violet-800 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-900/40",
     dot: "bg-violet-500", ring: "bg-violet-50 dark:bg-violet-900/20", accent: "text-violet-600 dark:text-violet-400",
   },
