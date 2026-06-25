@@ -2343,6 +2343,26 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing sequence reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // director-escort-inflight-specs Phase 1 — pre-grooming sweep over every in-flight / critical-planned /
+    // recently-authored spec this director drives. Dispatches each into one of five mechanical lanes
+    // (queued_build · status_drift · failed_retry · failed_repeat · stalled) so the gap between authoring a
+    // spec and shipping it closes the moment the standing pass runs — not after the next groom tick. Runs
+    // BEFORE escortApprovedGoals so an authored fix-spec carried by the goal walk is not double-touched.
+    const sweep = await lib.escortSweep(db);
+    if (sweep.queuedBuild.length) notes.push(`escort-sweep → queued ${sweep.queuedBuild.length} build(s): ${sweep.queuedBuild.join(", ")}`);
+    if (sweep.failedRetry.length) notes.push(`escort-sweep → retried ${sweep.failedRetry.length} failed build(s): ${sweep.failedRetry.join(", ")}`);
+    if (sweep.statusDrift.length) notes.push(`escort-sweep → resolved ${sweep.statusDrift.length} status drift(s): ${sweep.statusDrift.join(", ")}`);
+    if (sweep.failedRepeat.length) notes.push(`escort-sweep → escalated ${sweep.failedRepeat.length} repeat-failure(s): ${sweep.failedRepeat.join(", ")}`);
+    if (sweep.stalled.length) notes.push(`escort-sweep → flagged ${sweep.stalled.length} stalled build(s): ${sweep.stalled.join(", ")}`);
+    if (sweep.loopGuarded.length) notes.push(`escort-sweep loop-guard → escalated ${sweep.loopGuarded.length}: ${sweep.loopGuarded.join(", ")}`);
+    if (sweep.scanned && !sweep.queuedBuild.length && !sweep.failedRetry.length && !sweep.statusDrift.length && !sweep.failedRepeat.length && !sweep.stalled.length && !sweep.loopGuarded.length) {
+      notes.push(`escort-sweep: ${sweep.scanned} scanned, all healthy`);
+    }
+  } catch (e) {
+    notes.push(`escort-sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing escort-sweep failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     const escort = await lib.escortApprovedGoals(db);
     if (escort.queued.length) notes.push(`escorted → queued ${escort.queued.length} spec(s): ${escort.queued.join(", ")}`);
     if (escort.escalated.length) notes.push(`loop-guard → escalated ${escort.escalated.length}: ${escort.escalated.join(", ")}`);

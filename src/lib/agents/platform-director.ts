@@ -68,7 +68,7 @@ import {
   type RegressionInstructions,
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
-import { markSpecCardStatus } from "@/lib/spec-card-state";
+import { markSpecCardStatus, type SpecCardFlags } from "@/lib/spec-card-state";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { getPersona } from "@/lib/agents/personas";
@@ -733,6 +733,427 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
   }
 
   return { fixQueued, escalated };
+}
+
+// ── escortSweep — drive in-flight + director-authored specs through to ship ─────────────────────
+// director-escort-inflight-specs Phase 1. The director's existing standing pass investigates parks,
+// grooms partially-shipped specs, lifts gated builds, etc. — but it does NOT actively drive specs the
+// director ITSELF authored (groom/init/repair followups, fix specs) through to ship. So a build that
+// errored out, a spec stuck `in_progress` with no agent_jobs row in flight, or a critical spec marked
+// by the CEO can sit for hours before any lane re-touches it. escortSweep runs at the START of every
+// standing pass and closes that gap with five mechanical lanes (no `claude -p` investigation — the
+// follow-up lanes do that):
+//   1. `queued_build`  — no build job ever for this slug                  → queue one + log
+//   2. `status_drift`  — terminal-success build (completed/merged) but    → owner-scoped: flip card status
+//                        spec_card_state still planned/in_progress          + audit; non-owned: escalate
+//   3. `failed_retry`  — exactly one failed build, nothing in-flight      → queue a retry build + log
+//   4. `failed_repeat` — ≥2 failed builds, nothing in-flight              → escalate to CEO (deeper issue;
+//                                                                          the groom/init lane re-investigates
+//                                                                          if it has shipped phases)
+//   5. `stalled`       — an active build older than the stall window with → log + escalate so the owner can
+//                        no merge SHA yet                                   investigate (parked? branch-stuck?)
+// Loop-guard: the SAME lane on the SAME slug ≥3× in 24h escalates instead of re-acting, so a build that
+// always fails the same way (or a misclassified card) never enters an infinite re-enqueue. Every action
+// stamps a `director_activity` row `kind='escorted'` with `metadata.lane` so the audit ledger + the EOD
+// recap can read what each pass moved.
+
+/** Active (queued/building/...) build statuses for stall detection — same set as ACTIVE_BUILD_STATUSES below. */
+const ESCORT_ACTIVE_BUILD_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "claimed",
+  "building",
+  "needs_input",
+  "needs_approval",
+  "queued_resume",
+]);
+
+/** How long an active build may sit before the escort marks it stalled. */
+export const ESCORT_STALL_WINDOW_MS = 2 * 60 * 60 * 1000; // 2h
+
+/** Loop-guard: SAME (slug, lane) escorted action ≥ this many times in the 24h window → escalate instead. */
+export const ESCORT_LOOP_GUARD_MAX = 3;
+export const ESCORT_LOOP_GUARD_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** "Authored by this director" — the director_activity action kinds the escort treats as the spec-author signal. */
+const ESCORT_AUTHORED_ACTION_KINDS: readonly string[] = [
+  "groomed_authored_spec",
+  "init_authored_spec",
+  "repair_authored_spec",
+  "authored_fix",
+];
+
+/** The window the "authored recently by this director" criterion looks back over. */
+export const ESCORT_AUTHORED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** A lane the escort took on one spec — the metadata.lane stamp + the recap surface. */
+export type EscortLane =
+  | "queued_build"
+  | "status_drift"
+  | "failed_retry"
+  | "failed_repeat"
+  | "stalled"
+  | "loop_guard";
+
+/** Per-pass tally returned to the standing-pass log. */
+export interface EscortSweepResult {
+  scanned: number;
+  queuedBuild: string[];
+  statusDrift: string[];
+  failedRetry: string[];
+  failedRepeat: string[];
+  stalled: string[];
+  escalated: string[];
+  loopGuarded: string[];
+  skipped: number;
+}
+
+interface EscortCandidate {
+  slug: string;
+  cardStatus: SpecStatus;
+  critical: boolean;
+  source: "in_progress" | "critical" | "authored";
+}
+
+/**
+ * Lane-1 sources for this director. Pulls every spec_card_state row in the director's owner scope where:
+ *   - status='in_progress', OR
+ *   - status='planned' AND flags.critical=true, OR
+ *   - the spec was authored by this director within the last ESCORT_AUTHORED_WINDOW_MS (director_activity
+ *     `*_authored_spec` / `authored_fix` rows).
+ * The first two come from spec_card_state directly; the third comes from director_activity (the spec may
+ * not yet have a card row if no writer ran). Dedup by slug.
+ */
+async function findEscortCandidates(admin: Admin, workspaceId: string, scope: { specBySlug: Map<string, SpecCard>; isInScope: (card: SpecCard | undefined) => boolean }): Promise<EscortCandidate[]> {
+  const out: EscortCandidate[] = [];
+  const seen = new Set<string>();
+
+  // Source 1+2 — the live mirror.
+  const { data: states } = await admin
+    .from("spec_card_state")
+    .select("spec_slug, status, flags")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["in_progress", "planned"])
+    .limit(2000);
+  for (const row of (states ?? []) as { spec_slug: string; status: SpecStatus; flags: SpecCardFlags | null }[]) {
+    const card = scope.specBySlug.get(row.spec_slug);
+    if (!scope.isInScope(card)) continue;
+    const critical = !!row.flags?.critical;
+    if (row.status === "in_progress") {
+      seen.add(row.spec_slug);
+      out.push({ slug: row.spec_slug, cardStatus: row.status, critical, source: "in_progress" });
+    } else if (row.status === "planned" && critical) {
+      seen.add(row.spec_slug);
+      out.push({ slug: row.spec_slug, cardStatus: row.status, critical, source: "critical" });
+    }
+  }
+
+  // Source 3 — specs THIS director authored within the window.
+  const since = new Date(Date.now() - ESCORT_AUTHORED_WINDOW_MS).toISOString();
+  const { data: authored } = await admin
+    .from("director_activity")
+    .select("spec_slug, action_kind, metadata, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("director_function", PLATFORM)
+    .in("action_kind", ESCORT_AUTHORED_ACTION_KINDS)
+    .gte("created_at", since)
+    .limit(1000);
+  for (const row of (authored ?? []) as { spec_slug: string | null; metadata: Record<string, unknown> | null }[]) {
+    // The author lane records the NEW slug in metadata.followup_slug; fall back to spec_slug for `authored_fix`.
+    const followup = typeof row.metadata?.["followup_slug"] === "string" ? (row.metadata["followup_slug"] as string) : null;
+    const slug = followup || row.spec_slug || "";
+    if (!slug || seen.has(slug)) continue;
+    const card = scope.specBySlug.get(slug);
+    if (!scope.isInScope(card)) continue;
+    seen.add(slug);
+    out.push({ slug, cardStatus: card?.status ?? "planned", critical: !!card?.critical, source: "authored" });
+  }
+
+  return out;
+}
+
+/** The latest build agent_jobs row for a spec — what the escort classifies its lane on. */
+interface LatestBuild {
+  status: string;
+  createdAt: string;
+  failedCount: number; // failed/needs_attention attempts within the build-state window
+  lastError: string | null;
+  lastMergeSha: string | null; // from spec_card_state — proxy for "merge landed"
+}
+
+async function loadLatestBuildState(admin: Admin, workspaceId: string, slug: string): Promise<{ latest: LatestBuild | null; bs: SpecBuildState }> {
+  const bs = await specBuildState(admin, workspaceId, slug);
+  const { data: rows } = await admin
+    .from("agent_jobs")
+    .select("status, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const latestRow = (rows ?? [])[0] as { status?: string; created_at?: string } | undefined;
+  if (!latestRow) return { latest: null, bs };
+  // last_merge_sha lives on spec_card_state — pull it as the "merge landed" proxy.
+  const { data: card } = await admin
+    .from("spec_card_state")
+    .select("last_merge_sha")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .maybeSingle();
+  return {
+    latest: {
+      status: String(latestRow.status ?? ""),
+      createdAt: String(latestRow.created_at ?? ""),
+      failedCount: bs.failedCount,
+      lastError: bs.lastError,
+      lastMergeSha: ((card as { last_merge_sha?: string | null } | null)?.last_merge_sha) ?? null,
+    },
+    bs,
+  };
+}
+
+/** Count of recent `escorted` activity rows for (slug, lane) within the loop-guard window. */
+async function countRecentEscorted(admin: Admin, workspaceId: string, slug: string, lane: EscortLane): Promise<number> {
+  const since = new Date(Date.now() - ESCORT_LOOP_GUARD_WINDOW_MS).toISOString();
+  const { data } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("workspace_id", workspaceId)
+    .eq("director_function", PLATFORM)
+    .eq("action_kind", "escorted")
+    .eq("spec_slug", slug)
+    .gte("created_at", since)
+    .limit(50);
+  let n = 0;
+  for (const r of (data ?? []) as { metadata: Record<string, unknown> | null }[]) {
+    if (r.metadata?.["lane"] === lane) n++;
+  }
+  return n;
+}
+
+async function recordEscort(admin: Admin, args: { workspaceId: string; slug: string; lane: EscortLane; source: EscortCandidate["source"]; reason: string; extra?: Record<string, unknown> }): Promise<void> {
+  await recordDirectorActivity(admin, {
+    workspaceId: args.workspaceId,
+    directorFunction: PLATFORM,
+    actionKind: "escorted",
+    specSlug: args.slug,
+    reason: args.reason,
+    metadata: { lane: args.lane, source: args.source, ...(args.extra ?? {}), autonomous: true },
+  });
+}
+
+/**
+ * The pre-grooming escort sweep — one pass over every in-flight / authored / critical-planned spec the
+ * Platform director drives, dispatching each into ONE of the five lanes (or loop-guard escalating). Runs
+ * at the START of every standing pass (before grooming + the init lane), so a stalled author-follow-up or
+ * a failed-once retry lands the moment the pass starts instead of waiting for grooming's next tick. Dormant
+ * until Platform is live+autonomous; best-effort per spec — one failure never blocks the rest.
+ */
+export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
+  const empty: EscortSweepResult = { scanned: 0, queuedBuild: [], statusDrift: [], failedRetry: [], failedRepeat: [], stalled: [], escalated: [], loopGuarded: [], skipped: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty;
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+  const chart = await buildOrgChartGraph();
+
+  const { specs } = await getRoadmap();
+  const specBySlug = new Map(specs.map((s) => [s.slug, s]));
+  const isInScope = (card: SpecCard | undefined) => !!card && platformDrivesSpec(card.owner, chart, autonomy);
+
+  const candidates = await findEscortCandidates(admin, workspaceId, { specBySlug, isInScope });
+  const result: EscortSweepResult = { ...empty };
+  result.scanned = candidates.length;
+
+  for (const c of candidates) {
+    const card = specBySlug.get(c.slug);
+    if (!card) {
+      result.skipped++;
+      continue;
+    }
+    if (card.status === "shipped") {
+      // The spec already shipped — nothing for the escort to drive. (A flags.deferred would surface as
+      // status='deferred' via overlayDbStateOnSpec; we skip those too in the deferred check below.)
+      result.skipped++;
+      continue;
+    }
+    if (card.status === "deferred") {
+      result.skipped++;
+      continue;
+    }
+    if (card.autoBuild === false) {
+      // Owner opted this spec out of auto-build — the escort never queues for it.
+      result.skipped++;
+      continue;
+    }
+    if (card.blockedBy.some((b) => !b.cleared)) {
+      // Still blocked — its auto-queue fires when its last blocker ships.
+      result.skipped++;
+      continue;
+    }
+
+    let lane: EscortLane | null = null;
+    let reason = "";
+    let extra: Record<string, unknown> = {};
+
+    const { latest, bs } = await loadLatestBuildState(admin, workspaceId, c.slug);
+    const ownerScoped = isInScope(card);
+
+    if (!latest) {
+      lane = "queued_build";
+      reason = `No build job has ever existed for ${c.slug} (${c.source}, status=${c.cardStatus}${c.critical ? ", critical" : ""}) — queuing one.`;
+    } else if (latest.status === "merged" || latest.status === "completed") {
+      // Lane 2 — a terminal-success build but the card mirror never caught up. For owner-scoped slugs we
+      // flip the card status ourselves (the standard spec-status writer + spec_status_history audit); for
+      // non-owned slugs we escalate the drift so the spec's actual driver can act.
+      if (card.status === "planned" || card.status === "in_progress") {
+        lane = "status_drift";
+        const targetStatus: SpecStatus = latest.status === "merged" ? "shipped" : "in_progress";
+        reason = `Build of ${c.slug} is ${latest.status} but spec_card_state still ${card.status} — drift; flipping to ${targetStatus}.`;
+        extra = { build_status: latest.status, prior_card_status: card.status, target_status: targetStatus, owner_scoped: ownerScoped };
+      } else {
+        // Card already past planned/in_progress — no drift to fix.
+        result.skipped++;
+        continue;
+      }
+    } else if (FAILED_BUILD_STATUSES.has(latest.status) && !bs.activeBuild) {
+      if (bs.failedCount <= 1) {
+        lane = "failed_retry";
+        reason = `Last build of ${c.slug} ${latest.status} (1 failed attempt, no in-flight) — queuing a retry. ${latest.lastError ? `Latest: ${latest.lastError.slice(0, 200)}` : ""}`.trim();
+      } else {
+        lane = "failed_repeat";
+        reason = `Build of ${c.slug} has failed ${bs.failedCount}× with nothing in-flight — likely a deeper issue, not a flaky retry. Routing to the groom/init lane for re-investigation (fix-spec or dismiss).`;
+      }
+      extra = { failed_count: bs.failedCount, last_error: latest.lastError ?? undefined };
+    } else if (ESCORT_ACTIVE_BUILD_STATUSES.has(latest.status)) {
+      const ageMs = Date.now() - new Date(latest.createdAt || 0).getTime();
+      if (ageMs > ESCORT_STALL_WINDOW_MS && !latest.lastMergeSha) {
+        lane = "stalled";
+        reason = `Build of ${c.slug} has been ${latest.status} for ${(ageMs / 3_600_000).toFixed(1)}h with no merge SHA — stuck (parked? missing dep? branch-stuck?). Surfacing for investigation.`;
+        extra = { build_status: latest.status, age_hours: Number((ageMs / 3_600_000).toFixed(1)) };
+      } else {
+        // In-flight and within the stall window — leave it alone.
+        result.skipped++;
+        continue;
+      }
+    } else {
+      // Anything else (held, dismissed, blocked_on_usage, …) — leave it for the lane that owns that status.
+      result.skipped++;
+      continue;
+    }
+
+    // Loop-guard — same (slug, lane) action ≥ ESCORT_LOOP_GUARD_MAX times in the last 24h → escalate.
+    const priorActions = await countRecentEscorted(admin, workspaceId, c.slug, lane);
+    if (priorActions >= ESCORT_LOOP_GUARD_MAX) {
+      const diagnosis = `Escort sweep has taken the same action (${lane}) on ${c.slug} ${priorActions}× in the last 24h without it sticking — a deeper issue, not something another retry fixes. Stopping the loop and asking you to take a look.`;
+      const r = await escalateDiagnosisToCeo(admin, {
+        workspaceId,
+        specSlug: c.slug,
+        title: `Escort stuck: ${c.slug}`,
+        diagnosis,
+        dedupeKey: `escort-loopguard:${c.slug}:${lane}`,
+        deepLink: `/dashboard/roadmap/${c.slug}`,
+        escalationKind: "escort_loop_guard",
+        metadata: { lane, prior_actions: priorActions, ...extra },
+      });
+      if (r.emitted) {
+        result.loopGuarded.push(c.slug);
+        result.escalated.push(c.slug);
+        await recordEscort(admin, { workspaceId, slug: c.slug, lane: "loop_guard", source: c.source, reason: `Loop-guard fired on lane=${lane}: ${priorActions} prior actions in 24h. Escalated to CEO.`, extra: { original_lane: lane, prior_actions: priorActions } });
+      } else if (r.error) {
+        console.error(`[platform-director] escortSweep loop-guard escalation FAILED for ${c.slug}:`, r.error.message);
+      }
+      continue;
+    }
+
+    // Apply the lane's action.
+    try {
+      if (lane === "queued_build" || lane === "failed_retry") {
+        const retry = lane === "failed_retry";
+        const { error } = await admin.from("agent_jobs").insert({
+          workspace_id: workspaceId,
+          spec_slug: c.slug,
+          kind: "build",
+          status: "queued",
+          created_by: null,
+          instructions: `Escorted by the Platform/DevOps Director (escort-sweep, lane=${lane}): ${c.slug}${retry ? ` re-attempt #${bs.failedCount + 1} (prior build ${latest?.status})` : " — no prior build"}; building the spec.`,
+        });
+        if (error) {
+          console.warn(`[platform-director] escortSweep ${lane} enqueue failed for ${c.slug}: ${error.message}`);
+          continue;
+        }
+        await markSpecCardStatus(workspaceId, c.slug, "in_progress", phaseStatesOf(card), { actor: "director:platform", reason: `escort:${lane}` });
+        if (lane === "queued_build") result.queuedBuild.push(c.slug);
+        else result.failedRetry.push(c.slug);
+        await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
+      } else if (lane === "status_drift") {
+        if (ownerScoped) {
+          const targetStatus = String(extra["target_status"] ?? "in_progress") as SpecStatus;
+          await markSpecCardStatus(workspaceId, c.slug, targetStatus, phaseStatesOf(card), { actor: "director:platform", reason: `escort:status_drift — build ${latest?.status}, card was ${card.status}` });
+          result.statusDrift.push(c.slug);
+          await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
+        } else {
+          // Not driven by THIS director — escalate the drift so the actual owner can flip it.
+          const r = await escalateDiagnosisToCeo(admin, {
+            workspaceId,
+            specSlug: c.slug,
+            title: `Status drift on a non-owned spec: ${c.slug}`,
+            diagnosis: `${c.slug}'s build is ${latest?.status} but its card still reads ${card.status}, and the spec isn't owned by Platform (owner=${card.owner ?? "—"}) — I can't flip a card outside my own scope. Please drive the owning director (or flip the card yourself).`,
+            dedupeKey: `escort-status-drift:${c.slug}`,
+            deepLink: `/dashboard/roadmap/${c.slug}`,
+            escalationKind: "escort_status_drift_non_owned",
+            metadata: { ...extra, owner: card.owner ?? null },
+          });
+          if (r.emitted) {
+            result.statusDrift.push(c.slug);
+            result.escalated.push(c.slug);
+            await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra: { ...extra, escalated_non_owned: true } });
+          } else if (r.error) {
+            console.error(`[platform-director] escortSweep status-drift escalation FAILED for ${c.slug}:`, r.error.message);
+          }
+        }
+      } else if (lane === "failed_repeat") {
+        const r = await escalateDiagnosisToCeo(admin, {
+          workspaceId,
+          specSlug: c.slug,
+          title: `Build keeps failing: ${c.slug}`,
+          diagnosis: `${reason} ${latest?.lastError ? `Latest error: ${latest.lastError.slice(0, 400)}` : ""}`.trim(),
+          dedupeKey: `escort-failed-repeat:${c.slug}`,
+          deepLink: `/dashboard/roadmap/${c.slug}`,
+          escalationKind: "escort_failed_repeat",
+          metadata: extra,
+        });
+        if (r.emitted) {
+          result.failedRepeat.push(c.slug);
+          result.escalated.push(c.slug);
+          await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
+        } else if (r.error) {
+          console.error(`[platform-director] escortSweep failed-repeat escalation FAILED for ${c.slug}:`, r.error.message);
+        }
+      } else if (lane === "stalled") {
+        const r = await escalateDiagnosisToCeo(admin, {
+          workspaceId,
+          specSlug: c.slug,
+          title: `Build stalled: ${c.slug}`,
+          diagnosis: reason,
+          dedupeKey: `escort-stalled:${c.slug}`,
+          deepLink: `/dashboard/roadmap/${c.slug}`,
+          escalationKind: "escort_stalled",
+          metadata: extra,
+        });
+        if (r.emitted) {
+          result.stalled.push(c.slug);
+          result.escalated.push(c.slug);
+          await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
+        } else if (r.error) {
+          console.error(`[platform-director] escortSweep stalled escalation FAILED for ${c.slug}:`, r.error.message);
+        }
+      }
+    } catch (e) {
+      console.warn(`[platform-director] escortSweep ${lane} action failed for ${c.slug}:`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  return result;
 }
 
 // ── Phase 3 — loop-guard + CEO escalation (the high-stakes calls) ─────────────────────────────────
