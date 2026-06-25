@@ -2674,7 +2674,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           actionKind: "groomed_continue",
           specSlug: c.slug,
           reason: reasoning || `Next phase (${c.remainingPhases[0] ?? "next ⏳"}) needed now — queued its build to completion.`,
-          metadata: { remaining_phases: c.remainingPhases, retry, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count keystone-cover drives.
+          metadata: { remaining_phases: c.remainingPhases, retry, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} groom ${c.slug} → continue → queued next-phase build`);
         continue;
@@ -2742,7 +2744,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           actionKind: "groomed_split",
           specSlug: c.slug,
           reason: reasoning || `Leftover phase(s) are future, not needed now — split into their own planned card(s) (${authored.join(", ")}) and closed out the parent so it folds.`,
-          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authored, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count keystone-cover drives.
+          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authored, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} groom ${c.slug} → split → authored ${authored.join(", ")} + closed out parent (folds)`);
         continue;
@@ -2807,11 +2811,14 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           continue;
         }
         // 1) Author the followup card (create-only; an existing slug is treated as already authored).
+        // Pass the candidate's OWNING function so the activity row carries `owner_function` for the
+        // daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-reflects-
+        // cross-dept-drive Phase 1).
         const authored = await lib.applyDirectorAuthorFollowup(
           db,
           job.workspace_id,
           "groom",
-          { slug: c.slug },
+          { slug: c.slug, owner: c.owner ?? null },
           parsed.followup ?? {},
           reasoning || `Investigation surfaced a code-level root cause — authored a followup spec.`,
           followupCommit,
@@ -2873,7 +2880,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           actionKind: "groomed_split",
           specSlug: c.slug,
           reason: reasoning || `Followup spec authored — and the leftover phases are future (split into their own cards) so the parent folds.`,
-          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authoredSplits, followup_slug: authored.authoredSlug, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count keystone-cover drives.
+          metadata: { groom_key: lib.groomKey(c.slug), split_slugs: authoredSplits, followup_slug: authored.authoredSlug, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} groom ${c.slug} → author_followup_spec → authored ${authored.authoredSlug} + split ${authoredSplits.join(", ")} + closed out parent`);
         continue;
@@ -2899,7 +2908,10 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
           console.warn(`${tag} groom ${c.slug} → dismiss_candidate INVALID (${valid.error}) → escalated to CEO`);
           continue;
         }
-        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "groom", { slug: c.slug }, reasoning);
+        // Pass the candidate's OWNING function so the dismiss ledger row carries `owner_function` for
+        // the daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-
+        // reflects-cross-dept-drive Phase 1).
+        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "groom", { slug: c.slug, owner: c.owner ?? null }, reasoning);
         if (r.ok) {
           dismissed++;
           console.log(`${tag} groom ${c.slug} → dismiss_candidate → ledger row written; will skip next pass`);
@@ -3033,7 +3045,10 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           actionKind: "escorted_init",
           specSlug: c.slug,
           reason: reasoning || `Unstarted platform spec confirmed sound + in-scope — initiated its build (no waiting period).`,
-          metadata: { planned_phases: c.plannedPhases, retry, autonomous: true },
+          // Cross-dept stamp (director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive
+          // Phase 1) — the OWNING function, so the daily watch can count the keystone covering for a
+          // not-yet-live department's director (CS/Growth/CMO etc.).
+          metadata: { planned_phases: c.plannedPhases, retry, owner_function: c.owner ?? null, autonomous: true },
         });
         console.log(`${tag} init ${c.slug} → initiate → queued build`);
         return;
@@ -3059,11 +3074,14 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           console.warn(`${tag} init ${c.slug} → author_followup_spec INVALID (${valid.error}) → escalated to CEO`);
           return;
         }
+        // Pass the candidate's OWNING function so the activity row carries `owner_function` for the
+        // daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-reflects-
+        // cross-dept-drive Phase 1).
         const authored = await lib.applyDirectorAuthorFollowup(
           db,
           job.workspace_id,
           "init",
-          { slug: c.slug },
+          { slug: c.slug, owner: c.owner ?? null },
           parsed.followup ?? {},
           reasoning || `Right scope is a different spec — authored the followup and dismissed this candidate.`,
           followupCommit,
@@ -3097,7 +3115,10 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
           console.warn(`${tag} init ${c.slug} → dismiss_candidate INVALID (${valid.error}) → escalated to CEO`);
           return;
         }
-        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug }, reasoning);
+        // Pass the candidate's OWNING function so the dismiss ledger row carries `owner_function` for
+        // the daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-
+        // reflects-cross-dept-drive Phase 1).
+        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug, owner: c.owner ?? null }, reasoning);
         if (r.ok) {
           dismissed++;
           console.log(`${tag} init ${c.slug} → dismiss_candidate → ledger row written; will skip next pass`);
