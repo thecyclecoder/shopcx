@@ -25,6 +25,10 @@ The cron does **not** dedupe itself — it delegates to `enqueueSpecReviewIfDue`
 
 _None._ The box polls [[../tables/agent_jobs]] and claims the row; there is no HTTP call into the box (it only reaches out — [[../recipes/build-box-setup]]).
 
+## Status / open work
+
+**✅ Shipped** (2026-06-25): registered in [[../libraries/control-tower]] `MONITORED_LOOPS` (id: `spec-review-cron`, kind: `cron`, owner: `platform`, window: 1h). Emits `loop_heartbeats` beats; the dashboard shows a tile in the every-15-min crons group; the Control Tower monitor watches for staleness.
+
 ## Tables written
 
 - [[../tables/agent_jobs]] (inserts the `spec-review` job; one per workspace per cadence when due)
