@@ -1,0 +1,1 @@
+- **Surface Ada's repair-dismissals + a CEO Re-open override on the Control Tower** · verified 2026-06-25 · → [[lifecycles/director-supervised-repair-dismissal]] via [[dashboard/control-tower]] + [[libraries/platform-director]] + [[libraries/repair-agent]]
