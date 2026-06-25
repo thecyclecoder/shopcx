@@ -2633,6 +2633,18 @@ export interface PlatformWatchActivity {
   crossDeptDrives: number;
   /** per-owner breakdown of cross-dept drives today (e.g. `{cs:2, growth:1}`) for the watch line. */
   crossDeptByOwner: Record<string, number>;
+  // director-zero-backlog-error-autonomy-visible-reversible Phase 1 — the error-autonomy F/D/R/E rollup,
+  // so the CEO has after-the-fact visibility of what the error pipeline did overnight WITHOUT being
+  // in the loop up front. Every "F fixed" is a `claude/<slug>` PR with the verification trail — one
+  // `git revert` from undone (the reversibility half).
+  /** F — repair-signed fix specs that shipped today (auto-merged `claude/<slug>` PRs, each revertable). */
+  errorFixed: number;
+  /** D — Rafa's no-fix items Ada dismissed as benign today (mirror of dismissedRepairs, named for the F/D/R/E rollup). */
+  errorDismissedBenign: number;
+  /** R — backlog signatures the zero-backlog reconciler enqueued a fresh repair for today (reconciled_error action=enqueued_repair). */
+  errorReconciled: number;
+  /** E — escalations to the CEO as an EXTERNAL break today (escalation_kind=external_blocker). The ONLY routine error→CEO touch. */
+  errorEscalatedExternal: number;
 }
 
 /** The health half of the watch line — "all N platform loops green" / "K red (…)" / "X/N green, M degraded". */
@@ -2697,6 +2709,20 @@ function platformCrossDeptLine(a: PlatformWatchActivity): string | null {
   return `Drove ${a.crossDeptDrives} spec${a.crossDeptDrives === 1 ? "" : "s"} for other departments (${shown}${more}).`;
 }
 
+/**
+ * The error-autonomy rollup (director-zero-backlog-error-autonomy-visible-reversible Phase 1) — the
+ * after-the-fact F/D/R/E visibility line the CEO reads ONCE a day instead of being in the loop on every
+ * fix. "Errors tonight: F fixed & shipped, D dismissed-benign, R reconciled from backlog, E escalated
+ * to you as external." Each F is a `claude/<slug>` PR with the verification trail — one `git revert`
+ * from undone (the reversibility half: visible AND reversible). Null on a day with zero error activity
+ * so a quiet pipeline doesn't clutter the post.
+ */
+function platformErrorAutonomyLine(a: PlatformWatchActivity): string | null {
+  const total = a.errorFixed + a.errorDismissedBenign + a.errorReconciled + a.errorEscalatedExternal;
+  if (!total) return null;
+  return `Errors tonight: ${a.errorFixed} fixed & shipped, ${a.errorDismissedBenign} dismissed-benign, ${a.errorReconciled} reconciled from backlog, ${a.errorEscalatedExternal} escalated to you as external.`;
+}
+
 /** Ada's conversational watch post (plain text, no markdown) — health + what she did today. */
 export function composePlatformWatchBody(
   health: PlatformHealth,
@@ -2711,12 +2737,16 @@ export function composePlatformWatchBody(
   // keystone-cover line, so a day she escorted/initiated/groomed a CS/Growth/etc spec is visible
   // on the board (the "drove N for other departments" sentence). Null on a day with zero cross-dept work.
   const crossDeptLine = platformCrossDeptLine(activity);
+  // director-zero-backlog-error-autonomy-visible-reversible Phase 1 — the dedicated F/D/R/E error-
+  // autonomy rollup, so the CEO sees the overnight error pipeline at a glance without being in the
+  // loop on each fix. Null on a quiet day (zero error activity).
+  const errorAutonomyLine = platformErrorAutonomyLine(activity);
   const scorecard = scorecardLine ? ` ${scorecardLine}.` : "";
   // regression-backlog-reconciliation-scorecard Phase 1 — the D/F/R/E + coverage line, dedicated so the
   // regression flow is visible at a glance instead of buried in the Scorecard headline. Reads the snapshot
   // store via composeRegressionWatchLine ("read from the scorecard, never the raw tables").
   const regressions = regressionLine ? ` ${regressionLine}.` : "";
-  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}${crossDeptLine ? ` ${crossDeptLine}` : ""}${scorecard}${regressions}`;
+  return `${persona.emoji} Platform watch — ${platformHealthLine(health)}. Today: ${platformActivityLine(activity)}.${repairLine ? ` ${repairLine}` : ""}${parkedLine ? ` ${parkedLine}.` : ""}${crossDeptLine ? ` ${crossDeptLine}` : ""}${errorAutonomyLine ? ` ${errorAutonomyLine}` : ""}${scorecard}${regressions}`;
 }
 
 /**
@@ -2819,9 +2849,11 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
     .eq("director_function", PLATFORM)
     .gte("created_at", dayStart)
     .lt("created_at", dayEnd);
-  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, dismissedParks: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0, needsAttention: 0, needsAttentionOldestHours: 0, triagedReran: 0, crossDeptDrives: 0, crossDeptByOwner: {} };
+  const activity: PlatformWatchActivity = { squashed: 0, escorting: 0, escalated: 0, dismissedParks: 0, reviewedRepairs: 0, dismissedRepairs: 0, escalatedRepairs: 0, needsAttention: 0, needsAttentionOldestHours: 0, triagedReran: 0, crossDeptDrives: 0, crossDeptByOwner: {}, errorFixed: 0, errorDismissedBenign: 0, errorReconciled: 0, errorEscalatedExternal: 0 };
   for (const r of (activityRows ?? []) as { action_kind: string; metadata: Record<string, unknown> | null }[]) {
-    const repairEscalation = r.action_kind === "escalated" && r.metadata?.["escalation_kind"] === "repair_dismissal_suspect";
+    const escalationKind = typeof r.metadata?.["escalation_kind"] === "string" ? (r.metadata["escalation_kind"] as string) : null;
+    const reconcileAction = typeof r.metadata?.["action"] === "string" ? (r.metadata["action"] as string) : null;
+    const repairEscalation = r.action_kind === "escalated" && escalationKind === "repair_dismissal_suspect";
     if (r.action_kind === "approved_approval") activity.squashed++;
     else if (r.action_kind === "escorted_goal") activity.escorting++;
     else if (r.action_kind === "escalated") activity.escalated++;
@@ -2831,12 +2863,27 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
     if (r.action_kind === "dismissed_repair") {
       activity.dismissedRepairs++;
       activity.reviewedRepairs++;
+      // director-zero-backlog-error-autonomy-visible-reversible Phase 1 — the F/D/R/E rollup's D
+      // (dismissed-benign) — Ada's supervised dismissal of one of Rafa's no-fix calls. Mirror of
+      // dismissedRepairs, named for the error-autonomy panel.
+      activity.errorDismissedBenign++;
     } else if (r.action_kind === "kept_repair") {
       activity.reviewedRepairs++;
     } else if (repairEscalation) {
       activity.escalatedRepairs++;
       activity.reviewedRepairs++;
     }
+    // director-zero-backlog-error-autonomy-visible-reversible Phase 1 — the F/D/R/E rollup's R + E.
+    // R (reconciled from backlog): a backlog signature the zero-backlog reconciler found uncovered
+    // and enqueued a fresh repair for (metadata.action='enqueued_repair' from reconcileErrorBacklog);
+    // a stuck-build escalation (`escalated_stuck`) is NOT an R — it'll be counted under E if external,
+    // or stays in the generic `escalated` rollup otherwise.
+    if (r.action_kind === "reconciled_error" && reconcileAction === "enqueued_repair") activity.errorReconciled++;
+    // E (escalated to you as external): the ONLY routine error→CEO touch — director-supervised-repair-dismissal
+    // Phase 2's external-blocker escalation, where the verified diagnosis is a third-party dependency break
+    // beyond our retry/breaker. Distinct from the generic `escalated` count so the CEO can see "what HIT my
+    // inbox as needing a business decision" at a glance.
+    if (r.action_kind === "escalated" && escalationKind === "external_blocker") activity.errorEscalatedExternal++;
     // Phase 3 — the day's needs_attention triage: how many recoverable parked items the director re-ran.
     if (r.action_kind === "triaged_needs_attention" && r.metadata?.["action"] === "rerun") activity.triagedReran++;
     // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1 — count any
@@ -2851,6 +2898,40 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
         activity.crossDeptByOwner[ownerFn] = (activity.crossDeptByOwner[ownerFn] ?? 0) + 1;
       }
     }
+  }
+
+  // director-zero-backlog-error-autonomy-visible-reversible Phase 1 — F (fixed & shipped) in the F/D/R/E
+  // rollup. Source: spec_status_history rows transitioned to status='shipped' today by a merge actor
+  // (`actor LIKE 'merge:%'` — the build-merge hook is the only authoritative shipped writer; an owner /
+  // drift / Ada flip is NOT an auto-fix shipping), filtered to repair-signed specs (`SpecCard.repairSignature`
+  // — the Repair-signature marker Rafa stamps on every fix spec). Each F is a `claude/<slug>` PR with the
+  // verification trail (tsc + CI + spec-test), one `git revert` from undone — that's the reversibility half:
+  // the CEO gets after-the-fact visibility AND an instant undo without being in the loop up front.
+  // Best-effort: a missing audit table / read error swallows to 0 (no fabricated count).
+  try {
+    const { data: shipped } = await admin
+      .from("spec_status_history")
+      .select("spec_slug, actor")
+      .eq("workspace_id", workspaceId)
+      .eq("field", "status")
+      .eq("to_value", '"shipped"')
+      .gte("at", dayStart)
+      .lt("at", dayEnd)
+      .limit(500);
+    const shippedSlugs = new Set<string>();
+    for (const row of (shipped ?? []) as Array<{ spec_slug?: string | null; actor?: string | null }>) {
+      const slug = String(row.spec_slug ?? "");
+      const actor = String(row.actor ?? "");
+      if (!slug || !actor.startsWith("merge:")) continue;
+      shippedSlugs.add(slug);
+    }
+    if (shippedSlugs.size) {
+      const { specs } = await getRoadmap();
+      const repairSignedShippedSlugs = specs.filter((s) => s.repairSignature && shippedSlugs.has(s.slug));
+      activity.errorFixed = repairSignedShippedSlugs.length;
+    }
+  } catch {
+    /* best-effort — leave errorFixed at 0 on a read error */
   }
 
   // needs-attention KPI (Phase 3) — the open parked-work snapshot (count + oldest age), scoped to the items
@@ -2868,7 +2949,11 @@ export async function postPlatformWatchUpdate(admin: Admin, opts?: { date?: stri
 
   // Don't spam a fully-quiet, all-green day — post only when there's health to flag, work to report, or a
   // parked item that needs eyes (so a rotting needs_attention surfaces even when every loop is green).
-  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0 || activity.reviewedRepairs > 0 || activity.needsAttention > 0 || activity.triagedReran > 0;
+  // director-zero-backlog-error-autonomy-visible-reversible Phase 1 — also post on a day the error pipeline
+  // did ANY F/D/R/E work, so the autonomous fixes/dismisses/reconciles are visible even when every loop
+  // landed green by post time (the whole point of the rollup is the CEO seeing what happened overnight).
+  const errorAutonomyActivity = activity.errorFixed + activity.errorDismissedBenign + activity.errorReconciled + activity.errorEscalatedExternal;
+  const hasActivity = activity.squashed > 0 || activity.escorting > 0 || activity.escalated > 0 || activity.reviewedRepairs > 0 || activity.needsAttention > 0 || activity.triagedReran > 0 || errorAutonomyActivity > 0;
   if (!hasActivity && health.color === "green") return { posted: false, reason: "quiet" };
 
   // Phase 3 (platform-scorecard-surface) — the one-line scorecard summary, reading the trended store
