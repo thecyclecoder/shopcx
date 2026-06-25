@@ -1,7 +1,7 @@
 # Specs are data — the brain is the folded record
 
 **Owner:** [[../functions/platform]]
-**Status:** proposed
+**Status:** greenlit
 
 **Outcome:** In-flight specs live 100% in the database (content + phases + status as one row), not as static `docs/brain/specs/*.md` files. The board, agents, and build pipeline read that row directly. When a spec ships, the **fold** process writes it into the brain markdown — the permanent, human-readable record — and preserves the DB row. The mirror between a static `.md` and DB status disappears, and with it an entire class of drift bugs.
 
