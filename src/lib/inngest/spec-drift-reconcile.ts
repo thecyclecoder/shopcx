@@ -14,8 +14,13 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { runSpecDriftReconciler } from "@/lib/spec-drift";
+import { runSpecDriftReconciler, healBuiltUnstampedPhases } from "@/lib/spec-drift";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+
+// The canonical PM (build-console) workspace. The built-unstamped self-heal is SINGLE-WORKSPACE by
+// contract (repurpose-spec-drift-reconciler P1) — it stamps phases `shipped`, so it must never iterate
+// workspaces / touch a test workspace. The DB-vs-code surface above stays multi-workspace (read-only).
+const PM_WORKSPACE_ID = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
 export const specDriftReconcileCron = inngest.createFunction(
   {
@@ -47,15 +52,25 @@ export const specDriftReconcileCron = inngest.createFunction(
       return { workspaces: workspaceIds.length, specsScanned, flipped, surfaced };
     });
 
+    // repurpose-spec-drift-reconciler P1: self-heal "built-unstamped" phases. After db-driven-specs, status
+    // derives from spec_phases; a backfill seeded some phases `planned` whose work already merged, so the box
+    // re-builds them, no-ops "already merged via #N", and the phase stays planned forever (a phantom rebuild
+    // loop). The reconciler is Bo's supervisor: it reads that no-op outcome and STAMPS the phase shipped.
+    // Canonical PM workspace ONLY — this mutates, so it never iterates workspaces.
+    const healed = await step.run("heal-built-unstamped", async () => {
+      const rows = await healBuiltUnstampedPhases(PM_WORKSPACE_ID);
+      return { specs: rows.length, phases: rows.reduce((n, r) => n + r.phases.length, 0), detail: rows };
+    });
+
     await step.run("emit-heartbeat", async () => {
       await emitCronHeartbeat("spec-drift-reconcile", {
         ok: true,
-        produced: result,
-        detail: `${result.flipped} flipped · ${result.surfaced} surfaced · ${result.specsScanned} scanned`,
+        produced: { ...result, healedSpecs: healed.specs, healedPhases: healed.phases },
+        detail: `${result.flipped} flipped · ${result.surfaced} surfaced · ${result.specsScanned} scanned · ${healed.specs} healed (${healed.phases} phase)`,
         durationMs: Date.now() - startedAt,
       });
     });
 
-    return result;
+    return { ...result, healedSpecs: healed.specs, healedPhases: healed.phases };
   },
 );

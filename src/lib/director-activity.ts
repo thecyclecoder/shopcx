@@ -56,7 +56,11 @@ export type DirectorActionKind =
   // proposed goal to folded (the row stays for audit; the mirror-md lane reflects the new status).
   | "greenlit_goal"
   | "ungreenlit_goal"
-  | "declined_goal";
+  | "declined_goal"
+  // repurpose-spec-drift-reconciler Phase 1 — the spec-drift reconciler (supervising Bo) stamps phase(s)
+  // shipped after the box no-op'd a build as "already merged via #N" (work on main, phase left planned by
+  // a backfill). One row per healed spec; metadata carries { actor:'reconciler:spec-drift', pr, phases }.
+  | "healed_built_unstamped";
 
 export interface DirectorActivityInput {
   workspaceId: string;

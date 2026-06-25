@@ -29,6 +29,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { deriveSpecStatus, getRoadmap, listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { markSpecCardStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
+import { stampPhaseShipped } from "@/lib/specs-table";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken(): string | undefined {
@@ -502,6 +503,124 @@ export interface DriftSweepResult {
   specsScanned: number;
   flipped: number;
   surfaced: number;
+}
+
+// ── Self-heal "built-unstamped" phases (repurpose-spec-drift-reconciler P1) ─────────────────────────
+
+/**
+ * The strong, single signal that a spec is "built but unstamped": the box's build/fold job no-op'd as
+ * "already-shipped" — it found the WHOLE spec's work already merged on `main` (via a sibling build) and
+ * terminated WITHOUT opening a PR or touching files. The error/log_tail carries `already merged via #N`
+ * (the build claim-dedup at builder-worker.ts `findMergedSiblingBuild`, and the dirty-PR duplicate close).
+ * That outcome IS Bo's implicit report: the spec is on main, the phase just never got stamped (a backfill
+ * seeded it `planned`). We only trust THIS message — never the looser "no changes" outcome (which matched a
+ * genuinely-empty-phase spec, agents-hub-role-inboxes), so an incomplete spec is never over-stamped.
+ */
+const ALREADY_MERGED_VIA_RE = /already merged via #(\d+)/i;
+
+/** Cheap PR → merge-commit SHA resolution via the existing GitHub REST helper. Null on any miss. */
+async function resolvePrMergeSha(pr: number): Promise<string | null> {
+  try {
+    const res = await gh("GET", `/repos/${REPO}/pulls/${pr}`);
+    if (!res.ok) return null;
+    const sha = res.json.merge_commit_sha;
+    return typeof sha === "string" && sha ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Self-heal "built-unstamped" phases — the supervising-agent half of the box's "already-shipped" no-op.
+ *
+ * THE LOOP THIS CLOSES: after the db-driven-specs cutover, spec status is DERIVED from `spec_phases`. The
+ * backfill seeded some phases `planned` even though their work had already merged. When the box later builds
+ * such a phase, `runJob` finds the work already on `main`, terminates "already merged via #N" with NO file
+ * changes — and the phase STAYS `planned`. The board keeps showing it un-built and re-invites a phantom
+ * rebuild (the box starts, finds nothing, stops). Forever.
+ *
+ * THE FIX (conservative — only the strong signal): a spec qualifies iff (a) it has ≥1 `spec_phases` row whose
+ * status is NOT 'shipped'/'rejected', AND (b) it has a recent `agent_jobs` row (kind build|fold, status
+ * merged|completed) whose `error`/`log_tail` matches `already merged via #N` — the box CONFIRMING the whole
+ * spec is already on main. For each match we stamp EVERY non-shipped, non-rejected phase `shipped` via
+ * `stampPhaseShipped` (the canonical leaf write that advances the DERIVED status — the rollup trigger is
+ * gone), tagging `pr` (the key provenance) + a best-effort `merge_sha`, and log ONE supervisor-visible
+ * `director_activity` row per healed spec. Idempotent: a second run finds no qualifying phases.
+ *
+ * SINGLE-WORKSPACE by contract — the caller passes the canonical PM workspace; this never iterates workspaces.
+ */
+export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ slug: string; phases: number[]; pr: number }[]> {
+  const admin = createAdminClient();
+
+  // (a) Candidate specs: any with ≥1 phase NOT IN ('shipped','rejected'). One read, joined to phases.
+  const { data: phaseRows } = await admin
+    .from("spec_phases")
+    .select("position, status, specs!inner(slug, workspace_id)")
+    .eq("specs.workspace_id", workspaceId)
+    .not("status", "in", "(shipped,rejected)");
+  type Row = { position: number; status: Phase; specs: { slug: string; workspace_id: string } | { slug: string; workspace_id: string }[] };
+  const unstampedBySlug = new Map<string, number[]>();
+  for (const r of (phaseRows ?? []) as Row[]) {
+    const spec = Array.isArray(r.specs) ? r.specs[0] : r.specs;
+    if (!spec?.slug) continue;
+    const list = unstampedBySlug.get(spec.slug) ?? [];
+    list.push(r.position);
+    unstampedBySlug.set(spec.slug, list);
+  }
+  if (!unstampedBySlug.size) return [];
+
+  // (b) For each candidate, find a recent build/fold job the box no-op'd as "already merged via #N".
+  const healed: { slug: string; phases: number[]; pr: number }[] = [];
+  for (const [slug, positions] of unstampedBySlug) {
+    const { data: jobs } = await admin
+      .from("agent_jobs")
+      .select("error, log_tail, status")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .in("kind", ["build", "fold"])
+      .in("status", ["merged", "completed"])
+      .order("created_at", { ascending: false })
+      .limit(5);
+    let pr: number | null = null;
+    for (const j of (jobs ?? []) as { error: string | null; log_tail: string | null }[]) {
+      const m = `${j.error ?? ""}\n${j.log_tail ?? ""}`.match(ALREADY_MERGED_VIA_RE);
+      if (m) {
+        pr = Number(m[1]);
+        break;
+      }
+    }
+    if (pr === null) continue; // no strong "already-shipped" signal → leave (could be genuinely incomplete)
+
+    // Stamp every non-shipped, non-rejected phase shipped — the leaf write that advances the derived status.
+    const mergeSha = await resolvePrMergeSha(pr);
+    const stamped: number[] = [];
+    for (const position of positions.sort((a, b) => a - b)) {
+      try {
+        await stampPhaseShipped(workspaceId, slug, position, { pr, merge_sha: mergeSha });
+        stamped.push(position);
+      } catch {
+        /* a single phase write failing must not block the rest; the next sweep re-attempts the remainder */
+      }
+    }
+    if (!stamped.length) continue;
+    healed.push({ slug, phases: stamped, pr });
+
+    // Supervisor-visible report: one director_activity row naming the spec + phases healed + the PR.
+    try {
+      const { recordDirectorActivity } = await import("@/lib/director-activity");
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "healed_built_unstamped",
+        specSlug: slug,
+        reason: `reconciler:spec-drift stamped ${stamped.length} built-but-unstamped phase(s) (P${stamped.join(", P")}) of ${slug} shipped — the box confirmed the whole spec already merged via #${pr} (no file changes), so the backfilled-planned phase(s) were never advanced. Self-healed the derived status.`,
+        metadata: { actor: "reconciler:spec-drift", pr, merge_sha: mergeSha, phases: stamped },
+      });
+    } catch {
+      /* audit is best-effort — the stamp already landed */
+    }
+  }
+  return healed;
 }
 
 /**
