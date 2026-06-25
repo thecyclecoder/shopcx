@@ -328,7 +328,7 @@ function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string 
 
 // Async (NON-blocking) exec — REQUIRED for the long-running claude/tsc/apply steps so concurrent
 // build lanes actually overlap. spawnSync freezes the whole event loop and would serialize lanes.
-function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
+function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
   return new Promise((resolve) => {
     // ada-director-spec-status-cards-fix-tooling-fa6848: redirect stdin from /dev/null. Default `spawn`
     // leaves stdin as an open pipe never written to — the `claude -p` CLI sees that, waits 3s for input,
@@ -355,9 +355,38 @@ function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTime
       idleTimer = setTimeout(() => { killed = "idle"; child.kill("SIGKILL"); }, opts.idleTimeout);
     };
     bumpIdle();
-    child.stdout?.on("data", (d) => { out += d.toString(); if (out.length > cap) out = out.slice(-cap); bumpIdle(); });
+    // box-session-transparency Phase 1: opts.onLine fires once per complete newline-delimited stdout
+    // line — the shared streaming runner uses it to parse the agent's TodoWrite events live (the
+    // stream already carries them) and stream the checklist + current note onto the job row in real
+    // time. Buffered: chunks aren't newline-aligned; we hold any partial trailing line until the
+    // next chunk completes it. Best-effort — onLine MUST NOT throw (the line is dropped if it does).
+    let lineBuf = "";
+    const flushLine = (line: string) => {
+      if (!opts.onLine) return;
+      const s = line.trim();
+      if (!s) return;
+      try { opts.onLine(s); } catch { /* best-effort */ }
+    };
+    child.stdout?.on("data", (d) => {
+      const s = d.toString();
+      out += s;
+      if (out.length > cap) out = out.slice(-cap);
+      bumpIdle();
+      if (opts.onLine) {
+        lineBuf += s;
+        let idx;
+        while ((idx = lineBuf.indexOf("\n")) >= 0) {
+          flushLine(lineBuf.slice(0, idx));
+          lineBuf = lineBuf.slice(idx + 1);
+        }
+      }
+    });
     child.stderr?.on("data", (d) => { err += d.toString(); if (err.length > cap) err = err.slice(-cap); bumpIdle(); });
-    const cleanup = () => { if (hardTimer) clearTimeout(hardTimer); if (idleTimer) clearTimeout(idleTimer); };
+    const cleanup = () => {
+      if (hardTimer) clearTimeout(hardTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      if (lineBuf) { flushLine(lineBuf); lineBuf = ""; }
+    };
     child.on("close", (code) => { cleanup(); resolve({ code: code ?? -1, out, err, killed }); });
     child.on("error", (e) => { cleanup(); resolve({ code: -1, out, err: err + String(e), killed }); });
   });
@@ -862,27 +891,184 @@ function currentModelArgs(): string[] {
   return id ? ["--model", id] : [];
 }
 
-async function runClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  // Sandbox: stay on Max (no API key) AND drop prod-write secrets. Keep NEXT_PUBLIC_* (non-secret).
+// box-session-transparency Phase 1 — the ONE shared streaming runner every box session funnels through.
+//
+// Every `run*Claude` (build / fold / plan / seed / director / improve / triage / spec-test / spec-review /
+// migration-fix / dev-ask / pr-resolve / repair / regression / security / storefront-optimizer) routes
+// through here so that:
+//   1. Every prompt automatically carries the shared TodoWrite instruction (un-black-boxing the agent —
+//      it states a plan up front, ticks through it, and writes a one-line note per step).
+//   2. Stream-json is parsed LIVE: every `assistant` event whose content includes a TodoWrite tool_use
+//      → the checklist + the in-progress note are upserted onto agent_jobs (throttled, best-effort,
+//      never blocks the run; opts.jobId enables it).
+//   3. The same final-result aggregation as the old runClaude — session_id, is_error, result text,
+//      and the fleet-cost-metering usage.
+//
+// sandbox:
+//   "build" — strips SECRET_RE (no prod-write creds). Used by the build sandbox + pr-resolve worktree.
+//   "max"  — keeps the env, drops only ANTHROPIC_API_KEY (so all LLM is Max-billed). Default.
+
+const BOX_SESSION_TODOWRITE_INSTRUCTION = [
+  "",
+  "── Box-session transparency (your work is shown live on the box card) ──",
+  "Maintain a TodoWrite checklist for this session — state your plan as todos up front, mark each",
+  "in_progress/completed as you go, and put a ONE-LINE plain-English note on each (what you're doing",
+  "+ why) in the `activeForm` field. The checklist + the current in_progress note are shown live on",
+  "your box card — keep them human-readable.",
+].join("\n");
+
+type ChecklistItem = { step: string; status: "pending" | "in_progress" | "done"; note: string };
+
+// Buffered, throttled writer: TodoWrite events fire many-per-second mid-stream; we coalesce to ~every
+// CHECKLIST_WRITE_INTERVAL_MS, skip writes that are byte-identical to the previous one, and never let
+// a write error surface (best-effort — the runner's job is to RUN, not to journal).
+const CHECKLIST_WRITE_INTERVAL_MS = 2500;
+
+function makeChecklistWriter(jobId: string): { onLine: (line: string) => void; flush: () => Promise<void> } {
+  let pendingChecklist: ChecklistItem[] | null = null;
+  let pendingNote: string | null = null;
+  let lastWrittenKey: string | null = null;
+  let lastWriteAt = 0;
+  let writeTimer: NodeJS.Timeout | null = null;
+  let flushing = false;
+  let stopped = false;
+
+  const writeNow = async () => {
+    if (flushing) return;
+    flushing = true;
+    writeTimer = null;
+    try {
+      const c = pendingChecklist;
+      const n = pendingNote;
+      const key = JSON.stringify({ c, n });
+      if (key === lastWrittenKey) return;
+      lastWrittenKey = key;
+      lastWriteAt = Date.now();
+      const patch: Record<string, unknown> = {};
+      if (c) patch.session_checklist = c;
+      if (n !== null) patch.session_note = n;
+      if (Object.keys(patch).length === 0) return;
+      // Direct update (not the `update` helper) — that one also writes updated_at + runs the
+      // needs_attention classifier, which would treat every TodoWrite tick as a row mutation. We
+      // only want to stream the checklist columns; the lane lifecycle owns the rest.
+      await db.from("agent_jobs").update(patch).eq("id", jobId);
+    } catch {
+      /* best-effort — checklist is a live mirror, not a contract */
+    } finally {
+      flushing = false;
+    }
+  };
+
+  const schedule = () => {
+    if (stopped || writeTimer) return;
+    const wait = Math.max(0, CHECKLIST_WRITE_INTERVAL_MS - (Date.now() - lastWriteAt));
+    writeTimer = setTimeout(() => { void writeNow(); }, wait);
+  };
+
+  return {
+    onLine: (line: string) => {
+      if (stopped) return;
+      let obj: unknown;
+      try { obj = JSON.parse(line); } catch { return; }
+      const o = obj as { type?: string; message?: { content?: unknown } };
+      if (o?.type !== "assistant") return;
+      const content = o.message?.content;
+      if (!Array.isArray(content)) return;
+      for (const block of content) {
+        const b = block as { type?: string; name?: string; input?: { todos?: unknown } };
+        if (b?.type !== "tool_use" || b?.name !== "TodoWrite") continue;
+        const todos = b.input?.todos;
+        if (!Array.isArray(todos)) continue;
+        const checklist: ChecklistItem[] = todos
+          .map((t) => {
+            const td = t as { content?: unknown; status?: unknown; activeForm?: unknown };
+            const step = typeof td.content === "string" ? td.content : "";
+            const rawStatus = typeof td.status === "string" ? td.status : "pending";
+            const status: ChecklistItem["status"] =
+              rawStatus === "in_progress" ? "in_progress" :
+              rawStatus === "completed" ? "done" : "pending";
+            // activeForm is the present-continuous spinner verb the TodoWrite tool uses — this is the
+            // ONE-LINE plain-English note the shared prompt asks the agent to write. Fall back to the
+            // step itself so we never emit an empty card line.
+            const note = typeof td.activeForm === "string" && td.activeForm.trim() ? td.activeForm : step;
+            return { step, status, note };
+          })
+          .filter((c) => c.step);
+        if (!checklist.length) continue;
+        const inProgress = checklist.find((c) => c.status === "in_progress");
+        const tail = checklist[checklist.length - 1];
+        pendingChecklist = checklist;
+        pendingNote = (inProgress?.note || tail?.note || "").slice(0, 500);
+        schedule();
+      }
+    },
+    flush: async () => {
+      stopped = false; // allow one final flush
+      if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
+      await writeNow();
+      stopped = true;
+    },
+  };
+}
+
+interface RunBoxSessionOpts {
+  configDir?: string;
+  jobId?: string | null;
+  kind?: string;
+  sandbox?: "build" | "max";
+  timeout: number;
+  idleTimeout?: number;
+}
+
+interface RunResult {
+  session: string | null;
+  resultText: string;
+  isError: boolean;
+  raw: string;
+  usage: RunUsage;
+  model: string | null;
+}
+
+async function runBoxSession(prompt: string, sessionId: string | null, cwd: string, opts: RunBoxSessionOpts): Promise<RunResult> {
+  // Sandbox:
+  //   "build" — strip SECRET_RE (prod-write creds). Keep NEXT_PUBLIC_*. Used by the feature-build
+  //     sandbox + the pr-resolve worktree (the LLM must not be able to push, mutate prod DB, etc).
+  //   "max"  — keep the env, drop ONLY ANTHROPIC_API_KEY so all LLM is Max-billed. Used by every
+  //     non-build runner (director / improve / triage / etc — they need read-only DB/crypto creds).
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (k === "ANTHROPIC_API_KEY") continue;
-    if (/^NEXT_PUBLIC_/.test(k)) { env[k] = v; continue; }
-    if (SECRET_RE.test(k)) continue;
-    env[k] = v;
+  if ((opts.sandbox ?? "max") === "build") {
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k === "ANTHROPIC_API_KEY") continue;
+      if (/^NEXT_PUBLIC_/.test(k)) { env[k] = v; continue; }
+      if (SECRET_RE.test(k)) continue;
+      env[k] = v;
+    }
+  } else {
+    Object.assign(env, process.env);
+    delete env.ANTHROPIC_API_KEY;
   }
   // Multi-account: point the `claude` CLI at the chosen account's isolated credentials/config dir. An
   // ALIAS can't reach a spawned process (no shell), so the worker must set CLAUDE_CONFIG_DIR in the env
   // object itself. Unset → the CLI's default (~/.claude = pool[0]) — back-compat for callers not yet
   // wired into the pool (box-multi-account-failover Phase 1).
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+  if (opts.configDir) env.CLAUDE_CONFIG_DIR = opts.configDir;
   const base = sessionId ? ["--resume", sessionId] : [];
-  // stream-json (not json): the build must emit output continuously while it works so the hang
-  // detector can tell "actively building" from "stuck". Plain json buffers the whole run and prints
-  // once at the very end — zero liveness signal, so idle detection would kill every long build.
-  // --verbose is required by stream-json. The final {type:"result"} event carries the result text.
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
-  const r = await shAsync("claude", args, { cwd, env, idleTimeout: BUILD_IDLE_TIMEOUT_MS, timeout: BUILD_HARD_CAP_MS });
+  // stream-json (not json): every box session must emit output continuously so the hang detector can
+  // tell "actively running" from "stuck", AND so the live TodoWrite events arrive while the agent is
+  // still working (Phase 1's whole point). --verbose is required by stream-json. The final
+  // {type:"result"} event carries the result text. Plain json buffers the whole run and prints once
+  // at the very end — zero liveness signal AND no live checklist.
+  const augmentedPrompt = `${prompt}\n${BOX_SESSION_TODOWRITE_INSTRUCTION}`;
+  const args = [...base, ...currentModelArgs(), "-p", augmentedPrompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
+  const writer = opts.jobId ? makeChecklistWriter(opts.jobId) : null;
+  const r = await shAsync("claude", args, {
+    cwd,
+    env,
+    idleTimeout: opts.idleTimeout,
+    timeout: opts.timeout,
+    onLine: writer ? writer.onLine : undefined,
+  });
+  if (writer) await writer.flush();
   let session = sessionId;
   let resultText = "";
   let isError = r.code !== 0;
@@ -911,14 +1097,26 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
     resultText = (r.out || "") + (r.err || "");
     isError = true;
   }
+  const kind = opts.kind || "session";
   if (r.killed === "idle") {
     isError = true;
-    resultText = `[build killed: no output for ${Math.round(BUILD_IDLE_TIMEOUT_MS / 60000)} min — treated as hung]\n` + resultText;
+    resultText = `[${kind} killed: no output for ${Math.round((opts.idleTimeout || 0) / 60000)} min — treated as hung]\n` + resultText;
   } else if (r.killed === "hardcap") {
     isError = true;
-    resultText = `[build killed: exceeded the ${Math.round(BUILD_HARD_CAP_MS / 60000)} min hard cap]\n` + resultText;
+    resultText = `[${kind} killed: exceeded the ${Math.round(opts.timeout / 60000)} min hard cap]\n` + resultText;
   }
   return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+}
+
+async function runClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, {
+    configDir,
+    jobId,
+    kind: "build",
+    sandbox: "build",
+    idleTimeout: BUILD_IDLE_TIMEOUT_MS,
+    timeout: BUILD_HARD_CAP_MS,
+  });
 }
 
 // Box product-seed runner (box-product-seeding): launch a TOP-LEVEL `claude -p`
@@ -929,30 +1127,8 @@ async function runClaude(prompt: string, sessionId: string | null, cwd: string, 
 // workspace DB + storage and decrypt the per-workspace Gemini/Drive keys. This is
 // a trusted, fixed skill driving fixed tools (it never edits repo code), so it
 // runs at the same trust level as the old in-process seed.
-async function runSeedClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: SEED_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runSeedClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "product-seed", sandbox: "max", timeout: SEED_TIMEOUT_MS });
 }
 
 function parseStatus(text: string): { status: string; questions?: unknown[]; summary?: string; no_changes_reason?: string } | null {
@@ -2313,31 +2489,8 @@ async function runProposedGoalJob(job: Job) {
 // then either AUTO-APPROVES it within the leash (mirroring the human approve path WITHOUT the owner gate,
 // logging an approval_decisions row decided_by='director', autonomous=true) or ESCALATES — never
 // rubber-stamps, never an unconfirmable approve. It NEVER edits product code / opens a PR / runs a migration.
-async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  // KEEP the env (read-only DB/crypto creds) — only strip the API key so all LLM is Max-billed.
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run Ada's pass on a healthy account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: PLATFORM_DIRECTOR_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runDirectorClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "director", sandbox: "max", timeout: PLATFORM_DIRECTOR_TIMEOUT_MS });
 }
 
 // brain-platform-live-autonomous-status (Phase 2 — the recurrence guard): wrap EVERY read-only director
@@ -2405,7 +2558,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
         '{"verdict":"code-present","reasoning":"<false positive — the code IS on main, just moved/renamed; cite where>"}',
         '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
       ].join("\n");
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
       const verdict = String(parsed?.verdict);
       if (verdict === "code-present") {
@@ -2743,7 +2896,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
       // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
       const groomPrompt = await directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c));
-      const { resultText, usage, model } = await runDirectorClaude(groomPrompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText, usage, model } = await runDirectorClaude(groomPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
@@ -3106,7 +3259,7 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
-      const { resultText, isError, raw, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText, isError, raw, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       // Phase 4: a 529/overloaded is a transient throttle, NOT a spec problem — back off the batch, escalate nothing.
       if (isError && isMaxOverloaded(`${resultText} ${raw}`)) {
@@ -3311,7 +3464,7 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
       // Phase 2 live-state + P7 coaching: her supervision decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/initiation/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.repairDismissalInvestigationPrompt(c));
-      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -3572,7 +3725,7 @@ async function runPlatformDirectorJob(job: Job) {
       ? `\n\nYou are in a read-only worktree of the build's BRANCH (${targetBranch}) — the proposed migration SQL (supabase/migrations/), the apply script, and the new code ARE present here. READ them directly to confirm soundness; do NOT assume a file is missing just because it isn't on main.`
       : "";
     const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief) + branchNote);
-    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, investCwd, pickHealthyConfigDir());
+    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, investCwd, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
@@ -3745,7 +3898,7 @@ async function runDirectorBounceBackJob(job: Job) {
       } satisfies import("../src/lib/agents/platform-director").GroomCandidate;
 
       const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.groomInvestigationPrompt(candidate));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -3891,7 +4044,7 @@ async function runDirectorBounceBackJob(job: Job) {
       } satisfies import("../src/lib/agents/platform-director").InitCandidate;
 
       const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.initInvestigationPrompt(candidate));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -3968,7 +4121,7 @@ async function runDirectorBounceBackJob(job: Job) {
       } satisfies import("../src/lib/agents/platform-director").RepairDismissalCandidate;
 
       const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.repairDismissalInvestigationPrompt(candidate));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -4034,7 +4187,7 @@ async function runDirectorBounceBackJob(job: Job) {
       }
       const brief = lib.buildDirectorBrief(t, leashActions);
       const prompt = await directorDecisionPrompt(t.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.directorInvestigationPrompt(brief));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
       const verdict = String(parsed?.verdict || "");
       const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
@@ -4346,7 +4499,7 @@ async function runPlanJob(job: Job) {
         `SELF-SEQUENCING (goal-decomposition-encodes-blockers): every proposed branch MUST declare its prerequisites as \`blocked_by\`: a (possibly empty) list of the slugs it depends on — each slug MUST reference another proposed spec in THIS tree or an already-existing spec under docs/brain/specs/. The graph MUST be acyclic (no spec blocks itself, directly or transitively). Foundation specs that nothing precedes have \`blocked_by: []\`; a spec that needs a framework/memory/metric built first lists those slugs. Do NOT over-serialize independent branches — only list a real build-order dependency. The approved tree becomes self-sequencing: only unblocked specs build immediately, dependents auto-queue as their blockers ship.`,
         `Final message = ONLY one JSON object: {"status":"needs_approval","actions":[{"type":"spec","summary":"<title>","preview":"<intent>\\n\\nGap: <brain citation>","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…","blocked_by":["<sibling-or-existing-slug>"]}}]} | {"status":"completed","summary":"…"} | {"status":"needs_input","questions":[{"id":"q1","q":"…"}]}.`,
       ].join("\n");
-      const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
+      const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir, job.id);
       await meterAgentJob(job, configDir, usage, model);
       if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
       if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
@@ -4377,7 +4530,7 @@ async function runPlanJob(job: Job) {
             `Re-emit the SAME tree, but make the build order EXPLICIT. For every spec that depends on another, set its \`blocked_by\` to the slug(s) of its prerequisite milestone spec(s) — M2 blocked_by M1, the metric before the dashboard that surfaces it, etc. The graph MUST stay acyclic. ONLY if the milestones are genuinely independent (no spec consumes another's output) may a spec keep \`blocked_by: []\` — and then you MUST say so outright in that spec's \`intent\` ("independent of the other milestones — no build-order dependency"), so parallelism is a deliberate, visible choice, never an omission.`,
             `Final message = ONLY one JSON object, SAME shape as before: {"status":"needs_approval","actions":[{"type":"spec","summary":"…","preview":"…","spec":{"slug":"…","title":"…","owner":"…","parent":"…","milestone":"…","intent":"…","gap":"…","blocked_by":["<prereq-slug>"]}}]}.`,
           ].join("\n");
-          const r2 = await runClaude(fixPrompt, session || sessionId, wt, configDir);
+          const r2 = await runClaude(fixPrompt, session || sessionId, wt, configDir, job.id);
           await meterAgentJob(job, configDir, r2.usage, r2.model);
           if (r2.session) await update(job.id, { claude_session_id: r2.session, claude_session_config_dir: configDir });
           if (r2.isError && isUsageCapError(`${r2.resultText}\n${r2.raw}`)) {
@@ -4442,7 +4595,7 @@ async function runPlanJob(job: Job) {
       `Final message = ONLY {"status":"completed","summary":"authored N specs: …"} (or {"status":"needs_input","questions":[…]} only if a spec is genuinely under-specified).`,
     ].join("\n");
 
-    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir, job.id);
     await meterAgentJob(job, configDir, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
     if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
@@ -4612,7 +4765,7 @@ async function runFoldJob(job: Job) {
       ? `${(job.answers || []).length ? `Answers to your questions: ${JSON.stringify(job.answers)}. ` : ""}Continue the batch fold-build for specs: ${slugs.join(", ")}. Same rules and the same final JSON output protocol as before.`
       : foldBatchPrompt(slugs);
 
-    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt, undefined, job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     if (session) await update(job.id, { claude_session_id: session });
@@ -4767,7 +4920,7 @@ async function runProductSeedJob(job: Job) {
         ].join("\n");
 
   try {
-    const { session, resultText, isError, raw, usage, model } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR, pickHealthyConfigDir());
+    const { session, resultText, isError, raw, usage, model } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText);
@@ -4951,7 +5104,7 @@ async function runSpecChatJob(job: Job) {
     }
 
     // ── Run the box session (top-level Max claude; secrets stripped; WebSearch allowed) ──
-    const { session, resultText, isError, raw, usage, model } = await runClaude(prompt, sessionId, wt);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(prompt, sessionId, wt, undefined, job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
@@ -5065,30 +5218,8 @@ async function runSpecChatJob(job: Job) {
 // approval (it holds the prod write creds, exactly like today's Improve tab). No worktree / PR — this
 // mutates a DB session row, not the repo, so it runs read-only in the main checkout (REPO_DIR).
 // Params on the job: instructions = JSON {ticket_id, session_id, mode:'turn', user_message}.
-async function runImproveClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: IMPROVE_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runImproveClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "ticket-improve", sandbox: "max", timeout: IMPROVE_TIMEOUT_MS });
 }
 
 // Build the read-only context brief baked into turn 1 — so the box's FIRST reply already references
@@ -5292,7 +5423,7 @@ async function runTicketImproveJob(job: Job) {
           `Self-check it before you close: if you can't show graders a before/after, a tag/category delta, or a preserved-voice quote, the turn caps at ~6/10 regardless of how correct the underlying work was.`,
         ].join("\n");
 
-    const { session: boxSession, resultText, isError, raw, usage, model } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR, pickHealthyConfigDir());
+    const { session: boxSession, resultText, isError, raw, usage, model } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -5363,30 +5494,8 @@ async function runTicketImproveJob(job: Job) {
 // passes investigate read-only via scripts/improve-box-tools.ts) and unsets ANTHROPIC_API_KEY (Max,
 // $0 marginal). No worktree / PR — it mutates the DB + commits specs to main, not a feature branch.
 // See docs/brain/specs/box-escalation-triage.md.
-async function runTriageClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: TRIAGE_PASS_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runTriageClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "triage-escalations", sandbox: "max", timeout: TRIAGE_PASS_TIMEOUT_MS });
 }
 
 const TRIAGE_TOOLS_LINE =
@@ -5469,7 +5578,7 @@ async function runEscalationTriageJob(job: Job) {
       const brief = await loadTriageBrief(db, wsId, ticketId);
 
       // ── Solver (fresh session) ──
-      let solver = await runTriageClaude(triageSolverPrompt(ticketId, brief), null, REPO_DIR, ticketDir);
+      let solver = await runTriageClaude(triageSolverPrompt(ticketId, brief), null, REPO_DIR, ticketDir, job.id);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
       let proposal = extractJson<SolverProposal>(solver.resultText);
       if (!proposal || !proposal.decision) {
@@ -5485,17 +5594,17 @@ async function runEscalationTriageJob(job: Job) {
       const solverSession = solver.session;
 
       // ── Skeptic (fresh eyes — separate session) ──
-      let skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir);
+      let skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir, job.id);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
       let verdict = extractJson<SkepticVerdict>(skeptic.resultText);
 
       // ── One bounded re-loop on "revise" (solver incorporates critique; skeptic re-checks fresh) ──
       if (verdict?.verdict === "revise") {
-        solver = await runTriageClaude(triageRevisePrompt(verdict.critique || "", verdict.concerns || []), solverSession, REPO_DIR, ticketDir);
+        solver = await runTriageClaude(triageRevisePrompt(verdict.critique || "", verdict.concerns || []), solverSession, REPO_DIR, ticketDir, job.id);
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
         const revised = extractJson<SolverProposal>(solver.resultText);
         if (revised?.decision) proposal = revised;
-        skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir);
+        skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir, job.id);
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
         verdict = extractJson<SkepticVerdict>(skeptic.resultText);
       }
@@ -5560,30 +5669,8 @@ async function runEscalationTriageJob(job: Job) {
 // secrets (the agent probes prod read-only via scripts/spec-test-db-probe.ts, gh, vercel, GET hits) and
 // unsets ANTHROPIC_API_KEY (Max, $0 marginal). No worktree / PR — it writes one spec_test_runs row and
 // NEVER mutates prod or flips a spec verified/archived. See docs/brain/specs/spec-test-agent.md.
-async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: SPEC_TEST_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "spec-test", sandbox: "max", timeout: SPEC_TEST_TIMEOUT_MS });
 }
 
 type SpecTestCheck = { text: string; verdict: string; category?: string; evidence?: string; screenshot?: string };
@@ -5702,7 +5789,7 @@ async function runSpecTestJob(job: Job) {
       await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
     };
 
-    let { session, resultText, isError, raw, usage, model } = await runSpecTestClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+    let { session, resultText, isError, raw, usage, model } = await runSpecTestClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     let parsed = extractSpecTestResult(resultText);
@@ -5717,7 +5804,7 @@ async function runSpecTestJob(job: Job) {
         `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>"}`,
         `Reuse the checks you already determined; do not re-run anything. If you genuinely could not proceed, return ONLY {"status":"error","error":"<why>"}.`,
       ].join("\n");
-      const retry = await runSpecTestClaude(repair, session, REPO_DIR, pickHealthyConfigDir());
+      const retry = await runSpecTestClaude(repair, session, REPO_DIR, pickHealthyConfigDir(), job.id);
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, retry.usage, retry.model);
       if (retry.session) { session = retry.session; await update(job.id, { claude_session_id: session }); }
       resultText = retry.resultText; isError = retry.isError; raw = retry.raw;
@@ -5815,29 +5902,8 @@ async function runSpecTestJob(job: Job) {
 // or needs_fix (malformed — the diagnosis surfaces on director_activity, the spec stays in_review).
 // Read-only on Max (no API key, web search on); the worker is the only component that mutates state.
 // Implements docs/brain/specs/spec-review-agent.md Phase 2.
-async function runSpecReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: SPEC_REVIEW_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runSpecReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "spec-review", sandbox: "max", timeout: SPEC_REVIEW_TIMEOUT_MS });
 }
 
 interface SpecReviewDecisionJson {
@@ -5896,7 +5962,7 @@ async function runSpecReviewJob(job: Job) {
       `Every slug in the queue MUST appear in decisions[]. needs_fix.defects MUST list the specific checklist failures (no defects → not a needs_fix).`,
     ].join("\n");
 
-    const { session, resultText, isError, raw, usage, model } = await runSpecReviewClaude(prompt, null, REPO_DIR, pickHealthyConfigDir());
+    const { session, resultText, isError, raw, usage, model } = await runSpecReviewClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
 
@@ -5952,30 +6018,8 @@ async function runSpecReviewJob(job: Job) {
 // audit clears. Unfixable (no card anywhere) → surfaced human-needed with the box's written diagnosis,
 // the audit stays failed. spec_slug = the audit id; instructions = JSON {audit_id, subscription_id}.
 // No worktree / PR — it mutates the sub/catalog/Appstle, not the repo. See docs/brain/specs/migration-fix-agent.md.
-async function runMigrationFixClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: MIGRATION_FIX_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runMigrationFixClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "migration-fix", sandbox: "max", timeout: MIGRATION_FIX_TIMEOUT_MS });
 }
 
 // Best-effort re-fetch of the OLD Appstle contract's lines (for the grandfathered-base inference the
@@ -6294,7 +6338,7 @@ async function runMigrationFixJob(job: Job) {
       ? migrationFixAnswerPrompt(audit as Record<string, unknown>, brief, job.answers || [])
       : migrationFixPrompt(audit as Record<string, unknown>, brief);
     // On an answer-resume, resume the same Max session (the prior question + brief are in context).
-    const { session, resultText, isError, raw, usage, model } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR, pickHealthyConfigDir());
+    const { session, resultText, isError, raw, usage, model } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
@@ -6358,32 +6402,8 @@ async function runMigrationFixJob(job: Job) {
 // box is REPORT-BACK, never a builder: reads (SELECT/join/analysis via throwaway uncommitted scripts/_*.ts)
 // are silent; every proposed DB write / migration / spec handoff stops at a pending_actions approval card
 // the owner must click. Only deterministic worker code (mode:'approve_action') executes an approved card.
-async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  // KEEP the full env (DB/crypto creds for read-only probes + the throwaway query scripts) — only strip
-  // the API key so ALL LLM is Max-billed (never the Anthropic API). WebSearch stays on (analyst/planner).
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected Max account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: DEV_ASK_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runDevAskClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "dev-ask", sandbox: "max", timeout: DEV_ASK_TIMEOUT_MS });
 }
 
 interface DevThreadRow {
@@ -6596,7 +6616,7 @@ async function runDeveloperMessageJob(job: Job) {
         const turnPrompt = sid
           ? `${latest}\n\n${DEV_ASK_OUTPUT}`
           : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
-        return runDevAskClaude(await withCoaching(job, turnPrompt), sid, wt, cfg);
+        return runDevAskClaude(await withCoaching(job, turnPrompt), sid, wt, cfg, job.id);
       },
     );
     if (allCapped || !coachRun) {
@@ -7493,7 +7513,7 @@ async function runDirectorCoachJob(job: Job) {
         const turnPrompt = sid
           ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
           : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
-        return runDevAskClaude(turnPrompt, sid, wt, cfg);
+        return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
       },
     );
     if (allCapped || !coachRun) {
@@ -7570,35 +7590,9 @@ async function runDirectorCoachJob(job: Job) {
 // A Max `claude -p` that merges origin/main into a dirty claude/* PR + resolves the conflicts. Same
 // sandbox as a feature build (no ANTHROPIC_API_KEY, prod secrets stripped — NO prod creds), but it only
 // runs LOCAL git + tsc + file edits: it does NOT push (the worker re-verifies + pushes) and has no gh.
-async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (k === "ANTHROPIC_API_KEY") continue;
-    if (/^NEXT_PUBLIC_/.test(k)) { env[k] = v; continue; }
-    if (SECRET_RE.test(k)) continue; // drops GITHUB_TOKEN too → the LLM can't push; the worker does
-    env[k] = v;
-  }
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: PR_RESOLVE_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  // sandbox="build" — also drops GITHUB_TOKEN → the LLM can't push; the worker does.
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "pr-resolve", sandbox: "build", timeout: PR_RESOLVE_TIMEOUT_MS });
 }
 
 // Surface a PR that can't be auto-resolved (and isn't a re-buildable spec build) to the owner — a
@@ -7725,7 +7719,7 @@ async function runPrResolveJob(job: Job) {
       `  {"status":"escalate","reason":"<why it needs a human merge or a rebuild — one line>"}`,
     ].join("\n");
 
-    const { session, resultText, isError, raw, usage, model } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt, pickHealthyConfigDir());
+    const { session, resultText, isError, raw, usage, model } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = parseStatus(resultText) as { status?: string; reason?: string; summary?: string } | null;
@@ -7839,32 +7833,8 @@ async function runPrResolveJob(job: Job) {
 // DEFAULT authors the spec + SURFACES it for one-tap owner Build (it does NOT auto-queue the build);
 // only a narrow mechanical allow-list (REPAIR_AUTOBUILD_KINDS) auto-queues. It NEVER edits product
 // code / opens a PR / applies a migration — the build does that, owner-gated. (repair-agent Phase 1.)
-async function runRepairClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  // KEEP the env (read-only DB/crypto creds so the box can load + trace the error) — only strip the
-  // API key so ALL LLM is Max-billed (never the Anthropic API). Web search stays on (investigation).
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: REPAIR_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runRepairClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "repair", sandbox: "max", timeout: REPAIR_TIMEOUT_MS });
 }
 
 // Load the read-only brief: the originating error_events signature + sample (or the loop_alert), so
@@ -8251,7 +8221,7 @@ async function runRepairJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "repair",
       recognized: REPAIR_VERDICTS,
-      run: () => runRepairClaude(repairBrief, null, REPO_DIR, pickHealthyConfigDir()),
+      run: () => runRepairClaude(repairBrief, null, REPO_DIR, pickHealthyConfigDir(), job.id),
       onRun: async (r) => {
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
         if (r.session) await update(job.id, { claude_session_id: r.session });
@@ -8390,32 +8360,8 @@ async function runRepairJob(job: Job) {
 // fix routes to the CEO). Loop-guard: a fix that fails to hold after REGRESSION_LOOP_GUARD_MAX authored
 // attempts escalates to CEO. Every detect/dismiss/author/escalate writes a director_activity row.
 
-async function runRegressionClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  // Same env discipline as repair: KEEP read-only prod creds so the box can trace what regressed; strip
-  // ONLY the API key so all LLM is Max-billed; web search stays on (investigation).
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: REGRESSION_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runRegressionClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "regression", sandbox: "max", timeout: REGRESSION_TIMEOUT_MS });
 }
 
 interface RegressionBriefInstr {
@@ -8670,7 +8616,7 @@ async function runRegressionJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "regression review",
       recognized: REGRESSION_VERDICTS,
-      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR, pickHealthyConfigDir()),
+      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id),
       onRun: async (r) => {
         await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
         if (r.session) await update(job.id, { claude_session_id: r.session });
@@ -8821,27 +8767,8 @@ async function runRegressionJob(job: Job) {
 // `npm audit` CVE scan. Both NEVER mutate product code, open a PR, or bump a dep: a real finding AUTHORS a
 // scoped fix/upgrade spec to main + SURFACES a one-tap owner Build card (routed via the approval-router —
 // auto-queued within a live director's leash, else the CEO inbox). Mirrors runRegressionJob / repair.
-async function runSecurityClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  // Same env discipline as regression/repair: KEEP read-only prod creds + GITHUB_TOKEN so the box can
-  // `git show` the merged diff; strip ONLY the API key so all LLM is Max-billed; web search stays on.
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: SECURITY_REVIEW_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || "") };
+async function runSecurityClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "security-review", sandbox: "max", timeout: SECURITY_REVIEW_TIMEOUT_MS });
 }
 
 interface SecurityFixProposal {
@@ -9230,8 +9157,8 @@ async function runSecurityReviewJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "security review",
       recognized: SECURITY_VERDICTS,
-      run: () => runSecurityClaude(prompt, null, REPO_DIR, pickHealthyConfigDir()),
-      repair: (priorSession) => runSecurityClaude(securityReviewRepairPrompt(), priorSession, REPO_DIR, pickHealthyConfigDir()),
+      run: () => runSecurityClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id),
+      repair: (priorSession) => runSecurityClaude(securityReviewRepairPrompt(), priorSession, REPO_DIR, pickHealthyConfigDir(), job.id),
       onRun: async (r) => {
         if (r.session) await update(job.id, { claude_session_id: r.session });
       },
@@ -9304,30 +9231,8 @@ async function runSecurityReviewJob(job: Job) {
 // lander_type, audience, lever_key, lever_reason}. No PR — it mutates the experiment tables, not the
 // repo (except the missing-capability spec, committed to main like repair). See
 // docs/brain/specs/storefront-optimizer-agent.md.
-async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // stay on Max — never the Anthropic API
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir; // account-pool: run on the failover-selected account
-  const base = sessionId ? ["--resume", sessionId] : [];
-  const args = [...base, ...currentModelArgs(), "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"];
-  const r = await shAsync("claude", args, { cwd, env, timeout: STOREFRONT_OPTIMIZER_TIMEOUT_MS });
-  let session = sessionId;
-  let resultText = "";
-  let isError = r.code !== 0;
-  let usage: RunUsage = null;
-  let model: string | null = null;
-  try {
-    const obj = JSON.parse((r.out || "").trim());
-    session = obj.session_id || session;
-    resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-    isError = isError || obj.is_error === true;
-    // fleet-cost-metering Phase 1: the json result carries the run's token usage.
-    const ex = extractClaudeUsage(obj as Record<string, unknown>);
-    if (ex.usage) { usage = ex.usage; model = ex.model; }
-  } catch {
-    resultText = (r.out || "") + (r.err || "");
-  }
-  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+async function runStorefrontOptimizerClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "storefront-optimizer", sandbox: "max", timeout: STOREFRONT_OPTIMIZER_TIMEOUT_MS });
 }
 
 interface OptimizerSurfaceLite { workspace_id: string; product_id: string; lander_type: string; audience: string; lever_key?: string; lever_reason?: string }
@@ -9631,7 +9536,7 @@ async function runStorefrontOptimizerJob(job: Job) {
       return;
     }
 
-    const { session, resultText, isError, raw, usage, model } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR, pickHealthyConfigDir());
+    const { session, resultText, isError, raw, usage, model } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR, pickHealthyConfigDir(), job.id);
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<Record<string, unknown>>(resultText);
@@ -10115,7 +10020,7 @@ async function dispatchJob(job: Job) {
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const coachedPrompt = await appendAgentInstructions(db, job.workspace_id, "build", prompt);
 
-    const { session, resultText, isError, raw, usage, model } = await runClaude(coachedPrompt, sessionId, wt, configDir);
+    const { session, resultText, isError, raw, usage, model } = await runClaude(coachedPrompt, sessionId, wt, configDir, job.id);
     await meterAgentJob(job, configDir, usage, model);
     const logTail = raw.slice(-2000);
     // Persist the session AND its owning account so a later resume can pin to it (never cross-account).
