@@ -88,13 +88,20 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
 
   // Primary: a phase heading at H2 (`## Phase …`) OR H3 (`### Phase …` under a `## Phases` wrapper).
   // Matching only H2 left H3-phase specs with zero phases → stuck at `planned`. `Phase\b` skips
-  // `## Phases`. Boundary rule (skip-verification-subsections): the canonical spec shape includes
-  // a `## Verification` section with `### Phase N — …` subheaders mirroring each real phase — an
-  // unguarded H3 match double-counted them, stranding shipped specs with phantom ⏳ phases. So an
-  // H3 phase heading is counted ONLY when its nearest preceding H2 is `## Phases` (PR #557's
-  // wrapper case); under `## Verification`, `## Completion criteria`, `## Safety / invariants`,
-  // `## Background`, an H2 `## Phase N — …`, or any other section, an H3 `### Phase` is skipped.
-  // H2 `## Phase N — …` lines remain unconditionally counted.
+  // `## Phases`. Two invariants now layered on top:
+  //   - Boundary rule (skip-verification-subsections, PR #562): the canonical spec shape includes
+  //     a `## Verification` section with `### Phase N — …` subheaders mirroring each real phase —
+  //     an unguarded H3 match double-counted them, stranding shipped specs with phantom ⏳ phases.
+  //     So an H3 phase heading is counted ONLY when its nearest preceding H2 is `## Phases`
+  //     (PR #557's wrapper case); under `## Verification`, `## Completion criteria`, `## Safety /
+  //     invariants`, `## Background`, an H2 `## Phase N — …`, or any other section, an H3
+  //     `### Phase` is skipped. H2 `## Phase N — …` lines remain unconditionally counted.
+  //   - Fence rule (skip-fenced-code-blocks): any `##`/`###` Phase line inside a ``` or ~~~ fenced
+  //     code block is documentation, not a real phase. A spec embedding a canonical-shape EXAMPLE
+  //     in `## Background` / `## Anti-pattern` (e.g. the folded sibling's `## Background` ``` block
+  //     with 3 fenced `## Phase N` lines) otherwise inflates its phase count by the example. The
+  //     same fence guard applies to `currentH2` updates — a `## Whatever` inside a fence is NOT a
+  //     real section boundary — and to the fallback `## Phases` bullet path below.
   const isPhaseLine = (l: string) => /^#{2,3}\s+Phase\b/.test(l);
   const inPhasesWrapper = (currentH2: string | null) => /^Phases$/i.test(currentH2 ?? "");
   const isPhaseHeading = (l: string, currentH2: string | null): boolean => {
@@ -103,8 +110,28 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
     return inPhasesWrapper(currentH2); // H3 — only inside the `## Phases` wrapper
   };
 
+  // Precompute fence state per line. A fence delimiter (```` ``` ```` or `~~~`) toggles `inFence`;
+  // delimiter lines themselves are marked as in-fence so they're also skipped (harmless, since they
+  // don't match any phase/section pattern anyway). Lines marked in-fence are skipped wholesale by
+  // both the primary loop (no phase detection, no currentH2 update, no body-end termination) and
+  // the fallback loop (no `## Phases` wrapper entry, no bullet detection).
+  const fenceRe = /^\s*(```|~~~)/;
+  const inFence: boolean[] = new Array(lines.length).fill(false);
+  {
+    let f = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (fenceRe.test(lines[i])) {
+        f = !f;
+        inFence[i] = true;
+        continue;
+      }
+      inFence[i] = f;
+    }
+  }
+
   let currentH2: string | null = null;
   for (let i = 0; i < lines.length; i++) {
+    if (inFence[i]) continue;
     if (/^##\s+/.test(lines[i])) {
       currentH2 = lines[i].replace(/^##\s+/, "").trim();
     }
@@ -112,7 +139,9 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
     let emojiLine = i;
     let st = statusFromText(lines[i]);
     if (!st) {
-      for (let j = i + 1; j < lines.length && !lines[j].startsWith("## ") && !isPhaseHeading(lines[j], currentH2); j++) {
+      for (let j = i + 1; j < lines.length; j++) {
+        if (inFence[j]) continue;
+        if (lines[j].startsWith("## ") || isPhaseHeading(lines[j], currentH2)) break;
         const s = statusFromText(lines[j]);
         if (s) {
           st = s;
@@ -122,8 +151,10 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
       }
     }
     // Body = heading line → the next phase heading (H2/H3) or the next top-level "## " section.
+    // Lines inside a fence are NEVER a body boundary — a fenced `## Phase N` example must not cut
+    // the real phase's body short.
     let end = i + 1;
-    while (end < lines.length && !lines[end].startsWith("## ") && !isPhaseHeading(lines[end], currentH2)) end++;
+    while (end < lines.length && (inFence[end] || (!lines[end].startsWith("## ") && !isPhaseHeading(lines[end], currentH2)))) end++;
     phases.push({
       index: phases.length,
       title: cleanTitle(lines[i].replace(/^#{2,3}\s+/, "")),
@@ -137,6 +168,7 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
   // Fallback: emoji-bearing bullets under a single "## Phases" section.
   let inPhases = false;
   for (let i = 0; i < lines.length; i++) {
+    if (inFence[i]) continue;
     if (/^##\s+Phases?\s*$/i.test(lines[i])) {
       inPhases = true;
       continue;
@@ -150,8 +182,9 @@ export function parsePhasesWithLines(raw: string): DriftPhase[] {
     const inner = bm[1].replace(/^[⏳🚧✅❌]\s*/, "");
     if (!statusFromText(lines[i]) && !/^\*{0,2}(P\d+|Phase\s+\d+)\b/i.test(inner)) continue;
     // Body = this bullet + its indented continuation (sub-bullets) until the next top-level bullet / section.
+    // Lines inside a fence don't terminate the body.
     let end = i + 1;
-    while (end < lines.length && !/^[-*]\s/.test(lines[end]) && !/^##\s/.test(lines[end])) end++;
+    while (end < lines.length && (inFence[end] || (!/^[-*]\s/.test(lines[end]) && !/^##\s/.test(lines[end])))) end++;
     phases.push({
       index: phases.length,
       title: cleanTitle(bm[1]),
