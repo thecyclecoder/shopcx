@@ -15,10 +15,9 @@
  * - Audit: records one `director_activity` row with `action_kind='greenlit_goal'` carrying the
  *   actor's user id, the goal slug, and the goal id in metadata. The ledger is best-effort.
  *
- * The body of this route never touches the markdown — the mirror commit (a dual-write while
- * brain-roadmap `parseGoal` still serves readers) is the worker's `kind='mirror-goal-md'` lane in
- * goal-greenlight-button-and-author-writes-db Phase 4. Until that lands, the row write happens here
- * and the markdown drifts; the spec's transitional rail.
+ * The body of this route never touches the markdown — the roadmap readers read `public.goals` directly
+ * (goal-readers-from-db-retire-parsegoal), so the `setGoalStatus` row write here is the whole effect; no
+ * mirror commit is needed for any surface to see the greenlight.
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
