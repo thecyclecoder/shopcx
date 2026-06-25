@@ -1,0 +1,1 @@
+- **today-sync: downgrade handled Meta timeout blips to console.warn so the error feed doesn't escalate self-healing per-account skips** · verified 2026-06-25 · → [[inngest/today-sync]]
