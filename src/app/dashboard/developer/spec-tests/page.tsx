@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { getRoadmap, listArchivedSlugs, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestSpecTestRuns, getHumanCheckResolutions, checkKey, signSpecTestScreenshot, type SpecTestRun } from "@/lib/spec-test-runs";
+import { getLatestSpecTestRuns, signSpecTestScreenshot, type SpecTestRun } from "@/lib/spec-test-runs";
 import { AgentTestedStamp, TestChip, CheckList, type Check } from "./SpecTestView";
 import TestNowButton from "./TestNowButton";
 import ProposeFixButton from "./ProposeFixButton";
@@ -25,24 +25,9 @@ export default async function SpecTestsPage() {
   const shipped: SpecCard[] = specs
     .filter((s) => s.status === "shipped" && !archivedSet.has(s.slug))
     .sort((a, b) => a.title.localeCompare(b.title));
-  const [runs, resolutions]: [Record<string, SpecTestRun>, Awaited<ReturnType<typeof getHumanCheckResolutions>>] = workspaceId
-    ? await Promise.all([getLatestSpecTestRuns(workspaceId), getHumanCheckResolutions(workspaceId)])
-    : [{}, new Map()];
-
-  // Aggregated "Needs human testing" list across every shipped spec's latest run — EXCLUDING
-  // checks the owner has already resolved in the human-queue (verified/failed/dismissed), so this
-  // matches the queue's "waiting" set and clears as you mark items tested.
-  const needsHuman: { slug: string; title: string; check: SpecTestRun["checks"][number] }[] = [];
-  for (const s of shipped) {
-    const run = runs[s.slug];
-    if (!run) continue;
-    for (const c of run.checks) {
-      if (c.verdict !== "needs_human") continue;
-      const res = resolutions.get(`${s.slug}:${checkKey(c.text)}`);
-      if (res && res.resolution) continue; // already worked in the human-queue → drop it
-      needsHuman.push({ slug: s.slug, title: s.title, check: c });
-    }
-  }
+  const runs: Record<string, SpecTestRun> = workspaceId ? await getLatestSpecTestRuns(workspaceId) : {};
+  // (The aggregated "Needs human testing" card was removed — the Human-test queue sidebar item is the one
+  // place for that. This page is just the per-spec test-run list.)
 
   const tested = shipped.filter((s) => runs[s.slug]).length;
 
@@ -83,25 +68,6 @@ export default async function SpecTestsPage() {
         The owner still owns the <span className="font-medium">Verified &amp; archive</span> gate.
         <span className="ml-1 text-zinc-400">{tested}/{shipped.length} tested.</span>
       </p>
-
-      {/* Aggregated needs-human list — the parts only the owner can do. */}
-      {needsHuman.length > 0 && (
-        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50/60 p-4 dark:border-amber-900/40 dark:bg-amber-950/20">
-          <div className="mb-2 text-sm font-semibold text-amber-800 dark:text-amber-300">
-            👤 Needs human testing <span className="tabular-nums text-amber-500">{needsHuman.length}</span>
-          </div>
-          <ul className="space-y-1.5">
-            {needsHuman.map((n, i) => (
-              <li key={i} className="flex flex-wrap items-start gap-x-2 text-xs">
-                <Link href={`/dashboard/roadmap/${n.slug}`} className="font-medium text-amber-700 hover:underline dark:text-amber-400">
-                  {n.title}
-                </Link>
-                <span className="text-zinc-600 dark:text-zinc-400">{n.check.text}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {shipped.length === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
