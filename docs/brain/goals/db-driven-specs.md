@@ -35,16 +35,19 @@ A **SubGoal is just a Goal with a `parent_goal_id`** — NOT a separate table. T
 ## Decomposition
 
 ### M1 — The spec body in the DB
-- *(to be authored by Pia)* — schema for the spec body + a one-time backfill of `specs/*.md` → DB.
+- [[../specs/spec-body-table-and-backfill]] ⏳ — schema for `specs` + `spec_phases` (phases as a TABLE, status rolls up via a DB trigger) + a one-time backfill of `docs/brain/specs/*.md` → DB rows.
 
 ### M2 — The board + all reads come from the DB
-- *(to be authored by Pia)* — cut every reader over to the DB; delete the parser/overlay/reconcile + the specs file-tracing.
+- [[../specs/spec-readers-from-db-retire-parser]] ⏳ — cut every reader (board, slug page, Slack, build dispatch's blocker gate, spec-test) over to `specs` + `spec_phases`; retire `parseSpec` / `overlayDbStateOnSpec` / `reconcileSpecDrift` / the `kind='mirror-spec-md'` lane; drop the specs entries from `outputFileTracingIncludes`.
 
 ### M3 — Authoring + building write/read the DB
-- *(to be authored by Pia)* — creation surfaces insert rows; the worker materializes the spec for Bo's build.
+- [[../specs/spec-authoring-writes-db-and-worker-materialize]] ⏳ — every creation surface (planner, triage, fix-spec, regression, director split/author, Ada, Vale) INSERTs a row; the worker materializes the row to a temp file for Bo's build-spec skill; phase-PR tagging writes `spec_phases.pr + merge_sha` directly; a transitional `kind='mirror-spec-md'` worker lane keeps the markdown-first readers green until M2 cuts over.
 
 ### M4 — Fold writes the brain + preserves the row
-- *(to be authored by Pia)* — fold writes the brain page + flips the row to `folded`; retire the last mirror.
+- [[../specs/spec-fold-from-db-row]] ⏳ — `fold-to-brain` reads the shipped `specs` row + its `spec_phases` children, writes the lifecycle/library/table/dashboard/recipe pages as today, flips `specs.status` to `folded` (preserved, not deleted), and removes any legacy `.md`; retires the remaining `spec_card_state` mirror once nothing reads it.
 
 ### M5 — Goals are data too
-- *(to be authored by Pia)* — `goals` + `goal_milestones` tables; greenlight = a one-click DB flag + button; retire `parseGoal`/`setGoalStatusLine`; backfill `goals/*.md`.
+- [[../specs/goals-milestones-tables-and-backfill]] ⏳ — schema for `goals` (self-ref `parent_goal_id` — a SubGoal is just a goal with a parent) + `goal_milestones` (with rollup triggers); FK-constrain `specs.milestone_id`; one-time backfill of `docs/brain/goals/*.md` → rows.
+- [[../specs/goal-greenlight-button-and-author-writes-db]] ⏳ — Greenlight is a one-click DB flag with a CEO-only button on the goal card (the missing surface that forced THIS goal to be hand-committed); every goal-author surface (director-proposed-goals, director coach, the planner's SUBGOAL, the goal-decomposition engine seeding milestones) writes the row; a transitional `kind='mirror-goal-md'` worker lane keeps the markdown-first readers green until the reader cutover.
+- [[../specs/goal-readers-from-db-retire-parsegoal]] ⏳ — cut every goal reader (goals board, detail, taxonomy, function page, agents-hub CEO profile, decomposition gate, escort, plan-goal skill, goal-decomposition engine, Slack) over to `goals` + `goal_milestones`; retire `parseGoal` / `setGoalStatusLine` / `deriveGoalStatus` / the `kind='mirror-goal-md'` lane; drop the goals entries from `outputFileTracingIncludes`.
+- [[../specs/goal-fold-from-db-row]] ⏳ — goal fold reads the `complete` `goals` row + its joined children, rewrites `goals/{slug}.md` as the canonical folded narrative, cross-links the lifecycle/library/dashboard/function pages, flips `goals.status` to `folded` (preserved); this very goal becomes the first goal-fold target once every milestone ships.
