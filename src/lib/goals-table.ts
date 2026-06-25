@@ -348,3 +348,57 @@ export async function attachSpecToMilestone(specId: string, milestoneId: string 
     .eq("id", specId);
   if (error) throw error;
 }
+
+/** One milestone by its stable id (the join-free read for spec→milestone tooling). */
+export async function getMilestone(milestoneId: string): Promise<GoalMilestoneRow | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("goal_milestones")
+    .select(MILESTONE_COLUMNS)
+    .eq("id", milestoneId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as GoalMilestoneRow) ?? null;
+}
+
+/** Every milestone of a goal, ordered by position. */
+export async function listMilestones(goalId: string): Promise<GoalMilestoneRow[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("goal_milestones")
+    .select(MILESTONE_COLUMNS)
+    .eq("goal_id", goalId)
+    .order("position", { ascending: true });
+  if (error) throw error;
+  return (data as GoalMilestoneRow[]) ?? [];
+}
+
+/**
+ * CEO greenlight by slug — `proposed → greenlit`. Thin wrapper over `setGoalStatus` that resolves the slug
+ * within a workspace ([[../specs/goal-greenlight-button-and-author-writes-db]]).
+ */
+export async function greenlightGoal(workspaceId: string, slug: string, actor: string): Promise<void> {
+  const admin = createAdminClient();
+  const { data: goal, error } = await admin
+    .from("goals")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (error) throw error;
+  if (!goal) throw new Error(`greenlightGoal: no goal '${slug}' in workspace ${workspaceId}`);
+  await setGoalStatus((goal as { id: string }).id, "greenlit", actor);
+}
+
+/**
+ * Re-parent a goal — make it a subgoal of another (CEO Mode → Fully-Autonomous-CTO), or pass `null` to make
+ * it top-level. The `goals_parent_cycle` BEFORE trigger rejects any assignment that would create a cycle.
+ */
+export async function reparentGoal(goalId: string, parentGoalId: string | null): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("goals")
+    .update({ parent_goal_id: parentGoalId, updated_at: new Date().toISOString() })
+    .eq("id", goalId);
+  if (error) throw error;
+}

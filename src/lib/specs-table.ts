@@ -365,3 +365,55 @@ export async function movePhase(
     .eq("id", phaseId);
   if (error) throw error;
 }
+
+/**
+ * Stamp a phase `shipped` with its PR provenance — the [[../specs/director-trust-phase-pr-provenance]] /
+ * [[../specs/spec-status-phase-pr-provenance]] chain. Records the `merge_sha` (and `pr` when a PR was
+ * opened) of the commit that shipped this phase. The DB trigger rolls the parent `specs.status` up FROM
+ * the phases, so stamping a leaf phase is the ONLY write needed to advance a spec — never set
+ * `specs.status` directly (db-driven-specs: status is inferred from children, never manually set).
+ */
+export async function stampPhaseShipped(
+  workspaceId: string,
+  slug: string,
+  position: number,
+  provenance: { merge_sha: string; pr?: number | null },
+): Promise<void> {
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) throw new Error(`stampPhaseShipped: no spec '${slug}' in workspace ${workspaceId}`);
+  const { error } = await admin
+    .from("spec_phases")
+    .update({
+      status: "shipped",
+      merge_sha: provenance.merge_sha,
+      pr: provenance.pr ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("spec_id", (spec as { id: string }).id)
+    .eq("position", position);
+  if (error) throw error;
+}
+
+/** One phase by its stable id — the join-free read for provenance / phase-move tooling. */
+export async function getPhase(phaseId: string): Promise<SpecPhaseRow | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("spec_phases")
+    .select(PHASE_COLUMNS)
+    .eq("id", phaseId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as SpecPhaseRow) ?? null;
+}
+
+/** Every spec linked to a milestone (`specs.milestone_id = milestoneId`), phases included. */
+export async function specsForMilestone(workspaceId: string, milestoneId: string): Promise<SpecRow[]> {
+  return listSpecs(workspaceId, { milestone_id: milestoneId });
+}
