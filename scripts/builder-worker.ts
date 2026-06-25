@@ -911,12 +911,12 @@ function currentModelArgs(): string[] {
 //   "max"  — keeps the env, drops only ANTHROPIC_API_KEY (so all LLM is Max-billed). Default.
 
 const BOX_SESSION_TODOWRITE_INSTRUCTION = [
-  "",
-  "── Box-session transparency (your work is shown live on the box card) ──",
-  "Maintain a TodoWrite checklist for this session — state your plan as todos up front, mark each",
-  "in_progress/completed as you go, and put a ONE-LINE plain-English note on each (what you're doing",
-  "+ why) in the `activeForm` field. The checklist + the current in_progress note are shown live on",
-  "your box card — keep them human-readable.",
+  "── Box-session transparency — REQUIRED, do this FIRST ──",
+  "Your VERY FIRST action this session MUST be a TodoWrite call that lays out your plan as todos (one per",
+  "real step). Then, as you work, mark each in_progress→completed and keep a ONE-LINE plain-English note on",
+  "the active todo in its `activeForm` field (what you're doing + why). This is mandatory, not optional —",
+  "your checklist + the current note are shown LIVE on the box card so the CEO can watch the work happen.",
+  "Keep them human-readable and updated. Do this even for a short task.",
 ].join("\n");
 
 type ChecklistItem = { step: string; status: "pending" | "in_progress" | "done"; note: string };
@@ -1060,16 +1060,30 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   // still working (Phase 1's whole point). --verbose is required by stream-json. The final
   // {type:"result"} event carries the result text. Plain json buffers the whole run and prints once
   // at the very end — zero liveness signal AND no live checklist.
-  const augmentedPrompt = `${prompt}\n${BOX_SESSION_TODOWRITE_INSTRUCTION}`;
+  // Checklist (box-session-transparency): the TodoWrite directive goes FIRST so the agent actually does it.
+  // Appended at the END of a long build prompt it was ignored — the cards stayed black boxes (0 TodoWrite
+  // events). Up-front + mandatory, the agent states its plan as todos and the card mirrors it live.
+  const augmentedPrompt = `${BOX_SESSION_TODOWRITE_INSTRUCTION}\n\n${prompt}`;
   const args = [...base, ...currentModelArgs(), "-p", augmentedPrompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
   const writer = opts.jobId ? makeChecklistWriter(opts.jobId) : null;
-  const r = await shAsync("claude", args, {
-    cwd,
-    env,
-    idleTimeout: opts.idleTimeout,
-    timeout: opts.timeout,
-    onLine: writer ? writer.onLine : undefined,
-  });
+  // Account display (box-show-account-for-all-sessions): build/plan (kind="build") stamp + count their Round
+  // Robin account in the dispatch loop already; every OTHER session kind does it HERE so its box card shows
+  // the account AND the per-account in-flight count includes it (not just builds).
+  const tracksAccountHere = opts.kind !== "build" && !!opts.jobId && !!opts.configDir;
+  const acctHere = opts.configDir ? accountByDir.get(opts.configDir) : null;
+  if (tracksAccountHere) { stampLaneAccount(opts.jobId!, opts.configDir!); if (acctHere) acctHere.inFlight++; }
+  let r: Awaited<ReturnType<typeof shAsync>>;
+  try {
+    r = await shAsync("claude", args, {
+      cwd,
+      env,
+      idleTimeout: opts.idleTimeout,
+      timeout: opts.timeout,
+      onLine: writer ? writer.onLine : undefined,
+    });
+  } finally {
+    if (tracksAccountHere && acctHere) acctHere.inFlight--; // release the account slot when the session ends
+  }
   if (writer) await writer.flush();
   let session = sessionId;
   let resultText = "";
