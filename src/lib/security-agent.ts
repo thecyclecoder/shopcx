@@ -52,6 +52,19 @@ export const LIVE_SECURITY_STATUSES = [
   "needs_attention",
 ];
 
+/**
+ * Statuses where a security-review job is RUNNING (not yet surfaced for the owner) — drives the
+ * timeline's Security stage = `active` and Phase 3's fold gate's "defer until cleared" branch.
+ */
+export const RUNNING_SECURITY_STATUSES = ["queued", "claimed", "building", "needs_input", "queued_resume"] as const;
+
+/**
+ * Statuses where a security-review job is SURFACED for the owner — a routed real-vuln fix
+ * (`needs_approval`) or a needs-human finding (`needs_attention`). Drives the timeline's Security
+ * stage = `needs-attention` and Phase 3's fold gate's "block" branch.
+ */
+export const SURFACED_SECURITY_STATUSES = ["needs_approval", "needs_attention"] as const;
+
 /** Shape of a per-diff security-review job's `instructions` JSON — the brief the box loads to review. */
 export interface SecurityDiffInstructions {
   mode: "diff";
@@ -280,4 +293,48 @@ export async function getOpenSecurityReviews(admin: Admin, workspaceId: string):
       createdAt: String(row.created_at || ""),
     };
   });
+}
+
+/** Per-spec security-review rollup for the build-card lifecycle timeline. */
+export interface SecurityStateBySlug {
+  /** Any security-review job for this slug in `queued`/`claimed`/`building`/`needs_input`/`queued_resume` — the review is running. */
+  live: boolean;
+  /** Any security-review job in `needs_approval` (a routed real-vuln fix) or `needs_attention` (a needs-human finding) — surfaced to the owner. */
+  surfaced: boolean;
+  /** A `completed` security-review job exists for this slug AND no live/surfaced jobs are open — clean terminal state. */
+  completedClean: boolean;
+}
+
+/**
+ * Per-spec security-review rollup, one query for a whole board ([[build-card-lifecycle-timeline]]
+ * Phase 2). Returns the SAME signals the timeline's Security node + Phase 3's fold gate will read
+ * (they MUST agree). Read-only. Empty record when no security-review jobs exist. Per-diff (merge-SHA)
+ * jobs are keyed by their merged `spec_slug`; the daily dep-watch lives under [[SECURITY_DEP_WATCH_SLUG]]
+ * and is excluded from per-spec rollups (it's an infra job, not a per-spec lifecycle gate).
+ */
+export async function getSecurityStateBySlug(admin: Admin, workspaceId: string): Promise<Record<string, SecurityStateBySlug>> {
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, status, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "security-review")
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  const map: Record<string, SecurityStateBySlug> = {};
+  const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
+  const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
+  for (const row of (data ?? []) as Array<{ spec_slug: string; status: string }>) {
+    const slug = String(row.spec_slug || "");
+    if (!slug || slug === SECURITY_DEP_WATCH_SLUG || slug === SECURITY_DEP_UPGRADE_SLUG) continue;
+    const cur = (map[slug] ||= { live: false, surfaced: false, completedClean: false });
+    if (runningSet.has(row.status)) cur.live = true;
+    else if (surfacedSet.has(row.status)) cur.surfaced = true;
+    else if (row.status === "completed") cur.completedClean = true;
+  }
+  // `completedClean` is the CLEAN terminal state — a live/surfaced job for the same slug overrides it
+  // (the Security node can never read "done" while a routed fix or running review is still open).
+  for (const s of Object.values(map)) {
+    if (s.live || s.surfaced) s.completedClean = false;
+  }
+  return map;
 }

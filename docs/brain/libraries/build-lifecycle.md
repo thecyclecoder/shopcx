@@ -67,8 +67,14 @@ The 5 stages, in order — a spec walks them left to right:
 
 ## Callers
 
-- Phase 2 (this spec): the shared 5-node timeline component on `/dashboard/roadmap` (the build-card / spec-card)
-  AND on Control Tower (one shared component per the reusable-components rule).
+- **Phase 2 (shipped):** the shared 5-node timeline component [[../dashboard/roadmap|on `/dashboard/roadmap`]]
+  — the board card AND the [[../dashboard/roadmap|spec-detail card]] (one shared component per the
+  reusable-components rule). The page-level loader fetches the per-spec signals (latest job, latest
+  spec_test_runs, human resolutions, the LIVE spec-test slug set via `getLiveSpecTestSlugs`, the per-slug
+  security rollup via `getSecurityStateBySlug`) and hands them to the small context-builder library
+  [[build-lifecycle-context]], which assembles the LifecycleContext this helper consumes. The Archive
+  section synthesizes a fixed `FOLDED_DERIVATION` for compact "all 5 ✓" rendering on every folded entry.
+  The presentational component lives at `src/app/dashboard/roadmap/LifecycleTimeline.tsx`.
 - Phase 3 (this spec): `getAutoFoldEligibleSlugs` ([[spec-test-runs]]) extended to require the `security-test`
   rollup to be `done` before a spec is fold-eligible — same signal both surfaces consume.
 
