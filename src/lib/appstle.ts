@@ -344,6 +344,13 @@ export async function appstleAttemptBilling(
       // capturing the benign race. See [[portal-order-now-billing-collision]].
       if (/billing operation is already in progress/i.test(text)) {
         console.warn(`Appstle attempt billing race for ${billingAttemptId} (concurrent charge already running):`, text);
+      } else if (/usergeneratederror/i.test(text) && /out of stock/i.test(text)) {
+        // Appstle UserGeneratedError = business-condition rejection from
+        // upstream (here: a line item is out of stock), not a server fault.
+        // Dunning rotation will pick this up via the existing return shape
+        // below; log at warn so it stops noising the Vercel error feed /
+        // Control Tower as a foreign-app error.
+        console.warn(`Appstle attempt billing benign upstream rejection for ${billingAttemptId} (out of stock):`, text);
       } else {
         console.error(`Appstle attempt billing error for ${billingAttemptId}:`, text);
       }
