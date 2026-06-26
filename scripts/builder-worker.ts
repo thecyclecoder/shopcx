@@ -6408,6 +6408,41 @@ async function runSpecTestJob(job: Job) {
   const tag = `[spec-test:${slug}]`;
   console.log(`${tag} testing shipped spec (job ${job.id.slice(0, 8)})`);
   try {
+    // spec-test-materialize-on-derived-status: Vera reads the spec from `.box/spec-${slug}.md` (the prompt +
+    // SKILL.md both point there) — the worker MUST materialize the DB row to that path first, or Vera reads a
+    // non-existent file, probes `public.specs` directly, and errors with "was not materialized … status='X'".
+    // The gate on WHETHER to materialize is the DERIVED phase-rollup status (getSpec→deriveSpecCardStatus→
+    // rollupPhaseStatus: all phases shipped/rejected ⇒ shipped), NOT the stale stored `specs.status` column
+    // (which the DB trigger lags and often still reads 'planned' for a genuinely-shipped spec — the same
+    // stale-status class already fixed in runFoldJob + getAutoFoldEligibleSlugs). A spec whose phases are all
+    // shipped MUST materialize + test even when the stored column says 'planned'. Materialize into REPO_DIR/.box
+    // because spec-test runs in the MAIN checkout (REPO_DIR), matching the prompt's cwd.
+    {
+      const { getSpec: getRoadmapSpec } = await import("../src/lib/brain-roadmap");
+      const card = await getRoadmapSpec(slug, job.workspace_id);
+      const derived = card?.card.status; // phase-rollup; in_review/deferred/folded terminal overrides applied
+      // Testable = the derived rollup says shipped (spec-test's lane), OR an in_review spec (re-verify path —
+      // Vale's in_review queue stays materializable so a manual/re-test on an in_review spec still works).
+      const testable = derived === "shipped" || derived === "in_review";
+      if (!testable) {
+        const why = card
+          ? `spec ${slug} not testable — derived phase-rollup status='${derived}' (need shipped/in_review)`
+          : `spec ${slug} has no boardable DB row (folded or missing) — nothing to test`;
+        await update(job.id, { status: "completed", log_tail: why.slice(-2000) });
+        console.log(`${tag} ${why}`);
+        return;
+      }
+      const { materializeSpec } = await import("../src/lib/build-spec-materializer");
+      try {
+        await materializeSpec(job.workspace_id, slug, join(REPO_DIR, ".box"));
+      } catch (e) {
+        const why = `materializeSpec failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`;
+        await update(job.id, { status: "needs_attention", error: why, log_tail: why.slice(-2000) });
+        console.error(`${tag} ${why} — aborting before Vera (she would read a stale path)`);
+        return;
+      }
+    }
+
     const prompt = [
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is materialized from the DB to .box/spec-${slug}.md (public.specs + spec_phases — the docs/brain/specs/*.md files were DELETED in the DB cutover, do NOT read them). Read .box/spec-${slug}.md + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human), and run ONLY the non-destructive checks on the box.`,
