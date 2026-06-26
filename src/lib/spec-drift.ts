@@ -518,6 +518,23 @@ export interface DriftSweepResult {
  */
 const ALREADY_MERGED_VIA_RE = /already merged via #(\d+)/i;
 
+/**
+ * The SECOND built-unstamped signal — the RE-QUEUE case. When an owner re-queues an ALREADY-BUILT phase,
+ * Bo's pre-flight state-check finds every artifact for that phase already on `main`, makes zero edits, and
+ * the build terminates `status='needs_attention'` with a PHASE-SPECIFIC report like:
+ *
+ *   "All Phase-5 artifacts already exist on main: src/app/dashboard/agents/…"
+ *
+ * (Bo's emitted `no_changes_reason`/`summary`, surfaced into the job's `error`/`log_tail` at the no-PR/
+ * no-change path in builder-worker.ts — line ~10672. This is what happened to agents-hub-role-inboxes.)
+ *
+ * Unlike the `already merged via #N` signal (whole spec, carries a PR), this one is per-PHASE and carries
+ * NO PR — the heal IS the point. We match ONLY this explicit phase-specific wording (never a looser "no
+ * changes") and capture the phase NUMBER N, then stamp ONLY position N. Conservative + idempotent: a re-run
+ * finds the phase already shipped (so it never re-stamps), and a malformed/looser report never matches.
+ */
+const PHASE_ARTIFACTS_EXIST_RE = /All Phase[\s-]?(\d+)[\s-]?artifacts already exist on main/i;
+
 /** Cheap PR → merge-commit SHA resolution via the existing GitHub REST helper. Null on any miss. */
 async function resolvePrMergeSha(pr: number): Promise<string | null> {
   try {
@@ -620,6 +637,66 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
       /* audit is best-effort — the stamp already landed */
     }
   }
+
+  // (c) SECOND signal — the RE-QUEUE case. For each candidate, look for a recent build job the box parked
+  // `needs_attention` because Bo found a SPECIFIC phase's artifacts already on main ("All Phase-N artifacts
+  // already exist on main: …"). Per-phase, carries no PR — stamp ONLY position N, then clear the stuck card.
+  for (const [slug, positions] of unstampedBySlug) {
+    const unstamped = new Set(positions);
+    const { data: naJobs } = await admin
+      .from("agent_jobs")
+      .select("id, error, log_tail")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("kind", "build")
+      .eq("status", "needs_attention")
+      .order("created_at", { ascending: false })
+      .limit(5);
+    for (const j of (naJobs ?? []) as { id: string; error: string | null; log_tail: string | null }[]) {
+      const m = `${j.error ?? ""}\n${j.log_tail ?? ""}`.match(PHASE_ARTIFACTS_EXIST_RE);
+      if (!m) continue;
+      const n = Number(m[1]);
+      // Only stamp if N is a real, still-unstamped phase for this spec (idempotent: a re-run finds it shipped
+      // and unstamped no longer holds N → we skip + still clear the card). This signal carries no PR.
+      if (!unstamped.has(n)) {
+        // Phase already shipped (idempotent re-run) — but the needs_attention card may still be stuck. Clear it.
+        await admin.from("agent_jobs").update({ status: "completed" }).eq("id", j.id).then(undefined, () => {});
+        continue;
+      }
+      let ok = false;
+      try {
+        await stampPhaseShipped(workspaceId, slug, n, { pr: null, merge_sha: null });
+        ok = true;
+      } catch {
+        /* stamp failed — leave the card; the next sweep re-attempts */
+      }
+      if (!ok) continue;
+      unstamped.delete(n);
+
+      // Clear the stuck needs_attention card now that its phase is reconciled.
+      await admin.from("agent_jobs").update({ status: "completed" }).eq("id", j.id).then(undefined, () => {});
+
+      const existing = healed.find((h) => h.slug === slug);
+      if (existing) existing.phases.push(n);
+      else healed.push({ slug, phases: [n], pr: -1 });
+
+      // Supervisor-visible report — same shape as the already-merged branch, naming the re-queue signal.
+      try {
+        const { recordDirectorActivity } = await import("@/lib/director-activity");
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: "platform",
+          actionKind: "healed_built_unstamped",
+          specSlug: slug,
+          reason: `reconciler:spec-drift stamped built-but-unstamped phase P${n} of ${slug} shipped — a re-queued build hit Bo's "All Phase-${n} artifacts already exist on main" no-op (status=needs_attention, no PR, no file changes), so the backfilled-planned phase was never advanced. Self-healed the derived status and cleared the stuck card.`,
+          metadata: { actor: "reconciler:spec-drift", signal: "phase-artifacts-already-exist", pr: null, merge_sha: null, phase: n, job_id: j.id },
+        });
+      } catch {
+        /* audit is best-effort — the stamp already landed */
+      }
+    }
+  }
+
   return healed;
 }
 
