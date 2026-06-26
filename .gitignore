@@ -62,3 +62,4 @@ scripts/_*
 !scripts/_audit-spec-phase-overcount.ts
 !scripts/_audit-kpis.ts
 !scripts/_check-worker-lanes.ts
+!scripts/_check-pm-md-reads.ts

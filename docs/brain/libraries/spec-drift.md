@@ -1,8 +1,10 @@
 # libraries/spec-drift
 
-**DEPRECATED** (2026-06-24 — [[../specs/spec-readers-from-db-retire-parser]] Phase 3). The spec-drift reconciliation function `reconcileSpecDrift` is **scheduled for deletion** — its core purpose (keeping per-phase status in sync with shipped code) is now handled by [[../specs/spec-readers-from-db-retire-parser]] Phase 1 readers which read `public.spec_phases.status` directly from the DB (no markdown parse needed). 
+**DEPRECATED** (2026-06-24 — [[../specs/spec-readers-from-db-retire-parser]] Phase 3). The spec-drift reconciliation function `reconcileSpecDrift` is **scheduled for deletion** — its core purpose (keeping per-phase status in sync with shipped code) is now handled by [[../specs/spec-readers-from-db-retire-parser]] Phase 1 readers which read `public.spec_phases.status` directly from the DB (no markdown parse needed).
 
 The remaining live use case is **drift detection** (`runSpecDriftReconciler`) — the hourly backstop that surfaces mismatches between "code on main" and "DB says shipped," for manual operator review via the [[../dashboard/control-tower]]. This function is retained until [[migration-drift-track-table-renames]] folds its table dependency; refer to that spec for the timeline.
+
+**Pending DB-only data flow** ([[../specs/retire-md-reads-from-pm-flow]] Phase 2): `reconcileSpecDrift` and `runSpecDriftReconciler` still call `fetchSpecRawFromMain` + `phaseStatesFromRaw` + `mergePhaseStates` — Phase 2 deletes those calls. After Phase 2, the function reads `getSpec(workspaceId, slug)` ([[specs-table]]), uses `spec_phases[i].body` for `extractCodePaths` and `spec_phases[i].status` as the per-phase seed, and drops the `raw` variable entirely. The [[../recipes/pm-flow-data-sources]] recipe is the canonical post-purge call graph; `scripts/_check-pm-md-reads.ts` is the regression door (the file's reconcileSpecDrift + runSpecDriftReconciler entries are on `PENDING_PHASE_2_RETIREMENT` and shrink to empty when Phase 2 lands).
 
 **File:** `src/lib/spec-drift.ts` (candidate for retirement)
 
