@@ -17,6 +17,7 @@ import {
   isBareLifecycle,
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
+  isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseLogNoise,
 } from "./error-feed";
 
@@ -249,4 +250,79 @@ test("isBareInngestStepErrorMiddlewareLog KEEPS a non-bare message on /api/innge
 test("isBareInngestStepErrorMiddlewareLog returns false on empty / nullish input", () => {
   assert.equal(isBareInngestStepErrorMiddlewareLog("", "/api/inngest"), false);
   assert.equal(isBareInngestStepErrorMiddlewareLog("   ", "/api/inngest"), false);
+});
+
+// ── isTransientShopifyWebhookHmacFailure (error-feed-shopify-webhook-hmac-transient) ──
+// /api/webhooks/shopify(-returns) rejects an unverified request with a 401 + a
+// console.error("Shopify webhook HMAC failed for topic=… shop=…"). A single such log is a
+// one-off probe (Shopify wiring check, scanner, stale-secret retry) — classifying it
+// transient auto-resolves a first sighting (recorded, not paged); a chronic signing bug
+// would recur within the window and still surface. The false positive that opened
+// Control Tower `vercel:fc64a1540851bf79`.
+
+test("isTransientShopifyWebhookHmacFailure matches the shopify-route HMAC-failure log", () => {
+  assert.equal(
+    isTransientShopifyWebhookHmacFailure(
+      "/api/webhooks/shopify",
+      "Shopify webhook HMAC failed for topic=customers/update shop=acme.myshopify.com",
+    ),
+    true,
+  );
+});
+
+test("isTransientShopifyWebhookHmacFailure matches the shopify-returns-route HMAC-failure log", () => {
+  assert.equal(
+    isTransientShopifyWebhookHmacFailure(
+      "/api/webhooks/shopify-returns",
+      "Shopify returns webhook HMAC failed for topic=returns/create shop=acme.myshopify.com",
+    ),
+    true,
+  );
+});
+
+test("isTransientShopifyWebhookHmacFailure is case-insensitive on the path", () => {
+  assert.equal(
+    isTransientShopifyWebhookHmacFailure(
+      "/API/Webhooks/Shopify",
+      "Shopify webhook HMAC failed for topic=x shop=y",
+    ),
+    true,
+  );
+});
+
+test("isTransientShopifyWebhookHmacFailure KEEPS the same message on a different path", () => {
+  // A log from any other path (e.g. relayed/forwarded) is not the shopify-route signature.
+  assert.equal(
+    isTransientShopifyWebhookHmacFailure(
+      "/api/webhooks/meta",
+      "Shopify webhook HMAC failed for topic=x shop=y",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientShopifyWebhookHmacFailure(null, "Shopify webhook HMAC failed for topic=x shop=y"),
+    false,
+  );
+});
+
+test("isTransientShopifyWebhookHmacFailure KEEPS an unrelated error on the shopify route", () => {
+  // A JSON parse failure, a downstream throw — different prefix, kept + paged.
+  assert.equal(
+    isTransientShopifyWebhookHmacFailure(
+      "/api/webhooks/shopify",
+      "Shopify webhook error (orders/create): TypeError: Cannot read properties of undefined",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientShopifyWebhookHmacFailure("/api/webhooks/shopify", "Unexpected token in JSON"),
+    false,
+  );
+});
+
+test("isTransientShopifyWebhookHmacFailure returns false on empty / nullish input", () => {
+  assert.equal(isTransientShopifyWebhookHmacFailure(null, null), false);
+  assert.equal(isTransientShopifyWebhookHmacFailure(undefined, undefined), false);
+  assert.equal(isTransientShopifyWebhookHmacFailure("", ""), false);
+  assert.equal(isTransientShopifyWebhookHmacFailure("/api/webhooks/shopify", ""), false);
 });
