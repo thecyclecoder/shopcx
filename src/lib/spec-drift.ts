@@ -27,8 +27,8 @@
  * `spec_drift` table, rendered on the Control Tower for a one-tap flip. See docs/brain/libraries/spec-drift.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { deriveSpecStatus, getRoadmap, listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
-import { markSpecCardStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
+import { deriveSpecStatus, listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
+import { type SpecCardPhaseState } from "@/lib/spec-card-state";
 import { stampPhaseShipped } from "@/lib/specs-table";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
@@ -425,12 +425,14 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
 
   await syncDriftRows(workspaceId, slug, surfaced);
 
-  // Write the post-reconcile status + per-phase snapshot to the board mirror. spec-status-db-driven Phase 2:
-  // zero markdown commits, zero deploys for status; the audit row records the auto-flip.
+  // repurpose-spec-drift-reconciler Phase 2: status is now DERIVED from spec_phases. The reconciler no
+  // longer writes spec_card_state.status (or appends a spec_status_history row for it) — those writes
+  // were redundant with the canonical leaf write in agent-jobs.applyMergedBuildEffects (stampPhaseShipped
+  // on each flipped phase) and would have generated phantom audit rows for a derived field. We still
+  // return the post-reconcile snapshot so the merge-hook caller can compute its per-phase PR provenance
+  // off it, and we still forward-merge with the DB's per-phase mirror so a phase already shipped in the
+  // board state isn't regressed by the markdown-derived read.
   let phaseStates = phaseStatesFromRaw(raw);
-  // spec-status-db-driven Phase 4: the markdown no longer carries status emojis (Phase 3 stripped them), so a
-  // phase with no extractable code paths reads `planned` here even after it shipped. FORWARD-MERGE with the
-  // DB's current per-phase status so reconcile can only ever ADVANCE a phase, never regress a shipped one.
   try {
     const { getSpecCardStates, mergePhaseStates } = await import("@/lib/spec-card-state");
     const states = await getSpecCardStates(workspaceId);
@@ -440,10 +442,6 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
   }
   const { rollupPhaseStatus } = await import("@/lib/spec-card-state");
   const status: SpecStatus = phaseStates.length ? rollupPhaseStatus(phaseStates) : deriveSpecStatus(raw);
-  const reason = flipped.length
-    ? `auto-flip ${flipped.map((f) => `P${f.index + 1}`).join(", ")} → ✅ (code on main + build merged)`
-    : "drift reconcile (no flip)";
-  await markSpecCardStatus(workspaceId, slug, status, phaseStates, { actor: "drift:reconciler", reason });
 
   return { slug, flipped, surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status, phaseStates };
 }
@@ -701,150 +699,225 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
 }
 
 /**
- * Reese, repurposed (spec-status-db-driven Phase 4): the DB-vs-CODE consistency backstop. Status is now
- * DB-driven, so the old "markdown emoji vs code" reconciler is gone. Reese's new job is the INVERSE + the
- * one that actually matters in the DB world: for every phase `spec_card_state` marks **shipped**, verify the
- * phase's code is ACTUALLY on `main`. If a shipped phase's code paths are missing (a bad/reverted merge, a
- * wrong DB write), surface a `spec_drift` row — "DB says shipped, code is gone" — for Ada's supervision lane
- * to confirm + escalate. NEVER mutates status here (surface-don't-auto-correct, North star). The phase code
- * paths still live in the markdown body (content stayed in markdown); only STATUS moved to the DB.
+ * The DB-vs-CODE consistency backstop, plus the spec_phases anomaly sweep (repurpose-spec-drift-reconciler
+ * Phase 2). Status is DERIVED from spec_phases now (the rollup trigger was dropped — derive-rollup-status
+ * P3), so the reconciler NEVER writes spec_card_state.status anymore — that would only append phantom rows
+ * to spec_status_history for a field nothing reads. Its remaining jobs:
+ *
+ *   (a) DB-vs-code: for every phase canonical `spec_phases` marks **shipped**, verify the phase's code is
+ *       ACTUALLY on `main`. If a shipped phase's code paths are missing (a bad/reverted merge, a wrong DB
+ *       write), surface a `spec_drift` row for the supervising director to confirm + escalate. NEVER
+ *       mutates status here (surface-don't-auto-correct, North star — the leash's reversibility backstop).
+ *
+ *   (b) Anomaly sweep: surface genuine `spec_phases` anomalies the auto-healer can't fix — orphan rows
+ *       (a spec_phases child whose parent specs row is gone), duplicate positions within a spec (the
+ *       upsert spine bypassed), and provenance gaps (`status='shipped'` with both `pr` and `merge_sha`
+ *       null — a stamp landed without recording the merge that shipped it). One `director_activity` row
+ *       per anomaly cluster, routed to the platform director. Idempotent: a second pass finds the same
+ *       anomalies and emits the same audit rows; the dashboard de-dupes by spec/kind.
+ *
+ * The phase code paths still live in the markdown body (content stayed in markdown); only STATUS moved
+ * to the DB.
  */
 export async function runSpecDriftReconciler(workspaceId: string): Promise<DriftSweepResult> {
   if (!ghToken()) return { specsScanned: 0, flipped: 0, surfaced: 0 };
-  const { getSpecCardStates } = await import("@/lib/spec-card-state");
   const archived = new Set(await listArchivedSlugs());
-  const states = await getSpecCardStates(workspaceId);
   const cache = new Map<string, boolean>();
   const suspects: { slug: string; index: number; title: string }[] = [];
   let scanned = 0;
 
-  for (const [slug, state] of Object.entries(states)) {
-    if (archived.has(slug)) continue;
-    const shipped = (state.phase_states ?? []).filter((p) => p.status === "shipped");
-    if (!shipped.length) continue;
+  // (a) DB-vs-code: read the CANONICAL shipped phases from `spec_phases` (not the spec_card_state mirror)
+  //     so the check tracks the truth the board derives from. Joined to specs for the workspace gate.
+  const admin = createAdminClient();
+  const { data: shippedPhaseRows } = await admin
+    .from("spec_phases")
+    .select("position, status, specs!inner(slug, workspace_id, status)")
+    .eq("specs.workspace_id", workspaceId)
+    .eq("status", "shipped");
+  type ShippedRow = {
+    position: number;
+    status: Phase;
+    specs:
+      | { slug: string; workspace_id: string; status: string }
+      | { slug: string; workspace_id: string; status: string }[];
+  };
+  const shippedBySlug = new Map<string, number[]>();
+  for (const r of (shippedPhaseRows ?? []) as ShippedRow[]) {
+    const spec = Array.isArray(r.specs) ? r.specs[0] : r.specs;
+    if (!spec?.slug || spec.status === "folded") continue;
+    if (archived.has(spec.slug)) continue;
+    const list = shippedBySlug.get(spec.slug) ?? [];
+    list.push(r.position);
+    shippedBySlug.set(spec.slug, list);
+  }
+
+  for (const [slug, positions] of shippedBySlug) {
     const fetched = await fetchSpecRawFromMain(slug);
     if (!fetched) continue; // spec folded / not on main → nothing to verify against
     scanned++;
     const phases = parsePhasesWithLines(fetched.raw);
-    for (const sp of shipped) {
-      const phase = phases.find((p) => p.index === sp.index);
+    for (const position of positions) {
+      // `spec_phases.position` is 1-based; parsePhasesWithLines.index is 0-based.
+      const index = position - 1;
+      const phase = phases.find((p) => p.index === index);
       if (!phase) continue;
       const paths = extractCodePaths(phase.body);
       if (!paths.length) continue; // no code paths declared → can't verify → trust the DB (don't false-flag)
       const checks = await Promise.all(paths.map((p) => pathExistsOnMain(p, cache)));
-      if (!checks.every(Boolean)) suspects.push({ slug, index: sp.index, title: sp.title }); // shipped in DB, code missing on main
+      if (!checks.every(Boolean)) suspects.push({ slug, index, title: phase.title }); // shipped in DB, code missing on main
     }
   }
-  // ada-director-spec-status-cards Phase 3: any suspect whose most recent status flip was a director
-  // auto-apply (`actor=director:*`) is REVERTED — the leash's reversibility backstop. Build-merge-applied
-  // shipped phases that lost their code go through the surface path (the existing behavior); the operator
-  // confirms. Reverting a director flip writes one correction row to `spec_status_history` (actor=drift-
-  // reconciler) and one `director_activity` row (`reverted_director_flip`) so a recurring mis-flip pattern
-  // surfaces on the daily watch.
-  const reverted = await revertDirectorFlippedSuspects(workspaceId, states, suspects);
-  // Suspects we reverted no longer need surfacing — they're DB-corrected; only the rest get a drift row.
-  const surfaceList = suspects.filter((s) => !reverted.has(`${s.slug}#${s.index}`));
-  await syncReverseDriftRows(workspaceId, surfaceList);
-  return { specsScanned: scanned, flipped: 0, surfaced: surfaceList.length };
+  await syncReverseDriftRows(workspaceId, suspects);
+
+  // (b) Anomaly sweep — orphan/duplicate spec_phases rows + provenance gaps. Surface-only: one
+  //     director_activity row per spec with at least one anomaly the reconciler can't auto-heal.
+  await detectSpecPhaseAnomalies(workspaceId);
+
+  return { specsScanned: scanned, flipped: 0, surfaced: suspects.length };
 }
 
 /**
- * Per suspect, look up the most recent `spec_status_history` `field='status'` row whose `actor` is
- * `director:*` — that's the flip we're catching. If one is found, revert the spec_card_state row's
- * status to its `from_value` and stamp a correction history row (actor=`drift-reconciler`, reason
- * names the original director). Returns the set of `slug#index` keys that were reverted so the caller
- * can skip surfacing them as drift. Best-effort throughout — a DB read/write failure on one suspect
- * never blocks the next; the sweep runs again next beat.
+ * The spec_phases anomaly sweep (repurpose-spec-drift-reconciler Phase 2). Three genuine anomalies the
+ * reconciler can't auto-heal — they reflect a corrupt write upstream, not stale drift — surface to the
+ * platform director as one `director_activity` row per spec / kind:
+ *
+ *   - ORPHAN: a spec_phases row whose parent specs row is gone (the FK ON DELETE CASCADE should kill
+ *     these on parent delete, so a survivor is a data-integrity bug — probably a missing FK or a manual
+ *     row insert via a one-off script).
+ *
+ *   - DUPLICATE POSITION: two spec_phases rows with the same (spec_id, position). The unique index
+ *     should prevent this, so a survivor means the index is missing or was dropped — surface for the
+ *     director to investigate, never auto-deduplicate (which of the two carries the truth?).
+ *
+ *   - PROVENANCE GAP: a `status='shipped'` row with both `pr` IS NULL and `merge_sha` IS NULL — a stamp
+ *     landed without recording the merge that shipped it. The board's per-phase PR chip can't render
+ *     and the audit trail loses the shipping commit. Surface so the director can backfill from the
+ *     build job / merge hook.
+ *
+ * Read-only against `spec_phases` + `specs`; never mutates. Best-effort + never throws — a query failure
+ * leaves the next beat to retry. Returns the count of anomaly clusters reported (one per spec/kind).
  */
-async function revertDirectorFlippedSuspects(
-  workspaceId: string,
-  states: Record<string, import("@/lib/spec-card-state").SpecCardState>,
-  suspects: { slug: string; index: number; title: string }[],
-): Promise<Set<string>> {
-  const reverted = new Set<string>();
-  if (!suspects.length) return reverted;
+export async function detectSpecPhaseAnomalies(workspaceId: string): Promise<{ orphans: number; duplicates: number; provenanceGaps: number }> {
   const admin = createAdminClient();
-  const { markSpecCardStatus } = await import("@/lib/spec-card-state");
-  // De-dup by slug — one revert per spec is enough; the rollup recomputes from all phases.
-  const slugs = Array.from(new Set(suspects.map((s) => s.slug)));
-  for (const slug of slugs) {
-    const decision = await decideDirectorRevert(admin, workspaceId, slug);
-    if (!decision) continue;
-    const state = states[slug];
-    if (!state) continue;
-    const phaseStates = (state.phase_states ?? []).map((p) => ({ ...p }));
-    try {
-      await markSpecCardStatus(workspaceId, slug, decision.revertTo, phaseStates, {
-        actor: "drift-reconciler",
-        reason: `${decision.directorActor} flip not backed by merged code`,
-      });
-    } catch {
-      continue; // a write failure leaves the suspect on the surface path next beat
-    }
-    try {
-      const { recordDirectorActivity } = await import("@/lib/director-activity");
-      const directorFunction = decision.directorActor.replace(/^director:/, "") || "platform";
-      await recordDirectorActivity(admin, {
-        workspaceId,
-        directorFunction,
-        actionKind: "reverted_director_flip",
-        specSlug: slug,
-        reason: `drift-reconciler reverted ${decision.directorActor} status flip — phase code missing on main`,
-        metadata: { from: "shipped", revert_to: decision.revertTo, director_actor: decision.directorActor },
-      });
-    } catch { /* audit is best-effort */ }
-    for (const s of suspects) if (s.slug === slug) reverted.add(`${s.slug}#${s.index}`);
-  }
-  return reverted;
-}
+  let orphanReported = 0;
+  let dupReported = 0;
+  let gapReported = 0;
 
-/**
- * Pure-ish helper: read the most recent `field='status'` history rows for one slug and decide whether to
- * revert. Returns `{ revertTo, directorActor }` when the most recent status flip was a director auto-apply
- * AND has a parseable `from_value`; null otherwise (build-merge flip · owner flip · no history · stale).
- * Exported so the test suite can exercise the decision against a synthetic row set without hitting Supabase.
- */
-export async function decideDirectorRevert(
-  admin: ReturnType<typeof createAdminClient>,
-  workspaceId: string,
-  slug: string,
-): Promise<{ revertTo: SpecStatus; directorActor: string } | null> {
-  const { data } = await admin
-    .from("spec_status_history")
-    .select("actor, from_value, to_value")
-    .eq("workspace_id", workspaceId)
-    .eq("spec_slug", slug)
-    .eq("field", "status")
-    .order("at", { ascending: false })
-    .limit(1);
-  const rows = (data ?? []) as { actor: string; from_value: string | null; to_value: string }[];
-  return decideDirectorRevertFromRows(rows);
-}
+  const { recordDirectorActivity } = await import("@/lib/director-activity");
 
-/** Pure logic: given the most-recent-first status history rows for one slug, decide a revert. */
-export function decideDirectorRevertFromRows(
-  rows: { actor: string; from_value: string | null; to_value: string }[],
-): { revertTo: SpecStatus; directorActor: string } | null {
-  if (!rows.length) return null;
-  const most = rows[0];
-  if (!most.actor.startsWith("director:")) return null;
-  // The director flip we want to revert must have moved status TO shipped (a director-stamped row that's
-  // already non-shipped is either already corrected or wasn't the cause of the missing-code drift).
-  const parsedTo = safeParseStatus(most.to_value);
-  if (parsedTo !== "shipped") return null;
-  const revertTo = safeParseStatus(most.from_value) ?? "in_progress";
-  return { revertTo, directorActor: most.actor };
-}
-
-function safeParseStatus(json: string | null): SpecStatus | null {
-  if (!json) return null;
+  // ORPHAN sweep: a spec_phases row whose spec_id has no parent in `specs`. Workspace gate is tricky
+  // for orphans (no parent to read workspace_id from), so we read ALL spec_phases ids+spec_id and
+  // intersect against the specs id set — then filter to this workspace by sampling each orphan's
+  // already-known spec_id presence in the workspace's spec set. In practice an orphan is rare; this
+  // sweep is the safety rail.
   try {
-    const v = JSON.parse(json);
-    if (v === "planned" || v === "in_progress" || v === "shipped" || v === "rejected" || v === "deferred") return v;
-    return null;
-  } catch {
-    return null;
-  }
+    const { data: allPhases } = await admin.from("spec_phases").select("id, spec_id, position, status");
+    const phaseRows = (allPhases ?? []) as { id: string; spec_id: string; position: number; status: Phase }[];
+    if (phaseRows.length) {
+      const specIds = Array.from(new Set(phaseRows.map((p) => p.spec_id)));
+      const { data: liveSpecs } = await admin
+        .from("specs")
+        .select("id, slug, workspace_id")
+        .in("id", specIds);
+      const liveById = new Map<string, { slug: string; workspace_id: string }>();
+      for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string }[]) {
+        liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id });
+      }
+      const orphans = phaseRows.filter((p) => !liveById.has(p.spec_id));
+      if (orphans.length) {
+        try {
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: "platform",
+            actionKind: "spec_phases_anomaly",
+            specSlug: null,
+            reason: `reconciler:spec-drift surfaced ${orphans.length} orphan spec_phases row(s) — spec_id has no parent specs row (FK cascade should have killed these on parent delete). Inspect + clean up via a one-off script.`,
+            metadata: { actor: "reconciler:spec-drift", kind: "orphan", count: orphans.length, sample: orphans.slice(0, 10).map((o) => ({ id: o.id, spec_id: o.spec_id, position: o.position, status: o.status })) },
+          });
+          orphanReported = 1;
+        } catch { /* best-effort audit */ }
+      }
+
+      // DUPLICATE POSITION sweep: same (spec_id, position) appears twice. The unique index
+      // (spec_phases_spec_position) should prevent this — a survivor means the index is missing or was
+      // dropped. Group by (spec_id, position) and report any cluster with >1 row.
+      const byKey = new Map<string, { id: string; position: number; status: Phase }[]>();
+      for (const p of phaseRows) {
+        const liveSpec = liveById.get(p.spec_id);
+        if (!liveSpec || liveSpec.workspace_id !== workspaceId) continue;
+        const k = `${p.spec_id}#${p.position}`;
+        const list = byKey.get(k) ?? [];
+        list.push({ id: p.id, position: p.position, status: p.status });
+        byKey.set(k, list);
+      }
+      const dupClusters: { slug: string; position: number; ids: string[]; statuses: Phase[] }[] = [];
+      for (const [k, list] of byKey) {
+        if (list.length < 2) continue;
+        const [specId] = k.split("#");
+        const slug = liveById.get(specId)?.slug;
+        if (!slug) continue;
+        dupClusters.push({ slug, position: list[0].position, ids: list.map((l) => l.id), statuses: list.map((l) => l.status) });
+      }
+      for (const cluster of dupClusters) {
+        try {
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: "platform",
+            actionKind: "spec_phases_anomaly",
+            specSlug: cluster.slug,
+            reason: `reconciler:spec-drift surfaced duplicate spec_phases rows for ${cluster.slug} position ${cluster.position} — ${cluster.ids.length} rows share (spec_id, position). The unique index should prevent this; inspect which carries the truth + dedupe.`,
+            metadata: { actor: "reconciler:spec-drift", kind: "duplicate_position", slug: cluster.slug, position: cluster.position, ids: cluster.ids, statuses: cluster.statuses },
+          });
+          dupReported++;
+        } catch { /* best-effort audit */ }
+      }
+    }
+  } catch { /* best-effort — a read failure leaves the next beat to retry */ }
+
+  // PROVENANCE GAP sweep: a shipped spec_phases row with both pr IS NULL and merge_sha IS NULL. The
+  // per-phase PR chip can't render and the audit trail loses the shipping commit. Group by spec so the
+  // director sees one row per spec, not one per phase.
+  try {
+    const { data: shippedGaps } = await admin
+      .from("spec_phases")
+      .select("position, pr, merge_sha, specs!inner(slug, workspace_id, status)")
+      .eq("specs.workspace_id", workspaceId)
+      .eq("status", "shipped")
+      .is("pr", null)
+      .is("merge_sha", null);
+    type GapRow = {
+      position: number;
+      pr: number | null;
+      merge_sha: string | null;
+      specs:
+        | { slug: string; workspace_id: string; status: string }
+        | { slug: string; workspace_id: string; status: string }[];
+    };
+    const gapsBySlug = new Map<string, number[]>();
+    for (const r of (shippedGaps ?? []) as GapRow[]) {
+      const spec = Array.isArray(r.specs) ? r.specs[0] : r.specs;
+      if (!spec?.slug || spec.status === "folded") continue;
+      const list = gapsBySlug.get(spec.slug) ?? [];
+      list.push(r.position);
+      gapsBySlug.set(spec.slug, list);
+    }
+    for (const [slug, positions] of gapsBySlug) {
+      const sorted = positions.sort((a, b) => a - b);
+      try {
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: "platform",
+          actionKind: "spec_phases_anomaly",
+          specSlug: slug,
+          reason: `reconciler:spec-drift surfaced ${sorted.length} shipped phase(s) of ${slug} (P${sorted.join(", P")}) with no PR + no merge_sha — provenance lost. Backfill from the build job / merge hook so the per-phase PR chip and the audit trail recover.`,
+          metadata: { actor: "reconciler:spec-drift", kind: "provenance_gap", slug, phases: sorted },
+        });
+        gapReported++;
+      } catch { /* best-effort audit */ }
+    }
+  } catch { /* best-effort — a read failure leaves the next beat to retry */ }
+
+  return { orphans: orphanReported, duplicates: dupReported, provenanceGaps: gapReported };
 }
 
 /** Upsert an open `spec_drift` row per DB-shipped-but-code-missing phase; resolve rows that recovered. */
