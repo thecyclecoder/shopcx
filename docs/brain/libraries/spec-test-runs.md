@@ -60,11 +60,20 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
 **The fold trigger is the MACHINE spec-test pass, NOT human verification.** Fold is non-destructive (the [[../tables/specs]]
 row is preserved with `status='folded'`; the fold just extracts knowledge into the permanent brain pages), so the
 spec-test agent's green grade over the `## Verification` bullets is sufficient to fold. **Human QA is advisory** — a
-waiting/failed `needs_human` check NEVER blocks the fold.
+`needs_human` *verdict*, a waiting/failed `needs_human` *check*, or a human `failed` resolution NEVER blocks the fold
+(task #29). A `needs_human` run that carries ≥1 real machine pass and no open auto-`fail` is fold-eligible exactly like
+an `approved` one; only a genuine failure (`issues`/`error`, a 0-machine-pass empty run, or an open auto-`fail`) holds.
 - `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the shipped-not-archived specs whose **machine spec-test passed**:
-  latest run agent-verdict `approved` · 0 **unresolved auto-`fail` regressions**. It does **NOT** consult `needs_human`
-  checks or human `failed` resolutions (those are advisory). A failing run (`issues`/`needs_human`/`error`, or an open
-  auto-`fail`) is NOT eligible — it surfaces the failure instead. **fold-guard-live-build:** a slug with a live
+  latest run a **clean machine pass** (agent-verdict `approved` **OR `needs_human`**) **with `summary.auto_pass >= 1`** (≥1
+  real machine check actually passed) · 0 **unresolved auto-`fail` regressions**. **`needs_human` is ADVISORY-ELIGIBLE
+  (task #29):** a `needs_human` verdict means the agent machine-verified everything it could and flagged the REMAINDER for
+  *optional* human review — it is NOT a failure, so a `needs_human` run that carries real machine passes and no open
+  auto-`fail` folds just like an `approved` one. (Before this fix the gate required `agent_verdict='approved'`, which
+  wrongly stranded the machine-passed `needs_human` specs shipped-but-unfoldable.) It does **NOT** consult `needs_human`
+  *checks* or human `failed` resolutions (those are advisory). A genuinely failing run (`issues`/`error`, a 0-machine-pass
+  degenerate row, or an open auto-`fail` — including a `needs_human` run whose checks include an UNRESOLVED machine `fail`)
+  is NOT eligible — it surfaces the failure instead. It grades `getRoadmap(workspaceId)` (the SAME tenant whose runs it
+  reads), not the default-resolved workspace. **fold-guard-live-build:** a slug with a live
   `build`/`spec-test` `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also excluded** — auto-folding it would orphan the
   running build (its spec page 404s the moment the fold merges), so the fold is deferred until the job is terminal (the next
   gate pass re-picks it up), never dropped. This mirrors the manual fold guard `getLiveJobForSlug` ([[agent-jobs]]).
