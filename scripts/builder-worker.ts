@@ -4286,24 +4286,16 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // the next idle window so in-flight builds aren't interrupted for one or two commits.
   const behind = parseInt(sh("git", ["rev-list", "--count", `${local}..${remote}`]).out.trim() || "0", 10);
 
-  // Trigger on BOX-IMPACT, not a timer: only restart when the incoming diff touches the worker's own
-  // runtime (scripts/ or src/lib/). Non-box drift (dashboard/UI/docs) needs no restart — the worker keeps
-  // running and each build picks up the new code through its fresh per-build worktree.
-  const changed = sh("git", ["diff", "--name-only", local, remote]).out;
-  if (!BOX_RUNTIME_PATHS.test(changed)) return; // non-box drift → no restart, no drain
-
-  // DEFER TO A SUSTAINED IDLE (self-restart-defers-to-idle): never interrupt an in-flight workload. An
-  // AUTOMATIC box-impacting self-update fires ONLY when nothing is active AND nothing is queued — each build
-  // already gets fresh code through its own worktree, so the worker process can wait for a real lull (ONE
-  // restart at the end of a cascade, not one per spec that touches src/lib). A MANUAL "Queue restart"
-  // (worker_controls.drain_for_update) still restarts at idle regardless of the queue — that's its purpose.
-  if (activeBuilds !== 0) return; // active build → wait, don't restart
-  const { draining: manualDrain } = await readDrainControl();
-  if (!manualDrain) {
-    try {
-      const { count } = await db.from("agent_jobs").select("id", { count: "exact", head: true }).in("status", ["queued", "queued_resume"]);
-      if ((count ?? 0) > 0) { console.log(`[self-update] box-impacting change, but ${count} job(s) queued — deferring restart until a sustained idle`); return; }
-    } catch { /* count failed — fall through; better to update than to wedge behind forever */ }
+  // SELF-RESTART ON IDLE (self-restart-on-idle): whenever the box is IDLE (no active build) and behind
+  // origin/main, update to latest — regardless of WHAT changed or what is queued. There is no in-flight
+  // workload to interrupt, and queued jobs simply RESUME after the restart, so a queued-but-unclaimable job
+  // can never deadlock the update (the prior queued-count defer did exactly that — a stale box stuck behind
+  // because the one queued job it could not drain blocked its own update). BUSY → wait for idle (each build
+  // already gets fresh code via its own per-build worktree), UNLESS a box-impacting change (scripts/ or
+  // src/lib/) is FAR behind — then take the max-staleness override rather than let a saturated box run stale.
+  if (activeBuilds !== 0) {
+    const changed = sh("git", ["diff", "--name-only", local, remote]).out;
+    if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) return; // busy + (non-box OR small lag) → wait for idle
   }
 
   const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
