@@ -4495,12 +4495,16 @@ async function markNewSpecInReview(
     );
   }
   if (markdown && markdown.trim()) {
+    const { authorSpecRowFromMarkdown, MissingVerificationError } = await import("../src/lib/author-spec");
     try {
-      const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
       await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
         intendedStatusSetBy: actor,
       });
     } catch (e) {
+      // A missing-Verification authoring is NOT a best-effort warning — it's an untestable spec and must fail
+      // loudly so the author surface (planner / spec-chat finalize) surfaces it instead of persisting a row
+      // with an empty verification column. Every other (genuine DB) failure stays best-effort (logged).
+      if (e instanceof MissingVerificationError) throw e;
       console.warn(
         `[author-spec] authorSpecRowFromMarkdown ${slug} failed:`,
         e instanceof Error ? e.message : e,
@@ -4787,7 +4791,9 @@ async function runPlanJob(job: Job) {
     const changed = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()
       .split("\n").map((l) => l.trim().split(/\s+/).pop() || "").filter(Boolean);
     const specFiles = changed.filter((f) => f.startsWith("docs/brain/specs/") && f.endsWith(".md"));
+    const { MissingVerificationError } = await import("../src/lib/author-spec");
     let authored = 0;
+    const verificationFailures: string[] = [];
     for (const f of specFiles) {
       try {
         const content = readFileSync(join(wt, f), "utf8");
@@ -4798,8 +4804,25 @@ async function runPlanJob(job: Job) {
         await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`, content);
         authored++;
       } catch (e) {
-        console.error(`${tag} author ${f}: ${e instanceof Error ? e.message : e}`);
+        // A spec with no per-phase "## Verification" is untestable — fail loudly instead of silently dropping
+        // it (and then queueing a build for a spec that never landed in public.specs). Collected so the job
+        // fails with the full list of offending slugs.
+        if (e instanceof MissingVerificationError) {
+          verificationFailures.push(e.message);
+          console.error(`${tag} author ${f}: ${e.message}`);
+        } else {
+          console.error(`${tag} author ${f}: ${e instanceof Error ? e.message : e}`);
+        }
       }
+    }
+    if (verificationFailures.length) {
+      await update(job.id, {
+        status: "failed",
+        error:
+          `planner authored untestable spec(s) — every phase needs a non-empty "## Verification": ` +
+          verificationFailures.join(" | "),
+      });
+      return;
     }
 
     // Queue a build for each approved spec — the existing pipeline takes over (its own claude/* PR).
