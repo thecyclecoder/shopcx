@@ -159,6 +159,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/developer/spec-tests", label: "Spec Tests", icon: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" },
       { href: "/dashboard/developer/spec-tests/human-queue", label: "Human QA (optional)", icon: "M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" },
       { href: "/dashboard/developer/regressions", label: "Regressions", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z", ownerOnly: true },
+      { href: "/dashboard/developer/security-tests", label: "Security tests", icon: "M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z", ownerOnly: true },
       { href: "/dashboard/brain", label: "Brain", icon: ICONS.knowledge },
       { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
     ],
@@ -198,6 +199,7 @@ export default function Sidebar({
   const [humanTestCount, setHumanTestCount] = useState(0); // spec-test human checks waiting on you (owner)
   const [regressionCount, setRegressionCount] = useState(0); // shipped specs failing their own spec-test (owner)
   const [approvalsCount, setApprovalsCount] = useState(0); // approvals escalated to the CEO (Henry)
+  const [securityCount, setSecurityCount] = useState(0); // surfaced security findings (Vault, owner)
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -287,6 +289,11 @@ export default function Sidebar({
         fetch(`/api/developer/approvals?count=1`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d?.escalatedCount != null) setApprovalsCount(d.escalatedCount); })
+          .catch(() => {});
+        // Vault's surfaced security findings (real-vuln fix awaiting Build / needs-human) — count-only.
+        fetch(`/api/developer/security-tests?count=1`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.surfacedCount != null) setSecurityCount(d.surfacedCount); })
           .catch(() => {});
       }
     };
@@ -486,6 +493,12 @@ export default function Sidebar({
                           {item.href === "/dashboard/developer/approvals" && approvalsCount > 0 && (
                             <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
                               {approvalsCount > 99 ? "99+" : approvalsCount}
+                            </span>
+                          )}
+                          {/* Vault's open security findings — rose alert (a vuln/needs-human awaiting you). */}
+                          {item.href === "/dashboard/developer/security-tests" && securityCount > 0 && (
+                            <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-rose-600 dark:bg-rose-900/30 dark:text-rose-400">
+                              {securityCount > 99 ? "99+" : securityCount}
                             </span>
                           )}
                         </Link>
