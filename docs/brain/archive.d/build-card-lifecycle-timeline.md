@@ -1,0 +1,1 @@
+- **Build-card lifecycle timeline** · verified 2026-06-26 · → [[../lifecycles/roadmap-build-console]]
