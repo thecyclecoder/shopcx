@@ -51,7 +51,7 @@ The agent stamps one of these `action_kind` values per spec ([[../tables/directo
 ## Callers
 
 - `src/lib/inngest/spec-review-cron.ts` — the 15-min periodic enqueuer.
-- `scripts/builder-worker.ts` → `runSpecReviewJob` — claims the queued job, runs Vale on Max, applies every decision through `applySpecReviewDecision`, then runs Ada's disposition sweep ([[agents-spec-dispose]]) inline so a pass + dispose lands in one cron tick.
+- `scripts/builder-worker.ts` → `runSpecReviewJob` — claims the queued job, runs Vale on Max, applies every decision through `applySpecReviewDecision`, then runs Ada's disposition sweep ([[agents-spec-dispose]]) inline so a pass + dispose lands in one cron tick. The poll loop carries an OWN concurrency-1 `spec-review` claim lane (`MAX_SPEC_REVIEW=1`, `countSpecReview()`, Claude-down-gated like the other read-only Max agents — repair/regression/security-review/spec-test). Before this lane existed the cron's queued jobs sat unclaimed and `loop:agent:spec-review` went silent (Control Tower repair signature).
 
 ## Phase 4 — back-to-review (the shared mandate)
 

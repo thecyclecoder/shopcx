@@ -87,6 +87,10 @@ const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
 // `claude -p` pass walks every in_review spec and emits one QUALITY verdict per spec (pass/needs_fix);
 // the planned/deferred call belongs to Ada (Phase 3 — director-disposition lane).
 // Read-only against repo/DB. Minutes, like the other supervisory passes (repair/regression/spec-test).
+// Concurrency-1 own lane (one box, one sweep per cron tick — same shape as triage-escalations).
+// Claude-down-gated like the other read-only Max agents (repair/regression/security-review) — when
+// Claude is down the cron's queued spec-review jobs park `blocked_on_dependency` + drain on recovery.
+const MAX_SPEC_REVIEW = 1;
 const SPEC_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // Migration-fix jobs (migration-fix-agent) run in their OWN concurrency-1 lane: a top-level Max
 // `claude -p` (migration-fix skill) that DIAGNOSES a failed migration_audits row read-only and PROPOSES
@@ -10811,6 +10815,7 @@ async function main() {
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
+  const countSpecReview = () => [...active.values()].filter((v) => v.kind === "spec-review").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
@@ -10828,7 +10833,7 @@ async function main() {
   // races the standing pass on the same workspace (bounce-escalation-back-to-director).
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     const startedAt = Date.now();
@@ -10969,6 +10974,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed spec-test ${job.id.slice(0, 8)} → ${countSpecTest() + 1}/${MAX_SPEC_TEST} spec-test lane`);
+        launch(job);
+      }
+      // Fill the spec-review lane (spec-review-agent / Vale): cron-fired in_review queue sweep, concurrency-1.
+      // Read-only Max pass — gated on the Claude-down breaker (Phase 2) — parked jobs drain on recovery.
+      // Without this lane the spec-review-cron's queued jobs sit unclaimed (loop:agent:spec-review repair).
+      while (!claudeDown && countSpecReview() < MAX_SPEC_REVIEW) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["spec-review"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed spec-review ${job.id.slice(0, 8)} → ${countSpecReview() + 1}/${MAX_SPEC_REVIEW} spec-review lane`);
         launch(job);
       }
       // Fill the migration-fix lane (migration-fix-agent): event-fired gated billing repair, concurrency-1.
