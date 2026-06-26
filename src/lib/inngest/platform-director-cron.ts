@@ -31,7 +31,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
 import { agentGradingBatchReady, gradeConcludedAgentActions, detectGradeDropCoaching } from "@/lib/agents/agent-grader";
-import { computePlatformScorecard } from "@/lib/agents/platform-scorecard";
+import { computePlatformScorecard, type Cadence } from "@/lib/agents/platform-scorecard";
+import { auditAllKpis, type KpiAuditReport } from "@/lib/agents/kpi-review";
 
 export const platformDirectorCron = inngest.createFunction(
   {
@@ -227,12 +228,125 @@ export const platformDirectorCron = inngest.createFunction(
       return { snapshotted, metricsWritten, month_start: monthStart };
     });
 
+    // Platform Scorecard audit + persistent-drift alert (devops-kpi-review-sdk-and-data-fix Phase 5):
+    // on the SAME standing beat, audit every persisted KPI across all three cadences via the
+    // [[kpi-review]] SDK (re-derives ground truth + reports drift; NO writes to
+    // platform_scorecard_snapshots — only the engine writes there). Each audit verdict upserts ONE
+    // kpi_audit_log row per (workspace, metric, cadence, snapshot_date) so the trend is queryable.
+    // **Persistent** drift (≥2 consecutive snapshot_dates exceeding the metric's tolerance) opens a
+    // loop_alerts incident keyed `loop_id='kpi_drift:<metric>:<cadence>'` (the partial unique index
+    // dedupes it to one open row); a transient single-snapshot drift is logged but NOT alerted
+    // (self-healing on timing noise). A recovered metric (latest snapshot within tolerance)
+    // auto-resolves any open kpi_drift alert. The open alert feeds [[../libraries/platform-director]]
+    // `reconcileErrorBacklog` (loop_alerts → daily watch line) — no MONITORED_LOOPS registry entry
+    // needed. Best-effort + idempotent. See docs/brain/libraries/kpi-review.md.
+    const audit = await step.run("audit-platform-scorecard", async () => {
+      let auditsWritten = 0;
+      let opened = 0;
+      let resolved = 0;
+      const cadences: Cadence[] = ["daily", "weekly", "monthly"];
+      for (const workspaceId of result.workspaceIds || []) {
+        for (const cadence of cadences) {
+          let reports: KpiAuditReport[] = [];
+          try {
+            reports = await auditAllKpis(workspaceId, cadence);
+          } catch (e) {
+            console.error(`[platform-director-cron] auditAllKpis failed ws=${workspaceId} cadence=${cadence}:`, e instanceof Error ? e.message : e);
+            continue;
+          }
+          for (const r of reports) {
+            const loopId = `kpi_drift:${r.metric}:${cadence}`;
+            // Upsert the per-snapshot audit row (UNIQUE on (ws, metric, cadence, snapshot_date)) so a
+            // re-audit of the same snapshot refreshes the verdict in place instead of stacking rows.
+            const { error: upErr } = await admin
+              .from("kpi_audit_log")
+              .upsert(
+                {
+                  workspace_id: workspaceId,
+                  metric_key: r.metric,
+                  cadence,
+                  snapshot_date: r.snapshotDate,
+                  snapshot_value: r.snapshotValue,
+                  ground_truth_value: r.groundTruthValue,
+                  drift: r.drift,
+                  drift_pct: r.driftPct,
+                  within_tolerance: r.withinTolerance,
+                  unit: r.unit,
+                  audited_at: new Date().toISOString(),
+                },
+                { onConflict: "workspace_id,metric_key,cadence,snapshot_date" },
+              );
+            if (upErr) {
+              console.error(`[platform-director-cron] kpi_audit_log upsert failed ws=${workspaceId} ${loopId}:`, upErr.message);
+              continue;
+            }
+            auditsWritten++;
+
+            // Persistent-drift decision: read the latest 2 snapshot_dates' verdicts for this
+            // (ws, metric, cadence). The upsert above means at most one row per snapshot_date.
+            const { data: trend } = await admin
+              .from("kpi_audit_log")
+              .select("snapshot_date, within_tolerance")
+              .eq("workspace_id", workspaceId)
+              .eq("metric_key", r.metric)
+              .eq("cadence", cadence)
+              .order("snapshot_date", { ascending: false })
+              .limit(2);
+            const recent = (trend ?? []) as Array<{ snapshot_date: string; within_tolerance: boolean }>;
+            const persistent = recent.length >= 2 && recent.every((row) => row.within_tolerance === false);
+
+            // Look up any open kpi_drift incident for this (metric, cadence) — one row max per the
+            // partial unique index `loop_alerts_one_open_per_loop`.
+            const { data: openRow } = await admin
+              .from("loop_alerts")
+              .select("id")
+              .eq("loop_id", loopId)
+              .eq("status", "open")
+              .maybeSingle();
+            const open = openRow as { id: string } | null;
+
+            if (persistent) {
+              const detail = `KPI ${r.metric} (${cadence}) drifted ${r.driftPct == null ? "(undef)" : `${(r.driftPct * 100).toFixed(1)}%`} on ≥2 consecutive snapshots — snapshot=${r.snapshotValue} raw=${r.groundTruthValue}`;
+              if (open) {
+                // Already open — bump last_seen_at + refresh detail. NO re-page (mirrors the
+                // control-tower-monitor de-dupe contract).
+                await admin
+                  .from("loop_alerts")
+                  .update({ last_seen_at: new Date().toISOString(), reason: "kpi_drift", detail })
+                  .eq("id", open.id);
+              } else {
+                const { error: insErr } = await admin.from("loop_alerts").insert({
+                  loop_id: loopId,
+                  kind: "kpi-drift",
+                  reason: "kpi_drift",
+                  detail,
+                  status: "open",
+                });
+                if (!insErr) opened++;
+                else if (insErr.code !== "23505") console.warn(`[platform-director-cron] kpi_drift open failed ${loopId}:`, insErr.message);
+              }
+            } else if (open && r.withinTolerance) {
+              // Latest snapshot recovered → auto-resolve the open incident. (A single-snapshot blip
+              // stays "open if previously open" until the NEXT snapshot resolves it — that's the
+              // self-healing the spec calls out for transient timing noise.)
+              await admin
+                .from("loop_alerts")
+                .update({ status: "resolved", resolved_at: new Date().toISOString() })
+                .eq("id", open.id);
+              resolved++;
+            }
+          }
+        }
+      }
+      return { auditsWritten, opened, resolved };
+    });
+
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly } });
+      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly, audit } });
     });
 
-    return { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly };
+    return { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly, audit };
   },
 );
