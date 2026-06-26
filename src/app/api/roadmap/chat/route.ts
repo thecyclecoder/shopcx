@@ -125,8 +125,11 @@ export async function POST(request: Request) {
     }
     const title = specs.find((s) => s.slug === slug)?.title ?? slug;
     // fix-ship-retests-origin: the spec-test `check_key`(s) this fix targets — the same 16-hex hash
-    // [[spec-test-runs#checkKey]] keys runs by. Stamped machine-readably into the fix spec's `Fixes:` line so
-    // the fix build's merge can auto-re-test the origin (reconcileMergedJobs → retestOriginIfFixMerged).
+    // [[spec-test-runs#checkKey]] keys runs by. The `**Regression-of:** [[origin]]` line populates the
+    // typed `specs.regression_of_slug` column when the fix is authored (author-spec.extractRegressionHeaders),
+    // and that column is what `retestOriginIfFixMerged` reads after the fix build merges (no markdown
+    // fetch — retire-md-reads-from-pm-flow Phase 2). The `**Fixes:** … (check …)` line stays for human
+    // traceability of which failing checks this fix targets.
     const checkKeys = failing.map((c) => checkKey(c.text)).join(", ");
     const brief = [
       `The shipped spec "${title}" (docs/brain/specs/${slug}.md) FAILED its own ## Verification when the box spec-test QA agent last ran it — a likely regression or an incomplete build.`,
@@ -136,7 +139,8 @@ export async function POST(request: Request) {
       "",
       `Investigate each failure against the spec + the brain + the code, then propose a concise FIX spec: what's broken, what to change and where, and how to re-verify it. When we finalize, write it as a new spec under docs/brain/specs/ owned by [[../functions/platform]], parented under the same mandate/goal as the original where sensible.`,
       "",
-      `IMPORTANT — when you finalize the fix spec, include this exact machine-readable metadata line directly under the \`**Owner:** … · **Parent:** …\` line, verbatim (it links the fix back to the spec it resolves so the origin auto-re-tests once this fix ships — do not paraphrase or omit it):`,
+      `IMPORTANT — when you finalize the fix spec, include BOTH machine-readable metadata lines directly under the \`**Owner:** … · **Parent:** …\` line, verbatim (they link the fix back to the spec it resolves so the origin auto-re-tests once this fix ships — do not paraphrase or omit them):`,
+      `\`**Regression-of:** [[${slug}]]\``,
       `\`**Fixes:** ${slug} (check ${checkKeys})\``,
     ].join("\n");
     const created = await saveChat({

@@ -105,28 +105,12 @@ const INTENTIONAL_MATERIALIZATION: AllowedSite[] = [
 ];
 
 /**
- * PENDING_PHASE_2_RETIREMENT — call sites Phase 2 of `retire-md-reads-from-pm-flow` rewrites or
- * deletes. Each entry is a TODO with a counterpart in the spec body. Phase 2's PR shrinks this set
- * to empty. A new pending-retirement entry is forbidden: write the new code against `getSpec` /
- * `listSpecs` directly.
+ * PENDING_PHASE_2_RETIREMENT — empty: Phase 2 of `retire-md-reads-from-pm-flow` has landed
+ * (`reconcileSpecDrift` + `runSpecDriftReconciler` + `retestOriginIfFixMerged` all read the typed
+ * `specs` / `spec_phases` rows now). A new pending-retirement entry is forbidden: write the new code
+ * against `getSpec` / `listSpecs` directly.
  */
-const PENDING_PHASE_2_RETIREMENT: AllowedSite[] = [
-  {
-    file: "src/lib/spec-drift.ts",
-    fn: "reconcileSpecDrift",
-    reason: "Phase 2 — delete `fetchSpecRawFromMain` + `phaseStatesFromRaw` + `mergePhaseStates`; read `getSpec(workspaceId, slug)` and use `spec_phases[i].body` / `.status` directly",
-  },
-  {
-    file: "src/lib/spec-drift.ts",
-    fn: "runSpecDriftReconciler",
-    reason: "Phase 2 — second `fetchSpecRawFromMain` call site (the daily sweep) — same DB switchover as `reconcileSpecDrift`",
-  },
-  {
-    file: "src/lib/agent-jobs.ts",
-    fn: "retestOriginIfFixMerged",
-    reason: "Phase 2 — replace `fetchSpecRawFromMain` + `parseFixesLink` with a direct read of `specs.regression_of_slug` (the typed provenance column)",
-  },
-];
+const PENDING_PHASE_2_RETIREMENT: AllowedSite[] = [];
 
 /** Combined allow-list — these (file, fn) pairs are EXEMPT from the regression check. */
 const ALLOWED: Set<string> = new Set(

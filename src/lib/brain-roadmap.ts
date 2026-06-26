@@ -537,7 +537,7 @@ async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
 }
 
 /** Serialize a DB SpecRow back to a markdown blob with the same shape parseSpec/extractSpecSection/
- *  parseRepairSpecMeta/parseFixesLink/parseGoalSpecBlockers/buildSpecModal expect — preserves the H1, the
+ *  parseRepairSpecMeta/parseGoalSpecBlockers/buildSpecModal expect — preserves the H1, the
  *  metadata header lines (Owner / Parent / Blocked-by / Priority / Deferred / Auto-build /
  *  Repair-signature / Regression-of / Regression-signature), the summary paragraph, one `## Phase N — …`
  *  block per phase with the stored body, and (when any phase has verification) a single concatenated
