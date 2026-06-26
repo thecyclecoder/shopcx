@@ -152,6 +152,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/roadmap", label: "Roadmap", icon: "M9 4.5v15m6-15v15m-10.875 0h15.75c.621 0 1.125-.504 1.125-1.125V5.625c0-.621-.504-1.125-1.125-1.125H4.125C3.504 4.5 3 5.004 3 5.625v12.75c0 .621.504 1.125 1.125 1.125z" },
       { href: "/dashboard/roadmap/box", label: "Build box", icon: "M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3m16.5 0h.008v.008h-.008v-.008zm-3 0h.008v.008h-.008v-.008z", ownerOnly: true },
       { href: "/dashboard/developer/control-tower", label: "Control Tower", icon: "M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25", ownerOnly: true },
+      { href: "/dashboard/developer/approvals", label: "Approvals", icon: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.249-8.25-3.286z", ownerOnly: true },
       { href: "/dashboard/roadmap/goals", label: "Goals", icon: "M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" },
       { href: "/dashboard/roadmap/map", label: "Taxonomy map", icon: "M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.159.69.159 1.006 0z" },
       { href: "/dashboard/developer/messages", label: "Message Center", icon: "M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" },
@@ -196,6 +197,7 @@ export default function Sidebar({
   const [improveWaitingCount, setImproveWaitingCount] = useState(0); // Improve sessions waiting on you
   const [humanTestCount, setHumanTestCount] = useState(0); // spec-test human checks waiting on you (owner)
   const [regressionCount, setRegressionCount] = useState(0); // shipped specs failing their own spec-test (owner)
+  const [approvalsCount, setApprovalsCount] = useState(0); // approvals escalated to you (owner)
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -280,6 +282,11 @@ export default function Sidebar({
               setRegressionCount(d.counts.regressions || 0);
             }
           })
+          .catch(() => {});
+        // Approvals escalated to you (the routed-to-CEO queue) — lightweight count-only path.
+        fetch(`/api/developer/approvals?count=1`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.escalatedCount != null) setApprovalsCount(d.escalatedCount); })
           .catch(() => {});
       }
     };
@@ -473,6 +480,12 @@ export default function Sidebar({
                           {item.href === "/dashboard/developer/regressions" && regressionCount > 0 && (
                             <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-rose-600 dark:bg-rose-900/30 dark:text-rose-400">
                               {regressionCount > 99 ? "99+" : regressionCount}
+                            </span>
+                          )}
+                          {/* Approvals escalated to you — amber "needs you" alert. */}
+                          {item.href === "/dashboard/developer/approvals" && approvalsCount > 0 && (
+                            <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                              {approvalsCount > 99 ? "99+" : approvalsCount}
                             </span>
                           )}
                         </Link>

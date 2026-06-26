@@ -34,4 +34,4 @@ The flag ([[../tables/function_autonomy]]) enables *who decides*; this module gu
 
 ## Related
 
-[[../specs/approval-routing-engine]] · [[../tables/approval_decisions]] · [[approval-router]] · [[approval-inbox]] · [[roadmap-actions]] · [[../dashboard/agents]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+[[../specs/approval-routing-engine]] · [[../tables/approval_decisions]] · [[approval-router]] · [[approval-inbox]] · [[approvals-feed]] · [[roadmap-actions]] · [[../dashboard/agents]] · [[../dashboard/approvals]] · [[../operational-rules]] (§ North star — supervisable autonomy)
