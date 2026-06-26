@@ -1,0 +1,1 @@
+- **Classify Shopify webhook HMAC failures as transient in the error feed so a one-off probe stops paging** · verified 2026-06-26 · → [[../libraries/control-tower]]

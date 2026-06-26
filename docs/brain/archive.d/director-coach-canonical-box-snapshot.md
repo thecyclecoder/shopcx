@@ -1,0 +1,1 @@
+- **Director coach canonical box snapshot** · verified 2026-06-26 · → [[../libraries/director-box-snapshot]]
