@@ -2841,6 +2841,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (route.folded.length) notes.push(`park route → folded ${route.folded.length} already-shipped: ${route.folded.join(", ")}`);
     if (route.spawned.length) notes.push(`park route → spawned ${route.spawned.length} child spec(s): ${route.spawned.join(", ")}`);
     if (route.chatted.length) notes.push(`park route → invited CEO to chat on ${route.chatted.length}: ${route.chatted.join(", ")}`);
+    if (route.dismissed.length) notes.push(`park route → auto-dismissed ${route.dismissed.length} non-spec park(s): ${route.dismissed.join(", ")}`);
     if (route.backstopped.length) notes.push(`park route → backstop escalated ${route.backstopped.length}: ${route.backstopped.join(", ")}`);
     if (route.alarmed.length) notes.push(`park route → ALARM (>70 min) on ${route.alarmed.length}: ${route.alarmed.join(", ")}`);
   } catch (e) {
