@@ -8,8 +8,23 @@ import { type NextRequest, NextResponse } from "next/server";
 const HTML_LIMITED_BOT_UA_RE =
   /[\w-]+-Google|Google-[\w-]+|Chrome-Lighthouse|Slurp|DuckDuckBot|baiduspider|yandex|sogou|bitlybot|tumblr|vkShare|quora link preview|redditbot|ia_archiver|Bingbot|BingPreview|applebot|facebookexternalhit|facebookcatalog|Twitterbot|LinkedInBot|Slackbot|Discordbot|WhatsApp|SkypeUriPreview|Yeti|googleweblight/i;
 
-// Neutral SEO UA we substitute for HTML-limited bots so Next's getBotType()
-// returns undefined (it tests the incoming user-agent against the list above).
+// DOM bot — mirrors Next 16's internal HEADLESS_BROWSER_BOT_UA_RE in
+// next/dist/shared/lib/router/utils/is-bot. Matches the main Googlebot search
+// crawler ("Googlebot" but NOT "Mediapartners-Google" / "AdsBot-Google" — those
+// are caught by HTML_LIMITED_BOT_UA_RE above). Next classifies it as botType
+// "dom" via getBotType(); the SAME `botType && isRoutePPREnabled ? false`
+// short-circuit fires for "dom" as for "html", so leaving Googlebot un-neutralized
+// reproduces the resume-mismatch on /widget + the other PPR routes — the residual
+// signature vercel:975c7f77eb7132e6 that survived the HTML-only fix.
+const HEADLESS_BROWSER_BOT_UA_RE = /Googlebot(?!-)|Googlebot$/i;
+
+function isBotForPPR(userAgent: string): boolean {
+  return HTML_LIMITED_BOT_UA_RE.test(userAgent) || HEADLESS_BROWSER_BOT_UA_RE.test(userAgent);
+}
+
+// Neutral SEO UA we substitute for any UA Next's getBotType() recognizes (html
+// OR dom) so getBotType() returns undefined and the page falls through to the
+// streaming-metadata branch that matches the build-time prerender shell.
 const NEUTRAL_BOT_UA = "Mozilla/5.0 (compatible; ShopCXSEO/1.0; +https://shopcx.ai)";
 
 export async function proxy(request: NextRequest) {
@@ -21,8 +36,11 @@ export async function proxy(request: NextRequest) {
   //   serveStreamingMetadata = botType && isRoutePPREnabled ? false
   //     : !userAgent ? true : shouldServeStreamingMetadata(userAgent, htmlLimitedBots)
   // The leading `botType && isRoutePPREnabled` short-circuit forces the BLOCKING branch
-  // (a bare <__next_metadata_boundary__>, no <div hidden>) for every HTML-limited bot —
-  // and it IGNORES the htmlLimitedBots config (our next.config `/(?!)/` never gets a vote).
+  // (a bare <__next_metadata_boundary__>, no <div hidden>) for ANY bot Next recognizes —
+  // both HTML-limited bots (botType "html") AND the headless-browser DOM bot, Googlebot
+  // (botType "dom", matched separately by Next's HEADLESS_BROWSER_BOT_UA_RE in is-bot.js).
+  // The short-circuit IGNORES the htmlLimitedBots config (our next.config `/(?!)/` never
+  // gets a vote) and there is no equivalent config knob for the dom-bot branch at all.
   // When a bot crawl triggers an ISR revalidation the cached shell is re-rendered into that
   // blocking shape; a later resume render then throws "Expected the resume to render <div>
   // … but instead it rendered <__next_metadata_boundary__>" and React bails the page to CSR
@@ -44,7 +62,7 @@ export async function proxy(request: NextRequest) {
   // — so we compute the override headers once here and thread them through updateSession.
   const ua = request.headers.get("user-agent") || "";
   let botRequestHeaders: Headers | undefined;
-  if (ua && HTML_LIMITED_BOT_UA_RE.test(ua)) {
+  if (ua && isBotForPPR(ua)) {
     botRequestHeaders = new Headers(request.headers);
     botRequestHeaders.set("user-agent", NEUTRAL_BOT_UA);
     botRequestHeaders.set("x-original-user-agent", ua);
