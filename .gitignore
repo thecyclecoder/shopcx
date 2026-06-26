@@ -54,12 +54,12 @@ twilio-recovery.txt
 # ad-tool example render assets (binary, regenerated locally)
 remotion/public/adbuild/
 
-# scratch / one-off debug scripts
-scripts/_*
-# ...except the shared, committed bootstrap (the foundation every script imports)
-!scripts/_bootstrap.ts
-# ...and committed audit/utility scripts the brain refers to by their spec-mandated names.
-!scripts/_audit-spec-phase-overcount.ts
-!scripts/_audit-kpis.ts
-!scripts/_check-worker-lanes.ts
-!scripts/_check-pm-md-reads.ts
+# scripts convention: underscore (`scripts/_*`) scripts ARE COMMITTED by default.
+# Only throwaways are ignored — name them with the `_tmp-` or `_scratch-` prefix and they
+# stay out of git; everything else (`_bootstrap.ts`, `_audit-*.ts`, `_check-*.ts`, `_verify-*.ts`,
+# `_probe-*.ts`, customer-remedy one-offs the brain refers to by name, …) is tracked with no
+# per-file negation needed. This replaces the old `scripts/_*` blanket-ignore + growing
+# `!scripts/_foo.ts` allow-list, which silently dropped any new committed underscore-script that
+# nobody remembered to negate.
+scripts/_tmp-*
+scripts/_scratch-*
