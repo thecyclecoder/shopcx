@@ -434,18 +434,18 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
               type="button"
               onClick={() => setConfirmVerify((v) => !v)}
               className="flex-1 rounded-md bg-emerald-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-emerald-700"
-              title="Owner gate: confirm this shipped feature works in production, then fold + archive its spec"
+              title="Optional manual fold — a passing machine spec-test auto-folds this; use this to fold + archive it now"
             >
-              {confirmVerify ? "Cancel" : "Mark verified & archive"}
+              {confirmVerify ? "Cancel" : "Fold to brain now"}
             </button>
           )}
       </div>
       {canVerify && confirmVerify && (
         <div className="mt-2 space-y-2 rounded-md border border-emerald-200 bg-emerald-50/50 p-2 text-left dark:border-emerald-900/40 dark:bg-emerald-950/20">
           <p className="text-[11px] text-emerald-800 dark:text-emerald-300">
-            You&apos;ve confirmed this works in production. This queues a fold-build that folds the spec into the brain,
-            appends an archive entry, and deletes <code>specs/{slug}.md</code> — opening a PR for you to merge. Nothing is
-            lost (git-recoverable; knowledge lives in the brain).
+            Optional — a passing machine spec-test auto-folds this; this just does it now. Queues a fold-build that folds
+            the spec into the brain, appends an archive entry, and deletes <code>specs/{slug}.md</code> — opening a PR for
+            you to merge. Nothing is lost (git-recoverable; knowledge lives in the brain).
           </p>
           <button
             type="button"

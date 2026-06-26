@@ -1,6 +1,6 @@
 # pending_folds
 
-The set of shipped specs the owner has marked **verified**, awaiting (or mid-) a batch fold-build ([[../specs/fold-build-batching]]). One row per spec per workspace. Decouples "this spec should be folded" from the [[agent_jobs|fold job]] that does it: N verifies coalesce into **one** `kind='fold'` job that folds every `pending` row in a single PR — instead of one fold PR per spec all colliding on `archive.md`/README.
+The set of shipped specs queued to fold, awaiting (or mid-) a batch fold-build ([[../specs/fold-build-batching]]). A row is enqueued when a spec's **machine spec-test passes** (Gate B `autoFoldVerifiedSpecs`, fold-on-spec-test-pass task #29) — or by the owner's optional manual **Fold to brain now** override; human QA is advisory and does NOT enqueue here. One row per spec per workspace. Decouples "this spec should be folded" from the [[agent_jobs|fold job]] that does it: N enqueues coalesce into **one** `kind='fold'` job that folds every `pending` row in a single PR — instead of one fold PR per spec all colliding on `archive.md`/README.
 
 **Primary key:** `id` · **Unique:** `(workspace_id, spec_slug)`
 

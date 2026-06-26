@@ -6238,13 +6238,14 @@ async function runSpecTestJob(job: Job) {
       status: "completed",
       log_tail: `${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}. ${report}`.slice(-2000),
     });
-    // Auto-fold Gate B (auto-ship-pipeline Phase 2): an `approved` run with no waiting/failed human checks
-    // + no regressions just made this spec all-green → auto-archive it (enqueue_fold), no owner click.
-    // All-green-only + kill-switched inside the gate. Best-effort — never fail the spec-test run.
+    // Auto-fold Gate B (fold-on-spec-test-pass, task #29): this `approved` run just made the spec's MACHINE
+    // spec-test PASS (no open regression) → fold it into the brain (enqueue_fold), no human click. Human QA
+    // is advisory and intentionally NOT consulted by the gate. Machine-pass-only + kill-switched inside the
+    // gate. Best-effort — never fail the spec-test run.
     try {
       const { autoFoldVerifiedSpecs } = await import("../src/lib/spec-test-runs");
       const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
-      if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} fully-verified spec(s): ${f.foldedSlugs.join(", ")}`);
+      if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} machine-tested-green spec(s): ${f.foldedSlugs.join(", ")}`);
     } catch (e) {
       console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }

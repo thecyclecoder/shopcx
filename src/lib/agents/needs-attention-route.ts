@@ -175,8 +175,8 @@ function childSpecSlug(originSlug: string, klass: NeedsAttentionClass, jobId: st
  *
  * Verifies the spec actually exists, the spec is not archived, and (best-effort) flips its card to
  * shipped via the spec-status writer (`markSpecCardStatus` — actor=director:platform appends
- * spec_status_history). Then enqueues a `fold` job through the SAME `enqueue_fold` RPC the manual
- * "Mark verified & archive" click uses so the spec rides the next batch (no fan-out of N fold PRs).
+ * spec_status_history). Then enqueues a `fold` job through the SAME `enqueue_fold` RPC the machine
+ * spec-test pass / manual "Fold to brain now" override use so the spec rides the next batch (no fan-out of N fold PRs).
  *
  * Idempotent: ledger-deduped per job + the `enqueue_fold` RPC itself coalesces. Best-effort per row.
  */

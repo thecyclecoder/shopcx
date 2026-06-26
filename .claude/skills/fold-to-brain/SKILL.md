@@ -1,16 +1,16 @@
 ---
 name: fold-to-brain
-description: Use when a shipped spec (all phases ✅) OR a complete goal (all milestones rolled up) should be archived — fold its knowledge into the permanent brain pages (lifecycle/table/library/inngest/integration/recipe/dashboard/functions), cross-link, append to the archive index, and flip the DB row to status='folded'. The shipped→verified (spec) / complete→folded (goal) transition. Triggered by a fold-build or "archive the {slug} spec/goal."
+description: Use when a shipped spec whose MACHINE spec-test has passed OR a complete goal (all milestones rolled up) should be archived — fold its knowledge into the permanent brain pages (lifecycle/table/library/inngest/integration/recipe/dashboard/functions), cross-link, append to the archive index, and flip the DB row to status='folded'. The shipped→folded (spec, on machine spec-test pass — human QA is advisory) / complete→folded (goal) transition. Triggered by a fold-build or "archive the {slug} spec/goal."
 ---
 
 # fold-to-brain
 
-A shipped spec lives in `public.specs` + `public.spec_phases` (the DB row, post-[[spec-body-table-and-backfill]] / [[spec-readers-from-db-retire-parser]] / [[spec-fold-from-db-row]]). Once the **owner** marks it verified, its durable knowledge moves into the permanent brain pages and the row is flipped to `status='folded'` (preserved, not deleted — the board's archive view reads it). Any legacy `docs/brain/specs/{slug}.md` carried over from the backfill is `git rm`'d in the same PR; newly-authored specs have no `.md` and skip that step. Git history + the preserved row are the immutable archive. This is the `shipped → verified` fold ([[project-management]] § Folding a shipped spec).
+A shipped spec lives in `public.specs` + `public.spec_phases` (the DB row, post-[[spec-body-table-and-backfill]] / [[spec-readers-from-db-retire-parser]] / [[spec-fold-from-db-row]]). Once its **machine spec-test passes** (agent-verdict `approved`, no open regression — fold-on-spec-test-pass, task #29), its durable knowledge moves into the permanent brain pages and the row is flipped to `status='folded'` (preserved, not deleted — the board's archive view reads it). Any legacy `docs/brain/specs/{slug}.md` carried over from the backfill is `git rm`'d in the same PR; newly-authored specs have no `.md` and skip that step. Git history + the preserved row are the immutable archive. This is the `shipped → folded` fold ([[project-management]] § Folding a shipped spec).
 
 ## Preconditions (don't fold early)
 
 - **`public.specs.status === 'shipped'`** — the DB-trigger rollup ([[spec-body-table-and-backfill]]) guarantees this is equivalent to every `spec_phases` row being `shipped`. The worker enforces this guard before dispatching the fold ([[spec-fold-from-db-row]] Phase 1); if you see a non-shipped row, **stop** — don't fold.
-- The **owner** has confirmed it works in production (the human-only verify gate). Folding is never automatic on ship; it fires on **Mark verified & archive** (a fold-build) or an explicit ask. If you can't confirm verification, **stop** — don't fold.
+- The **machine spec-test has PASSED** (the latest [[spec_test_runs]] is agent-verdict `approved` with no open auto-`fail` regression — the fold trigger). Folding is never automatic on ship; it fires on the machine spec-test pass (Gate B `autoFoldVerifiedSpecs`), the owner's optional **Fold to brain now** override, or an explicit ask. **Human QA is advisory — never required to fold.** A spec whose latest run is `issues`/`needs_human`/`error` (or carries an open regression) is NOT ready: **stop** — don't fold.
 
 ## Procedure
 
