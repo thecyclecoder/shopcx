@@ -42,13 +42,28 @@ function timeAgo(iso: string): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
-export function DirectorActivity({ fn }: { fn: string }) {
+export function DirectorActivity({
+  fn,
+  actor,
+  hideIfEmpty,
+  heading,
+}: {
+  fn: string;
+  /** Narrow to rows whose metadata.actor matches — for a worker's slice of its director's feed. */
+  actor?: string;
+  /** When true, render nothing (no loading state, no "no activity" stub) when the feed is empty. */
+  hideIfEmpty?: boolean;
+  /** Optional title rendered inside the component so it co-hides with `hideIfEmpty`. */
+  heading?: string;
+}) {
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyJobId, setBusyJobId] = useState<string | null>(null);
 
-  const load = (alive = true) =>
-    fetch(`/api/developer/agents/activity?fn=${encodeURIComponent(fn)}`)
+  const load = (alive = true) => {
+    const params = new URLSearchParams({ fn });
+    if (actor) params.set("actor", actor);
+    return fetch(`/api/developer/agents/activity?${params.toString()}`)
       .then((r) => (r.ok ? r.json() : { activity: [] }))
       .then((d) => {
         if (alive) {
@@ -57,6 +72,7 @@ export function DirectorActivity({ fn }: { fn: string }) {
         }
       })
       .catch(() => alive && setLoading(false));
+  };
 
   useEffect(() => {
     let alive = true;
@@ -67,7 +83,7 @@ export function DirectorActivity({ fn }: { fn: string }) {
       clearInterval(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fn]);
+  }, [fn, actor]);
 
   const reopenPark = async (jobId: string) => {
     setBusyJobId(jobId);
@@ -88,11 +104,13 @@ export function DirectorActivity({ fn }: { fn: string }) {
     }
   };
 
-  if (loading) return <p className="text-[12px] text-zinc-400">Loading activity…</p>;
-  if (!entries.length)
+  if (loading) return hideIfEmpty ? null : <p className="text-[12px] text-zinc-400">Loading activity…</p>;
+  if (!entries.length) {
+    if (hideIfEmpty) return null;
     return <p className="text-[12px] text-zinc-400">No activity yet — actions appear here the moment she takes them.</p>;
+  }
 
-  return (
+  const list = (
     <ol className="space-y-1.5">
       {entries.map((e) => {
         const chip = actionChip(e.actionKind);
@@ -120,5 +138,12 @@ export function DirectorActivity({ fn }: { fn: string }) {
         );
       })}
     </ol>
+  );
+  if (!heading) return list;
+  return (
+    <div>
+      <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{heading}</h3>
+      {list}
+    </div>
   );
 }
