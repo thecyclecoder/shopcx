@@ -42,7 +42,7 @@ you are constrained to **reads** (see the hard rule).
 
 ## Step 1 — classify every `## Verification` bullet
 
-`Read` the spec at `docs/brain/specs/{slug}.md` (path given in your prompt). Pull its `## Verification`
+`Read` the spec at `.box/spec-{slug}.md` (the worker materialized it from the DB — `public.specs` + `spec_phases`; the old `docs/brain/specs/*.md` files were DELETED in the cutover, never read them). The exact path is given in your prompt. Pull its `## Verification`
 section — each bullet is one check, usually shaped `- On {where}, {do what} → expect {observable
 result}.`
 
