@@ -60,7 +60,13 @@ export type DirectorActionKind =
   // repurpose-spec-drift-reconciler Phase 1 — the spec-drift reconciler (supervising Bo) stamps phase(s)
   // shipped after the box no-op'd a build as "already merged via #N" (work on main, phase left planned by
   // a backfill). One row per healed spec; metadata carries { actor:'reconciler:spec-drift', pr, phases }.
-  | "healed_built_unstamped";
+  | "healed_built_unstamped"
+  // repurpose-spec-drift-reconciler Phase 2 — the reconciler's read-only sweep over `spec_phases` for
+  // genuine anomalies it can't auto-heal: orphan rows (FK parent missing), duplicate (spec_id, position)
+  // clusters (unique index missing/dropped), or shipped phases with no pr + no merge_sha (provenance
+  // gap). One row per spec/kind; metadata carries { kind:'orphan'|'duplicate_position'|'provenance_gap',
+  // actor:'reconciler:spec-drift', … }.
+  | "spec_phases_anomaly";
 
 export interface DirectorActivityInput {
   workspaceId: string;

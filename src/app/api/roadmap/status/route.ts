@@ -1,11 +1,10 @@
 /**
- * POST /api/roadmap/status — set a spec's overall status / one phase's status by writing the
- * `spec_card_state` DB mirror. Owner-gated (mirrors the branches merge route).
+ * POST /api/roadmap/status — set a spec's overall status / one phase's status. Owner-gated.
  *
- * spec-status-db-driven Phase 2: this used to PUT the spec markdown to `main` via the GitHub Contents
- * API on every flip (six git-committing status writers in total → a Vercel deploy storm of pure
- * metadata churn). Now status / per-phase state lives in the DB authoritatively; this route writes the
- * mirror + an audit row to `spec_status_history` and returns instantly — zero deploys.
+ * repurpose-spec-drift-reconciler Phase 2: spec status is now DERIVED from `spec_phases`, so this
+ * route writes the CANONICAL leaf (a `spec_phases` row) instead of the `spec_card_state` mirror —
+ * the board derives the rollup automatically. `in_review` is the one exception (an explicit
+ * lifecycle override, not derived) and still routes through `markSpecCardBackToReview`.
  *
  * Body: { slug, status } or { slug, phaseIndex, status }. See docs/brain/dashboard/roadmap.md.
  */
@@ -15,7 +14,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
-import { getSpecCardStates, markSpecCardStatus, markSpecCardShortCircuit, markSpecCardBackToReview, rollupPhaseStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
+import { getSpecCardStates, markSpecCardShortCircuit, markSpecCardBackToReview, rollupPhaseStatus, type SpecCardPhaseState } from "@/lib/spec-card-state";
+import { markPhaseInProgress, markRemainingPhasesShipped, restampPhases } from "@/lib/specs-table";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
 export async function POST(request: Request) {
@@ -92,29 +92,50 @@ export async function POST(request: Request) {
 
   const idx = typeof body.phaseIndex === "number" ? body.phaseIndex : null;
   let nextStatus: SpecStatus;
+
+  // repurpose-spec-drift-reconciler Phase 2: write the canonical leaf in `spec_phases` (1-based position
+  // mirrors specs-table convention), not the `spec_card_state` mirror — the board derives status from
+  // the phases. Per-phase flips touch the named position; spec-level flips translate to the appropriate
+  // phase write (shipped → mark every non-shipped phase shipped; in_progress → flip the earliest planned
+  // phase; planned/rejected → write that status across every non-terminal phase).
   if (idx !== null) {
-    const target = phaseStates.find((p) => p.index === idx);
-    if (target) {
-      target.status = newPhaseStatus;
-    } else if (idx >= 0 && idx < spec.card.phases.length) {
-      phaseStates.push({ index: idx, title: spec.card.phases[idx].title, status: newPhaseStatus });
-      phaseStates.sort((a, b) => a.index - b.index);
-    } else {
+    if (!(idx >= 0 && idx < spec.card.phases.length)) {
       return NextResponse.json({ error: "bad phaseIndex" }, { status: 400 });
     }
+    const target = phaseStates.find((p) => p.index === idx);
+    if (target) target.status = newPhaseStatus;
+    else {
+      phaseStates.push({ index: idx, title: spec.card.phases[idx].title, status: newPhaseStatus });
+      phaseStates.sort((a, b) => a.index - b.index);
+    }
+    // Owner flip carries no merge provenance — null both. A regression away from `shipped` clears the
+    // prior `pr`/`merge_sha` (they belong to the merge that's no longer truthful).
+    await restampPhases(workspaceId, slug, [{ position: idx + 1, status: newPhaseStatus, pr: null, merge_sha: null }]);
     nextStatus = phaseStates.length ? rollupPhaseStatus(phaseStates) : newPhaseStatus;
   } else {
-    nextStatus = newPhaseStatus;
+    // Spec-level flip: translate to phase writes so the derived rollup matches.
+    if (newPhaseStatus === "shipped") {
+      await markRemainingPhasesShipped(workspaceId, slug);
+      for (const p of phaseStates) p.status = "shipped";
+    } else if (newPhaseStatus === "in_progress") {
+      await markPhaseInProgress(workspaceId, slug);
+      const i = phaseStates.findIndex((p) => p.status === "planned");
+      if (i >= 0) phaseStates[i].status = "in_progress";
+    } else if (newPhaseStatus === "planned" || newPhaseStatus === "rejected") {
+      // Regress every non-terminal phase to the requested status. `restampPhases` clears pr/merge_sha
+      // for each touched position (the prior provenance no longer reflects truth).
+      const writes = phaseStates
+        .filter((p) => p.status !== newPhaseStatus)
+        .map((p) => ({ position: p.index + 1, status: newPhaseStatus, pr: null, merge_sha: null }));
+      if (writes.length) await restampPhases(workspaceId, slug, writes);
+      for (const p of phaseStates) p.status = newPhaseStatus;
+    }
+    nextStatus = phaseStates.length ? rollupPhaseStatus(phaseStates) : newPhaseStatus;
   }
-
-  const actor = `owner:${user.id}`;
-  const reason = idx !== null ? `phase ${idx} → ${newPhaseStatus} (owner flip)` : `spec → ${newPhaseStatus} (owner flip)`;
-  await markSpecCardStatus(workspaceId, slug, nextStatus, phaseStates, { actor, reason });
 
   // director-dismiss-park-and-short-circuit-spec Phase 2: a short-circuit marker only makes sense for a
   // shipped card. When the owner flips a short-circuited spec back off `shipped`, clear the marker so the
-  // card stops rendering "short-circuited — …" — restoring normal handling (the audit row records the
-  // status transition; the marker's prior value is in spec_status_history via the standard status row).
+  // card stops rendering "short-circuited — …" — restoring normal handling.
   const wasShortCircuited = existing?.flags?.short_circuit === true;
   if (wasShortCircuited && nextStatus !== "shipped") {
     await markSpecCardShortCircuit(workspaceId, slug, false);
