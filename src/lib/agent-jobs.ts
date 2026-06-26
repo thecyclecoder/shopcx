@@ -5,9 +5,9 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
-import { reconcileSpecDrift, fetchSpecRawFromMain, parseFixesLink } from "@/lib/spec-drift";
-import { markSpecCardMergeShipped, rollupPhaseStatus } from "@/lib/spec-card-state";
-import { stampPhaseShipped } from "@/lib/specs-table";
+import { fetchSpecRawFromMain, parseFixesLink } from "@/lib/spec-drift";
+import { rollupPhaseStatus } from "@/lib/spec-card-state";
+import { getSpec as getSpecFromDb, stampPhaseShipped } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -606,21 +606,25 @@ export async function retestOriginIfFixMerged(workspaceId: string, fixSlug: stri
  * The post-merge effects of a merged `kind='build'` job — the shared body run by BOTH paths that flip a
  * build to `merged`: the board-render reconcile ([[reconcileMergedJobs]], for a manual squash-merge) and
  * the auto-merge webhook path ([[handleAutoMergedBuildBranch]], auto-ship-pipeline). Extracting it keeps
- * the two identical so the chain + card-state advance the same whether a human or the auto-merge gate
- * landed the PR (chain-and-cardstate-under-automerge Phase 1). Steps, each best-effort/idempotent:
+ * the two identical so the chain + the spec advance the same whether a human or the auto-merge gate landed
+ * the PR (chain-and-cardstate-under-automerge Phase 1). Steps, each best-effort/idempotent:
  *
- *   1. reconcile spec-drift against `main` (flip phases whose code verifiably shipped) — returns the
- *      post-flip status + per-phase snapshot;
- *   2. mirror the merge to the board, with the status ROLLED UP from `phase_states` (Bug A — a still-⏳ H1
- *      no longer parks a part-shipped card in Planned), tagged deploy_pending + this merge's SHA;
- *   3. when the spec is now FULLY shipped (rollup === shipped): enqueue its spec-test + auto-queue any
+ *   1. 100% DB-DRIVEN — read the spec from `public.specs` + `public.spec_phases` via the specs-table SDK
+ *      ([[../libraries/specs-table]] `getSpec`). NO `spec_card_state` mirror read, NO markdown/spec-drift
+ *      read: the legacy reconcileSpecDrift path read the mirror, which a DB-authored spec has no row in, so
+ *      it stamped NOTHING — every DB-authored spec landed "built-unstamped". TRUST THE MERGE: stamp the
+ *      phase(s) this merge shipped (the build's named `Phase N`, else the first not-yet-shipped) via
+ *      `stampPhaseShipped`, tagging each with the PR # + merge SHA. The leaf write advances the now-DERIVED
+ *      `specs.status` (the DB rollup trigger is gone — status derives from `spec_phases` at read time). A
+ *      one-shot spec (zero phases) records its card-level PR on `specs.merged_pr` / `last_merge_sha`.
+ *   2. when the resulting rollup is FULLY shipped (rollup === shipped): enqueue its spec-test + auto-queue any
  *      dependent it just unblocked;
- *   4. if this was a `chain_phases` "Build all" build: queue the next ⏳ phase (Bug B — the chain advances
- *      off the merge itself, no board render required). queueNextChainedPhase no-ops when none ⏳ remain or
- *      a build is already in flight, so a double-run (both paths) queues exactly one next phase;
- *   5. re-test the origin spec if this build carries a `Fixes:` link.
+ *   3. if this was a `chain_phases` "Build all" build: queue the next ⏳ phase (the chain advances off the
+ *      merge itself, no board render required). queueNextChainedPhase no-ops when none ⏳ remain or a build is
+ *      already in flight, so a double-run (both paths) queues exactly one next phase;
+ *   4. re-test the origin spec if this build carries a `Fixes:` link.
  *
- * Never throws — every sub-step swallows its own error (the daily spec-drift / spec-test crons backstop).
+ * Never throws — every sub-step swallows its own error (the daily spec-test crons backstop).
  */
 /**
  * director-initiation-throughput Phase 3 — the event-driven top-up. A just-merged build FREED a lane;
@@ -672,55 +676,67 @@ export async function applyMergedBuildEffects(
   opts: { chainPhases?: boolean; mergeSha?: string | null; prNumber?: number | null; instructions?: string | null },
 ): Promise<void> {
   try {
-    const drift = await reconcileSpecDrift(workspaceId, slug);
-    let phaseStates = drift.phaseStates;
     const pr = opts.prNumber ?? null;
     const sha = opts.mergeSha ?? null;
-    // TRUST THE MERGE + TAG ITS PROVENANCE (db-driven-status-trust-the-merge / phase-pr-provenance). Builds
-    // ship a spec phase-by-phase, but a single PR/merge can ship SEVERAL phases at once. Which phases did THIS
-    // merge ship? (1) the phases reconcileSpecDrift flipped planned→shipped THIS pass — their code-path landed
-    // on main with this merge (could be several); (2) for PROSE phases reconcile can't verify (no declarable
-    // paths → it would leave them stuck `planned` despite the merge), the phase(s) the build's instructions
-    // name ("Phase N", possibly several), else the first not-yet-shipped. Tag EACH shipped phase with this
-    // PR # + merge SHA so "shipped" is provable, not inferred. Never blanket-ship phases with no evidence.
-    const shipped = new Set<number>(drift.flipped.map((f) => f.index));
-    if (shipped.size === 0 && phaseStates.length) {
-      const named = parsePhaseIndices(opts.instructions, phaseStates.length);
-      if (named.length) named.forEach((i) => shipped.add(i));
-      else { const i = phaseStates.findIndex((p) => p.status === "planned"); if (i >= 0) shipped.add(i); }
-    }
-    phaseStates = phaseStates.map((p) =>
-      shipped.has(p.index) ? { ...p, status: "shipped" as const, pr, merge_sha: sha } : p,
-    );
-    const rolled = phaseStates.length ? rollupPhaseStatus(phaseStates) : drift.status;
-    await markSpecCardMergeShipped(workspaceId, slug, {
-      status: rolled,
-      mergeSha: sha,
-      phaseStates,
-      prNumber: pr,
-    });
-    // spec-authoring-writes-db-and-worker-materialize Phase 2: ALSO write the per-phase PR provenance to
-    // `public.spec_phases` (the future-canonical surface). Double-write — `spec_card_state.phase_states[i]`
-    // above stays the read-path until [[spec-readers-from-db-retire-parser]] retires it. The DB rollup
-    // trigger keeps `specs.status` consistent on each phase write — no app-side rollup needed here.
-    if (shipped.size) {
-      try {
-        // Stamp each shipped phase's PR/SHA provenance through the SDK — the only status-write path; the
-        // DB trigger rolls specs.status up from the phases. No raw PM SQL (pm-db-agent-toolkit invariant).
-        await Promise.all(
-          [...shipped].map((idx) => stampPhaseShipped(workspaceId, slug, idx + 1, { pr, merge_sha: sha })),
-        );
-      } catch {
-        /* best-effort — spec_card_state.phase_states above is still a read-path; the row is reconciled
-           on the next author/edit pass via specs-table.upsertSpec. */
+    // 100% DB-DRIVEN (db-driven PM layer): read the spec from `public.specs` + `public.spec_phases` via the
+    // SDK — NO `spec_card_state` mirror, NO markdown/spec-drift read. A DB-authored spec has no mirror row, so
+    // the old reconcileSpecDrift path saw an empty phase set and stamped NOTHING — every DB-authored spec
+    // landed "built-unstamped". We trust the merge and stamp the phase(s) it shipped directly on the DB.
+    const spec = await getSpecFromDb(workspaceId, slug);
+    if (!spec) return; // no DB spec row → nothing to advance (the daily backlog cron backstops)
+    const phases = spec.phases; // 1-indexed by `position`, ordered ASC
+    // TRUST THE MERGE + TAG ITS PROVENANCE (phase-pr-provenance). A single PR/merge can ship SEVERAL phases at
+    // once, but builds ship a spec phase-by-phase — so never blanket-ship. Which phase(s) did THIS merge ship?
+    //   (1) the phase(s) the build's instructions NAME ("Phase N", possibly several) — mapped to positions;
+    //   (2) else the FIRST not-yet-shipped phase (lowest position whose status isn't shipped/rejected).
+    // Tag EACH shipped phase with this PR # + merge SHA so "shipped" is provable, not inferred.
+    const shippedPositions = new Set<number>();
+    const named = parsePhaseIndices(opts.instructions, phases.length); // 0-based indices
+    if (named.length) {
+      // map named 0-based indices → phase positions (1-indexed `position`, ordered ASC)
+      for (const i of named) {
+        const p = phases[i];
+        if (p) shippedPositions.add(p.position);
       }
+    } else {
+      const next = phases.find((p) => p.status !== "shipped" && p.status !== "rejected");
+      if (next) shippedPositions.add(next.position);
+    }
+    // Stamp each shipped phase's status + PR/SHA provenance through the SDK — the only status-write path.
+    // This leaf write is what advances the now-DERIVED spec status (the DB rollup trigger is gone — status
+    // derives from `spec_phases` at read time). No raw PM SQL (pm-db-agent-toolkit invariant).
+    if (shippedPositions.size) {
+      await Promise.all(
+        [...shippedPositions].map((position) => stampPhaseShipped(workspaceId, slug, position, { pr, merge_sha: sha })),
+      );
+    }
+    // Compute the resulting rollup over the post-stamp phase statuses so the downstream gates still fire.
+    // A spec with phases: roll up its (now-stamped) phases. A one-shot spec (zero phases): a single-PR ship
+    // IS the whole spec → shipped. Record the one-shot card-level provenance on `public.specs` (the canonical
+    // `merged_pr` / `last_merge_sha` columns — there's no phase slot to carry it) via the SDK admin client.
+    let rolled: Phase;
+    if (phases.length) {
+      rolled = rollupPhaseStatus(
+        phases.map((p) => ({
+          index: p.position - 1,
+          title: p.title,
+          status: shippedPositions.has(p.position) ? ("shipped" as Phase) : p.status,
+        })),
+      );
+    } else {
+      rolled = "shipped"; // one-shot spec — the single merge ships it
+      await createAdminClient()
+        .from("specs")
+        .update({ merged_pr: pr, last_merge_sha: sha, updated_at: new Date().toISOString() })
+        .eq("workspace_id", workspaceId)
+        .eq("slug", slug);
     }
     if (rolled === "shipped") {
       await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
       await autoQueueUnblockedBy(workspaceId, slug);
     }
   } catch {
-    /* event missed → the daily backlog + spec-drift crons mop it up */
+    /* event missed → the daily backlog + spec-test crons mop it up */
   }
   // security-dependency-agent Phase 1: give EVERY merged claude/* diff an autonomous security pass — the
   // supervisor on the auto-merge proxy (the unguarded half auto-merge opened). Fires on every merged build
