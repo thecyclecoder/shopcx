@@ -40,9 +40,7 @@ A markdown blob is still produced in a small set of places — by DESIGN, for a 
 | `src/lib/brain-roadmap.ts` · `getSpecMarkdownForCard` | the spec-card preview surface returns `{ raw, card }` for views that still expect a markdown payload | board card preview, in-app spec viewers |
 | `src/lib/build-spec-materializer.ts` | the box worker materializes a read-only `.box/spec-{slug}.md` copy of the DB row before invoking the headless build agent ([[../skills/build-spec]]) | the agent's working-tree Read |
 
-Anything ELSE — any future caller of `serializeSpecRowToMarkdown` or any new `docs/brain/specs/` fetch in PM scope — fails `scripts/_check-pm-md-reads.ts`. The allow-list lives there (`INTENTIONAL_MATERIALIZATION` + the transitional `PENDING_PHASE_2_RETIREMENT`); a new addition must update BOTH the table above AND `INTENTIONAL_MATERIALIZATION`, or the predeploy check fails. `PENDING_PHASE_2_RETIREMENT` shrinks to empty when Phase 2 lands — at that point every "to-retire" entry below is gone.
-
-> Two additional surviving consumers (write-side, no md-read pattern — they render to disk from the DB row, never parse markdown coming back, so the check script has nothing to enforce on them): `src/lib/brain-roadmap.ts` · `serializeSpecRowToMarkdown` (the renderer itself) and `src/lib/build-spec-materializer.ts` · `materializeSpec` / `renderSpecRow` (Bo's per-build `.box/spec-{slug}.md` write).
+Anything ELSE — any future caller of `serializeSpecRowToMarkdown` or any new `docs/brain/specs/` fetch in PM scope — fails `_check-pm-md-reads.ts`. The allow-list lives in `scripts/_audit-pm-md-reads.ts` (`INTENTIONAL_MATERIALIZATION`) so the audit + the check share one source of truth.
 
 ## What got retired (Phase 2 deletes)
 
