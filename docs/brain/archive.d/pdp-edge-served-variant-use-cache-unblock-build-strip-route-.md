@@ -1,0 +1,1 @@
+- **PDP edge-served variant 'use cache' — unblock build by stripping cacheComponents-incompatible exports** · verified 2026-06-26 · → [[../lifecycles/storefront-checkout]]
