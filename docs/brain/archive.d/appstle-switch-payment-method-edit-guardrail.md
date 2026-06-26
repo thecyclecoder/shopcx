@@ -1,0 +1,1 @@
+- **Recognize Appstle's billing-cycle-contract-edit guardrail in appstleSwitchPaymentMethod** · verified 2026-06-26 · → [[../libraries/appstle]]
