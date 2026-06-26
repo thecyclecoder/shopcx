@@ -70,6 +70,37 @@ export const CANARY_WINDOW_MS = Number(process.env.DEPLOY_GUARDIAN_CANARY_WINDOW
 export const DEPLOY_REGRESSION_MIN_SIGNATURES = Number(process.env.DEPLOY_GUARDIAN_MIN_SIGNATURES || 2);
 export const DEPLOY_REGRESSION_MIN_COUNT = Number(process.env.DEPLOY_GUARDIAN_MIN_COUNT || 3);
 
+/**
+ * Blast-radius gate (the second correlation filter, alongside `outage_correlated`): an error source / shape
+ * a Vercel CODE deploy has NO causal path to is NOT this deploy's regression — it's a foreign signal that
+ * merely shares the canary window. Excluding these is what `outage_correlated` already does for outages;
+ * this generalizes it to two classes the canary kept mis-attributing (build-card-lifecycle-timeline Phase 3
+ * incident: a `getAutoFoldEligibleSlugs` fold-gate diff was auto-reverted twice — once on a 1-second burst of
+ * `supabase-logs` gateway 502s, once on a recurring Appstle `UserGeneratedError` billing condition — neither
+ * touchable by the merged code, both `newRedLoops:[]`):
+ *
+ *  - `supabase-logs` — the Supabase DB-log poller's edge-API 5xx / `context canceled` / auth-gateway errors.
+ *    These are the Postgres/PostgREST/GoTrue gateway's OWN infra blips (platform-wide, hit unrelated routes
+ *    like `/auth/v1/user`, `/rest/v1/specs`). A deploy ships Vercel functions; it cannot make Supabase's
+ *    gateway return 502. Same exclusion class as an outage — still surfaced on the error feed, never an
+ *    auto-revert trigger. (Override: `DEPLOY_GUARDIAN_INCLUDE_INFRA_SOURCES=1` to re-arm them.)
+ *  - `UserGeneratedError:` — Appstle / business-state errors that fire on the customer's billing cadence, not
+ *    the code path (e.g. "Subscription contract cannot be updated if there is a current/upcoming billing
+ *    cycle edit"). A user/business-state condition, not a code fault — surfaced, never auto-reverted.
+ */
+const DEPLOY_REGRESSION_EXCLUDED_SOURCES: ReadonlySet<string> =
+  process.env.DEPLOY_GUARDIAN_INCLUDE_INFRA_SOURCES === "1" ? new Set() : new Set(["supabase-logs"]);
+
+/** A `vercel`/`inngest` error whose TITLE marks it a user/business-state condition, not a code fault. */
+function isUserGeneratedError(title: string | null): boolean {
+  return /UserGeneratedError\b/i.test(title || "");
+}
+
+/** Is this new-error signature a foreign infra / user-state signal a code deploy can't have caused? */
+export function isExcludedFromDeployRegression(r: { source: string; title: string | null }): boolean {
+  return DEPLOY_REGRESSION_EXCLUDED_SOURCES.has(r.source) || isUserGeneratedError(r.title);
+}
+
 /** Cap the watches evaluated per cron tick so a backlog can't run the tick unbounded. */
 const EVAL_BATCH_CAP = 25;
 
@@ -236,8 +267,10 @@ export async function gatherDeployFindings(admin: Admin, watch: DeployWatch): Pr
 
   // NEW error signatures: first seen WITHIN the canary window [deployed_at, window_ends_at], NOT
   // outage-correlated (those are outage symptoms, not this deploy's regression — agent-outage-resilience),
-  // and NOT in the pre-deploy baseline. Bounding the upper end to window_ends_at keeps attribution to THIS
-  // deploy's window even if the evaluator cron runs late (a later error belongs to a later deploy).
+  // NOT a foreign infra/user-state signal a code deploy can't have caused (DEPLOY_REGRESSION_EXCLUDED_SOURCES
+  // / UserGeneratedError — the second blast-radius filter), and NOT in the pre-deploy baseline. Bounding the
+  // upper end to window_ends_at keeps attribution to THIS deploy's window even if the evaluator cron runs late
+  // (a later error belongs to a later deploy).
   const { data: errRows } = await admin
     .from("error_events")
     .select("signature, source, title, count, first_seen_at, outage_correlated")
@@ -245,7 +278,7 @@ export async function gatherDeployFindings(admin: Admin, watch: DeployWatch): Pr
     .lte("first_seen_at", watch.window_ends_at)
     .eq("outage_correlated", false);
   const newErrorSignatures = ((errRows as Array<{ signature: string; source: string; title: string | null; count: number }> | null) || [])
-    .filter((r) => r.signature && !baselineSignatures.has(r.signature))
+    .filter((r) => r.signature && !baselineSignatures.has(r.signature) && !isExcludedFromDeployRegression(r))
     .map((r) => ({ signature: r.signature, source: r.source, title: r.title, count: r.count ?? 1 }));
 
   // NEW red loops: an alert that OPENED after the deploy + isn't one that was already open at deploy time.

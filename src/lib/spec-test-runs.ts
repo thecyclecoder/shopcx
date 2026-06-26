@@ -14,6 +14,7 @@ import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
 import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_FOLD_GATE_LOOP_ID } from "@/lib/control-tower/registry";
+import { getSecurityStateBySlug } from "@/lib/security-agent";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -501,18 +502,22 @@ export async function getHumanTestQueue(workspaceId: string): Promise<HumanTestQ
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * Gate B — fold on MACHINE spec-test pass (auto-ship-pipeline Phase 2; fold-on-spec-test-pass, task #29).
+ * Gate B — fold on MACHINE spec-test pass + SECURITY clear (auto-ship-pipeline Phase 2;
+ * fold-on-spec-test-pass, task #29; build-card-lifecycle-timeline Phase 3).
  *
  * The mirror of the auto-merge gate, one rung up the pipeline: where Gate A automates the owner's
  * rubber-stamp "merge" click on green PRs, Gate B folds a shipped spec into the brain the moment its
- * MACHINE spec-test passes (agent-verdict `approved` + no open regression) — no human click required.
- * Fold is NON-destructive (the specs/spec_phases row is PRESERVED with status='folded'; the fold just
- * extracts knowledge into the permanent brain pages), so the machine spec-test is sufficient verification.
- * It optimizes a bounded proxy (fold-when-machine-tested-green), the owner still owns the objective + can
- * pause it (the `workspaces.auto_fold_enabled` kill-switch), and every fold is surfaced (Control Tower
- * heartbeat + log). Human QA is now ADVISORY — a waiting/failed `needs_human` check does NOT block the
- * fold; only a real machine-detected regression (an open auto-`fail`) leaves the spec alone (hitting a rail
- * = leave it). Coalesces into the SAME batch fold-build the manual verify uses (enqueue_fold).
+ * MACHINE spec-test passes (agent-verdict `approved` + no open regression) AND its post-merge security
+ * review reaches a clean terminal state — no human click required. Fold is NON-destructive (the
+ * specs/spec_phases row is PRESERVED with status='folded'; the fold just extracts knowledge into the
+ * permanent brain pages), so the machine spec-test + a clean security pass are sufficient verification.
+ * It optimizes a bounded proxy (fold-when-machine-tested-green-AND-security-clear), the owner still owns
+ * the objective + can pause it (the `workspaces.auto_fold_enabled` kill-switch), and every fold is
+ * surfaced (Control Tower heartbeat + log). Human QA is ADVISORY — a waiting/failed `needs_human` check
+ * does NOT block the fold; only a real machine-detected regression (an open auto-`fail`) OR a live /
+ * surfaced security-review leaves the spec alone (hitting a rail = leave it; security routes a Build card
+ * via [[security-agent]] so the rail is actionable). Coalesces into the SAME batch fold-build the manual
+ * verify uses (enqueue_fold).
  * ────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -540,14 +545,24 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  * verification. Fold is NON-destructive in the DB-driven world (the specs/spec_phases row is PRESERVED
  * with status='folded'; the fold only extracts knowledge into the permanent brain pages) — so gating it
  * on an uncompletable human-test backlog just blinds the devops agents to shipped code. A spec is eligible
- * the moment its machine spec-test passes:
- *   - the latest spec_test run is a CLEAN MACHINE PASS — agent-verdict `approved` OR `needs_human` (its
- *     automatable Verification checks all pass; a `needs_human` verdict means the agent machine-verified
- *     everything it could and flagged the REMAINDER for OPTIONAL human review — task #29), AND
- *   - 0 regressions (no UNRESOLVED auto-`fail` check — an evidence-backed broken bullet; same definition the
- *     human-test queue / regression banner use). A FAILING spec-test (verdict `issues`/`error`, or any open
- *     auto-`fail` — incl. a `needs_human` run that carries an unresolved machine `fail`) is NOT eligible — it
- *     surfaces the failure instead of folding.
+ * when BOTH gates pass:
+ *   - **Spec-test gate** (the original): the latest spec_test run is a CLEAN MACHINE PASS — agent-verdict
+ *     `approved` OR `needs_human` (its automatable Verification checks all pass; a `needs_human` verdict means
+ *     the agent machine-verified everything it could and flagged the REMAINDER for OPTIONAL human review —
+ *     task #29) AND 0 regressions (no UNRESOLVED auto-`fail` check — an evidence-backed broken bullet; same
+ *     definition the human-test queue / regression banner use). A FAILING spec-test (verdict `issues`/`error`,
+ *     or any open auto-`fail` — incl. a `needs_human` run that carries an unresolved machine `fail`) is NOT
+ *     eligible — it surfaces the failure instead of folding.
+ *   - **Security-test gate** ([[../specs/build-card-lifecycle-timeline]] Phase 3): the per-diff
+ *     [[security-agent]] review for the slug has reached a clean terminal state — a `completed`
+ *     security-review job exists AND there is no live job (`queued`/`claimed`/`building`/`needs_input`/
+ *     `queued_resume`) and no surfaced job (`needs_approval` = routed real-vuln fix · `needs_attention` =
+ *     needs-human finding). The security-test rollup ([[getSecurityStateBySlug]]) is the SAME signal the
+ *     timeline's Security node reads (Phase 1 `securityCompletedClean`) so the two can never disagree.
+ *     A spec whose security-review is still live or surfaced is NOT yet eligible — the fold DEFERS until
+ *     security clears, exactly as it defers behind a live build today (fold-guard-live-build precedent).
+ *     A shipped spec with no security-review record yet (the merge hook hasn't fired, or it's mid-enqueue)
+ *     is also NOT eligible — defer until the post-merge review lands.
  *
  * Human QA is now ADVISORY, never a fold gate (task #29): a `needs_human` VERDICT, a `needs_human` check the
  * owner hasn't resolved, or a human `failed` resolution, does NOT block the fold (the "human QA pending" badge
@@ -568,10 +583,13 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  *      AND have 0 unresolved auto-`fail` regressions. A degenerate 0-check row — the "silent empty pass" the
  *      AgentVerdict doc warns about (an unparseable/empty verdict that reads like a clean pass) — is NOT a
  *      genuine verification: nothing was actually asserted, so it is NOT eligible. Absence of a `fail` ≠ a pass.
+ *
+ * Supervisable-autonomy posture: hitting the security rail (live/surfaced) = DEFER + escalate (the Build
+ * card surfaces the routed fix); the gate NEVER folds past it.
  */
 export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
   const admin = createAdminClient();
-  const [{ specs }, archived, runs, resolutions, liveRows] = await Promise.all([
+  const [{ specs }, archived, runs, resolutions, liveRows, securityBySlug] = await Promise.all([
     // Grade the SAME workspace whose spec-test runs we read below — `getRoadmap()` with no arg resolves a
     // non-deterministic DEFAULT workspace (latest agent_job), so the gate would otherwise grade the wrong
     // workspace's specs against this workspace's runs. Pass workspaceId so the rollup-derived `shipped` set
@@ -590,6 +608,11 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
       .eq("workspace_id", workspaceId)
       .in("kind", ["build", "spec-test"])
       .in("status", ACTIVE_STATUSES),
+    // fold-gate security gate (build-card-lifecycle-timeline Phase 3): one batched per-slug rollup that
+    // mirrors Phase 1's `securityCompletedClean` signal — clean iff a `completed` security-review job
+    // exists for the slug AND no live/surfaced job is open. Same source the Security node reads, so the
+    // node + the gate can never disagree.
+    getSecurityStateBySlug(admin, workspaceId),
   ]);
   const archivedSet = new Set(archived);
   const liveSlugs = new Set(((liveRows.data ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug));
@@ -624,6 +647,15 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     }
     if (hasRegression) continue;
 
+    // Security-test gate (build-card-lifecycle-timeline Phase 3): require a clean terminal security review.
+    // No record yet (`undefined`) is NOT clean — the post-merge security pass hasn't landed; defer. Live
+    // (`queued`/`claimed`/`building`/`needs_input`/`queued_resume`) defers. Surfaced (`needs_approval` =
+    // routed real-vuln fix · `needs_attention` = needs-human finding) defers. Only `completedClean === true`
+    // (a `completed` job with no live/surfaced sibling) clears the gate — the exact condition Phase 1's
+    // Security node renders as `done`.
+    const sec = securityBySlug[s.slug];
+    if (!sec?.completedClean) continue;
+
     eligible.push(s.slug);
   }
   return eligible;
@@ -639,12 +671,18 @@ export interface AutoFoldResult {
 }
 
 /**
- * Gate B: enqueue a batch fold-build for every shipped spec that PASSED its machine spec-test in a workspace.
+ * Gate B: enqueue a batch fold-build for every shipped spec that PASSED its machine spec-test AND its
+ * post-merge security review in a workspace.
  *
  * Guardrails (supervisable autonomy):
  *  - kill-switch: no-op when `auto_fold_enabled === false` on the workspace.
  *  - MACHINE-PASS only — agent-verdict approved + 0 open regressions (getAutoFoldEligibleSlugs). Human QA
  *    is advisory: a waiting/failed `needs_human` check does NOT block; only an open auto-`fail` regression does.
+ *  - SECURITY-CLEAR only (build-card-lifecycle-timeline Phase 3) — the per-diff security-review for the
+ *    slug must have reached a clean terminal state (`completedClean` via [[getSecurityStateBySlug]]). A live
+ *    review (`queued`/`claimed`/`building`/`needs_input`/`queued_resume`) or a surfaced one
+ *    (`needs_approval` routed fix · `needs_attention` needs-human finding) DEFERS the fold — exactly as a
+ *    live build does. Hitting the security rail = defer + escalate, never fold past it.
  *  - Idempotent: skips a spec already pending/folding (a fold job already owns it); enqueue_fold itself
  *    coalesces every eligible spec into ONE queued batch fold-build (no fan-out of N fold PRs).
  *  - requested_by = null (no human clicked — this is the gate). Surfaces the pass as a Control Tower

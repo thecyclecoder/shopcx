@@ -38,11 +38,12 @@ The 5 stages, in order — a spec walks them left to right:
 4. **`security-test`** — The [[security-agent]] post-merge review. Pending until the spec has shipped;
    then active while the security-review job is `queued`/`claimed`/`building`/`needs_input`/`queued_resume`
    (or post-ship with no record yet); done on a clean `completed`; needs-attention on `needs_approval`
-   (routed real-vuln fix) / `needs_attention` (needs-human finding). Phase 3 of this spec extends the fold
-   gate to require this stage to be `done` before fold — so the timeline and the gate read the SAME state.
+   (routed real-vuln fix) / `needs_attention` (needs-human finding). **Phase 3 (shipped)** extends the fold
+   gate to require this stage to be `done` before fold — so the timeline and the gate read the SAME state
+   (`securityCompletedClean === true` in both places).
 5. **`fold`** — The spec is archived to brain (`specs.status === "folded"`). Done iff folded; pending
    otherwise. By construction, a folded spec has every upstream stage done (build shipped, spec-test
-   passed, security cleared after Phase 3) so the full timeline reads checked.
+   passed, security cleared) so the full timeline reads checked.
 
 ## Types
 
@@ -75,8 +76,10 @@ The 5 stages, in order — a spec walks them left to right:
   [[build-lifecycle-context]], which assembles the LifecycleContext this helper consumes. The Archive
   section synthesizes a fixed `FOLDED_DERIVATION` for compact "all 5 ✓" rendering on every folded entry.
   The presentational component lives at `src/app/dashboard/roadmap/LifecycleTimeline.tsx`.
-- Phase 3 (this spec): `getAutoFoldEligibleSlugs` ([[spec-test-runs]]) extended to require the `security-test`
-  rollup to be `done` before a spec is fold-eligible — same signal both surfaces consume.
+- **Phase 3 (shipped):** `getAutoFoldEligibleSlugs` ([[spec-test-runs]]) requires the `security-test`
+  rollup to be `done` before a spec is fold-eligible — both surfaces consume the SAME
+  `getSecurityStateBySlug` signal so the Security node and the fold gate can never disagree. A live or
+  surfaced security-review defers the fold (hitting the security rail = escalate, never fold past it).
 
 ## Gotchas
 

@@ -20,8 +20,14 @@ The director auto-merges its own error fixes ([[../specs/director-zero-backlog-e
 
 Only signals that **FIRST appear AFTER the deploy timestamp** are attributed to the deploy (mirroring [[../specs/agent-outage-resilience]]'s outage-correlation tagging):
 
-- **NEW error signatures** — [[../tables/error_events]] rows with `first_seen_at >= deployed_at`, `outage_correlated = false` (outage symptoms aren't this deploy's fault), and the signature NOT in the pre-deploy baseline.
+- **NEW error signatures** — [[../tables/error_events]] rows with `first_seen_at >= deployed_at`, `outage_correlated = false` (outage symptoms aren't this deploy's fault), the signature NOT in the pre-deploy baseline, AND not a **blast-radius-excluded** infra/user-state signal (see below).
 - **NEW red loops** — [[../tables/loop_alerts]] rows `status='open'` with `opened_at >= deployed_at`, the `loop_id` NOT already open at deploy time.
+
+**Blast-radius filter (`isExcludedFromDeployRegression`).** A second correlation filter alongside `outage_correlated`: a Vercel CODE deploy has **no causal path** to certain error classes, so they're dropped from the new-error spike (still surfaced on the error feed — just never an auto-revert trigger). Two classes, both env-overridable:
+- **`source='supabase-logs'`** — the Supabase DB-log poller's edge-API 5xx / `context canceled` / auth-gateway errors. These are Postgres/PostgREST/GoTrue's OWN gateway blips (platform-wide, hit unrelated routes like `/auth/v1/user`, `/rest/v1/specs`); a deploy ships functions, it can't make Supabase return 502. Same exclusion class as an outage. Re-arm with `DEPLOY_GUARDIAN_INCLUDE_INFRA_SOURCES=1`.
+- **`UserGeneratedError:` titles** — Appstle / business-state errors that fire on the customer's billing cadence, not the code path (e.g. "Subscription contract cannot be updated if there is a current/upcoming billing-cycle edit"). A user/business-state condition, not a code fault.
+
+> This filter closed the [[../specs/build-card-lifecycle-timeline]] Phase 3 incident: a fold-gate diff (`getAutoFoldEligibleSlugs` security-gating) was auto-reverted twice — once on a 1-second burst of 7 `supabase-logs` 502s, once on a recurring Appstle `UserGeneratedError` — neither touchable by the merged code (both watches `newRedLoops:[]`). The temporal-only gate had mis-attributed two foreign signals that merely shared the canary window.
 - **Control-Tower cross-check** — the live [[control-tower]] `buildControlTowerSnapshot` red-loop count (a degraded snapshot is recorded `controlTowerOk:false`, never silently dropped).
 
 ## Exports

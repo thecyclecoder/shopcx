@@ -56,27 +56,34 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
   **+ the Regressions list** (keyed off evidence-backed `fail` checks only — `needs_human`/`inconclusive` never appear
   there, [[../specs/spec-test-classification|the classification rule]]). Regressions DO block the fold.
 
-### Auto-fold gate — Gate B (fold on MACHINE spec-test pass; fold-on-spec-test-pass, task #29)
-**The fold trigger is the MACHINE spec-test pass, NOT human verification.** Fold is non-destructive (the [[../tables/specs]]
-row is preserved with `status='folded'`; the fold just extracts knowledge into the permanent brain pages), so the
-spec-test agent's green grade over the `## Verification` bullets is sufficient to fold. **Human QA is advisory** — a
-`needs_human` *verdict*, a waiting/failed `needs_human` *check*, or a human `failed` resolution NEVER blocks the fold
-(task #29). A `needs_human` run that carries ≥1 real machine pass and no open auto-`fail` is fold-eligible exactly like
-an `approved` one; only a genuine failure (`issues`/`error`, a 0-machine-pass empty run, or an open auto-`fail`) holds.
-- `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the shipped-not-archived specs whose **machine spec-test passed**:
-  latest run a **clean machine pass** (agent-verdict `approved` **OR `needs_human`**) **with `summary.auto_pass >= 1`** (≥1
-  real machine check actually passed) · 0 **unresolved auto-`fail` regressions**. **`needs_human` is ADVISORY-ELIGIBLE
-  (task #29):** a `needs_human` verdict means the agent machine-verified everything it could and flagged the REMAINDER for
-  *optional* human review — it is NOT a failure, so a `needs_human` run that carries real machine passes and no open
-  auto-`fail` folds just like an `approved` one. (Before this fix the gate required `agent_verdict='approved'`, which
-  wrongly stranded the machine-passed `needs_human` specs shipped-but-unfoldable.) It does **NOT** consult `needs_human`
-  *checks* or human `failed` resolutions (those are advisory). A genuinely failing run (`issues`/`error`, a 0-machine-pass
-  degenerate row, or an open auto-`fail` — including a `needs_human` run whose checks include an UNRESOLVED machine `fail`)
-  is NOT eligible — it surfaces the failure instead. It grades `getRoadmap(workspaceId)` (the SAME tenant whose runs it
-  reads), not the default-resolved workspace. **fold-guard-live-build:** a slug with a live
-  `build`/`spec-test` `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also excluded** — auto-folding it would orphan the
-  running build (its spec page 404s the moment the fold merges), so the fold is deferred until the job is terminal (the next
-  gate pass re-picks it up), never dropped. This mirrors the manual fold guard `getLiveJobForSlug` ([[agent-jobs]]).
+### Auto-fold gate — Gate B (fold on MACHINE spec-test pass + SECURITY clear; fold-on-spec-test-pass, task #29; [[../specs/build-card-lifecycle-timeline]] Phase 3)
+**The fold trigger is the MACHINE spec-test pass + a clean post-merge SECURITY review, NOT human verification.** Fold is
+non-destructive (the [[../tables/specs]] row is preserved with `status='folded'`; the fold just extracts knowledge into the
+permanent brain pages), so the spec-test agent's green grade over the `## Verification` bullets + a clean security pass are
+sufficient to fold. **Human QA is advisory** — a `needs_human` *verdict*, a waiting/failed `needs_human` *check*, or a human
+`failed` resolution NEVER blocks the fold (task #29).
+- `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the shipped-not-archived specs whose **machine spec-test passed AND
+  security cleared**:
+  - **Spec-test gate:** latest run a **clean machine pass** (agent-verdict `approved` **OR `needs_human`**) **with
+    `summary.auto_pass >= 1`** (≥1 real machine check actually passed) · 0 **unresolved auto-`fail` regressions**.
+    **`needs_human` is ADVISORY-ELIGIBLE (task #29):** a `needs_human` verdict means the agent machine-verified everything it
+    could and flagged the REMAINDER for *optional* human review — it is NOT a failure, so a `needs_human` run that carries real
+    machine passes and no open auto-`fail` folds just like an `approved` one. (Before this fix the gate required
+    `agent_verdict='approved'`, which wrongly stranded the machine-passed `needs_human` specs shipped-but-unfoldable.) It does
+    **NOT** consult `needs_human` *checks* or human `failed` resolutions (those are advisory). A genuinely failing run
+    (`issues`/`error`, a 0-machine-pass degenerate row, or an open auto-`fail` — including a `needs_human` run whose checks
+    include an UNRESOLVED machine `fail`) is NOT eligible — it surfaces the failure instead. It grades `getRoadmap(workspaceId)`
+    (the SAME tenant whose runs it reads), not the default-resolved workspace.
+  - **Security-test gate (Phase 3):** the per-diff [[security-agent]] review for the slug must be `completedClean` via
+    [[security-agent]] `getSecurityStateBySlug` (a `completed` job exists AND no live `queued`/`claimed`/`building`/
+    `needs_input`/`queued_resume` job AND no surfaced `needs_approval` routed fix / `needs_attention` needs-human finding).
+    Same signal Phase 1's `securityCompletedClean` reads, so the [[build-lifecycle]] Security node and this gate **can never
+    disagree**. A spec with a live or surfaced security-review **defers** the fold (hitting the rail = escalate, never fold past
+    it); a shipped spec missing a security-review record entirely also defers (the post-merge enqueue hasn't fired yet).
+  - **fold-guard-live-build:** a slug with a live `build`/`spec-test` `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also
+    excluded** — auto-folding it would orphan the running build (its spec page 404s the moment the fold merges), so the fold is
+    deferred until the job is terminal (the next gate pass re-picks it up), never dropped. This mirrors the manual fold guard
+    `getLiveJobForSlug` ([[agent-jobs]]).
 - `isAutoFoldEnabled(workspaceId, admin?)` → `boolean` — the owner kill-switch (`workspaces.auto_fold_enabled`,
   default ON; `select("*")` so a pre-migration deploy degrades to enabled). Mirrors `isAutoMergeEnabled`.
 - `autoFoldVerifiedSpecs(workspaceId, admin?)` → `AutoFoldResult` — for each eligible spec not already
