@@ -1,0 +1,1 @@
+- **Growth Director — Stage 1: Per-Product Acquisition-ROAS Spine** · verified 2026-06-26 · → [[../libraries/acquisition-roas]]
