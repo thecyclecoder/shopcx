@@ -21,11 +21,7 @@
  * enqueue helper the cron uses. The agent is read-only; only this writer mutates state.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import {
-  effectiveStatusFromState,
-  markSpecCardValePassed,
-  type SpecCardFlags,
-} from "@/lib/spec-card-state";
+import { markSpecCardValePassed } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -46,36 +42,28 @@ export interface SpecReviewDecision {
 }
 
 /**
- * `(workspaceId, slug)` pairs in `in_review` for one workspace — Vale's queue per pass. Reads from
- * `spec_card_state` (the source of truth post-spec-status-db-driven). A spec that has never had a
- * card-state row written is treated as `planned` (its markdown default).
+ * Slugs parked in `in_review` for one workspace — Vale's queue per pass.
  *
- * Phase 3: this queue is the FULL `in_review` pool — Vale checks quality on every spec, EVEN ones already
- * carrying `flags.vale_pass=true`. The dedup is in the worker (a `vale_pass` spec is included in the prompt
- * only when the spec markdown has changed since the prior pass) — but a fresh selectInReviewSpecs caller
- * (Ada's disposition lane) reads `flags.vale_pass` directly off the row to skip its own re-check.
+ * Reads `public.specs` directly (the CANONICAL source post-db-driven-specs). The legacy `spec_card_state`
+ * mirror is NOT populated with `in_review` for newly-authored specs — a fresh spec lands as a `public.specs`
+ * row with `status='in_review'` and may never get a card-state row — so reading the mirror silently missed
+ * the whole queue and Vale never enqueued (the bug this fixes). `specs.deferred=true` wins over status
+ * (mirrors the readers' projection), so a deferred spec doesn't slip into the in_review pool by accident.
+ *
+ * Phase 3: this is the FULL `in_review` pool — Vale checks quality on every in_review spec, EVEN ones
+ * already carrying `vale_pass=true` (a re-author can invalidate a prior pass). Ada's disposition lane reads
+ * `specs.vale_pass` directly to skip its own re-check.
  */
 export async function selectInReviewSpecs(admin: Admin, workspaceId: string): Promise<string[]> {
   const { data, error } = await admin
-    .from("spec_card_state")
-    .select("spec_slug, status, flags")
+    .from("specs")
+    .select("slug, status, deferred")
     .eq("workspace_id", workspaceId)
     .eq("status", "in_review");
   if (error || !data) return [];
-  // effectiveStatusFromState honors flags.deferred (which wins over status), so a row marked deferred
-  // doesn't slip into the in_review pool by accident.
   return data
-    .map((r) => ({ slug: r.spec_slug as string, effective: effectiveStatusFromState({
-      workspace_id: workspaceId,
-      spec_slug: r.spec_slug as string,
-      status: r.status as "in_review",
-      phase_states: [],
-      flags: (r.flags ?? {}) as SpecCardFlags,
-      last_merge_sha: null,
-      updated_at: "",
-    }) }))
-    .filter((r) => r.effective === "in_review")
-    .map((r) => r.slug);
+    .filter((r) => !r.deferred) // a deferred spec is out of the in_review pool even if status still reads it
+    .map((r) => r.slug as string);
 }
 
 /**
