@@ -5,7 +5,6 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
-import { fetchSpecRawFromMain, parseFixesLink } from "@/lib/spec-drift";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
 import { getSpec as getSpecFromDb, stampPhaseShipped } from "@/lib/specs-table";
 
@@ -580,26 +579,27 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
 }
 
 /**
- * fix-ship-retests-origin: a just-merged build whose spec carries a machine-readable `Fixes: {origin}`
- * link (stamped by the propose-fix flow) should auto-re-test the ORIGIN spec — the fix is now live, so the
- * origin's previously-failing spec-test check can flip ✅ and its stale "Agent-tested · issues" badge clears
- * with no manual re-queue. Reads the merged fix spec's markdown from `main`, parses its `Fixes:` link, and
- * enqueues the origin's spec-test through the shared `enqueueSpecTestIfDue` guard (deduped; the origin's own
- * shipped-but-not-archived gate still applies — derived from disk, no `knownStatus`).
+ * fix-ship-retests-origin: a just-merged build whose spec is a regression fix for an ORIGIN spec should
+ * auto-re-test that origin — the fix is now live, so the origin's previously-failing spec-test check can
+ * flip ✅ and its stale "Agent-tested · issues" badge clears with no manual re-queue. Reads the typed
+ * `specs.regression_of_slug` provenance column directly (retire-md-reads-from-pm-flow Phase 2 — no more
+ * `**Fixes:**` markdown line fetch + parse), and enqueues the origin's spec-test through the shared
+ * `enqueueSpecTestIfDue` guard (deduped; the origin's own shipped-but-not-archived gate still applies).
  *
  * Re-test ONLY — never marks the origin verified/archived (the owner's gate); it just refreshes the QC
- * signal. A spec with no `Fixes:` link no-ops (back-compatible). A still-failing re-test keeps the red badge
- * correctly — the loop surfaces truth, it doesn't paper over it. Returns the origin slug iff a re-test was
- * actually enqueued (null otherwise). Best-effort: never throws on a missed fetch — the daily spec-test
- * backlog cron re-tests shipped specs anyway.
+ * signal. A spec with no `regression_of_slug` no-ops (back-compatible — the propose_fix flow's
+ * `**Regression-of:** [[origin]]` header populates the column when the spec is authored). A still-failing
+ * re-test keeps the red badge correctly — the loop surfaces truth, it doesn't paper over it. Returns the
+ * origin slug iff a re-test was actually enqueued (null otherwise). Best-effort: never throws on a missed
+ * read — the daily spec-test backlog cron re-tests shipped specs anyway.
  */
 export async function retestOriginIfFixMerged(workspaceId: string, fixSlug: string): Promise<string | null> {
-  const fetched = await fetchSpecRawFromMain(fixSlug);
-  if (!fetched) return null;
-  const link = parseFixesLink(fetched.raw);
-  if (!link || !link.origin || link.origin === fixSlug) return null; // no link / self-reference → no-op
-  const res = await enqueueSpecTestIfDue(workspaceId, link.origin);
-  return res.enqueued ? link.origin : null;
+  const spec = await getSpecFromDb(workspaceId, fixSlug);
+  if (!spec) return null;
+  const origin = spec.regression_of_slug;
+  if (!origin || origin === fixSlug) return null; // no link / self-reference → no-op
+  const res = await enqueueSpecTestIfDue(workspaceId, origin);
+  return res.enqueued ? origin : null;
 }
 
 /**

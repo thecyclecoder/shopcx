@@ -29,7 +29,7 @@ The retention operating system for Superfoods Company. Replaces Gorgias + Siena 
 These can't live in a wiki page — they're project-wide invariants:
 
 - **⭐ North star — supervisable autonomy.** Every autonomous tool optimizes a proxy and can reach a degenerate state that destroys the real objective (Goodhart). So: a tool optimizes a bounded proxy; a role agent owns the objective and supervises the tool; the CEO owns company objectives (CEO → role agent → tool). Every autonomous tool MUST surface its reasoning, respect its supervisor's guardrails (hitting a rail = escalate, not execute), and answer to an objective-owner — never a silent proxy-optimizer. See [operational-rules.md § North star](docs/brain/operational-rules.md).
-- **Database is the spec.** Status enums, column shapes — probe before assuming. See [Probing technique](docs/brain/README.md#probing-technique).
+- **Database is the spec.** Status enums, column shapes — probe before assuming. See [Probing technique](docs/brain/README.md#probing-technique). The PM flow reads `public.specs` + `public.spec_phases` via [specs-table](docs/brain/libraries/specs-table.md) `getSpec` / `listSpecs` — never a `docs/brain/specs/*.md` fetch (enforced in CI by [scripts/_check-pm-md-reads.ts](scripts/_check-pm-md-reads.ts); call graph: [pm-flow-data-sources](docs/brain/recipes/pm-flow-data-sources.md)).
 - **Internal joins use UUIDs**, never `shopify_*_id`. Shopify is being sunset.
 - **All writes go through `createAdminClient()`** (service role). Never client-side.
 - **Per-workspace credentials are encrypted** AES-256-GCM via `src/lib/crypto.ts`. Column names end with `_encrypted`.

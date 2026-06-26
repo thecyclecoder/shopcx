@@ -1,35 +1,38 @@
 /**
- * spec-drift — keep a spec's phase emojis in sync with shipped code (spec-drift-agent spec).
+ * spec-drift — keep a spec's phase status in sync with shipped code (spec-drift-agent spec).
  *
- * Builds keep merging without their phase emoji flipping ⏳/🚧 → ✅, so shipped work parks in the
- * Planned/In-progress columns. This module is the per-phase, EVIDENCE-GATED reconciler that closes
+ * Builds keep merging without their `spec_phases.status` advancing to `shipped`, so shipped work parks
+ * in the Planned/In-progress columns. This module is the per-phase, EVIDENCE-GATED reconciler that closes
  * that drift. It NEVER guesses "merged ⇒ done": for each phase it weighs two independent signals —
  *
  *   1. a merged `kind='build'` agent_job for the spec (the work was actually shipped), and
- *   2. the phase's claimed code is verifiably on `main` (every file path / migration it names exists).
+ *   2. the phase's claimed code is verifiably on `main` (every file path / migration its body names exists).
  *
  * and acts per-phase:
- *   - merged build  AND all named code on main, emoji still ⏳/🚧 → AUTO-FLIP that phase ✅ (commit to main).
+ *   - merged build  AND all named code on main, status still planned/in_progress → AUTO-STAMP shipped
+ *     (via `stampPhaseShipped` — the only status-write surface).
  *   - all named code on main but NO merged build on record (can't be confident it was this phase's
  *     deliberate ship) → SURFACE it as drift for a one-tap owner flip (never a wrong auto-flip).
  *   - code not fully on main, or the phase names no verifiable paths → LEAVE it (genuinely unbuilt:
  *     a fan-out phase, a deferred follow-on). This is the guardrail against over-flagging multi-phase
- *     specs with real pending later phases (pdp-refinement-pass P3, winning-static-creative-finder P6).
+ *     specs with real pending later phases.
  *
- * The spec's column then follows from deriveStatus over the corrected phases — a spec is "shipped"
- * only when EVERY phase is ✅ (so pdp-refinement-pass stays in-progress while P3 is real, but its
- * P1/P2 read ✅). This only ever rewrites the leading phase emoji (+ a now-consistent H1 ✅); it
- * never touches spec logic and never marks a spec VERIFIED (that's the owner's gate). It reconciles
- * planned↔shipped phase truth only.
+ * DB-only data flow (retire-md-reads-from-pm-flow Phase 2): reads the spec via [[specs-table]] `getSpec`
+ * — `spec_phases[i].body` for code-path extraction, `spec_phases[i].status` for the per-phase decision.
+ * NO `docs/brain/specs/*.md` HTTP fetch, NO markdown parse. The status writeback is `stampPhaseShipped`
+ * on the canonical `spec_phases` row; nothing rewrites a markdown body anymore. The spec's column then
+ * follows from the rollup readers (`rollupPhaseStatus` over the post-stamp phase set) — a spec is
+ * "shipped" only when EVERY phase is shipped.
  *
- * Two triggers (same engine): the build-merge path (reconcileMergedJobs, the root fix — Part A) and a
- * Control-Tower self-audit cron backstop (spec-drift-reconcile — Part B). Surfaced drift lands in the
- * `spec_drift` table, rendered on the Control Tower for a one-tap flip. See docs/brain/libraries/spec-drift.md.
+ * Two triggers (same engine): the build-merge path ([[agent-jobs]] `applyMergedBuildEffects`, the root
+ * fix — Part A) and a Control-Tower self-audit cron backstop (spec-drift-reconcile — Part B). Surfaced
+ * drift lands in the `spec_drift` table, rendered on the Control Tower for a one-tap flip. See
+ * docs/brain/libraries/spec-drift.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { deriveSpecStatus, listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
-import { type SpecCardPhaseState } from "@/lib/spec-card-state";
-import { stampPhaseShipped } from "@/lib/specs-table";
+import { listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
+import { rollupPhaseStatus } from "@/lib/spec-card-state";
+import { getSpec, stampPhaseShipped, type SpecPhaseRow } from "@/lib/specs-table";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken(): string | undefined {
@@ -52,163 +55,22 @@ async function gh(method: string, path: string, body?: unknown): Promise<{ ok: b
   return { ok: res.ok, status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
 }
 
-// ── Phase parsing (line-tracked, mirrors brain-roadmap parseSpec ordering) ───────────────────────
+// ── Phase shape (DB row → drift-reconciler view) ─────────────────────────────────────────────────
 
-const PLANNED = "⏳";
-const IN_PROGRESS = "🚧";
-const SHIPPED = "✅";
-const REJECTED = "❌";
-const EMOJI_RE = /[⏳🚧✅❌]/;
-
-function statusFromText(s: string): Phase | null {
-  if (s.includes(REJECTED)) return "rejected";
-  if (s.includes(IN_PROGRESS)) return "in_progress";
-  if (s.includes(PLANNED)) return "planned";
-  if (s.includes(SHIPPED)) return "shipped";
-  return null;
-}
-
-/** One phase with the exact line whose leading emoji encodes its status (for surgical rewrites). */
+/** One phase as the reconciler sees it — the typed `spec_phases` row projected to the fields drift work uses. */
 export interface DriftPhase {
-  index: number; // 0-based, matches the board parser order + /api/roadmap/status phaseIndex
+  index: number; // 0-based — matches the board parser order + /api/roadmap/spec-drift phaseIndex
+  position: number; // 1-based — the canonical `spec_phases.position` for the writeback stamp
   title: string;
   status: Phase;
-  emojiLine: number; // line index carrying the status emoji (heading line, or the bullet under it)
   body: string; // the phase's text — what we scan for code paths
 }
 
-/**
- * Parse a spec's phases with line numbers, mirroring brain-roadmap parseSpec EXACTLY so a phase's
- * `index` here matches the board + the status route. Heading shape (`## Phase N — … <emoji>`) is
- * primary; the `## Phases` bullet shape (`- ✅ **P1 …**`) is the fallback only when no heading-phases
- * exist. Returns [] for a spec with neither shape.
- */
-export function parsePhasesWithLines(raw: string): DriftPhase[] {
-  const lines = raw.split("\n");
-  const phases: DriftPhase[] = [];
-
-  // Primary: a phase heading at H2 (`## Phase …`) OR H3 (`### Phase …` under a `## Phases` wrapper).
-  // Matching only H2 left H3-phase specs with zero phases → stuck at `planned`. `Phase\b` skips
-  // `## Phases`. Two invariants now layered on top:
-  //   - Boundary rule (skip-verification-subsections, PR #562): the canonical spec shape includes
-  //     a `## Verification` section with `### Phase N — …` subheaders mirroring each real phase —
-  //     an unguarded H3 match double-counted them, stranding shipped specs with phantom ⏳ phases.
-  //     So an H3 phase heading is counted ONLY when its nearest preceding H2 is `## Phases`
-  //     (PR #557's wrapper case); under `## Verification`, `## Completion criteria`, `## Safety /
-  //     invariants`, `## Background`, an H2 `## Phase N — …`, or any other section, an H3
-  //     `### Phase` is skipped. H2 `## Phase N — …` lines remain unconditionally counted.
-  //   - Fence rule (skip-fenced-code-blocks): any `##`/`###` Phase line inside a ``` or ~~~ fenced
-  //     code block is documentation, not a real phase. A spec embedding a canonical-shape EXAMPLE
-  //     in `## Background` / `## Anti-pattern` (e.g. the folded sibling's `## Background` ``` block
-  //     with 3 fenced `## Phase N` lines) otherwise inflates its phase count by the example. The
-  //     same fence guard applies to `currentH2` updates — a `## Whatever` inside a fence is NOT a
-  //     real section boundary — and to the fallback `## Phases` bullet path below.
-  const isPhaseLine = (l: string) => /^#{2,3}\s+Phase\b/.test(l);
-  const inPhasesWrapper = (currentH2: string | null) => /^Phases$/i.test(currentH2 ?? "");
-  const isPhaseHeading = (l: string, currentH2: string | null): boolean => {
-    if (!isPhaseLine(l)) return false;
-    if (l.startsWith("## ")) return true; // H2 — always a real phase heading
-    return inPhasesWrapper(currentH2); // H3 — only inside the `## Phases` wrapper
-  };
-
-  // Precompute fence state per line. A fence delimiter (```` ``` ```` or `~~~`) toggles `inFence`;
-  // delimiter lines themselves are marked as in-fence so they're also skipped (harmless, since they
-  // don't match any phase/section pattern anyway). Lines marked in-fence are skipped wholesale by
-  // both the primary loop (no phase detection, no currentH2 update, no body-end termination) and
-  // the fallback loop (no `## Phases` wrapper entry, no bullet detection).
-  const fenceRe = /^\s*(```|~~~)/;
-  const inFence: boolean[] = new Array(lines.length).fill(false);
-  {
-    let f = false;
-    for (let i = 0; i < lines.length; i++) {
-      if (fenceRe.test(lines[i])) {
-        f = !f;
-        inFence[i] = true;
-        continue;
-      }
-      inFence[i] = f;
-    }
-  }
-
-  let currentH2: string | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    if (inFence[i]) continue;
-    if (/^##\s+/.test(lines[i])) {
-      currentH2 = lines[i].replace(/^##\s+/, "").trim();
-    }
-    if (!isPhaseHeading(lines[i], currentH2)) continue;
-    let emojiLine = i;
-    let st = statusFromText(lines[i]);
-    if (!st) {
-      for (let j = i + 1; j < lines.length; j++) {
-        if (inFence[j]) continue;
-        if (lines[j].startsWith("## ") || isPhaseHeading(lines[j], currentH2)) break;
-        const s = statusFromText(lines[j]);
-        if (s) {
-          st = s;
-          emojiLine = j;
-          break;
-        }
-      }
-    }
-    // Body = heading line → the next phase heading (H2/H3) or the next top-level "## " section.
-    // Lines inside a fence are NEVER a body boundary — a fenced `## Phase N` example must not cut
-    // the real phase's body short.
-    let end = i + 1;
-    while (end < lines.length && (inFence[end] || (!lines[end].startsWith("## ") && !isPhaseHeading(lines[end], currentH2)))) end++;
-    phases.push({
-      index: phases.length,
-      title: cleanTitle(lines[i].replace(/^#{2,3}\s+/, "")),
-      status: st ?? "planned",
-      emojiLine,
-      body: lines.slice(i, end).join("\n"),
-    });
-  }
-  if (phases.length) return phases;
-
-  // Fallback: emoji-bearing bullets under a single "## Phases" section.
-  let inPhases = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (inFence[i]) continue;
-    if (/^##\s+Phases?\s*$/i.test(lines[i])) {
-      inPhases = true;
-      continue;
-    }
-    if (inPhases && lines[i].startsWith("## ")) break;
-    if (!inPhases) continue;
-    const bm = lines[i].match(/^\s*[-*]\s+(.*\S)\s*$/);
-    if (!bm) continue;
-    // Recognize a phase bullet by a leading emoji (legacy) OR a `**P1**`/`**Phase 1**` label — Phase 3
-    // stripped the emojis, so an emoji-less `- **P1 — …**` must still parse (status defaults `planned`).
-    const inner = bm[1].replace(/^[⏳🚧✅❌]\s*/, "");
-    if (!statusFromText(lines[i]) && !/^\*{0,2}(P\d+|Phase\s+\d+)\b/i.test(inner)) continue;
-    // Body = this bullet + its indented continuation (sub-bullets) until the next top-level bullet / section.
-    // Lines inside a fence don't terminate the body.
-    let end = i + 1;
-    while (end < lines.length && (inFence[end] || (!/^[-*]\s/.test(lines[end]) && !/^##\s/.test(lines[end])))) end++;
-    phases.push({
-      index: phases.length,
-      title: cleanTitle(bm[1]),
-      status: statusFromText(lines[i]) ?? "planned",
-      emojiLine: i,
-      body: lines.slice(i, end).join("\n"),
-    });
-  }
-  return phases;
-}
-
-/** A spec's phases as the board mirror stores them — `[{ index, title, status }]` (spec-card-db-companion). */
-export function phaseStatesFromRaw(raw: string): SpecCardPhaseState[] {
-  return parsePhasesWithLines(raw).map((p) => ({ index: p.index, title: p.title, status: p.status }));
-}
-
-function cleanTitle(s: string): string {
-  return s
-    .replace(EMOJI_RE, "")
-    .replace(/\*\*/g, "")
-    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, link, alias) => alias || link)
-    .replace(/\s+/g, " ")
-    .trim();
+function driftPhasesFromRows(rows: SpecPhaseRow[]): DriftPhase[] {
+  return rows
+    .slice()
+    .sort((a, b) => a.position - b.position)
+    .map((p, i) => ({ index: i, position: p.position, title: p.title, status: p.status, body: p.body }));
 }
 
 // ── Code-on-main verification ────────────────────────────────────────────────────────────────────
@@ -248,45 +110,6 @@ async function pathExistsOnMain(path: string, cache: Map<string, boolean>): Prom
   return exists;
 }
 
-// ── Phase-emoji writeback (surgical — leading emoji only) ──────────────────────────────────────────
-
-/** Replace the first status emoji on a line with `target`, preserving position; insert one if absent. */
-function setEmojiOnLine(line: string, target: string): string {
-  if (EMOJI_RE.test(line)) return line.replace(EMOJI_RE, target);
-  const heading = line.match(/^(#{1,6}\s+)(.*)$/);
-  if (heading) return `${heading[1]}${heading[2].replace(/\s+$/, "")} ${target}`;
-  const bullet = line.match(/^(\s*[-*]\s+)(.*)$/);
-  if (bullet) return `${bullet[1]}${target} ${bullet[2]}`;
-  return `${line} ${target}`;
-}
-
-/** Set the H1 title's status emoji (strip any existing ⏳/🚧/✅, append target). Leaves an explicit ❌ alone. */
-function setH1(raw: string, target: string): string {
-  const lines = raw.split("\n");
-  const i = lines.findIndex((l) => l.startsWith("# "));
-  if (i < 0) return raw;
-  if (lines[i].includes(REJECTED)) return raw; // never overwrite an explicit cut title
-  lines[i] = `${lines[i].replace(/[⏳🚧✅]/g, "").replace(/\s+$/, "")} ${target}`;
-  return lines.join("\n");
-}
-
-/**
- * Flip the phase at `phaseIndex` to ✅ in the spec markdown (leading emoji only), and — if every phase
- * is now ✅ — flip the H1 to ✅ too so the raw markdown agrees with the board's all-✅-is-shipped parse.
- * Pure: returns the new markdown (unchanged if the index is out of range or already ✅). Shared by the
- * reconciler's auto-flip and the one-tap owner flip endpoint, so both shapes flip identically.
- */
-export function flipPhaseToShipped(raw: string, phaseIndex: number): string {
-  const phases = parsePhasesWithLines(raw);
-  const phase = phases.find((p) => p.index === phaseIndex);
-  if (!phase || phase.status === "shipped") return raw;
-  const lines = raw.split("\n");
-  lines[phase.emojiLine] = setEmojiOnLine(lines[phase.emojiLine], SHIPPED);
-  let updated = lines.join("\n");
-  if (deriveSpecStatus(updated) === "shipped") updated = setH1(updated, SHIPPED);
-  return updated;
-}
-
 // ── Reconciler ─────────────────────────────────────────────────────────────────────────────────────
 
 export interface SpecDriftRow {
@@ -308,96 +131,64 @@ export async function resolveDriftRow(admin: ReturnType<typeof createAdminClient
 
 export interface ReconcileResult {
   slug: string;
-  flipped: { index: number; title: string }[]; // phases auto-flipped ✅ this run
+  flipped: { index: number; title: string }[]; // phases auto-stamped shipped this run
   surfaced: { index: number; title: string }[]; // phases left for a one-tap owner flip (open drift rows)
-  status: SpecStatus; // derived spec status after any flips (incl. `deferred`)
-  // The post-reconcile per-phase snapshot (the same one mirrored to the board). The merge-write rolls these
-  // up to the card status (chain-and-cardstate-under-automerge Bug A) — empty for a spec with no phases.
-  phaseStates: SpecCardPhaseState[];
-  reason?: string; // why nothing happened (no token / not on main / no phases)
+  status: SpecStatus; // derived spec status after any stamps
+  reason?: string; // why nothing happened (no token / no spec row / no phases)
 }
 
 interface ReconcileOpts {
-  /** Pre-fetched set of spec slugs with a merged `kind='build'` job (the cron passes this once). */
-  mergedBuildSlugs?: Set<string>;
-  /** Pre-fetched spec markdown from `main` (skip the GET). */
-  rawFromMain?: string;
+  /** Pre-fetched map of spec slug → merged build PR # for the cron sweep (a single `agent_jobs` query). */
+  mergedBuildBySlug?: Map<string, { pr: number | null }>;
 }
 
-export async function fetchSpecRawFromMain(slug: string): Promise<{ raw: string; sha: string } | null> {
-  try {
-    const res = await gh("GET", `/repos/${REPO}/contents/docs/brain/specs/${slug}.md?ref=main`);
-    if (!res.ok) return null;
-    const raw = Buffer.from(String(res.json.content || "").replace(/\s/g, ""), "base64").toString("utf8");
-    return { raw, sha: String(res.json.sha || "") };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * fix-ship-retests-origin: parse a fix spec's machine-readable `Fixes:` metadata line, stamped by the
- * propose-fix flow (POST /api/roadmap/chat {action:"propose_fix"}). The line links a fix spec back to the
- * ORIGIN spec it resolves + the spec-test `check_key`(s) it targets, e.g.
- *
- *   **Fixes:** comp-subscriptions (check 3f9a1c2b7e0d5a64, 9b2e…)
- *
- * Strict by design: requires the `(check …)` parenthetical so a stray "Fixes:" in prose can't false-positive
- * into an unwanted origin re-test (the "deduped + bounded, back-compatible" guardrail). First match wins;
- * returns null when there's no link. `checkKeys` are the 16-hex [[checkKey]] hashes (traceability — the
- * re-test re-runs the whole origin spec-test, so the enqueue itself only needs `origin`).
- */
-export function parseFixesLink(raw: string): { origin: string; checkKeys: string[] } | null {
-  const m = raw.match(/^[ \t>*-]*(?:\*\*)?Fixes:?(?:\*\*)?[ \t]+([a-z0-9][a-z0-9-]*)[ \t]*\(\s*checks?\b([^)]*)\)/im);
-  if (!m) return null;
-  const origin = m[1];
-  const checkKeys = (m[2] || "")
-    .split(/[\s,]+/)
-    .map((s) => s.trim().toLowerCase())
-    .filter((s) => /^[0-9a-f]{16}$/.test(s));
-  return { origin, checkKeys };
-}
-
-/** Has a build PR for this spec actually merged? (the strong "work shipped" evidence). */
-async function hasMergedBuild(workspaceId: string, slug: string): Promise<boolean> {
+/** Look up the most recent merged `kind='build'` job for this spec — returns its PR # (or null). */
+async function findMergedBuild(workspaceId: string, slug: string): Promise<{ pr: number | null } | null> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("agent_jobs")
-    .select("id")
+    .select("pr_number")
     .eq("workspace_id", workspaceId)
     .eq("spec_slug", slug)
     .eq("kind", "build")
     .eq("status", "merged")
+    .order("created_at", { ascending: false })
     .limit(1);
-  return !!(data && data.length);
+  if (!data || !data.length) return null;
+  const pr = (data[0] as { pr_number: number | null }).pr_number;
+  return { pr: typeof pr === "number" ? pr : null };
 }
 
 /**
- * Reconcile ONE spec's phase emojis against code-on-main + merged-build evidence (the engine both
- * triggers share). Auto-flips confident phases (commits to `main`), upserts/clears `spec_drift` rows
- * for the ambiguous ones, and returns what it did. Never throws — best-effort, returns a reason on skip.
+ * Reconcile ONE spec's phase status against code-on-main + merged-build evidence (the engine both
+ * triggers share). Reads the spec from the DB ([[specs-table]] `getSpec`), auto-stamps confident phases
+ * via `stampPhaseShipped`, upserts/clears `spec_drift` rows for the ambiguous ones, and returns what
+ * it did. Never throws — best-effort, returns a reason on skip.
  */
 export async function reconcileSpecDrift(workspaceId: string, slug: string, opts: ReconcileOpts = {}): Promise<ReconcileResult> {
-  const empty = (reason: string): ReconcileResult => ({ slug, flipped: [], surfaced: [], status: "planned", phaseStates: [], reason });
+  const empty = (reason: string): ReconcileResult => ({ slug, flipped: [], surfaced: [], status: "planned", reason });
   if (!/^[a-z0-9-]+$/i.test(slug)) return empty("invalid slug");
   if (!ghToken()) return empty("no GitHub token");
 
-  const fetched = opts.rawFromMain ? { raw: opts.rawFromMain, sha: "" } : await fetchSpecRawFromMain(slug);
-  if (!fetched) return empty("spec not on main");
-  let { raw } = fetched;
-  let { sha } = fetched;
-
-  const phases = parsePhasesWithLines(raw);
-  if (!phases.length) return { slug, flipped: [], surfaced: [], status: deriveSpecStatus(raw), phaseStates: [], reason: "no phases" };
+  // DB-only spec read (retire-md-reads-from-pm-flow Phase 2). `spec_phases[i].body` is the code-path
+  // source; `spec_phases[i].status` is the seed. No `docs/brain/specs/*.md` HTTP fetch / markdown parse.
+  const spec = await getSpec(workspaceId, slug);
+  if (!spec) return empty("spec not in DB");
+  if (spec.status === "folded") return empty("spec folded — nothing to reconcile");
+  const phases = driftPhasesFromRows(spec.phases);
+  // A one-shot spec (no phases) has nothing to reconcile per-phase. The status it already carries IS
+  // the truth (the merge hook wrote it). Coerce to the brain-roadmap SpecStatus shape — `folded` was
+  // filtered above, so the remaining values overlap exactly.
+  if (!phases.length) return { slug, flipped: [], surfaced: [], status: spec.status as SpecStatus, reason: "no phases" };
 
   const mergedBuild =
-    opts.mergedBuildSlugs !== undefined ? opts.mergedBuildSlugs.has(slug) : await hasMergedBuild(workspaceId, slug);
+    opts.mergedBuildBySlug !== undefined ? (opts.mergedBuildBySlug.get(slug) ?? null) : await findMergedBuild(workspaceId, slug);
 
   const cache = new Map<string, boolean>();
-  const flipped: { index: number; title: string }[] = [];
+  const flipped: { index: number; title: string; position: number }[] = [];
   const surfaced: { index: number; phase: DriftPhase }[] = [];
 
-  // Decide per stale phase (anything not already ✅ and not an explicit ❌ cut).
+  // Decide per stale phase (anything not already shipped and not an explicit `rejected` cut).
   for (const phase of phases) {
     if (phase.status === "shipped" || phase.status === "rejected") continue;
     const paths = extractCodePaths(phase.body);
@@ -407,43 +198,36 @@ export async function reconcileSpecDrift(workspaceId: string, slug: string, opts
     if (!allOnMain) continue; // code not (fully) on main → genuinely unbuilt / fan-out / mid-build → leave
 
     if (mergedBuild) {
-      flipped.push({ index: phase.index, title: phase.title }); // confident: flip ✅
+      flipped.push({ index: phase.index, title: phase.title, position: phase.position }); // confident: stamp shipped
     } else {
       surfaced.push({ index: phase.index, phase }); // code on main but no merged build on record → surface
     }
   }
 
-  // spec-status-db-driven Phase 2: the auto-flip used to PUT the spec markdown to `main` (one of the six
-  // git-committing status writers). Now it updates the in-memory `raw` so the rollup downstream still
-  // reads the new ✅ for derivation, but skips the deploy-triggering commit — the DB mirror write below
-  // is the SOLE persistence path.
-  if (flipped.length) {
-    for (const f of flipped) raw = flipPhaseToShipped(raw, f.index);
+  // Stamp each confident phase shipped on the canonical `spec_phases` row. Best-effort per phase so a
+  // single failure doesn't block the rest — the next sweep re-attempts the remainder. Provenance: the
+  // merged build's PR # + the resolved merge SHA when we can fetch it. Falling back to nulls is safe
+  // because a phase whose status isn't shipped also has no prior pr/merge_sha to clobber.
+  const mergeSha = mergedBuild?.pr ? await resolvePrMergeSha(mergedBuild.pr) : null;
+  for (const f of flipped) {
+    try {
+      await stampPhaseShipped(workspaceId, slug, f.position, { pr: mergedBuild?.pr ?? null, merge_sha: mergeSha });
+    } catch {
+      /* leaf write failed — leave it for the next sweep */
+    }
   }
-  // suppress unused-warning for `sha` (the markdown PUT was the only caller).
-  void sha;
 
   await syncDriftRows(workspaceId, slug, surfaced);
 
-  // repurpose-spec-drift-reconciler Phase 2: status is now DERIVED from spec_phases. The reconciler no
-  // longer writes spec_card_state.status (or appends a spec_status_history row for it) — those writes
-  // were redundant with the canonical leaf write in agent-jobs.applyMergedBuildEffects (stampPhaseShipped
-  // on each flipped phase) and would have generated phantom audit rows for a derived field. We still
-  // return the post-reconcile snapshot so the merge-hook caller can compute its per-phase PR provenance
-  // off it, and we still forward-merge with the DB's per-phase mirror so a phase already shipped in the
-  // board state isn't regressed by the markdown-derived read.
-  let phaseStates = phaseStatesFromRaw(raw);
-  try {
-    const { getSpecCardStates, mergePhaseStates } = await import("@/lib/spec-card-state");
-    const states = await getSpecCardStates(workspaceId);
-    phaseStates = mergePhaseStates(phaseStates, states[slug]);
-  } catch {
-    /* DB read failed → fall back to the markdown-derived phaseStates (no regression protection this pass) */
-  }
-  const { rollupPhaseStatus } = await import("@/lib/spec-card-state");
-  const status: SpecStatus = phaseStates.length ? rollupPhaseStatus(phaseStates) : deriveSpecStatus(raw);
+  // Roll the post-stamp phase set up to a derived status — the same shape the board renderer reads.
+  const postStampPhases = phases.map((p) =>
+    flipped.some((f) => f.position === p.position) ? { ...p, status: "shipped" as Phase } : p,
+  );
+  const status: SpecStatus = rollupPhaseStatus(
+    postStampPhases.map((p) => ({ index: p.index, title: p.title, status: p.status })),
+  );
 
-  return { slug, flipped, surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status, phaseStates };
+  return { slug, flipped: flipped.map((f) => ({ index: f.index, title: f.title })), surfaced: surfaced.map((s) => ({ index: s.phase.index, title: s.phase.title })), status };
 }
 
 /** Upsert open `spec_drift` rows for the surfaced phases; resolve any open row no longer surfaced. */
@@ -814,8 +598,9 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
  *       per anomaly cluster, routed to the platform director. Idempotent: a second pass finds the same
  *       anomalies and emits the same audit rows; the dashboard de-dupes by spec/kind.
  *
- * The phase code paths still live in the markdown body (content stayed in markdown); only STATUS moved
- * to the DB.
+ * Phase bodies live in `public.spec_phases.body` (retire-md-reads-from-pm-flow Phase 2 — the PM flow
+ * reads no `docs/brain/specs/*.md` anymore); the path-existence check pulls `body` straight from the
+ * canonical row.
  */
 export async function runSpecDriftReconciler(workspaceId: string): Promise<DriftSweepResult> {
   if (!ghToken()) return { specsScanned: 0, flipped: 0, surfaced: 0 };
@@ -825,44 +610,43 @@ export async function runSpecDriftReconciler(workspaceId: string): Promise<Drift
   let scanned = 0;
 
   // (a) DB-vs-code: read the CANONICAL shipped phases from `spec_phases` (not the spec_card_state mirror)
-  //     so the check tracks the truth the board derives from. Joined to specs for the workspace gate.
+  //     so the check tracks the truth the board derives from. `body` + `title` come from the same row —
+  //     retire-md-reads-from-pm-flow Phase 2: no `docs/brain/specs/*.md` fetch + parse for the path
+  //     verification, we read the typed body straight from the canonical row.
   const admin = createAdminClient();
   const { data: shippedPhaseRows } = await admin
     .from("spec_phases")
-    .select("position, status, specs!inner(slug, workspace_id, status)")
+    .select("position, status, title, body, specs!inner(slug, workspace_id, status)")
     .eq("specs.workspace_id", workspaceId)
     .eq("status", "shipped");
   type ShippedRow = {
     position: number;
     status: Phase;
+    title: string;
+    body: string;
     specs:
       | { slug: string; workspace_id: string; status: string }
       | { slug: string; workspace_id: string; status: string }[];
   };
-  const shippedBySlug = new Map<string, number[]>();
+  const shippedBySlug = new Map<string, { position: number; title: string; body: string }[]>();
   for (const r of (shippedPhaseRows ?? []) as ShippedRow[]) {
     const spec = Array.isArray(r.specs) ? r.specs[0] : r.specs;
     if (!spec?.slug || spec.status === "folded") continue;
     if (archived.has(spec.slug)) continue;
     const list = shippedBySlug.get(spec.slug) ?? [];
-    list.push(r.position);
+    list.push({ position: r.position, title: r.title, body: r.body });
     shippedBySlug.set(spec.slug, list);
   }
 
-  for (const [slug, positions] of shippedBySlug) {
-    const fetched = await fetchSpecRawFromMain(slug);
-    if (!fetched) continue; // spec folded / not on main → nothing to verify against
+  for (const [slug, rows] of shippedBySlug) {
     scanned++;
-    const phases = parsePhasesWithLines(fetched.raw);
-    for (const position of positions) {
-      // `spec_phases.position` is 1-based; parsePhasesWithLines.index is 0-based.
-      const index = position - 1;
-      const phase = phases.find((p) => p.index === index);
-      if (!phase) continue;
-      const paths = extractCodePaths(phase.body);
+    for (const row of rows) {
+      // `spec_phases.position` is 1-based; the drift surface uses 0-based `index` (matches /api/roadmap/spec-drift).
+      const index = row.position - 1;
+      const paths = extractCodePaths(row.body);
       if (!paths.length) continue; // no code paths declared → can't verify → trust the DB (don't false-flag)
       const checks = await Promise.all(paths.map((p) => pathExistsOnMain(p, cache)));
-      if (!checks.every(Boolean)) suspects.push({ slug, index, title: phase.title }); // shipped in DB, code missing on main
+      if (!checks.every(Boolean)) suspects.push({ slug, index, title: row.title }); // shipped in DB, code missing on main
     }
   }
   await syncReverseDriftRows(workspaceId, suspects);
