@@ -8,7 +8,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 |---|---|---|
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 231 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 86 |
-| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 22 |
+| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 314 |
 | [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 33 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
