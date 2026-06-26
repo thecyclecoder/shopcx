@@ -1,0 +1,1 @@
+- **PDP Refinement Pass (repeatable per-product polish)** · verified 2026-06-26 · → [[functions/cmo]]

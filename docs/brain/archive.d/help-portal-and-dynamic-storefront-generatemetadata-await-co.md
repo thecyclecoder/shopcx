@@ -1,0 +1,1 @@
+- **Help + portal + dynamic-storefront generateMetadata (and customize/checkout/thank-you bodies) — await connection() so cacheComponents prerendering unblocks the build past /policies** · verified 2026-06-26 · → [[functions/platform]]

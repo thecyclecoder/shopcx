@@ -1,0 +1,1 @@
+- **Harden the Ticket Improve agent — roll persistent coaching into its mandate** · verified 2026-06-26 · → [[functions/platform]]

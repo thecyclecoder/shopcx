@@ -1,0 +1,1 @@
+- **PDP edge-served variants — actually cache each _sxv arm via Next 16 'use cache'** · verified 2026-06-26 · → [[functions/platform]]

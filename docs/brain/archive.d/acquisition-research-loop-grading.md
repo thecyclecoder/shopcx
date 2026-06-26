@@ -1,0 +1,1 @@
+- **Acquisition Research — continuous loop + grading** · verified 2026-06-26 · → [[libraries/acquisition-gap-grader]]
