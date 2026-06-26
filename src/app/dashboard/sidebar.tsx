@@ -6,6 +6,15 @@ import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { useSectionNav } from "@/lib/section-nav-context";
+import {
+  DEVELOPER_NAV,
+  DEVELOPER_OVERVIEW_HREF,
+  DEVELOPER_OVERVIEW_ICON,
+  DEVELOPER_PORTAL_ICON,
+  isInDeveloperPortal,
+  isDeveloperHrefActive,
+  type DeveloperBadgeKey,
+} from "@/lib/developer-nav";
 import type { WorkspaceWithRole } from "@/lib/types/workspace";
 import NotificationBell from "@/components/notification-bell";
 
@@ -143,27 +152,9 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "#", label: "Email", icon: ICONS.marketing, comingSoon: true },
     ],
   },
-  {
-    label: "Developer",
-    ownerOnly: true,
-    icon: "M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5",
-    collapsible: true,
-    items: [
-      { href: "/dashboard/roadmap/goals", label: "Goals", icon: "M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" },
-      { href: "/dashboard/roadmap", label: "Pipeline", icon: "M9 4.5v15m6-15v15m-10.875 0h15.75c.621 0 1.125-.504 1.125-1.125V5.625c0-.621-.504-1.125-1.125-1.125H4.125C3.504 4.5 3 5.004 3 5.625v12.75c0 .621.504 1.125 1.125 1.125z" },
-      { href: "/dashboard/roadmap/box", label: "Build box", icon: "M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3m16.5 0h.008v.008h-.008v-.008zm-3 0h.008v.008h-.008v-.008z", ownerOnly: true },
-      { href: "/dashboard/developer/control-tower", label: "Control Tower", icon: "M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25", ownerOnly: true },
-      { href: "/dashboard/developer/approvals", label: "Approvals", icon: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.249-8.25-3.286z", ownerOnly: true },
-      { href: "/dashboard/roadmap/map", label: "Taxonomy map", icon: "M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.159.69.159 1.006 0z" },
-      { href: "/dashboard/developer/messages", label: "Message Center", icon: "M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" },
-      { href: "/dashboard/developer/spec-tests", label: "Spec Tests", icon: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" },
-      { href: "/dashboard/developer/spec-tests/human-queue", label: "Human QA (optional)", icon: "M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" },
-      { href: "/dashboard/developer/regressions", label: "Regressions", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z", ownerOnly: true },
-      { href: "/dashboard/developer/security-tests", label: "Security tests", icon: "M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z", ownerOnly: true },
-      { href: "/dashboard/brain", label: "Brain", icon: ICONS.knowledge },
-      { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
-    ],
-  },
+  // Developer is a PORTAL, not a collapsible section — clicking it lands on the Overview and the
+  // sidebar takes over with the developer sub-nav (see the takeover block below + lib/developer-nav).
+  { href: DEVELOPER_OVERVIEW_HREF, label: "Developer", icon: DEVELOPER_PORTAL_ICON, ownerOnly: true },
   { href: "/dashboard/settings", label: "Settings", icon: ICONS.settings },
 ];
 
@@ -184,6 +175,9 @@ export default function Sidebar({
   const searchParams = useSearchParams();
   const { nav: sectionNav } = useSectionNav(); // contextual takeover (a section page registers its sub-nav)
   const activeSection = searchParams.get("s") || (sectionNav?.sections[0]?.key ?? "");
+  // Developer is a portal: a pathname-driven sidebar takeover (same UX as a director profile, but the
+  // member routes are a fixed set, so it's detected from the path rather than registered per-page).
+  const inDeveloperPortal = workspace.role === "owner" && !sectionNav && isInDeveloperPortal(pathname);
   const [open, setOpen] = useState(false);
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
@@ -323,6 +317,24 @@ export default function Sidebar({
     router.push("/login");
   };
 
+  // The live badge for a developer-portal item (reuses the same counts the old section badges read).
+  const devBadge = (key?: DeveloperBadgeKey) => {
+    if (!key) return null;
+    const map: Record<DeveloperBadgeKey, { n: number; cls: string }> = {
+      approvals: { n: approvalsCount, cls: "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400" },
+      security: { n: securityCount, cls: "bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400" },
+      regressions: { n: regressionCount, cls: "bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400" },
+      humanQA: { n: humanTestCount, cls: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
+      branches: { n: branchesCount, cls: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300" },
+    };
+    const b = map[key];
+    if (!b || b.n <= 0) return null;
+    return (
+      <span className={`rounded-full px-1.5 py-0.5 text-xs font-medium tabular-nums ${b.cls}`}>{b.n > 99 ? "99+" : b.n}</span>
+    );
+  };
+  const devHrefs = DEVELOPER_NAV.map((i) => i.href);
+
   const sidebarContent = (
     <>
       {/* Logo */}
@@ -388,7 +400,50 @@ export default function Sidebar({
             })}
           </div>
         )}
-        {!sectionNav && NAV_STRUCTURE.map((entry, idx) => {
+        {/* Developer portal takeover — pathname-driven (the member routes are a fixed set). Mirrors the
+            director-profile takeover visually: back to the main nav + the developer sub-nav with badges. */}
+        {inDeveloperPortal && (
+          <div className="space-y-0.5">
+            <Link
+              href="/dashboard"
+              className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+              Dashboard
+            </Link>
+            <p className="px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Developer</p>
+            <Link
+              href={DEVELOPER_OVERVIEW_HREF}
+              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                pathname === DEVELOPER_OVERVIEW_HREF
+                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300"
+                  : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              }`}
+            >
+              <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={DEVELOPER_OVERVIEW_ICON} /></svg>
+              Overview
+            </Link>
+            {DEVELOPER_NAV.map((item) => {
+              const active = isDeveloperHrefActive(pathname, item.href, devHrefs);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                    active
+                      ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300"
+                      : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  }`}
+                >
+                  <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={item.icon} /></svg>
+                  <span className="flex-1">{item.label}</span>
+                  {devBadge(item.badge)}
+                </Link>
+              );
+            })}
+          </div>
+        )}
+        {!sectionNav && !inDeveloperPortal && NAV_STRUCTURE.map((entry, idx) => {
           // Section with children
           if ("items" in entry) {
             const section = entry as NavSection;
@@ -510,8 +565,10 @@ export default function Sidebar({
             );
           }
 
-          // Top-level item (Dashboard, Tickets, Settings)
+          // Top-level item (Dashboard, Tickets, Developer, Settings)
           const item = entry as NavItem;
+          if (item.ownerOnly && workspace.role !== "owner") return null;
+          if (item.adminOnly && !["owner", "admin"].includes(workspace.role)) return null;
           const isActive = pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
           const isTickets = item.href === "/dashboard/tickets";
