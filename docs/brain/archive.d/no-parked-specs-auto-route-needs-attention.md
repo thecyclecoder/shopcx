@@ -1,0 +1,1 @@
+- **no-parked-specs-auto-route-needs-attention** · verified 2026-06-26 · → [[functions/platform]]

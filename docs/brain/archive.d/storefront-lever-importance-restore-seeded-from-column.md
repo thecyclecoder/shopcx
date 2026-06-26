@@ -1,0 +1,1 @@
+- **Restore storefront_lever_importance.seeded_from on live DB** · verified 2026-06-26 · → [[tables/storefront_lever_importance]]

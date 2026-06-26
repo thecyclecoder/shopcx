@@ -1,0 +1,1 @@
+- **Agent outage resilience — survive a Claude/API outage queue-driven, never drop work** · verified 2026-06-26 · → [[libraries/anthropic-retry]]

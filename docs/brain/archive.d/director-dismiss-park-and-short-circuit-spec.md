@@ -1,0 +1,1 @@
+- **Ada can dismiss a stale park + short-circuit a no-longer-needed spec** · verified 2026-06-26 · → [[functions/platform]]

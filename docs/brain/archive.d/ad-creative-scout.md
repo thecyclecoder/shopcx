@@ -1,0 +1,1 @@
+- **Ad Creative Scout — DB-fed sweep + capture EVERYTHING + ad-gap layer** · verified 2026-06-26 · → [[libraries/ad-gap]]
