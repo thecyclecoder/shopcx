@@ -149,6 +149,11 @@ const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
 const MAX_PROPOSED_GOAL = Number(process.env.AGENT_TODO_MAX_PROPOSED_GOAL || 1);
+// Proposed-model-tier resume (box-agent-model-tiers P3): a `proposed-model-tier` row sits needs_approval
+// until the routed supervisor decides via the inbox; on approve it flips to queued_resume and the worker
+// applies the registry change (instant, no LLM). Concurrency-1 lane — the apply is a single DB write.
+// Surfaced by vale-spec-review-restore-worker-claim-lane Phase 2's static lane check.
+const MAX_PROPOSED_MODEL_TIER = 1;
 // One Platform/DevOps Director pass (platform-director-agent P1): read-only investigation of a
 // Platform-routed Approval Request (the cause + the proposed fix + the implicated spec/migration) →
 // a verdict (auto-approve within the leash, else escalate). Minutes — same ballpark as a repair/
@@ -10373,6 +10378,9 @@ async function dispatchJob(job: Job) {
   if (job.kind === "proposed-goal") return runProposedGoalJob(job);
   if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
   if (job.kind === "audit-spec-shipped-state") return runAuditSpecShippedStateJob(job);
+  // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
+  // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
+  // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
@@ -10784,6 +10792,19 @@ async function main() {
   mkdirSync(BUILDS_DIR, { recursive: true });
   sh("git", ["worktree", "prune"]); // clear stale worktrees from a previous run
   console.log(`builder-worker up — repo ${REPO} @ ${RUNNING_SHA || "?"}, up to ${MAX_CONCURRENT} build lanes + ${MAX_FOLD} fold + ${MAX_SEED} seed + ${MAX_SPEC_CHAT} spec-chat + ${MAX_TICKET_IMPROVE} ticket-improve + ${MAX_TRIAGE} triage + ${MAX_SPEC_TEST} spec-test + ${MAX_MIGRATION_FIX} migration-fix + ${MAX_DEV_ASK} dev-ask + ${MAX_PR_RESOLVE} pr-resolve + ${MAX_REPAIR} repair lane, polling every ${POLL_MS}ms`);
+  // vale-spec-review-restore-worker-claim-lane Phase 2: a one-line lane-cap summary at startup so a
+  // missing claim lane is visible in the first few lines of the box log (a kind in the union with no
+  // entry in this list is an immediate flag — the same gap _check-worker-lanes.ts surfaces at CI time).
+  console.log(
+    `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
+    `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, dev-ask:${MAX_DEV_ASK}, ` +
+    `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
+    `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
+    `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
+  );
 
   // Deploy-time Inngest re-sync (control-tower-complete-coverage spec, Phase 2): the worker
   // restarts right after it self-updates to a freshly-deployed SHA, so pinging the Inngest serve
@@ -10833,6 +10854,7 @@ async function main() {
   // races the standing pass on the same workspace (bounce-escalation-back-to-director).
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
+  const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
   const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
@@ -11081,6 +11103,16 @@ async function main() {
       // Fill the proposed-goal lane (director-proposed-goals): a director-proposed goal artifact + its CEO
       // greenlight — FRESH commits the inert `Status: proposed` goal + parks needs_approval (routes to CEO);
       // RESUME greenlight-flips Status: greenlit on main, or archive-deletes on decline. Concurrency-1, fast, no LLM.
+      // Fill the proposed-model-tier resume lane (box-agent-model-tiers P3): on supervisor approval the
+      // inbox flips the job queued_resume; this lane lands runProposedModelTierJob, which APPLIES the
+      // registry change. Without this lane an approved tier change sits queued_resume forever.
+      while (countProposedModelTier() < MAX_PROPOSED_MODEL_TIER) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["proposed-model-tier"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed proposed-model-tier ${job.id.slice(0, 8)} → ${countProposedModelTier() + 1}/${MAX_PROPOSED_MODEL_TIER} proposed-model-tier lane`);
+        launch(job);
+      }
       while (countProposedGoal() < MAX_PROPOSED_GOAL) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["proposed-goal"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
