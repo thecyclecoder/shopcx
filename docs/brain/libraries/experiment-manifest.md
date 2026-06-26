@@ -1,6 +1,6 @@
 # libraries/experiment-manifest
 
-The **edge read-side** of the storefront experiment framework: the active-experiment MANIFEST that lets the Vercel edge middleware sticky-assign a PDP variant without a per-request DB hit, plus the cache plumbing that keeps it fresh. Implements Phase 1 of `docs/brain/specs/pdp-edge-served-experiments.md` (the durable architecture behind [[../specs/pdp-experiment-wiring]] Phase 2).
+The **edge read-side** of the storefront experiment framework: the active-experiment MANIFEST that lets the Vercel edge middleware sticky-assign a PDP variant without a per-request DB hit, plus the cache plumbing that keeps it fresh. Shipped Phase 1 of the edge-served PDP A/B feature (the durable architecture behind [[../specs/pdp-experiment-wiring]] Phase 2).
 
 **Files:** `src/lib/storefront/experiment-manifest.ts` (edge-safe: pure helpers + DB build + Edge Config publish — no `next/cache`, no runtime Supabase) · `src/lib/storefront/experiment-cache.ts` (server-only: `next/cache` purge). Tables [[../tables/storefront_experiments]] + [[../tables/storefront_experiment_variants]] · Blob route `src/app/api/storefront/experiment-manifest/route.ts` · Edge reader `src/lib/supabase/middleware.ts` · Render caller `src/app/(storefront)/store/[workspace]/[slug]/page.tsx` · Integration [[../integrations/vercel]] (Edge Config).
 
