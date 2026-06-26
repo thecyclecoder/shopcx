@@ -1,6 +1,6 @@
 # adlibrary
 
-**AdLibrary.com** — ad-intelligence index used to discover long-running competitor + category ads (the winners we reverse-engineer). Chosen because it works with **no KYC**, unlike Meta's Ad Library API which is gated behind facebook.com identity confirmation. See [[../specs/winning-static-creative-finder]] · client: [[../libraries/adlibrary]].
+**AdLibrary.com** — ad-intelligence index used to discover long-running competitor + category ads (the winners we reverse-engineer). Chosen because it works with **no KYC**, unlike Meta's Ad Library API which is gated behind facebook.com identity confirmation. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]] · client: [[../libraries/adlibrary]].
 
 ## Auth
 

@@ -1,6 +1,6 @@
 # inngest/creative-finder
 
-Daily sweep that pulls long-running competitor + category ads from [[../integrations/adlibrary]], vision-deconstructs each static into a skeleton, and routes videos aside for Phase 6. See [[../specs/winning-static-creative-finder]].
+Daily sweep that pulls long-running competitor + category ads from [[../integrations/adlibrary]], vision-deconstructs each static into a skeleton, and routes videos aside for Phase 6. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]].
 
 **File:** `src/lib/inngest/creative-finder.ts`
 

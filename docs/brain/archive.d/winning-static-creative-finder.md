@@ -1,0 +1,1 @@
+- **Winning Static-Creative Finder** · verified 2026-06-26 · → [[lifecycles/creative-finder]]
