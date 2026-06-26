@@ -1086,7 +1086,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     // POST /rest/v1/rpc/control_tower_loop_beats. Inline-agent/reactive beats are high-volume and
     // excluded here — they get latest + history + ok/err counts from fetchInlineAgentState below.
     admin.rpc("control_tower_loop_beats", { p_history_limit: HISTORY_LIMIT }),
-    admin.from("loop_alerts").select("id, loop_id, reason, detail, opened_at, last_seen_at").eq("status", "open"),
+    admin.from("loop_alerts").select("id, loop_id, kind, owner, reason, detail, opened_at, last_seen_at").eq("status", "open"),
     admin.from("agent_jobs").select("id, kind, status, created_at, claimed_at, updated_at").in("status", ["queued", "claimed", "building", "queued_resume"]),
     fetchAssertionInputs(admin),
     fetchInlineAgentState(admin),
@@ -1143,8 +1143,18 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     byLoop.set(b.loop_id, arr);
   }
   const alertByLoop = new Map<string, OpenAlert>();
-  for (const a of (openAlerts ?? []) as Array<OpenAlert & { loop_id: string }>) {
-    alertByLoop.set(a.loop_id, { id: a.id, reason: a.reason, detail: a.detail, opened_at: a.opened_at, last_seen_at: a.last_seen_at });
+  // Alerts opened OUTSIDE the MONITORED_LOOPS registry — the audit-platform-scorecard step
+  // (devops-kpi-review-sdk-and-data-fix Phase 5) opens `kpi_drift:<metric>:<cadence>` rows with
+  // `owner='platform'` that aren't tied to a registered cron/agent-kind loop. We fold them into the
+  // owning department's openAlerts count so the daily watch line + the dept rollup badge see them.
+  const unregisteredAlertsByOwner = new Map<string, number>();
+  const registeredLoopIds = new Set(MONITORED_LOOPS.map((l) => l.id));
+  for (const a of (openAlerts ?? []) as Array<OpenAlert & { loop_id: string; owner: string | null }>) {
+    if (registeredLoopIds.has(a.loop_id)) {
+      alertByLoop.set(a.loop_id, { id: a.id, reason: a.reason, detail: a.detail, opened_at: a.opened_at, last_seen_at: a.last_seen_at });
+    } else if (a.owner) {
+      unregisteredAlertsByOwner.set(a.owner, (unregisteredAlertsByOwner.get(a.owner) ?? 0) + 1);
+    }
   }
   const activeJobs = (jobs ?? []) as ActiveJob[];
   // Queue-aware self-update deferral inputs (mirror-worker-queue-aware-self-update). The worker
@@ -1228,7 +1238,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   // Phase 3: department rollups (CEO-glance). Each org function's loops collapse to a worst-of
   // health tile (red > amber > green) with a healthy/total count + open-alert count — the dashboard
   // leads with these, then drills into the per-loop cards.
-  const departments = buildDepartmentRollups(loops);
+  const departments = buildDepartmentRollups(loops, unregisteredAlertsByOwner);
 
   return { generatedAt: new Date().toISOString(), counts, loops, departments, selfAudit };
 }
@@ -1246,11 +1256,18 @@ function worstColor(colors: LoopColor[]): LoopColor {
  * open-alert count — the CEO glance before the per-loop drill-in. Departments stay in
  * OWNER_FUNCTIONS order; one with no loops is omitted.
  */
-function buildDepartmentRollups(loops: LoopStatus[]): DepartmentRollup[] {
+function buildDepartmentRollups(
+  loops: LoopStatus[],
+  unregisteredAlertsByOwner: Map<string, number>,
+): DepartmentRollup[] {
   return OWNER_FUNCTIONS.map(({ id, label, healthLabel }) => {
     const mine = loops.filter((l) => l.owner === id);
     const counts = { green: 0, amber: 0, red: 0 };
     for (const l of mine) counts[l.color]++;
+    // openAlerts = alerts on registered loops + open alerts opened OUTSIDE the registry that name
+    // this dept as their owner (e.g. `kpi_drift:*` from the audit-platform-scorecard step).
+    const registeredAlerts = mine.filter((l) => l.openAlert).length;
+    const unregisteredAlerts = unregisteredAlertsByOwner.get(id) ?? 0;
     return {
       owner: id,
       label,
@@ -1259,7 +1276,7 @@ function buildDepartmentRollups(loops: LoopStatus[]): DepartmentRollup[] {
       total: mine.length,
       healthy: counts.green,
       counts,
-      openAlerts: mine.filter((l) => l.openAlert).length,
+      openAlerts: registeredAlerts + unregisteredAlerts,
     };
   }).filter((d) => d.total > 0);
 }

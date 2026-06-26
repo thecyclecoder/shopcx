@@ -31,7 +31,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
 import { agentGradingBatchReady, gradeConcludedAgentActions, detectGradeDropCoaching } from "@/lib/agents/agent-grader";
-import { computePlatformScorecard } from "@/lib/agents/platform-scorecard";
+import { computePlatformScorecard, type Cadence } from "@/lib/agents/platform-scorecard";
+import { auditAllKpis } from "@/lib/agents/kpi-review";
 
 export const platformDirectorCron = inngest.createFunction(
   {
@@ -227,12 +228,111 @@ export const platformDirectorCron = inngest.createFunction(
       return { snapshotted, metricsWritten, month_start: monthStart };
     });
 
+    // KPI audit on the standing pass + alert on persistent drift
+    // (devops-kpi-review-sdk-and-data-fix Phase 5). After the three scorecard snapshots have settled
+    // for this beat, re-derive every advertised KPI from the raw tables (auditAllKpis) and log one
+    // kpi_audit_log row per metric per cadence. Then close the trust loop: a metric whose drift
+    // exceeds its tolerance for ≥2 consecutive audits opens a loop_alerts row
+    // (loop_id='kpi_drift:<metric>:<cadence>', owner='platform') — surfaces on the control-tower
+    // surface + the daily watch line. A single over-tolerance reading is logged but NOT alerted
+    // (self-healing on timing noise: a median metric tolerates a wider band already, and an
+    // isolated blip is almost always a write that landed between the snapshot + the re-derive).
+    // Best-effort + idempotent: an audit miss never breaks the cron; the next beat re-checks.
+    const audit = await step.run("audit-platform-scorecard", async () => {
+      let auditedMetrics = 0;
+      let opened = 0;
+      let resolved = 0;
+      const cadences: Cadence[] = ["daily", "weekly", "monthly"];
+      for (const workspaceId of result.workspaceIds || []) {
+        for (const cadence of cadences) {
+          try {
+            const reports = await auditAllKpis(workspaceId, cadence);
+            if (!reports.length) continue;
+            for (const r of reports) {
+              auditedMetrics++;
+              const { error: insertErr } = await admin.from("kpi_audit_log").insert({
+                workspace_id: workspaceId,
+                metric_key: r.metric,
+                cadence: r.cadence,
+                snapshot_date: r.snapshotDate,
+                snapshot_value: r.snapshotValue,
+                ground_truth_value: r.groundTruthValue,
+                drift: r.drift,
+                drift_pct: r.driftPct,
+                within_tolerance: r.withinTolerance,
+              });
+              if (insertErr) {
+                console.warn(`[platform-director-cron] kpi_audit_log insert failed ws=${workspaceId} ${r.metric}/${r.cadence}:`, insertErr.message);
+                continue;
+              }
+
+              // The alerter spine: open iff the LAST TWO audits (this one + the immediately prior)
+              // are BOTH over-tolerance. The just-inserted row is row #1; we read row #2 — the
+              // prior audit for the same (workspace, metric, cadence). Anything older is irrelevant
+              // (self-healing).
+              const loopId = `kpi_drift:${r.metric}:${r.cadence}`;
+              const { data: priorRows } = await admin
+                .from("kpi_audit_log")
+                .select("within_tolerance")
+                .eq("workspace_id", workspaceId)
+                .eq("metric_key", r.metric)
+                .eq("cadence", r.cadence)
+                .order("audited_at", { ascending: false })
+                .limit(2);
+              const last = (priorRows ?? []) as Array<{ within_tolerance: boolean }>;
+              const twoOverInARow = last.length >= 2 && !last[0].within_tolerance && !last[1].within_tolerance;
+
+              const { data: existing } = await admin
+                .from("loop_alerts")
+                .select("id")
+                .eq("loop_id", loopId)
+                .eq("status", "open")
+                .maybeSingle();
+
+              if (twoOverInARow) {
+                const detail = `${r.label} (${r.cadence}): snapshot=${r.snapshotValue} · raw=${r.groundTruthValue} · drift=${r.drift}${r.driftPct != null ? ` (${(r.driftPct * 100).toFixed(2)}%)` : ""}`;
+                if (existing) {
+                  await admin
+                    .from("loop_alerts")
+                    .update({ last_seen_at: new Date().toISOString(), reason: "kpi_drift", detail })
+                    .eq("id", (existing as { id: string }).id);
+                } else {
+                  const { error: openErr } = await admin.from("loop_alerts").insert({
+                    loop_id: loopId,
+                    kind: "kpi-audit",
+                    owner: "platform",
+                    reason: "kpi_drift",
+                    detail,
+                    status: "open",
+                  });
+                  if (!openErr) opened++;
+                  else if (openErr.code !== "23505") console.warn(`[platform-director-cron] kpi drift alert open failed ${loopId}:`, openErr.message);
+                }
+              } else if (existing && r.withinTolerance) {
+                // Latest reading is healthy → auto-resolve. (A still-over-tolerance reading with no
+                // prior is the transient case: log only, leave any existing alert as-is until the
+                // next beat confirms or clears it.)
+                await admin
+                  .from("loop_alerts")
+                  .update({ status: "resolved", resolved_at: new Date().toISOString() })
+                  .eq("id", (existing as { id: string }).id);
+                resolved++;
+              }
+            }
+          } catch (e) {
+            console.error(`[platform-director-cron] kpi audit failed ws=${workspaceId} cadence=${cadence}:`, e instanceof Error ? e.message : e);
+          }
+        }
+      }
+      return { auditedMetrics, opened, resolved };
+    });
+
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly } });
+      await emitCronHeartbeat("platform-director-cron", { ok: true, produced: { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly, audit } });
     });
 
-    return { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly };
+    return { ...result, grading, workerGrading, scorecard, scorecardWeekly, scorecardMonthly, audit };
   },
 );

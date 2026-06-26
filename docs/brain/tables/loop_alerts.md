@@ -2,6 +2,8 @@
 
 The Control Tower's de-duped incident log ([[../specs/control-tower]] Phase 1). The [[../inngest/control-tower-monitor]] cron opens **one OPEN alert per loop** when a registered loop goes red (liveness / cron-freshness / stuck-jobs violation), pages the owners on first sight, and **auto-resolves** the alert the moment the loop goes healthy again. The [[../dashboard/control-tower]] dashboard renders the open alert on the loop's tile.
 
+A second writer joined in [[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 5: the [[../inngest/platform-director-cron]] `audit-platform-scorecard` step opens `kpi_drift:<metric>:<cadence>` alerts (`owner='platform'`, `kind='kpi-audit'`, `reason='kpi_drift'`) when a Platform Scorecard KPI drifts beyond its tolerance for ≥2 consecutive audits, and resolves them the moment the metric is healthy again. Same partial-unique-index de-dupe spine — the audit step is just a second writer against the same table.
+
 **Global infra, not workspace-scoped** (same as [[loop_heartbeats]] / [[worker_heartbeats]]). RLS: any authenticated user reads; service role writes.
 
 **Primary key:** `id`
@@ -11,9 +13,10 @@ The Control Tower's de-duped incident log ([[../specs/control-tower]] Phase 1). 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `uuid` | PK · `gen_random_uuid()` |
-| `loop_id` | `text` | the violating loop (registry id) — at most **one** `status='open'` row per `loop_id` |
-| `kind` | `text?` | the loop kind (`worker`｜`cron`｜`agent-kind`) |
-| `reason` | `text` | which check fired: `liveness` ｜ `cron_freshness` ｜ `stuck_jobs` |
+| `loop_id` | `text` | the violating loop (registry id, OR `kpi_drift:<metric>:<cadence>` for an audit-opened drift alert) — at most **one** `status='open'` row per `loop_id` |
+| `kind` | `text?` | the loop kind (`worker`｜`cron`｜`agent-kind`｜`kpi-audit` for a KPI drift alert) |
+| `owner` | `text?` | the owning function (`platform`｜…). NULL for monitor-opened rows (owner is derived from the [[../libraries/control-tower]] registry); SET on rows opened outside the registry (e.g. `owner='platform'` on `kpi_drift:*` audit alerts) so they can declare their owner without inheriting from the registry. Added [[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 5 |
+| `reason` | `text` | which check fired: `liveness` ｜ `cron_freshness` ｜ `stuck_jobs` ｜ `kpi_drift` |
 | `detail` | `text` | the human-readable violation ("Cron X hasn't run in 4h…") — refreshed each tick while open |
 | `status` | `text` | `open` (default) ｜ `resolved` · CHECK-constrained |
 | `opened_at` | `timestamptz` | when the incident first opened · default `now()` |
@@ -39,6 +42,8 @@ The unique index is the belt-and-suspenders against a racing double-open (the cr
 ## Migration
 
 `supabase/migrations/20260622120000_control_tower.sql` (this table + [[loop_heartbeats]] + RLS) · apply: `scripts/apply-control-tower-migration.ts`
+
+`supabase/migrations/20260727120000_kpi_audit_log_and_loop_alerts_owner.sql` adds the nullable `owner` column (+ creates [[kpi_audit_log]]) · apply: `scripts/apply-kpi-audit-log-migration.ts`
 
 ## Related
 
