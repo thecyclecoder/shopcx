@@ -48,6 +48,13 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 /** The Platform/DevOps Director supervises the Deploy Guardian — its director_activity rows carry this. */
 const GUARDIAN_FUNCTION = "platform";
+/**
+ * The persona key that stamps the activity row's `metadata.actor` — Reva (the Deploy Guardian). The
+ * supervising director_function is still `platform`, but the actor tag lets the worker profile + the
+ * Ada feed show the work as REVA's (not a bare "platform" function row). Mirrors the spec-drift
+ * reconciler's `actor: "reconciler:spec-drift"` tagging — same activity ledger, named author.
+ */
+const GUARDIAN_ACTOR = "deploy-guardian";
 
 /** Bounded canary window: how long after a deploy we watch before stamping a verdict (10–15 min band). */
 export const CANARY_WINDOW_MS = Number(process.env.DEPLOY_GUARDIAN_CANARY_WINDOW_MS || 12 * 60 * 1000);
@@ -555,6 +562,7 @@ export async function evaluateDeployWatch(admin: Admin, watch: DeployWatch): Pro
 /** Shared director_activity metadata for a deploy verdict row. */
 function deployActivityMeta(watch: DeployWatch, verdict: DeployVerdict, findings: DeployWatchFindings, extra?: Record<string, unknown>): Record<string, unknown> {
   return {
+    actor: GUARDIAN_ACTOR, // Reva — names the worker that took the action under the supervising platform director.
     deploy_watch_id: watch.id,
     branch: watch.branch,
     pr_number: watch.pr_number,
