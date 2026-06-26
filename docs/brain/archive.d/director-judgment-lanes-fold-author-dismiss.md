@@ -1,0 +1,1 @@
+- **Director judgment lanes can fold-now, author follow-up specs, dismiss false alarms** · verified 2026-06-26 · → [[../libraries/platform-director]]
