@@ -5014,30 +5014,39 @@ async function runFoldJob(job: Job) {
     return;
   }
 
-  // spec-fold-from-db-row Phase 1 guard: refuse to fold a spec whose `public.specs.status` is not
-  // `shipped`. The DB-trigger rollup (spec-body-table-and-backfill) ensures `shipped` ≡ every
-  // `spec_phases` row is shipped — this is the structural rail the goal protects. Any non-shipped
-  // slug is released back to `pending` (so the next dispatch picks it up only when its status
-  // genuinely settles) and logged. Already-folded rows are dropped silently (idempotent re-fold).
+  // spec-fold-from-db-row Phase 1 guard: refuse to fold a spec that isn't genuinely `shipped`. The
+  // structural rail the goal protects is `shipped` ≡ every `spec_phases` row is shipped.
+  //
+  // fix(fold): determine `shipped` from the DERIVED phase rollup — NOT the stored `specs.status` column.
+  // The stored column is vestigial/stale (post-derive-rollup-status, a spec's status is derived from its
+  // phases, not stored; a genuinely-shipped spec frequently still reads `planned`/`in_progress` on the
+  // row). Reading it mislabeled every shipped spec as non-shipped and released the whole batch back to
+  // `pending`, so pending_folds never drained ("nothing foldable — released N non-shipped"). We now grade
+  // against `getRoadmap(workspaceId)`, whose SpecCard `.status` is the canonical rollup
+  // (deriveSpecCardStatus→rollupPhaseStatus: all phases shipped ⇒ shipped) the board itself uses — the
+  // SAME fix already applied in getAutoFoldEligibleSlugs (src/lib/spec-test-runs.ts). `getRoadmap` filters
+  // out `folded` specs (isBoardableStatus), so a claimed slug ABSENT from the derived map is an
+  // already-folded row (idempotent re-fold) — dropped silently. Present-but-not-shipped → released.
   {
-    const { data: specRows } = await db
-      .from("specs")
-      .select("slug, status")
-      .eq("workspace_id", job.workspace_id)
-      .in("slug", slugs);
-    const statusBySlug = new Map<string, string>();
-    for (const r of (specRows ?? []) as { slug: string; status: string }[]) statusBySlug.set(r.slug, r.status);
+    const { getRoadmap } = await import("../src/lib/brain-roadmap");
+    const { specs: cards } = await getRoadmap(job.workspace_id);
+    const derivedBySlug = new Map<string, string>();
+    for (const c of cards) derivedBySlug.set(c.slug, c.status);
     const releaseable: string[] = [];
     const allowed: string[] = [];
     const alreadyFolded: string[] = [];
     for (const slug of slugs) {
-      const st = statusBySlug.get(slug);
-      if (st === "shipped") {
+      const derived = derivedBySlug.get(slug);
+      if (derived === "shipped") {
+        // DERIVED-shipped (all phases shipped) ⇒ genuinely foldable, regardless of the stale stored column.
         allowed.push(slug);
-      } else if (st === "folded") {
+      } else if (derived === undefined) {
+        // Absent from the boardable roadmap ⇒ already `folded` (getRoadmap filters folded via
+        // isBoardableStatus) — drop as an idempotent re-fold.
         alreadyFolded.push(slug);
       } else {
-        // missing row OR non-shipped non-folded → release for a later batch when status settles.
+        // present but a non-shipped rollup (planned/in_progress/in_review/deferred) → release for a later
+        // batch when its phases settle to shipped.
         releaseable.push(slug);
       }
     }
