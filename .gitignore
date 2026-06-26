@@ -63,5 +63,3 @@ scripts/_*
 !scripts/_audit-kpis.ts
 !scripts/_check-worker-lanes.ts
 !scripts/_check-pm-md-reads.ts
-# ...and one-shot backfills awaiting a prod run; deleted after the sweep lands.
-!scripts/_backfill-pm-flow-phase-stamps.ts
