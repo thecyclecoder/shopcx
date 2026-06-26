@@ -26,7 +26,7 @@ const STATUS_STYLE: Record<FeedStatus, { label: string; cls: string }> = {
   escalated: { label: "Escalated", cls: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300" },
 };
 
-type Filter = "needs-you" | "all" | "approved" | "declined";
+type Filter = "needs-ceo" | "all" | "approved" | "declined";
 
 // ── A single meta chip (spec / goal / milestone / phase) ────────────────────────
 function MetaChip({ label, value, accent }: { label: string; value: string; accent?: string }) {
@@ -94,7 +94,7 @@ function ApprovalCard({ item, onActed }: { item: ApprovalFeedItem; onActed: () =
   return (
     <li
       className={`rounded-xl border p-3.5 shadow-sm sm:p-4 ${
-        item.actionable
+        item.escalated
           ? "border-amber-300 bg-amber-50/50 dark:border-amber-900/50 dark:bg-amber-950/15"
           : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
       }`}
@@ -102,7 +102,7 @@ function ApprovalCard({ item, onActed }: { item: ApprovalFeedItem; onActed: () =
       {/* Header: status · type · autonomy · time */}
       <div className="flex flex-wrap items-center gap-1.5">
         <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${status.cls}`}>
-          {item.actionable ? "Needs you" : status.label}
+          {item.escalated ? "Needs CEO" : status.label}
         </span>
         <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
           {item.typeLabel}
@@ -278,7 +278,7 @@ export default function ApprovalsPage() {
   const counts = useMemo(() => {
     const all = items ?? [];
     return {
-      needsYou: all.filter((i) => i.actionable).length,
+      needsCeo: all.filter((i) => i.escalated).length,
       pending: all.filter((i) => i.source === "pending").length,
       all: all.length,
     };
@@ -287,7 +287,7 @@ export default function ApprovalsPage() {
   const visible = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return (items ?? []).filter((i) => {
-      if (filter === "needs-you" && !i.actionable) return false;
+      if (filter === "needs-ceo" && !i.escalated) return false;
       if (filter === "approved" && i.status !== "approved") return false;
       if (filter === "declined" && i.status !== "declined") return false;
       if (!needle) return true;
@@ -312,7 +312,7 @@ export default function ApprovalsPage() {
 
   const FILTERS: { id: Filter; label: string; badge?: number }[] = [
     { id: "all", label: "All activity", badge: counts.all || undefined },
-    { id: "needs-you", label: "Needs you", badge: counts.needsYou || undefined },
+    { id: "needs-ceo", label: "Needs CEO", badge: counts.needsCeo || undefined },
     { id: "approved", label: "Approved" },
     { id: "declined", label: "Declined" },
   ];
@@ -324,12 +324,12 @@ export default function ApprovalsPage() {
           <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Approvals</h1>
           <p className="mt-1 max-w-xl text-sm text-zinc-500 dark:text-zinc-400">
             Every approval in one feed. Most are auto-approved by the autonomous director and logged here; the ones
-            escalated to you carry the decision inline.
+            escalated to the CEO (Henry) carry the decision inline.
           </p>
         </div>
-        {counts.needsYou > 0 && (
+        {counts.needsCeo > 0 && (
           <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-            {counts.needsYou} need{counts.needsYou === 1 ? "s" : ""} you
+            {counts.needsCeo} need{counts.needsCeo === 1 ? "s" : ""} CEO
           </span>
         )}
       </div>
@@ -381,11 +381,11 @@ export default function ApprovalsPage() {
         ) : visible.length === 0 ? (
           <div className="rounded-xl border border-dashed border-zinc-200 px-4 py-14 text-center dark:border-zinc-800">
             <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">
-              {filter === "needs-you" ? "Nothing needs you right now." : "No approvals yet."}
+              {filter === "needs-ceo" ? "Nothing escalated to the CEO right now." : "No approvals yet."}
             </p>
             <p className="mx-auto mt-1 max-w-sm text-[12px] text-zinc-400">
-              Every routed approve/decline lands here — autonomous director auto-approvals as logs, escalations to you
-              as actionable cards.
+              Every routed approve/decline lands here — autonomous director auto-approvals as logs, escalations to the
+              CEO as actionable cards.
             </p>
           </div>
         ) : (
