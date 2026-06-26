@@ -32,7 +32,13 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec, stampPhaseShipped, type SpecPhaseRow } from "@/lib/specs-table";
+import {
+  getSpec,
+  listSpecs,
+  listSpecPhaseAnomalies,
+  stampPhaseShipped,
+  type SpecPhaseRow,
+} from "@/lib/specs-table";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken(): string | undefined {
@@ -380,20 +386,16 @@ async function resolvePrMergeSha(pr: number): Promise<string | null> {
 export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ slug: string; phases: number[]; pr: number }[]> {
   const admin = createAdminClient();
 
-  // (a) Candidate specs: any with ≥1 phase NOT IN ('shipped','rejected'). One read, joined to phases.
-  const { data: phaseRows } = await admin
-    .from("spec_phases")
-    .select("position, status, specs!inner(slug, workspace_id)")
-    .eq("specs.workspace_id", workspaceId)
-    .not("status", "in", "(shipped,rejected)");
-  type Row = { position: number; status: Phase; specs: { slug: string; workspace_id: string } | { slug: string; workspace_id: string }[] };
+  // (a) Candidate specs: any with ≥1 phase NOT IN ('shipped','rejected'). Read the specs (phases joined)
+  //     through the specs-table SDK (no raw PM SQL — pm-db-agent-toolkit) and filter in memory.
+  const specs = await listSpecs(workspaceId);
   const unstampedBySlug = new Map<string, number[]>();
-  for (const r of (phaseRows ?? []) as Row[]) {
-    const spec = Array.isArray(r.specs) ? r.specs[0] : r.specs;
-    if (!spec?.slug) continue;
-    const list = unstampedBySlug.get(spec.slug) ?? [];
-    list.push(r.position);
-    unstampedBySlug.set(spec.slug, list);
+  for (const spec of specs) {
+    if (spec.status === "folded") continue; // folded specs are archived — don't re-heal their phases
+    const positions = spec.phases
+      .filter((p) => p.status !== "shipped" && p.status !== "rejected")
+      .map((p) => p.position);
+    if (positions.length) unstampedBySlug.set(spec.slug, positions);
   }
   if (!unstampedBySlug.size) return [];
 
@@ -612,30 +614,19 @@ export async function runSpecDriftReconciler(workspaceId: string): Promise<Drift
   // (a) DB-vs-code: read the CANONICAL shipped phases from `spec_phases` (not the spec_card_state mirror)
   //     so the check tracks the truth the board derives from. `body` + `title` come from the same row —
   //     retire-md-reads-from-pm-flow Phase 2: no `docs/brain/specs/*.md` fetch + parse for the path
-  //     verification, we read the typed body straight from the canonical row.
-  const admin = createAdminClient();
-  const { data: shippedPhaseRows } = await admin
-    .from("spec_phases")
-    .select("position, status, title, body, specs!inner(slug, workspace_id, status)")
-    .eq("specs.workspace_id", workspaceId)
-    .eq("status", "shipped");
-  type ShippedRow = {
-    position: number;
-    status: Phase;
-    title: string;
-    body: string;
-    specs:
-      | { slug: string; workspace_id: string; status: string }
-      | { slug: string; workspace_id: string; status: string }[];
-  };
+  //     verification, we read the typed body straight from the canonical row. Through the specs-table SDK
+  //     (no raw PM SQL — pm-db-agent-toolkit); filter to shipped phases of non-folded specs in memory.
+  const specRows = await listSpecs(workspaceId);
   const shippedBySlug = new Map<string, { position: number; title: string; body: string }[]>();
-  for (const r of (shippedPhaseRows ?? []) as ShippedRow[]) {
-    const spec = Array.isArray(r.specs) ? r.specs[0] : r.specs;
-    if (!spec?.slug || spec.status === "folded") continue;
+  for (const spec of specRows) {
+    if (spec.status === "folded") continue;
     if (archived.has(spec.slug)) continue;
-    const list = shippedBySlug.get(spec.slug) ?? [];
-    list.push({ position: r.position, title: r.title, body: r.body });
-    shippedBySlug.set(spec.slug, list);
+    const shipped = spec.phases.filter((p) => p.status === "shipped");
+    if (!shipped.length) continue;
+    shippedBySlug.set(
+      spec.slug,
+      shipped.map((p) => ({ position: p.position, title: p.title, body: p.body })),
+    );
   }
 
   for (const [slug, rows] of shippedBySlug) {
@@ -687,68 +678,53 @@ export async function detectSpecPhaseAnomalies(workspaceId: string): Promise<{ o
 
   const { recordDirectorActivity } = await import("@/lib/director-activity");
 
-  // ORPHAN sweep: a spec_phases row whose spec_id has no parent in `specs`. Workspace gate is tricky
-  // for orphans (no parent to read workspace_id from), so we read ALL spec_phases ids+spec_id and
-  // intersect against the specs id set — then filter to this workspace by sampling each orphan's
-  // already-known spec_id presence in the workspace's spec set. In practice an orphan is rare; this
-  // sweep is the safety rail.
+  // ORPHAN + PROVENANCE-GAP sweeps both come from the specs-table SDK's integrity-scan reader
+  // (`listSpecPhaseAnomalies`) — no raw PM SQL (pm-db-agent-toolkit). The reader resolves spec_id→{slug,
+  // workspace} internally: orphans are global (no parent to read a workspace from), provenance gaps are
+  // workspace-scoped + folded-excluded.
+  let anomalies: Awaited<ReturnType<typeof listSpecPhaseAnomalies>> = { orphans: [], provenanceGaps: [] };
   try {
-    const { data: allPhases } = await admin.from("spec_phases").select("id, spec_id, position, status");
-    const phaseRows = (allPhases ?? []) as { id: string; spec_id: string; position: number; status: Phase }[];
-    if (phaseRows.length) {
-      const specIds = Array.from(new Set(phaseRows.map((p) => p.spec_id)));
-      const { data: liveSpecs } = await admin
-        .from("specs")
-        .select("id, slug, workspace_id")
-        .in("id", specIds);
-      const liveById = new Map<string, { slug: string; workspace_id: string }>();
-      for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string }[]) {
-        liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id });
-      }
-      const orphans = phaseRows.filter((p) => !liveById.has(p.spec_id));
-      if (orphans.length) {
-        try {
-          await recordDirectorActivity(admin, {
-            workspaceId,
-            directorFunction: "platform",
-            actionKind: "spec_phases_anomaly",
-            specSlug: null,
-            reason: `reconciler:spec-drift surfaced ${orphans.length} orphan spec_phases row(s) — spec_id has no parent specs row (FK cascade should have killed these on parent delete). Inspect + clean up via a one-off script.`,
-            metadata: { actor: "reconciler:spec-drift", kind: "orphan", count: orphans.length, sample: orphans.slice(0, 10).map((o) => ({ id: o.id, spec_id: o.spec_id, position: o.position, status: o.status })) },
-          });
-          orphanReported = 1;
-        } catch { /* best-effort audit */ }
-      }
+    anomalies = await listSpecPhaseAnomalies(workspaceId);
+  } catch { /* best-effort — a read failure leaves the next beat to retry */ }
 
-      // DUPLICATE POSITION sweep: same (spec_id, position) appears twice. The unique index
-      // (spec_phases_spec_position) should prevent this — a survivor means the index is missing or was
-      // dropped. Group by (spec_id, position) and report any cluster with >1 row.
-      const byKey = new Map<string, { id: string; position: number; status: Phase }[]>();
-      for (const p of phaseRows) {
-        const liveSpec = liveById.get(p.spec_id);
-        if (!liveSpec || liveSpec.workspace_id !== workspaceId) continue;
-        const k = `${p.spec_id}#${p.position}`;
-        const list = byKey.get(k) ?? [];
-        list.push({ id: p.id, position: p.position, status: p.status });
-        byKey.set(k, list);
+  // ORPHAN sweep: a spec_phases row whose parent specs row is gone (FK cascade should have killed it).
+  if (anomalies.orphans.length) {
+    try {
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "spec_phases_anomaly",
+        specSlug: null,
+        reason: `reconciler:spec-drift surfaced ${anomalies.orphans.length} orphan spec_phases row(s) — spec_id has no parent specs row (FK cascade should have killed these on parent delete). Inspect + clean up via a one-off script.`,
+        metadata: { actor: "reconciler:spec-drift", kind: "orphan", count: anomalies.orphans.length, sample: anomalies.orphans.slice(0, 10).map((o) => ({ id: o.phase_id, spec_id: o.spec_id, position: o.position, status: o.status })) },
+      });
+      orphanReported = 1;
+    } catch { /* best-effort audit */ }
+  }
+
+  // DUPLICATE POSITION sweep: same (spec_id, position) appears twice. The unique index
+  // (spec_phases_spec_position) should prevent this — a survivor means the index is missing or was
+  // dropped. Read the workspace's specs through the SDK (no raw PM SQL); a duplicate surfaces as two
+  // `spec.phases` entries sharing a position. Surface, never auto-dedupe (which row carries the truth?).
+  try {
+    const specRows = await listSpecs(workspaceId);
+    for (const spec of specRows) {
+      const byPos = new Map<number, SpecPhaseRow[]>();
+      for (const p of spec.phases) {
+        const list = byPos.get(p.position) ?? [];
+        list.push(p);
+        byPos.set(p.position, list);
       }
-      const dupClusters: { slug: string; position: number; ids: string[]; statuses: Phase[] }[] = [];
-      for (const [k, list] of byKey) {
+      for (const [position, list] of byPos) {
         if (list.length < 2) continue;
-        const [specId] = k.split("#");
-        const slug = liveById.get(specId)?.slug;
-        if (!slug) continue;
-        dupClusters.push({ slug, position: list[0].position, ids: list.map((l) => l.id), statuses: list.map((l) => l.status) });
-      }
-      for (const cluster of dupClusters) {
         try {
           await recordDirectorActivity(admin, {
             workspaceId,
             directorFunction: "platform",
             actionKind: "spec_phases_anomaly",
-            specSlug: cluster.slug,
-            reason: `reconciler:spec-drift surfaced duplicate spec_phases rows for ${cluster.slug} position ${cluster.position} — ${cluster.ids.length} rows share (spec_id, position). The unique index should prevent this; inspect which carries the truth + dedupe.`,
-            metadata: { actor: "reconciler:spec-drift", kind: "duplicate_position", slug: cluster.slug, position: cluster.position, ids: cluster.ids, statuses: cluster.statuses },
+            specSlug: spec.slug,
+            reason: `reconciler:spec-drift surfaced duplicate spec_phases rows for ${spec.slug} position ${position} — ${list.length} rows share (spec_id, position). The unique index should prevent this; inspect which carries the truth + dedupe.`,
+            metadata: { actor: "reconciler:spec-drift", kind: "duplicate_position", slug: spec.slug, position, ids: list.map((l) => l.id), statuses: list.map((l) => l.status) },
           });
           dupReported++;
         } catch { /* best-effort audit */ }
@@ -756,48 +732,28 @@ export async function detectSpecPhaseAnomalies(workspaceId: string): Promise<{ o
     }
   } catch { /* best-effort — a read failure leaves the next beat to retry */ }
 
-  // PROVENANCE GAP sweep: a shipped spec_phases row with both pr IS NULL and merge_sha IS NULL. The
-  // per-phase PR chip can't render and the audit trail loses the shipping commit. Group by spec so the
-  // director sees one row per spec, not one per phase.
-  try {
-    const { data: shippedGaps } = await admin
-      .from("spec_phases")
-      .select("position, pr, merge_sha, specs!inner(slug, workspace_id, status)")
-      .eq("specs.workspace_id", workspaceId)
-      .eq("status", "shipped")
-      .is("pr", null)
-      .is("merge_sha", null);
-    type GapRow = {
-      position: number;
-      pr: number | null;
-      merge_sha: string | null;
-      specs:
-        | { slug: string; workspace_id: string; status: string }
-        | { slug: string; workspace_id: string; status: string }[];
-    };
-    const gapsBySlug = new Map<string, number[]>();
-    for (const r of (shippedGaps ?? []) as GapRow[]) {
-      const spec = Array.isArray(r.specs) ? r.specs[0] : r.specs;
-      if (!spec?.slug || spec.status === "folded") continue;
-      const list = gapsBySlug.get(spec.slug) ?? [];
-      list.push(r.position);
-      gapsBySlug.set(spec.slug, list);
-    }
-    for (const [slug, positions] of gapsBySlug) {
-      const sorted = positions.sort((a, b) => a - b);
-      try {
-        await recordDirectorActivity(admin, {
-          workspaceId,
-          directorFunction: "platform",
-          actionKind: "spec_phases_anomaly",
-          specSlug: slug,
-          reason: `reconciler:spec-drift surfaced ${sorted.length} shipped phase(s) of ${slug} (P${sorted.join(", P")}) with no PR + no merge_sha — provenance lost. Backfill from the build job / merge hook so the per-phase PR chip and the audit trail recover.`,
-          metadata: { actor: "reconciler:spec-drift", kind: "provenance_gap", slug, phases: sorted },
-        });
-        gapReported++;
-      } catch { /* best-effort audit */ }
-    }
-  } catch { /* best-effort — a read failure leaves the next beat to retry */ }
+  // PROVENANCE GAP sweep: a shipped spec_phases row with both pr IS NULL and merge_sha IS NULL (resolved
+  // by the SDK reader). Group by spec so the director sees one row per spec, not one per phase.
+  const gapsBySlug = new Map<string, number[]>();
+  for (const g of anomalies.provenanceGaps) {
+    const list = gapsBySlug.get(g.slug) ?? [];
+    list.push(g.position);
+    gapsBySlug.set(g.slug, list);
+  }
+  for (const [slug, positions] of gapsBySlug) {
+    const sorted = positions.sort((a, b) => a - b);
+    try {
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "spec_phases_anomaly",
+        specSlug: slug,
+        reason: `reconciler:spec-drift surfaced ${sorted.length} shipped phase(s) of ${slug} (P${sorted.join(", P")}) with no PR + no merge_sha — provenance lost. Backfill from the build job / merge hook so the per-phase PR chip and the audit trail recover.`,
+        metadata: { actor: "reconciler:spec-drift", kind: "provenance_gap", slug, phases: sorted },
+      });
+      gapReported++;
+    } catch { /* best-effort audit */ }
+  }
 
   return { orphans: orphanReported, duplicates: dupReported, provenanceGaps: gapReported };
 }

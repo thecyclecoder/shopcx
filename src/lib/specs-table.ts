@@ -76,6 +76,13 @@ export interface SpecRow {
    *  call is parked waiting; null means Ada hasn't touched this Vale-passed spec yet. */
   ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
   milestone_id: string | null;
+  /** spec-status-phase-pr-provenance Phase 1 — card-level shipping PR for a ONE-SHOT spec (zero phases):
+   *  the single merge that ships the whole spec, recorded here because there's no phase slot to carry it.
+   *  For multi-phase specs the per-phase `spec_phases.pr` is the provenance; this stays null. */
+  merged_pr: number | null;
+  /** spec-status-phase-pr-provenance Phase 1 — the merge SHA paired with `merged_pr` (one-shot specs).
+   *  Also the deploy-aware UI slot the board compares against `VERCEL_GIT_COMMIT_SHA`. */
+  last_merge_sha: string | null;
   created_at: string;
   updated_at: string;
   phases: SpecPhaseRow[];
@@ -152,12 +159,14 @@ interface SpecRowDb {
   vale_pass: boolean | null;
   ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
   milestone_id: string | null;
+  merged_pr: number | null;
+  last_merge_sha: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, ada_disposition, milestone_id, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, ada_disposition, milestone_id, merged_pr, last_merge_sha, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, verification, created_at, updated_at";
 
@@ -183,6 +192,8 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     vale_pass: db.vale_pass,
     ada_disposition: db.ada_disposition,
     milestone_id: db.milestone_id,
+    merged_pr: db.merged_pr,
+    last_merge_sha: db.last_merge_sha,
     created_at: db.created_at,
     updated_at: db.updated_at,
     phases,
@@ -546,4 +557,163 @@ export async function getPhase(phaseId: string): Promise<SpecPhaseRow | null> {
 /** Every spec linked to a milestone (`specs.milestone_id = milestoneId`), phases included. */
 export async function specsForMilestone(workspaceId: string, milestoneId: string): Promise<SpecRow[]> {
   return listSpecs(workspaceId, { milestone_id: milestoneId });
+}
+
+/**
+ * Write the EXPLICIT lifecycle override on `specs.status` — the states that are NOT derivable from the
+ * phase rollup (`shipped` is normally derived, but the fold/disposition/review lanes set these directly as
+ * deliberate lifecycle calls): `in_review` (newly authored, build pipeline holds), `deferred` (parked),
+ * `folded` (archived after a fold). Mirrors goals-table `setGoalStatus`: a slug-resolved single UPDATE with
+ * an `actor` tag bumped onto `updated_at` (the audit-grade trail lives elsewhere — director_activity rows).
+ *
+ * This is the ONLY sanctioned `specs.status` writer outside `upsertSpec`. The deriving readers prefer the
+ * phase rollup; this column carries the non-derivable overrides only (CLAUDE.md "Database is the spec":
+ * derived status from the phase rollup, stored status columns are explicit lifecycle overrides).
+ */
+export async function setSpecStatus(
+  workspaceId: string,
+  slug: string,
+  status: SpecStatus,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _actor: string,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("specs")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+}
+
+/**
+ * Write the spec's `blocked_by` list — the spec-blockers enforcement point (the build pipeline holds a spec
+ * until every slug in this array has shipped). The caller computes the merged/ordered list (e.g. the
+ * milestone-sequence reconciler's order-preserving union); this just persists it. A slug-resolved single
+ * UPDATE within a workspace.
+ */
+export async function setSpecBlockers(
+  workspaceId: string,
+  slug: string,
+  blockedBy: string[],
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("specs")
+    .update({ blocked_by: blockedBy, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+}
+
+/**
+ * Stamp a ONE-SHOT spec's card-level merge provenance on `specs.merged_pr` + `specs.last_merge_sha` — the
+ * spec-status-phase-pr-provenance Phase 1 chain for a zero-phase spec (the single merge ships the whole
+ * spec, and there's no `spec_phases` slot to carry the PR/SHA, so it lands on the parent row). For a
+ * multi-phase spec the per-phase `stampPhaseShipped` is the provenance writer; this is the one-shot path.
+ * `pr` may be null (a merge with no PR); `merge_sha` is the commit that shipped it.
+ */
+export async function stampSpecMergeProvenance(
+  workspaceId: string,
+  slug: string,
+  provenance: { pr: number | null; merge_sha: string | null },
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("specs")
+    .update({
+      merged_pr: provenance.pr,
+      last_merge_sha: provenance.merge_sha,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+}
+
+/** One orphan `spec_phases` row — a child whose parent `specs` row is gone (FK cascade should have killed
+ *  it; a survivor is a data-integrity bug). */
+export interface OrphanPhaseAnomaly {
+  phase_id: string;
+  spec_id: string;
+  position: number;
+  status: Phase;
+}
+
+/** One provenance-gap phase — `status='shipped'` with both `pr` and `merge_sha` null (the merge that
+ *  shipped it was never recorded). Resolved to its parent spec's slug + workspace. */
+export interface ProvenanceGapAnomaly {
+  slug: string;
+  workspace_id: string;
+  position: number;
+}
+
+export interface SpecPhaseAnomalies {
+  /** spec_phases rows whose parent specs row is missing. Workspace can't be resolved (no parent), so these
+   *  are global — the integrity rail surfaces them regardless of the requesting workspace. */
+  orphans: OrphanPhaseAnomaly[];
+  /** Shipped phases (in the requested workspace) carrying no PR + no merge_sha. */
+  provenanceGaps: ProvenanceGapAnomaly[];
+}
+
+/**
+ * Integrity-scan reader for the spec_phases anomaly sweep (the reconciler's surface-don't-auto-correct
+ * rail): returns (a) ORPHAN spec_phases rows whose parent `specs` row is missing, and (b) PROVENANCE-GAP
+ * phases — `status='shipped'` with both `pr` and `merge_sha` null. Resolves `spec_id → {slug, workspace}`
+ * internally so callers never touch raw PM tables. Read-only; folded specs are excluded from the gap set
+ * (a folded spec is archived, its provenance no longer actionable). Orphans are global by nature (no parent
+ * row to read a workspace from), so the orphan set is not workspace-filtered.
+ */
+export async function listSpecPhaseAnomalies(workspaceId: string): Promise<SpecPhaseAnomalies> {
+  const admin = createAdminClient();
+
+  // Read all phases (id, spec_id, position, status) + the live spec id→{slug, workspace, status} map, then
+  // intersect: orphans are phases whose spec_id is absent from the live set.
+  const { data: allPhases, error: pErr } = await admin
+    .from("spec_phases")
+    .select("id, spec_id, position, status, pr, merge_sha");
+  if (pErr) throw pErr;
+  const phaseRows = (allPhases ?? []) as {
+    id: string;
+    spec_id: string;
+    position: number;
+    status: Phase;
+    pr: number | null;
+    merge_sha: string | null;
+  }[];
+
+  const orphans: OrphanPhaseAnomaly[] = [];
+  const provenanceGaps: ProvenanceGapAnomaly[] = [];
+  if (!phaseRows.length) return { orphans, provenanceGaps };
+
+  const specIds = Array.from(new Set(phaseRows.map((p) => p.spec_id)));
+  const { data: liveSpecs, error: sErr } = await admin
+    .from("specs")
+    .select("id, slug, workspace_id, status")
+    .in("id", specIds);
+  if (sErr) throw sErr;
+  const liveById = new Map<string, { slug: string; workspace_id: string; status: SpecStatus }>();
+  for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string; status: SpecStatus }[]) {
+    liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id, status: s.status });
+  }
+
+  for (const p of phaseRows) {
+    const parent = liveById.get(p.spec_id);
+    if (!parent) {
+      orphans.push({ phase_id: p.id, spec_id: p.spec_id, position: p.position, status: p.status });
+      continue;
+    }
+    // Provenance gap: shipped phase, no pr + no merge_sha, in the requested workspace, non-folded parent.
+    if (
+      p.status === "shipped" &&
+      p.pr === null &&
+      p.merge_sha === null &&
+      parent.workspace_id === workspaceId &&
+      parent.status !== "folded"
+    ) {
+      provenanceGaps.push({ slug: parent.slug, workspace_id: parent.workspace_id, position: p.position });
+    }
+  }
+
+  return { orphans, provenanceGaps };
 }

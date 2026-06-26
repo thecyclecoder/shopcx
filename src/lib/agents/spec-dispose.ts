@@ -32,6 +32,7 @@ import {
 } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
+import { listSpecs } from "@/lib/specs-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -66,24 +67,15 @@ export interface DispositionCandidate {
 }
 
 export async function selectDispositionCandidates(
-  admin: Admin,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _admin: Admin,
   workspaceId: string,
 ): Promise<DispositionCandidate[]> {
-  const { data, error } = await admin
-    .from("specs")
-    .select("slug, status, deferred, vale_pass, ada_disposition, intended_status")
-    .eq("workspace_id", workspaceId)
-    .eq("status", "in_review");
-  if (error || !data) return [];
+  // Read the in_review cohort through the specs-table SDK (no raw PM SQL — pm-db-agent-toolkit). The JS
+  // filters below (vale_pass / ada_disposition / deferred / intended_status) all live on SpecRow.
+  const rows = await listSpecs(workspaceId, { status: "in_review" });
   const out: DispositionCandidate[] = [];
-  for (const r of data as Array<{
-    slug: string;
-    status: string;
-    deferred: boolean | null;
-    vale_pass: boolean | null;
-    ada_disposition: string | null;
-    intended_status: "planned" | "deferred" | null;
-  }>) {
+  for (const r of rows) {
     if (!r.vale_pass) continue; // Vale hasn't passed it yet — not Ada's turn.
     if (r.ada_disposition) continue; // already disposed (autonomous flip landed) or parked (pending_upgrade) — skip.
     if (r.deferred) continue; // an out-of-band defer already happened — leave it for the operator.

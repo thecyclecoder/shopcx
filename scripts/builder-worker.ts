@@ -2969,13 +2969,12 @@ async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string
       const merged = [...existingBlockers];
       for (const b of v.declaredBlockers) if (!merged.includes(b)) merged.push(b);
       if (merged.length !== existingBlockers.length) {
-        const { error: blkErr } = await db
-          .from("specs")
-          .update({ blocked_by: merged, updated_at: new Date().toISOString() })
-          .eq("workspace_id", job.workspace_id)
-          .eq("slug", v.slug);
-        if (blkErr) {
-          console.error(`${tag} sequence: failed to persist Blocked-by for ${v.slug} (skipping hold): ${blkErr.message}`);
+        // Persist through the specs-table SDK (the only sanctioned `specs.blocked_by` writer) — no raw PM SQL.
+        try {
+          const { setSpecBlockers } = await import("../src/lib/specs-table");
+          await setSpecBlockers(job.workspace_id, v.slug, merged);
+        } catch (blkErr) {
+          console.error(`${tag} sequence: failed to persist Blocked-by for ${v.slug} (skipping hold): ${blkErr instanceof Error ? blkErr.message : String(blkErr)}`);
           continue;
         }
       }
@@ -5159,11 +5158,11 @@ async function runFoldJob(job: Job) {
       // spec-fold-from-db-row Phase 1: flip the spec rows even when there was no new brain edit —
       // the row is the live status surface now, so a re-fold that finds the brain already updated
       // still needs to mark the spec `folded` (otherwise it loops as `shipped`-but-pending forever).
-      await db
-        .from("specs")
-        .update({ status: "folded", updated_at: new Date().toISOString() })
-        .eq("workspace_id", job.workspace_id)
-        .in("slug", slugs);
+      // Through the specs-table SDK (the only sanctioned `specs.status` writer) — no raw PM SQL.
+      {
+        const { setSpecStatus } = await import("../src/lib/specs-table");
+        for (const slug of slugs) await setSpecStatus(job.workspace_id, slug, "folded", "fold-worker");
+      }
       // A fold can pause on needs_input → draft PR; un-draft it on a no-new-change resume (same gap as runJob).
       const pr = await ensurePr(branch!, slugs[0] || "fold", false);
       if (pr) {
@@ -5200,12 +5199,11 @@ async function runFoldJob(job: Job) {
     // rollup (spec-body-table-and-backfill) leaves `folded` alone — it's terminal-ish — so a later
     // phase-write can't quietly reset it. The row is PRESERVED: every other column (title, summary,
     // owner, parent, blocked_by, milestone_id) stays so the board's archive view + audit history
-    // can render the folded card unchanged.
-    await db
-      .from("specs")
-      .update({ status: "folded", updated_at: new Date().toISOString() })
-      .eq("workspace_id", job.workspace_id)
-      .in("slug", slugs);
+    // can render the folded card unchanged. Through the specs-table SDK — no raw PM SQL.
+    {
+      const { setSpecStatus } = await import("../src/lib/specs-table");
+      for (const slug of slugs) await setSpecStatus(job.workspace_id, slug, "folded", "fold-worker");
+    }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
     // Snapshot-race sweep: specs enqueued into pending_folds AFTER this job's opening snapshot are still
