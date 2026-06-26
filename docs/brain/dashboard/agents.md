@@ -3,7 +3,7 @@
 The owner-only **Agents hub** ([[../specs/agents-hub-role-inboxes]], M1 of [[../goals/devops-director]]) — the single surface that renders the live org chart (**CEO · Directors · Workers**) read from the brain, and gives every role the same **three-tab inbox** (Messages · Approval Requests · Daily Summaries). The foundation the routing engine (M2), the gamified board (M3), and the live Platform director (M4) all write *into*. Consolidates every approval into one routed surface (replacing the scattered Control Tower feeds, spec cards, the box `approvalHref`): platform-owned approvals route to the **live Platform/DevOps Director (Ada)** (`live + autonomous` since 2026-06-23, [[../tables/function_autonomy]]); the not-yet-automated directors' approvals still land in the **CEO inbox**.
 
 **Route:** `/dashboard/agents` (client poller, owner-only)
-**Sidebar:** **Developer** section (owner-only) → **Agents** (right under [[control-tower|Control Tower]]).
+**Sidebar:** the **Developer** portal (owner-only) → **Org** group → **Message Board** (`/dashboard/agents`), alongside Org Chart · Directors · Agents — the Org surfaces moved here off the main tree ([[developer]] portal).
 **Sibling surface:** [[agents__scorecard|Platform scorecard]] — `/dashboard/agents/scorecard` ([[../specs/platform-scorecard-surface]] Phase 2, milestone (d) of [[../goals/platform-department-scorecard]]) — the daily/weekly/monthly KPI instrument panel, linked from the hub header.
 
 ## Surfaces
