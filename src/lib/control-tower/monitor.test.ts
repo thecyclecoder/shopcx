@@ -10,7 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evalAgentKind, evalCron, extractCronExpr, firstScheduledFiringMs, jobStuckSince, nextFiringAtOrAfter, parseCronExpr, type ActiveJob } from "./monitor";
+import { evalAgentKind, evalCron, evalWorker, extractCronExpr, firstScheduledFiringMs, jobStuckSince, nextFiringAtOrAfter, parseCronExpr, type ActiveJob, type WorkerRow } from "./monitor";
 import type { MonitoredLoop } from "./registry";
 
 test("extractCronExpr pulls the 5-field expression from expectedCadence", () => {
@@ -291,5 +291,111 @@ test("evalCron still flips RED for a genuinely-dead cron once the observed-ancho
     assert.equal(result.violation?.reason, "registered_not_firing");
   } finally {
     Date.now = realNow;
+  }
+});
+
+// ─── Queue-aware self-update deferral (control-tower-self-update-tile-queue-aware) ───
+// evalWorker mirrors scripts/builder-worker.ts:4290 — an idle worker BEHIND origin/main
+// while {queued, queued_resume} > 0 is intentionally parking its self-update until a
+// sustained idle. Reading that as "self-update stuck" was the monitor false positive
+// (signal loop:box). A MANUAL queue restart (drain_for_update=true) is the explicit
+// "restart at idle regardless of the queue" lever — so it still reds at grace.
+
+const workerLoop: MonitoredLoop = {
+  id: "box",
+  kind: "worker",
+  owner: "platform",
+  label: "Box build worker",
+  description: "The self-hosted build worker poll loop.",
+  expectedCadence: "polls every ~5s",
+  livenessWindowMs: 5 * 60_000,
+  shaGraceMs: 30 * 60_000,
+};
+
+const idleBehindWorker = (overrides: Partial<WorkerRow> = {}): WorkerRow => ({
+  running_sha: "aaaaaaa",
+  status: null,
+  active_builds: 0,
+  detail: null,
+  last_poll_at: "2026-06-25T11:59:55Z",
+  // started_at well past the 30-min shaGraceMs so the only thing keeping it green is queue/drain.
+  started_at: "2026-06-25T10:00:00Z",
+  accounts: null,
+  ...overrides,
+});
+
+test("evalWorker stays GREEN with update-deferred status when behind+idle but queued > 0 and no manual drain", () => {
+  // The loop:box false-positive case: SHA behind origin/main, box at idle, but builds are queued
+  // for back-to-back specs — the worker intentionally parks its self-update so it doesn't restart
+  // between specs. Must NOT be a red.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker(), 3, false);
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /update deferred · 3 queued/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker flips RED at shaGrace when behind+idle and queue is empty (no defer)", () => {
+  // Empty backlog ⇒ no excuse for parking the self-update. shaGrace exhausted ⇒ the real
+  // "self-update stuck" condition we still want to page on.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "liveness");
+    assert.match(result.statusText, /behind origin\/main/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker flips RED at shaGrace under a MANUAL drain regardless of queued count", () => {
+  // worker_controls.drain_for_update=true means the CEO explicitly wants the box to restart at
+  // idle ignoring the queue — so a queued backlog DOES NOT defer the red.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker(), 5, true);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "liveness");
+    assert.match(result.violation!.detail, /manual drain set/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker still flags behind+busy as GREEN (existing behavior — never interrupt an in-flight build)", () => {
+  // Sanity guard the new queue-aware branch did not displace the existing behind+busy path.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker({ active_builds: 2 }), 0, false);
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /building — update deferred/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
   }
 });

@@ -293,7 +293,7 @@ interface AccountsSnapshot {
   all_capped?: boolean;
   soonest_reset?: string | null;
 }
-interface WorkerRow {
+export interface WorkerRow {
   running_sha: string | null;
   status: string | null;
   active_builds: number | null;
@@ -338,7 +338,12 @@ export function jobStuckSince(j: ActiveJob, workerStartedAt: string | null = nul
   return baseMs >= startedMs ? base : workerStartedAt;
 }
 
-function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+export function evalWorker(
+  loop: MonitoredLoop,
+  row: WorkerRow | null,
+  queuedCount = 0,
+  manualDrain = false,
+): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -376,9 +381,21 @@ function evalWorker(loop: MonitoredLoop, row: WorkerRow | null): Omit<LoopStatus
   const running = row.running_sha || "";
   const idle = (row.active_builds ?? 0) === 0;
   const behind = !!deployed && !!running && deployed.slice(0, running.length) !== running;
-  const behindTooLong = behind && idle && ageMs(row.started_at) > (loop.shaGraceMs ?? 30 * 60_000);
+  // Mirror the worker's queue-aware self-update deferral (scripts/builder-worker.ts:4290 —
+  // self-restart-defers-to-idle): when the box is IDLE but `queued > 0` AND no manual drain is set,
+  // the worker INTENTIONALLY parks the self-update until a sustained idle so a cascade of queued
+  // builds isn't restarted between specs. Reading that as "self-update stuck" was the monitor false
+  // positive (loop:box) — the worker is behaving exactly as designed. A MANUAL queue-restart
+  // (worker_controls.drain_for_update) still restarts at idle regardless of the queue (that's its
+  // purpose), so behindTooLong still reds at grace under a manual drain.
+  const queueDeferred = behind && idle && queuedCount > 0 && !manualDrain;
+  if (queueDeferred) {
+    return { ...base, color: "green", statusText: `idle — update deferred · ${queuedCount} queued (${running} → ${deployed.slice(0, 7)} on sustained idle)`, detail: row.detail ?? null, violation: null };
+  }
+  // Red when behind+idle AND past shaGrace AND not queue-deferred (queue empty OR manual drain set).
+  const behindTooLong = behind && idle && !queueDeferred && ageMs(row.started_at) > (loop.shaGraceMs ?? 30 * 60_000);
   if (behindTooLong) {
-    return { ...base, color: "red", statusText: `behind origin/main — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker is running ${running} but origin/main is ${deployed.slice(0, 7)} — self-update stuck for ${elapsed(row.started_at)}.` } };
+    return { ...base, color: "red", statusText: `behind origin/main — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker is running ${running} but origin/main is ${deployed.slice(0, 7)} — self-update stuck for ${elapsed(row.started_at)}${manualDrain ? " (manual drain set)" : ""}.` } };
   }
   // Behind but BUSY (active build in flight) ⇒ the worker is intentionally deferring
   // self-update until its lanes clear (sacrosanct — never kill an in-flight build). That's
@@ -1058,7 +1075,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }, { data: firstSeenRows }] = await Promise.all([
+  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }, { data: firstSeenRows }, { data: workerCtrl }] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at, accounts").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly read (control-tower-loop-beats-rpc-perf P1): a lateral join takes
     // the distinct cron + agent-kind loop_ids and, per loop, reads only its latest HISTORY_LIMIT
@@ -1091,6 +1108,12 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     // registered for at least one full window." Tiny table (one row per registered loop) — read
     // unbounded.
     admin.from("monitored_loops_first_seen").select("loop_id, first_seen_at"),
+    // Manual queue-restart flag (worker_controls.drain_for_update) — mirrors the worker's own
+    // self-update decision (scripts/builder-worker.ts:4290): a manual drain restarts at idle
+    // regardless of the queue (that's the whole point), so when it's set the queue-aware deferral
+    // is suppressed and behindTooLong still reds at grace. Singleton row keyed by WORKER_BOX_ID;
+    // missing row ⇒ drain off (no-op).
+    admin.from("worker_controls").select("drain_for_update").eq("box_id", WORKER_BOX_ID).maybeSingle(),
   ]);
 
   // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
@@ -1124,6 +1147,12 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     alertByLoop.set(a.loop_id, { id: a.id, reason: a.reason, detail: a.detail, opened_at: a.opened_at, last_seen_at: a.last_seen_at });
   }
   const activeJobs = (jobs ?? []) as ActiveJob[];
+  // Queue-aware self-update deferral inputs (mirror-worker-queue-aware-self-update). The worker
+  // intentionally parks its self-update while {queued, queued_resume} > 0 unless a MANUAL queue
+  // restart is set — without these the box tile reads "self-update stuck" while the worker is
+  // behaving exactly as designed (the loop:box false positive).
+  const queuedCount = activeJobs.filter((j) => j.status === "queued" || j.status === "queued_resume").length;
+  const manualDrain = !!(workerCtrl as { drain_for_update: boolean } | null)?.drain_for_update;
 
   // Empirical first-observed-at anchor (control-tower-registered-not-firing-observed-anchor-grace
   // P1). Build the loop_id → first_seen_at(ms) map from the read above, then best-effort upsert a
@@ -1170,7 +1199,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const history = byLoop.get(loop.id) ?? [];
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
-    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null);
+    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
