@@ -244,6 +244,43 @@ export function isTransientInngestStepRetryThrow(
 }
 
 /**
+ * Shopify webhook HMAC-failure noise — the shopify companion to
+ * `isTransientInngestStepRetryThrow`, factored here so the vercel-logs route can reuse it
+ * ([[../specs/error-feed-shopify-webhook-hmac-transient]]).
+ *
+ * `/api/webhooks/shopify` + `/api/webhooks/shopify-returns` reject a request whose HMAC
+ * doesn't verify with a 401 and a `console.error("Shopify webhook HMAC failed …")` /
+ * `console.error("Shopify returns webhook HMAC failed …")`. A SINGLE such log is almost
+ * never an integration bug — it's a one-off probe (Shopify's own wiring check, a scanner,
+ * a stale-secret retry from a deleted-then-recreated webhook subscription) that the next
+ * legitimate delivery clears. Minting a fresh OPEN incident on first sighting pages
+ * Platform owners on a healthy webhook loop (Control Tower `vercel:fc64a1540851bf79`).
+ *
+ * `true` ONLY when the log is from one of the shopify webhook routes AND the message
+ * begins with the exact HMAC-failure prefix. Wired in `/api/webhooks/vercel-logs` as the
+ * `transient` flag to `recordError`, which auto-resolves a first sighting (recorded for
+ * visibility, NOT paged, no repair fan-out) and escalates to a real open+page ONLY if
+ * the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` — so a one-off probe is
+ * dropped while a chronic signing bug (would recur every beat) still surfaces.
+ *
+ * Unrelated errors on the same routes (a JSON parse failure, a downstream throw) carry
+ * different messages and stay captured / paged on first sighting.
+ */
+export function isTransientShopifyWebhookHmacFailure(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  const p = (path ?? "").trim().toLowerCase();
+  if (p !== "/api/webhooks/shopify" && p !== "/api/webhooks/shopify-returns") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  return (
+    text.startsWith("Shopify webhook HMAC failed") ||
+    text.startsWith("Shopify returns webhook HMAC failed")
+  );
+}
+
+/**
  * Transient Supabase-logs noise — the supabase-logs companion to `isBareLifecycle` /
  * `isTransientInngestTransportError`, factored here so the poller can reuse it
  * ([[../specs/error-feed-supabase-logs-transient-5xx-scoping]]).
