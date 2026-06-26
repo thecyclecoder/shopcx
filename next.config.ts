@@ -6,20 +6,25 @@ const nextConfig: NextConfig = {
   // searchParams and renders dynamically on every request, defeating the
   // pdp-edge-served-experiments per-arm cache contract.
   cacheComponents: true,
-  // Force the Next 16 MetadataWrapper to always take the streaming branch so the
-  // PPR resume replay matches the build-time prerender. With cacheComponents on,
-  // the storefront PDP (src/app/(storefront)/store/[workspace]/[slug]/page.tsx) is
-  // prerendered with no UA, so MetadataWrapper bakes <div hidden><MetadataBoundary/></div>
-  // into the static shell. At runtime, requests from HTML-limited bots (Bingbot,
-  // facebookexternalhit, Twitterbot, LinkedInBot, Slackbot, Applebot, …) would otherwise
-  // take the blocking branch (<MetadataBoundary/> directly) and React's resume replay
-  // throws "Expected the resume to render <div> in this slot but instead it rendered
-  // <__next_metadata_boundary__>", bailing the page to CSR (no SSR HTML for bots → SEO
-  // regression). Passing a regex that never matches any UA makes shouldServeStreamingMetadata
-  // return true for every request, so build-time and runtime always pick the same shell shape.
-  // (?!) is a negative lookahead against the always-matching empty pattern — it can never match.
-  // Static HTML is fully baked at build time, so bots still see the full page in the initial
-  // response; only the metadata wrapper shape is held constant.
+  // Metadata-streaming for NON-bot UAs. With cacheComponents on, every prerendered
+  // route is PPR and bakes the STREAMING metadata wrapper into its build-time shell:
+  // <div hidden><MetadataBoundary/></div> (export runs with no UA, where Next hardcodes
+  // serveStreamingMetadata=true). `/(?!)/` is a regex that never matches, so the runtime
+  // shouldServeStreamingMetadata() returns true for every non-bot request → their resume
+  // shell matches the prerendered shell.
+  //
+  // ⚠️ This does NOT cover HTML-limited bots. Next's app-page handler computes
+  //   serveStreamingMetadata = botType && isRoutePPREnabled ? false : !ua ? true
+  //     : shouldServeStreamingMetadata(ua, htmlLimitedBots)
+  // and the leading `botType && isRoutePPREnabled` short-circuit forces the BLOCKING branch
+  // (a bare <__next_metadata_boundary__>) for bots, IGNORING this htmlLimitedBots value. On
+  // an ISR revalidate triggered by a bot crawl, the cached shell is poisoned to the blocking
+  // shape; a later resume then throws "Expected the resume to render <div> … rendered
+  // <__next_metadata_boundary__>" and React bails /store, /widget, /portal, /help to CSR.
+  // htmlLimitedBots cannot fix that branch, and `dynamic`/`experimental_ppr` opt-outs are
+  // rejected under cacheComponents. The actual fix neutralizes the bot UA at the edge in
+  // src/proxy.ts so getBotType() returns undefined and bots take this same streaming branch.
+  // See docs/brain/recipes/next16-metadata-boundary-csr-bail.md.
   htmlLimitedBots: /(?!)/,
   // Prevent 308 trailing-slash redirects — Shopify app proxy follows 3xx redirects,
   // which breaks the proxy flow (redirects to storefront instead of proxying to backend)
