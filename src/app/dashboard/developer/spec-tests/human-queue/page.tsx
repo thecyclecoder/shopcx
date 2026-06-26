@@ -3,11 +3,12 @@
 /**
  * /dashboard/developer/spec-tests/human-queue — the Human-test queue (spec-test-agent Phase 2).
  *
- * The box spec-test QA agent runs the non-destructive `## Verification` bullets and classifies the rest
- * (visual/UX or prod-mutating) as `needs_human`. This page aggregates every `needs_human` check across
- * the latest run of every shipped-but-unverified spec — the parts only the owner can do — so they do
- * only those, mark each tested, and clear the queue before the Verified & archive gate. Regressions
- * (a shipped spec that FAILED its own spec-test) live on their own page at /dashboard/developer/regressions.
+ * ADVISORY / OPTIONAL (fold-on-spec-test-pass, task #29): folding into the brain now fires on the MACHINE
+ * spec-test pass, NOT on clearing this queue. This list is the parts the box QA agent classified `needs_human`
+ * (visual/UX or prod-mutating) across the latest run of every shipped-but-unverified spec — a place to run
+ * extra human QA if you want, NOT a gate. It never blocks the fold, the brain, or a spec's progression; you
+ * can clear an item whenever (or never). Regressions (a shipped spec that FAILED its own spec-test — those DO
+ * block the fold) live on their own page at /dashboard/developer/regressions.
  * Read-only over /api/developer/spec-test/human-queue; the owner's resolutions are the only writes.
  * Polls every ~8s + revalidates on focus.
  */
@@ -92,10 +93,17 @@ export default function HumanTestQueuePage() {
     <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 pt-20 md:pt-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Human-test queue</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Human-test queue</h1>
+            <span className="rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+              Advisory · optional
+            </span>
+          </div>
           <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
             The parts the box QA agent <span className="font-medium">can&apos;t</span> auto-test (visual/UX or
-            prod-mutating) across every shipped-but-unverified spec. Do them, mark each tested, then verify.
+            prod-mutating) across every shipped-but-unverified spec. Optional extra QA — specs already fold into
+            the brain on the machine spec-test pass, so this never blocks anything. Clear an item whenever you
+            want, or never.
           </p>
         </div>
         <Link
@@ -119,9 +127,9 @@ export default function HumanTestQueuePage() {
           {/* Needs human testing — the waiting pile. */}
           <section className="space-y-2">
             <div className="flex items-baseline gap-2">
-              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">👤 Needs human testing</h2>
+              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">👤 Human QA pending</h2>
               <span className="text-xs tabular-nums text-zinc-400">{waiting.length}</span>
-              <span className="text-xs text-zinc-400">· only you can run these</span>
+              <span className="text-xs text-zinc-400">· optional — never blocks the fold</span>
             </div>
             {waiting.length === 0 ? (
               <p className="rounded-lg border border-dashed border-zinc-200 px-4 py-6 text-center text-sm text-zinc-400 dark:border-zinc-800">

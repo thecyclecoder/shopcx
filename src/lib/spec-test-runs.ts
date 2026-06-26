@@ -480,23 +480,25 @@ export async function getHumanTestQueue(workspaceId: string): Promise<HumanTestQ
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * Gate B — auto-fold fully-verified specs (auto-ship-pipeline spec, Phase 2).
+ * Gate B — fold on MACHINE spec-test pass (auto-ship-pipeline Phase 2; fold-on-spec-test-pass, task #29).
  *
  * The mirror of the auto-merge gate, one rung up the pipeline: where Gate A automates the owner's
- * rubber-stamp "merge" click on green PRs, Gate B automates the owner's rubber-stamp "Mark verified &
- * archive" click on ALL-GREEN shipped specs — the exact state the owner archives on. It optimizes a
- * bounded proxy (fold-when-all-pass), the owner still owns the objective + can pause it (the
- * `workspaces.auto_fold_enabled` kill-switch), and every fold is surfaced (Control Tower heartbeat +
- * log). It NEVER skips the human checks — it just stops making the owner click once the human is done.
- * A spec with ONE waiting / failed human check or a regression is left alone (hitting a rail = leave it).
- * Coalesces into the SAME batch fold-build the manual verify uses (enqueue_fold).
+ * rubber-stamp "merge" click on green PRs, Gate B folds a shipped spec into the brain the moment its
+ * MACHINE spec-test passes (agent-verdict `approved` + no open regression) — no human click required.
+ * Fold is NON-destructive (the specs/spec_phases row is PRESERVED with status='folded'; the fold just
+ * extracts knowledge into the permanent brain pages), so the machine spec-test is sufficient verification.
+ * It optimizes a bounded proxy (fold-when-machine-tested-green), the owner still owns the objective + can
+ * pause it (the `workspaces.auto_fold_enabled` kill-switch), and every fold is surfaced (Control Tower
+ * heartbeat + log). Human QA is now ADVISORY — a waiting/failed `needs_human` check does NOT block the
+ * fold; only a real machine-detected regression (an open auto-`fail`) leaves the spec alone (hitting a rail
+ * = leave it). Coalesces into the SAME batch fold-build the manual verify uses (enqueue_fold).
  * ────────────────────────────────────────────────────────────────────────── */
 
 /**
  * Kill-switch: is auto-fold enabled for a workspace? Default ENABLED (true) — the gate automates the
  * owner's verify-&-archive click, the flag exists to PAUSE it. Read via `select("*")` so a deploy that
  * lands before the `auto_fold_enabled` migration applies degrades gracefully (column absent ⇒ undefined ⇒
- * enabled), and a read failure also defaults to enabled (best-effort; the fold is still guarded all-green).
+ * enabled), and a read failure also defaults to enabled (best-effort; the fold is still guarded by machine pass).
  * Only an explicit `auto_fold_enabled === false` pauses the gate. Mirrors isAutoMergeEnabled.
  */
 export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin): Promise<boolean> {
@@ -511,14 +513,22 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
 }
 
 /**
- * The set of shipped-but-not-archived specs that are FULLY verified for a workspace — the all-green state
- * the owner archives on:
- *   - the latest spec_test run is agent-verdict `approved` (its automatable checks all pass), AND
- *   - 0 human checks waiting (no `needs_human` check the owner hasn't resolved), AND
- *   - 0 human checks failed (no resolution === 'failed' for the spec — a confirmed-broken bullet), AND
- *   - 0 regressions (no unresolved auto-`fail` check — same definition the human-test queue uses).
- * Pure read; mirrors the per-spec board-chip / human-queue derivation so it can never disagree with what
- * the owner sees. A spec missing a run, or agent-verdict `issues`/`needs_human`/`error`, is NOT eligible.
+ * The set of shipped-but-not-archived specs eligible to fold for a workspace.
+ *
+ * fold-on-spec-test-pass (task #29): the fold trigger is the MACHINE spec-test pass, NOT human
+ * verification. Fold is NON-destructive in the DB-driven world (the specs/spec_phases row is PRESERVED
+ * with status='folded'; the fold only extracts knowledge into the permanent brain pages) — so gating it
+ * on an uncompletable human-test backlog just blinds the devops agents to shipped code. A spec is eligible
+ * the moment its machine spec-test passes:
+ *   - the latest spec_test run is agent-verdict `approved` (its automatable Verification checks all pass), AND
+ *   - 0 regressions (no UNRESOLVED auto-`fail` check — an evidence-backed broken bullet; same definition the
+ *     human-test queue / regression banner use). A FAILING spec-test (verdict `issues`/`needs_human`/`error`,
+ *     or any open auto-`fail`) is NOT eligible — it surfaces the failure instead of folding.
+ *
+ * Human QA is now ADVISORY, never a fold gate: a `needs_human` check the owner hasn't resolved, or a human
+ * `failed` resolution, does NOT block the fold (the "human QA pending" badge stays for the owner to clear
+ * whenever they want, or never). Pure read; mirrors the regression definition so the gate can never disagree
+ * with the surfaced regression banner. A spec missing a run is NOT eligible (it hasn't been machine-tested yet).
  */
 export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
   const admin = createAdminClient();
@@ -545,24 +555,20 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     if (s.status !== "shipped" || archivedSet.has(s.slug)) continue;
     if (liveSlugs.has(s.slug)) continue;
     const run = runs[s.slug];
+    // Machine spec-test PASS = agent-verdict approved. `issues`/`needs_human`/`error` (or a missing run) is
+    // a non-pass → not eligible. needs_human checks are advisory and intentionally NOT consulted here.
     if (!run || run.agent_verdict !== "approved") continue;
 
-    let blocked = false;
+    // 0 regressions only: an UNRESOLVED auto-`fail` (an evidence-backed broken bullet) blocks the fold — that
+    // is a real machine-detected failure, not a human-QA item. (An `approved` run won't carry a `fail`, but
+    // we keep the guard so a hand-edited run / future verdict shape can't fold over an open regression.)
+    let hasRegression = false;
     for (const c of run.checks) {
-      const key = checkKey(c.text);
-      const res = resolutions.get(`${s.slug}:${key}`);
-      // a needs_human check the owner hasn't resolved (waiting), or an unresolved auto-fail (regression)
-      if (c.verdict === "needs_human" && !res?.resolution) { blocked = true; break; }
-      if (c.verdict === "fail" && !res?.resolution) { blocked = true; break; }
+      if (c.verdict !== "fail") continue;
+      const res = resolutions.get(`${s.slug}:${checkKey(c.text)}`);
+      if (!res?.resolution) { hasRegression = true; break; }
     }
-    if (blocked) continue;
-
-    // 0 human checks FAILED: any resolution === 'failed' for this spec (a confirmed-broken bullet) blocks.
-    let hasFailed = false;
-    for (const [k, row] of resolutions) {
-      if (k.startsWith(`${s.slug}:`) && row.resolution === "failed") { hasFailed = true; break; }
-    }
-    if (hasFailed) continue;
+    if (hasRegression) continue;
 
     eligible.push(s.slug);
   }
@@ -571,7 +577,7 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
 
 export interface AutoFoldResult {
   enabled: boolean;
-  /** shipped-but-not-archived specs that are fully verified (all-green) this pass. */
+  /** shipped-but-not-archived specs that PASSED their machine spec-test (no open regression) this pass. */
   eligible: number;
   /** specs newly enqueued for the batch fold-build (excludes ones already pending/folding). */
   folded: number;
@@ -579,12 +585,12 @@ export interface AutoFoldResult {
 }
 
 /**
- * Gate B: enqueue a batch fold-build for every fully-verified shipped spec in a workspace.
+ * Gate B: enqueue a batch fold-build for every shipped spec that PASSED its machine spec-test in a workspace.
  *
  * Guardrails (supervisable autonomy):
  *  - kill-switch: no-op when `auto_fold_enabled === false` on the workspace.
- *  - ALL-GREEN only — agent-verdict approved + 0 human checks waiting/failed + 0 regressions
- *    (getAutoFoldEligibleSlugs). A spec with one open/failed/waiting check is left for the human.
+ *  - MACHINE-PASS only — agent-verdict approved + 0 open regressions (getAutoFoldEligibleSlugs). Human QA
+ *    is advisory: a waiting/failed `needs_human` check does NOT block; only an open auto-`fail` regression does.
  *  - Idempotent: skips a spec already pending/folding (a fold job already owns it); enqueue_fold itself
  *    coalesces every eligible spec into ONE queued batch fold-build (no fan-out of N fold PRs).
  *  - requested_by = null (no human clicked — this is the gate). Surfaces the pass as a Control Tower

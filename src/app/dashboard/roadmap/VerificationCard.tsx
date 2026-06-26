@@ -87,7 +87,8 @@ export default function VerificationCard({
         {isOwner && <TestNowButton slug={slug} compact />}
       </div>
       <p className="mb-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-        The box checked the automatable parts — it never marks this verified. You still own the Verified &amp; archive gate.
+        The box checks the automatable parts. On an <span className="font-medium">approved</span> run the spec auto-folds
+        into the brain — no click needed. Any human-only checks below are advisory and never block the fold.
       </p>
       {run.agent_verdict === "issues" && (
         <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-rose-200 bg-rose-50/60 px-2 py-1.5 dark:border-rose-900/50 dark:bg-rose-950/20">
@@ -100,7 +101,7 @@ export default function VerificationCard({
       {run.checks.length > 0 && <CheckList checks={run.checks} />}
       {humanChecks.length > 0 && (
         <div className="mt-2 border-t border-indigo-100 pt-2 dark:border-indigo-900/40">
-          <div className="mb-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">👤 Needs human testing</div>
+          <div className="mb-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">👤 Human QA pending (advisory — doesn&apos;t block the fold)</div>
           <ul className="space-y-1">
             {humanChecks.map((c, i) => (
               <li key={i} className="text-[11px] text-zinc-600 dark:text-zinc-400">{c.text}</li>
@@ -130,7 +131,7 @@ export default function VerificationCard({
         </div>
         {allGreen ? (
           <div className="mb-2 rounded-md border border-emerald-300 bg-emerald-100/70 px-2 py-1.5 text-[11px] font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">
-            ✅ All checks green — ready to archive. Mark verified &amp; archive with confidence.
+            ✅ All checks green. The machine spec-test pass auto-folds this into the brain — no click needed.
           </div>
         ) : null}
         <ul className="space-y-1">

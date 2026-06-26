@@ -52,24 +52,30 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
 - `upsertHumanCheckResolution({...})` / `clearHumanCheckResolution(...)` — owner-only writes to
   [[../tables/spec_test_human_checks]], integrity-checked (`check_key` must equal `checkKey(check_text)`).
 - `getHumanTestQueue(workspaceId)` → `HumanTestQueue` — aggregates every waiting `needs_human` check across the
-  latest run of each shipped-unverified spec **+ the Regressions list** (keyed off evidence-backed `fail` checks
-  only — `needs_human`/`inconclusive` never appear there, [[../specs/spec-test-classification|the classification rule]]).
+  latest run of each shipped-unfolded spec (drives the **advisory** Human QA queue — these never gate the fold; task #29)
+  **+ the Regressions list** (keyed off evidence-backed `fail` checks only — `needs_human`/`inconclusive` never appear
+  there, [[../specs/spec-test-classification|the classification rule]]). Regressions DO block the fold.
 
-### Auto-fold gate — Gate B ([[../specs/auto-ship-pipeline]] Phase 2)
-- `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the **all-green** shipped-not-archived specs: latest run
-  agent-verdict `approved` · 0 waiting `needs_human` checks · 0 human checks resolved `failed` · 0 unresolved
-  auto-`fail` regressions. Reuses the SAME per-spec derivation as the board chip / human-test queue, so the gate
-  can never disagree with what the owner sees. **fold-guard-live-build:** a slug with a live `build`/`spec-test`
-  `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also excluded** — auto-folding it would orphan the running build
-  (its spec page 404s the moment the fold merges), so the fold is deferred until the job is terminal (the next gate
-  pass re-picks it up), never dropped. This mirrors the manual verify guard `getLiveJobForSlug` ([[agent-jobs]]).
+### Auto-fold gate — Gate B (fold on MACHINE spec-test pass; fold-on-spec-test-pass, task #29)
+**The fold trigger is the MACHINE spec-test pass, NOT human verification.** Fold is non-destructive (the [[../tables/specs]]
+row is preserved with `status='folded'`; the fold just extracts knowledge into the permanent brain pages), so the
+spec-test agent's green grade over the `## Verification` bullets is sufficient to fold. **Human QA is advisory** — a
+waiting/failed `needs_human` check NEVER blocks the fold.
+- `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the shipped-not-archived specs whose **machine spec-test passed**:
+  latest run agent-verdict `approved` · 0 **unresolved auto-`fail` regressions**. It does **NOT** consult `needs_human`
+  checks or human `failed` resolutions (those are advisory). A failing run (`issues`/`needs_human`/`error`, or an open
+  auto-`fail`) is NOT eligible — it surfaces the failure instead. **fold-guard-live-build:** a slug with a live
+  `build`/`spec-test` `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also excluded** — auto-folding it would orphan the
+  running build (its spec page 404s the moment the fold merges), so the fold is deferred until the job is terminal (the next
+  gate pass re-picks it up), never dropped. This mirrors the manual fold guard `getLiveJobForSlug` ([[agent-jobs]]).
 - `isAutoFoldEnabled(workspaceId, admin?)` → `boolean` — the owner kill-switch (`workspaces.auto_fold_enabled`,
   default ON; `select("*")` so a pre-migration deploy degrades to enabled). Mirrors `isAutoMergeEnabled`.
 - `autoFoldVerifiedSpecs(workspaceId, admin?)` → `AutoFoldResult` — for each eligible spec not already
   `pending`/`folding`, calls `enqueue_fold(p_user:null)` (coalesced into the ONE batch fold-build, [[../specs/fold-build-batching]]);
   emits the `auto-fold-gate` reactive Control Tower heartbeat ([[control-tower]], `AUTO_FOLD_GATE_LOOP_ID`). The
-  all-green mirror of `autoMergeReadyPrs` ([[github-pr-resolve]]), one rung up the pipeline. Triggered reactively by
-  the worker after a spec-test run + by the human-queue POST, and periodically by [[../inngest/spec-test-cron]].
+  machine-pass mirror of `autoMergeReadyPrs` ([[github-pr-resolve]]), one rung up the pipeline. Triggered reactively by
+  the worker after a spec-test run (the primary fold trigger), as a best-effort backstop by the advisory human-queue POST,
+  and periodically by [[../inngest/spec-test-cron]].
 
 ## Classification policy — "if a machine can test it, the machine does it"
 

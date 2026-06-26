@@ -74,8 +74,9 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error }, { status: 500 });
     // Re-open → strip the ✅ from this bullet on the spec markdown (best-effort, never blocks the click).
     const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
-    // Auto-fold Gate B (auto-ship-pipeline Phase 2): a resolution change can flip a spec all-green →
-    // auto-archive it (or, here on a re-open, it simply finds nothing newly-eligible). Best-effort.
+    // Auto-fold Gate B sweep (fold-on-spec-test-pass, task #29): human-check resolutions are now ADVISORY and
+    // no longer flip fold-eligibility (the machine spec-test pass is the trigger). This call is just a cheap
+    // best-effort backstop sweep — it folds any spec whose machine test already passed. Never blocks the click.
     await autoFoldVerifiedSpecs(workspaceId).catch(() => null);
     return NextResponse.json({ ok: true, cleared: true, allGreen: green?.allGreen ?? false });
   }
@@ -101,8 +102,9 @@ export async function POST(request: Request) {
   // Owner marked ✓ Tested (or another resolution) → reflect green state onto the spec markdown: a
   // `verified` resolution lands a leading ✅ on the bullet (committed to main); any other clears it.
   const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
-  // Auto-fold Gate B (auto-ship-pipeline Phase 2): the owner resolving the LAST waiting human check can
-  // flip a spec all-green — auto-archive it without a second click. All-green-only; best-effort.
+  // Auto-fold Gate B sweep (fold-on-spec-test-pass, task #29): human-check resolutions are now ADVISORY and
+  // no longer gate the fold (the machine spec-test pass is the trigger). Kept as a cheap best-effort backstop
+  // sweep so a spec whose machine test already passed folds even if its spec-test-completion sweep was missed.
   await autoFoldVerifiedSpecs(workspaceId).catch(() => null);
   return NextResponse.json({ ok: true, resolution, allGreen: green?.allGreen ?? false });
 }
