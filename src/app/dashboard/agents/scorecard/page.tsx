@@ -55,6 +55,24 @@ interface HistoryPayload {
   cadence: Cadence;
   history: HistoryPoint[];
 }
+interface AuditReport {
+  metric: string;
+  cadence: Cadence;
+  snapshotDate: string;
+  snapshotValue: number;
+  groundTruthValue: number;
+  drift: number;
+  driftPct: number | null;
+  withinTolerance: boolean;
+  snapshotDetail: Record<string, unknown>;
+  groundTruthDetail: Record<string, unknown>;
+  unit: string;
+  label: string;
+  polarity: "up_is_good" | "down_is_good";
+}
+interface AuditPayload {
+  report: AuditReport | null;
+}
 
 const SECTIONS: Array<{ cadence: Cadence; title: string; subtitle: string; defs: MetricDisplayDef[] }> = [
   {
@@ -207,6 +225,8 @@ function KpiTile({
   reservedHint?: string;
 }) {
   const [history, setHistory] = useState<HistoryPoint[] | null>(null);
+  const [audit, setAudit] = useState<AuditReport | null>(null);
+  const [auditExpanded, setAuditExpanded] = useState(false);
   useEffect(() => {
     if (!row) return;
     let cancelled = false;
@@ -217,6 +237,22 @@ function KpiTile({
       })
       .catch(() => {
         if (!cancelled) setHistory([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [def.key, cadence, row]);
+
+  useEffect(() => {
+    if (!row) return;
+    let cancelled = false;
+    fetch(`/api/developer/agents/scorecard/audit?metric=${encodeURIComponent(def.key)}&cadence=${cadence}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((d: AuditPayload) => {
+        if (!cancelled) setAudit(d.report);
+      })
+      .catch(() => {
+        if (!cancelled) setAudit(null);
       });
     return () => {
       cancelled = true;
@@ -266,8 +302,86 @@ function KpiTile({
       <div className="mt-2 h-8">
         <Sparkline points={history ?? []} polarity={def.polarity} />
       </div>
+      <DriftSubscript audit={audit} expanded={auditExpanded} onToggle={() => setAuditExpanded((e) => !e)} />
     </div>
   );
+}
+
+// ── Drift subscript ────────────────────────────────────────────────────────────
+
+function DriftSubscript({
+  audit,
+  expanded,
+  onToggle,
+}: {
+  audit: AuditReport | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (!audit) return null;
+  const band = driftBand(audit);
+  const klass =
+    band === "green"
+      ? "text-emerald-600 dark:text-emerald-400"
+      : band === "amber"
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-rose-600 dark:text-rose-400";
+  const pct =
+    audit.driftPct == null ? null : `${audit.drift > 0 ? "+" : audit.drift < 0 ? "−" : ""}${(audit.driftPct * 100).toFixed(1)}%`;
+  const label =
+    band === "green"
+      ? "audit: snapshot ✓"
+      : band === "amber"
+        ? `drift: ${pct ?? "—"} vs raw`
+        : `DRIFT: snapshot=${formatNumber(audit.snapshotValue)} · raw=${formatNumber(audit.groundTruthValue)}`;
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`text-[10px] font-medium tabular-nums ${klass} hover:underline`}
+        title={
+          audit.driftPct == null
+            ? `drift ${formatNumber(audit.drift)} (snapshot 0 — % undefined)`
+            : `drift ${formatNumber(audit.drift)} (${(audit.driftPct * 100).toFixed(2)}%)`
+        }
+      >
+        {label}
+      </button>
+      {expanded ? (
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+          <div className="rounded border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+            <p className="mb-1 font-semibold uppercase tracking-wider text-zinc-500">snapshot</p>
+            <p className="mb-1 tabular-nums">value: {formatNumber(audit.snapshotValue)}</p>
+            <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[9px] leading-snug text-zinc-600 dark:text-zinc-300">
+              {JSON.stringify(audit.snapshotDetail, null, 2)}
+            </pre>
+          </div>
+          <div className="rounded border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+            <p className="mb-1 font-semibold uppercase tracking-wider text-zinc-500">raw (now)</p>
+            <p className="mb-1 tabular-nums">value: {formatNumber(audit.groundTruthValue)}</p>
+            <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[9px] leading-snug text-zinc-600 dark:text-zinc-300">
+              {JSON.stringify(audit.groundTruthDetail, null, 2)}
+            </pre>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function driftBand(audit: AuditReport): "green" | "amber" | "red" {
+  // null driftPct → snapshotValue=0; treat exact-match as green, any drift as red (no % to band on).
+  if (audit.driftPct == null) return audit.drift === 0 ? "green" : "red";
+  if (audit.driftPct < 0.005) return "green";
+  if (audit.driftPct <= 0.05) return "amber";
+  return "red";
+}
+
+function formatNumber(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (Number.isInteger(n)) return n.toString();
+  return n.toFixed(Math.abs(n) >= 1 ? 2 : 4);
 }
 
 // ── Sparkline ──────────────────────────────────────────────────────────────────
