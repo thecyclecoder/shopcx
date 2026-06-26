@@ -1,7 +1,56 @@
 import { updateSession } from "@/lib/supabase/middleware";
 import { type NextRequest, NextResponse } from "next/server";
 
+// HTML-limited bots — mirrors Next 16's internal list
+// (next/dist/shared/lib/router/utils/html-bots). These are the crawlers Next
+// classifies as botType "html" via getBotType(); on a PPR route Next forces
+// blocking (non-streaming) metadata for them — see the comment in proxy() below.
+const HTML_LIMITED_BOT_UA_RE =
+  /[\w-]+-Google|Google-[\w-]+|Chrome-Lighthouse|Slurp|DuckDuckBot|baiduspider|yandex|sogou|bitlybot|tumblr|vkShare|quora link preview|redditbot|ia_archiver|Bingbot|BingPreview|applebot|facebookexternalhit|facebookcatalog|Twitterbot|LinkedInBot|Slackbot|Discordbot|WhatsApp|SkypeUriPreview|Yeti|googleweblight/i;
+
+// Neutral SEO UA we substitute for HTML-limited bots so Next's getBotType()
+// returns undefined (it tests the incoming user-agent against the list above).
+const NEUTRAL_BOT_UA = "Mozilla/5.0 (compatible; ShopCXSEO/1.0; +https://shopcx.ai)";
+
 export async function proxy(request: NextRequest) {
+  // ── Next 16 metadata-boundary resume-mismatch root-cause fix ──
+  // With cacheComponents on, every prerendered app route is PPR and its build-time
+  // static shell bakes the STREAMING metadata wrapper: <div hidden><MetadataBoundary/></div>
+  // (the export prerender runs with no UA, where Next hardcodes serveStreamingMetadata=true).
+  // At runtime Next's app-page handler computes (node_modules/next .../templates/app-page.js):
+  //   serveStreamingMetadata = botType && isRoutePPREnabled ? false
+  //     : !userAgent ? true : shouldServeStreamingMetadata(userAgent, htmlLimitedBots)
+  // The leading `botType && isRoutePPREnabled` short-circuit forces the BLOCKING branch
+  // (a bare <__next_metadata_boundary__>, no <div hidden>) for every HTML-limited bot —
+  // and it IGNORES the htmlLimitedBots config (our next.config `/(?!)/` never gets a vote).
+  // When a bot crawl triggers an ISR revalidation the cached shell is re-rendered into that
+  // blocking shape; a later resume render then throws "Expected the resume to render <div>
+  // … but instead it rendered <__next_metadata_boundary__>" and React bails the page to CSR
+  // (digest 34312922) — killing SSR HTML for SEO + LCP on /store, /widget, /portal, /help.
+  // We can't change Next's bot regex or that short-circuit, and `dynamic` / `experimental_ppr`
+  // route opt-outs are rejected under cacheComponents. So we neutralize the bot UA here:
+  // getBotType() then returns undefined, the handler takes the SAME streaming branch as the
+  // build-time shell (shapes match → no resume mismatch → no CSR bail), and the bot still
+  // receives the fully-baked static HTML (full content + real metadata). The original UA is
+  // forwarded in `x-original-user-agent` for any downstream bot-aware logic. Verified in an
+  // isolated Next 16.2.9 repro: pre-fix Slackbot got a 5.8KB bare-boundary shell vs the
+  // 7.1KB <div hidden> prerender; post-fix Slackbot/Bingbot/facebookexternalhit each get the
+  // identical 7.1KB streaming shell as Chrome (both the direct-/store and the custom-domain
+  // rewrite paths). See docs/brain/recipes/next16-metadata-boundary-csr-bail.md.
+  //
+  // We can't mutate the incoming request's headers (read-only) or use `new NextRequest(req,
+  // {headers})` (its overload doesn't forward to the render). The forwarding mechanism that
+  // works is passing `{ request: { headers } }` to every terminal NextResponse.next()/rewrite()
+  // — so we compute the override headers once here and thread them through updateSession.
+  const ua = request.headers.get("user-agent") || "";
+  let botRequestHeaders: Headers | undefined;
+  if (ua && HTML_LIMITED_BOT_UA_RE.test(ua)) {
+    botRequestHeaders = new Headers(request.headers);
+    botRequestHeaders.set("user-agent", NEUTRAL_BOT_UA);
+    botRequestHeaders.set("x-original-user-agent", ua);
+  }
+  const botInit = botRequestHeaders ? { request: { headers: botRequestHeaders } } : undefined;
+
   // Widget/API routes — bypass auth + CORS (no subdomain rewrite needed)
   if (request.nextUrl.pathname.startsWith("/api/widget/") || request.nextUrl.pathname.startsWith("/widget/") || request.nextUrl.pathname.startsWith("/api/portal/")) {
     if (request.method === "OPTIONS") {
@@ -12,15 +61,18 @@ export async function proxy(request: NextRequest) {
       return res;
     }
 
-    const response = NextResponse.next();
+    // Forward the neutralized bot UA to the /widget render so its PPR shell matches
+    // the build-time streaming shell (same root cause as /store, /portal, /help).
+    const response = NextResponse.next(botInit);
     response.headers.set("Access-Control-Allow-Origin", "*");
     response.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     response.headers.set("Access-Control-Allow-Headers", "Content-Type");
     return response;
   }
 
-  // Portal pages need subdomain rewrite but no auth — updateSession handles both
-  return await updateSession(request);
+  // Portal/help/storefront pages need subdomain + custom-domain rewrites — updateSession
+  // handles those AND forwards the neutralized bot UA into each rewrite/next it returns.
+  return await updateSession(request, botRequestHeaders);
 }
 
 export const config = {

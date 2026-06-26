@@ -200,7 +200,22 @@ async function resolveStorefrontSlugByDomain(
   }
 }
 
-export async function updateSession(request: NextRequest) {
+export async function updateSession(
+  request: NextRequest,
+  // Next 16 metadata-boundary CSR-bail fix (see src/proxy.ts): when the caller
+  // neutralized an HTML-limited bot UA, these override headers must ride along on
+  // EVERY response we return (next + rewrite) so the neutralized UA reaches the
+  // page render and its PPR shell matches the build-time streaming shell. Each
+  // NextResponse.rewrite/next below threads `reqInit` (or the merged `rewriteInit`)
+  // to forward them.
+  overrideRequestHeaders?: Headers,
+) {
+  // `{ request: { headers } }` forwards modified request headers to the render
+  // (the only mechanism in Next 16 that does). Undefined when not a bot → no-op.
+  const reqInit = overrideRequestHeaders
+    ? { request: { headers: overrideRequestHeaders } }
+    : { request };
+
   // ── Subdomain routing for help center mini-sites ──
   const hostname = request.headers.get("host") || "";
   const isLocalhost = hostname.includes("localhost") || hostname.includes("127.0.0.1");
@@ -228,7 +243,7 @@ export async function updateSession(request: NextRequest) {
           url.pathname = `/api/sl/${segs[0]}`;
           url.searchParams.set("ws", wsId);
           if (segs.length === 2) url.searchParams.set("c", segs[1]);
-          return NextResponse.rewrite(url);
+          return NextResponse.rewrite(url, reqInit);
         }
         // Anything else on the shortlink domain → 404 (don't fall
         // through to storefront logic).
@@ -267,7 +282,7 @@ export async function updateSession(request: NextRequest) {
       if (isPrimaryDomain && pathname.startsWith("/store/")) {
         const segs = pathname.split("/").filter(Boolean);
         if (segs.length >= 3) {
-          const res = NextResponse.next({ request });
+          const res = NextResponse.next(reqInit);
           res.headers.set("x-robots-tag", "noindex, nofollow");
           return res;
         }
@@ -305,7 +320,7 @@ export async function updateSession(request: NextRequest) {
             // real cached PDP. No-op when no PDP experiment runs on this surface.
             const assign = await resolvePdpEdgeAssignment(request, storefrontSlug, segs[0]);
             if (assign.rewriteVariantId) url.searchParams.set("_sxv", assign.rewriteVariantId);
-            const res = NextResponse.rewrite(url);
+            const res = NextResponse.rewrite(url, reqInit);
             if (assign.cookieValue) {
               res.cookies.set("sx_variant", assign.cookieValue, {
                 path: "/",
@@ -321,7 +336,7 @@ export async function updateSession(request: NextRequest) {
           if (segs.length === 2 && segs[0] === "blog") {
             const url = request.nextUrl.clone();
             url.pathname = `/store/${storefrontSlug}/blog/${segs[1]}`;
-            return NextResponse.rewrite(url);
+            return NextResponse.rewrite(url, reqInit);
           }
         }
       }
@@ -391,12 +406,12 @@ export async function updateSession(request: NextRequest) {
           // double-prefix bug where /portal/{slug}/login would become
           // /portal/{slug}/portal/{slug}/login — produced a 404 on
           // every login redirect from /portal/[slug]/page.tsx).
-          if (pathname.startsWith(`/portal/${slug}`)) return NextResponse.next({ request });
+          if (pathname.startsWith(`/portal/${slug}`)) return NextResponse.next(reqInit);
 
           // Skip API routes / static assets — those shouldn't be
           // rewritten under the portal slug at all.
           if (pathname.startsWith("/api/") || pathname.startsWith("/_next/")) {
-            return NextResponse.next({ request });
+            return NextResponse.next(reqInit);
           }
 
           // Portal sections — clean per-section URLs (/subscriptions,
@@ -410,7 +425,7 @@ export async function updateSession(request: NextRequest) {
           if (PORTAL_SECTIONS.has(sectionFromPath)) {
             url.pathname = `/portal/${slug}`;
             url.searchParams.set("section", sectionFromPath);
-            return NextResponse.rewrite(url);
+            return NextResponse.rewrite(url, reqInit);
           }
 
           // Subscription detail route — /subscriptions/{uuid} rewrites
@@ -420,7 +435,7 @@ export async function updateSession(request: NextRequest) {
           const subDetailMatch = pathname.match(/^\/subscriptions\/([0-9a-f-]{36})\/?$/i);
           if (subDetailMatch) {
             url.pathname = `/portal/${slug}/subscriptions/${subDetailMatch[1]}`;
-            return NextResponse.rewrite(url);
+            return NextResponse.rewrite(url, reqInit);
           }
 
           // Server routes (login, callback, logout) — rewrite path as-is.
@@ -429,12 +444,12 @@ export async function updateSession(request: NextRequest) {
           url.pathname = isServerRoute
             ? `/portal/${slug}${pathname}`
             : `/portal/${slug}`;
-          return NextResponse.rewrite(url);
+          return NextResponse.rewrite(url, reqInit);
         }
         if (purpose === "help") {
           // Skip if already rewritten (same double-prefix protection
           // as the portal branch).
-          if (pathname.startsWith(`/help/${slug}`)) return NextResponse.next({ request });
+          if (pathname.startsWith(`/help/${slug}`)) return NextResponse.next(reqInit);
           // Help center on its own subdomain (help.example.com).
           // Map every path 1:1 under /help/{slug}.
           if (pathname === "/") {
@@ -442,18 +457,18 @@ export async function updateSession(request: NextRequest) {
           } else {
             url.pathname = `/help/${slug}${pathname}`;
           }
-          return NextResponse.rewrite(url);
+          return NextResponse.rewrite(url, reqInit);
         }
 
         // ── Fallback path-prefix routing (shopcx.ai subdomain pattern) ──
         // /kb/* → help center
         if (pathname.startsWith("/kb/")) {
           url.pathname = `/help/${slug}${pathname.slice(3)}`;
-          return NextResponse.rewrite(url);
+          return NextResponse.rewrite(url, reqInit);
         }
         if (pathname === "/kb") {
           url.pathname = `/help/${slug}`;
-          return NextResponse.rewrite(url);
+          return NextResponse.rewrite(url, reqInit);
         }
 
         // /portal/* → portal minisite (client-side router handles sub-paths)
@@ -461,7 +476,7 @@ export async function updateSession(request: NextRequest) {
           const portalPath = pathname === "/portal" ? "" : pathname.slice(7);
           const isServerRoute = portalPath.endsWith("/login") || portalPath.endsWith("/callback");
           url.pathname = isServerRoute ? `/portal/${slug}${portalPath}` : `/portal/${slug}`;
-          return NextResponse.rewrite(url);
+          return NextResponse.rewrite(url, reqInit);
         }
 
         // Root → redirect to /kb/
@@ -477,7 +492,7 @@ export async function updateSession(request: NextRequest) {
     }
   }
 
-  let supabaseResponse = NextResponse.next({ request });
+  let supabaseResponse = NextResponse.next(reqInit);
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -491,7 +506,7 @@ export async function updateSession(request: NextRequest) {
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value)
           );
-          supabaseResponse = NextResponse.next({ request });
+          supabaseResponse = NextResponse.next(reqInit);
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, options)
           );
