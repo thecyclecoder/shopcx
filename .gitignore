@@ -61,3 +61,4 @@ scripts/_*
 # ...and committed audit/utility scripts the brain refers to by their spec-mandated names.
 !scripts/_audit-spec-phase-overcount.ts
 !scripts/_audit-kpis.ts
+!scripts/_check-worker-lanes.ts
