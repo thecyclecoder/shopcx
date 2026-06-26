@@ -23,6 +23,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { markSpecCardValePassed } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { listSpecs } from "@/lib/specs-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -54,16 +55,16 @@ export interface SpecReviewDecision {
  * already carrying `vale_pass=true` (a re-author can invalidate a prior pass). Ada's disposition lane reads
  * `specs.vale_pass` directly to skip its own re-check.
  */
-export async function selectInReviewSpecs(admin: Admin, workspaceId: string): Promise<string[]> {
-  const { data, error } = await admin
-    .from("specs")
-    .select("slug, status, deferred")
-    .eq("workspace_id", workspaceId)
-    .eq("status", "in_review");
-  if (error || !data) return [];
-  return data
+export async function selectInReviewSpecs(
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _admin: Admin,
+  workspaceId: string,
+): Promise<string[]> {
+  // Read the in_review pool through the specs-table SDK (no raw PM SQL — pm-db-agent-toolkit).
+  const rows = await listSpecs(workspaceId, { status: "in_review" });
+  return rows
     .filter((r) => !r.deferred) // a deferred spec is out of the in_review pool even if status still reads it
-    .map((r) => r.slug as string);
+    .map((r) => r.slug);
 }
 
 /**

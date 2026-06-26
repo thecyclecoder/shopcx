@@ -6,7 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, stampPhaseShipped } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -725,11 +725,8 @@ export async function applyMergedBuildEffects(
       );
     } else {
       rolled = "shipped"; // one-shot spec — the single merge ships it
-      await createAdminClient()
-        .from("specs")
-        .update({ merged_pr: pr, last_merge_sha: sha, updated_at: new Date().toISOString() })
-        .eq("workspace_id", workspaceId)
-        .eq("slug", slug);
+      // Record the card-level provenance through the specs-table SDK (no raw PM SQL — pm-db-agent-toolkit).
+      await stampSpecMergeProvenance(workspaceId, slug, { pr, merge_sha: sha });
     }
     if (rolled === "shipped") {
       await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
