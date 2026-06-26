@@ -1,0 +1,1 @@
+- **Optimizer hero preview gate — see/reject-with-notes before a generated hero goes live** · verified 2026-06-26 · → [[libraries/storefront-optimizer-agent]]
