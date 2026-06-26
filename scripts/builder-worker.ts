@@ -5369,6 +5369,10 @@ function renderTranscript(messages: ChatRow["messages"]): string {
 
 const SPEC_CHAT_OUTPUT = `Final message = ONLY one JSON object, nothing else: {"status":"replied","reply":"<your plain-text conversational answer to the founder>"}.`;
 
+// A new-feature spec-chat thread is keyed by a UUID (job.spec_slug), not a spec slug — guard so a UUID never
+// becomes the finalized spec's kebab slug (the spec must be addressable/buildable by a real slug).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function specChatFraming(slug?: string, seedSlug?: string): string {
   const ground = slug
     ? `You are REFINING the existing spec docs/brain/specs/${slug}.md — Read it from the working tree first as grounding; preserve shipped (✅) phases unless told otherwise.`
@@ -5458,24 +5462,50 @@ async function runSpecChatJob(job: Job) {
   }
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
 
+  // Materialize the EXISTING spec into the worktree for refine/verify grounding — specs live in the DB now
+  // (no docs/brain/specs/*.md on main), so the box can't Read the file unless we render it from the row. The
+  // build job does the same via materializeSpec → .box/; here we render to docs/brain/specs/{slug}.md because
+  // that's the path the refine/verify prompt + specChatFraming tell the box to Read. Best-effort: a fresh
+  // new-feature chat has no existing row (nothing to materialize), and verify/refine of a not-yet-authored
+  // slug just proceeds without grounding rather than aborting the turn.
+  const groundSlug = mode === "verify" ? (params.slug || "") : refineSlug;
+  if (groundSlug) {
+    try {
+      const { getSpec } = await import("../src/lib/specs-table");
+      const existing = await getSpec(job.workspace_id, groundSlug);
+      if (existing) {
+        const { renderSpecRow } = await import("../src/lib/build-spec-materializer");
+        const dir = join(wt, "docs/brain/specs");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, `${groundSlug}.md`), renderSpecRow(existing), "utf8");
+        console.log(`${tag} materialized existing spec ${groundSlug} for grounding`);
+      }
+    } catch (e) {
+      console.warn(`${tag} materialize ${groundSlug} for grounding failed (proceeding): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   try {
     // ── Build the per-mode prompt ──
-    // finalize/verify: the box WRITES the spec file into the worktree (robust for large markdown — no
-    // JSON-escaping fragility); the worker then reads the changed docs/brain/specs/*.md + commits it to
-    // main (the runPlanJob pattern). turn: the box returns a short conversational reply as JSON.
+    // finalize/verify: the AUTHORED OUTPUT is the DB spec row (public.specs + public.spec_phases via the
+    // author-spec SDK). The box materializes the spec markdown into the worktree as a scratch buffer (robust
+    // for large markdown — no JSON-escaping fragility); the worker reads that buffer and AUTHORS it to the DB
+    // (markNewSpecInReview → authorSpecRowFromMarkdown → upsertSpec). NO docs/brain/specs/*.md is committed
+    // — specs live in the DB now (spec-pm-markdown-purge / retire-md-reads). turn: the box returns a short
+    // conversational reply as JSON. (Mirrors runPlanJob: the box generates, the worker authors to the DB.)
     let prompt: string;
     if (mode === "verify") {
       const slug = params.slug || "";
       prompt = [
-        `Use the spec-chat skill in VERIFY mode. Read docs/brain/specs/${slug}.md from the working tree and the brain pages it touches.`,
-        `WRITE an updated docs/brain/specs/${slug}.md that inserts (or refreshes) ONLY a "## Verification" section — a concrete, prod-facing test checklist the OWNER follows to confirm the feature works in production. 3-7 bullets, each "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the spec touched (look them up; never invent). No vague "test it works". Preserve everything else in the file byte-for-byte; put the section before "## Related" if present.`,
+        `Use the spec-chat skill in VERIFY mode. The spec lives in the DB (public.specs); the worker materialized it for you at docs/brain/specs/${slug}.md in the working tree — Read it (and the brain pages it touches) as grounding.`,
+        `WRITE an updated docs/brain/specs/${slug}.md that inserts (or refreshes) ONLY a "## Verification" section — a concrete, prod-facing test checklist the OWNER follows to confirm the feature works in production. 3-7 bullets, each "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the spec touched (look them up; never invent). No vague "test it works". Preserve everything else in the file byte-for-byte; put the section before "## Related" if present. The worker re-authors this body to public.specs — the .md is a scratch buffer, not the source of truth.`,
         `Do NOT edit any other file, do NOT run git. Final message = ONLY one JSON object: {"status":"verified","slug":"${slug}"}.`,
       ].join("\n");
     } else if (mode === "finalize") {
       const finalizeAsk = [
-        `Now FINALIZE this spec in FINALIZE mode: WRITE the file docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing file unless the conversation said otherwise` : `pick a short kebab-case slug from the title; all new phases start ⏳`}).`,
-        `It MUST have: an H1 "# <Title>" (NO status emoji — status is DB-driven); directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\`; a one-paragraph summary tied to a business outcome; concrete "## Phase N — name" sections (NO status markers — spec status + per-phase status live in spec_card_state, the markdown is content-only); a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
-        `Write ONLY that one file under docs/brain/specs/; do NOT edit anything else, do NOT run git. Final message = ONLY one JSON object: {"status":"finalized","slug":"<the slug you wrote>"}.`,
+        `Now FINALIZE this spec in FINALIZE mode. The AUTHORED OUTPUT is a DB spec row in public.specs + public.spec_phases — the worker reads the markdown you write and authors it to the DB via the author-spec SDK (no .md is committed). Materialize the full spec by WRITING the file docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing spec unless the conversation said otherwise` : `pick a SHORT kebab-case slug derived FROM THE TITLE — lowercase words joined by hyphens, e.g. "auto-refund-on-stuck-return"; NEVER a UUID or a random id; all new phases start ⏳`}).`,
+        `It MUST have (the author-spec SDK parses these into the DB row + spec_phases): an H1 "# <Title>" (NO status emoji — status is DB-driven); directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\` (a real owner function slug + a real parent — a spec with no owner/parent is unbuildable); a one-paragraph summary tied to a business outcome; AT LEAST ONE concrete "## Phase N — name" section (NO status markers — per-phase status lives in spec_phases, the markdown is content-only) — each phase becomes a spec_phases row; a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
+        `Write ONLY that one file under docs/brain/specs/; do NOT edit anything else, do NOT run git. Final message = ONLY one JSON object: {"status":"finalized","slug":"<the kebab slug you wrote>"}.`,
       ].join("\n");
       prompt = isResume
         ? finalizeAsk
@@ -5544,17 +5574,36 @@ async function runSpecChatJob(job: Job) {
       return;
     }
 
-    // finalize — commit the one spec file the box wrote.
+    // finalize — AUTHOR the spec the box materialized into the worktree to the DB (public.specs +
+    // public.spec_phases via the author-spec SDK). The worktree .md is a scratch buffer; the DB row is the
+    // authored output (spec-pm-markdown-purge / retire-md-reads — no .md is committed). Success ≡ a spec row
+    // (+ ≥1 phase) now exists for the slug; a missing markdown buffer is only a failure when it leaves us with
+    // no DB row to author.
     const hintSlug = typeof parsed?.slug === "string" ? (parsed.slug as string).replace(/[^a-z0-9-]/gi, "") : "";
     const written =
       (refineSlug && specFiles.find((f) => f === `docs/brain/specs/${refineSlug}.md`)) ||
       (hintSlug && specFiles.find((f) => f === `docs/brain/specs/${hintSlug}.md`)) ||
       specFiles[0];
-    if (!written) {
-      await failTurn("box did not write a spec file", logTail);
+    // Derive the slug. Prefer the materialized file's name; fall back to the model's JSON hint. NEVER let a
+    // UUID placeholder (job.spec_slug is a UUID for a fresh new-feature chat) become the spec slug — a real
+    // spec needs a kebab slug to be addressable/buildable. A refine already carries a real slug.
+    const isKebab = (s: string) => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s) && !UUID_RE.test(s);
+    const fileSlug = written ? written.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "") : "";
+    const slug = refineSlug || (isKebab(fileSlug) ? fileSlug : "") || (isKebab(hintSlug) ? hintSlug : "");
+    if (!slug) {
+      await failTurn(
+        written
+          ? `box wrote ${written} but its slug isn't a valid kebab-case spec slug (got "${fileSlug || hintSlug}") — a finalized spec needs a real kebab slug, never a UUID`
+          : `box did not materialize a spec to author (no docs/brain/specs/*.md written, no usable slug hint) — nothing landed in public.specs`,
+        logTail,
+      );
       return;
     }
-    const slug = written.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
+    if (!written) {
+      // No buffer to read → no body to author. The DB row can't be created from nothing.
+      await failTurn(`box did not materialize the spec markdown for ${slug} — nothing to author to public.specs`, logTail);
+      return;
+    }
     const content = readFileSync(join(wt, written), "utf8");
     // spec-review-agent Phase 3 — a freshly-created spec from spec-chat (Sage) lands `in_review` with
     // intended_status=planned. A `refine` (a spec that already has a card row) leaves the existing flags
@@ -5569,6 +5618,24 @@ async function runSpecChatJob(job: Job) {
       }
     } catch (e) {
       await failTurn(`DB author failed: ${e instanceof Error ? e.message : String(e)}`, logTail);
+      return;
+    }
+    // Finalize VALIDATION — the authored output is the DB row, so success is confirmed by READING it back:
+    // a spec row (+ ≥1 phase) must now exist in public.specs for the slug. (Replaces the old
+    // "box did not write a spec file" markdown-existence check.)
+    try {
+      const { getSpec } = await import("../src/lib/specs-table");
+      const row = await getSpec(job.workspace_id, slug);
+      if (!row) {
+        await failTurn(`spec ${slug} was not authored to public.specs (no row after author)`, logTail);
+        return;
+      }
+      if (!row.phases.length) {
+        await failTurn(`spec ${slug} authored to public.specs but has no phases — an unbuildable spec`, logTail);
+        return;
+      }
+    } catch (e) {
+      await failTurn(`DB read-back failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`, logTail);
       return;
     }
     // Flip the thread finalized + link the slug, store the session, clear thinking.

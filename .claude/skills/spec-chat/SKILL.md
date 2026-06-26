@@ -1,6 +1,6 @@
 ---
 name: spec-chat
-description: Spec a ShopCX feature WITH the founder as a long-running, resumable Max chat on the build box — the roadmap authoring chat moved off the Anthropic API (box-spec-chat). Full working-tree Read/Grep/Glob over docs/brain/ + src/, WebSearch for competitors/libraries, accumulated session context across turns. Invoked by the box worker's spec-chat job (scripts/builder-worker.ts → runSpecChatJob) as a top-level `claude -p` on Max. Modes: turn (converse) · finalize (emit the spec markdown) · verify (emit a ## Verification section). Implements docs/brain/specs/box-spec-chat.md.
+description: Spec a ShopCX feature WITH the founder as a long-running, resumable Max chat on the build box — the roadmap authoring chat moved off the Anthropic API (box-spec-chat). Full working-tree Read/Grep/Glob over docs/brain/ + src/, WebSearch for competitors/libraries, accumulated session context across turns. Invoked by the box worker's spec-chat job (scripts/builder-worker.ts → runSpecChatJob) as a top-level `claude -p` on Max. Modes: turn (converse) · finalize (author the spec to public.specs + spec_phases via the SDK — the markdown is a scratch buffer the worker reads, not the source of truth) · verify (author a ## Verification section). Implements docs/brain/specs/box-spec-chat.md.
 ---
 
 # spec-chat
@@ -25,14 +25,19 @@ GitHub-API tools, you have the **whole working tree** and the **web**.
   in a turn). Max ~2 sentences per paragraph. Ask clarifying questions only for genuine **product**
   decisions — resolve everything technical yourself from the tree.
 - **Do NOT edit files** in `turn` mode. You are speccing, not building. In `finalize`/`verify` you
-  WRITE exactly one file under `docs/brain/specs/` into the working tree (never run `git`); the worker
-  reads that changed file and commits it to `main`. Touch no other file.
+  WRITE exactly one file under `docs/brain/specs/` into the working tree (never run `git`) **as a
+  scratch buffer** — the worker reads that file and AUTHORS the spec to the **DB** (`public.specs` +
+  `public.spec_phases` via the author-spec SDK). The DB row is the authored output; **no `.md` is
+  committed to `main`** (specs live in the DB now — spec-pm-markdown-purge / retire-md-reads). Touch no
+  other file.
 - **Never the Anthropic API; never a nested `claude`.** All reasoning happens here, on Max.
-- **A good spec** (per `docs/brain/project-management.md`) has: an H1 `# <Title> <emoji>`; directly
-  under it `**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or goal milestone}`
-  (exactly one owner + one parent — no orphans); a one-paragraph outcome-tied summary; concrete
-  `## Phase N — name` sections with file paths / schema / tasks, each line tagged ⏳/🚧/✅; a
-  `## Safety / invariants` section; `## Completion criteria`; and a `## Verification` checklist.
+- **A good spec** (per `docs/brain/project-management.md`) — the worker parses these into the DB row +
+  `spec_phases` — has: an H1 `# <Title>` (NO status emoji — status is DB-driven); directly under it
+  `**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or goal milestone}` (exactly one
+  REAL owner + one REAL parent — no orphans; a spec missing either is unbuildable); a one-paragraph
+  outcome-tied summary; **at least one** concrete `## Phase N — name` section with file paths / schema /
+  tasks (NO status markers — per-phase status lives in `spec_phases`) — each becomes a `spec_phases`
+  row; a `## Safety / invariants` section; `## Completion criteria`; and a `## Verification` checklist.
 
 ## Modes (the worker tells you which; it sets your final-JSON shape)
 
@@ -43,9 +48,11 @@ directly (the worker appends/commits it). Output ONLY the one JSON object asked 
   On turn 1 you get the full transcript + framing; on later turns you `--resume` this same session and
   get just the new message (you already hold the accumulated context — reference earlier turns, don't
   re-state them). Final: `{"status":"replied","reply":"<your plain-text answer>"}`.
-- **finalize** — WRITE `docs/brain/specs/{slug}.md` for the feature you've shaped (refine: edit the
-  existing file, preserve shipped ✅ phases unless told otherwise; new: pick a short kebab-case slug
-  from the title, all phases start ⏳). Final: `{"status":"finalized","slug":"<the slug you wrote>"}`.
+- **finalize** — WRITE `docs/brain/specs/{slug}.md` as the scratch buffer for the feature you've shaped;
+  the worker authors it to `public.specs` + `public.spec_phases` (no `.md` is committed). Refine: edit
+  the worker-materialized existing file, preserve shipped phases unless told otherwise. New: pick a
+  SHORT **kebab-case** slug derived from the title (lowercase words joined by hyphens — NEVER a UUID or
+  random id). Final: `{"status":"finalized","slug":"<the kebab slug you wrote>"}`.
 - **verify** — Read the named spec + its brain homes and WRITE the file back with a concrete,
   prod-facing `## Verification` section upserted (each bullet `- On {where}, {do what} → expect
   {observable result}`, real routes/tables/CLI, never vague), preserving the rest byte-for-byte.
