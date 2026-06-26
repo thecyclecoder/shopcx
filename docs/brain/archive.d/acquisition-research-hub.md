@@ -1,0 +1,1 @@
+- **Acquisition Research Hub — one surface for sets + findings + gap queue** · verified 2026-06-26 · → [[libraries/acquisition-hub]]
