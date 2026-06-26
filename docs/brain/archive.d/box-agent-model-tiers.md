@@ -1,0 +1,1 @@
+- **Per-agent model tiers + director-proposed model changes** · verified 2026-06-26 · → [[../tables/agent_model_tiers]]
