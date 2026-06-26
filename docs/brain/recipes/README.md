@@ -51,6 +51,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[fire-an-inngest-event]] — `inngest.send({name, data})`
 - [[write-a-migration-apply-script]] — `scripts/apply-*.ts` pattern using `pg` client
 - [[dev-message-center-db]] — read-only prod-DB queries from the Developer Message Center (throwaway `scripts/_*.ts`, SELECT-only, never committed)
+- [[pm-flow-data-sources]] — the PM flow's post-purge call graph (DB row → typed reader → consumer) + every surviving consumer of `serializeSpecRowToMarkdown` ([[../specs/retire-md-reads-from-pm-flow]])
 
 ## Build & ops skills (committed Claude Code skills)
 
