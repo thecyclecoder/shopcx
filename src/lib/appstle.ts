@@ -468,6 +468,25 @@ export async function appstleSwitchPaymentMethod(
 
     if (!res.ok && res.status !== 204) {
       const text = await res.text();
+      // Appstle's own authoritative guardrail: it refuses to switch the
+      // payment method while a billing-cycle / contract edit is in flight
+      // (400 UserGeneratedError, "billing cycle contract edit"). This is
+      // an expected, user-generated transient — NOT a server error — so
+      // log at warn and surface a stable error code the caller can retry.
+      // Mirrors the recognizer shape in appstleRemoveLineItem.
+      const lower = text.toLowerCase();
+      if (
+        res.status === 400 &&
+        lower.includes("usergeneratederror") &&
+        lower.includes("billing cycle contract edit")
+      ) {
+        console.warn(
+          `[appstleSwitchPaymentMethod] contract-edit guardrail for contract ${contractId}:`,
+          res.status,
+          text.slice(0, 200),
+        );
+        return { success: false, error: "contract_edit_in_progress" };
+      }
       console.error(`Appstle switch payment method error for contract ${contractId}:`, text);
       return { success: false, error: `Appstle API error: ${res.status}` };
     }
