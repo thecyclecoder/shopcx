@@ -1,0 +1,1 @@
+- **Portal login page: wrap LoginClient in a host element so PPR resume shell matches** · verified 2026-06-26 · → [[operational-rules]]
