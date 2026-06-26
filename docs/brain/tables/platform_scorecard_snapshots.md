@@ -19,7 +19,7 @@ Written **only** by [[../libraries/platform-scorecard]] `computePlatformScorecar
 | `value` | `numeric` | — | the computed metric value over the current window · default 0 |
 | `prior_value` | `numeric` | ✓ | the prior equal-length window's value (or the prior stored snapshot for a current-state metric like `loop_health`) · null when no prior |
 | `delta_pct` | `numeric` | ✓ | `(value − prior_value) / prior_value` — the trend arrow · null when `prior_value` is null/0 |
-| `unit` | `text` | — | CHECK ∈ `count` \| `ratio` \| `hours` \| `pct` · how to render `value` · default `count` |
+| `unit` | `text` | — | CHECK ∈ `count` \| `ratio` \| `hours` \| `pct` \| `grade` · how to render `value` (`grade` is the 1–10 scale shared by `worker_grade_rollup` + `director_call_grade`, rendered as `X.X / 10` — added in [[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 2) · default `count` |
 | `detail` | `jsonb` | — | per-metric breakdown (red/amber loops · still-open error signatures · numerator/denominator) · default `{}` |
 | `created_at` / `updated_at` | `timestamptz` | — | default `now()` |
 

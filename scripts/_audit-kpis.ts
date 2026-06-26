@@ -26,6 +26,7 @@ function fmt(n: number, unit: string): string {
   if (unit === "pct") return `${n.toFixed(2)}%`;
   if (unit === "ratio") return n.toFixed(4);
   if (unit === "hours") return `${n.toFixed(2)}h`;
+  if (unit === "grade") return `${n.toFixed(2)}/10`;
   return Number.isInteger(n) ? n.toString() : n.toFixed(2);
 }
 
