@@ -1,0 +1,1 @@
+- **PDP edge-served variant 'use cache' — unblock the build (round 3) by stripping the cacheComponents-incompatible dynamicParams = true knob** · verified 2026-06-26 · → [[lifecycles/storefront-checkout]]

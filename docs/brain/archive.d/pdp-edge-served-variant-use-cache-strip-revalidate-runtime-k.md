@@ -1,0 +1,1 @@
+- **PDP edge-served variant 'use cache' — unblock the build (round 2) by stripping the cacheComponents-incompatible revalidate + runtime = "edge" knobs** · verified 2026-06-26 · → [[lifecycles/storefront-checkout]]
