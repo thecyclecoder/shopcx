@@ -1,6 +1,6 @@
 # `src/lib/adlibrary.ts` — AdLibrary.com discovery client
 
-Discovery half of the winning-static-creative finder (Phase 2). Searches [[../integrations/adlibrary]] for long-running competitor + category ads, classifies static vs video at pull time, and fetches creative bytes (Bearer key) for vision. See [[../specs/winning-static-creative-finder]].
+Discovery half of the winning-static-creative finder (Phase 2). Searches [[../integrations/adlibrary]] for long-running competitor + category ads, classifies static vs video at pull time, and fetches creative bytes (Bearer key) for vision. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]].
 
 ## Exports
 

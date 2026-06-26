@@ -1,6 +1,6 @@
 # creative_skeletons
 
-One row per analyzed competitor/category **winner** pulled from [[../integrations/adlibrary]]. Stores the reverse-engineered **structure** (hook → mechanism claim → proof → offer skeleton) + a **link** to the creative for analysis — never a lifted asset. The cross-brand-repetition signal over these rows is what the Phase 4 pattern matrix mines. See [[../specs/winning-static-creative-finder]].
+One row per analyzed competitor/category **winner** pulled from [[../integrations/adlibrary]]. Stores the reverse-engineered **structure** (hook → mechanism claim → proof → offer skeleton) + a **link** to the creative for analysis — never a lifted asset. The cross-brand-repetition signal over these rows is what the Phase 4 pattern matrix mines. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]].
 
 **Primary key:** `id`
 
