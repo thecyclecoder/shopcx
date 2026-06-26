@@ -1,0 +1,1 @@
+- **Time-box Slack API fetches so a slow Slack endpoint can't wedge a per-minute Slack cron** · verified 2026-06-26 · → [[libraries/slack]]
