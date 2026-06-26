@@ -1,0 +1,1 @@
+- **Control Tower: anchor registered_not_firing grace to first-observed-in-snapshot, not just hand-edited registeredAt** · verified 2026-06-26 · → [[lifecycles/control-tower]]
