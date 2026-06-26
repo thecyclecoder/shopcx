@@ -550,6 +550,19 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  * `failed` resolution, does NOT block the fold (the "human QA pending" badge stays for the owner to clear
  * whenever they want, or never). Pure read; mirrors the regression definition so the gate can never disagree
  * with the surfaced regression banner. A spec missing a run is NOT eligible (it hasn't been machine-tested yet).
+ *
+ * Two correctness rails (fix(fold) — getAutoFoldEligibleSlugs requires derived-shipped + approved spec-test):
+ *   1. DERIVED-shipped, never the stored column. `getRoadmap()` builds each SpecCard's `status` from the
+ *      PHASE ROLLUP (`deriveSpecCardStatus`→`rollupPhaseStatus`: all phases shipped ⇒ shipped; terminal
+ *      deferred/in_review/folded win), NOT the vestigial `specs.status` column — so a spec stamped
+ *      `planned`/`in_review`/`in_progress` on the row but with all phases shipped reads `shipped` here, and a
+ *      still-building spec never reads shipped just because the stored column is stale. We re-assert
+ *      `s.status === "shipped"` (a `deferred`/`in_review`/`in_progress`/`planned` rollup is rejected).
+ *   2. POSITIVE approval, not absence-of-failure. The latest run must be `agent_verdict='approved'` AND carry
+ *      at least one real machine `pass` check (`summary.auto_pass > 0`). A degenerate 0-check `approved` row —
+ *      the "silent empty pass" the AgentVerdict doc warns about (an unparseable/empty verdict that reads like a
+ *      clean pass) — is NOT a genuine verification: nothing was actually asserted, so it is NOT eligible.
+ *      Absence of a `fail` ≠ an approval.
  */
 export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
   const admin = createAdminClient();
@@ -573,12 +586,17 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
   const liveSlugs = new Set(((liveRows.data ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug));
   const eligible: string[] = [];
   for (const s of specs) {
+    // Rail 1 — DERIVED-shipped only. `s.status` is the PHASE ROLLUP from getRoadmap (deriveSpecCardStatus),
+    // never the stale stored `specs.status` column; a `planned`/`in_progress`/`in_review`/`deferred` rollup
+    // (or an archived spec) is rejected. All phases shipped ⇒ shipped ⇒ pass this gate.
     if (s.status !== "shipped" || archivedSet.has(s.slug)) continue;
     if (liveSlugs.has(s.slug)) continue;
     const run = runs[s.slug];
-    // Machine spec-test PASS = agent-verdict approved. `issues`/`needs_human`/`error` (or a missing run) is
-    // a non-pass → not eligible. needs_human checks are advisory and intentionally NOT consulted here.
-    if (!run || run.agent_verdict !== "approved") continue;
+    // Rail 2 — POSITIVE approval, not absence-of-failure. The latest run must be agent-verdict `approved`
+    // (`issues`/`needs_human`/`error`, or a MISSING run, are non-pass → not eligible) AND carry at least one
+    // real machine `pass` check. A degenerate 0-check `approved` row asserted nothing, so it is NOT a genuine
+    // verification — absence of a `fail` ≠ an approval. needs_human checks stay advisory (not consulted).
+    if (!run || run.agent_verdict !== "approved" || run.summary.auto_pass < 1) continue;
 
     // 0 regressions only: an UNRESOLVED auto-`fail` (an evidence-backed broken bullet) blocks the fold — that
     // is a real machine-detected failure, not a human-QA item. (An `approved` run won't carry a `fail`, but
