@@ -533,6 +533,35 @@ const ALREADY_MERGED_VIA_RE = /already merged via #(\d+)/i;
  */
 const PHASE_ARTIFACTS_EXIST_RE = /All Phase[\s-]?(\d+)[\s-]?artifacts already exist on main/i;
 
+/**
+ * The THIRD, GENERAL built-unstamped signal — heal-any-box-parked-already-built. Bo parks a re-built
+ * phase `needs_attention` with VARYING wordings beyond the two specific ones above: "Phase 2 already on
+ * main — …", "already-shipped: {slug} already merged via #X", "All Phase-5 artifacts already exist on
+ * main: …", "no changes" / "no file changes", etc. This broad matcher catches the whole family so a
+ * parked-already-built job no longer slips through to pile up as needs_attention (→ Ada re-escalates →
+ * operator hand-stamps). It is INTENTIONALLY loose on the SIGNAL but STRICT on the ACTION: a match only
+ * triggers a stamp of the ONE phase the build was dispatched for (parsed from the job's `instructions`,
+ * never a blanket all-non-shipped stamp — a real incident came from over-stamping a multi-phase spec, so
+ * per-phase precision is the hard guardrail here).
+ */
+const ALREADY_BUILT_BROAD_RE = /already (on main|merged|built|shipped)|artifacts already exist|no (file )?changes/i;
+
+/**
+ * Parse the DISPATCHED phase number from a build job's text. PRIMARY source is the job's `instructions`
+ * (the build was dispatched FOR that phase — `phaseScopedInstructions` embeds `"Phase N — <title>"`);
+ * FALLBACK is the parked log message. We take the FIRST `Phase <N>` either yields (regex ported from
+ * builder-worker.ts `derivePhase`). Returns null when neither names a phase — the caller then SKIPS the
+ * job (never guesses / never defaults to position 1), the per-phase-precision guard.
+ */
+function dispatchedPhaseNumber(instructions: string | null | undefined, log: string | null | undefined): number | null {
+  const PHASE_RE = /\bPhase\s+(\d+)\b/i;
+  const fromInstr = instructions ? PHASE_RE.exec(instructions) : null;
+  if (fromInstr) return Number(fromInstr[1]);
+  const fromLog = log ? PHASE_RE.exec(log) : null;
+  if (fromLog) return Number(fromLog[1]);
+  return null;
+}
+
 /** Cheap PR → merge-commit SHA resolution via the existing GitHub REST helper. Null on any miss. */
 async function resolvePrMergeSha(pr: number): Promise<string | null> {
   try {
@@ -688,6 +717,75 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
           specSlug: slug,
           reason: `reconciler:spec-drift stamped built-but-unstamped phase P${n} of ${slug} shipped — a re-queued build hit Bo's "All Phase-${n} artifacts already exist on main" no-op (status=needs_attention, no PR, no file changes), so the backfilled-planned phase was never advanced. Self-healed the derived status and cleared the stuck card.`,
           metadata: { actor: "reconciler:spec-drift", signal: "phase-artifacts-already-exist", pr: null, merge_sha: null, phase: n, job_id: j.id },
+        });
+      } catch {
+        /* audit is best-effort — the stamp already landed */
+      }
+    }
+  }
+
+  // (d) THIRD signal — the GENERAL parked-already-built case. The two branches above match only two
+  // specific wordings; Bo parks an already-built rebuild `needs_attention` with many OTHER wordings
+  // ("Phase 2 already on main — …", "already merged via #X", "no changes", …). Catch the whole family
+  // with ALREADY_BUILT_BROAD_RE so none slip through to pile up as needs_attention. PER-PHASE PRECISION
+  // is the hard rule: stamp ONLY the phase the build was DISPATCHED for (parsed from the job's
+  // `instructions`, log as fallback) — NEVER a blanket all-non-shipped stamp (a real over-stamp incident
+  // came from that). If no phase can be parsed, SKIP the job. Idempotent: a re-run finds N already
+  // shipped → skip the stamp but still clear the lingering parked card.
+  for (const [slug, positions] of unstampedBySlug) {
+    const unstamped = new Set(positions);
+    const { data: naJobs } = await admin
+      .from("agent_jobs")
+      .select("id, error, log_tail, instructions")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("kind", "build")
+      .eq("status", "needs_attention")
+      .order("created_at", { ascending: false })
+      .limit(5);
+    for (const j of (naJobs ?? []) as { id: string; error: string | null; log_tail: string | null; instructions: string | null }[]) {
+      const log = `${j.error ?? ""}\n${j.log_tail ?? ""}`;
+      if (!ALREADY_BUILT_BROAD_RE.test(log)) continue; // not an "already built" park → leave it for Ada
+
+      // Per-phase precision: the dispatched phase is reliably named in `instructions` ("Phase N — …");
+      // the log is a fallback. No number from either → SKIP (never guess / never default to position 1).
+      const n = dispatchedPhaseNumber(j.instructions, log);
+      if (n === null) continue;
+
+      // Idempotent: a re-run (or a phase already shipped by an earlier branch this pass) finds N no longer
+      // in `unstamped` → skip the stamp but STILL clear the lingering parked card.
+      if (!unstamped.has(n)) {
+        await admin.from("agent_jobs").update({ status: "completed" }).eq("id", j.id).then(undefined, () => {});
+        continue;
+      }
+
+      let ok = false;
+      try {
+        await stampPhaseShipped(workspaceId, slug, n, { pr: null, merge_sha: null });
+        ok = true;
+      } catch {
+        /* stamp failed — leave the card; the next sweep re-attempts */
+      }
+      if (!ok) continue;
+      unstamped.delete(n);
+
+      // Clear the stuck needs_attention card (clears Ada's escalation) now that its phase is reconciled.
+      await admin.from("agent_jobs").update({ status: "completed" }).eq("id", j.id).then(undefined, () => {});
+
+      const existing = healed.find((h) => h.slug === slug);
+      if (existing) existing.phases.push(n);
+      else healed.push({ slug, phases: [n], pr: -1 });
+
+      // Supervisor-visible report — same shape as the existing branches, naming the parked-build signal.
+      try {
+        const { recordDirectorActivity } = await import("@/lib/director-activity");
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: "platform",
+          actionKind: "healed_built_unstamped",
+          specSlug: slug,
+          reason: `reconciler:spec-drift stamped built-but-unstamped phase P${n} of ${slug} shipped — a re-queued build parked needs_attention because the box found the phase already built on main (matched the general "already built" signal, no PR, no file changes). Parsed the dispatched phase from the job instructions, stamped ONLY P${n}, self-healed the derived status, and cleared the stuck card.`,
+          metadata: { actor: "reconciler:spec-drift", signal: "already-built-broad", pr: null, merge_sha: null, phase: n, job_id: j.id },
         });
       } catch {
         /* audit is best-effort — the stamp already landed */
