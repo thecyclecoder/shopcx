@@ -197,7 +197,7 @@ export default function Sidebar({
   const [improveWaitingCount, setImproveWaitingCount] = useState(0); // Improve sessions waiting on you
   const [humanTestCount, setHumanTestCount] = useState(0); // spec-test human checks waiting on you (owner)
   const [regressionCount, setRegressionCount] = useState(0); // shipped specs failing their own spec-test (owner)
-  const [approvalsCount, setApprovalsCount] = useState(0); // approvals escalated to you (owner)
+  const [approvalsCount, setApprovalsCount] = useState(0); // approvals escalated to the CEO (Henry)
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -283,7 +283,7 @@ export default function Sidebar({
             }
           })
           .catch(() => {});
-        // Approvals escalated to you (the routed-to-CEO queue) — lightweight count-only path.
+        // Approvals escalated to the CEO (Henry) — the routed-to-CEO queue, lightweight count-only path.
         fetch(`/api/developer/approvals?count=1`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d?.escalatedCount != null) setApprovalsCount(d.escalatedCount); })

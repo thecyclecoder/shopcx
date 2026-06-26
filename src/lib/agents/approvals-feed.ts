@@ -76,7 +76,9 @@ export interface ApprovalFeedItem {
   id: string;
   source: "pending" | "decision";
   status: FeedStatus;
-  /** true only for a pending request escalated to the human (CEO) — render Approve/Decline. */
+  /** true for any pending request routed to the CEO seat (Henry) — what's escalated to the CEO. */
+  escalated: boolean;
+  /** true only for an escalated request that also has an inline decision to make (Approve/Decline). */
   actionable: boolean;
   createdAt: string;
 
@@ -374,8 +376,10 @@ export async function buildApprovalsFeed(admin: Admin, workspaceId: string): Pro
       id: n.id,
       source: "pending",
       status: "awaiting",
-      // Actionable when escalated to the human AND there's an inline decision to make. A
-      // needs_attention park (no inline actions) routes the human to the deep-link instead.
+      // Escalated = routed to the CEO seat (Henry) — everything the CEO must look at, parks included.
+      escalated: escalatedToHuman,
+      // Actionable when escalated AND there's an inline decision to make. A needs_attention park
+      // (no inline actions) routes the CEO to the deep-link instead.
       actionable: escalatedToHuman && Boolean(jobId) && inline.length > 0,
       createdAt: n.created_at,
       kind,
@@ -415,6 +419,7 @@ export async function buildApprovalsFeed(admin: Admin, workspaceId: string): Pro
       id: d.id,
       source: "decision",
       status: d.decision as FeedStatus,
+      escalated: false,
       actionable: false,
       createdAt: d.created_at,
       kind,
