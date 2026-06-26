@@ -1,0 +1,1 @@
+- **Scorecard monthly leading curve** · verified 2026-06-26 · → [[libraries/platform-scorecard]]
