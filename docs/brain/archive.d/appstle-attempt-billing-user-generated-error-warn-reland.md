@@ -1,0 +1,1 @@
+- **Re-land the appstleAttemptBilling UserGeneratedError (out-of-stock) warn branch that Reva auto-reverted, so dunning OOS rejections stop noising the error feed again** · verified 2026-06-26 · → [[libraries/appstle]]

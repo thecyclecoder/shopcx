@@ -1,0 +1,1 @@
+- **Control Tower box tile: mirror worker's queue-aware self-update deferral before red-flagging** · verified 2026-06-26 · → [[libraries/control-tower]]

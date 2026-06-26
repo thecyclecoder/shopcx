@@ -1,0 +1,1 @@
+- **Approval routing engine — route up the org chart to first live boss, else CEO** · verified 2026-06-26 · → [[libraries/approval-router]]

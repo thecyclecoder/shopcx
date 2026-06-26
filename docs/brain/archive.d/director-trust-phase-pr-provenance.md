@@ -1,0 +1,1 @@
+- **Director lanes trust phase_states.pr (not status alone) + request-audit action** · verified 2026-06-26 · → [[libraries/spec-status-history]]

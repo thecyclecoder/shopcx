@@ -1,0 +1,1 @@
+- **Box session transparency — Task tool rename (TodoWrite → TaskCreate/TaskUpdate)** · verified 2026-06-26 · → [[recipes/box-session-transparency]]

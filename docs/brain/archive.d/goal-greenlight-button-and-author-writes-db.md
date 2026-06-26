@@ -1,0 +1,1 @@
+- **Greenlight button (one-click DB flag) + goal authoring writes the row** · verified 2026-06-26 · → [[lifecycles/db-driven-specs]]
