@@ -1455,6 +1455,20 @@ async function update(id: string, patch: Record<string, unknown>) {
 }
 
 /**
+ * planner-gates-build-queue-on-authored-specs Phase 2 — true when an error thrown by `materializeSpec`
+ * was specifically "no specs row for (workspace, slug)" (the author lane silently failed upstream),
+ * not a transient DB/connection failure or a different materializer bug. The materializer throws a
+ * stable, prefix-matched message — see src/lib/build-spec-materializer.ts `materializeSpec`. Used at
+ * every dispatch-time materializeSpec call site to route the "row missing" subset to a soft park
+ * (status=needs_attention, class=spec_row_missing) instead of a fatal failure, so the parked-router
+ * can dismiss / re-queue rather than the build sitting on `failed` forever.
+ */
+function isMaterializeMissingRowError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  return /^materializeSpec: no specs row /.test(msg);
+}
+
+/**
  * Read the just-parked row, classify it, and stamp `needs_attention_class` (+ mirror onto
  * spec_card_state.flags.last_park_class). Called from `update` only on the needs_attention
  * transition; the standing backstop sweep re-runs it against any row that landed unclassified
@@ -4840,7 +4854,32 @@ async function runPlanJob(job: Job) {
       return;
     }
 
-    // Queue a build for each approved spec — the existing pipeline takes over (its own claude/* PR).
+    // planner-gates-build-queue-on-authored-specs Phase 1: re-query public.specs for every approved
+    // slug AFTER the authoring loop and BEFORE the queue loop — partition into landed (row found) vs
+    // missing (no row). markNewSpecInReview's authorSpecRowFromMarkdown can silently swallow a failure
+    // (the planner-side callers don't unwrap it), so the per-slug try/catch above can complete with
+    // `authored` incremented while no row actually reached `public.specs`. Without this gate the next
+    // step queues a phantom build for a slug the build worker can't materialize. Only queue `landed`;
+    // failing the job with the explicit `missing` list makes the silent author-write failure loud and
+    // refuses to dispatch a build that has nothing to materialize.
+    const { getSpec: getSpecRow } = await import("../src/lib/specs-table");
+    const landed: typeof approved = [];
+    const missingSlugs: string[] = [];
+    for (const a of approved) {
+      const s = a.spec!;
+      try {
+        const row = await getSpecRow(job.workspace_id, s.slug);
+        if (row) landed.push(a);
+        else missingSlugs.push(s.slug);
+      } catch (e) {
+        // Treat a getSpec failure as missing — refusing to queue is the safe default; the planner-gate
+        // failure line names the slug, the owner can re-plan once the underlying DB hiccup clears.
+        console.error(`${tag} getSpec(${s.slug}) threw: ${e instanceof Error ? e.message : String(e)} — treating as missing`);
+        missingSlugs.push(s.slug);
+      }
+    }
+
+    // Queue a build for each LANDED approved spec — the existing pipeline takes over (its own claude/* PR).
     // Route through queueRoadmapBuild (the single enqueue chokepoint) so this agent path honours the
     // SAME spec-blockers gate as the dashboard + Slack: a freshly-authored spec that declares an
     // unshipped `Blocked-by` is refused here too, instead of inserting a build row that would collide.
@@ -4848,7 +4887,7 @@ async function runPlanJob(job: Job) {
     const { queueRoadmapBuild } = await import("../src/lib/roadmap-actions");
     const queuedSlugs: string[] = [];
     const blockedSlugs: string[] = [];
-    for (const a of approved) {
+    for (const a of landed) {
       const s = a.spec!;
       const res = await queueRoadmapBuild(job.workspace_id, job.created_by ?? "", {
         slug: s.slug,
@@ -4859,27 +4898,40 @@ async function runPlanJob(job: Job) {
       else console.error(`${tag} queueRoadmapBuild failed for ${s.slug}: ${res.status} ${res.error}`);
     }
 
+    const missingSlugSet = new Set(missingSlugs);
     const acted = actions.map((a) =>
       a.type === "spec" && a.status === "approved"
         ? {
             ...a,
             status: "done" as const,
-            result: queuedSlugs.includes(a.spec!.slug)
-              ? "authored + build queued"
-              : blockedSlugs.includes(a.spec!.slug)
-                ? "authored (build blocked — prerequisite not shipped)"
-                : "authored",
+            result: missingSlugSet.has(a.spec!.slug)
+              ? "NOT authored — public.specs write silently failed; build NOT queued"
+              : queuedSlugs.includes(a.spec!.slug)
+                ? "authored + build queued"
+                : blockedSlugs.includes(a.spec!.slug)
+                  ? "authored (build blocked — prerequisite not shipped)"
+                  : "authored",
           }
         : a.type === "spec" && a.status === "declined"
           ? { ...a, status: "done" as const, result: "recorded ❌" }
           : a,
     );
+    if (missingSlugs.length) {
+      await update(job.id, {
+        status: "failed",
+        pending_actions: acted,
+        error: `planner-gate: ${missingSlugs.length} approved spec(s) never reached public.specs — refused to queue phantom builds: ${missingSlugs.join(", ")}`,
+        log_tail: `authored ${authored} of ${approved.length} specs; ${missingSlugs.length} never reached public.specs: ${missingSlugs.join(", ")} — refused to queue phantom builds`.slice(-2000),
+      });
+      console.error(`${tag} ✗ planner-gate failed — ${missingSlugs.length} missing: ${missingSlugs.join(", ")}`);
+      return;
+    }
     await update(job.id, {
       status: "completed",
       pending_actions: acted,
       log_tail: `authored ${authored} specs to public.specs; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}${blockedSlugs.length ? `; ${blockedSlugs.length} blocked: ${blockedSlugs.join(", ")}` : ""}`,
     });
-    console.log(`${tag} ✓ authored ${approved.length} specs → queued ${queuedSlugs.length} builds`);
+    console.log(`${tag} ✓ authored ${landed.length} specs → queued ${queuedSlugs.length} builds`);
   } finally {
     chosenAccount.inFlight--; // release the account's round-robin load slot
     sh("git", ["worktree", "remove", "--force", wt]);
@@ -5102,11 +5154,25 @@ async function runFoldJob(job: Job) {
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         await setFoldRows(job.id, "folding", { status: "pending", job_id: null });
-        await update(job.id, {
-          status: "failed",
-          error: `materializeSpec failed for ${slug}: ${why}`,
-          log_tail: `fold aborted — could not materialize ${slug} from DB row; no PR opened`,
-        });
+        // planner-gates-build-queue-on-authored-specs Phase 2 — a missing public.specs row is the
+        // silent author-write fallout, not a materializer bug. Park (not fail) with class
+        // spec_row_missing so the parked-router can dismiss it — the underlying work has no spec to
+        // drive it; folding it would just hand build a phantom slug too.
+        if (isMaterializeMissingRowError(e)) {
+          await update(job.id, {
+            status: "needs_attention",
+            needs_attention_class: "spec_row_missing",
+            error: `public.specs has no row for ${slug} — author lane silently failed upstream; do not retry build until row is authored`,
+            log_tail: `fold parked — ${slug} missing from public.specs; awaiting parked-router disposition`.slice(-2000),
+          });
+          console.warn(`${tag} parked needs_attention (spec_row_missing) — ${slug} has no public.specs row`);
+        } else {
+          await update(job.id, {
+            status: "failed",
+            error: `materializeSpec failed for ${slug}: ${why}`,
+            log_tail: `fold aborted — could not materialize ${slug} from DB row; no PR opened`,
+          });
+        }
         sh("git", ["worktree", "remove", "--force", wt]);
         return;
       }
@@ -6436,9 +6502,18 @@ async function runSpecTestJob(job: Job) {
       try {
         await materializeSpec(job.workspace_id, slug, join(REPO_DIR, ".box"));
       } catch (e) {
-        const why = `materializeSpec failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`;
-        await update(job.id, { status: "needs_attention", error: why, log_tail: why.slice(-2000) });
-        console.error(`${tag} ${why} — aborting before Vera (she would read a stale path)`);
+        // planner-gates-build-queue-on-authored-specs Phase 2 — stamp spec_row_missing explicitly when
+        // the row is gone (instead of letting the classifier guess); leave the generic park reason on
+        // other materializer faults so the heuristic can still bucket them.
+        if (isMaterializeMissingRowError(e)) {
+          const why = `public.specs has no row for ${slug} — author lane silently failed upstream; do not retry build until row is authored`;
+          await update(job.id, { status: "needs_attention", needs_attention_class: "spec_row_missing", error: why, log_tail: why.slice(-2000) });
+          console.warn(`${tag} parked needs_attention (spec_row_missing) — ${slug} has no public.specs row — aborting before Vera`);
+        } else {
+          const why = `materializeSpec failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`;
+          await update(job.id, { status: "needs_attention", error: why, log_tail: why.slice(-2000) });
+          console.error(`${tag} ${why} — aborting before Vera (she would read a stale path)`);
+        }
         return;
       }
     }
@@ -6623,6 +6698,7 @@ async function runSpecReviewJob(job: Job) {
   // A spec that can't be materialized (no row — shouldn't happen, the status came FROM specs) is dropped
   // from the queue so Vale never reads a stale path.
   const reviewable: string[] = [];
+  const missingRowSlugs: string[] = [];
   {
     const { materializeSpec } = await import("../src/lib/build-spec-materializer");
     for (const slug of pending) {
@@ -6630,12 +6706,25 @@ async function runSpecReviewJob(job: Job) {
         await materializeSpec(job.workspace_id, slug, join(REPO_DIR, ".box"));
         reviewable.push(slug);
       } catch (e) {
+        if (isMaterializeMissingRowError(e)) missingRowSlugs.push(slug);
         console.warn(`${tag} could not materialize ${slug} from DB row: ${e instanceof Error ? e.message : String(e)} — dropping from queue`);
       }
     }
     if (!reviewable.length) {
-      const tail = `materialize failed for all ${pending.length} in_review spec(s) — nothing reviewable`;
-      await update(job.id, { status: "needs_attention", error: tail, log_tail: tail.slice(-2000) });
+      // planner-gates-build-queue-on-authored-specs Phase 2 — when EVERY drop was a missing public.specs
+      // row (selectInReviewSpecs returned a slug the row has since vanished from), stamp
+      // spec_row_missing so the parked-router dismisses it. Otherwise leave the class unstamped and let
+      // the heuristic classifier handle a real materializer fault (DB outage, decoder bug, etc.).
+      const allMissing = missingRowSlugs.length === pending.length;
+      const tail = allMissing
+        ? `public.specs has no row for any of ${pending.length} in_review spec(s): ${pending.join(", ")} — author lane silently failed upstream`
+        : `materialize failed for all ${pending.length} in_review spec(s) — nothing reviewable`;
+      await update(job.id, {
+        status: "needs_attention",
+        ...(allMissing ? { needs_attention_class: "spec_row_missing" as const } : {}),
+        error: tail,
+        log_tail: tail.slice(-2000),
+      });
       console.error(`${tag} ${tail}`);
       return;
     }
@@ -10762,13 +10851,29 @@ async function dispatchJob(job: Job) {
       const written = await materializeSpec(job.workspace_id, slug, join(wt, ".box"));
       specText = readFileSync(written, "utf8");
     } catch (e) {
-      const why = `materializeSpec failed: ${e instanceof Error ? e.message : String(e)}`;
-      await update(job.id, {
-        status: "failed",
-        error: `cannot materialize spec ${slug} from DB — ${why}`,
-        log_tail: `build aborted — ${why}; no PR opened`,
-      });
-      console.error(`${tag} ${why} → failed (no silent empty merge)`);
+      // planner-gates-build-queue-on-authored-specs Phase 2 — if the public.specs row is missing the
+      // failure is the silent author-write fallout (an in-flight pre-gate plan, or a row deleted
+      // mid-queue), NOT a materializer bug. Soft-land it on needs_attention with class
+      // spec_row_missing so the parked-router can dismiss-park (the build has no spec to drive); a
+      // genuine materializer fault (DB outage / decoder bug) still goes to `failed`.
+      if (isMaterializeMissingRowError(e)) {
+        const why = `public.specs has no row for ${slug} — author lane silently failed upstream; do not retry build until row is authored`;
+        await update(job.id, {
+          status: "needs_attention",
+          needs_attention_class: "spec_row_missing",
+          error: why,
+          log_tail: `build parked — ${why}; no PR opened`.slice(-2000),
+        });
+        console.warn(`${tag} parked needs_attention (spec_row_missing) — ${slug} has no public.specs row`);
+      } else {
+        const why = `materializeSpec failed: ${e instanceof Error ? e.message : String(e)}`;
+        await update(job.id, {
+          status: "failed",
+          error: `cannot materialize spec ${slug} from DB — ${why}`,
+          log_tail: `build aborted — ${why}; no PR opened`,
+        });
+        console.error(`${tag} ${why} → failed (no silent empty merge)`);
+      }
       chosenAccount.inFlight--;
       sh("git", ["worktree", "remove", "--force", wt]);
       return;
