@@ -1,0 +1,1 @@
+- **Landing Page Scout — per-chapter lander snapshots + gap analysis** · verified 2026-06-26 · → [[../libraries/landing-page-scout]]
