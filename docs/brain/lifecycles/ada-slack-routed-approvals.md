@@ -119,6 +119,18 @@ Box runs runDirectorCoachJob:
 - **Non-CEO routed approvals stay in the dashboard.** Director-routed approvals never enter `#cto-ada` (the founder's leash check filter — only the CEO's queue Slack-mirrors).
 - **`#alerts-critical` / `#daily-digest` still post as `shopcx`.** No persona leak — `postAsAda` is only ever called from the routed-inbox emit + Phase 4 mirror + [[ada-slack-chat]].
 
+## Status / open work
+
+**Shipped:** CEO routed approvals surface in #cto-ada as Block Kit cards (routine decisions) or chat-mode threads (complex approvals), with full bidirectional sync to the web inbox.
+
+**Known gaps / not yet shipped:**
+- None
+
+**Recent activity:**
+- Ada surfaces routed CEO inbox approvals in #cto-ada (all 5 phases shipped and verified)
+
+**Open questions:** None
+
 ## Related
 
 [[../specs/ada-slack-routed-approvals]] · [[../libraries/approval-inbox]] · [[../libraries/roadmap-actions]] · [[../libraries/slack]] · [[ada-slack-chat]] · [[../tables/dashboard_notifications]] · [[../tables/director_coach_threads]] · [[../dashboard/agents]] · [[../functions/platform]]
