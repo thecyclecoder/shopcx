@@ -267,6 +267,17 @@ function ProfileCard({
           Box lane <span className="font-mono text-zinc-500 dark:text-zinc-400">{worker.kind}</span> — its requests route
           up to the CEO inbox until {dp.name} ({dp.role}) goes live (approval-routing engine, M2).
         </p>
+        {/* Recent actions this worker filed under its supervising director (filtered by metadata.actor).
+            Hidden when the worker doesn't tag activity — keeps non-actor workers' profiles uncluttered.
+            Surfaces Reva's auto-rollbacks (deploy-health-rollback-guardian) + Reese's reconcile heals. */}
+        <div className="mt-6">
+          <DirectorActivity
+            fn={director.slug}
+            actor={worker.kind}
+            hideIfEmpty
+            heading={`Recent activity · under ${dp.name} (${dp.role})`}
+          />
+        </div>
         {/* box-agent-model-tiers Phase 4: the worker's current model tier + governed change history. */}
         <ModelTierCard kind={worker.kind} />
         {/* worker-grading Phase 3: the Director's grade rollup + the worker's recent graded actions. */}
