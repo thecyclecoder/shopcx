@@ -1,0 +1,1 @@
+- **Head-of-Growth campaign-grading loop** · verified 2026-06-26 · → [[../tables/storefront_campaign_grades]]
