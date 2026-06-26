@@ -1,0 +1,1 @@
+- **Competitor Scout — DB-driven per-product competitor set** · verified 2026-06-26 · → [[../inngest/competitor-scout]]
