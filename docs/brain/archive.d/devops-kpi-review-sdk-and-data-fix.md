@@ -1,0 +1,1 @@
+- **DevOps KPI review SDK + scorecard data/display fixes** · verified 2026-06-26 · → [[../libraries/kpi-review]]

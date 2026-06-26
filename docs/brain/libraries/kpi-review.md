@@ -43,8 +43,8 @@ Prints `metric · cadence · snapshot · ground-truth · drift · driftPct · st
 ## Callers
 
 - `scripts/_audit-kpis.ts` — the Phase 1 CLI surface.
-- (Phase 4 — TBD) `GET /api/developer/agents/scorecard/audit?metric=&cadence=` — owner-gated, calls `auditKpi` and feeds the scorecard tile's drift subscript.
-- (Phase 5 — TBD) `audit-platform-scorecard` step on [[../inngest/platform-director-cron]] — calls `auditAllKpis` on the standing pass, writes a per-metric audit log row, and opens a `loop_alerts` row on persistent drift.
+- (Phase 4 — planned) `GET /api/developer/agents/scorecard/audit?metric=&cadence=` — owner-gated, calls `auditKpi` for a single metric or `auditAllKpis` for a cadence's full registry. The scorecard page's `KpiTile` component will call this after the snapshot loads, rendering a subscript: `audit: snapshot ✓` (drift <0.5%), `drift: +Y% vs raw` (0.5–5%), or `DRIFT: snapshot=X · raw=Y` (>5%). Click to expand per-metric drift detail side-by-side (`snapshotDetail` vs `groundTruthDetail`).
+- (Phase 5 — planned) `audit-platform-scorecard` step on [[../inngest/platform-director-cron]] — will run `auditAllKpis` on the standing pass, write per-metric audit records (table TBD: `kpi_audit_log` or [[../tables/director_activity]] action_kind), and open a [[../tables/loop_alerts]] row (`signature:'kpi_drift:<metric>:<cadence>'`) on persistent drift (≥2 consecutive snapshots exceeding tolerance).
 
 ## Related
 
