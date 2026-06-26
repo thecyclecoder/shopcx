@@ -1,0 +1,1 @@
+- **Storefront /policies/[slug] page + cached route metadata caching** · verified 2026-06-26 · → [[../lifecycles/storefront-checkout]]
