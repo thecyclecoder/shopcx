@@ -1,0 +1,1 @@
+- **Migration robustness — pin the card + handle unmappable items** · verified 2026-06-26 · → [[../lifecycles/subscription-billing]]
