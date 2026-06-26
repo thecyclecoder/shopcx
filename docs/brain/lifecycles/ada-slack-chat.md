@@ -90,4 +90,4 @@ A `source='slack'` thread is the **same row** the web director-coach chat reads,
 
 ## Related
 
-[[../libraries/director-coach-threads]] · [[../tables/director_coach_threads]] · [[../tables/workspaces]] · [[../libraries/slack]] · [[../functions/platform]] · [[../specs/ada-slack-chat]] · [[roadmap-build-console]] · [[../operational-rules]]
+[[../libraries/director-coach-threads]] · [[../tables/director_coach_threads]] · [[../tables/workspaces]] · [[../libraries/slack]] · [[../integrations/slack]] · [[../functions/platform]] · [[../specs/ada-slack-chat]] · [[roadmap-build-console]] · [[../operational-rules]]
