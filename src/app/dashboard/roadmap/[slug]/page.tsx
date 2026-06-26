@@ -4,7 +4,6 @@ import { marked } from "marked";
 import { getSpec, listSpecSlugs, extractSpecSection, stripSpecSection, type SpecStatus } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
-import { getSpecCardStates, mergePhaseStates } from "@/lib/spec-card-state";
 import {
   getLatestSpecTestRuns,
   getHumanCheckResolutions,
@@ -54,13 +53,12 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const [spec, specSlugs] = await Promise.all([getSpec(slug, workspaceId ?? undefined), listSpecSlugs()]);
   if (!spec) notFound();
 
-  const [jobsBySlug, folds, testRuns, resolutions, cardStates, liveSpecTestSlugs, securityBySlug] = workspaceId
+  const [jobsBySlug, folds, testRuns, resolutions, liveSpecTestSlugs, securityBySlug] = workspaceId
     ? await Promise.all([
         getLatestJobsBySlug(workspaceId),
         getPendingFolds(workspaceId),
         getLatestSpecTestRuns(workspaceId),
         getHumanCheckResolutions(workspaceId),
-        getSpecCardStates(workspaceId),
         getLiveSpecTestSlugs(workspaceId),
         getSecurityStateBySlug(createAdminClient(), workspaceId),
       ])
@@ -69,13 +67,13 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
         {} as Record<string, PendingFold>,
         {} as Record<string, SpecTestRun>,
         new Map<string, import("@/lib/spec-test-runs").HumanCheckRow>(),
-        {} as Record<string, import("@/lib/spec-card-state").SpecCardState>,
         new Set<string>() as ReadonlySet<string>,
         {} as Record<string, import("@/lib/security-agent").SecurityStateBySlug>,
       ];
-  // Overlay the DB mirror's per-phase states onto the markdown phases so the detail page reflects per-phase
-  // progress instantly (the board's overall status already does this via resolveBoardStatus).
-  const phases = mergePhaseStates(spec.card.phases, (cardStates as Record<string, import("@/lib/spec-card-state").SpecCardState>)[slug]);
+  // spec-readers-from-db-retire-parser Phase 3: per-phase status + PR/merge_sha provenance come straight off
+  // the DB-sourced `spec.card.phases` (dbRowToSpecCard maps `public.spec_phases` rows) — the legacy
+  // `mergePhaseStates` overlay onto the retired `spec_card_state.phase_states` slot is gone.
+  const phases = spec.card.phases;
   const job = jobsBySlug[slug] ?? null;
   const fold = folds[slug] ?? null;
   const testRun = testRuns[slug] ?? null;

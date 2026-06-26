@@ -111,34 +111,10 @@ export function rollupPhaseStatus(phaseStates: SpecCardPhaseState[]): Phase {
   return "planned";
 }
 
-/**
- * Forward-merge the markdown-parsed phases with the DB mirror's per-phase states: each phase shows whichever
- * source is MORE advanced (planned < in_progress < shipped), matched by index. So the board reflects per-phase
- * progress from the DB mirror INSTANTLY on each phase's merge — no waiting for the markdown bundle to redeploy —
- * and neither stale source ever regresses a phase. The board's overall column already uses resolveBoardStatus;
- * this is the same DB-first treatment for the per-phase checkmarks (fixes phases reading stale during a build).
- */
-export function mergePhaseStates<T extends { status: Phase; pr?: number | null; merge_sha?: string | null }>(
-  markdownPhases: T[],
-  state: SpecCardState | undefined,
-): T[] {
-  if (!state?.phase_states?.length) return markdownPhases;
-  const byIndex = new Map(state.phase_states.map((p) => [p.index, p]));
-  return markdownPhases.map((p, i) => {
-    const db = byIndex.get(i);
-    if (!db) return p;
-    // spec-status-phase-pr-provenance Phase 3: when the DB phase is at/ahead of the markdown, also surface
-    // the PR + merge_sha provenance so callers (PhaseList, spec-detail) can render the per-phase PR chip.
-    if (PHASE_RANK[db.status] > PHASE_RANK[p.status]) {
-      return { ...p, status: db.status, pr: db.pr ?? null, merge_sha: db.merge_sha ?? null };
-    }
-    // Status matches — still pull provenance forward (markdown carries none).
-    if (db.status === p.status && (db.pr || db.merge_sha)) {
-      return { ...p, pr: db.pr ?? null, merge_sha: db.merge_sha ?? null };
-    }
-    return p;
-  });
-}
+// spec-readers-from-db-retire-parser Phase 3: `mergePhaseStates` is RETIRED. Per-phase status + PR/merge_sha
+// provenance are now authoritative on `public.spec_phases` and flow straight onto `SpecCard.phases` via
+// brain-roadmap `dbRowToSpecCard`; the spec-detail page reads `spec.card.phases` directly (no overlay onto the
+// retired `spec_card_state.phase_states` slot).
 
 /** Every spec_card_state row for a workspace, keyed by spec slug — the board's DB-first read. */
 export async function getSpecCardStates(workspaceId: string): Promise<Record<string, SpecCardState>> {

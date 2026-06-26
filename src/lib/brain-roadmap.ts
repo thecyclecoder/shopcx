@@ -3,11 +3,13 @@
  * board, the spec detail page, the Slack roadmap surfaces, and every script/agent that asks
  * "what's the state of spec X."
  *
- * spec-readers-from-db-retire-parser Phase 1 (2026-06-25): every SPEC read now comes from
- * `public.specs` + `public.spec_phases` via `readSpecsFromDb(workspaceId)` — the DB row IS the
- * truth. `parseSpec` + `overlayDbStateOnSpec` + `mergePhaseStates` still live in this file (so
- * a handful of consumers compile) but are NO LONGER on the `getRoadmap` / `getSpec` /
- * `listSpecSlugs` paths; Phase 3 retires them.
+ * spec-readers-from-db-retire-parser (2026-06-25/26): every SPEC read comes from `public.specs` +
+ * `public.spec_phases` via `readSpecsFromDb(workspaceId)` — the DB row IS the truth. Phase 3 RETIRED the
+ * read-side overlay/merge: `overlayDbStateOnSpec` + `spec-card-state.mergePhaseStates` are gone (the
+ * card is built straight from the DB rows, per-phase pr/merge_sha included). `parseSpec` is no longer on
+ * any READER path (getRoadmap/getSpec/listSpecSlugs are pure-DB); it survives ONLY as the markdown→card
+ * AUTHORING parser (`author-spec.authorSpecRowFromMarkdown`) + the `deriveSpecStatus(raw)` would-this-fold
+ * helper ([[platform-director]]) — both write/check paths, not board reads.
  *
  * goal-readers-from-db-retire-parsegoal (2026-06-25): every GOAL read now comes from `public.goals` +
  * `public.goal_milestones` via `getGoals` / `getGoal` / `getRoadmapFilters` / `listGoalSlugs` (mapping a
@@ -47,9 +49,10 @@ export type SpecStatus = Phase | "deferred" | "in_review";
 export interface SpecPhase {
   title: string;
   status: Phase;
-  /** spec-status-phase-pr-provenance Phase 3: the PR # + merge SHA that SHIPPED this phase. Surfaced from
-   *  `spec_card_state.phase_states[i].{pr,merge_sha}` by `overlayDbStateOnSpec` / `mergePhaseStates` so the
-   *  board and the spec-detail page can render a "P2 ✓ #519" PR chip per shipped phase (provable status). */
+  /** spec-status-phase-pr-provenance Phase 3: the PR # + merge SHA that SHIPPED this phase. After
+   *  spec-readers-from-db-retire-parser Phase 3 these come straight off the `public.spec_phases` row
+   *  (`dbRowToSpecCard`), so the board and the spec-detail page render a "P2 ✓ #519" PR chip per shipped
+   *  phase (provable status) with no `spec_card_state` overlay. */
   pr?: number | null;
   merge_sha?: string | null;
 }
@@ -344,55 +347,11 @@ function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCa
   });
 }
 
-/**
- * spec-status-db-driven Phase 1: overlay the DB mirror onto a markdown-parsed SpecCard. status /
- * critical / deferred / per-phase status come from the DB authoritatively (the markdown lags by a
- * deploy, and Phase 3 strips the emojis entirely). Markdown is consulted only as a fallback when no DB
- * row exists yet (a brand-new spec the backfill hasn't reached).
- */
-function overlayDbStateOnSpec<T extends SpecCard>(spec: T, state: import("@/lib/spec-card-state").SpecCardState | undefined): T {
-  if (!state) return spec;
-  const PHASE_RANK: Record<Phase, number> = { rejected: -1, planned: 0, in_progress: 1, shipped: 2 };
-  // `flags.deferred` wins over phase rollup for display. Un-defer reveals the underlying rollup.
-  const status: SpecStatus = state.flags?.deferred ? "deferred" : state.status;
-  // Per-phase: DB is authoritative; markdown is the fallback for indices the DB doesn't know.
-  // spec-status-phase-pr-provenance Phase 3: carry the PR/SHA provenance through so the board can render
-  // a "P2 ✓ #519" chip per shipped phase.
-  const byIndex = new Map((state.phase_states ?? []).map((p) => [p.index, p]));
-  const phases = spec.phases.map((p, i) => {
-    const db = byIndex.get(i);
-    if (!db) return p;
-    return { ...p, status: db.status, pr: db.pr ?? null, merge_sha: db.merge_sha ?? null };
-  });
-  // Forward-merge safety: if markdown has a more-advanced phase than the DB (a fresh edit), keep it
-  // (and drop any stale DB provenance — the markdown is ahead).
-  for (let i = 0; i < phases.length; i++) {
-    if (PHASE_RANK[spec.phases[i].status] > PHASE_RANK[phases[i].status]) {
-      phases[i] = spec.phases[i];
-    }
-  }
-  const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
-  for (const p of phases) counts[p.status]++;
-  // director-dismiss-park-and-short-circuit-spec Phase 2 — surface short-circuit state from spec_card_state.flags
-  // so the board renders a "shipped + short-circuited" sub-line with the reason.
-  const rawScReason = state.flags?.short_circuit_reason;
-  const shortCircuited = state.flags?.short_circuit === true ? true : spec.shortCircuited;
-  const shortCircuitReason = typeof rawScReason === "string" && rawScReason ? rawScReason : spec.shortCircuitReason;
-  // spec-status-phase-pr-provenance Phase 3: one-shot specs (no phases) carry their shipping PR at the
-  // card level via `flags.merged_pr`. Surfaced as `shippedPr` so the board renders a card-level "✓ #PR" chip.
-  const flagsMergedPr = state.flags?.merged_pr;
-  const shippedPr = typeof flagsMergedPr === "number" ? flagsMergedPr : spec.shippedPr ?? null;
-  return {
-    ...spec,
-    status,
-    critical: !!state.flags?.critical || spec.critical,
-    phases,
-    counts,
-    shortCircuited,
-    shortCircuitReason,
-    shippedPr,
-  };
-}
+// spec-readers-from-db-retire-parser Phase 3: `overlayDbStateOnSpec` is RETIRED. It overlaid the
+// `spec_card_state` mirror onto a markdown-parsed SpecCard; the DB-first readers below build the card
+// straight from `public.specs` + `public.spec_phases` (`dbRowToSpecCard`), so there's no markdown card to
+// overlay. The only transient `spec_card_state.flags` signals that aren't on `public.specs` yet
+// (short_circuit / one-shot merged_pr) are surfaced by `overlayCardFlags` instead.
 
 /**
  * The (effectively single-tenant) build-console workspace to resolve when a caller doesn't pass one — the

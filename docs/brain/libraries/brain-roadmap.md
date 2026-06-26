@@ -4,6 +4,8 @@
 
 **File:** `src/lib/brain-roadmap.ts`
 
+> **Parser status** ([[../specs/spec-readers-from-db-retire-parser]] Phase 3, 2026-06-26). `overlayDbStateOnSpec` and `spec-card-state.mergePhaseStates` are **DELETED** — the card is built straight from the DB rows (`dbRowToSpecCard`), per-phase `pr`/`merge_sha` included, so the spec-detail page reads `spec.card.phases` with no `spec_card_state.phase_states` overlay. `parseSpec` (and its `deriveSpecStatus` wrapper) is **no longer on any reader path** — it survives ONLY as the markdown→`SpecCard` AUTHORING parser used by [[author-spec]] `authorSpecRowFromMarkdown` and the [[platform-director]] would-this-fold check. `reconcileSpecDrift` lives in [[spec-drift]] (DB-sourced, repurposed as the self-heal engine — see that page), not here.
+
 ## Why this exists
 
 The [[../dashboard/roadmap|Roadmap board]], goal/function maps, and detail pages all project a single unified view of the planning state: specs (from `public.specs` + `public.spec_phases`), goals (from `docs/brain/goals/*.md`), and functions (from `docs/brain/functions/*.md`). This module is the single loader for all three. Read-only at request time.
@@ -12,7 +14,7 @@ The [[../dashboard/roadmap|Roadmap board]], goal/function maps, and detail pages
 
 - **`SpecCard`** — one spec: `slug`, `title`, `status` (derived `SpecStatus`), `summary`, `phases[]`, `counts`, `owner?` (function slug from `**Owner:** [[../functions/x]]`), `parent?` (mandate/goal-milestone from `**Parent:**`), **`blockedBy[]`** (prerequisite specs — see below), and **`autoBuild?`** (`false` ⇒ opted out of spec-blockers auto-queue via `**Auto-build:** off`).
 - **`Phase`** = `"planned" | "in_progress" | "shipped" | "rejected"` — a **phase-level** status (`SpecPhase.status`, `counts`).
-- **`SpecStatus`** = `Phase | "deferred"` — the **whole-spec** board status ([[../specs/director-drives-all-specs-and-deferred-status]] Phase 1). `deferred` is orthogonal to phase progress: `parseSpec` flags it from a leading `**Deferred:**` metadata line (already authored by [[board-grooming]] split cards) **or** `**Status:** deferred`, and `deriveStatus` returns `"deferred"` over any ⏳ phases. A deferred spec gets its **own board column** and is **excluded by every auto-build lane** ([[platform-director]]) until the CEO removes the marker (un-defers → Planned). Detection is **anchored to line-start** so a prose/backtick mention of the marker is not a false positive. Phases are never `deferred` (no emoji maps to it).
+- **`SpecStatus`** = `Phase | "deferred" | "in_review"` — the **whole-spec** board status ([[../specs/director-drives-all-specs-and-deferred-status]] Phase 1). `deferred` is orthogonal to phase progress: the board reads it from the `public.specs.deferred` column (`dbRowToSpecCard` → `deriveSpecCardStatus` returns `"deferred"` over any phase rollup). A deferred spec gets its **own board column** and is **excluded by every auto-build lane** ([[platform-director]]) until the CEO removes the marker (un-defers → Planned). Phases are never `deferred` (no emoji maps to it). _(The legacy `parseSpec`/`deriveStatus` markdown deferred-flagging is now AUTHORING-only — see the parser note below — not a reader path.)_
 - `ProjectTrack`, `RoadmapData`, `FunctionMap`/`FunctionGroup`/`ParentGroup`, `FunctionCard`/`Mandate`, `GoalCard`/`Milestone`, `ArchiveEntry`.
 
 ## Key exports

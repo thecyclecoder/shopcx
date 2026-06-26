@@ -1,10 +1,10 @@
 # libraries/spec-drift
 
-**DEPRECATED** (2026-06-24 — [[../specs/spec-readers-from-db-retire-parser]] Phase 3). The spec-drift reconciliation function `reconcileSpecDrift` is **scheduled for deletion** — its core purpose (keeping per-phase status in sync with shipped code) is now handled by [[../specs/spec-readers-from-db-retire-parser]] Phase 1 readers which read `public.spec_phases.status` directly from the DB (no markdown parse needed). 
+**MARKDOWN PARSER RETIRED, FUNCTION KEPT** ([[../specs/spec-readers-from-db-retire-parser]] Phase 3, 2026-06-26). Phase 3 retired this module's **markdown-emoji drift WRITE path** — `fetchSpecRawFromMain`, `phaseStatesFromRaw`, `parsePhasesWithLines`, `flipPhaseToShipped`, `setEmojiOnLine`, `setH1` are all GONE (no `docs/brain/specs/*.md` fetch, no emoji rewrite). It did NOT delete `reconcileSpecDrift` itself: the function was **migrated to read `public.spec_phases` directly** (via [[specs-table]] `getSpec`) by [[retire-md-reads-from-pm-flow]] Phase 2 and **repurposed** as the live self-heal engine — it auto-stamps confident built-but-unstamped phases on the canonical `spec_phases` row (`stampPhaseShipped`) and surfaces ambiguous ones for owner review.
 
-The remaining live use case is **drift detection** (`runSpecDriftReconciler`) — the hourly backstop that surfaces mismatches between "code on main" and "DB says shipped," for manual operator review via the [[../dashboard/control-tower]]. This function is retained until [[migration-drift-track-table-renames]] folds its table dependency; refer to that spec for the timeline.
+`reconcileSpecDrift` stays wired into [[../inngest/spec-drift-reconcile]] (the hourly reconciler) and the box worker ([[../lifecycles/roadmap-build-console]]); `runSpecDriftReconciler` / `healBuiltUnstampedPhases` are the sweep entrypoints, with **drift detection** (`detectSpecPhaseAnomalies` + the [[../dashboard/control-tower]] surface) the operator-review backstop. The `spec_drift` table itself is retained until [[migration-drift-track-table-renames]] folds its dependency.
 
-**File:** `src/lib/spec-drift.ts` (candidate for retirement)
+**File:** `src/lib/spec-drift.ts` (DB-sourced; markdown parser retired)
 
 ## The evidence model
 

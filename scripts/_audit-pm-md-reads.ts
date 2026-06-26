@@ -194,12 +194,18 @@ export const INTENTIONAL_MATERIALIZATION: AllowEntry[] = [
       "disk reflects it). Round-trip materialization path, not a docs/brain/specs/*.md fetch.",
   },
   {
+    // The AUTHORING round-trip: parseSpec over agent-AUTHORED markdown to UPSERT into public.specs +
+    // public.spec_phases (author-spec.ts:304, inside authorSpecRowFromMarkdown). The enclosing-function
+    // detector labels this call site by the nearest in-function `// ENFORCEMENT` comment, not the fn name —
+    // so the allow entry keys on `ENFORCEMENT`. spec-readers-from-db-retire-parser Phase 3 makes parseSpec
+    // formally authoring-only, so this materialization call site is intentionally allow-listed.
     file: "src/lib/author-spec.ts",
-    fn: "authorSpecRowFromMarkdown",
+    fn: "ENFORCEMENT",
     reason:
-      "The AUTHORING round-trip: parseSpec over agent-AUTHORED markdown to UPSERT the spec into public.specs " +
-      "+ public.spec_phases. The markdown is the agent's output buffer being written INTO the DB, not a spec " +
-      "state READ. Recipe: pm-flow-data-sources § 'parsers scoped to the round-trip materialization path only'.",
+      "The AUTHORING round-trip: parseSpec over agent-AUTHORED markdown to UPSERT into public.specs + " +
+      "public.spec_phases. The markdown is the agent's output buffer being written INTO the DB, not a spec " +
+      "state READ (the detector labels the call site by the in-function `// ENFORCEMENT` comment, not the fn " +
+      "name). Recipe: pm-flow-data-sources § round-trip materialization.",
   },
 ];
 
