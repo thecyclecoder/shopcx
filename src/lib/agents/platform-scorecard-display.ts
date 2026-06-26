@@ -96,6 +96,10 @@ export function formatMetricValue(value: number, unit: string): string {
   if (unit === "pct") return `${value.toFixed(1)}%`;
   if (unit === "ratio") return `${(value * 100).toFixed(1)}%`;
   if (unit === "hours") return `${value.toFixed(1)}h`;
+  // The 1–10 grade scale shared by `worker_grade_rollup` + `director_call_grade`
+  // ([[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 2). Rendered as "X.X / 10" so an 8.5
+  // reads as `8.5 / 10`, never as `850%` (the pre-fix `'ratio'` bug).
+  if (unit === "grade") return `${value.toFixed(1)} / 10`;
   // count + anything else
   return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(1);
 }
@@ -147,6 +151,8 @@ function formatHeadlineValue(value: number, unit: string): string {
   if (unit === "pct") return `${value.toFixed(0)}%`;
   if (unit === "ratio") return `${(value * 100).toFixed(0)}%`;
   if (unit === "hours") return `${value.toFixed(1)}h`;
+  // Same "X.X / 10" rendering on the watch line — keeps the grade scale unambiguous in the EOD recap.
+  if (unit === "grade") return `${value.toFixed(1)} / 10`;
   if (Number.isInteger(value)) return value.toString();
   return value.toFixed(2);
 }

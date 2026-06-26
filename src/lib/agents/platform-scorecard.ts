@@ -35,7 +35,13 @@ import { computeAgentRollup, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
 type Admin = ReturnType<typeof createAdminClient>;
 
 export type Cadence = "daily" | "weekly" | "monthly";
-export type MetricUnit = "count" | "ratio" | "hours" | "pct";
+/**
+ * Render unit for `value` — drives the display-side formatter in [[platform-scorecard-display]].
+ * `'grade'` is the 1–10 scale shared by worker + director rollups
+ * ([[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 2 — was previously stamped `'ratio'`, which
+ * rendered an 8.5/10 grade as "850%").
+ */
+export type MetricUnit = "count" | "ratio" | "hours" | "pct" | "grade";
 
 /** The org-chart function this scorecard belongs to — only platform-attributed rows are counted for
  *  the function-scoped metrics (escalations). Mirrors director-xp's "attribute to a real slug" guard. */
@@ -722,7 +728,7 @@ const approvalsUntouchedPct: MetricDef = {
  */
 const workerGradeRollup: MetricDef = {
   key: "worker_grade_rollup",
-  unit: "ratio",
+  unit: "grade",
   compute: async (ctx) => {
     const { admin, workspaceId } = ctx;
     const byWorker: Record<string, { average: number | null; prior: number | null; drop: number | null; count: number }> = {};
@@ -1083,7 +1089,7 @@ const deployReliability: MetricDef = {
 const DIRECTOR_GRADE_DIMENSIONS = ["auto-approval", "goal-escort"] as const;
 const directorCallGrade: MetricDef = {
   key: "director_call_grade",
-  unit: "ratio",
+  unit: "grade",
   compute: async (ctx) => {
     const { admin, workspaceId, curr, prev } = ctx;
     const meanFor = async (w: MetricWindow["curr"]): Promise<{ blended: number | null; byDim: Record<string, { mean: number | null; count: number }>; total: number }> => {
@@ -1241,8 +1247,9 @@ export async function computeScorecardValuesOnly(
       console.error(`[platform-scorecard] metric ${metric.key} compute failed:`, e instanceof Error ? e.message : e);
       result = { value: 0, priorValue: null, detail: { error: e instanceof Error ? e.message : String(e) } };
     }
-    const value = round(result.value, metric.unit === "count" ? 0 : metric.unit === "hours" ? 2 : 4);
-    const priorValue = result.priorValue == null ? null : round(result.priorValue, metric.unit === "count" ? 0 : metric.unit === "hours" ? 2 : 4);
+    const precision = metric.unit === "count" ? 0 : metric.unit === "hours" || metric.unit === "grade" ? 2 : 4;
+    const value = round(result.value, precision);
+    const priorValue = result.priorValue == null ? null : round(result.priorValue, precision);
     rows.push({
       workspace_id: workspaceId,
       metric_key: metric.key,
