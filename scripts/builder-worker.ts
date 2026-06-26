@@ -4527,27 +4527,13 @@ async function closeOutSpecForFold(workspaceId: string, slug: string): Promise<{
   return { ok: true, flipped };
 }
 
-// Re-plan hygiene: record declined proposals as ❌ in the goal doc so re-plan never re-proposes them.
-// Best-effort append under a "## Declined branches" section (created if absent).
+// Re-plan hygiene: record declined proposals as ❌. spec-pm-markdown-purge — goals live in `public.goals`
+// now (no `docs/brain/goals/{slug}.md` to append a "## Declined branches" section to). The durable decline
+// record is the job's persisted `pending_actions` (each declined action flips to `result: "recorded ❌"`),
+// which the PM board reads. No GitHub markdown write. Kept as a logging hook so the call sites stay intact.
 async function recordDeclined(goalSlug: string, declined: ProposedSpec[]) {
   if (!declined.length) return;
-  const filePath = `docs/brain/goals/${goalSlug}.md`;
-  const get = await gh("GET", `/repos/${REPO}/contents/${filePath}?ref=main`);
-  if (!get.ok) return;
-  const sha = (get.json as { sha?: string }).sha;
-  let md = Buffer.from(String((get.json as { content?: string }).content || "").replace(/\s/g, ""), "base64").toString("utf8");
-  const lines = declined.map((d) => `- ❌ ${d.slug} — ${d.title} (declined; not re-proposed)`).join("\n");
-  if (/##\s+Declined branches/i.test(md)) {
-    md = md.replace(/(##\s+Declined branches[^\n]*\n)/i, `$1${lines}\n`);
-  } else {
-    md = `${md.trimEnd()}\n\n## Declined branches\n\n${lines}\n`;
-  }
-  await gh("PUT", `/repos/${REPO}/contents/${filePath}`, {
-    message: `plan: ${goalSlug} → record ${declined.length} declined branch(es)`,
-    content: Buffer.from(md, "utf8").toString("base64"),
-    sha,
-    branch: "main",
-  });
+  console.log(`[plan:${goalSlug}] recorded ${declined.length} declined branch(es) on the job (DB-driven; no goal-doc write): ${declined.map((d) => d.slug).join(", ")}`);
 }
 
 // Parse a planner's needs_approval `actions` into typed spec PendingActions. No-orphan rule: drop any
@@ -4640,11 +4626,38 @@ async function runPlanJob(job: Job) {
   if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
 
+  // spec-pm-markdown-purge / goal-readers-from-db-retire-parsegoal: the goal lives in `public.goals` +
+  // `public.goal_milestones` now — there is NO `docs/brain/goals/{slug}.md` on disk (commit 2038f71a purged
+  // every goal markdown). The box session has NO DB access, so it cannot ground a decomposition unless we
+  // RENDER the goal row for it. Mirror the fold-goal lane + the spec-chat materializer: materialize the goal
+  // (outcome, success metric, milestones, the goal body — incl. the M1 Vercel-override note recorded on it)
+  // to the worktree's gitignored `.box/goal-{slug}.md` and point the planner at THAT file. The `.box` copy is
+  // a read-only scratch buffer regenerated per dispatch — NEVER `docs/brain/goals/` (deleted). Materialize for
+  // BOTH propose + resume: the resume (author) round also references the goal's outcome/milestones.
+  let materializedGoalPath = `.box/goal-${goalSlug}.md`;
+  try {
+    const { materializeGoal } = await import("../src/lib/build-goal-materializer");
+    const abs = await materializeGoal(job.workspace_id, goalSlug, join(wt, ".box"));
+    materializedGoalPath = abs.startsWith(`${wt}/`) ? abs.slice(wt.length + 1) : abs; // worktree-relative for the prompt
+    console.log(`${tag} materialized goal ${goalSlug} → ${materializedGoalPath} for grounding`);
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    await update(job.id, {
+      status: "failed",
+      error: `materializeGoal failed for ${goalSlug}: ${why}`,
+      log_tail: `plan aborted — could not materialize goal ${goalSlug} from public.goals; the box has no DB access and there is no goal markdown to ground against`,
+    });
+    console.error(`${tag} materializeGoal failed: ${why}`);
+    sh("git", ["worktree", "remove", "--force", wt]);
+    chosenAccount.inFlight--; // release the account's round-robin load slot (we bail before the try/finally)
+    return;
+  }
+
   try {
     if (!isResume) {
       // PROPOSE — run the plan-goal skill. The planner writes nothing; it emits a tree for approval.
       const prompt = [
-        `Use the plan-goal skill to plan the goal docs/brain/goals/${goalSlug}.md (cwd is the repo root).`,
+        `Use the plan-goal skill to plan the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (it was purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (outcome, success metric, milestones, the goal body). Read THAT file — do NOT look for docs/brain/goals/${goalSlug}.md, it does not exist.`,
         ...(job.instructions ? [`Extra planning guidance: ${job.instructions}`] : []),
         `You are PROPOSING only — do NOT author specs, do NOT queue builds, do NOT run git. Read the goal + the brain, gap-analyze, and emit the proposed tree. Every proposed spec MUST carry an owner + parent (reject your own orphans).`,
         `SELF-SEQUENCING (goal-decomposition-encodes-blockers): every proposed branch MUST declare its prerequisites as \`blocked_by\`: a (possibly empty) list of the slugs it depends on — each slug MUST reference another proposed spec in THIS tree or an already-existing spec under docs/brain/specs/. The graph MUST be acyclic (no spec blocks itself, directly or transitively). Foundation specs that nothing precedes have \`blocked_by: []\`; a spec that needs a framework/memory/metric built first lists those slugs. Do NOT over-serialize independent branches — only list a real build-order dependency. The approved tree becomes self-sequencing: only unblocked specs build immediately, dependents auto-queue as their blockers ship.`,
@@ -4709,7 +4722,8 @@ async function runPlanJob(job: Job) {
       return;
     }
 
-    // RESUME — author APPROVED specs, wikilink into the goal doc, record declines, queue builds.
+    // RESUME — author APPROVED specs to public.specs, record declines, queue builds. (No goal-doc commit:
+    // goals live in public.goals now; the decline record is the persisted `pending_actions` ❌ on this job.)
     const actions = job.pending_actions || [];
     const approved = actions.filter((a) => a.type === "spec" && a.status === "approved" && a.spec);
     const declined = actions.filter((a) => a.type === "spec" && a.status === "declined" && a.spec);
@@ -4733,13 +4747,12 @@ async function runPlanJob(job: Job) {
       })
       .join("\n");
     const declinedNote = declined.length
-      ? `\n\nDECLINED branches (record as ❌ under a "## Declined branches" section in the goal doc so re-plan never re-proposes them): ${declined.map((a) => a.spec!.slug).join(", ")}.`
+      ? `\n\nDECLINED branches: ${declined.map((a) => a.spec!.slug).join(", ")} — the worker records these as ❌ on the goal's DB row; do NOT re-propose them.`
       : "";
     const prompt = [
-      `Author the owner-APPROVED specs for goal docs/brain/goals/${goalSlug}.md (cwd is the repo root). Do NOT build anything; do NOT run git. Only write files under docs/brain/specs/ and edit docs/brain/goals/${goalSlug}.md.`,
-      `For EACH approved spec below, create docs/brain/specs/{slug}.md as a real, concrete build spec: an H1 "# {Title}" (NO status emoji — spec status is DB-driven, the markdown is content-only); directly under it the metadata line \`**Owner:** [[../functions/{owner}]] · **Parent:** {parent}\`; a one-paragraph summary tied to the goal's success metric; concrete "## Phase N — name" sections (NO status emoji/marker on any phase — per-phase status lives in spec_card_state, never the markdown) grounded in the brain (read pages to cite real table/library names + the gap); a "## Safety / invariants" section; a "## Completion criteria" section. Match the style of existing docs/brain/specs/*.md.`,
-      `BLOCKED-BY (goal-decomposition-encodes-blockers): when an approved spec below lists \`blocked_by\`, add a metadata header line immediately after the \`**Owner:** … · **Parent:** …\` line, in exactly this format: \`**Blocked-by:** [[<slug>]], [[<slug>]]\` (one [[slug]] wikilink per blocker, comma-separated). This gates the spec's build until its prerequisites ship. If a spec has no \`blocked_by\` line below, do NOT add a Blocked-by header (it is a foundation spec that builds immediately). Use ONLY the slugs listed in that spec's \`blocked_by\` — do not invent prerequisites.`,
-      `Then update docs/brain/goals/${goalSlug}.md: under the matching milestone in "## Decomposition", add a wikilink to each new spec, e.g. "[[../specs/{slug}]] ⏳ — {one-line}".${declinedNote}`,
+      `Author the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric). Do NOT build anything; do NOT run git; do NOT create or edit any docs/brain/goals/ file. ONLY write the spec markdown files under docs/brain/specs/ — the worker reads each and AUTHORS it to the DB (public.specs + public.spec_phases); no .md is committed and the goal-milestone wikilink is the worker's DB write, not yours.`,
+      `For EACH approved spec below, create docs/brain/specs/{slug}.md as a real, concrete build spec (a scratch buffer the worker reads and authors to public.specs — NOT committed): an H1 "# {Title}" (NO status emoji — spec status is DB-driven, the markdown is content-only); directly under it the metadata line \`**Owner:** [[../functions/{owner}]] · **Parent:** {parent}\`; a one-paragraph summary tied to the goal's success metric; concrete "## Phase N — name" sections (NO status emoji/marker on any phase — per-phase status lives in spec_phases, never the markdown) grounded in the brain (read pages to cite real table/library names + the gap); a "## Safety / invariants" section; a "## Completion criteria" section. Match the style the build/fold materializers render.`,
+      `BLOCKED-BY (goal-decomposition-encodes-blockers): when an approved spec below lists \`blocked_by\`, add a metadata header line immediately after the \`**Owner:** … · **Parent:** …\` line, in exactly this format: \`**Blocked-by:** [[<slug>]], [[<slug>]]\` (one [[slug]] wikilink per blocker, comma-separated). This gates the spec's build until its prerequisites ship and the author-spec SDK parses it into the spec row's \`blocked_by\`. If a spec has no \`blocked_by\` line below, do NOT add a Blocked-by header (it is a foundation spec that builds immediately). Use ONLY the slugs listed in that spec's \`blocked_by\` — do not invent prerequisites.${declinedNote}`,
       ``,
       `Approved specs:\n${specList}`,
       ``,
@@ -4765,30 +4778,27 @@ async function runPlanJob(job: Job) {
       return;
     }
 
-    // spec-pm-markdown-purge: the planner sub-agent writes the authored specs into the worktree; the worker
-    // reads each and authors it to the DB ONLY (public.specs + public.spec_phases) — NO spec .md is committed
-    // to main. The goal doc is NOT a spec, so it still commits to main here (goal readers are a separate concern).
+    // spec-pm-markdown-purge: the planner sub-agent materializes each authored spec into the worktree as a
+    // scratch buffer; the worker reads each and AUTHORS it to the DB ONLY (public.specs + public.spec_phases
+    // via the author-spec SDK) — NO spec .md is committed to main, and NO goal doc commits to main either
+    // (goals live in public.goals now — there is no docs/brain/goals/{slug}.md to write). The goal→milestone
+    // wikilink + the milestone_id binding are DB concerns, not a markdown commit. Mirror the spec-chat finalize
+    // lane: the markdown is a buffer the worker reads, the DB row is the authored output.
     const changed = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim()
       .split("\n").map((l) => l.trim().split(/\s+/).pop() || "").filter(Boolean);
-    const docFiles = changed.filter((f) => f.startsWith("docs/brain/specs/") || f === `docs/brain/goals/${goalSlug}.md`);
-    let committed = 0;
-    for (const f of docFiles) {
+    const specFiles = changed.filter((f) => f.startsWith("docs/brain/specs/") && f.endsWith(".md"));
+    let authored = 0;
+    for (const f of specFiles) {
       try {
         const content = readFileSync(join(wt, f), "utf8");
-        if (f.startsWith("docs/brain/specs/")) {
-          // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with the author's
-          // intended_status=planned (the planner only proposes specs it wants built; the deferred call
-          // is Ada's, downstream of Vale). DB-only — no .md commit.
-          const slug = f.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
-          await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`, content);
-          committed++;
-        } else {
-          const r = await putFileMain(f, content, `plan: ${goalSlug} → ${f.replace("docs/brain/", "")}`);
-          if (r.ok) committed++;
-          else console.error(`${tag} commit failed for ${f}: ${r.status}`);
-        }
+        // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with the author's
+        // intended_status=planned (the planner only proposes specs it wants built; the deferred call
+        // is Ada's, downstream of Vale). DB-only — no .md commit (markNewSpecInReview → authorSpecRowFromMarkdown).
+        const slug = f.replace(/^docs\/brain\/specs\//, "").replace(/\.md$/, "");
+        await markNewSpecInReview(job.workspace_id, slug, "planned", "planner", `planner authored for goal ${goalSlug}`, content);
+        authored++;
       } catch (e) {
-        console.error(`${tag} author/commit ${f}: ${e instanceof Error ? e.message : e}`);
+        console.error(`${tag} author ${f}: ${e instanceof Error ? e.message : e}`);
       }
     }
 
@@ -4829,7 +4839,7 @@ async function runPlanJob(job: Job) {
     await update(job.id, {
       status: "completed",
       pending_actions: acted,
-      log_tail: `committed ${committed} docs to main; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}${blockedSlugs.length ? `; ${blockedSlugs.length} blocked: ${blockedSlugs.join(", ")}` : ""}`,
+      log_tail: `authored ${authored} specs to public.specs; queued ${queuedSlugs.length} builds: ${queuedSlugs.join(", ")}${blockedSlugs.length ? `; ${blockedSlugs.length} blocked: ${blockedSlugs.join(", ")}` : ""}`,
     });
     console.log(`${tag} ✓ authored ${approved.length} specs → queued ${queuedSlugs.length} builds`);
   } finally {
