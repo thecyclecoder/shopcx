@@ -66,6 +66,8 @@ async function appstleUnskipOrder(workspaceId: string, billingAttemptId: string,
 async function appstleSwitchPaymentMethod(workspaceId: string, contractId: string, paymentMethodId: string,) : Promise<
 ```
 
+Recognizes Appstle's billing-cycle-contract-edit guardrail (`400 UserGeneratedError` with body containing *"billing cycle contract edit"*). When Appstle has a contract edit in flight it refuses concurrent payment-method switches; this is an expected, user-generated transient — NOT a server fault — so the helper logs at `console.warn` (Vercel error feed / Control Tower stop surfacing it) and returns `{ success: false, error: "contract_edit_in_progress" }` so callers can retry instead of seeing a bare status string. Mirrors the recognizer shape in `appstleRemoveLineItem` ([[subscription-items]]).
+
 ### `appstleSendPaymentUpdateEmail` — function
 
 ```ts
