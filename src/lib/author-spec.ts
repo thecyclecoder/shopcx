@@ -174,6 +174,54 @@ function attachSpecLevelVerification(
   }
 }
 
+/**
+ * Thrown when a spec is authored with a phase that carries NO non-empty `## Verification` / `### Verification`
+ * checklist. A spec with no acceptance check is untestable (spec-test defaults it to needs_human forever) —
+ * this is exactly why ~13 historical specs shipped with an empty verification column. The authoring MUST fail
+ * loudly at the parse step (before the DB write) rather than silently persisting an empty verification.
+ */
+export class MissingVerificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingVerificationError";
+  }
+}
+
+/**
+ * Reject any phase that has no non-empty Verification section. Throws `MissingVerificationError` (loud, with
+ * the slug + the offending phase position + title) so the authoring path FAILS rather than writing an empty
+ * verification column. This is the single enforcement chokepoint — `authorSpecRowFromMarkdown` runs it before
+ * `upsertSpec`, so every author surface (planner, spec-chat, triage, regression, repair, …) inherits it.
+ *
+ * `phaseBodies` is the output of `extractPhaseBodies` (which already split spec-level `## Verification` onto
+ * the last phase). A phase whose `verification` is null/empty/whitespace fails. A spec with zero phases also
+ * fails — there's nothing to test.
+ */
+export function assertEveryPhaseHasVerification(
+  slug: string,
+  phaseBodies: { title: string; body: string; verification: string | null }[],
+): void {
+  if (!phaseBodies.length) {
+    throw new MissingVerificationError(
+      `spec ${slug} has no phases — every spec needs at least one phase with a non-empty "## Verification" (>=1 concrete acceptance check)`,
+    );
+  }
+  const missing = phaseBodies
+    .map((p, i) => ({ pos: i + 1, title: p.title, ok: !!(p.verification && p.verification.trim()) }))
+    .filter((p) => !p.ok);
+  if (missing.length) {
+    const which = missing
+      .map((m) => `phase ${m.pos}${m.title ? ` (${m.title})` : ""}`)
+      .join(", ");
+    throw new MissingVerificationError(
+      `spec ${slug} ${missing.length === 1 ? "has a phase" : "has phases"} with no Verification — ${which} ` +
+        `has no "## Verification" / "### Verification" section (or it's empty). Every phase needs >=1 concrete ` +
+        `acceptance check ("- On {where}, {do what} → expect {observable result}"). Add a Verification section ` +
+        `so the spec is testable — no untestable specs.`,
+    );
+  }
+}
+
 /** `**Repair-signature:** `…`` line (box Repair-Agent specs). Returns the SIGNATURE TEXT, not just presence. */
 export function extractRepairSignature(raw: string): string | null {
   for (const l of raw.split("\n")) {
@@ -243,9 +291,17 @@ export async function authorSpecRowFromMarkdown(
   intendedStatus: "planned" | "deferred",
   opts: AuthorSpecOpts = {},
 ): Promise<boolean> {
+  // ENFORCEMENT (reject before the DB write): every phase must carry a non-empty Verification. This runs
+  // OUTSIDE the best-effort try/catch below so a missing-Verification authoring FAILS LOUDLY (throws) rather
+  // than being swallowed into a `false` return — an untestable spec must never reach public.spec_phases. A
+  // genuine DB/upsert error stays best-effort (returns false, logged) per the dual-write posture; only this
+  // structural defect is a hard error. ~13 specs shipped with empty verification columns because there was no
+  // gate here — this is that gate.
+  const phaseBodies = extractPhaseBodies(markdown);
+  assertEveryPhaseHasVerification(slug, phaseBodies);
+
   try {
     const card = parseSpec(slug, markdown);
-    const phaseBodies = extractPhaseBodies(markdown);
     const regressionHeaders = extractRegressionHeaders(markdown);
 
     const phases: SpecPhaseInput[] = card.phases.map((p, i) => ({
