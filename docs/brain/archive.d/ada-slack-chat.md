@@ -1,0 +1,1 @@
+- **Ada on Slack — chat with your CTO in #cto-ada** · verified 2026-06-26 · → [[../lifecycles/ada-slack-chat]]

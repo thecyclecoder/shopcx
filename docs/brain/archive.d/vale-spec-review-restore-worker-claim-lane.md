@@ -1,0 +1,1 @@
+- **Vale spec-review — restore the missing worker claim lane** · verified 2026-06-26 · → [[../recipes/build-box-setup]]
