@@ -541,15 +541,20 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  * with status='folded'; the fold only extracts knowledge into the permanent brain pages) — so gating it
  * on an uncompletable human-test backlog just blinds the devops agents to shipped code. A spec is eligible
  * the moment its machine spec-test passes:
- *   - the latest spec_test run is agent-verdict `approved` (its automatable Verification checks all pass), AND
+ *   - the latest spec_test run is a CLEAN MACHINE PASS — agent-verdict `approved` OR `needs_human` (its
+ *     automatable Verification checks all pass; a `needs_human` verdict means the agent machine-verified
+ *     everything it could and flagged the REMAINDER for OPTIONAL human review — task #29), AND
  *   - 0 regressions (no UNRESOLVED auto-`fail` check — an evidence-backed broken bullet; same definition the
- *     human-test queue / regression banner use). A FAILING spec-test (verdict `issues`/`needs_human`/`error`,
- *     or any open auto-`fail`) is NOT eligible — it surfaces the failure instead of folding.
+ *     human-test queue / regression banner use). A FAILING spec-test (verdict `issues`/`error`, or any open
+ *     auto-`fail` — incl. a `needs_human` run that carries an unresolved machine `fail`) is NOT eligible — it
+ *     surfaces the failure instead of folding.
  *
- * Human QA is now ADVISORY, never a fold gate: a `needs_human` check the owner hasn't resolved, or a human
- * `failed` resolution, does NOT block the fold (the "human QA pending" badge stays for the owner to clear
- * whenever they want, or never). Pure read; mirrors the regression definition so the gate can never disagree
- * with the surfaced regression banner. A spec missing a run is NOT eligible (it hasn't been machine-tested yet).
+ * Human QA is now ADVISORY, never a fold gate (task #29): a `needs_human` VERDICT, a `needs_human` check the
+ * owner hasn't resolved, or a human `failed` resolution, does NOT block the fold (the "human QA pending" badge
+ * stays for the owner to clear whenever they want, or never). Before this fix only `approved` folded, which
+ * wrongly stranded the machine-passed `needs_human` specs shipped-but-unfoldable. Pure read; mirrors the
+ * regression definition so the gate can never disagree with the surfaced regression banner. A spec missing a
+ * run is NOT eligible (it hasn't been machine-tested yet).
  *
  * Two correctness rails (fix(fold) — getAutoFoldEligibleSlugs requires derived-shipped + approved spec-test):
  *   1. DERIVED-shipped, never the stored column. `getRoadmap()` builds each SpecCard's `status` from the
@@ -558,16 +563,20 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  *      `planned`/`in_review`/`in_progress` on the row but with all phases shipped reads `shipped` here, and a
  *      still-building spec never reads shipped just because the stored column is stale. We re-assert
  *      `s.status === "shipped"` (a `deferred`/`in_review`/`in_progress`/`planned` rollup is rejected).
- *   2. POSITIVE approval, not absence-of-failure. The latest run must be `agent_verdict='approved'` AND carry
- *      at least one real machine `pass` check (`summary.auto_pass > 0`). A degenerate 0-check `approved` row —
- *      the "silent empty pass" the AgentVerdict doc warns about (an unparseable/empty verdict that reads like a
- *      clean pass) — is NOT a genuine verification: nothing was actually asserted, so it is NOT eligible.
- *      Absence of a `fail` ≠ an approval.
+ *   2. POSITIVE machine pass, not absence-of-failure. The latest run must be `agent_verdict IN
+ *      ('approved','needs_human')` AND carry at least one real machine `pass` check (`summary.auto_pass >= 1`),
+ *      AND have 0 unresolved auto-`fail` regressions. A degenerate 0-check row — the "silent empty pass" the
+ *      AgentVerdict doc warns about (an unparseable/empty verdict that reads like a clean pass) — is NOT a
+ *      genuine verification: nothing was actually asserted, so it is NOT eligible. Absence of a `fail` ≠ a pass.
  */
 export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
   const admin = createAdminClient();
   const [{ specs }, archived, runs, resolutions, liveRows] = await Promise.all([
-    getRoadmap(),
+    // Grade the SAME workspace whose spec-test runs we read below — `getRoadmap()` with no arg resolves a
+    // non-deterministic DEFAULT workspace (latest agent_job), so the gate would otherwise grade the wrong
+    // workspace's specs against this workspace's runs. Pass workspaceId so the rollup-derived `shipped` set
+    // and the spec-test runs are always for the same tenant.
+    getRoadmap(workspaceId),
     listArchivedSlugs(),
     getLatestSpecTestRuns(workspaceId),
     getHumanCheckResolutions(workspaceId),
@@ -592,15 +601,21 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     if (s.status !== "shipped" || archivedSet.has(s.slug)) continue;
     if (liveSlugs.has(s.slug)) continue;
     const run = runs[s.slug];
-    // Rail 2 — POSITIVE approval, not absence-of-failure. The latest run must be agent-verdict `approved`
-    // (`issues`/`needs_human`/`error`, or a MISSING run, are non-pass → not eligible) AND carry at least one
-    // real machine `pass` check. A degenerate 0-check `approved` row asserted nothing, so it is NOT a genuine
-    // verification — absence of a `fail` ≠ an approval. needs_human checks stay advisory (not consulted).
-    if (!run || run.agent_verdict !== "approved" || run.summary.auto_pass < 1) continue;
+    // Rail 2 — POSITIVE machine pass, not absence-of-failure. The latest run must be a CLEAN MACHINE PASS:
+    // agent-verdict `approved` OR `needs_human` (task #29 — `needs_human` means the agent machine-verified
+    // everything it could and flagged the REMAINDER for OPTIONAL human review; human QA is advisory, NOT a
+    // failure or a fold gate), AND carry at least one real machine `pass` check (`summary.auto_pass >= 1`).
+    // `issues`/`error` (a genuine failure / unparseable-or-errored run) and a MISSING run are non-pass → not
+    // eligible. A degenerate 0-check row asserted nothing, so it is NOT a genuine verification — absence of a
+    // `fail` ≠ a machine pass. The unresolved-`fail` guard below additionally rejects a `needs_human` run whose
+    // machine checks include an open `fail` regression.
+    if (!run || (run.agent_verdict !== "approved" && run.agent_verdict !== "needs_human")) continue;
+    if (run.summary.auto_pass < 1) continue;
 
     // 0 regressions only: an UNRESOLVED auto-`fail` (an evidence-backed broken bullet) blocks the fold — that
-    // is a real machine-detected failure, not a human-QA item. (An `approved` run won't carry a `fail`, but
-    // we keep the guard so a hand-edited run / future verdict shape can't fold over an open regression.)
+    // is a real machine-detected failure, not a human-QA item. This is the guard that keeps a `needs_human`
+    // run with a lingering machine `fail` OUT (an `approved` run won't carry a `fail`, but a `needs_human` one
+    // can) — and also covers any hand-edited / future verdict shape that would fold over an open regression.
     let hasRegression = false;
     for (const c of run.checks) {
       if (c.verdict !== "fail") continue;
