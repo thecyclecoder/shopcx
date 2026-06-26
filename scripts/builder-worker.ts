@@ -2903,13 +2903,29 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   // to advance / all healthy) is skipped so the board isn't flooded every ~15m; the daily watch + activity feed
   // cover the all-quiet heartbeat.
   try {
-    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|drift: none|flipped 0|reverse-drift 0/i;
+    // "all X" scan heartbeats (all triaged / all ordered / all covered / …) mean "I checked, nothing
+    // NEW to do" — the actionable cases have their own meaningful notes ("re-ran N" / "escalated N").
+    // A genuine park stays surfaced in the CEO's Approvals inbox, not re-announced on the board every pass.
+    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|all triaged|all ordered|drift: none|flipped 0|reverse-drift 0/i;
     const meaningful = notes.filter((n) => n && !QUIET.test(n));
     if (meaningful.length) {
       const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));
       const body = [`🛠️ Standing pass — here's what I just set up:`, ...(directiveLine ? [directiveLine] : []), ...meaningful.map((n) => `• ${n}`)].join("\n").slice(0, 3500);
-      const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body, kind: "update", metadata: { standing_pass: true } });
+      // Systemic guard: never re-post an IDENTICAL recap back-to-back. Any stable heartbeat that slips
+      // the QUIET filter would otherwise flood the board (the appstle / regression loops, 2026-06-26);
+      // the activity feed + this job's log_tail still capture every pass.
+      const { data: prior } = await db
+        .from("director_messages")
+        .select("body")
+        .eq("workspace_id", job.workspace_id)
+        .eq("author_function", "platform")
+        .filter("metadata->>standing_pass", "eq", "true")
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (prior?.[0]?.body !== body) {
+        const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+        await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body, kind: "update", metadata: { standing_pass: true } });
+      }
     }
   } catch (e) {
     console.error(`${tag} standing-pass board recap failed (continuing):`, e instanceof Error ? e.message : e);
