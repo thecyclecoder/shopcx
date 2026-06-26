@@ -11,7 +11,10 @@ The **department-level KPI aggregation engine** behind the [[../goals/platform-d
 - **`type Cadence = 'daily' | 'weekly' | 'monthly'`** · **`type MetricUnit = 'count' | 'ratio' | 'hours' | 'pct'`**
 - **`interface ScorecardSnapshotRow`** — one persisted row (`workspace_id, metric_key, cadence, snapshot_date, window_days, value, prior_value, delta_pct, unit, detail, updated_at`).
 - **`interface ComputeOptions { cadence; snapshotDate?; windowDays? }`** — `snapshotDate` defaults to today (UTC), `windowDays` to the cadence default (daily=1).
-- **`computePlatformScorecard(workspaceId, opts): Promise<ScorecardSnapshotRow[]>`** — for each KPI in the cadence's registry, compute the trailing-window `value`, the prior equal-length `prior_value`, and `delta_pct`, then **upsert** every row on `(workspace_id, metric_key, cadence, snapshot_date)`. Idempotent (a same-day re-run upserts in place). A quiet workspace writes zeros, never errors; a single metric's read failing writes a zero row + logs (the rest still land).
+- **`computePlatformScorecard(workspaceId, opts): Promise<ScorecardSnapshotRow[]>`** — for each KPI in the cadence's registry, compute the trailing-window `value`, the prior equal-length `prior_value`, and `delta_pct`, then **upsert** every row on `(workspace_id, metric_key, cadence, snapshot_date)`. Idempotent (a same-day re-run upserts in place). A quiet workspace writes zeros, never errors; a single metric's read failing writes a zero row + logs (the rest still land). Thin wrapper around `computeScorecardValuesOnly` + the upsert.
+- **`computeScorecardValuesOnly(workspaceId, opts): Promise<ScorecardSnapshotRow[]>`** — the same compute pass WITHOUT the upsert, so [[kpi-review]] can re-derive ground truth without violating the "one writer" rule (the SDK is read-only). Same window math + same rounding → byte-equivalent rows to what `computePlatformScorecard` would persist.
+- **`getRegisteredMetrics(cadence): ReadonlyArray<{ key; unit }>`** — the `(metric_key, unit)` tuples for every metric in the cadence's registry; lets [[kpi-review]] enumerate the advertised KPI set without re-importing the private `MetricDef` shape.
+- **`getDefaultWindowDays(cadence): number`** — the engine's default trailing-window length per cadence (daily=1 / weekly=7 / monthly=30).
 
 ## The daily KPI registry
 
@@ -64,4 +67,4 @@ The daily snapshot beat on [[../inngest/platform-director-cron]] (`snapshot-plat
 
 ## Related
 
-[[../archive.d/platform-scorecard-engine]] · [[../specs/regression-backlog-reconciliation-scorecard]] · [[../goals/platform-department-scorecard]] · [[../tables/platform_scorecard_snapshots]] · [[../inngest/platform-director-cron]] · [[meta__scorecards]] · [[director-xp]] · [[director-recap]] · [[control-tower]] · [[../operational-rules]]
+[[../archive.d/platform-scorecard-engine]] · [[../specs/regression-backlog-reconciliation-scorecard]] · [[../goals/platform-department-scorecard]] · [[../tables/platform_scorecard_snapshots]] · [[../inngest/platform-director-cron]] · [[kpi-review]] · [[meta__scorecards]] · [[director-xp]] · [[director-recap]] · [[control-tower]] · [[../operational-rules]]

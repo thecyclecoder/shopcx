@@ -1173,12 +1173,14 @@ const REGISTRY: Record<Cadence, MetricDef[]> = {
 const DEFAULT_WINDOW: Record<Cadence, number> = { daily: 1, weekly: 7, monthly: 30 };
 
 /**
- * Compute + persist every KPI in the cadence's registry for one workspace as-of `snapshotDate`. For
- * each metric: compute the trailing-window value, the prior equal-length window value, and delta_pct,
- * then UPSERT on (workspace_id, metric_key, cadence, snapshot_date) — idempotent, a same-day re-run
- * upserts in place. Returns the rows written. A quiet workspace writes zeros, never errors.
+ * Compute every KPI in the cadence's registry for one workspace as-of `snapshotDate` and return the
+ * rows WITHOUT persisting them — the shared compute pass behind both `computePlatformScorecard` (the
+ * writer) and [[kpi-review]] `auditAllKpis` (the read-only diff layer). Same window math, same
+ * `MetricDef.compute`, same rounding — so "ground truth" the audit produces is byte-equivalent to
+ * what the engine would persist. A single metric's read failing writes a zero row + logs, never
+ * drops the rest.
  */
-export async function computePlatformScorecard(
+export async function computeScorecardValuesOnly(
   workspaceId: string,
   opts: ComputeOptions,
 ): Promise<ScorecardSnapshotRow[]> {
@@ -1256,6 +1258,22 @@ export async function computePlatformScorecard(
     });
   }
 
+  return rows;
+}
+
+/**
+ * Compute + persist every KPI in the cadence's registry for one workspace as-of `snapshotDate`. For
+ * each metric: compute the trailing-window value, the prior equal-length window value, and delta_pct,
+ * then UPSERT on (workspace_id, metric_key, cadence, snapshot_date) — idempotent, a same-day re-run
+ * upserts in place. Returns the rows written. A quiet workspace writes zeros, never errors.
+ */
+export async function computePlatformScorecard(
+  workspaceId: string,
+  opts: ComputeOptions,
+): Promise<ScorecardSnapshotRow[]> {
+  const rows = await computeScorecardValuesOnly(workspaceId, opts);
+  if (!rows.length) return rows;
+  const admin = createAdminClient();
   const { error } = await admin
     .from("platform_scorecard_snapshots")
     .upsert(rows, { onConflict: "workspace_id,metric_key,cadence,snapshot_date" });
@@ -1263,6 +1281,21 @@ export async function computePlatformScorecard(
     await reportDbError(error, { op: "platform-scorecard-upsert", table: "platform_scorecard_snapshots", rows: rows.length });
     throw new Error(`platform_scorecard_snapshots upsert failed: ${(error as { code?: string }).code ?? "?"} ${error.message}`);
   }
-
   return rows;
+}
+
+/**
+ * The (metric_key, unit) tuples for every metric in the cadence's registry — the surface [[kpi-review]]
+ * needs to enumerate the advertised KPI set without re-importing the private `MetricDef` shape.
+ */
+export function getRegisteredMetrics(cadence: Cadence): ReadonlyArray<{ key: string; unit: MetricUnit }> {
+  return REGISTRY[cadence].map((m) => ({ key: m.key, unit: m.unit }));
+}
+
+/**
+ * The default trailing-window length the engine uses for a cadence — exposed so [[kpi-review]] can
+ * read it without duplicating the table.
+ */
+export function getDefaultWindowDays(cadence: Cadence): number {
+  return DEFAULT_WINDOW[cadence];
 }
