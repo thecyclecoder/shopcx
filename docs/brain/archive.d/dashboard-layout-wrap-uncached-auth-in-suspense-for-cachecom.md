@@ -1,0 +1,1 @@
+- **Dashboard layout — wrap uncached auth (cookies/supabase.auth/workspace fetch) in Suspense for cacheComponents prerendering** · verified 2026-06-26 · → [[operational-rules]]
