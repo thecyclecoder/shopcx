@@ -72,6 +72,7 @@ interface Job {
   pr_url: string | null;
   pr_number: number | null;
   created_at: string;
+  phase?: string | null; // queued-jobs-log: "Phase N" (from instructions, or the spec's next-unshipped phase)
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 interface FailedJob {
@@ -322,6 +323,60 @@ function LaneRowGrid({ label, total, lanes }: { label: string; total: number; la
   );
 }
 
+// "Jobs in queue" — a compact log/feed of jobs WAITING to be claimed (queued / queued_resume), oldest
+// first (next up). One row per job with the agent's PROFILE PHOTO (kind→persona, the same resolver the
+// active lanes use), the agent name, the kind chip, the spec slug, and the derived "Phase N" — so the CEO
+// can see what's lined up behind the active builds, with faces. Read-only, visually consistent with the
+// lane cards above (queued-jobs-log).
+function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Jobs in queue</h3>
+        <span className="text-xs tabular-nums text-zinc-400">{jobs.length} waiting</span>
+      </div>
+      {jobs.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-zinc-200 py-6 text-center text-xs text-zinc-400 dark:border-zinc-800">
+          No jobs queued
+        </div>
+      ) : (
+        <ul className="divide-y divide-zinc-100 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
+          {jobs.map((j) => {
+            const persona = personaForKind(j.kind);
+            // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
+            const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
+            return (
+              <li key={j.id} className="flex items-center gap-2.5 px-3 py-2">
+                <PersonaAvatar persona={persona} size={20} />
+                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{persona.name}</span>
+                <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[j.kind] || KIND_CHIP.build}`}>
+                  {j.kind}
+                </span>
+                {slugIsLink ? (
+                  <Link
+                    href={`/dashboard/roadmap/${j.spec_slug}`}
+                    className="min-w-0 truncate text-[12px] font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400"
+                    title={j.spec_slug}
+                  >
+                    {j.spec_slug}
+                  </Link>
+                ) : (
+                  <span className="min-w-0 truncate text-[12px] font-medium text-zinc-600 dark:text-zinc-300" title={j.spec_slug}>
+                    {j.spec_slug}
+                  </span>
+                )}
+                {j.spec_missing && <span className="shrink-0 text-[10px] text-zinc-400">(spec archived)</span>}
+                {j.phase && <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">{j.phase}</span>}
+                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(j.created_at)} ago</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function BoxPage() {
   const workspace = useWorkspace();
   const [worker, setWorker] = useState<Worker | null>(null);
@@ -485,14 +540,9 @@ export default function BoxPage() {
             <LaneRowGrid label="Fold lane" total={worker.fold_lanes} lanes={foldLanes} />
           </div>
 
-          {/* Queue depth */}
-          <div className="mt-5 flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
-            <span className="inline-flex items-center rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium tabular-nums dark:bg-zinc-800">
-              {queue.length}
-            </span>
-            <span className="text-zinc-500 dark:text-zinc-400">
-              job{queue.length === 1 ? "" : "s"} waiting in the queue
-            </span>
+          {/* Jobs in queue — a faces-attached log of what's lined up behind the active lanes (queued-jobs-log) */}
+          <div className="mt-5">
+            <QueuedJobsLog jobs={queue} />
           </div>
 
           {/* Failed builds — surface the failure + the real reason (529 / Max / tsc) + a one-tap retry */}

@@ -160,10 +160,11 @@ export async function GET() {
     }
   }
 
-  // Open jobs (live, actionable layer) for queue depth + paused callouts.
+  // Open jobs (live, actionable layer) for queue depth + paused callouts. `instructions` is pulled so the
+  // queued-jobs log (below) can parse the per-job "Phase N" the worker was handed.
   const { data: jobsData } = await admin
     .from("agent_jobs")
-    .select("id, spec_slug, kind, status, pr_url, pr_number, created_at")
+    .select("id, spec_slug, kind, status, pr_url, pr_number, created_at, instructions")
     .eq("workspace_id", workspaceId)
     .in("status", ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"])
     .order("created_at", { ascending: true });
@@ -175,6 +176,7 @@ export async function GET() {
     pr_url: string | null;
     pr_number: number | null;
     created_at: string;
+    instructions: string | null;
   }[];
 
   // fold-guard-live-build (Phase 1) — defense in depth: a build/spec-test job whose spec page no longer
@@ -182,9 +184,16 @@ export async function GET() {
   // LIVE (non-archived) spec slugs; the page routes a job with `spec_missing` to a safe target instead of
   // the would-be-404 /dashboard/roadmap/{slug}. Best-effort — a roadmap-read failure just leaves it false.
   let liveSpecSlugs = new Set<string>();
+  // slug → its next-unshipped phase index (1-based), the fallback phase when a queued job's instructions
+  // don't carry a "Phase N" of their own (queued-jobs-log). Undefined = the spec is fully shipped / unknown.
+  const nextPhaseBySlug = new Map<string, number>();
   try {
     const { specs } = await getRoadmap();
     liveSpecSlugs = new Set(specs.map((s) => s.slug));
+    for (const s of specs) {
+      const idx = s.phases.findIndex((p) => p.status !== "shipped");
+      if (idx >= 0) nextPhaseBySlug.set(s.slug, idx + 1);
+    }
   } catch {
     /* roadmap read failed — leave spec_missing false (no worse than today) */
   }
@@ -193,8 +202,42 @@ export async function GET() {
   const specMissing = (kind: string, slug: string): boolean =>
     (kind === "build" || kind === "spec-test") && !liveSpecSlugs.has(slug);
 
-  // Waiting = not yet in a lane; paused = needs owner action.
-  const queue = jobs.filter((j) => j.status === "queued" || j.status === "queued_resume");
+  // Derive a queued job's PHASE: prefer the "Phase N" the worker was handed in its instructions (a chained
+  // per-phase build carries this); fall back to the spec's next-unshipped phase. Null when neither resolves
+  // (one-shot spec / non-build kind / fully-shipped). `instructions` may be plain text or a JSON blob — try
+  // both. Returns a display string like "Phase 2".
+  const phaseForJob = (kind: string, slug: string, instructions: string | null): string | null => {
+    if (instructions) {
+      // The raw instructions string, or a `.prompt`/`.instructions` field if it's a JSON envelope.
+      let text = instructions;
+      try {
+        const j = JSON.parse(instructions);
+        if (j && typeof j === "object") text = String(j.prompt ?? j.instructions ?? instructions);
+      } catch {
+        /* plain text — use as-is */
+      }
+      const m = text.match(/\bPhase\s+(\d+)\b/i);
+      if (m) return `Phase ${m[1]}`;
+    }
+    const next = nextPhaseBySlug.get(slug);
+    return next ? `Phase ${next}` : null;
+  };
+
+  // Waiting = not yet in a lane; paused = needs owner action. The queue carries the avatar-log fields
+  // (kind, spec_slug, derived phase) the box page renders as the "Jobs in queue" feed.
+  const queue = jobs
+    .filter((j) => j.status === "queued" || j.status === "queued_resume")
+    .map((j) => ({
+      id: j.id,
+      spec_slug: j.spec_slug,
+      kind: j.kind,
+      status: j.status,
+      pr_url: j.pr_url,
+      pr_number: j.pr_number,
+      created_at: j.created_at,
+      phase: phaseForJob(j.kind, j.spec_slug, j.instructions),
+      spec_missing: specMissing(j.kind, j.spec_slug),
+    }));
   const paused = jobs
     .filter((j) => j.status === "needs_input" || j.status === "needs_approval")
     .map((j) => ({ ...j, spec_missing: specMissing(j.kind, j.spec_slug) }));
