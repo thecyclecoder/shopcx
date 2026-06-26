@@ -1,0 +1,1 @@
+- **Creative Finder — Video** · verified 2026-06-26 · → [[libraries/video-skeleton]]
