@@ -29,7 +29,7 @@ Catches **every** kind regardless of which surface raised it (repair / db_health
 
 **Phase 4 — one inbox, single source.** The shared `routedInboxHref(role?)` (in `src/lib/agents/inbox.ts`) is the deep-link every **migrated** surface now points at instead of raising its own standalone approval card: the [[control-tower]] repair/db-health feeds (now read-only views), the spec-card [[roadmap|BuildButton/PlanButton]], and the box page [[roadmap|`approvalHref`]] (paused jobs → the inbox; failed jobs → their spec/surface, never the retired Control-Tower default). After migration no approval surfaces anywhere except the routed inbox (genuinely multi-choice surfaces remain only as the inbox's deep-link **targets**).
 
-## Slack #cto-ada mirror ([[../specs/ada-slack-routed-approvals]])
+## Slack #cto-ada mirror ([[../lifecycles/ada-slack-routed-approvals]])
 
 A **CEO-routed** Approval Request whose workspace has `slack_ada_channel_id` set is also mirrored into `#cto-ada` as Ada (the [[slack-ada]] surface). The reconciler picks the right surface per request:
 
@@ -77,4 +77,4 @@ When a director escalates a sound diagnosis the CEO inbox can render only **Dism
 
 ## Related
 
-[[../specs/approval-routing-engine]] · [[approval-router]] · [[director-bounce-back]] · [[../tables/function_autonomy]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../tables/director_activity]] · [[../dashboard/agents]] · [[roadmap-actions]] · [[control-tower]] · [[../goals/devops-director]] · [[../operational-rules]]
+[[../specs/approval-routing-engine]] · [[approval-router]] · [[director-bounce-back]] · [[../lifecycles/ada-slack-routed-approvals]] · [[../tables/function_autonomy]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../tables/director_activity]] · [[../dashboard/agents]] · [[roadmap-actions]] · [[control-tower]] · [[../goals/devops-director]] · [[../operational-rules]]

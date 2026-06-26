@@ -1,0 +1,1 @@
+- **Ada surfaces routed CEO inbox approvals in #cto-ada** · verified 2026-06-26 · → [[lifecycles/ada-slack-routed-approvals]]
