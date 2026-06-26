@@ -61,7 +61,7 @@ Status is now DERIVED from `spec_phases`, so the reconciler **no longer writes**
 
 ## Related
 
-[[../specs/spec-drift-agent]] · [[../tables/spec_drift]] · [[../inngest/spec-drift-reconcile]] · [[agent-jobs]] · [[brain-roadmap]] · [[../dashboard/control-tower]] · [[../project-management]] · [[../specs/spec-test-agent]]
+[[../specs/spec-drift-agent]] · [[../tables/spec_drift]] · [[../inngest/spec-drift-reconcile]] · [[agent-jobs]] · [[brain-roadmap]] · [[../dashboard/control-tower]] · [[../project-management]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-test-agent]]
 
 ---
 
