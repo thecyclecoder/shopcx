@@ -1,12 +1,12 @@
 # libraries/build-spec-materializer
 
-Renders a spec row + its [[../tables/spec_phases]] children to a temp markdown file the [[../skills/build-spec]] skill consumes. Authored by [[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 2.
+Renders a spec row + its [[../tables/spec_phases]] children to a temp markdown file the [[../skills/build-spec]] skill (and [[../skills/fold-to-brain]] during folding) consumes. Authored by [[../specs/spec-authoring-writes-db-and-worker-materialize]] Phase 2; adopted by [[../specs/spec-fold-from-db-row]] Phase 1 to enable DB-driven folding.
 
 **File:** `src/lib/build-spec-materializer.ts`
 
 ## Why this exists
 
-Phase 1 of [[../specs/spec-authoring-writes-db-and-worker-materialize]] dual-wrote every author surface to [[../tables/specs]] + [[../tables/spec_phases]]. Phase 2 cuts the BUILD side over so Bo (the [[../skills/build-spec]] skill) reads the DB row — not `docs/brain/specs/{slug}.md` — even though the markdown still exists on `main` (dual-write Phase 4 keeps the mirror commit live until [[../specs/spec-readers-from-db-retire-parser]] retires the parser). The box worker's `runBuildJob` calls `materializeSpec` to render the row to `${wt}/.box/spec-${slug}.md` and hands the build-spec skill that path. Bo never needs the `.md` under `docs/brain/specs/`.
+Phase 1 of [[../specs/spec-authoring-writes-db-and-worker-materialize]] dual-wrote every author surface to [[../tables/specs]] + [[../tables/spec_phases]]. Phase 2 cuts the BUILD side over so Bo (the [[../skills/build-spec]] skill) reads the DB row — not `docs/brain/specs/{slug}.md` — even though the markdown still exists on `main` (dual-write Phase 4 keeps the mirror commit live until [[../specs/spec-readers-from-db-retire-parser]] retires the parser). The box worker's `runBuildJob` calls `materializeSpec` to render the row to `${wt}/.box/spec-${slug}.md` and hands the build-spec skill that path. Bo never needs the `.md` under `docs/brain/specs/`. Later, [[../specs/spec-fold-from-db-row]] Phase 1 reuses the same materializer so the fold-to-brain skill reads specs from the DB (via the same in-memory text shape) rather than parsing `docs/brain/specs/{slug}.md` — enabling the spec row to be preserved with `status='folded'` post-fold rather than deleted.
 
 ## Exports
 
@@ -29,7 +29,8 @@ The `## Safety / invariants` and `## Completion criteria` sections are NOT captu
 
 ## Wiring
 
-- `scripts/builder-worker.ts` `runBuildJob` calls `materializeSpec(job.workspace_id, slug, "${wt}/.box")` before dispatching the [[../skills/build-spec]] skill. The temp `.box/` directory is gitignored, so `git add -A` skips it.
+- **Build path:** `scripts/builder-worker.ts` `runBuildJob` calls `materializeSpec(job.workspace_id, slug, "${wt}/.box")` before dispatching the [[../skills/build-spec]] skill. The temp `.box/` directory is gitignored, so `git add -A` skips it.
+- **Fold path:** `scripts/builder-worker.ts` `runFoldJob` calls the same `materializeSpec` for each shipped spec (guarded by `status='shipped'`), then dispatches the [[../skills/fold-to-brain]] skill with the materialized path. After fold commits, the worker updates the DB row to `status='folded'` (preserved, not deleted).
 - The materialized file is regenerated on EVERY dispatch (fresh + resume) — the worktree is wiped at the top of every run, and the spec row may have been edited between rounds.
 - The db-health-spec-body-robust check (0-byte / phaseless refusal) runs over the MATERIALIZED file, so an empty row produces a clean `failed` job instead of a silent empty PR.
 
@@ -41,4 +42,4 @@ The `## Safety / invariants` and `## Completion criteria` sections are NOT captu
 
 ## Related
 
-[[specs-table]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-db-driven]] · [[../specs/spec-readers-from-db-retire-parser]] · [[author-spec]] · [[../skills/build-spec]]
+[[specs-table]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-db-driven]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-fold-from-db-row]] · [[author-spec]] · [[../skills/build-spec]] · [[../skills/fold-to-brain]]
