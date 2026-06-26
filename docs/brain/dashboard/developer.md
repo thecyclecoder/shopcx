@@ -11,17 +11,21 @@ The owner-only **Developer portal** — the home + contextual sidebar takeover f
 
 Implemented in `src/app/dashboard/sidebar.tsx`, driven by [[../libraries/developer-nav]]:
 
-- **Pathname-driven**, not context-registered. A director profile registers its sub-nav via `setNav` (the section-nav context (`src/lib/section-nav-context.tsx`)) because it's one page; the developer area spans a **fixed set of routes** across `/dashboard/roadmap/*`, `/dashboard/developer/*`, `/dashboard/brain`, `/dashboard/branches`, so the sidebar detects membership with `isInDeveloperPortal(pathname)` and renders the takeover — no per-page registration to forget, and it persists as you move between surfaces.
-- Renders: **← Dashboard** (exit) · the **Developer** title · an **Overview** link · then one link per [[../libraries/developer-nav]] `DEVELOPER_NAV` entry, each with its icon + a live **badge** (Approvals escalated to CEO · Security findings · Regressions · Human QA · open Branches — the same counts the old section badges read). Active highlighting is most-specific-wins (`isDeveloperHrefActive`).
-- A director-profile takeover (`sectionNav`) still wins if both could apply (they never overlap — `/dashboard/agents/*` isn't a developer route).
+- **Pathname-driven**, not context-registered. A director profile registers its sub-nav via `setNav` (the section-nav context (`src/lib/section-nav-context.tsx`)) because it's one page; the developer area spans a **fixed set of routes** across `/dashboard/agents/*`, `/dashboard/roadmap/*`, `/dashboard/developer/*`, `/dashboard/brain`, `/dashboard/branches`, so the sidebar detects membership with `isInDeveloperPortal(pathname)` and renders the takeover — no per-page registration to forget, and it persists as you move between surfaces.
+- Renders: **← Dashboard** (exit) · the **Developer** title · an **Overview** link · then the surfaces **grouped under headings** (`DEVELOPER_GROUPS` — **Org · Development · Resources**), each link with its icon + a live **badge** (Approvals escalated to CEO · Security findings · Regressions · Human QA · open Branches — the same counts the old section badges read). Active highlighting is most-specific-wins (`isDeveloperHrefActive`).
+- A director-profile takeover (`sectionNav`) wins when both could apply — a director profile (`/dashboard/agents/[role]`) sets `sectionNav`, so it shows the director takeover even though the path is inside the portal; the **Org** group's non-profile routes (Message Board / Org Chart / Directors / Agents) don't set it, so they get the developer takeover.
 
 ## The Overview page
 
-`src/app/dashboard/developer/page.tsx` — the portal home: a card grid, **one card per developer surface** ([[../libraries/developer-nav]] `DEVELOPER_NAV`), each with its icon, a one-line description, and the same live badge. Click a card → that surface (and the sidebar stays scoped to the portal). Owner-gated; the badges come from the same lightweight count endpoints the sidebar polls (`/api/developer/approvals?count=1`, `/api/developer/security-tests?count=1`, `/api/developer/spec-test/human-queue`, `/api/branches`).
+`src/app/dashboard/developer/page.tsx` — the portal home: card sections (**one per group**, [[../libraries/developer-nav]] `DEVELOPER_GROUPS`), each a heading + one card per surface (icon, one-line description, same live badge). Click a card → that surface (and the sidebar stays scoped to the portal). Owner-gated; the badges come from the same lightweight count endpoints the sidebar polls (`/api/developer/approvals?count=1`, `/api/developer/security-tests?count=1`, `/api/developer/spec-test/human-queue`, `/api/branches`).
 
-## The surfaces (cards)
+## The surfaces (cards), by group
 
-[[control-tower|Goals]] · [[roadmap|Pipeline]] · the Build box · [[control-tower|Control Tower]] · [[approvals|Approvals]] · the Taxonomy map · the Message Center · [[../libraries/spec-test-agent|Spec Tests]] · Human QA · Regressions · [[security-tests|Security tests]] · [[../README|Brain]] · Branches. The list lives **once** in [[../libraries/developer-nav]] — add a developer surface there and it appears in both the takeover and the Overview cards.
+- **Org** (moved here off the main tree) — [[agents|Message Board]] (`/dashboard/agents`) · Org Chart · Directors · Agents (the box worker lanes).
+- **Development** — [[control-tower|Goals]] · [[roadmap|Pipeline]] · the Build box · [[control-tower|Control Tower]] · [[approvals|Approvals]] · the Taxonomy map · the Message Center · [[../libraries/spec-test-agent|Spec Tests]] · Human QA · Regressions · [[security-tests|Security tests]] · Branches.
+- **Resources** — [[../README|Brain]].
+
+The groups live **once** in [[../libraries/developer-nav]] `DEVELOPER_GROUPS` — add a surface to a group and it appears in both the takeover (under its heading) and the Overview cards.
 
 ## Related
 
