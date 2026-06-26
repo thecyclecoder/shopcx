@@ -4897,6 +4897,60 @@ async function setFoldRows(jobId: string, from: string, patch: Record<string, un
   await db.from("pending_folds").update({ ...patch, updated_at: new Date().toISOString() }).eq("job_id", jobId).eq("status", from);
 }
 
+// ── Snapshot-race orphan killer (fix(fold)) ─────────────────────────────────
+// A fold-batch job atomically claims every `pending` pending_folds row → `folding` at the moment it
+// STARTS (the snapshot). Any spec enqueued into pending_folds AFTER that snapshot orphans at `pending`
+// until a NEW fold-batch job runs — and nothing reliably creates that next job (autoFoldVerifiedSpecs
+// only enqueues when it has a genuinely-new eligible spec, and enqueue_fold reuses the already-queued
+// job, so a spec that arrived mid-fold has no job to ride). Result: specs stranded `pending` forever.
+//
+// Fix: at the END of every fold-batch job (both the no-op "nothing to fold" path AND the successful-
+// fold path), after the job is marked completed, sweep for remaining `pending` rows in the SAME
+// workspace and enqueue a FRESH kind='fold' job if real work remains and one isn't already queued.
+//
+// Guards against an infinite loop:
+//  - Only re-enqueues when there are GENUINELY `status='pending'` rows (rows a job claims + folds clear
+//    to `folded`, so a re-enqueue happens only while real, unclaimed work remains).
+//  - Dedup: skips if a kind='fold' job is already queued/building for the workspace (the next batch will
+//    sweep these rows). enqueue_fold itself coalesces (reuse-or-create) + the agent_jobs_one_queued_fold
+//    unique index is the DB belt-and-suspenders, so even a race can't storm multiple jobs.
+async function reEnqueueFoldIfPending(workspaceId: string, tag: string): Promise<void> {
+  try {
+    const { data: stillPending } = await db
+      .from("pending_folds")
+      .select("spec_slug")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "pending")
+      .limit(1);
+    const pendingSlug = ((stillPending ?? []) as { spec_slug: string }[])[0]?.spec_slug;
+    if (!pendingSlug) return; // no orphaned work — nothing to sweep
+
+    // Dedup: don't pile a second fold job on if one is already waiting/running for this workspace.
+    const { data: liveFold } = await db
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "fold")
+      .in("status", ["queued", "queued_resume", "building"])
+      .limit(1);
+    if ((liveFold ?? []).length) {
+      console.log(`${tag} pending_folds rows remain but a fold job is already queued/active — skipping re-enqueue`);
+      return;
+    }
+
+    // enqueue_fold coalesces (reuse-or-create one queued fold job) + leaves the already-`pending` row
+    // untouched. Passing a remaining pending slug just guarantees the queued job exists for the sweep.
+    const { error } = await db.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: pendingSlug, p_user: null });
+    if (error) {
+      console.warn(`${tag} re-enqueue fold failed: ${error.message}`);
+      return;
+    }
+    console.log(`${tag} ↻ re-enqueued a fold-batch — pending_folds rows arrived during this job (snapshot-race sweep)`);
+  } catch (e) {
+    console.warn(`${tag} re-enqueue fold errored: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 function foldBatchPrompt(slugs: string[]): string {
   // spec-fold-from-db-row Phase 1: the spec BODY now lives in `public.specs` + `public.spec_phases`;
   // the worker materializes each row to a gitignored `.box/spec-{slug}.md` (the same shape `build-spec`
@@ -4954,6 +5008,9 @@ async function runFoldJob(job: Job) {
   console.log(`${tag} ${isResume ? "resuming" : "folding"} ${slugs.length} spec(s): ${slugs.join(", ") || "(none)"}`);
   if (!slugs.length) {
     await update(job.id, { status: "completed", log_tail: "no pending-fold specs; nothing to fold" });
+    // Snapshot-race sweep: a spec may have landed in pending_folds after this job's snapshot (or this
+    // job claimed nothing because a sibling already did) — re-enqueue a fresh batch if rows remain.
+    await reEnqueueFoldIfPending(job.workspace_id, tag);
     return;
   }
 
@@ -5106,6 +5163,8 @@ async function runFoldJob(job: Job) {
       } else {
         await update(job.id, { status: "completed", log_tail: "no file changes; specs already folded" });
       }
+      // Snapshot-race sweep: rows enqueued after this job's snapshot are still `pending` here too.
+      await reEnqueueFoldIfPending(job.workspace_id, tag);
       return;
     }
     sh("git", ["add", "-A"], { cwd: wt });
@@ -5140,6 +5199,9 @@ async function runFoldJob(job: Job) {
       .in("slug", slugs);
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
+    // Snapshot-race sweep: specs enqueued into pending_folds AFTER this job's opening snapshot are still
+    // `pending` and were NOT folded here — re-enqueue a fresh fold-batch so they get swept next.
+    await reEnqueueFoldIfPending(job.workspace_id, tag);
   } finally {
     sh("git", ["worktree", "remove", "--force", wt]);
   }
