@@ -1,0 +1,1 @@
+- **PDP edge-served experiments — variant at the edge, cached per arm** · verified 2026-06-26 · → [[libraries/experiment-manifest]]
