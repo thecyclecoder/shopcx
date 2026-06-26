@@ -148,6 +148,43 @@ async function markRouted(admin: Admin, jobId: string, klass: NeedsAttentionClas
   }
 }
 
+/**
+ * Clear a park the director ALREADY routed on a prior pass (its class is a `routed_*` marker) but that
+ * was left in `needs_attention`. Routing IS the disposition — the fold / child-spec / chat followup is
+ * the live surface now, so the parked job has no further role; leaving it parked makes it a zombie that
+ * self-watch ("build stuck >90m") and the needs-attention triage ("N parked, all triaged") re-report
+ * every standing pass forever (the appstle-switch-payment-method-edit-guardrail board loop, 2026-06-26).
+ *
+ * Flip it to the terminal `completed` (the same terminal a superseded/held build and the dismiss-park
+ * action already use — director-directives `holdOutOfOrderBuilds`, platform-director dismiss) so it
+ * leaves needs_attention. Reversible via the [[director_activity]] ledger. Best-effort; re-asserts the
+ * status so it never flips a row that changed under us.
+ */
+async function clearRoutedZombie(admin: Admin, row: ParkedRow): Promise<boolean> {
+  const { error } = await admin
+    .from("agent_jobs")
+    .update({
+      status: "completed",
+      error: `routed park cleared: '${row.needs_attention_class}' disposition already actioned — leaving needs_attention`.slice(0, 2000),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", row.id)
+    .eq("status", "needs_attention"); // never resurrect a row that already moved on
+  if (error) {
+    console.warn(`[needs-attention-route] clear routed zombie failed for ${row.id}: ${error.message}`);
+    return false;
+  }
+  await recordDirectorActivity(admin, {
+    workspaceId: row.workspace_id,
+    directorFunction: PLATFORM,
+    actionKind: "routed_needs_attention",
+    specSlug: row.spec_slug,
+    reason: `Cleared a routed park left in needs_attention ('${row.needs_attention_class}') — disposition already actioned; row is terminal.`,
+    metadata: { job_id: row.id, action: "clear_routed_zombie", prior_class: row.needs_attention_class, target_kind: row.kind, autonomous: true },
+  });
+  return true;
+}
+
 // Commit the child blocker spec markdown to main via the GitHub Contents API (Phase 2). Mirrors
 // `ghCommitSpec` in agent-grader.ts — works from both the deployed runtime + the box, get-then-PUT
 // so it updates in place. Returns true on success; false on missing token / API failure.
@@ -605,12 +642,18 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
 
   for (const row of items) {
     const klass = row.needs_attention_class;
-    // Already routed (the marker class) OR already in the ledger → skip the class router; the
-    // backstop sweep still runs (so the alarm fires for a re-tagged row that's been sitting too long).
     const isRoutedMarker = typeof klass === "string" && klass.startsWith("routed_");
     const inLedger = ledger.routed.has(row.id);
     const atCap =
       folded.length + spawned.length + chatted.length + backstopped.length + dismissed.length >= PLATFORM_DIRECTOR_ROUTE_CAP;
+
+    // Already routed on a prior pass (the `routed_*` marker) but still parked → it's a zombie the
+    // disposition already handled. Clear it terminal and move on — do NOT fall through to the backstop
+    // (which would otherwise alarm/re-report it every pass; the appstle-* board loop, 2026-06-26).
+    if (isRoutedMarker) {
+      await clearRoutedZombie(admin, row);
+      continue;
+    }
 
     // NON-SPEC kinds (e.g. ticket-improve) — dismiss the park directly and SKIP both the class
     // dispatch and the backstop sweep. The dismiss is the terminal: the row's status flips to
