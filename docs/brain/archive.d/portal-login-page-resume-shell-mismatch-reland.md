@@ -1,0 +1,1 @@
+- **Re-land portal login page host-element wrap — regression fix auto-reverted by Reva, restores shell-mismatch prevention** · verified 2026-06-26 · → [[operational-rules]]
