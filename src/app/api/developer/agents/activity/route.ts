@@ -1,11 +1,14 @@
 /**
- * /api/developer/agents/activity — a director's live activity feed (director observability).
+ * /api/developer/agents/activity — a director's (or worker's) live activity feed.
  *
  * Owner-gated, read-only. `GET ?fn=<director_function>` returns { activity: DirectorActivityEntry[] } —
- * the director's own `director_activity` rows (every autonomous action it took: auto-approved,
+ * the supervising director's `director_activity` rows (every autonomous action it took: auto-approved,
  * escorted a goal/spec, coached a worker, escalated to the CEO), newest-first. Backs the "Recent
- * activity" section on the director's profile page (/dashboard/agents/[role]) so the operator can see
- * the director is alive + exactly what it's doing autonomously.
+ * activity" section on the director's profile page (/dashboard/agents/[role]).
+ *
+ * `&actor=<actor>` narrows to rows whose `metadata.actor` matches — used by a worker profile to show
+ * ONLY that worker's rows (e.g. Reva's deploy_rolled_back actions filed under the platform director).
+ * Mirrors the actor-tagging convention (`actor: "deploy-guardian"`, `actor: "reconciler:spec-drift"`).
  *
  * See docs/brain/tables/director_activity.md.
  */
@@ -16,7 +19,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 
 export async function GET(req: Request) {
-  const fn = new URL(req.url).searchParams.get("fn");
+  const url = new URL(req.url);
+  const fn = url.searchParams.get("fn");
+  const actor = url.searchParams.get("actor");
   if (!fn) return NextResponse.json({ error: "Missing ?fn" }, { status: 400 });
 
   const supabase = await createClient();
@@ -40,13 +45,14 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Only the workspace owner can view director activity" }, { status: 403 });
   }
 
-  const { data } = await admin
+  let query = admin
     .from("director_activity")
     .select("id, action_kind, spec_slug, reason, metadata, created_at")
     .eq("workspace_id", workspaceId)
-    .eq("director_function", fn)
-    .order("created_at", { ascending: false })
-    .limit(50);
+    .eq("director_function", fn);
+  // Worker scoping: narrow to rows whose metadata.actor matches (PostgREST jsonb -> text op).
+  if (actor) query = query.eq("metadata->>actor", actor);
+  const { data } = await query.order("created_at", { ascending: false }).limit(50);
 
   // director-dismiss-park-and-short-circuit-spec Phase 1: a `dismissed_park` row carries the parked
   // job's id in metadata so the activity feed can render a Re-open button. The button hides once a

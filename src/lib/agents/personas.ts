@@ -147,6 +147,13 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-cyan-100 text-cyan-800 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-300 dark:border-cyan-900/40",
     dot: "bg-cyan-500", ring: "bg-cyan-50 dark:bg-cyan-900/20", accent: "text-cyan-600 dark:text-cyan-400",
   },
+  "deploy-guardian": {
+    key: "deploy-guardian", name: "Reva", role: "Deploy Guardian", emoji: "🛡️",
+    personality: "Watches each auto-merged deploy over its canary window — on a clear deploy-correlated regression, restores known-good FAST (revert the offending squash on main); escalates anything ambiguous instead of guessing.",
+    mascotId: "default", avatarUrl: `${AV}reva-deployguardian.jpg?v=4`,
+    chip: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-900/40",
+    dot: "bg-fuchsia-500", ring: "bg-fuchsia-50 dark:bg-fuchsia-900/20", accent: "text-fuchsia-600 dark:text-fuchsia-400",
+  },
   db_health: {
     key: "db_health", name: "Devi", role: "DB Health", emoji: "🔵",
     personality: "Watches slow queries + growth, EXPLAIN-diagnoses, proposes the index.",
@@ -270,6 +277,11 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Verify shipped specs still hold against live prod state",
     "Catch false-✅ specs + drift from their verification checklist",
     "Flag regressions back to the owning function as fix work",
+  ],
+  "deploy-guardian": [
+    "Watch each auto-merged deploy over a bounded canary window for deploy-correlated regressions",
+    "Restore known-good fast — auto-revert the offending squash-merge on a clear regression",
+    "Escalate anything ambiguous (an unsure verdict, a revert conflict, a rollback-then-reland loop) instead of guessing",
   ],
   build: [
     "Claim queued build jobs off the roadmap",

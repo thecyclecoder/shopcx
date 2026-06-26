@@ -68,6 +68,17 @@ const TERMINAL_DIRECTOR_CLASSES: ReadonlySet<string> = new Set(["dismissed_by_di
 /** Kinds another standing lane already owns — these don't get auto-routed by THIS sweep. */
 const SKIP_KINDS: ReadonlySet<string> = new Set(["platform-director", "fold"]);
 
+/**
+ * Kinds that are NON-SPEC jobs — they don't open a PR against a spec, so the four class routers
+ * (fold / child-spec / chat / backstop-CEO) can't act on them, AND the 70-min invariant alarm is
+ * irrelevant ("a spec sitting 70 min in needs_attention" — there is no spec). A parked
+ * `ticket-improve` (a one-shot ticket co-pilot turn — [[../../docs/brain/specs/ticket-improve-park-auto-route.md]])
+ * would otherwise fall to `unknown`, sit 60 min, and surface to the CEO for nothing the CEO can do
+ * about it — the right terminal is to DISMISS the park (reversible: one CEO click on the activity
+ * row to re-open). Extend this set when a new non-spec job kind goes live.
+ */
+const NON_SPEC_KINDS: ReadonlySet<string> = new Set(["ticket-improve"]);
+
 export interface RouteResult {
   /** specs whose park flipped to fold (Phase 1). */
   folded: string[];
@@ -79,6 +90,8 @@ export interface RouteResult {
   backstopped: string[];
   /** specs that posted the 70-min park alarm (Phase 4 invariant). */
   alarmed: string[];
+  /** non-spec jobs whose park auto-resolved to `dismissed` (NON_SPEC_KINDS — e.g. ticket-improve). */
+  dismissed: string[];
   /** parked rows examined this pass. */
   scanned: number;
 }
@@ -493,13 +506,80 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
 }
 
 /**
+ * Auto-resolve a parked NON-SPEC job by DISMISSING it. The job (e.g. `ticket-improve`) doesn't
+ * target a spec, so none of the class routers (already_shipped→fold, real_blocker/tooling_failure→
+ * child-spec, design_change→CEO chat) can act on it — and the backstop sweep would pointlessly
+ * surface a parked ticket co-pilot turn to the CEO and post the 70-min invariant alarm against a
+ * non-existent spec. Dismissing is the right terminal: the row leaves the `needs_attention` feed
+ * (so the alarm never reaches it) and one CEO click on the activity row reopens it if wrong.
+ *
+ * Uses the same shape as `applyDismissParkActionInline` in `scripts/builder-worker.ts` — flips
+ * status='dismissed' + needs_attention_class='dismissed_by_director' + a `dismissed_park`
+ * [[../tables/director_activity]] row — so the activity feed renders consistently with manual
+ * dismisses and the existing `POST /api/developer/director-activity/reopen-park` endpoint works
+ * unchanged. The director_activity row is also picked up by the ledger so a re-run sees it as
+ * settled (belt-and-suspenders against the status filter that already excludes dismissed rows).
+ */
+async function routeNonSpecJob(admin: Admin, row: ParkedRow): Promise<boolean> {
+  const reason = `non-spec job (kind=${row.kind}) has no actionable spec route — auto-dismissing the park instead of escalating to the CEO`;
+  const { error } = await admin
+    .from("agent_jobs")
+    .update({
+      status: "dismissed",
+      needs_attention_class: "dismissed_by_director",
+      error: `dismissed by ${PLATFORM} director: ${reason}`.slice(0, 2000),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", row.id)
+    .eq("status", "needs_attention"); // re-assert: never dismiss a row that flipped under us
+  if (error) {
+    console.warn(`[needs-attention-route] non-spec dismiss failed for ${row.id}: ${error.message}`);
+    return false;
+  }
+  await recordDirectorActivity(admin, {
+    workspaceId: row.workspace_id,
+    directorFunction: PLATFORM,
+    actionKind: "dismissed_park",
+    specSlug: row.spec_slug,
+    reason,
+    metadata: {
+      job_id: row.id,
+      spec_slug: row.spec_slug,
+      prior_class: row.needs_attention_class,
+      target_kind: row.kind,
+      auto_applied: true,
+      autonomous: true,
+      source: "non_spec_kind_router",
+    },
+  });
+  // ALSO write a `routed_needs_attention` ledger row so loadLedger() sees this job as settled on
+  // the next pass (the status filter already excludes a dismissed row, but the ledger dedup is the
+  // contract the spec calls out — "stamp a director_activity audit row so a re-run never double-routes").
+  await recordDirectorActivity(admin, {
+    workspaceId: row.workspace_id,
+    directorFunction: PLATFORM,
+    actionKind: "routed_needs_attention",
+    specSlug: row.spec_slug,
+    reason: `Auto-routed parked ${row.kind} ${row.id.slice(0, 8)} → dismissed (non-spec kind).`,
+    metadata: {
+      job_id: row.id,
+      action: "dismiss_non_spec",
+      target_kind: row.kind,
+      prior_class: row.needs_attention_class,
+      autonomous: true,
+    },
+  });
+  return true;
+}
+
+/**
  * The single standing entry: read every NON-OWNED parked row (skipping kinds another lane owns),
  * route each by its class, and run the backstop over the survivors. Dormant until Platform is
  * live + autonomous; bounded per pass; ledger-deduped per job. Returns a one-line summary the
  * standing-pass logger renders.
  */
 export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
-  const empty: RouteResult = { folded: [], spawned: [], chatted: [], backstopped: [], alarmed: [], scanned: 0 };
+  const empty: RouteResult = { folded: [], spawned: [], chatted: [], backstopped: [], alarmed: [], dismissed: [], scanned: 0 };
   const autonomy = await loadAutonomyMap();
   if (!platformIsAutoApprover(autonomy)) return empty;
 
@@ -521,6 +601,7 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
   const chatted: string[] = [];
   const backstopped: string[] = [];
   const alarmed: string[] = [];
+  const dismissed: string[] = [];
 
   for (const row of items) {
     const klass = row.needs_attention_class;
@@ -528,7 +609,23 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
     // backstop sweep still runs (so the alarm fires for a re-tagged row that's been sitting too long).
     const isRoutedMarker = typeof klass === "string" && klass.startsWith("routed_");
     const inLedger = ledger.routed.has(row.id);
-    const atCap = folded.length + spawned.length + chatted.length + backstopped.length >= PLATFORM_DIRECTOR_ROUTE_CAP;
+    const atCap =
+      folded.length + spawned.length + chatted.length + backstopped.length + dismissed.length >= PLATFORM_DIRECTOR_ROUTE_CAP;
+
+    // NON-SPEC kinds (e.g. ticket-improve) — dismiss the park directly and SKIP both the class
+    // dispatch and the backstop sweep. The dismiss is the terminal: the row's status flips to
+    // 'dismissed' so the next sweep's status filter excludes it, and (critically) the in-pass
+    // backstop never runs against this row so the 70-min invariant alarm cannot fire for a
+    // non-spec job sitting >70 min in needs_attention. (ticket-improve-park-auto-route)
+    if (!inLedger && !atCap && NON_SPEC_KINDS.has(row.kind)) {
+      const ok = await routeNonSpecJob(admin, row);
+      if (ok) {
+        dismissed.push(row.spec_slug ?? row.id.slice(0, 8));
+        continue;
+      }
+      // If the dismiss write failed, fall through to the normal class/backstop path — better to
+      // surface late than to silently drop the row.
+    }
 
     if (!isRoutedMarker && !inLedger && !atCap) {
       let dispatched = false;
@@ -549,5 +646,5 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
     if (back.alarmed && !ledger.alarmed.has(row.id)) alarmed.push(row.spec_slug ?? row.id.slice(0, 8));
   }
 
-  return { folded, spawned, chatted, backstopped, alarmed, scanned: items.length };
+  return { folded, spawned, chatted, backstopped, alarmed, dismissed, scanned: items.length };
 }

@@ -367,9 +367,9 @@ function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTime
     };
     bumpIdle();
     // box-session-transparency Phase 1: opts.onLine fires once per complete newline-delimited stdout
-    // line — the shared streaming runner uses it to parse the agent's TaskCreate/TaskUpdate events
-    // live (the stream already carries them) and stream the checklist + current note onto the job row
-    // in real time. Buffered: chunks aren't newline-aligned; we hold any partial trailing line until the
+    // line — the shared streaming runner uses it to parse the agent's TodoWrite events live (the
+    // stream already carries them) and stream the checklist + current note onto the job row in real
+    // time. Buffered: chunks aren't newline-aligned; we hold any partial trailing line until the
     // next chunk completes it. Best-effort — onLine MUST NOT throw (the line is dropped if it does).
     let lineBuf = "";
     const flushLine = (line: string) => {
@@ -907,13 +907,11 @@ function currentModelArgs(): string[] {
 // Every `run*Claude` (build / fold / plan / seed / director / improve / triage / spec-test / spec-review /
 // migration-fix / dev-ask / pr-resolve / repair / regression / security / storefront-optimizer) routes
 // through here so that:
-//   1. Every prompt automatically carries the shared checklist instruction (un-black-boxing the agent —
-//      it states a plan up front via TaskCreate, ticks through it via TaskUpdate, and writes a one-line
-//      note per step).
-//   2. Stream-json is parsed LIVE: every `assistant` event whose content includes a TaskCreate /
-//      TaskUpdate tool_use (or a legacy TodoWrite from an older transcript) → the checklist + the
-//      in-progress note are upserted onto agent_jobs (throttled, best-effort, never blocks the run;
-//      opts.jobId enables it).
+//   1. Every prompt automatically carries the shared TodoWrite instruction (un-black-boxing the agent —
+//      it states a plan up front, ticks through it, and writes a one-line note per step).
+//   2. Stream-json is parsed LIVE: every `assistant` event whose content includes a TodoWrite tool_use
+//      → the checklist + the in-progress note are upserted onto agent_jobs (throttled, best-effort,
+//      never blocks the run; opts.jobId enables it).
 //   3. The same final-result aggregation as the old runClaude — session_id, is_error, result text,
 //      and the fleet-cost-metering usage.
 //
@@ -921,36 +919,23 @@ function currentModelArgs(): string[] {
 //   "build" — strips SECRET_RE (no prod-write creds). Used by the build sandbox + pr-resolve worktree.
 //   "max"  — keeps the env, drops only ANTHROPIC_API_KEY (so all LLM is Max-billed). Default.
 
-const BOX_SESSION_CHECKLIST_INSTRUCTION = [
+const BOX_SESSION_TODOWRITE_INSTRUCTION = [
   "── Box-session transparency — REQUIRED, do this FIRST ──",
-  "Your VERY FIRST action this session MUST be a TaskCreate call (one per real step in your plan).",
-  "Then, as you work, drive each task with TaskUpdate (status pending → in_progress → completed) and",
-  "keep a ONE-LINE plain-English note on the active task in its `activeForm` field (what you're doing",
-  "+ why). This is mandatory, not optional — your checklist + the current note are shown LIVE on the",
-  "box card so the CEO can watch the work happen. Keep them human-readable and updated. Do this even",
-  "for a short task.",
+  "Your VERY FIRST action this session MUST be a TodoWrite call that lays out your plan as todos (one per",
+  "real step). Then, as you work, mark each in_progress→completed and keep a ONE-LINE plain-English note on",
+  "the active todo in its `activeForm` field (what you're doing + why). This is mandatory, not optional —",
+  "your checklist + the current note are shown LIVE on the box card so the CEO can watch the work happen.",
+  "Keep them human-readable and updated. Do this even for a short task.",
 ].join("\n");
 
 type ChecklistItem = { step: string; status: "pending" | "in_progress" | "done"; note: string };
 
-type Task = {
-  id: string;
-  step: string;
-  status: "pending" | "in_progress" | "done";
-  note?: string;
-  deleted?: boolean;
-};
-
-// Buffered, throttled writer: TaskCreate/TaskUpdate events fire many-per-second mid-stream; we
-// coalesce to ~every CHECKLIST_WRITE_INTERVAL_MS, skip writes that are byte-identical to the previous
-// one, and never let a write error surface (best-effort — the runner's job is to RUN, not to journal).
+// Buffered, throttled writer: TodoWrite events fire many-per-second mid-stream; we coalesce to ~every
+// CHECKLIST_WRITE_INTERVAL_MS, skip writes that are byte-identical to the previous one, and never let
+// a write error surface (best-effort — the runner's job is to RUN, not to journal).
 const CHECKLIST_WRITE_INTERVAL_MS = 2500;
 
 function makeChecklistWriter(jobId: string): { onLine: (line: string) => void; flush: () => Promise<void> } {
-  // Session-scoped task list — TaskCreate appends, TaskUpdate mutates in place by id. We keep deleted
-  // entries in the array (so future TaskCreate ids stay sequentially aligned with the tool's own
-  // `String(tasks.length + 1)` allocation) but filter them out of the persisted checklist.
-  const tasks: Task[] = [];
   let pendingChecklist: ChecklistItem[] | null = null;
   let pendingNote: string | null = null;
   let lastWrittenKey: string | null = null;
@@ -975,7 +960,7 @@ function makeChecklistWriter(jobId: string): { onLine: (line: string) => void; f
       if (n !== null) patch.session_note = n;
       if (Object.keys(patch).length === 0) return;
       // Direct update (not the `update` helper) — that one also writes updated_at + runs the
-      // needs_attention classifier, which would treat every checklist tick as a row mutation. We
+      // needs_attention classifier, which would treat every TodoWrite tick as a row mutation. We
       // only want to stream the checklist columns; the lane lifecycle owns the rest.
       await db.from("agent_jobs").update(patch).eq("id", jobId);
     } catch {
@@ -991,26 +976,6 @@ function makeChecklistWriter(jobId: string): { onLine: (line: string) => void; f
     writeTimer = setTimeout(() => { void writeNow(); }, wait);
   };
 
-  const mapStatus = (raw: unknown): ChecklistItem["status"] | "deleted" => {
-    if (raw === "in_progress") return "in_progress";
-    if (raw === "completed") return "done";
-    if (raw === "deleted") return "deleted";
-    return "pending";
-  };
-
-  // Project the internal task list to the persisted checklist shape (filter deleted, drop ids).
-  const recompute = () => {
-    const checklist: ChecklistItem[] = tasks
-      .filter((t) => !t.deleted && t.step)
-      .map((t) => ({ step: t.step, status: t.status, note: (t.note && t.note.trim()) ? t.note : t.step }));
-    if (!checklist.length) return;
-    const inProgress = checklist.find((c) => c.status === "in_progress");
-    const tail = checklist[checklist.length - 1];
-    pendingChecklist = checklist;
-    pendingNote = (inProgress?.note || tail?.note || "").slice(0, 500);
-    schedule();
-  };
-
   return {
     onLine: (line: string) => {
       if (stopped) return;
@@ -1020,66 +985,33 @@ function makeChecklistWriter(jobId: string): { onLine: (line: string) => void; f
       if (o?.type !== "assistant") return;
       const content = o.message?.content;
       if (!Array.isArray(content)) return;
-      let mutated = false;
       for (const block of content) {
-        const b = block as { type?: string; name?: string; input?: Record<string, unknown> };
-        if (b?.type !== "tool_use") continue;
-        const input = (b.input ?? {}) as Record<string, unknown>;
-
-        if (b.name === "TaskCreate") {
-          const subject = typeof input.subject === "string" ? input.subject : "";
-          if (!subject) continue;
-          // Allocate id mirroring the TaskCreate tool's own sequential string ids starting at "1".
-          const id = String(tasks.length + 1);
-          const activeForm = typeof input.activeForm === "string" ? input.activeForm : "";
-          const description = typeof input.description === "string" ? input.description : "";
-          const note = activeForm.trim() || description.trim() || subject;
-          tasks.push({ id, step: subject, status: "pending", note });
-          mutated = true;
-          continue;
-        }
-
-        if (b.name === "TaskUpdate") {
-          const taskId = typeof input.taskId === "string" ? input.taskId : "";
-          if (!taskId) continue;
-          const t = tasks.find((x) => x.id === taskId);
-          if (!t) continue;
-          if (typeof input.subject === "string" && input.subject) t.step = input.subject;
-          if (typeof input.activeForm === "string" && input.activeForm.trim()) t.note = input.activeForm;
-          else if (typeof input.description === "string" && input.description.trim() && !t.note) t.note = input.description;
-          if ("status" in input) {
-            const next = mapStatus(input.status);
-            if (next === "deleted") t.deleted = true;
-            else t.status = next;
-          }
-          mutated = true;
-          continue;
-        }
-
-        // Back-compat: an older transcript may still stream TodoWrite (full-list-each-tick). Replace
-        // the task array wholesale so the checklist stays in sync.
-        if (b.name === "TodoWrite") {
-          const todos = input.todos;
-          if (!Array.isArray(todos)) continue;
-          tasks.length = 0;
-          for (const t of todos) {
+        const b = block as { type?: string; name?: string; input?: { todos?: unknown } };
+        if (b?.type !== "tool_use" || b?.name !== "TodoWrite") continue;
+        const todos = b.input?.todos;
+        if (!Array.isArray(todos)) continue;
+        const checklist: ChecklistItem[] = todos
+          .map((t) => {
             const td = t as { content?: unknown; status?: unknown; activeForm?: unknown };
             const step = typeof td.content === "string" ? td.content : "";
-            if (!step) continue;
-            const status = mapStatus(td.status);
+            const rawStatus = typeof td.status === "string" ? td.status : "pending";
+            const status: ChecklistItem["status"] =
+              rawStatus === "in_progress" ? "in_progress" :
+              rawStatus === "completed" ? "done" : "pending";
+            // activeForm is the present-continuous spinner verb the TodoWrite tool uses — this is the
+            // ONE-LINE plain-English note the shared prompt asks the agent to write. Fall back to the
+            // step itself so we never emit an empty card line.
             const note = typeof td.activeForm === "string" && td.activeForm.trim() ? td.activeForm : step;
-            tasks.push({
-              id: String(tasks.length + 1),
-              step,
-              status: status === "deleted" ? "pending" : status,
-              note,
-              deleted: status === "deleted" ? true : undefined,
-            });
-          }
-          mutated = true;
-        }
+            return { step, status, note };
+          })
+          .filter((c) => c.step);
+        if (!checklist.length) continue;
+        const inProgress = checklist.find((c) => c.status === "in_progress");
+        const tail = checklist[checklist.length - 1];
+        pendingChecklist = checklist;
+        pendingNote = (inProgress?.note || tail?.note || "").slice(0, 500);
+        schedule();
       }
-      if (mutated) recompute();
     },
     flush: async () => {
       stopped = false; // allow one final flush
@@ -1133,15 +1065,14 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   if (opts.configDir) env.CLAUDE_CONFIG_DIR = opts.configDir;
   const base = sessionId ? ["--resume", sessionId] : [];
   // stream-json (not json): every box session must emit output continuously so the hang detector can
-  // tell "actively running" from "stuck", AND so the live TaskCreate/TaskUpdate events arrive while
-  // the agent is still working (Phase 1's whole point). --verbose is required by stream-json. The
-  // final {type:"result"} event carries the result text. Plain json buffers the whole run and prints
-  // once at the very end — zero liveness signal AND no live checklist.
-  // Checklist (box-session-transparency): the checklist directive goes FIRST so the agent actually
-  // does it. Appended at the END of a long build prompt it was ignored — the cards stayed black
-  // boxes (0 checklist events). Up-front + mandatory, the agent states its plan as tasks and the
-  // card mirrors it live.
-  const augmentedPrompt = `${BOX_SESSION_CHECKLIST_INSTRUCTION}\n\n${prompt}`;
+  // tell "actively running" from "stuck", AND so the live TodoWrite events arrive while the agent is
+  // still working (Phase 1's whole point). --verbose is required by stream-json. The final
+  // {type:"result"} event carries the result text. Plain json buffers the whole run and prints once
+  // at the very end — zero liveness signal AND no live checklist.
+  // Checklist (box-session-transparency): the TodoWrite directive goes FIRST so the agent actually does it.
+  // Appended at the END of a long build prompt it was ignored — the cards stayed black boxes (0 TodoWrite
+  // events). Up-front + mandatory, the agent states its plan as todos and the card mirrors it live.
+  const augmentedPrompt = `${BOX_SESSION_TODOWRITE_INSTRUCTION}\n\n${prompt}`;
   const args = [...base, ...currentModelArgs(), "-p", augmentedPrompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
   const writer = opts.jobId ? makeChecklistWriter(opts.jobId) : null;
   // Account display (box-show-account-for-all-sessions): build/plan (kind="build") stamp + count their Round
@@ -2841,6 +2772,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (route.folded.length) notes.push(`park route → folded ${route.folded.length} already-shipped: ${route.folded.join(", ")}`);
     if (route.spawned.length) notes.push(`park route → spawned ${route.spawned.length} child spec(s): ${route.spawned.join(", ")}`);
     if (route.chatted.length) notes.push(`park route → invited CEO to chat on ${route.chatted.length}: ${route.chatted.join(", ")}`);
+    if (route.dismissed.length) notes.push(`park route → auto-dismissed ${route.dismissed.length} non-spec park(s): ${route.dismissed.join(", ")}`);
     if (route.backstopped.length) notes.push(`park route → backstop escalated ${route.backstopped.length}: ${route.backstopped.join(", ")}`);
     if (route.alarmed.length) notes.push(`park route → ALARM (>70 min) on ${route.alarmed.length}: ${route.alarmed.join(", ")}`);
   } catch (e) {

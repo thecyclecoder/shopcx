@@ -1,0 +1,1 @@
+- **Goal fold writes the brain from a DB row + flips the row to folded** · verified 2026-06-26 · → [[lifecycles/roadmap-build-console]]

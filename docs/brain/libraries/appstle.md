@@ -46,8 +46,6 @@ async function appstleAttemptBilling(workspaceId: string, billingAttemptId: stri
 
 On a non-2xx/204 response it returns the Appstle **response body** in `error` (mirrors `appstleSkipUpcomingOrder` / `appstleSubscriptionAction`) so callers can pattern-match instead of seeing a bare status string. When the upstream body matches *"billing operation is already in progress"* (Appstle's concurrency lock — meaning Appstle is ALREADY billing this contract), the helper logs at `console.warn` instead of `console.error` so the Vercel error feed / Control Tower stop capturing the benign race. [[portal__handlers__order-now]] keys off the same text to convert the response into a 200 with `alreadyBilling: true`.
 
-It also downgrades a second benign-body class: Appstle `UserGeneratedError` responses that carry an "out of stock" message are upstream **business-condition rejections** (a line item ran out of stock between when dunning queued the attempt and when Appstle tried to charge), not server faults. The helper still returns `{ success: false, error: text }` so dunning rotation accounting is unchanged, but logs at `console.warn` so the Vercel error feed / Control Tower stop surfacing them as foreign-app noise.
-
 ### `appstleSkipUpcomingOrder` — function
 
 ```ts
@@ -65,6 +63,8 @@ async function appstleUnskipOrder(workspaceId: string, billingAttemptId: string,
 ```ts
 async function appstleSwitchPaymentMethod(workspaceId: string, contractId: string, paymentMethodId: string,) : Promise<
 ```
+
+Recognizes Appstle's billing-cycle-contract-edit guardrail (`400 UserGeneratedError` with body containing *"billing cycle contract edit"*). When Appstle has a contract edit in flight it refuses concurrent payment-method switches; this is an expected, user-generated transient — NOT a server fault — so the helper logs at `console.warn` (Vercel error feed / Control Tower stop surfacing it) and returns `{ success: false, error: "contract_edit_in_progress" }` so callers can retry instead of seeing a bare status string. Mirrors the recognizer shape in `appstleRemoveLineItem` ([[subscription-items]]).
 
 ### `appstleSendPaymentUpdateEmail` — function
 

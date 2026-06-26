@@ -1,0 +1,1 @@
+- **Directors can propose goals (CEO-greenlit)** · verified 2026-06-26 · → [[libraries/goal-proposals]]

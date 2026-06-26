@@ -1,0 +1,1 @@
+- **Director-owned error autonomy: every error self-fixes or escalates as external** · verified 2026-06-26 · → [[../libraries/platform-director]]

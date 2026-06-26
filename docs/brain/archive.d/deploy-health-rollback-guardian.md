@@ -1,0 +1,1 @@
+- **Deploy-Health & Auto-Rollback guardian** · verified 2026-06-26 · → [[../libraries/deploy-guardian]]
