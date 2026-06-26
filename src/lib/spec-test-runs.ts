@@ -131,6 +131,27 @@ export async function hasActiveSpecTestJob(workspaceId: string, specSlug: string
   return Array.isArray(data) && data.length > 0;
 }
 
+/**
+ * The set of spec slugs that have a `spec-test` agent_jobs row in ACTIVE_STATUSES (the LIVE spec-test
+ * gate the build-card lifecycle timeline reads — Spec Test stage = active while a run is in flight).
+ * Per-board fetch (one query, not N×); empty Set when there's no active workspace.
+ */
+export async function getLiveSpecTestSlugs(workspaceId: string): Promise<Set<string>> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("spec_slug")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "spec-test")
+    .in("status", ACTIVE_STATUSES)
+    .limit(500);
+  const set = new Set<string>();
+  for (const r of (data ?? []) as { spec_slug: string }[]) {
+    if (r.spec_slug) set.add(r.spec_slug);
+  }
+  return set;
+}
+
 /** The compact board chip text — "✅ 8 · ✗ 1 · 👤 1" — from a run's summary. */
 export function chipParts(s: SpecTestSummary): { pass: number; fail: number; human: number; inconclusive: number } {
   return { pass: s.auto_pass, fail: s.auto_fail, human: s.needs_human, inconclusive: s.inconclusive };

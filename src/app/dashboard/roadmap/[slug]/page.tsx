@@ -8,10 +8,16 @@ import { getSpecCardStates, mergePhaseStates } from "@/lib/spec-card-state";
 import {
   getLatestSpecTestRuns,
   getHumanCheckResolutions,
+  getLiveSpecTestSlugs,
   parseVerificationBullets,
   deriveGreenBullets,
   type SpecTestRun,
 } from "@/lib/spec-test-runs";
+import { getSecurityStateBySlug } from "@/lib/security-agent";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { deriveLifecycleStage } from "@/lib/build-lifecycle";
+import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
+import LifecycleTimeline from "../LifecycleTimeline";
 import StatusControl from "../StatusControl";
 import PriorityControl from "../PriorityControl";
 import AuthoringChat from "../AuthoringChat";
@@ -48,21 +54,46 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const [spec, specSlugs] = await Promise.all([getSpec(slug, workspaceId ?? undefined), listSpecSlugs()]);
   if (!spec) notFound();
 
-  const [jobsBySlug, folds, testRuns, resolutions, cardStates] = workspaceId
+  const [jobsBySlug, folds, testRuns, resolutions, cardStates, liveSpecTestSlugs, securityBySlug] = workspaceId
     ? await Promise.all([
         getLatestJobsBySlug(workspaceId),
         getPendingFolds(workspaceId),
         getLatestSpecTestRuns(workspaceId),
         getHumanCheckResolutions(workspaceId),
         getSpecCardStates(workspaceId),
+        getLiveSpecTestSlugs(workspaceId),
+        getSecurityStateBySlug(createAdminClient(), workspaceId),
       ])
-    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, new Map(), {}];
+    : [
+        {} as Record<string, AgentJob>,
+        {} as Record<string, PendingFold>,
+        {} as Record<string, SpecTestRun>,
+        new Map<string, import("@/lib/spec-test-runs").HumanCheckRow>(),
+        {} as Record<string, import("@/lib/spec-card-state").SpecCardState>,
+        new Set<string>() as ReadonlySet<string>,
+        {} as Record<string, import("@/lib/security-agent").SecurityStateBySlug>,
+      ];
   // Overlay the DB mirror's per-phase states onto the markdown phases so the detail page reflects per-phase
   // progress instantly (the board's overall status already does this via resolveBoardStatus).
   const phases = mergePhaseStates(spec.card.phases, (cardStates as Record<string, import("@/lib/spec-card-state").SpecCardState>)[slug]);
   const job = jobsBySlug[slug] ?? null;
   const fold = folds[slug] ?? null;
   const testRun = testRuns[slug] ?? null;
+
+  // build-card-lifecycle-timeline Phase 2 — the same 5-node timeline the board card renders, here on the
+  // detail "build/spec card" (one shared component per the reusable-components rule). The detail page
+  // only resolves boardable specs (getSpec filters folded), so `folded: false` is always correct here.
+  const lifecycleCtx = buildLifecycleContext({
+    spec: spec.card,
+    job,
+    testRun,
+    humanResolutions: resolutions,
+    liveSpecTestSlugs,
+    security: securityBySlug[slug],
+    folded: false,
+  });
+  const derivation = deriveLifecycleStage(lifecycleCtx);
+  const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass);
 
   // Phase 3 (spec-test-maximize-machine-coverage): live per-bullet green state — green when the agent
   // passed it OR the owner marked it ✓ Tested. Lets the founder watch the card fill in before the
@@ -145,6 +176,9 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
             )}
 
             <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
+              {/* build-card-lifecycle-timeline Phase 2 — the 5-node timeline replacing the floating pill,
+                  rendered here too (one shared component across the board card + detail card). */}
+              <LifecycleTimeline derivation={derivation} currentLabel={pill.label} currentTitle={pill.title} />
               <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} initialFold={fold} blockedBy={spec.card.blockedBy} />
               <div className="mt-3">
                 <VerificationCard

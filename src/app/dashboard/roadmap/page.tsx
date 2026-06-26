@@ -2,8 +2,13 @@ import Link from "next/link";
 import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecStatus, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
-import { getLatestSpecTestRuns, getHumanResolutionCounts, type SpecTestRun } from "@/lib/spec-test-runs";
+import { getLatestSpecTestRuns, getHumanResolutionCounts, getHumanCheckResolutions, getLiveSpecTestSlugs, type SpecTestRun } from "@/lib/spec-test-runs";
+import { getSecurityStateBySlug, type SecurityStateBySlug } from "@/lib/security-agent";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { deriveLifecycleStage } from "@/lib/build-lifecycle";
+import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
 import LifecycleControls from "./LifecycleControls";
+import LifecycleTimeline from "./LifecycleTimeline";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
@@ -113,7 +118,32 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: SpecStatus; goalSlugs: string[]; source: SpecSource }) {
+// build-card-lifecycle-timeline Phase 2 — a folded spec's timeline reads ALL FIVE NODES CHECKED. The
+// Archive section below the active board renders a tiny version of the timeline on every folded entry
+// using this stable constant, so the verification "a folded spec → all 5 nodes checked" is visible.
+const FOLDED_DERIVATION = deriveLifecycleStage({
+  status: "folded",
+  valePass: true,
+  phases: [],
+  buildLive: false,
+  buildNeedsAttention: false,
+  specTestVerdict: "approved",
+  specTestHasOpenRegression: false,
+  specTestLive: false,
+  securityLive: false,
+  securitySurfaced: false,
+  securityCompletedClean: true,
+});
+
+function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source, humanResolutions, liveSpecTestSlugs, security, folded }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: SpecStatus; goalSlugs: string[]; source: SpecSource; humanResolutions: Map<string, import("@/lib/spec-test-runs").HumanCheckRow>; liveSpecTestSlugs: ReadonlySet<string>; security: SecurityStateBySlug | undefined; folded: boolean }) {
+  // build-card-lifecycle-timeline Phase 2: the 5-node timeline replacing the floating pill on the card.
+  // Derived from the same signals the board already loads (job / testRun / vale_pass / phases) plus the
+  // per-board fetches for live spec-test jobs and the security-review rollup (one query each). The pill
+  // label translates the LifecycleStageStatus + the live job into the same vocabulary the floating chip
+  // used (so a CEO reading "Building…" / "Folding…" / "Vale pending" sees no copy regression).
+  const lifecycleCtx = buildLifecycleContext({ spec, job, testRun, humanResolutions, liveSpecTestSlugs, security, folded });
+  const derivation = deriveLifecycleStage(lifecycleCtx);
+  const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass);
   return (
     <div
       data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}
@@ -192,6 +222,10 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
         </Link>
       )}
       {spec.phases.length > 0 && <PhaseList slug={spec.slug} phases={spec.phases} />}
+      {/* build-card-lifecycle-timeline Phase 2 — the 5-node lifecycle timeline replacing the floating
+          pill. Renders Spec Review · Build · Spec Test · Security · Fold; the live status pill attaches
+          to the CURRENT (earliest non-done) stage rather than floating in the action row. */}
+      <LifecycleTimeline derivation={derivation} currentLabel={pill.label} currentTitle={pill.title} />
       <div className="mt-2 space-y-2">
         {/* Status is DERIVED (getRoadmap rolls up spec_phases) and never user-settable — the only real
             board inputs are the explicit-lifecycle levers: Review / Prioritize / Defer / Make Active. */}
@@ -222,10 +256,35 @@ export default async function RoadmapPage() {
     getArchive(workspaceId ?? undefined),
     getRoadmapFilters(workspaceId ?? undefined),
   ]);
-  const [jobsBySlug, folds, testRuns, humanResolvedBySlug] = workspaceId
-    ? await Promise.all([getLatestJobsBySlug(workspaceId), getPendingFolds(workspaceId), getLatestSpecTestRuns(workspaceId), getHumanResolutionCounts(workspaceId)])
-    : [{} as Record<string, AgentJob>, {} as Record<string, PendingFold>, {} as Record<string, SpecTestRun>, {} as Record<string, number>];
+  // build-card-lifecycle-timeline Phase 2 — additional per-board fetches the lifecycle timeline reads:
+  //   - humanResolutions (the spec_test_human_checks rows) — for the open-regression flag on Spec Test
+  //   - liveSpecTestSlugs (active spec-test agent_jobs) — for Spec Test = active vs done
+  //   - securityBySlug (security-review agent_jobs rollup) — for the Security node (and Phase 3 gate)
+  //   - foldedSet (specs.status='folded') — the SpecCard surface coerces folded→shipped, so the timeline
+  //     reads the raw flag from the archive snapshot to mark the Fold node done.
+  const [jobsBySlug, folds, testRuns, humanResolvedBySlug, humanResolutions, liveSpecTestSlugs, securityBySlug] = workspaceId
+    ? await Promise.all([
+        getLatestJobsBySlug(workspaceId),
+        getPendingFolds(workspaceId),
+        getLatestSpecTestRuns(workspaceId),
+        getHumanResolutionCounts(workspaceId),
+        getHumanCheckResolutions(workspaceId),
+        getLiveSpecTestSlugs(workspaceId),
+        getSecurityStateBySlug(createAdminClient(), workspaceId),
+      ])
+    : [
+        {} as Record<string, AgentJob>,
+        {} as Record<string, PendingFold>,
+        {} as Record<string, SpecTestRun>,
+        {} as Record<string, number>,
+        new Map<string, import("@/lib/spec-test-runs").HumanCheckRow>(),
+        new Set<string>() as ReadonlySet<string>,
+        {} as Record<string, SecurityStateBySlug>,
+      ];
   if (workspaceId) await reconcileMergedJobs(Object.values(jobsBySlug));
+  // `getRoadmap` already filters folded specs out (boardable-only), so every card on the active board is
+  // `folded: false`. The Archive section below renders a separate compact timeline that synthesizes a
+  // folded LifecycleContext from a stable constant (the spec's slug isn't tracked through archive entries).
   // Column placement = the DERIVED `card.status` from getRoadmap, with ONE live-build overlay: a card
   // that derives `planned` but has an active build job in flight is promoted to In progress (never
   // demotes a further-along status). The job overlay reads agent_jobs, not spec_card_state.
@@ -281,7 +340,7 @@ export default async function RoadmapPage() {
                       Nothing here
                     </div>
                   ) : (
-                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} />)
+                    items.map((spec) => <Card key={spec.slug} spec={spec} job={jobsBySlug[spec.slug] ?? null} fold={folds[spec.slug] ?? null} testRun={testRuns[spec.slug] ?? null} humanResolved={humanResolvedBySlug[spec.slug] ?? 0} status={col.key} goalSlugs={filters.goalsBySpec[spec.slug] ?? []} source={filters.sourceBySpec[spec.slug] ?? "manual"} humanResolutions={humanResolutions} liveSpecTestSlugs={liveSpecTestSlugs} security={securityBySlug[spec.slug]} folded={false} />)
                   )}
                 </div>
               </div>
@@ -301,19 +360,26 @@ export default async function RoadmapPage() {
               Shipped + owner-verified in production, folded into the brain. Reads the folded{" "}
               <code>public.specs</code> rows (status=&apos;folded&apos;). Re-hydrate any of these into a fresh spec.
             </p>
-            <ul className="space-y-1.5">
+            <ul className="space-y-2">
               {archive.map((e, i) => (
-                <li key={i} data-spec-search={`${e.title} ${e.link} ${e.label}`.toLowerCase()} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                  <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
-                  <Link href={`/dashboard/brain/${e.link}`} className="font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400">
-                    {e.title}
-                  </Link>
-                  {e.date && <span className="text-zinc-400">verified {e.date}</span>}
-                  <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                  <Link href={`/dashboard/brain/${e.link}`} className="text-teal-600 hover:underline dark:text-teal-400">
-                    {e.label} ↗
-                  </Link>
-                  <AuthoringChat seed seedSlug={e.link} triggerLabel="New spec from brain" />
+                <li key={i} data-spec-search={`${e.title} ${e.link} ${e.label}`.toLowerCase()} className="flex flex-col gap-1 rounded-md px-1 py-1.5 text-xs">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
+                    <Link href={`/dashboard/brain/${e.link}`} className="font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400">
+                      {e.title}
+                    </Link>
+                    {e.date && <span className="text-zinc-400">verified {e.date}</span>}
+                    <span className="text-zinc-300 dark:text-zinc-600">·</span>
+                    <Link href={`/dashboard/brain/${e.link}`} className="text-teal-600 hover:underline dark:text-teal-400">
+                      {e.label} ↗
+                    </Link>
+                    <AuthoringChat seed seedSlug={e.link} triggerLabel="New spec from brain" />
+                  </div>
+                  {/* build-card-lifecycle-timeline Phase 2 — a folded spec's timeline reads all 5 nodes
+                      checked. Rendered in a compact density so it stays unobtrusive in the archive list. */}
+                  <div className="ml-3.5 max-w-md">
+                    <LifecycleTimeline derivation={FOLDED_DERIVATION} density="compact" />
+                  </div>
                 </li>
               ))}
             </ul>

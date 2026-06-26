@@ -21,48 +21,6 @@ const PHASE_EMOJI: Record<Phase, string> = { planned: "⏳", in_progress: "🚧"
 
 type Blocker = { slug: string; title: string; status: Phase; cleared: boolean };
 
-const LABEL: Record<JobStatus, string> = {
-  queued: "Queued",
-  claimed: "Starting…",
-  building: "Building…",
-  needs_input: "Needs input",
-  needs_approval: "Needs approval",
-  queued_resume: "Resuming…",
-  blocked_on_usage: "Paused · usage",
-  completed: "Built",
-  merged: "Merged ✓",
-  failed: "Failed",
-  needs_attention: "Needs attention",
-};
-
-// Suffix the chip with the job KIND when it isn't a build, so a queued spec-test/pr-resolve/fold
-// doesn't read as a queued *build* — a spec-test waits on its own concurrency-limited lane, not a
-// build lane, so "Queued" with free build lanes looked like a stuck build. `build` = the default,
-// no suffix. (spec-test isn't in JobKind's union but arrives at runtime, hence the string keys.)
-const KIND_SUFFIX: Record<string, string> = {
-  "spec-test": " · test",
-  "pr-resolve": " · resolve",
-  fold: " · fold",
-  plan: " · plan",
-  "product-seed": " · seed",
-  "ticket-improve": " · improve",
-  "migration-fix": " · fix",
-};
-
-const CHIP: Record<JobStatus, string> = {
-  queued: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
-  claimed: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-  building: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-  needs_input: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
-  needs_approval: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-  queued_resume: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-  blocked_on_usage: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
-  completed: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-  merged: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-  failed: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
-  needs_attention: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
-};
-
 export default function BuildButton({ slug, initialJob, specStatus, initialFold, blockedBy }: { slug: string; initialJob: AgentJob | null; specStatus: SpecStatus; initialFold?: PendingFold | null; blockedBy?: Blocker[] }) {
   const workspace = useWorkspace();
   const router = useRouter();
@@ -89,13 +47,20 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
       const res = await fetch(`/api/roadmap/build?slug=${encodeURIComponent(slug)}`);
       if (res.ok) {
         const d = await res.json();
-        setJob(d.job);
+        // build-card-lifecycle-timeline Phase 2: when the job status FLIPS during a poll, kick a server
+        // refresh so the parent-rendered LifecycleTimeline picks up the new pill text. Without this, the
+        // local state advances but the timeline (server-rendered on the page) sticks on its first-paint
+        // status — observed as "Building…" lingering after the build flipped to needs_approval.
+        setJob((prev) => {
+          if (d.job && prev && d.job.status !== prev.status) router.refresh();
+          return d.job;
+        });
         setFold(d.fold ?? null);
       }
     } catch {
       /* transient — keep polling */
     }
-  }, [slug]);
+  }, [slug, router]);
 
   // A pending/folding spec is being retired by a batch fold-build (fold-build-batching) — its own build
   // job no longer maps 1:1 to a PR, so show "Folding…" and keep polling until the fold row clears.
@@ -119,16 +84,10 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   const blocked = uncleared.length > 0;
   const blockedTooltip = blocked ? `Build is blocked — ship first: ${uncleared.map((b) => b.slug).join(", ")}` : undefined;
 
-  // A build in `needs_approval` WITH an open PR is the informative "built, but gated" state: the code is
-  // written + the PR is up (often draft), it just needs the CEO to approve a migration/prod-script before it
-  // can merge. "Built · needs approval" says both — far less confusing than a bare "Built" pill on an
-  // un-merged, un-shipped phase. (Without a PR, the gate is pre-code, so keep plain "Needs approval".)
-  const chipText = job ? (job.status === "needs_approval" && job.pr_number ? "Built · needs approval" : LABEL[job.status]) : "";
-  const chip = job ? (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${CHIP[job.status]}`}>
-      {chipText}
-    </span>
-  ) : null;
+  // build-card-lifecycle-timeline Phase 2: the floating status pill is REPLACED by the per-card
+  // LifecycleTimeline rendered at the parent (the board Card / detail sidebar). BuildButton no longer
+  // owns the chip — the PR link is the only inline crumb left here, since the timeline pill carries
+  // the human label ("Building…" / "Built · needs approval" / "Folding…").
   const prLink = job?.pr_url ? (
     <a href={job.pr_url} target="_blank" rel="noreferrer" className="text-[11px] text-teal-600 hover:underline">
       PR ↗
@@ -136,12 +95,7 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   ) : null;
 
   if (workspace.role !== "owner") {
-    return chip ? (
-      <div className="flex items-center gap-2">
-        {chip}
-        {prLink}
-      </div>
-    ) : null;
+    return prLink ? <div className="flex items-center gap-2">{prLink}</div> : null;
   }
 
   async function build() {
@@ -308,22 +262,10 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   return (
     <div className="w-full">
       <div className="flex items-center justify-end gap-2">
-        {folding ? (
-          <>
-            <span
-              className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-              title="Verified — being retired into the brain by a batch fold-build (one PR folds all verified specs)"
-            >
-              Folding…
-            </span>
-            {foldPrLink}
-          </>
-        ) : (
-          <>
-            {chip}
-            {prLink}
-          </>
-        )}
+        {/* build-card-lifecycle-timeline Phase 2: the status pill moved to the LifecycleTimeline on the
+            parent card. We still surface the PR link inline (and the fold-PR link while folding) as a
+            useful jump-off; the live status text now lives ATTACHED to the timeline's current node. */}
+        {folding ? foldPrLink : prLink}
         {merged && <span className="text-[11px] text-emerald-600">merged ✓</span>}
         {canMerge && (
           <button
