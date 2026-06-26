@@ -166,15 +166,15 @@ export function lifecyclePillForCurrent(
   // Security — the security-review job's state.
   if (current === "security-test") {
     if (currentStatus === "needs-attention") {
-      return { label: "Security: needs review", title: "A security review surfaced a routed real-vuln fix or a needs-human finding — clear it in the Agents inbox before fold." };
+      return { label: "Security: needs review", title: "A security review surfaced a routed real-vuln fix or a needs-human finding — clear it in the Agents inbox." };
     }
-    return { label: "Security review", title: "Post-merge security review is in flight — the fold gate defers until it clears (Phase 3)." };
+    return { label: "Security review", title: "Post-merge security review is in flight — clean completion is the last gate before fold (Phase 3)." };
   }
 
-  // Fold (active without a folding row) — the spec passed both gates (spec-test + security) and is
-  // waiting for the auto-fold gate's next pass to enqueue the batch fold-build.
+  // Fold (active without a folding row) — pre-Phase-3 a fold can sit pending behind a live security
+  // review; once Phase 3 lands it sits pending until both spec-test + security clear.
   if (current === "fold") {
-    return { label: "Awaiting fold", title: "Spec is shipped + verified + security-clear; the auto-fold gate will pick it up on the next pass." };
+    return { label: "Awaiting fold", title: "Spec is shipped + verified; the auto-fold gate will pick it up on the next pass." };
   }
 
   return {};
