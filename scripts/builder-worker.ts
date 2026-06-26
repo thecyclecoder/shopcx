@@ -4299,7 +4299,7 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   }
 
   const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
-  console.log(`[self-update] ${manualDrain ? "manual drain reached idle" : "sustained idle"} + box-impacting change (${behind} behind, ${fromTo}) — updating worker code`);
+  console.log(`[self-update] idle + behind (${behind} behind, ${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
   const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
 
