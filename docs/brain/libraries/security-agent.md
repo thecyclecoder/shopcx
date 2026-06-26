@@ -25,6 +25,9 @@ The agent **reviews + classifies** (a bounded proxy: "did this diff/dep introduc
 - `enqueueSecurityReviewJob(admin, { mergeSha, specSlug, prNumber?, workspaceId? })` → enqueue ONE per-diff `security-review` [[agent_jobs]] job. **Deduped by the merge SHA** — a re-run (the two merge-hook paths firing for one merge) never double-files. **Best-effort, never throws.**
 - `enqueueDepWatchJob(admin, { workspaceId? })` → enqueue the daily dep-watch scan. Deduped to ≤1 live scan + a recent-window guard. **Best-effort, never throws.**
 - `getOpenSecurityReviews(admin, workspaceId)` → `SecuritySurfaceItem[]` — READ-ONLY: open security items awaiting the owner (`needs_approval` = a routed fix with a `security_build` Build action, or `needs_attention` = needs-human). Clean reviews complete silently.
+- `getSecurityStateBySlug(admin, workspaceId)` → `Record<slug, SecurityStateBySlug>` — READ-ONLY per-spec rollup (`live`/`surfaced`/`completedClean`) for the build-card lifecycle timeline's Security node + the fold gate (they MUST agree). Dep-watch sentinels excluded.
+- `listSecurityReviews(admin, workspaceId, limit?)` → `SecurityReviewLogItem[]` — READ-ONLY: Vault's **full** review log (clean ones included), newest-first, for the [[../dashboard/security-tests]] surface. Derives a `verdict` per row (`clean｜false-positive｜real-vuln｜needs-human｜running｜failed` — a completed review's verdict is parsed off the `log_tail` prefix) and resolves each reviewed slug's [[../tables/specs|spec]] title. Bounded (≤500).
+- `countOpenSecurityReviews(admin, workspaceId)` → `number` — the surfaced count (`needs_approval`/`needs_attention`) for the Security tests sidebar badge. Clean reviews never count.
 
 ## Trigger — event-driven (Phase 1) + a daily cron (Phase 2)
 
@@ -47,4 +50,4 @@ The agent **reviews + classifies** (a bounded proxy: "did this diff/dep introduc
 
 ## Related
 
-[[../specs/security-dependency-agent]] · [[../inngest/security-dep-watch]] · [[repair-agent]] · [[regression-agent]] · [[approval-router]] · [[agent-jobs]] · [[director-activity]] · [[../tables/director_activity]] · [[control-tower]] · [[../integrations/github-webhook]] · [[agent-personas]] · [[../goals/grow-surface-platform-agent-team]]
+[[../specs/security-dependency-agent]] · [[../inngest/security-dep-watch]] · [[../dashboard/security-tests]] · [[repair-agent]] · [[regression-agent]] · [[approval-router]] · [[agent-jobs]] · [[director-activity]] · [[../tables/director_activity]] · [[control-tower]] · [[../integrations/github-webhook]] · [[agent-personas]] · [[../goals/grow-surface-platform-agent-team]]

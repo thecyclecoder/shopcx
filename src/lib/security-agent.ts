@@ -338,3 +338,121 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
   }
   return map;
 }
+
+// ── Vault's full results log (dashboard/security-tests) ─────────────────────────
+
+/** The verdict surfaced per review row on the Security tests log — Vault's three classifications
+ * plus the terminal/in-flight job states (clean = a completed review that surfaced nothing). */
+export type SecurityReviewVerdict = SecurityVerdict | "clean" | "running" | "failed";
+
+/** One row of Vault's security-review log — a single review of one merged diff (or the dep-watch scan). */
+export interface SecurityReviewLogItem {
+  jobId: string;
+  /** the reviewed merged spec slug (or [[SECURITY_DEP_WATCH_SLUG]] for the CVE scan). */
+  specSlug: string;
+  /** the reviewed spec's human title, when the slug resolves to a real spec (else null). */
+  specTitle: string | null;
+  mode: "diff" | "dep-watch";
+  verdict: SecurityReviewVerdict;
+  /** raw agent_jobs.status (for the curious / debugging). */
+  status: string;
+  /** the box's plain-text finding + classification (log_tail). */
+  finding: string;
+  /** the authored fix/upgrade spec slug (set only for a routed real-vuln fix). */
+  fixSlug: string | null;
+  prNumber: number | null;
+  createdAt: string;
+}
+
+/** Derive the log verdict from a job's status + finding text. Surfaced jobs carry the real verdict in
+ * their status; a completed job's verdict is parsed off the log_tail prefix (`clean`/`false-positive`). */
+function deriveReviewVerdict(status: string, finding: string, fixSlug: string | null): SecurityReviewVerdict {
+  if (status === "needs_approval") return fixSlug ? "real-vuln" : "needs-human";
+  if (status === "needs_attention") return "needs-human";
+  if (status === "failed") return "failed";
+  if (status === "completed") {
+    return /^\s*false-positive\b/i.test(finding) ? "false-positive" : "clean";
+  }
+  return "running";
+}
+
+/**
+ * READ-ONLY: Vault's full security-review log for a workspace — every review she's run (clean ones
+ * included), newest-first, for the dashboard/security-tests surface. Enriches each row with the
+ * reviewed spec's title when the slug resolves to a real [[specs]] row. Bounded.
+ */
+export async function listSecurityReviews(
+  admin: Admin,
+  workspaceId: string,
+  limit = 200,
+): Promise<SecurityReviewLogItem[]> {
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("id, spec_slug, status, instructions, pending_actions, log_tail, pr_number, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "security-review")
+    .order("created_at", { ascending: false })
+    .limit(Math.min(limit, 500));
+
+  const rows = (data ?? []) as Array<Record<string, unknown>>;
+
+  // Batch-resolve spec titles for the reviewed slugs (skip the dep-watch sentinels).
+  const slugs = Array.from(
+    new Set(
+      rows
+        .map((r) => String(r.spec_slug || ""))
+        .filter((s) => s && s !== SECURITY_DEP_WATCH_SLUG && s !== SECURITY_DEP_UPGRADE_SLUG),
+    ),
+  );
+  const titleBySlug = new Map<string, string>();
+  if (slugs.length) {
+    const { data: specs } = await admin
+      .from("specs")
+      .select("slug, title")
+      .eq("workspace_id", workspaceId)
+      .in("slug", slugs);
+    for (const s of (specs ?? []) as Array<{ slug: string; title: string | null }>) {
+      if (s.title) titleBySlug.set(s.slug, s.title);
+    }
+  }
+
+  return rows.map((row) => {
+    const status = String(row.status || "");
+    let mode: "diff" | "dep-watch" = "diff";
+    try {
+      const instr = JSON.parse(String(row.instructions || "{}")) as { mode?: string };
+      if (instr.mode === "dep-watch") mode = "dep-watch";
+    } catch {
+      /* instructions not JSON — default to diff */
+    }
+    const actions = Array.isArray(row.pending_actions) ? (row.pending_actions as Array<Record<string, unknown>>) : [];
+    const buildAction = actions.find((a) => a.type === "security_build" && a.status === "pending");
+    const fixSlug = buildAction ? String(buildAction.spec_slug || "") || null : null;
+    const finding = typeof row.log_tail === "string" ? row.log_tail : "";
+    const specSlug = String(row.spec_slug || "");
+    return {
+      jobId: String(row.id),
+      specSlug,
+      specTitle: titleBySlug.get(specSlug) ?? null,
+      mode,
+      verdict: deriveReviewVerdict(status, finding, fixSlug),
+      status,
+      finding,
+      fixSlug,
+      prNumber: typeof row.pr_number === "number" ? row.pr_number : null,
+      createdAt: String(row.created_at || ""),
+    };
+  });
+}
+
+/** Lightweight count of SURFACED security reviews (a routed real-vuln fix or a needs-human finding)
+ * awaiting the owner — the sidebar badge. Clean reviews never count. */
+export async function countOpenSecurityReviews(admin: Admin, workspaceId: string): Promise<number> {
+  const { count } = await admin
+    .from("agent_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "security-review")
+    .in("status", SURFACED_SECURITY_STATUSES as unknown as string[]);
+  return count ?? 0;
+}
