@@ -6324,23 +6324,49 @@ async function runSpecReviewJob(job: Job) {
   }
   console.log(`${tag} reviewing ${pending.length} in_review spec(s): ${pending.join(", ")}`);
 
+  // db-driven-specs: Vale reads the SPEC ROW, not `docs/brain/specs/{slug}.md` (those .md files were
+  // DELETED in the purge). Materialize each in_review spec (public.specs + public.spec_phases) into the
+  // run dir's gitignored `.box/spec-{slug}.md` — same shape Bo (build) + the fold runner read. spec-review
+  // runs in REPO_DIR (not a worktree), so materialize into REPO_DIR/.box and the prompt's cwd matches.
+  // A spec that can't be materialized (no row — shouldn't happen, the status came FROM specs) is dropped
+  // from the queue so Vale never reads a stale path.
+  const reviewable: string[] = [];
+  {
+    const { materializeSpec } = await import("../src/lib/build-spec-materializer");
+    for (const slug of pending) {
+      try {
+        await materializeSpec(job.workspace_id, slug, join(REPO_DIR, ".box"));
+        reviewable.push(slug);
+      } catch (e) {
+        console.warn(`${tag} could not materialize ${slug} from DB row: ${e instanceof Error ? e.message : String(e)} — dropping from queue`);
+      }
+    }
+    if (!reviewable.length) {
+      const tail = `materialize failed for all ${pending.length} in_review spec(s) — nothing reviewable`;
+      await update(job.id, { status: "needs_attention", error: tail, log_tail: tail.slice(-2000) });
+      console.error(`${tag} ${tail}`);
+      return;
+    }
+  }
+
   try {
     const prompt = [
       `You are Vale, the box's Spec-Review agent — the meticulous reviewer who guards the build pipeline. Use the spec-review skill (cwd is the repo root). You are on Max (no ANTHROPIC_API_KEY, web search on), read-only against the repo + DB. The WORKER (deterministic Node) is the only component that mutates state — you investigate and emit verdicts.`,
       ``,
       `Phase 3 (governance — CEO design): you check QUALITY only. The DIRECTOR (Ada) decides planned vs deferred — NOT you. So your verdict is a binary "is this spec well-formed?" — pass OR needs_fix. A passing spec stays in_review for Ada's disposition lane (she picks it up next); a malformed spec stays in_review with the diagnosis recorded.`,
       ``,
-      `THE QUEUE — ${pending.length} spec(s) parked in_review awaiting your review:`,
-      pending.map((s) => `  • docs/brain/specs/${s}.md`).join("\n"),
+      `🗃️ DB-DRIVEN SPECS — specs now live in public.specs + public.spec_phases, NOT in docs/brain/specs/*.md (those files were DELETED in the db-driven-specs purge — do NOT try to read them, they don't exist). The worker has MATERIALIZED each in_review spec's DB row to a temp file under .box/. Read THAT file, never docs/brain/specs/….`,
       ``,
-      `For EACH spec, read the markdown + check it against this CHECKLIST:`,
-      `  • H1 + content-only — no status markers (no leading ⏳/🚧/✅/❌ on the H1; status is DB-driven now, never in the markdown).`,
-      `  • Exactly one well-formed phase sequence — no duplicate or mangled phase numbers (a "P1/P2/P1/P2" shape is a defect).`,
-      `  • A real **Owner:** [[../functions/{slug}]] line (the DRI) pointing at a real functions/ doc.`,
-      `  • A real **Parent:** (a mandate or goal milestone) — no orphan specs.`,
-      `  • A **Blocked-by:** [[…]] line IFF the spec actually has prerequisites (absence is fine when there are none).`,
-      `  • A DB-companion plan if the spec adds a customer-referenced table (the CLAUDE.md hard rule — a Sonnet data tool must be wired in sonnet-orchestrator-v2.ts).`,
-      `  • A **Verification** section (## Verification block) so the spec-test agent can grade it later.`,
+      `THE QUEUE — ${reviewable.length} spec(s) parked in_review awaiting your review. Read the materialized DB row at each path:`,
+      reviewable.map((s) => `  • .box/spec-${s}.md`).join("\n"),
+      ``,
+      `For EACH spec, read its .box/spec-{slug}.md (the materialized DB row) + check it against this CHECKLIST (adapted to the DB row — the materialized file has NO status markers; status is a DB column, so don't check the H1 for emojis):`,
+      `  • Exactly one well-formed phase sequence — the phases are spec_phases rows rendered as "## Phase N — …" headings; no duplicate / mangled / out-of-order phase numbers (a "P1/P2/P1/P2" shape is a defect). A one-shot spec with no "## Phase" heading is fine (the whole thing ships in one PR).`,
+      `  • A real **Owner:** [[../functions/{slug}]] line (the DRI) — the wikilink must resolve to a real docs/brain/functions/ doc.`,
+      `  • A real **Parent:** line (a function mandate — a ### under that function's ## Mandates — or a goal milestone in docs/brain/goals/) — no orphan specs.`,
+      `  • A **Blocked-by:** [[…]] line IFF the spec actually has prerequisites (the body names them). Absence is fine when there are none; only a defect when prerequisites are named in the body but missing from the header.`,
+      `  • A DB-companion plan if the spec adds a customer-referenced table (the CLAUDE.md hard rule — a Sonnet data tool must be wired in sonnet-orchestrator-v2.ts). Flag a customer_id table introduced with no such plan.`,
+      `  • A Verification block per phase — each phase in the materialized file should carry its "### Verification" section (spec_phases.verification) so the spec-test agent can grade it later. A phase with no verification is a defect; a one-shot spec needs at least one Verification block.`,
       ``,
       `Then route each spec with ONE quality verdict:`,
       `  • pass — the CHECKLIST passes. The worker sets flags.vale_pass=true; the spec stays in_review for Ada's disposition lane (she'll decide planned vs deferred). You DO NOT decide that — even if the spec's own body says "park this," report pass; Ada reads the same signal and disposes.`,
@@ -6369,7 +6395,7 @@ async function runSpecReviewJob(job: Job) {
       return;
     }
 
-    const queuedSet = new Set(pending);
+    const queuedSet = new Set(reviewable);
     let passed = 0;
     let needsFix = 0;
     const skipped: string[] = [];
@@ -6388,7 +6414,7 @@ async function runSpecReviewJob(job: Job) {
     // Phase 3 — every Vale pass enqueues a candidate for Ada's disposition lane. Run the sweep INLINE
     // so a pass + dispose lands in one cron tick (no waiting for the next director pass).
     const dispo = await runAdaDispositionSweep(a, job.workspace_id);
-    const tail = `reviewed ${parsed.decisions.length}/${pending.length} — ✅${passed} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
+    const tail = `reviewed ${parsed.decisions.length}/${reviewable.length} — ✅${passed} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {

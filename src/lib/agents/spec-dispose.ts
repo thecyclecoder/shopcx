@@ -29,7 +29,6 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import {
   applyAdaDisposition,
   markSpecCardPendingUpgrade,
-  type SpecCardFlags,
 } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
@@ -54,10 +53,12 @@ export interface AdaDecision {
 
 /**
  * One row per Vale-passed `in_review` spec — the cohort Ada's disposition lane operates on. Selected
- * directly off `spec_card_state` (no markdown parse — the DB is the spec). A row whose
- * `flags.ada_disposition` is already set is skipped (idempotent re-fire); a row whose
- * `flags.intended_status` is missing falls back to `planned` (the safe historical default — every
- * in_review row is a NEW spec, where the author's bias is to build).
+ * directly off `public.specs` (the CANONICAL source post-db-driven-specs — the legacy `spec_card_state`
+ * mirror isn't reliably populated with `in_review` for newly-authored specs, and Vale's pass dual-writes
+ * `specs.vale_pass=true` while only ever creating a status-less mirror row). A row whose `ada_disposition`
+ * is already set is skipped (idempotent re-fire); a row whose `intended_status` is missing falls back to
+ * `planned` (the safe historical default — every in_review row is a NEW spec, where the author's bias is
+ * to build).
  */
 export interface DispositionCandidate {
   slug: string;
@@ -69,19 +70,25 @@ export async function selectDispositionCandidates(
   workspaceId: string,
 ): Promise<DispositionCandidate[]> {
   const { data, error } = await admin
-    .from("spec_card_state")
-    .select("spec_slug, status, flags")
+    .from("specs")
+    .select("slug, status, deferred, vale_pass, ada_disposition, intended_status")
     .eq("workspace_id", workspaceId)
     .eq("status", "in_review");
   if (error || !data) return [];
   const out: DispositionCandidate[] = [];
-  for (const r of data as Array<{ spec_slug: string; status: string; flags: SpecCardFlags | null }>) {
-    const flags = r.flags ?? {};
-    if (!flags.vale_pass) continue; // Vale hasn't passed it yet — not Ada's turn.
-    if (flags.ada_disposition) continue; // already disposed (autonomous flip already landed) or parked (pending_upgrade) — skip.
-    if (flags.deferred) continue; // an out-of-band defer already happened — leave it for the operator.
-    const intended: "planned" | "deferred" = flags.intended_status === "deferred" ? "deferred" : "planned";
-    out.push({ slug: r.spec_slug, intended });
+  for (const r of data as Array<{
+    slug: string;
+    status: string;
+    deferred: boolean | null;
+    vale_pass: boolean | null;
+    ada_disposition: string | null;
+    intended_status: "planned" | "deferred" | null;
+  }>) {
+    if (!r.vale_pass) continue; // Vale hasn't passed it yet — not Ada's turn.
+    if (r.ada_disposition) continue; // already disposed (autonomous flip landed) or parked (pending_upgrade) — skip.
+    if (r.deferred) continue; // an out-of-band defer already happened — leave it for the operator.
+    const intended: "planned" | "deferred" = r.intended_status === "deferred" ? "deferred" : "planned";
+    out.push({ slug: r.slug, intended });
   }
   return out;
 }
