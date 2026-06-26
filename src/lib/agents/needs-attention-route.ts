@@ -543,6 +543,104 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
 }
 
 /**
+ * planner-gates-build-queue-on-authored-specs Phase 2 — true when a still-open plan job in the
+ * workspace has this slug in its `pending_actions` (an approved/pending spec proposal that the plan
+ * RESUME will author + re-queue). If so the parked `spec_row_missing` build is NOT dismissed: it
+ * waits for the plan to land the row + the plan's re-queue takes over. Read-only / best-effort —
+ * a DB hiccup falls through to "no open plan owns this slug" so the dismiss path can still run.
+ */
+async function planJobOwnsSlug(admin: Admin, workspaceId: string, slug: string): Promise<boolean> {
+  const OPEN_PLAN_STATUSES = ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_approval", "blocked_on_usage"];
+  try {
+    const { data, error } = await admin
+      .from("agent_jobs")
+      .select("pending_actions")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "plan")
+      .in("status", OPEN_PLAN_STATUSES)
+      .limit(50);
+    if (error) {
+      console.warn(`[needs-attention-route] planJobOwnsSlug lookup failed for ${slug}: ${error.message}`);
+      return false;
+    }
+    for (const row of (data ?? []) as Array<{ pending_actions: unknown }>) {
+      const actions = Array.isArray(row.pending_actions) ? (row.pending_actions as Array<{ spec?: { slug?: string } }>) : [];
+      for (const a of actions) if (a?.spec?.slug === slug) return true;
+    }
+    return false;
+  } catch (e) {
+    console.warn(`[needs-attention-route] planJobOwnsSlug threw for ${slug}:`, e instanceof Error ? e.message : e);
+    return false;
+  }
+}
+
+/**
+ * planner-gates-build-queue-on-authored-specs Phase 2 — auto-dismiss a parked build whose
+ * `public.specs` row is missing (the author lane silently failed upstream). The underlying work has
+ * no spec to drive it, so the build can never run; the right terminal is to DISMISS the park (the
+ * same shape `routeNonSpecJob` uses) so the row leaves `needs_attention` and the 70-min invariant
+ * alarm cannot fire against a phantom. Skipped when an OPEN plan job in the workspace still owns
+ * the slug in `pending_actions` — the plan RESUME will author the row + re-queue a fresh build, so
+ * the parked one just waits (a slightly-noisier inbox is the right cost vs. dismissing the work the
+ * plan is about to revive).
+ */
+async function routeSpecRowMissing(admin: Admin, row: ParkedRow): Promise<"dismissed" | "deferred_plan_owns" | "failed"> {
+  if (row.spec_slug) {
+    const owned = await planJobOwnsSlug(admin, row.workspace_id, row.spec_slug);
+    if (owned) {
+      console.log(`[needs-attention-route] spec_row_missing ${row.spec_slug} deferred — open plan job still owns the slug in pending_actions`);
+      return "deferred_plan_owns";
+    }
+  }
+  const reason = `spec_row_missing: public.specs has no row for ${row.spec_slug ?? "(no slug)"} and no open plan owns the slug — auto-dismissing the park`;
+  const { error } = await admin
+    .from("agent_jobs")
+    .update({
+      status: "dismissed",
+      needs_attention_class: "dismissed_by_director",
+      error: `dismissed by ${PLATFORM} director: ${reason}`.slice(0, 2000),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", row.id)
+    .eq("status", "needs_attention"); // re-assert: never dismiss a row that flipped under us
+  if (error) {
+    console.warn(`[needs-attention-route] spec_row_missing dismiss failed for ${row.id}: ${error.message}`);
+    return "failed";
+  }
+  await recordDirectorActivity(admin, {
+    workspaceId: row.workspace_id,
+    directorFunction: PLATFORM,
+    actionKind: "dismissed_park",
+    specSlug: row.spec_slug,
+    reason,
+    metadata: {
+      job_id: row.id,
+      spec_slug: row.spec_slug,
+      prior_class: row.needs_attention_class,
+      target_kind: row.kind,
+      auto_applied: true,
+      autonomous: true,
+      source: "spec_row_missing_router",
+    },
+  });
+  await recordDirectorActivity(admin, {
+    workspaceId: row.workspace_id,
+    directorFunction: PLATFORM,
+    actionKind: "routed_needs_attention",
+    specSlug: row.spec_slug,
+    reason: `Auto-routed parked ${row.kind} ${row.id.slice(0, 8)} → dismissed (spec_row_missing).`,
+    metadata: {
+      job_id: row.id,
+      action: "dismiss_spec_row_missing",
+      target_kind: row.kind,
+      prior_class: row.needs_attention_class,
+      autonomous: true,
+    },
+  });
+  return "dismissed";
+}
+
+/**
  * Auto-resolve a parked NON-SPEC job by DISMISSING it. The job (e.g. `ticket-improve`) doesn't
  * target a spec, so none of the class routers (already_shipped→fold, real_blocker/tooling_failure→
  * child-spec, design_change→CEO chat) can act on it — and the backstop sweep would pointlessly
@@ -668,6 +766,25 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
       }
       // If the dismiss write failed, fall through to the normal class/backstop path — better to
       // surface late than to silently drop the row.
+    }
+
+    // planner-gates-build-queue-on-authored-specs Phase 2 — a parked build whose `public.specs`
+    // row never landed (the planner author lane silently failed upstream). Dismiss the park unless
+    // an open plan in the workspace still owns the slug in `pending_actions` (its RESUME will
+    // re-queue). SKIP the backstop sweep on the dismiss path so the 70-min alarm cannot fire for
+    // a phantom; the deferred-plan-owns path falls through to the backstop (legitimate wait — the
+    // alarm IS the right escalation if the plan stays open too long). The class string is written
+    // by the worker outside the NeedsAttentionClass enum (it's a sentinel the dispatch-time guard
+    // stamps; the heuristic classifier never returns it), so the comparison is against the raw DB
+    // value rather than the typed union.
+    if ((klass as string | null) === "spec_row_missing" && !inLedger && !atCap) {
+      const outcome = await routeSpecRowMissing(admin, row);
+      if (outcome === "dismissed") {
+        dismissed.push(row.spec_slug ?? row.id.slice(0, 8));
+        continue;
+      }
+      // outcome === "deferred_plan_owns" → fall through to backstop only (no class dispatch).
+      // outcome === "failed" → also fall through; the alarm will eventually surface it.
     }
 
     if (!isRoutedMarker && !inLedger && !atCap) {
