@@ -1,0 +1,1 @@
+- **Iteration ingest async reports — fix security verdict resolution tooling (parse-repair)** · verified 2026-06-26 · → [[../libraries/security-agent]]
