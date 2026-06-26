@@ -1,0 +1,1 @@
+- **Director escort — drive in-flight + authored-fix specs through to ship** · verified 2026-06-26 · → [[../libraries/platform-director]]
