@@ -298,7 +298,7 @@ export default async function RoadmapPage() {
   return (
     <div className="mx-auto w-full max-w-screen-2xl p-6">
       <div className="flex items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Roadmap</h1>
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Pipeline</h1>
         <div className="flex items-center gap-3">
           <BoxChip />
           <Link href="/dashboard/roadmap/goals" className="text-sm text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
