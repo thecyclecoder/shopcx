@@ -1,0 +1,1 @@
+- **Surface regression coverage on the scorecard** · verified 2026-06-26 · → [[../dashboard/agents__scorecard]]
