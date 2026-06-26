@@ -1,1 +1,1 @@
-- **Goals + goal_milestones tables + specs.milestone_id FK + one-time backfill** · verified 2026-06-25 · → [[lifecycles/roadmap-build-console]]
+- **goals + goal_milestones tables + specs.milestone_id FK + one-time backfill** · verified 2026-06-26 · → [[lifecycles/db-driven-specs]]

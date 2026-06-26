@@ -1,0 +1,1 @@
+- **ticket-improve park auto-route — stop failed ticket-improve jobs escalating to the CEO** · verified 2026-06-26 · → [[inngest/ticket-improve]]

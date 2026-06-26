@@ -1,0 +1,1 @@
+- **Repurpose the spec-drift reconciler → self-heal built-unstamped phases** · verified 2026-06-26 · → [[libraries/spec-drift]]

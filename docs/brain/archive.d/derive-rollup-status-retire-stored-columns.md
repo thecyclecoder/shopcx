@@ -1,0 +1,1 @@
+- **Derive rollup status, retire the stored status columns (kill the drift class)** · verified 2026-06-26 · → [[lifecycles/db-driven-specs]]

@@ -1,0 +1,1 @@
+- **Retire markdown reads from the PM flow — DB is the only source** · verified 2026-06-26 · → [[recipes/pm-flow-data-sources]]

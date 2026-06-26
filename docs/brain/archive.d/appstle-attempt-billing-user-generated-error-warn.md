@@ -1,0 +1,1 @@
+- **Downgrade Appstle attempt-billing UserGeneratedError (out-of-stock) to warn so dunning OOS rejections stop noising the error feed** · verified 2026-06-26 · → [[libraries/appstle]]

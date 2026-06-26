@@ -1,0 +1,1 @@
+- **Reva — deploy-guardian rollback agent: register persona + visualize under Ada** · verified 2026-06-26 · → [[agents/personas]]

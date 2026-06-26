@@ -1,0 +1,1 @@
+- **Box-session transparency — a live checklist + notes on every box session** · verified 2026-06-26 · → [[recipes/box-session-transparency]]

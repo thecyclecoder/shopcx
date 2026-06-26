@@ -1,0 +1,1 @@
+- **Restore TaskCreate/TaskUpdate checklist parser in builder-worker (re-land of PR 743)** · verified 2026-06-26 · → [[recipes/box-session-transparency]]

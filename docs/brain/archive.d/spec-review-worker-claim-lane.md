@@ -1,0 +1,1 @@
+- **Wire the missing spec-review claim lane in the box worker** · verified 2026-06-26 · → [[recipes/builder-worker-lanes]]

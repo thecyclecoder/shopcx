@@ -1,0 +1,1 @@
+- **Spec body in the DB — specs + spec_phases tables + one-time backfill** · verified 2026-06-26 · → [[lifecycles/db-driven-specs]]
