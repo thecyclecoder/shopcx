@@ -26,6 +26,8 @@ async function appstleSkipNextOrder(workspaceId: string, contractId: string,) : 
 async function appstleUpdateBillingInterval(workspaceId: string, contractId: string, interval: "DAY" | "WEEK" | "MONTH" | "YEAR", intervalCount: number,) : Promise<
 ```
 
+Short-circuits no-op requests: if the local `subscriptions.billing_interval` + `billing_interval_count` already match the requested values, returns `{ success: true }` without calling Appstle. Same-value submissions previously hit Appstle's billing-policy validator and surfaced as recurring noise on the Vercel error feed / Control Tower (signature `09366492567e0fde`). Customer intent (frequency = X) is satisfied without the API round-trip.
+
 ### `appstleUpdateNextBillingDate` — function
 
 ```ts
