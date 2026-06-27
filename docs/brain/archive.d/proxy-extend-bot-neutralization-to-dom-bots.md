@@ -1,0 +1,1 @@
+- **Extend proxy bot-UA neutralization to DOM bots** · verified 2026-06-27 · → [[../libraries/control-tower]]

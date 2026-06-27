@@ -78,6 +78,17 @@ Catches a **silently-skipped migration**: a migration that never applied is invi
 - **Where it runs:** `scripts/builder-worker.ts` → `runMigrationDriftJob` (a periodic box job, ~30 min, in-flight-guarded so it never overlaps/stalls the 5s poll) reads the live `public` BASE TABLE names off the pooler (`information_schema.tables` — not exposed via PostgREST, so raw `pg` via `poolerConnectionString()`) and writes the `DriftResult` into a `loop_heartbeats` beat (`loop_id = MIGRATION_DRIFT_LOOP_ID`, `kind:'cron'`, `produced.missing`, `ok = status!=='skipped'`). The deployed Next runtime can't do this — the `.sql` files aren't bundled.
 - **Surfacing** = the standard monitor path: `monitor.ts` `evalOutputAssertion('migration-drift', …)` reads `latest.produced.missing` (allowlisted ones already excluded box-side) and flips the tile **red** (`reason='migration_drift'`) → de-duped [[../tables/loop_alerts]] + page + [[repair-agent]] enqueue, exactly like any P1 red. Cron-freshness/never-fired keeps a *dead* check visible too.
 
+## Real-bug fixes archived
+
+Four real-bug fixes that reduced Control Tower noise + improved error feed accuracy:
+
+- **`proxy-extend-bot-neutralization-to-dom-bots`** — Extended proxy bot-UA neutralization to DOM bots (Googlebot) to close a residual `/widget` metadata-boundary resume mismatch. Repair signature `vercel:975c7f77eb7132e6`.
+- **`portal-route-suppress-expected-401-error-logs`** — Portal route no longer console.error on expected 401 auth-misses. Repair signature `vercel:1a3270b4a24a9960`.
+- **`appstle-frequency-update-noop-guard`** — Short-circuit no-op frequency changes before they hit Appstle's billing-policy validator, clearing recurring noise from the Control Tower error feed. Repair signature `vercel:09366492567e0fde`.
+- **`create-full-return-null-shopify-mirror-guard`** — createFullReturn guards null Shopify mirror + de-noises recoverable-error logs. Repair signature `vercel:314ca8c785aff3eb`.
+
+Each addressed a root cause in [[../tables/error_events]]; folded into their respective service pages ([[../integrations/appstle]], `src/lib/shopify-returns.ts` docs, etc.) with cross-links from the error-feed [[../libraries/control-tower]].
+
 ## Gotchas
 
 - **SHA-behind needs `VERCEL_GIT_COMMIT_SHA`** (the deployed commit) as the origin/main proxy; unset locally ⇒ the check is skipped (no false positive). It only fires red after `shaGraceMs` (default 30m) so an in-progress deploy / self-update never pages.

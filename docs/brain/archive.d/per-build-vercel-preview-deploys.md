@@ -1,0 +1,1 @@
+- **Per-build Vercel preview deploys** · verified 2026-06-27 · → [[../libraries/vercel-project]]
