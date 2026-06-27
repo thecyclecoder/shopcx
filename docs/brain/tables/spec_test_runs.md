@@ -17,6 +17,8 @@ The box **spec-test QA agent**'s report over shipped-but-unverified specs ([[../
 | `checks` | `jsonb` | `[{ text, verdict: pass｜fail｜needs_human｜inconclusive, category: auto｜needs_human｜inconclusive, evidence, screenshot? }]` — one per `## Verification` bullet, with concrete evidence (SELECT result / HTTP status / `file:line` / `vercel`/`gh` line / browser-check assertions). `screenshot` (optional) is a **BROWSER check's** evidence capture — the storage path in the private `spec-test-evidence` bucket, written by `scripts/spec-test-browser-check.ts` ([[../specs/spec-test-deep-verification]] Phase 1); the Developer page signs it per-render (`signSpecTestScreenshot`) and shows the image inline. · default `[]` |
 | `transcript` | `text?` | last ~8 KB of the agent's raw output (debugging) |
 | `error` | `text?` | failure reason (no parseable JSON / agent-reported error / worker exception) |
+| `spec_branch` | `text?` | the `claude/*` branch under test on a **pre-merge** run ([[../specs/spec-test-on-preview-pre-merge]] Phase 2). Null on the post-ship/standing-lane run (which targets prod). M3's "spec-test green for this branch" helper reads the latest row per `(workspace_id, spec_slug, spec_branch)`. |
+| `preview_url` | `text?` | the per-build `*.vercel.app` preview origin the runner pointed its GET / browser / `vercel inspect|logs` checks at — same null-on-post-ship rule. |
 | `run_at` | `timestamptz` | when the run completed · default `now()` |
 | `created_at` / `updated_at` | `timestamptz` | |
 
@@ -30,7 +32,7 @@ The `spec-test` skill is contracted to emit **only** the result JSON as its fina
 
 ## Indexes / RLS
 
-- `spec_test_runs_ws_slug_idx (workspace_id, spec_slug, run_at desc)` (latest-per-spec read) · `spec_test_runs_ws_run_idx (workspace_id, run_at desc)`.
+- `spec_test_runs_ws_slug_idx (workspace_id, spec_slug, run_at desc)` (latest-per-spec read) · `spec_test_runs_ws_run_idx (workspace_id, run_at desc)` · `spec_test_runs_ws_slug_branch_idx (workspace_id, spec_slug, spec_branch, run_at desc)` (latest-per-branch read — [[../specs/spec-test-on-preview-pre-merge]] M3 green-signal helper).
 - RLS: `spec_test_runs_select` (workspace members read) · `spec_test_runs_service` (service role all writes). The box worker writes via the service role.
 
 ## Who writes / reads
@@ -41,7 +43,7 @@ The `spec-test` skill is contracted to emit **only** the result JSON as its fina
 
 ## Migration
 
-`supabase/migrations/20260620120000_spec_test_runs.sql` (apply: `scripts/apply-spec-test-runs-migration.ts`).
+`supabase/migrations/20260620120000_spec_test_runs.sql` (apply: `scripts/apply-spec-test-runs-migration.ts`) · `supabase/migrations/20260627120000_spec_test_runs_branch_preview.sql` (apply: `scripts/apply-spec-test-runs-branch-preview-migration.ts`) — adds `spec_branch` + `preview_url` for the pre-merge lane.
 
 ## Related
 

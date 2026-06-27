@@ -325,6 +325,12 @@ interface Job {
   answers: { id: string; answer: string }[];
   pending_actions: PendingAction[];
   pr_number: number | null;
+  // spec-test-on-preview-pre-merge Phase 1: the per-build *.vercel.app preview origin a pre-merge
+  // spec-test (or future security-test) job runs its non-destructive checks against. Set by
+  // enqueuePreMergeSpecTest (src/lib/agent-jobs.ts) for `claude/*` branches; null for the
+  // post-ship standing lane (which still hits prod). The column-typed field is preferred over
+  // parsing `instructions` — Phase 2's runSpecTestJob reads it directly.
+  preview_url?: string | null;
 }
 
 async function admin() {
@@ -6562,9 +6568,34 @@ async function runSpecTestJob(job: Job) {
       }
     }
 
+    // spec-test-on-preview-pre-merge Phase 2 — detect a PRE-MERGE run and resolve the per-build
+    // *.vercel.app preview origin to point the runner's GET / browser-check / `vercel inspect|logs`
+    // calls at the PREVIEW deployment instead of prod. Prefer the column-typed `preview_url`
+    // (enqueuePreMergeSpecTest sets it on the row); fall back to parsing it out of `instructions`
+    // (Phase 1's chokepoint formats `Preview origin: <url>` into the free-text field, so we stay
+    // resilient if a future enqueuer skips the column). A claude/* branch is the necessary
+    // condition (the post-ship standing lane carries neither, so this whole branch is inert there).
+    let previewOrigin: string | null = null;
+    const branch = job.spec_branch ?? null;
+    if (branch && branch.startsWith("claude/")) {
+      const col = (job.preview_url ?? "").trim();
+      if (col) {
+        previewOrigin = col.replace(/\/$/, "");
+      } else if (job.instructions) {
+        const m = /Preview origin:\s*(https?:\/\/\S+)/i.exec(job.instructions);
+        if (m) previewOrigin = m[1].replace(/[.,)\]]+$/, "").replace(/\/$/, "");
+      }
+    }
+    const isPreMerge = !!previewOrigin && !!branch;
+
     const prompt = [
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is materialized from the DB to .box/spec-${slug}.md (public.specs + spec_phases — the docs/brain/specs/*.md files were DELETED in the DB cutover, do NOT read them). Read .box/spec-${slug}.md + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human), and run ONLY the non-destructive checks on the box.`,
+      ...(isPreMerge
+        ? [
+            `🎯 PRE-MERGE TARGET (spec-test-on-preview-pre-merge Phase 2) — this is a PRE-MERGE verification against the PER-BUILD PREVIEW deployment for branch \`${branch}\`. PREVIEW ORIGIN: ${previewOrigin}. Every HTTP probe MUST hit this origin, NOT https://shopcx.ai: any \`curl\` GET / status check, the \`vercel inspect <url>\` + \`vercel logs <url>\` calls (use the preview URL — this branch's per-build preview already exists), and EVERY \`npx tsx scripts/spec-test-browser-check.ts\` invocation (pass \`--base-url ${previewOrigin}\` so the owner-session is minted against the preview host). The repo checkout itself is on \`main\`, but the spec body materialized at .box/spec-${slug}.md is the BRANCH'S spec (from public.spec_phases keyed to this branch). Read-only DB probes still hit the shared prod DB (preview deployments use the same Postgres) — that's correct, no override needed.`,
+          ]
+        : []),
       `⭐ MANDATE — IF A MACHINE CAN TEST IT, THE MACHINE DOES IT. Maximize machine coverage; \`needs_human\` is the LAST resort, not the default. You have THREE non-destructive execution modes — reach for them in order before deferring: (1) read-only probes (repo/DB/HTTP/migration-present), (2) OUTCOME PROBE, (3) NON-DESTRUCTIVE LOCAL HARNESS.`,
       `OUTCOME-NOT-ACTION: a bullet shaped "do X (a mutation) → expect observable Y" — first ask: is Y ALREADY observable read-only? (a prod row already in the expected state from real traffic, a column already populated, a rendered context string on an existing order, a unique-index definition in pg_indexes). If yes → probe Y read-only and pass/fail on that evidence. Do NOT defer just because the ACTION X mutates — you verify the OUTCOME. Only when the observable requires YOU to perform an irreversible prod mutation that real traffic hasn't already produced → needs_human.`,
       `LOCAL HARNESS: when the logic under test is reachable as a pure function / parser / classifier / validator in src/, author a THROWAWAY local script (scratch, _-prefixed, NEVER committed) that imports it and exercises it locally — INCLUDING FAULT INJECTION (feed malformed payload, force unparseable output) — run it with \`npx tsx _spec-test-harness.ts\`. No prod write, no network side-effect → it's \`auto\`. Record the input you fed + the value/state returned as evidence. This converts the whole fault-injection bucket from needs_human to auto WHENEVER the logic is reachable as a local unit (e.g. "force unparseable output → error state" over a pure extractor: import it, feed garbage, assert the error state).`,
@@ -6581,11 +6612,14 @@ async function runSpecTestJob(job: Job) {
 
     // Records the run as a distinct, retryable `error` state (NOT a 0-check approved/empty row): the
     // Developer page shows "Run errored — retry" with the raw tail, and "Test now" re-runs it.
+    // Pre-merge Phase 2: carry `spec_branch` + `preview_url` even on the error path, so M3's
+    // green-signal helper sees the LATEST row per (slug, branch) regardless of pass/fail/error.
     const writeErrorRun = async (reason: string, transcript: string, status: string, jobError?: string) => {
       await db.from("spec_test_runs").insert({
         workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
         agent_verdict: "error", summary: {}, checks: [],
         transcript: transcript.slice(-8000), error: reason,
+        spec_branch: branch, preview_url: previewOrigin,
       });
       await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
     };
@@ -6629,6 +6663,11 @@ async function runSpecTestJob(job: Job) {
     await db.from("spec_test_runs").insert({
       workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
       agent_verdict, summary, checks, transcript: raw.slice(-8000), error: null,
+      // spec-test-on-preview-pre-merge Phase 2: stamp the branch + preview origin on a pre-merge
+      // run so M3's "spec-test green for this branch" helper can read the latest verdict per
+      // (slug, branch) deterministically — no JOIN through agent_jobs. Post-ship runs leave both
+      // null (the standing lane targets prod, not a branch).
+      spec_branch: branch, preview_url: previewOrigin,
     });
     // spec-test-maximize-machine-coverage Phase 3: reflect the run's green (`pass`) checks onto the spec
     // markdown's verification bullets (leading ✅, committed to main). Best-effort — never fail the run.
@@ -6687,9 +6726,15 @@ async function runSpecTestJob(job: Job) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     try {
+      // Pre-merge Phase 2: even on a worker-side throw, carry the branch + preview origin from the
+      // job row so the run is still attributable to this (slug, branch) for M3's read.
+      const previewCol = (job.preview_url ?? "").trim();
+      const previewFromInstr = job.instructions ? /Preview origin:\s*(https?:\/\/\S+)/i.exec(job.instructions)?.[1] : null;
+      const previewOrigin = (previewCol || previewFromInstr || "").replace(/[.,)\]]+$/, "").replace(/\/$/, "") || null;
       await db.from("spec_test_runs").insert({
         workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
         agent_verdict: "error", summary: {}, checks: [], transcript: null, error: `error: ${msg}`,
+        spec_branch: job.spec_branch ?? null, preview_url: previewOrigin,
       });
     } catch { /* audit best-effort */ }
     await update(job.id, { status: "failed", error: msg });
