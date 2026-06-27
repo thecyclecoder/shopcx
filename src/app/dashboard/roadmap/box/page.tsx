@@ -85,6 +85,18 @@ interface FailedJob {
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 
+// preview-test-promote-pipeline M1 Phase 3 — the Vercel Ignored-Build-Step override state. Surfaced
+// here so the supervisor can SEE that `claude/*` preview builds are enabled. enabled: the live Vercel
+// command matches `CLAUDE_PREVIEW_IGNORE_COMMAND`; drifted: a different command is set (run the
+// apply script); unknown: token absent or fetch failed (chip stays neutral, not a red).
+interface PreviewBuildOverride {
+  status: "enabled" | "drifted" | "unknown";
+  expected: string;
+  actual: string | null;
+  reason: string | null;
+  fetched_at: string | null;
+}
+
 // Route a FAILED job to where you'd look at / rebuild it (a failure isn't an approval — see the paused
 // section below, which routes to the routed inbox). SAFE-BY-DEFAULT (a NEW agent kind can never 404 here):
 // only kinds whose `spec_slug` is a REAL spec/goal — or that have a dedicated surface — get a deep link;
@@ -387,6 +399,7 @@ export default function BoxPage() {
   const [loading, setLoading] = useState(true);
   const [drain, setDrain] = useState<{ draining: boolean; requested_by: string | null } | null>(null);
   const [drainBusy, setDrainBusy] = useState(false);
+  const [previewOverride, setPreviewOverride] = useState<PreviewBuildOverride | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -400,6 +413,7 @@ export default function BoxPage() {
           setPaused(d.paused ?? []);
           setFailed(d.failed ?? []);
           setDrain(d.drain ?? null);
+          setPreviewOverride(d.preview_build_override ?? null);
         })
         .catch(() => {})
         .finally(() => alive && setLoading(false));
@@ -532,6 +546,33 @@ export default function BoxPage() {
             {worker.status !== "healthy" && <span className="opacity-80">· {worker.status}</span>}
             {worker.detail && <span className="opacity-80">· {worker.detail}</span>}
           </div>
+
+          {/* preview-test-promote-pipeline M1 Phase 3 — Vercel Ignored-Build-Step override state.
+              A live chip showing whether `claude/*` build branches produce a preview deploy. The
+              supervisor sees the override is in place without running the apply script. The actual
+              command is the tooltip — see + pause the tool (supervisable autonomy). */}
+          {previewOverride && (
+            <div className="mb-5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <span
+                title={previewOverride.actual ?? previewOverride.reason ?? "Run scripts/apply-vercel-ignore-step-override.ts to set"}
+                className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                  previewOverride.status === "enabled"
+                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                    : previewOverride.status === "drifted"
+                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                    : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                }`}
+              >
+                <span aria-hidden>{previewOverride.status === "enabled" ? "●" : previewOverride.status === "drifted" ? "⚠" : "○"}</span>
+                {previewOverride.status === "enabled" && "Vercel preview builds: enabled for claude/*"}
+                {previewOverride.status === "drifted" && "Vercel preview builds: drifted — re-apply override"}
+                {previewOverride.status === "unknown" && `Vercel preview builds: unknown${previewOverride.reason ? ` (${previewOverride.reason})` : ""}`}
+              </span>
+              {previewOverride.fetched_at && (
+                <span className="tabular-nums text-zinc-400">checked {elapsed(previewOverride.fetched_at)} ago</span>
+              )}
+            </div>
+          )}
 
           {/* Lane grid + per-account Max load */}
           <div className="space-y-5">

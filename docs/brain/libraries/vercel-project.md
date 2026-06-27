@@ -83,12 +83,14 @@ Convenience: prepend `https://` to a `Deployment.url` (Vercel returns the bare h
 
 - **[[../recipes/apply-vercel-ignore-step-override]]** — `scripts/apply-vercel-ignore-step-override.ts` re-applies the override deterministically (a second run is a no-op). The PATCH the goal records lives here, not in a hand-flipped dashboard setting.
 - **[[preview-capture]]** (M1 Phase 2) — `src/lib/preview-capture.ts` `capturePreviewUrlForJob` / `pollCapturePreviewUrl` calls `getLatestReadyDeploymentForBranch(job.spec_branch, sha)` and persists the URL + state on the owning `agent_jobs` row (`preview_url` / `preview_state`). The box worker (`scripts/builder-worker.ts`) fires the poll right after `git push` succeeds — fire-and-forget, idempotent, best-effort.
+- **`/api/roadmap/box`** (M1 Phase 3) — server-side calls `getProjectIgnoreState()` with a 60s module cache and exposes the result as `preview_build_override` on the box-page payload. The `/dashboard/roadmap/box` page renders a chip (`enabled` · `drifted` · `unknown`) so the supervisor can SEE preview builds are on without running the apply script (supervisable autonomy: see + pause).
 
 ## Safety rails
 
-- The override builds `claude/*` ONLY. Incidental branches (no `claude/` prefix, not production) still skip — this is preserved by the literal command string + a Phase 3 grep gate.
+- The override builds `claude/*` ONLY. Incidental branches (no `claude/` prefix, not production) still skip — this is preserved by the literal command string + the Phase 3 grep gate at `scripts/_check-vercel-ignore-step-rails.ts` (wired into `npm run predeploy`). The gate asserts the constant still carries the `^claude/` anchor, the `production` env check, the `exit 1` build branch, and the `exit 0` skip branch; CI fails red if a code change ever weakens any of them.
 - The deployments lookup is **read-only** against Vercel and refuses to run for `main` / `master` — neither helper can promote or merge.
 - Token is read from `process.env` per call. No module-level capture, no hardcoded fallback — rotating the token in the systemd `EnvironmentFile` takes effect on the next invocation.
+- The build-console chip surfaces the live override state from a 60s server-side cache — the supervisor can see the override is in place + pause the tool without SSH (supervisable autonomy).
 
 ## Related
 

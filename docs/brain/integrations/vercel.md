@@ -1,6 +1,59 @@
 # integrations/vercel
 
-The hosting + edge platform. This page covers **Vercel Edge Config** as used by the PDP edge-served A/B ([[../libraries/experiment-manifest]]); the broader Vercel surface (deploys, ISR, log drain) is covered in [[vercel-log-drain]] and the deploy notes in `CLAUDE.md`.
+The hosting + edge platform. This page covers two surfaces:
+
+1. **Project build-gate (Ignored-Build-Step)** — the API the box uses to flip on per-build preview deploys for `claude/*` build branches ([[../libraries/vercel-project]], [[../goals/preview-test-promote-pipeline]] M1).
+2. **Edge Config** — the globally-replicated KV the PDP edge middleware reads for the active-experiment manifest ([[../libraries/experiment-manifest]]).
+
+The broader Vercel surface (deploys, ISR, log drain) is covered in [[vercel-log-drain]] and the deploy notes in `CLAUDE.md`.
+
+## Ignored-Build-Step override — preview deploys for `claude/*`
+
+**What:** Vercel's per-project `commandForIgnoringBuildStep` is a shell script Vercel runs against every push to decide whether to BUILD (`exit 1`) or SKIP (`exit 0`) that ref. By default the project skips every non-production ref, so a box-pushed `claude/*` branch never produces a preview deployment. M1 of [[../goals/preview-test-promote-pipeline]] PATCHes the command so production AND any `claude/*` ref BUILD, while every incidental branch (a stale `feature/x`, an open-source dep PR, a topic branch) still skips.
+
+### The override command
+
+```sh
+if [ "$VERCEL_ENV" = production ] || echo "$VERCEL_GIT_COMMIT_REF" | grep -q '^claude/'; then exit 1; else exit 0; fi
+```
+
+- `$VERCEL_ENV = production` → BUILD (unchanged — production deploys are never skipped).
+- `$VERCEL_GIT_COMMIT_REF` starts with `claude/` → BUILD (the M1 unlock — every box-pushed build branch now gets a preview).
+- anything else → SKIP (the safety rail — the override does NOT re-enable every preview).
+
+This is the EXACT command [[../libraries/vercel-project]] exports as `CLAUDE_PREVIEW_IGNORE_COMMAND`. The literal string is the contract — its `claude/` + `exit 0` shape is asserted by `scripts/_check-vercel-ignore-step-rails.ts` so a code change can't silently widen the build set.
+
+### Endpoints
+
+- **Read:** `GET https://api.vercel.com/v9/projects/${PROJECT_ID}?teamId=${TEAM_ID}` → returns `commandForIgnoringBuildStep`.
+- **Write:** `PATCH https://api.vercel.com/v9/projects/${PROJECT_ID}?teamId=${TEAM_ID}` with body `{ commandForIgnoringBuildStep: <command> }`.
+- **Per-branch deployments (read-only):** `GET https://api.vercel.com/v6/deployments?projectId=…&teamId=…&meta-githubCommitRef=<branch>` — the lookup the preview-URL capture path uses; refuses to run for `main` / `master` so it can NEVER resolve a production URL.
+
+| | |
+|---|---|
+| Project | `prj_80PnLIjdKT4YAxITnbjkTCgbP0Qv` (`shopcx`) |
+| Team | `team_7VetGZ2S7RsYHDoX2bSoB6En` (`dylan-ralstons-projects`) |
+
+### Credentials
+
+- `VERCEL_API_TOKEN` (preferred — already used by [[../libraries/experiment-manifest]]'s Edge Config write path and by the workspace integration routes), with `VERCEL_TOKEN` as a fallback. **Never hardcoded** — both helpers read from `process.env` per call and throw if neither is set.
+- The token needs project-read + project-write scope on `dylan-ralstons-projects`. Rotate by replacing the value in the box's systemd `EnvironmentFile`; it takes effect on the next `scripts/apply-vercel-ignore-step-override.ts` invocation.
+
+### Applying / re-applying
+
+```sh
+npx tsx scripts/apply-vercel-ignore-step-override.ts
+```
+
+Idempotent. The script GETs the current command first; a second run is a no-op. The build console shows the live `commandForIgnoringBuildStep` value (cached ~60s) so the supervisor can see preview builds are enabled without running the script.
+
+### Safety rails
+
+- **`claude/*` only.** The else-branch is `exit 0` (SKIP) — an incidental branch is NOT rebuilt. The `scripts/_check-vercel-ignore-step-rails.ts` grep gate fails CI if the constant ever loses the `claude/` discriminator or the `exit 0` else-branch.
+- **Read-only deployments lookup.** `listDeploymentsForBranch` refuses `main` / `master` / empty — the capture path cannot accidentally resolve to a production URL.
+- **Neither helper promotes or merges.** The only mutation surface is `PATCH …/v9/projects/{id}` (the override write); preview promotion / merge is M4's bounded action, owned elsewhere.
+
+
 
 ## Edge Config — the active-experiment manifest store
 
