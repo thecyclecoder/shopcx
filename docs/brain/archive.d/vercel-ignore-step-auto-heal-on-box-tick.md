@@ -1,0 +1,1 @@
+- **Auto-heal Vercel Ignored-Build-Step override drift on box-worker tick** · verified 2026-06-27 · → [[../integrations/vercel]]
