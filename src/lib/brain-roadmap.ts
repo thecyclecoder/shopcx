@@ -110,6 +110,11 @@ export interface SpecCard {
    * All optional — older rows / non-in_review cards carry undefined. Consumed by the In Review column on the
    * roadmap board (`InReviewLane`) and by Vale's role page; not used for status routing. */
   valePass?: boolean;
+  /** build-gate-durable-review-signal — the DURABLE "this spec passed Vale review" signal, read straight
+   *  off `specs.vale_review_passed_at` (non-null → true). UNLIKE `valePass` (the transient flag Ada's
+   *  disposition consumes), this survives the spec leaving in_review — so the claim-time build gate can
+   *  still tell, at build time, that the spec genuinely passed review. Cleared on a send-back / re-author. */
+  valeReviewPassed?: boolean;
   adaDisposition?: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade";
   intendedStatus?: "planned" | "deferred";
 }
@@ -510,6 +515,9 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
     // them undefined so consumers can branch on presence). Boolean→true|undefined keeps the SpecCard shape
     // tri-state-friendly the way autoBuild already does.
     valePass: row.vale_pass === true ? true : undefined,
+    // build-gate-durable-review-signal — durable pass signal (survives Ada consuming vale_pass). The gate
+    // reads THIS, not valePass. Non-null timestamp → passed review.
+    valeReviewPassed: row.vale_review_passed_at ? true : undefined,
     adaDisposition: row.ada_disposition ?? undefined,
     intendedStatus: row.intended_status ?? undefined,
   };
