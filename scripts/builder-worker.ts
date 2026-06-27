@@ -11156,6 +11156,22 @@ async function dispatchJob(job: Job) {
       await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
       return;
     }
+    // per-build-vercel-preview-deploys Phase 2 — kick off a fire-and-forget poll that captures the
+    // branch's Vercel preview URL onto the agent_jobs row once the deployment reaches READY. Best
+    // effort + idempotent; failures are swallowed (never fatal to the build). The worker process is
+    // long-lived (job-loop), so the poll outlives this runJob.
+    const headSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim() || null;
+    void (async () => {
+      try {
+        const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
+        await pollCapturePreviewUrl(
+          { jobId: job.id, branch: branch!, commitSha: headSha },
+          { log: (m) => console.log(`${tag} ${m}`) },
+        );
+      } catch (e) {
+        console.error(`${tag} preview-capture poll failed:`, e instanceof Error ? e.message : e);
+      }
+    })();
     const pr = await ensurePr(branch!, slug, false);
     if (!pr) {
       await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });

@@ -82,7 +82,7 @@ Convenience: prepend `https://` to a `Deployment.url` (Vercel returns the bare h
 ## Callers
 
 - **[[../recipes/apply-vercel-ignore-step-override]]** — `scripts/apply-vercel-ignore-step-override.ts` re-applies the override deterministically (a second run is a no-op). The PATCH the goal records lives here, not in a hand-flipped dashboard setting.
-- M1 Phase 2 will add the preview-URL capture path on the box worker that calls `getLatestReadyDeploymentForBranch(job.spec_branch, sha)` and persists the URL on the owning `agent_jobs` row.
+- **[[preview-capture]]** (M1 Phase 2) — `src/lib/preview-capture.ts` `capturePreviewUrlForJob` / `pollCapturePreviewUrl` calls `getLatestReadyDeploymentForBranch(job.spec_branch, sha)` and persists the URL + state on the owning `agent_jobs` row (`preview_url` / `preview_state`). The box worker (`scripts/builder-worker.ts`) fires the poll right after `git push` succeeds — fire-and-forget, idempotent, best-effort.
 
 ## Safety rails
 
