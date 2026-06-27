@@ -41,11 +41,15 @@ This is the EXACT command [[../libraries/vercel-project]] exports as `CLAUDE_PRE
 
 ### Applying / re-applying
 
+The **box worker (`scripts/builder-worker.ts`) is now the primary path**: it calls `patchIgnoredBuildStep()` once at startup AND once at the top of every poll-loop tick, both wrapped in try/catch so a thrown error never crashes the worker. The helper is idempotent (GETs the current command first; no-ops when it already matches `CLAUDE_PREVIEW_IGNORE_COMMAND`; only PATCHes on diff), so steady-state cost is one Vercel GET per tick. A manual revert in the Vercel dashboard is healed by the very next tick (~5s) — visible in worker logs as `vercel-project: commandForIgnoringBuildStep updated. before: … after: …`.
+
+The manual recipe is the **break-glass** path (also idempotent — used when bringing up a fresh project or after a token rotation):
+
 ```sh
 npx tsx scripts/apply-vercel-ignore-step-override.ts
 ```
 
-Idempotent. The script GETs the current command first; a second run is a no-op. The build console shows the live `commandForIgnoringBuildStep` value (cached ~60s) so the supervisor can see preview builds are enabled without running the script.
+The build console shows the live `commandForIgnoringBuildStep` value (cached ~60s) so the supervisor can see preview builds are enabled without running anything — and the chip + the spec-test agent remain as the secondary signal if the auto-heal itself ever keeps failing (regression-of: per-build-vercel-preview-deploys).
 
 ### Safety rails
 
