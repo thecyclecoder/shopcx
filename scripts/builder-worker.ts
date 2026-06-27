@@ -588,18 +588,48 @@ function pickHealthyConfigDir(): string | undefined {
 // for a weekly wall it's the real reset; if a weekly is genuinely a day out and we under-guess, the rejoin
 // just re-caps and re-reads the (now later) reset. Only parse when the message says UTC (the box's tz) so a
 // localized non-UTC string can't be misread as UTC. Returns null otherwise → caller falls back to ~5h.
+// Parse the REAL reset time from the wall message so the capped account auto-returns to rotation at its
+// actual reset, not a flat now+cooldown guess. Priority order (defensive — any tier that can't produce a
+// FUTURE time falls through to the next; a null return → caller uses the default cooldown, never caps
+// forever):
+//   1. The `resetsAt` epoch inside the structured rate_limit_info/event JSON — a UNIX SECONDS timestamp
+//      (e.g. resetsAt:1782810000). The most authoritative signal; also tolerate ms epochs + the camel/snake
+//      `reset_at` / `resetAt` spellings. Only accept a plausibly-future seconds-epoch.
+//   2. A "resets at <ISO/time>" / "try again at <time>" phrase with a Date-parseable value.
+//   3. The legacy UTC clock-hour phrase ("resets 7pm (UTC)") — the box runs in UTC, so parse that hour.
 function parseResetTime(text: string, now: number): number | null {
-  const t = (text || "").toLowerCase();
-  if (!t.includes("utc")) return null; // box emits UTC; a non-UTC localization would mis-parse
-  const m = t.match(/resets?\s+(\d{1,2})\s*(am|pm)/);
-  if (!m) return null;
-  let hour = parseInt(m[1], 10) % 12;
-  if (m[2] === "pm") hour += 12;
-  const d = new Date(now);
-  d.setUTCHours(hour, 0, 0, 0);
-  let resetAt = d.getTime();
-  while (resetAt <= now) resetAt += 24 * 60 * 60 * 1000; // next future occurrence of that UTC hour
-  return resetAt;
+  const raw = text || "";
+  const t = raw.toLowerCase();
+
+  // (1) Structured epoch: resetsAt / resets_at / reset_at / resetAt : <unix seconds | ms>.
+  const epochM = raw.match(/resets?_?at"?\s*[:=]\s*"?(\d{10,13})/i);
+  if (epochM) {
+    let ms = parseInt(epochM[1], 10);
+    if (epochM[1].length <= 11) ms *= 1000; // 10-digit (and 11-digit) values are seconds → ms
+    if (ms > now && ms < now + 30 * 24 * 60 * 60 * 1000) return ms; // sane future window (≤30d) guards garbage
+  }
+
+  // (2) "resets at <time>" / "try again at <time>" → Date-parseable.
+  const atM = raw.match(/(?:resets?|try again)\s+at\s+([0-9tz:+\-./]{4,30}(?:\s*(?:am|pm|utc|z))?)/i);
+  if (atM) {
+    const parsed = Date.parse(atM[1].trim().replace(/[.\s]+$/, "")); // strip a trailing sentence period
+    if (!Number.isNaN(parsed) && parsed > now && parsed < now + 30 * 24 * 60 * 60 * 1000) return parsed;
+  }
+
+  // (3) Legacy UTC clock-hour phrase ("resets 7pm (UTC)"). Only when the message says UTC (the box's tz).
+  if (t.includes("utc")) {
+    const m = t.match(/resets?\s+(\d{1,2})\s*(am|pm)/);
+    if (m) {
+      let hour = parseInt(m[1], 10) % 12;
+      if (m[2] === "pm") hour += 12;
+      const d = new Date(now);
+      d.setUTCHours(hour, 0, 0, 0);
+      let resetAt = d.getTime();
+      while (resetAt <= now) resetAt += 24 * 60 * 60 * 1000; // next future occurrence of that UTC hour
+      return resetAt;
+    }
+  }
+  return null; // caller falls back to the default cooldown — never caps forever
 }
 function markAccountCapped(dir: string, now: number, errorText?: string) {
   const a = accountByDir.get(dir);
@@ -613,15 +643,49 @@ function markAccountCapped(dir: string, now: number, errorText?: string) {
 // Distinguish a Max usage-WALL (pull the account from rotation) from a transient 529/overloaded (which
 // the existing retry owns — NOT a cap, NOT an account switch). Conservative: a 529/overloaded mention
 // short-circuits to "not a cap" so a transient is never mistaken for the wall.
+// A REJECTED rate-limit event is the structured tell of an account/org usage WALL (the 7-day cap shape
+// `rateLimitType:"seven_day" · status:"rejected" · overageStatus:"rejected"`), as opposed to a soft
+// rate-limit warning. We treat a `rate_limit_event`/`rate_limit_info` carrying status/overageStatus
+// "rejected" OR an explicit window `rateLimitType` as a hard rejection → the wall. This is robust to
+// Anthropic re-wording: the rejection SIGNAL, not an exact phrase.
+function isHardRateLimitRejection(t: string): boolean {
+  return (
+    /(?:status|overage_?status)"?\s*[:=]\s*"?rejected\b/.test(t) ||
+    /rate_?limit_?type"?\s*[:=]\s*"?(?:seven_day|seven-day|7_?day|five_hour|five-hour|5_?hour|weekly|opus_weekly|monthly|thirty_day|[a-z_]*?_limit)\b/.test(t) ||
+    /org_level_disabled/.test(t)
+  );
+}
+
+// Classify a session-ending error as the Max usage WALL (→ pull the account from rotation + hop) vs a
+// transient 529/overloaded (→ the existing in-account retry owns it). This CLASSIFIER is the load-bearing
+// fix: Anthropic's wall wording DRIFTED — the current `rate_limit_event` shape (rateLimitType:"seven_day",
+// status:"rejected", overageStatus:"rejected") was being misread as a transient 429, so even paths that
+// ARE wired for failover never hopped and just DIED on the capped account. The classifier is now ROBUST to
+// future wording changes — it fires on the rate-limit/usage-wall SIGNAL rather than a brittle exact phrase,
+// and ERRS TOWARD treating a rejection as a cap.
+//
+// CAUTION: this is run on the FULL session output (`${resultText}\n${raw}`), which for a build is the whole
+// transcript — so a pure cap-VOCABULARY match (a stray "reset"/"limit"/"usage" in a build's own work) would
+// false-cap a HEALTHY account. So we require an actual rate-limit / wall SIGNAL, not just vocabulary:
+//  • a HARD rate-limit rejection (status/overageStatus "rejected", a window rateLimitType, org_level_disabled)
+//    → the wall, regardless of other text (this is the seven_day shape that was slipping through).
+//  • an explicit rate-limit / usage-wall PHRASE (rate_limit_event/error, "usage|session|… limit reached",
+//    "limit will reset", "out of usage", "quota exceeded", "N-hour/N-day/weekly limit", "you've hit your …
+//    limit") → the wall. These are the wall messages; the cap-vocabulary regex is intentionally anchored to
+//    a `limit`/`rate_limit`/`usage`/`quota`/`overage` head so incidental transcript words don't trip it.
+//  • 529 / "overloaded" with NO wall signal → transient, NOT a cap (preserve the existing short-circuit so a
+//    genuine server-overload still gets the in-account retry).
+//  • a bare transient 429 with none of the above, an idle/hardcap kill, a generic crash → NOT a cap.
 function isUsageCapError(text: string): boolean {
   const t = (text || "").toLowerCase();
-  if (/\b529\b|overloaded/.test(t)) return false; // transient — existing retry path
-  // The Max 5-hour wall surfaces in several phrasings — "usage limit reached", and ALSO
-  // "You've hit your session limit · resets 7pm (UTC)" (the shape that slipped through and FAILED a build
-  // instead of failing over). Match "session limit" + the "(reached|hit) your … limit" phrasing too. The
-  // bare 429/rate_limit is deliberately NOT matched (a transient too-many-requests isn't the wall); the
-  // distinguishing signal is the limit MESSAGE, and 529/overloaded already short-circuits above.
-  return /usage limit reached|usage limit|session limit|limit reached|limit will reset|out of usage|quota (?:exceeded|reached)|(?:reached|hit) your[\w .]*limit|5-? ?hour limit/.test(t);
+  if (isHardRateLimitRejection(t)) return true; // structured account/org wall (incl. seven_day) → hop
+  // Transient 529/overloaded short-circuit — only when it isn't ALSO a hard rejection (handled above).
+  if (/\b529\b|overloaded/.test(t)) return false;
+  // Explicit wall phrasings + the structured rate_limit event/error names. Robust to re-wording while still
+  // anchored to a real rate-limit/usage signal (not bare vocabulary) so it can't false-cap a healthy build.
+  // NOTE: "limit reached|exceeded" must be QUALIFIED (usage/session/daily/… limit) so a stray "no limit hit"
+  // in a build transcript can't trip it; the "(reached|hit) your/the … limit" phrase is the other wall shape.
+  return /rate_?limit_?(?:event|error|reached|exceeded)|(?:usage|session|daily|weekly|monthly|account|organization)\s+limit (?:reached|exceeded|hit)|(?:reached|hit) (?:your|the)[\w .]*\blimit\b|limit will reset|out of usage|usage limit|quota (?:exceeded|reached)|over your usage|\b\d+-? ?(?:hour|day) limit\b|weekly limit|overage[_ ]?status|too many requests.*(?:usage|limit|quota)/.test(t);
 }
 
 // The account decision for a job at dispatch time. `run` → use this config dir (and this session, which
@@ -717,6 +781,64 @@ async function withAccountFailover<T extends { isError: boolean; raw: string; re
     }
     return { result: r, configDir, allCapped: false };
   }
+}
+
+// ── THE FOREMAN HELPER (universal account failover) ─────────────────────────────────────────────────
+// runBoxClaude is the ONE path every non-build-dispatch box claude session routes through, so a usage
+// wall on one Max account hops to the next instead of killing the job. It wraps `withAccountFailover`
+// (the proven in-call hop) around a base runner (runClaude / runDirectorClaude / runSeedClaude / any
+// run*Claude that calls runBoxSession), and on the wall — INCLUDING the 7-day `rejected` account/org cap
+// that isUsageCapError now recognizes — marks the account capped, hops to a healthy one, and re-runs
+// FRESH there (the runner rebuilds context from its transcript prompt — the established pattern).
+//
+// Why a helper and not "bake into runClaude": the feature build/plan DISPATCH paths (runJob / runPlanJob)
+// already own a richer, session-PINNED account flow — resolveAccountForJob + handlePoolUsageCap re-dispatch
+// (queued_resume so the branch/PR is reused; canStartFresh semantics for a non-idempotent plan-author
+// resume). Baking failover into the shared base runClaude would DOUBLE-wrap those. So those two dispatch
+// paths keep their own mechanism; EVERY OTHER session type (fold, goal-fold, spec-chat, dev-ask, coach,
+// director, ticket-improve, triage, spec-test, spec-review, migration-fix, repair, regression, security,
+// storefront, product-seed, pr-resolve) routes through THIS helper — no box session starts on a
+// non-failover path.
+//
+// Semantics preserved (matching withAccountFailover): a RESUME pins to its session's owning account
+// (`pin.sessionConfigDir`) when healthy — never a cross-account `--resume` ("No conversation found"); if
+// that account is capped it starts FRESH on a healthy one (sessionId cleared inside the closure). When
+// ALL accounts are capped → `{ allCapped: true, result: null }`, and the caller parks `blocked_on_usage`
+// (auto-resumes at the soonest reset). Metering/session-persist use the RETURNED `configDir` — the account
+// the run actually landed on after any hop. The `run` closure MUST pass its `cfg`/`sid` straight to the
+// base runner's (configDir, sessionId) args so CLAUDE_CONFIG_DIR points at the chosen account.
+async function runBoxClaude(
+  pin: { sessionConfigDir?: string | null; sessionId?: string | null },
+  run: (configDir: string, sessionId: string | null) => Promise<RunResult>,
+): Promise<{ result: RunResult | null; configDir: string | null; allCapped: boolean }> {
+  return withAccountFailover<RunResult>(pin, run);
+}
+
+// The marker an all-capped lane run carries in its synthetic result (so a caller's existing `isError +
+// isUsageCapError` park path fires, and the box log shows WHY the lane no-op'd). isUsageCapError matches
+// it ("usage limit reached … all Max accounts capped").
+const ALL_CAPPED_MARKER = "usage limit reached — all Max accounts capped (parked; auto-resumes at the soonest reset)";
+
+// runBoxLane — the foreman helper for the SINGLE-SHOT lanes (director / seed / improve / spec-test /
+// spec-review / migration-fix / repair / regression / security / storefront / pr-resolve / triage). These
+// lanes previously did `pickHealthyConfigDir()` → ONE run: they STARTED on a healthy account but a usage
+// wall hit MID-RUN just errored, with no hop to another account. runBoxLane gives them the same in-call
+// failover the build/coach paths have: it self-selects a healthy account, runs, and on the wall (incl. the
+// 7-day `rejected` cap) marks it capped + hops to the next healthy account, re-running FRESH (these lanes
+// are single-shot/idempotent — no session to lose). It ALWAYS returns a RunResult: when EVERY account is
+// capped it synthesizes an `isError:true` result whose text carries ALL_CAPPED_MARKER (so the lane's
+// existing isUsageCapError/isError handling parks or re-queues it — it auto-resumes once an account resets,
+// and until then re-picks instantly return all-capped without ever spawning claude). `run(cfg)` MUST pass
+// `cfg` straight to the base runner's configDir arg. `pin` is for the rare resume-pinned single-shot
+// (migration-fix answer-resume); omit it for a fresh single-shot.
+async function runBoxLane(
+  run: (configDir: string, sessionId: string | null) => Promise<RunResult>,
+  pin?: { sessionConfigDir?: string | null; sessionId?: string | null },
+): Promise<RunResult & { configDir: string | null; allCapped: boolean }> {
+  const { result, configDir, allCapped } = await runBoxClaude(pin ?? {}, run);
+  if (result) return { ...result, configDir, allCapped };
+  // allCapped (or no healthy account to even start on) → a synthetic wall result the lane handles as a cap.
+  return { session: pin?.sessionId ?? null, resultText: ALL_CAPPED_MARKER, isError: true, raw: ALL_CAPPED_MARKER, usage: null, model: null, configDir: null, allCapped: true };
 }
 
 // Re-queue jobs parked `blocked_on_usage` once an account that would actually RUN them is healthy again.
@@ -2691,7 +2813,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
         '{"verdict":"code-present","reasoning":"<false positive — the code IS on main, just moved/renamed; cite where>"}',
         '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
       ].join("\n");
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(prompt, sid, REPO_DIR, cfg, job.id));
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
       const verdict = String(parsed?.verdict);
       if (verdict === "code-present") {
@@ -3132,7 +3254,7 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
       // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
       const groomPrompt = await directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c));
-      const { resultText, usage, model } = await runDirectorClaude(groomPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText, usage, model } = await runBoxLane((cfg, sid) => runDirectorClaude(groomPrompt, sid, REPO_DIR, cfg, job.id));
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
@@ -3490,7 +3612,7 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
       // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
-      const { resultText, isError, raw, usage, model } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText, isError, raw, usage, model } = await runBoxLane((cfg, sid) => runDirectorClaude(investPrompt, sid, REPO_DIR, cfg, job.id));
       await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
       // Phase 4: a 529/overloaded is a transient throttle, NOT a spec problem — back off the batch, escalate nothing.
       if (isError && isMaxOverloaded(`${resultText} ${raw}`)) {
@@ -3693,7 +3815,7 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
       // Phase 2 live-state + P7 coaching: her supervision decision carries the authoritative function_autonomy
       // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/initiation/approval).
       const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.repairDismissalInvestigationPrompt(c));
-      const { resultText } = await runDirectorClaude(investPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(investPrompt, sid, REPO_DIR, cfg, job.id));
       const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -3953,7 +4075,7 @@ async function runPlatformDirectorJob(job: Job) {
       ? `\n\nYou are in a read-only worktree of the build's BRANCH (${targetBranch}) — the proposed migration SQL (supabase/migrations/), the apply script, and the new code ARE present here. READ them directly to confirm soundness; do NOT assume a file is missing just because it isn't on main.`
       : "";
     const investPrompt = await directorDecisionPrompt(t.workspace_id, lib.directorInvestigationPrompt(brief) + branchNote);
-    const { session, resultText, isError, usage, model } = await runDirectorClaude(investPrompt, null, investCwd, pickHealthyConfigDir(), job.id);
+    const { session, resultText, isError, usage, model } = await runBoxLane((cfg, sid) => runDirectorClaude(investPrompt, sid, investCwd, cfg, job.id));
     await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
@@ -4126,7 +4248,7 @@ async function runDirectorBounceBackJob(job: Job) {
       } satisfies import("../src/lib/agents/platform-director").GroomCandidate;
 
       const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.groomInvestigationPrompt(candidate));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(prompt, sid, REPO_DIR, cfg, job.id));
       const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -4273,7 +4395,7 @@ async function runDirectorBounceBackJob(job: Job) {
       } satisfies import("../src/lib/agents/platform-director").InitCandidate;
 
       const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.initInvestigationPrompt(candidate));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(prompt, sid, REPO_DIR, cfg, job.id));
       const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -4350,7 +4472,7 @@ async function runDirectorBounceBackJob(job: Job) {
       } satisfies import("../src/lib/agents/platform-director").RepairDismissalCandidate;
 
       const prompt = await directorDecisionPrompt(job.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.repairDismissalInvestigationPrompt(candidate));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(prompt, sid, REPO_DIR, cfg, job.id));
       const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
@@ -4416,7 +4538,7 @@ async function runDirectorBounceBackJob(job: Job) {
       }
       const brief = lib.buildDirectorBrief(t, leashActions);
       const prompt = await directorDecisionPrompt(t.workspace_id, bounceBackPreamble(ctx) + "\n" + lib.directorInvestigationPrompt(brief));
-      const { resultText } = await runDirectorClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
+      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(prompt, sid, REPO_DIR, cfg, job.id));
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
       const verdict = String(parsed?.verdict || "");
       const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
@@ -5427,14 +5549,30 @@ async function runFoldJob(job: Job) {
   }
 
   try {
-    const prompt = isResume
+    const basePrompt = isResume
       ? `${(job.answers || []).length ? `Answers to your questions: ${JSON.stringify(job.answers)}. ` : ""}Continue the batch fold-build for specs: ${slugs.join(", ")}. Same rules and the same final JSON output protocol as before.`
       : foldBatchPrompt(slugs);
+    const prompt = await withCoaching(job, basePrompt);
 
-    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt, undefined, job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    // Universal account failover: route the fold session through the foreman helper so a usage wall
+    // (incl. the 7-day `rejected` cap that previously KILLED the fold with no hop) fails over to a healthy
+    // Max account instead of dying. Pin a resume to its owning account; on the wall, hop fresh. allCapped →
+    // release the batch back to `pending` and park `blocked_on_usage` (auto-resumes when an account resets).
+    const { result: foldRun, configDir: foldDir, allCapped } = await runBoxClaude(
+      { sessionConfigDir: job.claude_session_config_dir, sessionId: job.claude_session_id },
+      (cfg, sid) => runClaude(prompt, sid, wt, cfg, job.id), // `prompt` already carries Ada's coaching
+    );
+    if (allCapped || !foldRun) {
+      await setFoldRows(job.id, "folding", { status: "pending", job_id: null }); // release for a healthy-account retry
+      await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — fold auto-resumes at reset", log_tail: "fold parked — every Max account at its usage wall" });
+      console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
+      return;
+    }
+    const { session, resultText, isError, raw, usage, model } = foldRun;
+    await meterAgentJob(job, foldDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    if (session) await update(job.id, { claude_session_id: session });
+    // Persist the session AND the account it landed on (after any failover hop) so a resume can re-pin.
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: foldDir });
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
@@ -5642,14 +5780,26 @@ async function runGoalFoldJob(job: Job) {
   }
 
   try {
-    const prompt = isResume
+    const basePrompt = isResume
       ? `${(job.answers || []).length ? `Answers to your questions: ${JSON.stringify(job.answers)}. ` : ""}Continue the goal fold-build for goal: ${slug}. Same rules and the same final JSON output protocol as before.`
       : goalFoldPrompt(slug);
+    const prompt = await withCoaching(job, basePrompt);
 
-    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), job.claude_session_id, wt, undefined, job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    // Universal account failover (foreman helper): hop to a healthy Max account on the usage wall — incl.
+    // the 7-day `rejected` cap that previously killed the goal-fold — instead of dying on one capped account.
+    const { result: goalFoldRun, configDir: goalFoldDir, allCapped } = await runBoxClaude(
+      { sessionConfigDir: job.claude_session_config_dir, sessionId: job.claude_session_id },
+      (cfg, sid) => runClaude(prompt, sid, wt, cfg, job.id), // `prompt` already carries Ada's coaching
+    );
+    if (allCapped || !goalFoldRun) {
+      await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — goal fold auto-resumes at reset", log_tail: "goal fold parked — every Max account at its usage wall" });
+      console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
+      return;
+    }
+    const { session, resultText, isError, raw, usage, model } = goalFoldRun;
+    await meterAgentJob(job, goalFoldDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    if (session) await update(job.id, { claude_session_id: session });
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: goalFoldDir });
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — parsed status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
@@ -5806,9 +5956,12 @@ async function runProductSeedJob(job: Job) {
         ].join("\n");
 
   try {
-    const { session, resultText, isError, raw, usage, model } = await runSeedClaude(prompt, job.claude_session_id, REPO_DIR, pickHealthyConfigDir(), job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
+    const { session, resultText, isError, raw, usage, model, configDir: seedDir } = await runBoxLane(
+      (cfg, sid) => runSeedClaude(prompt, sid, REPO_DIR, cfg, job.id),
+      { sessionConfigDir: job.claude_session_config_dir, sessionId: job.claude_session_id },
+    );
+    await meterAgentJob(job, seedDir ?? job.claude_session_config_dir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: seedDir });
     const parsed = parseStatus(resultText);
     const summary = parsed && typeof parsed.summary === "string" ? parsed.summary : "";
     // Supervision hook: post the skill's run summary + reasoning back on the job.
@@ -6020,8 +6173,26 @@ async function runSpecChatJob(job: Job) {
     }
 
     // ── Run the box session (top-level Max claude; secrets stripped; WebSearch allowed) ──
-    const { session, resultText, isError, raw, usage, model } = await runClaude(prompt, sessionId, wt, undefined, job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    // Universal account failover (foreman helper): a usage wall — incl. the 7-day `rejected` cap — hops to
+    // a healthy Max account instead of failing the turn. spec-chat keeps its session on roadmap_chats
+    // (no per-account column), so a resume assumes the default account (RR1) as owner — same convention as
+    // dev-ask/coach; if RR1 is capped the helper starts FRESH on a healthy account (the prompt rebuilds the
+    // full conversation from the transcript, so nothing is lost). allCapped → park `blocked_on_usage`.
+    const { result: chatRun, configDir: chatDir, allCapped } = await runBoxClaude(
+      { sessionId },
+      (cfg, sid) => runClaude(prompt, sid, wt, cfg, job.id),
+    );
+    if (allCapped || !chatRun) {
+      // Park (not fail) so the turn auto-resumes when an account resets. Surface the wait on the chat thread.
+      if (chatId) {
+        await db.from("roadmap_chats").update({ turn_status: "idle", last_error: "all Max accounts at the usage wall — retrying when one resets", updated_at: new Date().toISOString() }).eq("id", chatId);
+      }
+      await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — spec-chat auto-resumes at reset" });
+      console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
+      return;
+    }
+    const { session, resultText, isError, raw, usage, model } = chatRun;
+    await meterAgentJob(job, chatDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
     const newSession = session || sessionId;
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
@@ -6383,8 +6554,11 @@ async function runTicketImproveJob(job: Job) {
           `Self-check it before you close: if you can't show graders a before/after, a tag/category delta, or a preserved-voice quote, the turn caps at ~6/10 regardless of how correct the underlying work was.`,
         ].join("\n");
 
-    const { session: boxSession, resultText, isError, raw, usage, model } = await runImproveClaude(prompt, session.box_session_id, REPO_DIR, pickHealthyConfigDir(), job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    const { session: boxSession, resultText, isError, raw, usage, model, configDir: improveDir } = await runBoxLane(
+      (cfg, sid) => runImproveClaude(prompt, sid, REPO_DIR, cfg, job.id),
+      { sessionId: session.box_session_id }, // chat session has no per-account column → owner defaults to RR1 (dev-ask convention)
+    );
+    await meterAgentJob(job, improveDir ?? undefined, usage, model);
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
@@ -6527,9 +6701,6 @@ async function runEscalationTriageJob(job: Job) {
   const summaries: string[] = [];
   for (const ticketId of sel.selected) {
     const triageRunId = randomUUID();
-    // Account-pool: pin ONE healthy Max account for this ticket's whole solver→skeptic→revise loop — the
-    // revise RESUMES the solver's session, which can't cross accounts. undefined (all capped) → default.
-    const ticketDir = pickHealthyConfigDir();
     try {
       // Paper trail: the routine is taking a stab at this escalated ticket. Internal-only — a human
       // reading the thread sees the AI is on it and can still step in (escalate to a person).
@@ -6537,9 +6708,16 @@ async function runEscalationTriageJob(job: Job) {
 
       const brief = await loadTriageBrief(db, wsId, ticketId);
 
-      // ── Solver (fresh session) ──
-      let solver = await runTriageClaude(triageSolverPrompt(ticketId, brief), null, REPO_DIR, ticketDir, job.id);
-      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
+      // ── Solver (fresh session) ── Universal account failover: run the FRESH solver through the foreman
+      // helper so a usage wall (incl. the 7-day `rejected` cap) hops to a healthy Max account instead of
+      // dying. The account the solver LANDS on becomes `ticketDir` and pins the rest of this ticket's
+      // solver→skeptic→revise loop — the revise RESUMES the solver's session, which can't cross accounts.
+      // allCapped → solver.isError carries ALL_CAPPED_MARKER and the no-parseable-proposal path below
+      // records no_quorum (the ticket stays escalated; the sweep retries it once an account resets).
+      const solver0 = await runBoxLane((cfg, sid) => runTriageClaude(triageSolverPrompt(ticketId, brief), sid, REPO_DIR, cfg, job.id));
+      const ticketDir = solver0.configDir ?? pickHealthyConfigDir();
+      let solver: RunResult = solver0;
+      await meterAgentJob(job, ticketDir ?? undefined, solver.usage, solver.model);
       let proposal = extractJson<SolverProposal>(solver.resultText);
       if (!proposal || !proposal.decision) {
         await recordTriageRun(db, {
@@ -6553,19 +6731,19 @@ async function runEscalationTriageJob(job: Job) {
       }
       const solverSession = solver.session;
 
-      // ── Skeptic (fresh eyes — separate session) ──
+      // ── Skeptic (fresh eyes — separate session) ── pinned to the solver's landed account (ticketDir).
       let skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir, job.id);
-      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
+      await meterAgentJob(job, ticketDir ?? undefined, skeptic.usage, skeptic.model);
       let verdict = extractJson<SkepticVerdict>(skeptic.resultText);
 
       // ── One bounded re-loop on "revise" (solver incorporates critique; skeptic re-checks fresh) ──
       if (verdict?.verdict === "revise") {
         solver = await runTriageClaude(triageRevisePrompt(verdict.critique || "", verdict.concerns || []), solverSession, REPO_DIR, ticketDir, job.id);
-        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, solver.usage, solver.model);
+        await meterAgentJob(job, ticketDir ?? undefined, solver.usage, solver.model);
         const revised = extractJson<SolverProposal>(solver.resultText);
         if (revised?.decision) proposal = revised;
         skeptic = await runTriageClaude(triageSkepticPrompt(ticketId, brief, proposal), null, REPO_DIR, ticketDir, job.id);
-        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, skeptic.usage, skeptic.model);
+        await meterAgentJob(job, ticketDir ?? undefined, skeptic.usage, skeptic.model);
         verdict = extractJson<SkepticVerdict>(skeptic.resultText);
       }
 
@@ -6821,8 +6999,13 @@ async function runSpecTestJob(job: Job) {
       await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
     };
 
-    let { session, resultText, isError, raw, usage, model } = await runSpecTestClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    // Universal account failover (foreman helper): the fresh spec-test run hops to a healthy Max account on
+    // the usage wall (incl. the 7-day `rejected` cap). The landed account (specTestDir) pins the parse-repair
+    // re-prompt, which RESUMES the same session (can't cross accounts).
+    let { session, resultText, isError, raw, usage, model, configDir: specTestDir } = await runBoxLane(
+      (cfg, sid) => runSpecTestClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, specTestDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
     let parsed = extractSpecTestResult(resultText);
 
@@ -6836,8 +7019,8 @@ async function runSpecTestJob(job: Job) {
         `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>"}`,
         `Reuse the checks you already determined; do not re-run anything. If you genuinely could not proceed, return ONLY {"status":"error","error":"<why>"}.`,
       ].join("\n");
-      const retry = await runSpecTestClaude(repair, session, REPO_DIR, pickHealthyConfigDir(), job.id);
-      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, retry.usage, retry.model);
+      const retry = await runSpecTestClaude(repair, session, REPO_DIR, specTestDir ?? pickHealthyConfigDir(), job.id);
+      await meterAgentJob(job, specTestDir ?? undefined, retry.usage, retry.model);
       if (retry.session) { session = retry.session; await update(job.id, { claude_session_id: session }); }
       resultText = retry.resultText; isError = retry.isError; raw = retry.raw;
       parsed = extractSpecTestResult(resultText);
@@ -7046,8 +7229,10 @@ async function runSpecReviewJob(job: Job) {
       `Every slug in the queue MUST appear in decisions[]. needs_fix.defects MUST list the specific checklist failures (no defects → not a needs_fix).`,
     ].join("\n");
 
-    const { session, resultText, isError, raw, usage, model } = await runSpecReviewClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    const { session, resultText, isError, raw, usage, model, configDir: reviewDir } = await runBoxLane(
+      (cfg, sid) => runSpecReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, reviewDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
 
     const parsed = extractJson<{ status?: string; error?: string; decisions?: SpecReviewDecisionJson[] }>(resultText);
@@ -7419,10 +7604,15 @@ async function runMigrationFixJob(job: Job) {
     const prompt = isAnswerResume
       ? migrationFixAnswerPrompt(audit as Record<string, unknown>, brief, job.answers || [])
       : migrationFixPrompt(audit as Record<string, unknown>, brief);
-    // On an answer-resume, resume the same Max session (the prior question + brief are in context).
-    const { session, resultText, isError, raw, usage, model } = await runMigrationFixClaude(prompt, isAnswerResume ? job.claude_session_id : null, REPO_DIR, pickHealthyConfigDir(), job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
+    // On an answer-resume, resume the same Max session (the prior question + brief are in context) — pinned
+    // to its owning account; if capped, the foreman helper starts fresh on a healthy one (the brief is
+    // re-supplied in the prompt). Fresh diagnosis round-robins. Either way a usage wall hops accounts.
+    const { session, resultText, isError, raw, usage, model, configDir: mfDir } = await runBoxLane(
+      (cfg, sid) => runMigrationFixClaude(prompt, sid, REPO_DIR, cfg, job.id),
+      isAnswerResume ? { sessionConfigDir: job.claude_session_config_dir, sessionId: job.claude_session_id } : undefined,
+    );
+    await meterAgentJob(job, mfDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: mfDir });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
@@ -8853,9 +9043,12 @@ async function runPrResolveJob(job: Job) {
       `  {"status":"escalate","reason":"<why it needs a human merge or a rebuild — one line>"}`,
     ].join("\n");
 
-    const { session, resultText, isError, raw, usage, model } = await runPrResolveClaude(await withCoaching(job, prompt), null, wt, pickHealthyConfigDir(), job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
+    const coachedPrPrompt = await withCoaching(job, prompt);
+    const { session, resultText, isError, raw, usage, model, configDir: prDir } = await runBoxLane(
+      (cfg, sid) => runPrResolveClaude(coachedPrPrompt, sid, wt, cfg, job.id),
+    );
+    await meterAgentJob(job, prDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: prDir });
     const parsed = parseStatus(resultText) as { status?: string; reason?: string; summary?: string } | null;
     const reason = String(parsed?.reason || parsed?.summary || "").slice(0, 500);
     console.log(`${tag} claude finished — status=${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -9360,10 +9553,11 @@ async function runRepairJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "repair",
       recognized: REPAIR_VERDICTS,
-      run: () => runRepairClaude(repairBrief, null, REPO_DIR, pickHealthyConfigDir(), job.id),
+      // Universal account failover: each fresh attempt hops to a healthy Max account on the usage wall.
+      run: () => runBoxLane((cfg, sid) => runRepairClaude(repairBrief, sid, REPO_DIR, cfg, job.id)),
       onRun: async (r) => {
-        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
-        if (r.session) await update(job.id, { claude_session_id: r.session });
+        await meterAgentJob(job, r.configDir ?? undefined, r.usage ?? null, r.model ?? null);
+        if (r.session) await update(job.id, { claude_session_id: r.session, claude_session_config_dir: r.configDir });
       },
     });
     const { isError, raw } = run;
@@ -9758,10 +9952,11 @@ async function runRegressionJob(job: Job) {
     const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
       agent: "regression review",
       recognized: REGRESSION_VERDICTS,
-      run: () => runRegressionClaude(coachedRegressionPrompt, null, REPO_DIR, pickHealthyConfigDir(), job.id),
+      // Universal account failover: each fresh attempt hops to a healthy Max account on the usage wall.
+      run: () => runBoxLane((cfg, sid) => runRegressionClaude(coachedRegressionPrompt, sid, REPO_DIR, cfg, job.id)),
       onRun: async (r) => {
-        await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage ?? null, r.model ?? null);
-        if (r.session) await update(job.id, { claude_session_id: r.session });
+        await meterAgentJob(job, r.configDir ?? undefined, r.usage ?? null, r.model ?? null);
+        if (r.session) await update(job.id, { claude_session_id: r.session, claude_session_config_dir: r.configDir });
       },
     });
     const { isError, raw } = run;
@@ -10414,13 +10609,22 @@ async function runSecurityReviewJob(job: Job) {
     // needs to re-emit them in the recognized shape. Wired via `repair` so attempt 2 is a same-session
     // parse-repair instead of a wasted fresh re-investigation.
     const SECURITY_VERDICTS = new Set(["clean", "false-positive", "needs-human", "real-vuln"]);
-    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict({
+    // Universal account failover: the fresh attempt hops to a healthy Max account on the usage wall and
+    // records the account it LANDED on (securityDir); the parse-repair (attempt 2) RESUMES that session, so
+    // it must pin to the same account — never a cross-account --resume.
+    let securityDir: string | null = null;
+    const { run, parsed, verdict, fallbackReason } = await resolveReviewVerdict<RunResult>({
       agent: "security review",
       recognized: SECURITY_VERDICTS,
-      run: () => runSecurityClaude(prompt, null, REPO_DIR, pickHealthyConfigDir(), job.id),
-      repair: (priorSession) => runSecurityClaude(securityReviewRepairPrompt(), priorSession, REPO_DIR, pickHealthyConfigDir(), job.id),
+      run: async () => {
+        const r = await runBoxLane((cfg, sid) => runSecurityClaude(prompt, sid, REPO_DIR, cfg, job.id));
+        securityDir = r.configDir; // pin the parse-repair (attempt 2 resume) to the account this landed on
+        const { configDir: _cd, allCapped: _ac, ...base } = r;
+        return base;
+      },
+      repair: (priorSession) => runSecurityClaude(securityReviewRepairPrompt(), priorSession, REPO_DIR, securityDir ?? pickHealthyConfigDir(), job.id),
       onRun: async (r) => {
-        if (r.session) await update(job.id, { claude_session_id: r.session });
+        if (r.session) await update(job.id, { claude_session_id: r.session, claude_session_config_dir: securityDir });
       },
     });
     const { isError, raw } = run;
@@ -10800,9 +11004,11 @@ async function runStorefrontOptimizerJob(job: Job) {
       return;
     }
 
-    const { session, resultText, isError, raw, usage, model } = await runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), null, REPO_DIR, pickHealthyConfigDir(), job.id);
-    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
+    const { session, resultText, isError, raw, usage, model, configDir: sfDir } = await runBoxLane(
+      (cfg, sid) => runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, sfDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: sfDir });
     const parsed = extractJson<Record<string, unknown>>(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
