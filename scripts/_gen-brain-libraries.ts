@@ -362,6 +362,7 @@ const GOTCHAS: Record<string, string[]> = {
     "Always go through `createFullReturn()` — never set `is_return: true` on EasyPost shipments directly (it swaps from/to addresses).",
     "`net_refund_cents` is set at creation and is the contract. Never re-derive at refund time.",
     "`freeLabel: true` = we eat the EasyPost cost; net_refund = order_total_cents.",
+    "`createShopifyReturn` throws `RecoverableShopifyReturnError` for caller-handled failures (null Shopify mirror, Shopify userErrors). `createFullReturn` catches that class and returns `{ success: false, error }` WITHOUT `console.error` so a healthy recovery doesn't churn the Control Tower error feed (signature `vercel:314ca8c785aff3eb`). Unexpected throws still log.",
   ],
   "dunning": [
     "Card dedup is by `(last4, expiry_month, expiry_year, card_brand)` — Shopify can return multiple `paymentMethodToken`s for the same logical card.",

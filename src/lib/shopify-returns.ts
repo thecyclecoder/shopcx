@@ -32,6 +32,24 @@ async function shopifyGraphQL(
   return res.json();
 }
 
+// ── Recoverable-error class ──
+
+/**
+ * A return that didn't take in Shopify's mirror for a reason the CALLER
+ * handles cleanly (null `data.return`, userErrors). createFullReturn surfaces
+ * these as `{ success: false, error }` and the playbook/orchestrator escalate
+ * or fall back — they're not bugs in our code, so we skip the
+ * `console.error("[createFullReturn] Error:", …)` that otherwise reaches the
+ * Vercel log drain and mints a Control Tower incident on every healthy
+ * recovery (signature `vercel:314ca8c785aff3eb`).
+ */
+export class RecoverableShopifyReturnError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RecoverableShopifyReturnError";
+  }
+}
+
 // ── Types ──
 
 export interface CreateReturnParams {
@@ -140,11 +158,23 @@ export async function createShopifyReturn(
   };
 
   if (data.userErrors?.length) {
-    throw new Error(`Shopify returnCreate user error: ${data.userErrors[0].message}`);
+    // Shopify-side validation (e.g. "Some return line items could not be
+    // created", duplicate return, item already refunded). Caller-handled —
+    // surface as a recoverable failure so createFullReturn's catch can
+    // skip the console.error noise.
+    throw new RecoverableShopifyReturnError(
+      `Shopify returnCreate user error: ${data.userErrors[0].message}`,
+    );
   }
 
   if (!data.return) {
-    throw new Error("Shopify returnCreate returned null");
+    // Shopify accepted the mutation but didn't materialize a return record —
+    // observed when the order has no returnable lines (already fully
+    // returned, unfulfilled, etc.). The OUTER call site handles this via
+    // {success: false}; treat it as a recoverable failure, not a bug.
+    throw new RecoverableShopifyReturnError(
+      "Shopify returnCreate returned null mirror — order has no returnable lines or Shopify rejected the return",
+    );
   }
 
   const shopifyReturnGid = data.return.id;
@@ -869,6 +899,16 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
       labelCostCents: params.freeLabel ? 0 : labelCostCents,
     };
   } catch (err) {
+    // Recoverable failures (null Shopify mirror / Shopify userErrors / known
+    // EasyPost configuration gaps) are caller-handled via {success: false}
+    // and shouldn't churn the Control Tower error feed — the Vercel log
+    // drain captures every `console.error` and mints a paged incident on a
+    // healthy recovery path (signature `vercel:314ca8c785aff3eb`). Skip the
+    // log for that class; keep it for unexpected throws so a real bug still
+    // surfaces.
+    if (err instanceof RecoverableShopifyReturnError) {
+      return { success: false, error: err.message };
+    }
     console.error("[createFullReturn] Error:", err);
     return { success: false, error: String(err) };
   }
