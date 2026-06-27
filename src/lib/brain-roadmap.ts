@@ -1348,7 +1348,16 @@ function goalRowToCard(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>):
 
 /** Resolve each milestone of a goal to its linked SpecCards, keyed by milestone id. Reads child specs via
  *  the specs-table SDK (`specsForMilestone`) and maps them to SpecCards from the already-loaded board set
- *  (so completion mirrors the board exactly), falling back to a fresh DB read for any not on the board. */
+ *  (so completion mirrors the board exactly), falling back to a fresh DB read for any not on the board.
+ *
+ *  goal-completion-counts-folded-specs: FOLDED specs are INCLUDED in this set — folded is the terminal done
+ *  state (shipped → archived into the brain), strictly *more* complete than shipped, so it must count TOWARD
+ *  goal/milestone completion, never against it. The old `.filter(isBoardableStatus)` dropped folded here
+ *  (folded leaves the board), so once a goal's specs folded they vanished from the completion count and a
+ *  fully-folded goal derived `0 of 0 → 0%` — the more done it got, the lower its % dropped. A folded row is
+ *  off the board (`board` excludes it), so it always takes the `dbRowToSpecCard(r)` fallback, which maps
+ *  `status='folded'` → a `shipped` card (deriveSpecCardStatus) — and `specCompletion` returns 1 for shipped.
+ *  Net: a folded spec counts as COMPLETE. Boardable (non-folded) specs still prefer their resolved board card. */
 async function specsByMilestoneForGoals(workspaceId: string, goals: GoalRow[], board: SpecCard[]): Promise<Map<string, SpecCard[]>> {
   const bySlug = new Map(board.map((c) => [c.slug, c]));
   const out = new Map<string, SpecCard[]>();
@@ -1356,11 +1365,10 @@ async function specsByMilestoneForGoals(workspaceId: string, goals: GoalRow[], b
   await Promise.all(
     milestoneIds.map(async (mid) => {
       const rows = await specsForMilestone(workspaceId, mid);
-      // Prefer the board's already-resolved SpecCard (carries blocker resolution + card-state overlay);
-      // fall back to a fresh map of the raw row for any spec not boardable (e.g. folded — excluded above).
-      const cards = rows
-        .filter((r) => isBoardableStatus(r.status))
-        .map((r) => bySlug.get(r.slug) ?? dbRowToSpecCard(r));
+      // Prefer the board's already-resolved SpecCard (carries blocker resolution + card-state overlay); fall
+      // back to a fresh map of the raw row for any spec not on the board — a folded spec is off the board, so
+      // it takes this fallback, where dbRowToSpecCard maps folded → a shipped card (counts as complete).
+      const cards = rows.map((r) => bySlug.get(r.slug) ?? dbRowToSpecCard(r));
       out.set(mid, cards);
     }),
   );
