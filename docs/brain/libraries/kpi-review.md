@@ -44,7 +44,7 @@ Prints `metric · cadence · snapshot · ground-truth · drift · driftPct · st
 
 - `scripts/_audit-kpis.ts` — the Phase 1 CLI surface.
 - (Phase 4 — planned) `GET /api/developer/agents/scorecard/audit?metric=&cadence=` — owner-gated, calls `auditKpi` for a single metric or `auditAllKpis` for a cadence's full registry. The scorecard page's `KpiTile` component will call this after the snapshot loads, rendering a subscript: `audit: snapshot ✓` (drift <0.5%), `drift: +Y% vs raw` (0.5–5%), or `DRIFT: snapshot=X · raw=Y` (>5%). Click to expand per-metric drift detail side-by-side (`snapshotDetail` vs `groundTruthDetail`).
-- (Phase 5 — planned) `audit-platform-scorecard` step on [[../inngest/platform-director-cron]] — will run `auditAllKpis` on the standing pass, write per-metric audit records (table TBD: `kpi_audit_log` or [[../tables/director_activity]] action_kind), and open a [[../tables/loop_alerts]] row (`signature:'kpi_drift:<metric>:<cadence>'`) on persistent drift (≥2 consecutive snapshots exceeding tolerance).
+- `audit-platform-scorecard` step on [[../inngest/platform-director-cron]] ([[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 5) — runs `auditAllKpis(workspaceId, cadence)` on the standing pass for all three cadences, upserts one [[../tables/kpi_audit_log]] row per metric (idempotent on `snapshot_date`), and opens a [[../tables/loop_alerts]] row (`loop_id`/`signature` = `kpi_drift:<metric>:<cadence>`, `owner='platform'`, `kind='kpi-drift'`, `reason='kpi_drift'`) when a metric has been over-tolerance for ≥2 consecutive snapshots. A single-snapshot drift is logged but NOT alerted (self-healing on transient timing noise); a metric recovering to within-tolerance auto-resolves its open alert.
 
 ## Related
 
