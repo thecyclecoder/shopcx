@@ -9688,6 +9688,36 @@ function securityDiffPrompt(mergeSha: string, specSlug: string, prNumber?: numbe
     ``,
     `THE MERGED DIFF: commit ${mergeSha} on main${prNumber ? ` (PR #${prNumber})` : ""}, the merged build of spec "${specSlug}".`,
     `First run \`git fetch origin main\` then \`git show ${mergeSha}\` (or \`git diff ${mergeSha}~1 ${mergeSha}\`) to read EXACTLY what changed. Then read the touched files in the working tree for context. Run the /security-review skill's checks over the diff.`,
+    ...securityReviewChecksAndVerdictBlock(),
+  ].join("\n");
+}
+
+// Phase 2 of [[../specs/security-test-on-preview-pre-merge]]: the pre-merge branch-mode prompt. Same review
+// contract as diff mode (NEVER mutates / NEVER edits product code / NEVER opens a PR — it reviews + classifies
+// + AUTHORS a fix spec on real-vuln), but it reads the UNMERGED branch diff (`git diff origin/main...origin/{branch}`)
+// instead of a post-merge main commit, and any runtime probe lands on the per-build Vercel preview origin
+// (NOT prod). The verdict the M4 promote gate reads to refuse to auto-merge an unreviewed branch comes from
+// this lane's terminal state.
+function securityBranchPrompt(branch: string, previewOrigin: string, specSlug: string, prNumber?: number | null): string {
+  const previewLine = previewOrigin
+    ? `Any runtime probe (curl / HTTP check / route hit) MUST target the per-build preview origin \`${previewOrigin}\` — NOT production. The preview is the same code as the unmerged branch.`
+    : `Skip runtime probes for this pass (no preview origin recorded). Static review only.`;
+  return [
+    `You are the box's Security / Dependency Agent ("Vault") on Max (web search on, no API key). You KEEP read access to prod, but you NEVER mutate, NEVER edit product code, and NEVER open a PR in this pass: you REVIEW an UNMERGED branch diff read-only and either clear it or AUTHOR a fix spec (a doc). The actual code build is queued later by the DevOps Director — not now. cwd is the repo root.`,
+    `You are the supervisor on the auto-merge proxy: auto-merge optimizes "ship the fix"; its degenerate state is shipping a fix that introduces a vulnerability. Give this UNMERGED build branch an autonomous security pass BEFORE it merges — so a real vuln blocks the auto-merge instead of escaping into main.`,
+    ``,
+    `THE UNMERGED BRANCH: \`${branch}\`${prNumber ? ` (PR #${prNumber})` : ""}, the in-progress build of spec "${specSlug}".`,
+    `First run \`git fetch origin main\` and \`git fetch origin ${branch}\`, then \`git diff origin/main...origin/${branch}\` to read EXACTLY what the branch changes vs main. Then read the touched files in the working tree for context. Run the /security-review skill's checks over the branch diff. Your evidence MUST reference the branch diff (and the touched files at branch HEAD), NOT a post-merge commit on main.`,
+    previewLine,
+    ...securityReviewChecksAndVerdictBlock(),
+  ].join("\n");
+}
+
+// Shared review-checks + verdict-envelope block — identical wording across diff + branch modes so Vault's
+// review contract is the same regardless of when she runs (post-merge vs pre-merge). Returns string[] so
+// callers can spread it into their own prompt array.
+function securityReviewChecksAndVerdictBlock(): string[] {
+  return [
     ``,
     `Review for (ShopCX-specific, per CLAUDE.md invariants):`,
     `  • Injection — SQL / command / prompt injection, unsanitized input reaching a query or shell.`,
@@ -9710,7 +9740,7 @@ function securityDiffPrompt(mergeSha: string, specSlug: string, prNumber?: numbe
     `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet that must hold>","..."]}}`,
     `  {"status":"clean"|"false-positive","review":"<what you checked + why it's safe>"}`,
     `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
-  ].join("\n");
+  ];
 }
 
 // iteration-ingest-async-reports-fix-tooling-69594a: same-session JSON parse-repair re-prompt. When the
@@ -9733,18 +9763,42 @@ function securityReviewRepairPrompt(): string {
   ].join("\n");
 }
 
-function securityFixSpecMarkdown(spec: SecurityFixProposal, mergedSlug: string, mergeSha: string): string {
+// Discriminated source of the security finding — drives the fix spec's header line, default verification
+// bullet, and footer attribution. `diff` = a post-merge finding tied to a merge SHA; `branch` =
+// [[../specs/security-test-on-preview-pre-merge]] Phase 2's pre-merge finding tied to the unmerged branch +
+// its per-build preview origin.
+type SecurityFixSource =
+  | { kind: "diff"; mergeSha: string }
+  | { kind: "branch"; branch: string; previewOrigin: string };
+
+function securityFixSpecMarkdown(spec: SecurityFixProposal, parentSlug: string, source: SecurityFixSource): string {
   const verification = (Array.isArray(spec.verification) ? spec.verification : []).filter((b) => typeof b === "string" && b.trim());
+  const defaultBullet =
+    source.kind === "diff"
+      ? `- Re-review the merged diff (\`git show ${source.mergeSha}\`) → expect the flagged vulnerability is closed.`
+      : `- Re-review the branch diff (\`git diff origin/main...origin/${source.branch}\`) → expect the flagged vulnerability is closed.`;
   const vBullets = verification.length
     ? verification.map((b) => `- ${b.trim()}`).join("\n")
-    : `- Re-review the merged diff (\`git show ${mergeSha}\`) → expect the flagged vulnerability is closed.`;
+    : defaultBullet;
+  const sourceHeaderLine =
+    source.kind === "diff"
+      ? `**Security-of-merge:** \`${source.mergeSha}\``
+      : `**Security-of-branch:** \`${source.branch}\`${source.previewOrigin ? ` · preview \`${source.previewOrigin}\`` : ""}`;
+  const intentDefault =
+    source.kind === "diff"
+      ? "Close the vulnerability the merged diff introduced."
+      : "Close the vulnerability the unmerged branch diff introduced before it merges.";
+  const footer =
+    source.kind === "diff"
+      ? `> Authored by the box Security Agent (Vault) — a security finding on the merged diff of [[${parentSlug}]] (commit \`${source.mergeSha}\`). Read-only review; the owner-gated build applies the fix. The DevOps Director queues the build (auto-approve within its leash; pre-live the CEO queues it).`
+      : `> Authored by the box Security Agent (Vault) — a security finding on the UNMERGED branch diff of [[${parentSlug}]] (branch \`${source.branch}\`${source.previewOrigin ? `, preview \`${source.previewOrigin}\`` : ""}). Read-only review; the owner-gated build applies the fix. The DevOps Director queues the build (auto-approve within its leash; pre-live the CEO queues it).`;
   return [
     `# ${spec.title}`,
     ``,
-    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/security-dependency-agent]]"} · **Fixes:** [[${mergedSlug}]]`,
-    `**Security-of-merge:** \`${mergeSha}\``,
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/security-dependency-agent]]"} · **Fixes:** [[${parentSlug}]]`,
+    sourceHeaderLine,
     ``,
-    (spec.intent || "Close the vulnerability the merged diff introduced.").trim(),
+    (spec.intent || intentDefault).trim(),
     ``,
     `## Phase 1 — close the vulnerability`,
     (spec.fix || "Scope from the security review above; land the fix + its brain page.").trim(),
@@ -9753,14 +9807,15 @@ function securityFixSpecMarkdown(spec: SecurityFixProposal, mergedSlug: string, 
     `## Verification`,
     vBullets,
     ``,
-    `> Authored by the box Security Agent (Vault) — a security finding on the merged diff of [[${mergedSlug}]] (commit \`${mergeSha}\`). Read-only review; the owner-gated build applies the fix. The DevOps Director queues the build (auto-approve within its leash; pre-live the CEO queues it).`,
+    footer,
     ``,
   ].join("\n");
 }
 
 // Author the fix spec on main DIRECTLY (mirrors authorRegressionFixSpec — same-slug convergence stays
-// idempotent). Returns the resolved slug + whether it pre-existed, or null on failure.
-async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+// idempotent). Returns the resolved slug + whether it pre-existed, or null on failure. The `source`
+// discriminator picks the diff/branch flavor of the rendered spec markdown.
+async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: SecurityFixSource, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
   const s = (raw || {}) as SecurityFixProposal;
   const rawSlug = String(s.slug || "");
   const title = String(s.title || "");
@@ -9772,9 +9827,13 @@ async function authorSecurityFixSpec(raw: unknown, mergedSlug: string, mergeSha:
     const { getSpec } = await import("../src/lib/brain-roadmap");
     const existing = await getSpec(slug, workspaceId);
     if (existing) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
-    const markdown = securityFixSpecMarkdown({ ...s, slug, title }, mergedSlug, mergeSha);
+    const markdown = securityFixSpecMarkdown({ ...s, slug, title }, parentSlug, source);
+    const reason =
+      source.kind === "diff"
+        ? `security-agent fix for merged ${parentSlug}`
+        : `security-agent fix for unmerged branch of ${parentSlug}`;
     try {
-      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent fix for merged ${mergedSlug}`, markdown);
+      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", reason, markdown);
     } catch (e) {
       console.warn(`[security] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
       return null;
@@ -9985,13 +10044,13 @@ async function runSecurityReviewJob(job: Job) {
   const tag = `[security:${job.id.slice(0, 8)}]`;
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const { SECURITY_DIRECTOR_FUNCTION, depFindingSignature } = await import("../src/lib/security-agent");
-  let instr: { mode?: string; merge_sha?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string } = {};
+  let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
     /* not JSON — degrade */
   }
-  const mode = instr.mode === "dep-watch" ? "dep-watch" : "diff";
+  const mode = instr.mode === "dep-watch" ? "dep-watch" : instr.mode === "branch" ? "branch" : "diff";
 
   // ── Disposer action resume — a routed security_build was approved (queue) or declined (dismiss). ──
   const buildAction = (job.pending_actions || []).find((a) => a.type === "security_build");
@@ -10053,17 +10112,56 @@ async function runSecurityReviewJob(job: Job) {
       return;
     }
 
-    // ── Phase 1: per-merged-diff security pass. ──
-    const mergeSha = instr.merge_sha || "";
-    const mergedSlug = instr.spec_slug || job.spec_slug;
-    if (!mergeSha) {
-      await update(job.id, { status: "completed", error: null, log_tail: "no merge sha — nothing to review" });
-      console.log(`${tag} no merge sha → no-op`);
-      return;
-    }
-    console.log(`${tag} reviewing merged diff ${mergeSha.slice(0, 12)} (spec ${mergedSlug})`);
+    // ── Build the per-mode prompt + source-discriminator. ──
+    // `diff` (post-merge) reads `git show {sha}` from main; `branch` ([[../specs/security-test-on-preview-pre-merge]]
+    // Phase 2, pre-merge) reads `git diff origin/main...origin/{branch}` and runtime probes hit `preview_origin`,
+    // never prod. After the prompt is built, the verdict-handling tail is identical (clean / false-positive /
+    // needs-human / real-vuln) — drives off `parentSlug` + `source` for fix-spec authoring + the surfaced
+    // context label.
+    const parentSlug = instr.spec_slug || job.spec_slug;
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
-    const prompt = await appendAgentInstructions(db, job.workspace_id, "security-review", securityDiffPrompt(mergeSha, mergedSlug, instr.pr_number ?? null));
+    let basePrompt: string;
+    let source: SecurityFixSource;
+    let contextLabel: string;
+    let activityReason: (verdict: string, review: string) => string;
+    let activityMetadata: Record<string, unknown>;
+    let specLabel: string;
+    if (mode === "branch") {
+      // ── Phase 2: pre-merge per-branch security pass. ──
+      const branch = String(instr.branch || job.spec_branch || "");
+      const previewOrigin = String(instr.preview_origin || "");
+      if (!branch) {
+        await update(job.id, { status: "completed", error: null, log_tail: "no branch — nothing to review" });
+        console.log(`${tag} no branch → no-op`);
+        return;
+      }
+      console.log(`${tag} reviewing unmerged branch ${branch} (spec ${parentSlug}${previewOrigin ? `, preview ${previewOrigin}` : ""})`);
+      basePrompt = securityBranchPrompt(branch, previewOrigin, parentSlug, instr.pr_number ?? null);
+      source = { kind: "branch", branch, previewOrigin };
+      contextLabel = `unmerged branch ${branch}`;
+      specLabel = `unmerged ${parentSlug} (${branch})`;
+      activityReason = (verdict, review) =>
+        `Security review of unmerged ${parentSlug} (branch ${branch}): ${verdict} — ${review}`.slice(0, 4000);
+      activityMetadata = { branch, preview_origin: previewOrigin, job_id: job.id };
+    } else {
+      // ── Phase 1: per-merged-diff security pass. ──
+      const mergeSha = instr.merge_sha || "";
+      if (!mergeSha) {
+        await update(job.id, { status: "completed", error: null, log_tail: "no merge sha — nothing to review" });
+        console.log(`${tag} no merge sha → no-op`);
+        return;
+      }
+      console.log(`${tag} reviewing merged diff ${mergeSha.slice(0, 12)} (spec ${parentSlug})`);
+      basePrompt = securityDiffPrompt(mergeSha, parentSlug, instr.pr_number ?? null);
+      source = { kind: "diff", mergeSha };
+      contextLabel = `merged diff ${mergeSha.slice(0, 12)}`;
+      specLabel = `merged ${parentSlug}`;
+      activityReason = (verdict, review) =>
+        `Security review of merged ${parentSlug} (commit ${mergeSha.slice(0, 12)}): ${verdict} — ${review}`.slice(0, 4000);
+      activityMetadata = { merge_sha: mergeSha, job_id: job.id };
+    }
+
+    const prompt = await appendAgentInstructions(db, job.workspace_id, "security-review", basePrompt);
     // verdict-robustness (Phase 2): parse robustly; an unparseable/unrecognized verdict re-runs ONCE before
     // failing safe to an ACTIONABLE needs_attention reason (never a bare "ended without a recognizable verdict").
     // iteration-ingest-async-reports-fix-tooling-69594a: the prior `iteration-ingest-async-reports` build
@@ -10084,7 +10182,7 @@ async function runSecurityReviewJob(job: Job) {
       },
     });
     const { isError, raw } = run;
-    console.log(`${tag} claude finished — verdict: ${verdict || "(none)"} isError=${isError}`);
+    console.log(`${tag} claude finished (${contextLabel}) — verdict: ${verdict || "(none)"} isError=${isError}`);
 
     if (verdict === "clean" || verdict === "false-positive") {
       const review = String(parsed?.review || `${verdict} — no vulnerability introduced`);
@@ -10100,9 +10198,9 @@ async function runSecurityReviewJob(job: Job) {
         workspaceId: job.workspace_id,
         directorFunction: SECURITY_DIRECTOR_FUNCTION,
         actionKind: "escalated",
-        specSlug: mergedSlug,
-        reason: `Security review of merged ${mergedSlug} (commit ${mergeSha.slice(0, 12)}): needs-human — ${review}`.slice(0, 4000),
-        metadata: { merge_sha: mergeSha, job_id: job.id },
+        specSlug: parentSlug,
+        reason: activityReason("needs-human", review),
+        metadata: activityMetadata,
       });
       await update(job.id, { status: "needs_attention", error: "needs-human", instructions: JSON.stringify({ ...instr, verdict }), log_tail: review.slice(-2000) });
       console.log(`${tag} needs-human → surfaced, no spec`);
@@ -10111,14 +10209,14 @@ async function runSecurityReviewJob(job: Job) {
 
     if (verdict === "real-vuln") {
       const review = String(parsed?.review || "");
-      const authored = await authorSecurityFixSpec(parsed?.spec, mergedSlug, mergeSha, job.workspace_id);
+      const authored = await authorSecurityFixSpec(parsed?.spec, parentSlug, source, job.workspace_id);
       if (!authored) {
         await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real vulnerability but no valid fix spec" });
         console.log(`${tag} real-vuln but no valid spec → surfaced needs-human`);
         return;
       }
       const ledger = JSON.stringify({ ...instr, verdict, authored_slug: authored.slug });
-      await routeSecurityFix(job, authored, { tag, specLabel: `merged ${mergedSlug}`, review, ledger, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION });
+      await routeSecurityFix(job, authored, { tag, specLabel, review, ledger, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION });
       return;
     }
 
