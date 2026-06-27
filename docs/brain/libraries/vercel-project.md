@@ -2,7 +2,7 @@
 
 The narrow Vercel REST API surface the per-build preview-deploy pipeline needs ([[../goals/preview-test-promote-pipeline]] M1). Two responsibilities — and no more:
 
-1. **Idempotently override the project's Ignored-Build-Step** so `claude/*` build branches produce a preview deployment.
+1. **Idempotently override the project's Ignored-Build-Step** so SPEC-BUILD branches (`claude/build-*`) produce a preview deployment — and ONLY those (`vercel-skip-non-spec-build-refs`).
 2. **Read-only look up of a branch's latest preview deployment** so the worker can persist its URL on the owning `agent_jobs` row.
 
 Anything mutating outside #1 (canceling a deploy, promoting a preview, redeploying) lives elsewhere — neither helper here can promote or merge.
@@ -33,19 +33,21 @@ The supervisable-autonomy override write.
 3. Otherwise `PATCH /v9/projects/{PROJECT_ID}?teamId={TEAM_ID}` with `{ commandForIgnoringBuildStep: desired }`.
 4. Console-logs the before/after so the override is auditable from the build console (supervisable autonomy: the tool surfaces its reasoning).
 
-`desired` defaults to **`CLAUDE_PREVIEW_IGNORE_COMMAND`** — the exact override the goal records:
+`desired` defaults to **`CLAUDE_PREVIEW_IGNORE_COMMAND`** — the exact override (narrowed to spec-builds by `vercel-skip-non-spec-build-refs`, 2026-06-27):
 
 ```sh
-if [ "$VERCEL_ENV" = production ] || echo "$VERCEL_GIT_COMMIT_REF" | grep -q '^claude/'; then exit 1; else exit 0; fi
+if [ "$VERCEL_ENV" = production ] || echo "$VERCEL_GIT_COMMIT_REF" | grep -q '^claude/build-'; then exit 1; else exit 0; fi
 ```
 
 Vercel runs this in `/bin/sh`: `exit 1` means BUILD, `exit 0` means SKIP. So:
 
 - production deploys (`$VERCEL_ENV = production`) → BUILD (unchanged)
-- `claude/anything` build branches → BUILD (the new behavior — the M1 unlock)
-- any other branch (an incidental open-source dependabot push, a topic branch, a stale `feature/x`) → SKIP
+- spec-build branches (`claude/build-*` — `runBuildJob`'s lane) → BUILD (the only lane that needs a per-build preview, for pre-merge spec-testing)
+- any other branch — incl. EVERY other foreman lane (`claude/fold-*`, `claude/goal-fold-*`, `claude/plan-*`, `claude/spec-chat-*`, `claude/dev-ask-*`, `claude/director-coach-*`) and any incidental topic / dependabot push → SKIP
 
-That last property is the safety rail: the override builds `claude/*` ONLY — it does NOT re-enable every preview.
+That last property is the safety rail: the override builds `claude/build-*` ONLY — it does NOT build folds or any other `claude/*` lane. (Pre-2026-06-27 it whitelisted all `claude/*`, which built folds too — a fold's preview FAILS and blocked the fold PR merge; `vercel-skip-non-spec-build-refs` fixed it by giving spec-builds a distinct prefix.)
+
+> **The live value is bound to this constant by the auto-heal.** The box worker re-PATCHes the override to `CLAUDE_PREVIEW_IGNORE_COMMAND` on every tick, so a bare Vercel-dashboard/API change is reverted within ~5s to whatever the RUNNING `builder-worker.ts` exports. Changing the override durably = change this constant in code AND get the box running the new code (merge to `main` → box `git pull` → worker restart).
 
 ### `getProjectIgnoreState()` → `{ commandForIgnoringBuildStep }`
 

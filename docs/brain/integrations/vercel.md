@@ -2,26 +2,30 @@
 
 The hosting + edge platform. This page covers two surfaces:
 
-1. **Project build-gate (Ignored-Build-Step)** — the API the box uses to flip on per-build preview deploys for `claude/*` build branches ([[../libraries/vercel-project]], [[../goals/preview-test-promote-pipeline]] M1).
+1. **Project build-gate (Ignored-Build-Step)** — the API the box uses to flip on per-build preview deploys for SPEC-BUILD branches (`claude/build-*`) ([[../libraries/vercel-project]], [[../goals/preview-test-promote-pipeline]] M1, narrowed by `vercel-skip-non-spec-build-refs`).
 2. **Edge Config** — the globally-replicated KV the PDP edge middleware reads for the active-experiment manifest ([[../libraries/experiment-manifest]]).
 
 The broader Vercel surface (deploys, ISR, log drain) is covered in [[vercel-log-drain]] and the deploy notes in `CLAUDE.md`.
 
-## Ignored-Build-Step override — preview deploys for `claude/*`
+## Ignored-Build-Step override — preview deploys for SPEC-BUILDS (`claude/build-*`)
 
-**What:** Vercel's per-project `commandForIgnoringBuildStep` is a shell script Vercel runs against every push to decide whether to BUILD (`exit 1`) or SKIP (`exit 0`) that ref. By default the project skips every non-production ref, so a box-pushed `claude/*` branch never produces a preview deployment. M1 of [[../goals/preview-test-promote-pipeline]] PATCHes the command so production AND any `claude/*` ref BUILD, while every incidental branch (a stale `feature/x`, an open-source dep PR, a topic branch) still skips.
+**What:** Vercel's per-project `commandForIgnoringBuildStep` is a shell script Vercel runs against every push to decide whether to BUILD (`exit 1`) or SKIP (`exit 0`) that ref. By default the project skips every non-production ref, so a box-pushed branch never produces a preview deployment. M1 of [[../goals/preview-test-promote-pipeline]] PATCHes the command so production AND spec-build refs BUILD, while every incidental branch (a stale `feature/x`, an open-source dep PR, a topic branch) still skips.
+
+**Narrowed (`vercel-skip-non-spec-build-refs`, 2026-06-27):** the original M1 command whitelisted ALL `claude/*` refs — which built every foreman lane, including folds (`claude/fold-*`). A fold's preview build FAILS (the worktree is `main` + brain-only edits, no app change to deploy meaningfully) and the failing Vercel check left fold PRs `UNSTABLE`, blocking the merge (#816/#817). Fix: spec-builds now carry a distinct `claude/build-` prefix (set in `runBuildJob`, `scripts/builder-worker.ts`) and the whitelist matches `^claude/build-` ONLY. Every other `claude/*` lane (fold / goal-fold / plan / spec-chat / dev-ask / director-coach) now SKIPS — none of them need a preview (only spec-builds get pre-merge spec-tested against their preview origin).
 
 ### The override command
 
 ```sh
-if [ "$VERCEL_ENV" = production ] || echo "$VERCEL_GIT_COMMIT_REF" | grep -q '^claude/'; then exit 1; else exit 0; fi
+if [ "$VERCEL_ENV" = production ] || echo "$VERCEL_GIT_COMMIT_REF" | grep -q '^claude/build-'; then exit 1; else exit 0; fi
 ```
 
 - `$VERCEL_ENV = production` → BUILD (unchanged — production deploys are never skipped).
-- `$VERCEL_GIT_COMMIT_REF` starts with `claude/` → BUILD (the M1 unlock — every box-pushed build branch now gets a preview).
-- anything else → SKIP (the safety rail — the override does NOT re-enable every preview).
+- `$VERCEL_GIT_COMMIT_REF` starts with `claude/build-` → BUILD (the spec-build lane — the only one that needs a per-build preview).
+- anything else (incl. `claude/fold-*`, `claude/plan-*`, `claude/spec-chat-*`, …) → SKIP (the safety rail — the override does NOT re-enable previews for non-spec-build lanes).
 
-This is the EXACT command [[../libraries/vercel-project]] exports as `CLAUDE_PREVIEW_IGNORE_COMMAND`. The literal string is the contract — its `claude/` + `exit 0` shape is asserted by `scripts/_check-vercel-ignore-step-rails.ts` so a code change can't silently widen the build set.
+This is the EXACT command [[../libraries/vercel-project]] exports as `CLAUDE_PREVIEW_IGNORE_COMMAND`. The literal string is the contract — its `^claude/build-` + `exit 0` shape is asserted by `scripts/_check-vercel-ignore-step-rails.ts` so a code change can't silently widen the build set back to all `claude/*`.
+
+> **Auto-heal binds the live value to the code.** The box worker re-PATCHes this command to `CLAUDE_PREVIEW_IGNORE_COMMAND` on EVERY tick (~5s). So a bare Vercel-API PATCH does NOT durably change the live value — the box reverts it to whatever the running `builder-worker.ts` exports within one tick. Changing the override for real = change `CLAUDE_PREVIEW_IGNORE_COMMAND` in code AND get the box worker running the new code (merge to `main` → box `git pull` → worker restart).
 
 ### Endpoints
 
@@ -53,7 +57,7 @@ The build console shows the live `commandForIgnoringBuildStep` value (cached ~60
 
 ### Safety rails
 
-- **`claude/*` only.** The else-branch is `exit 0` (SKIP) — an incidental branch is NOT rebuilt. The `scripts/_check-vercel-ignore-step-rails.ts` grep gate fails CI if the constant ever loses the `claude/` discriminator or the `exit 0` else-branch.
+- **`claude/build-*` only.** The else-branch is `exit 0` (SKIP) — an incidental branch AND every non-spec-build foreman lane (folds/plans/spec-chat/…) is NOT rebuilt. The `scripts/_check-vercel-ignore-step-rails.ts` grep gate fails CI if the constant ever loses the `^claude/build-` discriminator or the `exit 0` else-branch (i.e. if it widens back to all `claude/*`).
 - **Read-only deployments lookup.** `listDeploymentsForBranch` refuses `main` / `master` / empty — the capture path cannot accidentally resolve to a production URL.
 - **Neither helper promotes or merges.** The only mutation surface is `PATCH …/v9/projects/{id}` (the override write); preview promotion / merge is M4's bounded action, owned elsewhere.
 
