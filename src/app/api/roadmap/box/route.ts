@@ -15,6 +15,70 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap } from "@/lib/brain-roadmap";
 import type { SessionChecklistItem } from "@/lib/agent-jobs";
+import {
+  CLAUDE_PREVIEW_IGNORE_COMMAND,
+  getProjectIgnoreState,
+} from "@/lib/vercel-project";
+
+// preview-test-promote-pipeline M1 Phase 3 — the Vercel Ignored-Build-Step override state, surfaced
+// on the build console so the supervisor can SEE that `claude/*` preview builds are enabled. Cached
+// at module scope (60s TTL) so the box's 5-second poll doesn't hammer the Vercel API. A missing
+// token / network failure / API error returns { status: "unknown" } — never throws — so the box
+// page still renders.
+type PreviewOverride = {
+  status: "enabled" | "drifted" | "unknown";
+  expected: string;
+  actual: string | null;
+  reason: string | null;
+  fetched_at: string | null;
+};
+
+const PREVIEW_OVERRIDE_TTL_MS = 60_000;
+let cachedPreviewOverride: PreviewOverride | null = null;
+let cachedPreviewOverrideAt = 0;
+
+async function getPreviewOverrideState(): Promise<PreviewOverride> {
+  const now = Date.now();
+  if (cachedPreviewOverride && now - cachedPreviewOverrideAt < PREVIEW_OVERRIDE_TTL_MS) {
+    return cachedPreviewOverride;
+  }
+  if (!process.env.VERCEL_API_TOKEN && !process.env.VERCEL_TOKEN) {
+    const v: PreviewOverride = {
+      status: "unknown",
+      expected: CLAUDE_PREVIEW_IGNORE_COMMAND,
+      actual: null,
+      reason: "VERCEL_API_TOKEN not set",
+      fetched_at: new Date(now).toISOString(),
+    };
+    cachedPreviewOverride = v;
+    cachedPreviewOverrideAt = now;
+    return v;
+  }
+  try {
+    const { commandForIgnoringBuildStep } = await getProjectIgnoreState();
+    const v: PreviewOverride = {
+      status: commandForIgnoringBuildStep === CLAUDE_PREVIEW_IGNORE_COMMAND ? "enabled" : "drifted",
+      expected: CLAUDE_PREVIEW_IGNORE_COMMAND,
+      actual: commandForIgnoringBuildStep,
+      reason: null,
+      fetched_at: new Date(now).toISOString(),
+    };
+    cachedPreviewOverride = v;
+    cachedPreviewOverrideAt = now;
+    return v;
+  } catch (e) {
+    const v: PreviewOverride = {
+      status: "unknown",
+      expected: CLAUDE_PREVIEW_IGNORE_COMMAND,
+      actual: null,
+      reason: e instanceof Error ? e.message.slice(0, 200) : "fetch failed",
+      fetched_at: new Date(now).toISOString(),
+    };
+    cachedPreviewOverride = v;
+    cachedPreviewOverrideAt = now;
+    return v;
+  }
+}
 
 
 interface LaneRow {
@@ -264,5 +328,10 @@ export async function GET() {
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
     .slice(0, 20);
 
-  return NextResponse.json({ worker, queue, paused, failed, drain });
+  // preview-test-promote-pipeline M1 Phase 3 — the Vercel Ignored-Build-Step override state. Cached
+  // 60s; never throws (best-effort). Surfaced as a chip on /dashboard/roadmap/box so the supervisor
+  // can see the override is in place without running the apply script (supervisable autonomy).
+  const preview_build_override = await getPreviewOverrideState();
+
+  return NextResponse.json({ worker, queue, paused, failed, drain, preview_build_override });
 }
