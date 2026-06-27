@@ -697,6 +697,139 @@ export interface AutoFoldResult {
  *  - requested_by = null (no human clicked — this is the gate). Surfaces the pass as a Control Tower
  *    heartbeat (loop_id = AUTO_FOLD_GATE_LOOP_ID) + a console log of each folded spec.
  */
+/* ──────────────────────────────────────────────────────────────────────────
+ * spec-test-on-preview-pre-merge Phase 3 — "spec-test green for this branch".
+ *
+ * A pre-merge spec-test (Phase 1 enqueue → Phase 2 runner) writes one
+ * spec_test_runs row stamped with `spec_branch` + `preview_url` against the
+ * per-build `*.vercel.app` preview. M4's promote-on-green gate needs a
+ * deterministic read of "did the latest pre-merge run for THIS branch pass?"
+ * — and it MUST agree with what the post-ship fold gate (above) calls a pass,
+ * because both gates are the same supervision rail (one before the merge, one
+ * after).
+ *
+ * So this section mirrors `getAutoFoldEligibleSlugs`'s **Rail 2** verbatim:
+ *   - agent-verdict `approved` OR `needs_human` (the `needs_human`-is-eligible
+ *     task #29 carve-out — the agent machine-verified what it could and flagged
+ *     the rest as optional human review; human QA is advisory),
+ *   - `summary.auto_pass >= 1` (a real machine check actually passed — no silent
+ *     0-check `approved` reads as a pass; absence-of-fail ≠ pass),
+ *   - 0 UNRESOLVED auto-`fail` regressions (consult the same
+ *     `spec_test_human_checks` resolutions the human-queue uses, so a dismissed
+ *     false-positive doesn't keep the branch un-promotable).
+ * Absence of a run for `(slug, branch)` is NOT green — defer (the pre-merge
+ * enqueue hasn't fired yet, or the box hasn't reached a verdict); same
+ * absence-≠-clean rule the post-ship fold gate applies.
+ *
+ * Mirrors [[../specs/security-test-on-preview-pre-merge]] Phase 3's
+ * `getSecurityStateForBranch` / `isSecurityGreenForBranch` shape so the M4
+ * promote gate can read both signals with the same call pattern.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface SpecTestStateForBranch {
+  /** Latest `spec_test_runs` row for this `(workspace, slug, branch)`, or null when none yet. */
+  latest: SpecTestRun | null;
+  /**
+   * True iff `latest` is a CLEAN MACHINE PASS by the SAME definition
+   * [[getAutoFoldEligibleSlugs]] Rail 2 uses: agent-verdict `approved` OR
+   * `needs_human`, `summary.auto_pass >= 1`, and zero UNRESOLVED auto-`fail`
+   * checks. The pre-merge promote gate and the post-ship fold gate can never
+   * disagree because they share this predicate.
+   */
+  cleanMachinePass: boolean;
+}
+
+/**
+ * Latest `spec_test_runs` row for `(workspace, slug, branch)` — backed by the
+ * per-branch index `spec_test_runs_ws_slug_branch_idx`. Null when no pre-merge
+ * run has landed for the branch yet (deferral signal for the promote gate).
+ */
+export async function getLatestSpecTestRunForBranch(
+  workspaceId: string,
+  specSlug: string,
+  branch: string,
+): Promise<SpecTestRun | null> {
+  if (!workspaceId || !specSlug || !branch) return null;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("spec_test_runs")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", specSlug)
+    .eq("spec_branch", branch)
+    .order("run_at", { ascending: false })
+    .limit(1);
+  const row = ((data ?? [])[0] as Record<string, unknown> | undefined) ?? null;
+  return row ? normalizeRun(row) : null;
+}
+
+/**
+ * Per-branch spec-test rollup ([[../specs/spec-test-on-preview-pre-merge]] Phase 3) — the
+ * **M4 pre-merge promote gate** reads this. Mirrors [[getAutoFoldEligibleSlugs]] Rail 2
+ * (POSITIVE machine pass, not absence-of-failure) so the pre-merge gate and the post-ship
+ * fold gate can never disagree on what "spec-test green" means:
+ *   - agent-verdict IN (`approved`, `needs_human`) — `needs_human` is advisory-eligible
+ *     (task #29); a `needs_human` run that machine-verified everything it could and
+ *     flagged the rest as OPTIONAL human review is a pass, just like an `approved` one.
+ *   - `summary.auto_pass >= 1` — at least one real machine check actually passed.
+ *     A degenerate 0-check row (the "silent empty pass" the AgentVerdict doc warns about)
+ *     is NOT a genuine verification.
+ *   - 0 UNRESOLVED auto-`fail` regressions — joins `spec_test_human_checks` resolutions
+ *     the same way the human-queue regression banner does, so a dismissed false-positive
+ *     doesn't keep the branch un-promotable.
+ *
+ * Absence of a run for `(slug, branch)` is NOT green (defer; the pre-merge enqueue
+ * hasn't fired yet, or the box hasn't reached a verdict). Mirrors
+ * [[../libraries/security-agent]] `getSecurityStateForBranch` (one rail, two signals).
+ */
+export async function getSpecTestStateForBranch(
+  workspaceId: string,
+  specSlug: string,
+  branch: string,
+): Promise<SpecTestStateForBranch> {
+  const state: SpecTestStateForBranch = { latest: null, cleanMachinePass: false };
+  if (!workspaceId || !specSlug || !branch) return state;
+  const [latest, resolutions] = await Promise.all([
+    getLatestSpecTestRunForBranch(workspaceId, specSlug, branch),
+    getHumanCheckResolutions(workspaceId),
+  ]);
+  state.latest = latest;
+  if (!latest) return state;
+  // Rail 2 — POSITIVE machine pass (mirrors getAutoFoldEligibleSlugs Rail 2 verbatim).
+  if (latest.agent_verdict !== "approved" && latest.agent_verdict !== "needs_human") return state;
+  if (latest.summary.auto_pass < 1) return state;
+  // 0 UNRESOLVED auto-`fail` regressions — same `${slug}:${check_key}` join the
+  // human-queue / fold gate use; a dismissed/verified resolution clears the fail.
+  for (const c of latest.checks) {
+    if (c.verdict !== "fail") continue;
+    const res = resolutions.get(`${specSlug}:${checkKey(c.text)}`);
+    if (!res?.resolution) return state;
+  }
+  state.cleanMachinePass = true;
+  return state;
+}
+
+/**
+ * The "spec-test green for this branch" signal the **M4 pre-merge promote gate** reads
+ * ([[../specs/spec-test-on-preview-pre-merge]] Phase 3). Green iff
+ * [[getSpecTestStateForBranch]]'s `cleanMachinePass` is true — the SAME pass definition
+ * [[getAutoFoldEligibleSlugs]] Rail 2 enforces (`approved`/`needs_human` +
+ * `auto_pass >= 1` + 0 unresolved auto-`fail`). The pre-merge gate and the post-ship
+ * fold gate share this predicate so they can never disagree. A branch with no pre-merge
+ * `spec_test_runs` row yet is NOT green (defer; same absence-≠-clean rule).
+ *
+ * Mirrors [[../libraries/security-agent]] `isSecurityGreenForBranch` so M4 reads both
+ * signals with one call pattern.
+ */
+export async function isSpecTestGreenForBranch(
+  workspaceId: string,
+  specSlug: string,
+  branch: string,
+): Promise<boolean> {
+  const state = await getSpecTestStateForBranch(workspaceId, specSlug, branch);
+  return state.cleanMachinePass;
+}
+
 export async function autoFoldVerifiedSpecs(workspaceId: string, adminClient?: Admin): Promise<AutoFoldResult> {
   const admin = adminClient || createAdminClient();
   const result: AutoFoldResult = { enabled: true, eligible: 0, folded: 0, foldedSlugs: [] };

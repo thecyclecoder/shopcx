@@ -56,6 +56,36 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
   **+ the Regressions list** (keyed off evidence-backed `fail` checks only — `needs_human`/`inconclusive` never appear
   there, [[../specs/spec-test-classification|the classification rule]]). Regressions DO block the fold.
 
+### Pre-merge mode — `claude/*` branch verification against the per-build preview ([[../specs/spec-test-on-preview-pre-merge]])
+The spec-test agent runs in TWO modes off the SAME runner + JSON contract:
+- **Post-ship (standing lane)** — the daily [[../inngest/spec-test-cron]] sweep + the on-demand **Test now** button enqueue
+  one `kind='spec-test'` job per shipped-but-not-archived spec; the runner's checks hit **prod** (`https://shopcx.ai`). Both
+  `spec_branch` and `preview_url` on the resulting `spec_test_runs` row are NULL — the latest-per-`(workspace, slug)` read
+  ([[#runs-read--normalize|getLatestSpecTestRuns]]) drives the board chip + Auto-fold gate.
+- **Pre-merge** (Phase 1 enqueue: [[../libraries/agent-jobs]] `enqueuePreMergeSpecTest`; Phase 2 runner: `scripts/builder-worker.ts`
+  → `runSpecTestJob`) — when a `claude/*` build reaches a READY per-build Vercel preview ([[../specs/per-build-vercel-preview-deploys]]
+  Phase 2 stamps `agent_jobs.preview_url`) and the branch is still unmerged, the worker enqueues ONE `kind='spec-test'` job stamped
+  with `spec_branch=<branch>` + the preview origin in `instructions`. The runner threads that origin onto every non-destructive
+  probe — `curl`/HTTP GETs, `vercel inspect|logs <preview>`, `npx tsx scripts/spec-test-browser-check.ts --base-url <preview>` —
+  so the WHOLE verification hits the per-build `*.vercel.app` preview, NEVER prod. The resulting `spec_test_runs` row carries
+  `spec_branch` + `preview_url` (the per-branch index `spec_test_runs_ws_slug_branch_idx` backs the per-`(slug, branch)` read).
+  The runner's contract is otherwise unchanged: one JSON verdict, no mutating checks. Dedupe key is per-branch (workspace, slug,
+  branch) so a pre-merge run on branch A doesn't block one on branch B; the post-ship `(workspace, slug)` chokepoint is strictly
+  broader so the two lanes never collide.
+
+### Pre-merge green-signal (Phase 3) — readable by the M4 promote gate
+- `getLatestSpecTestRunForBranch(workspaceId, slug, branch)` → `SpecTestRun | null` — the latest pre-merge row for the branch
+  (per-branch index read; null = no pre-merge run landed yet → defer, NOT green).
+- `getSpecTestStateForBranch(workspaceId, slug, branch)` → `{ latest, cleanMachinePass }` — the per-branch rollup the
+  **M4 pre-merge promote gate** reads. **Mirrors [[#auto-fold-gate--gate-b-fold-on-machine-spec-test-pass--security-clear-fold-on-spec-test-pass-task-29-specsbuild-card-lifecycle-timeline-phase-3|getAutoFoldEligibleSlugs]] Rail 2 verbatim** so the pre-merge gate and the post-ship fold gate can never disagree on what "spec-test green" means:
+  agent-verdict `approved` OR `needs_human` (task #29: `needs_human` is advisory-eligible), `summary.auto_pass >= 1` (≥1 real
+  machine check — no silent 0-check pass), 0 UNRESOLVED auto-`fail` regressions (joins the same `spec_test_human_checks`
+  resolutions the human-queue uses, so a dismissed false-positive doesn't keep the branch un-promotable).
+- `isSpecTestGreenForBranch(workspaceId, slug, branch)` → `boolean` — convenience boolean (`cleanMachinePass`). Mirrors
+  [[security-agent]] `isSecurityGreenForBranch` so M4 reads both signals with one call pattern.
+- **Absence of a run is NOT green** — defer (the pre-merge enqueue hasn't fired yet, or the box hasn't reached a verdict);
+  same absence-≠-clean rule the post-ship fold gate applies.
+
 ### Auto-fold gate — Gate B (fold on MACHINE spec-test pass + SECURITY clear; fold-on-spec-test-pass, task #29; [[../specs/build-card-lifecycle-timeline]] Phase 3)
 **The fold trigger is the MACHINE spec-test pass + a clean post-merge SECURITY review, NOT human verification.** Fold is
 non-destructive (the [[../tables/specs]] row is preserved with `status='folded'`; the fold just extracts knowledge into the

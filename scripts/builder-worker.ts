@@ -232,6 +232,20 @@ const GOAL_ESCORT_INTERVAL_MS = 5 * 60 * 1000; // ~5 min
 let lastGoalEscortSweep = 0;
 let goalEscortSweepInFlight = false;
 
+// Fold-queue reaper (fix(fold)): a periodic, self-healing sweep that drains the pending_folds queue
+// after a box restart killed the fold lane mid-flight. Two failure modes it heals (both strand a
+// shipped, fold-eligible spec showing "Folding" forever): (1) a row stuck status='folding' under a
+// job_id whose fold job is no longer active (box died mid-fold) → reset to pending; (2) rows in
+// status='pending' with NO active fold job (the fold-batch job died before its completion-time
+// re-enqueue could fire — the re-enqueue can't survive the restart that kills it) → enqueue exactly
+// one fold-batch. Because it runs every reaper tick and depends on no single job surviving, it
+// self-heals after ANY restart — unlike runFoldJob's completion-time reEnqueueFoldIfPending. Throttled
+// + in-flight-guarded like the other periodic sweeps; 0 ⇒ run on the first poll so a stranded queue
+// drains immediately on boot.
+const FOLD_QUEUE_REAPER_INTERVAL_MS = 2 * 60 * 1000; // ~2 min — quick to un-strand a stuck fold queue.
+let lastFoldQueueReaper = 0; // 0 ⇒ run on first poll so a queue stranded by the prior instance drains right away.
+let foldQueueReaperInFlight = false;
+
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
 // `blocked_on_dependency` (agent-outage-resilience Phase 2): parked when the Claude-down breaker is
@@ -5136,6 +5150,102 @@ async function reEnqueueFoldIfPending(workspaceId: string, tag: string): Promise
     console.log(`${tag} ↻ re-enqueued a fold-batch — pending_folds rows arrived during this job (snapshot-race sweep)`);
   } catch (e) {
     console.warn(`${tag} re-enqueue fold errored: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+// ── Fold-queue reaper (fix(fold)) ────────────────────────────────────────────
+// The periodic, self-healing backstop for the fold queue. runFoldJob's completion-time
+// reEnqueueFoldIfPending can't survive the very box restart that strands a fold (the re-enqueue runs
+// INSIDE the job that just died), so two failure modes leak through and leave a shipped, fold-eligible
+// spec showing "Folding" forever:
+//   1. A pending_folds row stuck status='folding' under a job_id whose fold job is no longer active
+//      (the box restarted mid-fold) — the row is bound to a dead job that will never clear it.
+//   2. pending_folds rows in status='pending' with NO active fold job to drain them (the fold-batch
+//      job died — crash/restart — before it could re-enqueue itself).
+// This reaper runs every tick (throttled) and depends on no single job surviving, so it self-heals
+// after ANY restart. Per workspace, idempotently:
+//   (A) Un-orphan folding rows: any row status='folding' whose job_id has no claiming fold job in an
+//       active state (queued/queued_resume/claimed/building) → reset to status='pending', job_id=NULL.
+//   (B) Guarantee a drainer: if ≥1 status='pending' row exists and there is NO active fold job for the
+//       workspace, enqueue exactly ONE kind='fold' fold-batch (via reEnqueueFoldIfPending → enqueue_fold,
+//       which coalesces; the agent_jobs_one_queued_fold_idx unique index is the DB belt-and-suspenders).
+// The "no active fold job" guard in reEnqueueFoldIfPending avoids duplicate fold-batch jobs. Best-effort
+// — a reaper failure must never break the poll loop.
+//
+// Active = a fold job that can still drain the queue: status in
+// (queued | queued_resume | claimed | building). A 'queued' fold is the to-be-claimed drainer; a
+// claimed/building one is mid-fold; queued_resume is a paused fold awaiting re-dispatch. Anything else
+// (completed/failed/needs_attention/…) or a job_id that no longer resolves is NOT active — the row it
+// claimed is orphaned and must be released back to 'pending'.
+const ACTIVE_FOLD_JOB_STATUSES = ["queued", "queued_resume", "claimed", "building"] as const;
+
+async function runFoldQueueReaperJob(): Promise<void> {
+  try {
+    // Workspaces with any non-terminal fold queue work (pending OR folding). One sweep per workspace.
+    const { data: rows, error } = await db
+      .from("pending_folds")
+      .select("workspace_id, status, job_id")
+      .in("status", ["pending", "folding"]);
+    if (error) {
+      console.error("[fold-reaper] pending_folds query failed (skipping sweep):", error.message);
+      return;
+    }
+    const queue = (rows ?? []) as { workspace_id: string; status: string; job_id: string | null }[];
+    if (queue.length === 0) return; // nothing pending/folding anywhere — no-op
+
+    const workspaces = [...new Set(queue.map((r) => r.workspace_id))];
+    for (const workspaceId of workspaces) {
+      const tag = `[fold-reaper:${workspaceId.slice(0, 8)}]`;
+
+      // (A) Un-orphan folding rows: reset any status='folding' row whose claiming job is no longer in an
+      // active fold state. Done as one UPDATE keyed on the set of dead job_ids so concurrent live folds
+      // (a genuinely in-flight runFoldJob) are never disturbed — only rows bound to a dead/missing job
+      // flip back to pending. Idempotent: a row already released won't match status='folding' next tick.
+      const foldingJobIds = [
+        ...new Set(
+          queue
+            .filter((r) => r.workspace_id === workspaceId && r.status === "folding" && r.job_id)
+            .map((r) => r.job_id as string),
+        ),
+      ];
+      if (foldingJobIds.length) {
+        const { data: liveJobs } = await db
+          .from("agent_jobs")
+          .select("id")
+          .in("id", foldingJobIds)
+          .eq("kind", "fold")
+          .in("status", ACTIVE_FOLD_JOB_STATUSES as unknown as string[]);
+        const aliveIds = new Set(((liveJobs ?? []) as { id: string }[]).map((j) => j.id));
+        const deadIds = foldingJobIds.filter((id) => !aliveIds.has(id));
+        if (deadIds.length) {
+          const { data: released, error: relErr } = await db
+            .from("pending_folds")
+            .update({ status: "pending", job_id: null, updated_at: new Date().toISOString() })
+            .eq("workspace_id", workspaceId)
+            .eq("status", "folding")
+            .in("job_id", deadIds)
+            .select("spec_slug");
+          if (relErr) {
+            console.warn(`${tag} un-orphan folding rows failed: ${relErr.message}`);
+          } else {
+            const freed = ((released ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug);
+            if (freed.length) {
+              console.log(`${tag} un-orphaned ${freed.length} 'folding' row(s) bound to a dead fold job → pending: ${freed.join(", ")}`);
+            }
+          }
+        }
+      }
+
+      // (B) Guarantee a drainer: after un-orphaning, if real pending work remains and no active fold job
+      // exists, enqueue ONE fold-batch. reEnqueueFoldIfPending already (a) no-ops when nothing is pending,
+      // (b) skips when a fold job is already queued/queued_resume/building (its dedup guard — so no
+      // duplicate fold-batch), and (c) routes through enqueue_fold (per-workspace advisory-lock coalesce
+      // + the agent_jobs_one_queued_fold_idx unique index). Reusing it keeps the job shape identical to
+      // every other fold enqueue path.
+      await reEnqueueFoldIfPending(workspaceId, tag);
+    }
+  } catch (e) {
+    console.error("[fold-reaper] sweep errored (continuing):", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -11970,6 +12080,15 @@ async function main() {
             goalEscortSweepInFlight = false;
           }
         })();
+      }
+      // Fold-queue reaper (fix(fold)): self-healing drainer for the pending_folds queue — un-orphans rows
+      // stuck 'folding' under a dead fold job + guarantees ONE fold-batch exists whenever pending work has
+      // no active fold job. runs every tick (throttled) and survives any box restart, unlike runFoldJob's
+      // completion-time re-enqueue. Fire-and-forget + in-flight-guarded; best-effort, never breaks the loop.
+      if (!foldQueueReaperInFlight && Date.now() - lastFoldQueueReaper > FOLD_QUEUE_REAPER_INTERVAL_MS) {
+        lastFoldQueueReaper = Date.now();
+        foldQueueReaperInFlight = true;
+        void runFoldQueueReaperJob().finally(() => { foldQueueReaperInFlight = false; });
       }
       // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
       // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
