@@ -169,9 +169,6 @@ export async function appstleUpdateBillingInterval(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
   }
-  await healOnTouch(workspaceId, contractId);
-  const creds = await getAppstleCredentials(workspaceId);
-  if (!creds) return { success: false, error: "Appstle not configured" };
 
   // Appstle's SellingPlanInterval enum is strictly UPPERCASE
   // (DAY/WEEK/MONTH/YEAR). The TS signature claims uppercase but the
@@ -183,6 +180,30 @@ export async function appstleUpdateBillingInterval(
   if (!["DAY", "WEEK", "MONTH", "YEAR"].includes(normalizedInterval)) {
     return { success: false, error: `Invalid interval: ${interval} (expected DAY/WEEK/MONTH/YEAR)` };
   }
+
+  // No-op guard: skip the Appstle PUT if the local subscription already
+  // has the requested interval+count. Same-value submissions hit
+  // Appstle's billing-policy validator and surfaced as recurring noise
+  // on the Vercel error feed / Control Tower (signature 09366492567e0fde).
+  // Customer intent is satisfied; report success without the API call.
+  const admin = createAdminClient();
+  const { data: currentSub } = await admin
+    .from("subscriptions")
+    .select("billing_interval, billing_interval_count")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (
+    currentSub &&
+    String(currentSub.billing_interval || "").toUpperCase() === normalizedInterval &&
+    Number(currentSub.billing_interval_count) === Number(intervalCount)
+  ) {
+    return { success: true };
+  }
+
+  await healOnTouch(workspaceId, contractId);
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
     const res = await loggedAppstleFetch(
@@ -202,7 +223,6 @@ export async function appstleUpdateBillingInterval(
     }
 
     // Update local record
-    const admin = createAdminClient();
     await admin
       .from("subscriptions")
       .update({
