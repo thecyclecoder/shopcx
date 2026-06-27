@@ -464,6 +464,68 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
   return map;
 }
 
+/** Per-branch security-review rollup — same shape as [[SecurityStateBySlug]] but keyed to the build's
+ * `claude/*` branch (pre-merge `branch`-mode jobs carry `spec_branch === branch`). The pre-merge M4
+ * promote gate reads this. */
+export interface SecurityStateForBranch {
+  /** Any security-review job for this branch in `queued`/`claimed`/`building`/`needs_input`/`queued_resume` — the review is running. */
+  live: boolean;
+  /** Any security-review job for this branch in `needs_approval` (a routed real-vuln fix) or `needs_attention` (a needs-human finding) — surfaced to the owner. */
+  surfaced: boolean;
+  /** A `completed` security-review job exists for this branch AND no live/surfaced sibling — clean terminal state. */
+  completedClean: boolean;
+}
+
+/**
+ * Per-branch security-review rollup ([[../specs/security-test-on-preview-pre-merge]] Phase 3) — the
+ * pre-merge **M4 promote gate** reads this. Same `live`/`surfaced`/`completedClean` definition as
+ * [[getSecurityStateBySlug]] (a `completed` job exists AND no live/surfaced sibling) so the pre-merge
+ * gate and the post-ship fold gate ([[../specs/build-card-lifecycle-timeline]] Phase 3 / [[spec-test-runs]]
+ * `getAutoFoldEligibleSlugs`) can never disagree on what "security green" means. Branch-mode jobs carry
+ * `spec_branch === branch`; the rollup is scoped to that column. A branch with no security-review record
+ * yet returns all-false (NOT clean) — the pre-merge enqueue (Phase 1) hasn't fired, or the box hasn't
+ * reached a verdict; same absence-≠-clean rule the post-ship gate applies.
+ */
+export async function getSecurityStateForBranch(admin: Admin, branch: string): Promise<SecurityStateForBranch> {
+  const state: SecurityStateForBranch = { live: false, surfaced: false, completedClean: false };
+  const b = String(branch || "").trim();
+  if (!b) return state;
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("status")
+    .eq("kind", "security-review")
+    .eq("spec_branch", b)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
+  const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
+  for (const row of (data ?? []) as Array<{ status: string }>) {
+    if (runningSet.has(row.status)) state.live = true;
+    else if (surfacedSet.has(row.status)) state.surfaced = true;
+    else if (row.status === "completed") state.completedClean = true;
+  }
+  // Mirrors getSecurityStateBySlug: a live/surfaced sibling for the same branch overrides the clean
+  // terminal — the gate can never read "green" while a routed fix or running review is still open.
+  // The two helpers MUST agree on the clean definition (the pre-merge gate and the post-ship fold gate
+  // are the same supervision rail; if they disagreed, a branch could promote past a finding the fold
+  // gate would block, or vice versa).
+  if (state.live || state.surfaced) state.completedClean = false;
+  return state;
+}
+
+/**
+ * The "security-test green for this branch" signal the **M4 pre-merge promote gate** reads
+ * ([[../specs/security-test-on-preview-pre-merge]] Phase 3). Green iff [[getSecurityStateForBranch]]'s
+ * `completedClean` is true — the SAME `completedClean` definition the post-ship fold gate reuses via
+ * [[getSecurityStateBySlug]] ([[spec-test-runs]] `getAutoFoldEligibleSlugs`), so the two gates can never
+ * disagree on what "security green" means. A branch with no security-review record yet is NOT green
+ * (defer; the post-ship gate is the same — absence ≠ clean).
+ */
+export async function isSecurityGreenForBranch(admin: Admin, branch: string): Promise<boolean> {
+  const state = await getSecurityStateForBranch(admin, branch);
+  return state.completedClean;
+}
+
 // ── Vault's full results log (dashboard/security-tests) ─────────────────────────
 
 /** The verdict surfaced per review row on the Security tests log — Vault's three classifications
