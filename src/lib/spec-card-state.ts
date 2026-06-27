@@ -74,6 +74,17 @@ export interface SpecCardFlags {
    */
   vale_pass?: boolean;
   /**
+   * build-gate-durable-review-signal — the DURABLE counterpart to the transient `vale_pass`. Set to `true`
+   * alongside `vale_pass` on a Vale PASS (`markSpecCardValePassed`); UNLIKE `vale_pass` it is NOT consumed by
+   * Ada's disposition (`applyAdaDisposition` / `markSpecCardPendingUpgrade` leave it intact), so it survives
+   * the spec leaving `in_review`. Mirrors to `specs.vale_review_passed_at` (true → now(), false → null) via
+   * `dualWriteSpecRow`. Cleared (set `false`) on a send-back / re-author (`markSpecCardBackToReview`) so a
+   * materially-changed spec must be re-reviewed. The claim-time build gate reads the persisted timestamp as
+   * its review-passed signal, never the consumed `vale_pass`. Write-only here (the board doesn't render it);
+   * absent from a patch = untouched, exactly so the disposition writers don't have to carry it.
+   */
+  vale_review_passed?: boolean;
+  /**
    * spec-review-agent Phase 3 — Ada's disposition record (per-spec, one shot). Set when she autonomously
    * applies a decision OR when she opens a gated proposal to the CEO. The board reads this to know that
    * the disposition lane has already touched a Vale-passed spec and the same Ada pass should NOT re-touch
@@ -289,7 +300,10 @@ async function upsertCardState(
  *  - patch.last_merge_sha          → specs.last_merge_sha   (the deploy-aware UI slot).
  *  - patch.flags.short_circuit         → specs.short_circuit         (boolean, paired with reason).
  *  - patch.flags.short_circuit_reason  → specs.short_circuit_reason  (text; cleared when short_circuit=false).
- *  - patch.flags.vale_pass         → specs.vale_pass         (Vale's CHECKLIST pass).
+ *  - patch.flags.vale_pass         → specs.vale_pass         (Vale's CHECKLIST pass — TRANSIENT, consumed).
+ *  - patch.flags.vale_review_passed → specs.vale_review_passed_at (build-gate-durable-review-signal — the
+ *                                    DURABLE pass stamp; true → now(), false/undefined → null. NOT consumed
+ *                                    by the disposition writers, so it survives the spec leaving in_review).
  *  - patch.flags.ada_disposition   → specs.ada_disposition   ('autonomous_same' | 'autonomous_downgrade' |
  *                                    'pending_upgrade'; cleared on dispose).
  *  - patch.flags.merged_pr         → specs.merged_pr         (one-shot card-level shipping PR — multi-
@@ -331,6 +345,13 @@ async function dualWriteSpecRow(
       }
       if (Object.prototype.hasOwnProperty.call(f, "vale_pass")) {
         updateFields.vale_pass = f.vale_pass === undefined ? null : !!f.vale_pass;
+      }
+      // build-gate-durable-review-signal — the DURABLE review-passed timestamp. `true` stamps now(),
+      // `false`/undefined clears it (a send-back / re-author must re-review). Only the Vale-pass writer and
+      // the back-to-review writer carry this key; every other writer omits it, leaving the column untouched.
+      if (Object.prototype.hasOwnProperty.call(f, "vale_review_passed")) {
+        const stamp = new Date().toISOString();
+        updateFields.vale_review_passed_at = f.vale_review_passed ? stamp : null;
       }
       if (Object.prototype.hasOwnProperty.call(f, "ada_disposition")) {
         const v = f.ada_disposition;
@@ -517,13 +538,18 @@ export async function markSpecCardForReview(
  * and the spec is well-formed. Sets `flags.vale_pass=true` so Ada's disposition lane can pick it up.
  * Does NOT flip the status — a passed spec stays in `in_review` until Ada (or, on UPGRADE, the CEO)
  * disposes it. The bounce leg (`needs_fix`) doesn't touch this flag; it surfaces via `director_activity`.
+ *
+ * build-gate-durable-review-signal — ALSO stamps the DURABLE `vale_review_passed` marker (mirrors to
+ * `specs.vale_review_passed_at`). UNLIKE `vale_pass` (consumed by Ada's disposition), this survives the spec
+ * leaving in_review, so the claim-time build gate can still tell — at build time — that the spec passed
+ * review. Cleared only by `markSpecCardBackToReview` (a send-back / re-author must re-review).
  */
 export async function markSpecCardValePassed(
   workspaceId: string,
   slug: string,
   audit: { actor: string; reason?: string },
 ): Promise<void> {
-  await upsertCardState(workspaceId, slug, { flags: { vale_pass: true } }, [
+  await upsertCardState(workspaceId, slug, { flags: { vale_pass: true, vale_review_passed: true } }, [
     { field: "status", actor: audit.actor, reason: audit.reason ?? "vale: pass (quality check cleared)" },
   ]);
 }
@@ -589,6 +615,10 @@ export async function markSpecCardPendingUpgrade(
  * the author intended, and the prior Vale verdict is stale once the file changed). Idempotent: re-calling
  * on an already-in_review row leaves it in_review and re-audits.
  *
+ * build-gate-durable-review-signal — ALSO clears the DURABLE `vale_review_passed` marker (→
+ * `specs.vale_review_passed_at = null`). A send-back means the spec changed materially / failed re-check, so
+ * the prior "passed review" stamp is stale: the spec must pass Vale AGAIN before the build gate releases it.
+ *
  * Best-effort + audited via `spec_status_history`. The CALLER is responsible for recording the matching
  * `director_activity` row (`spec_sent_back_to_review`) with their actor — that side carries the diagnosis
  * the CEO reads (which check failed, who sent it back, what to fix).
@@ -605,6 +635,7 @@ export async function markSpecCardBackToReview(
       status: "in_review",
       flags: {
         vale_pass: undefined,
+        vale_review_passed: false,
         ada_disposition: undefined,
         intended_status: undefined,
         deferred: false,

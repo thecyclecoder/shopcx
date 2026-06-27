@@ -72,6 +72,11 @@ export interface SpecRow {
   /** spec-review-agent Phase 3 — Vale's CHECKLIST verdict; `true` once she's passed the spec. The In
    *  Review board lane reads this to render Vale's pending vs Vale-passed state per card. */
   vale_pass: boolean | null;
+  /** build-gate-durable-review-signal — the DURABLE "passed Vale review" stamp. Set alongside `vale_pass`
+   *  on a Vale PASS; UNLIKE `vale_pass` it is NOT consumed by Ada's disposition, so it survives the spec
+   *  leaving in_review. The claim-time build gate reads THIS (non-null = passed review) instead of the
+   *  consumed `vale_pass`. Cleared on a send-back / re-author (must be re-reviewed). */
+  vale_review_passed_at: string | null;
   /** spec-review-agent Phase 3 — Ada's disposition state. `pending_upgrade` means a CEO Planned/Deferred
    *  call is parked waiting; null means Ada hasn't touched this Vale-passed spec yet. */
   ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
@@ -157,6 +162,7 @@ interface SpecRowDb {
   regression_signature: string | null;
   auto_build: boolean;
   vale_pass: boolean | null;
+  vale_review_passed_at: string | null;
   ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
   milestone_id: string | null;
   merged_pr: number | null;
@@ -166,7 +172,7 @@ interface SpecRowDb {
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, ada_disposition, milestone_id, merged_pr, last_merge_sha, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, milestone_id, merged_pr, last_merge_sha, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, verification, created_at, updated_at";
 
@@ -190,6 +196,7 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     regression_signature: db.regression_signature,
     auto_build: db.auto_build,
     vale_pass: db.vale_pass,
+    vale_review_passed_at: db.vale_review_passed_at,
     ada_disposition: db.ada_disposition,
     milestone_id: db.milestone_id,
     merged_pr: db.merged_pr,

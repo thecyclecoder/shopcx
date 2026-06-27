@@ -38,6 +38,12 @@ const BUILDS_DIR = resolve(REPO_DIR, "../builds"); // each build gets its own wo
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN || "";
 const POLL_MS = 5000;
+// build-gate-durable-review-signal: when the claim-time build gate HOLDS a build (requeue — e.g. a blocker
+// not yet shipped, or Vale hasn't passed the spec), it re-queues with `claimed_at` stamped this far into the
+// FUTURE so the claim RPC (which now skips queued jobs with a future claimed_at) backs off instead of
+// re-picking the same held build every POLL_MS tick. Bounded short — long enough to stop the churn, short
+// enough that a build releases promptly once Vale passes / its blocker ships (the escort also re-releases).
+const BUILD_GATE_HOLD_COOLDOWN_MS = 90 * 1000; // 90s back-off on a gate hold
 // Build liveness (build-all-phases-chain Part B): a multi-phase build can legitimately work for
 // 40+ min, so don't guillotine on wall-clock. Instead kill only if the build subprocess goes
 // SILENT for BUILD_IDLE_TIMEOUT_MS (hung), with BUILD_HARD_CAP_MS as a generous backstop against a
@@ -3206,12 +3212,39 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
 
   // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
   // (phases present + each with verification, coherent, real Owner/Parent, not malformed) BEFORE its build.
-  // `card.valePass` reads `public.specs.vale_pass` straight off the row (the EXISTING verdict mechanism —
-  // markSpecCardValePassed sets it on a Vale PASS); we do NOT invent a parallel reviewer. A spec with no
-  // pass is held queued. To avoid waiting on the next spec-review-cron tick, proactively enqueue a Vale pass
-  // here (deduped — enqueueSpecReviewIfDue no-ops if one's already in flight or no in_review spec exists) so
-  // the review lands promptly; on PASS Vale flips vale_pass=true and the next claim attempt clears this leg.
-  if (card.valePass !== true) {
+  //
+  // build-gate-durable-review-signal: the leg now tests the DURABLE `card.valeReviewPassed` (reads
+  // `specs.vale_review_passed_at`), NOT the transient `card.valePass`. `vale_pass` is a Vale→Ada hand-off
+  // flag that Ada's disposition CONSUMES when the spec leaves in_review (applyAdaDisposition clears it) — so
+  // by build-claim time a spec that genuinely passed review has vale_pass=null and the old test deadlocked
+  // it forever (re-claim every tick). `vale_review_passed_at` is stamped on the SAME Vale PASS but is NOT
+  // consumed by the disposition, so it survives into `planned`/shipped; a send-back / re-author clears it
+  // (markSpecCardBackToReview) so a materially-changed spec must be re-reviewed. We do NOT invent a parallel
+  // reviewer — same Vale PASS, durable marker.
+  if (card.valeReviewPassed !== true) {
+    // Two deadlock classes both land here with no durable pass:
+    //   (a) status=in_review — a freshly authored spec still in Vale's queue (normal — just hold + nudge).
+    //   (b) status=planned (or any non-review, non-shipped state) that NEVER entered review — authored
+    //       directly as planned (director fix-spec / Pia / rescue / manual). The old proactive enqueue only
+    //       covered in_review specs, so this class looped forever with no path to review. Route it INTO
+    //       review: flip it back to in_review (markSpecCardBackToReview — clears any stale disposition
+    //       signals too) so Vale's lane picks it up, instead of deadlocking it in planned.
+    const postReviewPassed = card.status === "shipped"; // an already-shipped spec is past review by construction
+    if (!postReviewPassed && card.status !== "in_review") {
+      try {
+        const { markSpecCardBackToReview } = await import("../src/lib/spec-card-state");
+        await markSpecCardBackToReview(job.workspace_id, slug, {
+          actor: "claim-gate",
+          reason: `routed into review — ${slug} reached ${card.status} without a durable Vale pass (unreviewed); build held until Vale passes`,
+        });
+        console.log(`${tag} claim-gate: ${slug} unreviewed in ${card.status} → flipped to in_review for Vale`);
+      } catch (e) {
+        console.error(`${tag} claim-gate: routing ${slug} into review failed (continuing to hold):`, e instanceof Error ? e.message : e);
+      }
+    }
+    // Proactively enqueue a Vale pass (deduped — enqueueSpecReviewIfDue no-ops if one's already in flight or
+    // no in_review spec exists) so the review lands promptly without waiting on the spec-review-cron tick; on
+    // PASS Vale stamps vale_review_passed_at and the next claim attempt clears this leg.
     try {
       const { enqueueSpecReviewIfDue } = await import("../src/lib/agents/spec-review");
       const r = await enqueueSpecReviewIfDue(job.workspace_id);
@@ -3221,8 +3254,8 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     }
     const note = card.status === "in_review"
       ? "awaiting Vale's spec-review verdict"
-      : `status=${card.status} but vale_pass not set — Vale must pass the authored spec before its build`;
-    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} not spec-review-passed (${note}); left queued until Vale passes` };
+      : `status=${card.status} but no durable Vale pass — routed into review; Vale must pass the spec before its build`;
+    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} not spec-review-passed (${note}); held with cooldown until Vale passes` };
   }
 
   return { ok: true };
@@ -11376,10 +11409,16 @@ async function dispatchJob(job: Job) {
         });
         console.warn(`${tag} claim-gate → parked needs_attention (${gate.parkClass ?? "spec_row_missing"}): ${gate.reason}`);
       } else {
-        // Un-claim: back to `queued` with claimed_at cleared (the reaper/escort re-release pattern) so the
-        // next poll re-evaluates it once Vale passes / its last blocker ships. No worktree was created yet.
-        await update(job.id, { status: "queued", claimed_at: null, log_tail: gate.reason.slice(-2000) });
-        console.log(`${tag} claim-gate → held (re-queued): ${gate.reason}`);
+        // Un-claim: back to `queued`. build-gate-durable-review-signal — instead of clearing claimed_at
+        // (which made the held build instantly re-claimable → re-evaluated EVERY poll tick → churn), stamp a
+        // FUTURE claimed_at as a "don't re-pick before T" cooldown; the claim RPC skips a queued job whose
+        // claimed_at is still in the future, so the build backs off ~BUILD_GATE_HOLD_COOLDOWN_MS before being
+        // re-evaluated. The director escort / sequence reconciler still re-release it on the slower cadence
+        // once Vale passes / its last blocker ships; this only debounces the box's own tight poll loop. No
+        // worktree was created yet.
+        const holdUntil = new Date(Date.now() + BUILD_GATE_HOLD_COOLDOWN_MS).toISOString();
+        await update(job.id, { status: "queued", claimed_at: holdUntil, log_tail: gate.reason.slice(-2000) });
+        console.log(`${tag} claim-gate → held (re-queued, cooldown ${Math.round(BUILD_GATE_HOLD_COOLDOWN_MS / 1000)}s): ${gate.reason}`);
       }
       return;
     }
