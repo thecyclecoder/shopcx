@@ -9346,9 +9346,18 @@ async function hasActiveBuildForSlug(slug: string): Promise<{ active: boolean; r
     const owner = REPO.split("/")[0];
     const open = await gh("GET", `/repos/${REPO}/pulls?state=open&per_page=100`);
     if (open.ok && Array.isArray(open.json)) {
-      const prefix = `claude/${slug}-`;
+      // vercel-skip-non-spec-build-refs: spec-build branches are now `claude/build-${slug}-…`.
+      // Match the current prefix AND the legacy `claude/${slug}-…` form so an in-flight pre-rename
+      // build's open PR is still detected during/after the rollout.
+      const buildPrefix = `claude/build-${slug}-`;
+      const legacyPrefix = `claude/${slug}-`;
       const hit = (open.json as Array<{ head?: { ref?: string }; number?: number }>).find(
-        (p) => typeof p.head?.ref === "string" && (p.head.ref === `claude/${slug}` || p.head.ref.startsWith(prefix)),
+        (p) =>
+          typeof p.head?.ref === "string" &&
+          (p.head.ref === `claude/build-${slug}` ||
+            p.head.ref.startsWith(buildPrefix) ||
+            p.head.ref === `claude/${slug}` ||
+            p.head.ref.startsWith(legacyPrefix)),
       );
       if (hit) return { active: true, reason: `open PR #${hit.number}` };
     }
@@ -11484,7 +11493,12 @@ async function dispatchJob(job: Job) {
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
   if (!isResume) {
-    branch = `claude/${slug}-${Date.now().toString(36)}`;
+    // vercel-skip-non-spec-build-refs: spec-builds carry the `claude/build-` prefix so the Vercel
+    // Ignored-Build-Step whitelist (CLAUDE_PREVIEW_IGNORE_COMMAND) can POSITIVELY match the only lane
+    // that needs a per-build preview — every other foreman lane (fold/goal-fold/plan/spec-chat/…)
+    // skips. (Pre-2026-06-27 this was `claude/${slug}-…`; an arbitrary slug couldn't be told apart
+    // from a fold by name, so the old `^claude/` whitelist built folds too and blocked their merge.)
+    branch = `claude/build-${slug}-${Date.now().toString(36)}`;
     removeWorktreeForBranch(branch); // idempotent add — never collide with a prior tree holding this branch
     const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
     if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);

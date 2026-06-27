@@ -2,8 +2,10 @@
 // Ignored-Build-Step) and per-branch preview-deployment lookup. The narrow API surface the
 // per-build-preview pipeline needs (preview-test-promote-pipeline M1):
 //
-//   - patchIgnoredBuildStep(): idempotently PATCH commandForIgnoringBuildStep so any `claude/*`
-//     build branch produces a Vercel preview deployment, while every incidental branch is still
+//   - patchIgnoredBuildStep(): idempotently PATCH commandForIgnoringBuildStep so ONLY a SPEC-BUILD
+//     branch (`claude/build-*`, the runBuildJob lane that genuinely needs a preview for spec-testing)
+//     produces a Vercel preview deployment, while every incidental branch — incl. every OTHER foreman
+//     lane (`claude/fold-*`, `claude/goal-fold-*`, `claude/plan-*`, `claude/spec-chat-*`, …) — is
 //     skipped. Reads the current value first, surfaces the before/after, and only writes when it
 //     differs — the supervisable-autonomy reasoning trail.
 //
@@ -19,11 +21,16 @@
 const PROJECT_ID = "prj_80PnLIjdKT4YAxITnbjkTCgbP0Qv";
 const TEAM_ID = "team_7VetGZ2S7RsYHDoX2bSoB6En";
 
-// The exact override command the goal records (preview-test-promote-pipeline, 2026-06-26).
-// Build production AND any `claude/*` ref; skip everything else. The single-line shell form
-// Vercel runs in /bin/sh — `exit 1` means BUILD, `exit 0` means SKIP.
+// The exact override command the goal records (preview-test-promote-pipeline, 2026-06-26;
+// narrowed to spec-builds only 2026-06-27 — vercel-skip-non-spec-build-refs).
+// Build production AND ONLY a SPEC-BUILD ref (`claude/build-*` — runBuildJob's lane, the one that
+// needs a preview for pre-merge spec-testing); SKIP everything else, incl. every OTHER foreman lane
+// (`claude/fold-*`, `claude/goal-fold-*`, `claude/plan-*`, `claude/spec-chat-*`, `claude/dev-ask-*`,
+// `claude/director-coach-*`) and every incidental topic branch. A whitelist, not a blacklist: a new
+// foreman lane added later is skip-by-default unless it adopts the `claude/build-` prefix. The
+// single-line shell form Vercel runs in /bin/sh — `exit 1` means BUILD, `exit 0` means SKIP.
 export const CLAUDE_PREVIEW_IGNORE_COMMAND =
-  `if [ "$VERCEL_ENV" = production ] || echo "$VERCEL_GIT_COMMIT_REF" | grep -q '^claude/'; then exit 1; else exit 0; fi`;
+  `if [ "$VERCEL_ENV" = production ] || echo "$VERCEL_GIT_COMMIT_REF" | grep -q '^claude/build-'; then exit 1; else exit 0; fi`;
 
 function vercelToken(): string {
   const t = process.env.VERCEL_API_TOKEN || process.env.VERCEL_TOKEN;
