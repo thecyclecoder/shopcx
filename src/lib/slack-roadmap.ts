@@ -26,7 +26,7 @@ export const ACTIONS = {
 const DASH = "https://shopcx.ai/dashboard/roadmap";
 const BOARD_CARD_CAP = 16; // keep the board well under Slack's 50-block message ceiling
 
-const PHASE_EMOJI: Record<SpecStatus, string> = { planned: "⏳", in_progress: "🚧", in_review: "🔍", shipped: "✅", deferred: "⏸️", rejected: "❌" };
+const PHASE_EMOJI: Record<SpecStatus, string> = { planned: "⏳", in_progress: "🚧", in_testing: "🧪", in_review: "🔍", shipped: "✅", deferred: "⏸️", rejected: "❌" };
 
 const SECTIONS: { status: Phase; label: string }[] = [
   { status: "in_progress", label: "🚧 In progress" },
