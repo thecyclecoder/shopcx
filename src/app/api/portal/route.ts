@@ -28,6 +28,14 @@ function jsonErr(body: Record<string, unknown>, status = 400) {
   return NextResponse.json({ ok: false, ...body }, { status });
 }
 
+// Stable messages thrown by resolveAuth() when a visitor lands on the portal without a
+// valid cookie session — the 401 response is correct, no log line needed.
+const EXPECTED_AUTH_MISS = new Set([
+  "No portal session",
+  "Invalid portal session",
+  "Portal session expired",
+]);
+
 async function resolveAuth(req: NextRequest): Promise<PortalAuthResult> {
   // Try HMAC auth first (Shopify App Proxy)
   const url = new URL(req.url);
@@ -236,6 +244,14 @@ async function handle(req: NextRequest) {
 
     if (message === "APP_PROXY_INVALID_SIGNATURE") {
       return jsonErr({ error: "unauthorized", message: "Invalid signature" }, 401);
+    }
+
+    // Expected cookie-session auth-misses — a visitor hits the portal without a valid
+    // session. The 401 IS the correct response; logging it via console.error feeds the
+    // Vercel log drain → Control Tower (signature vercel:1a3270b4a24a9960) and pages
+    // owners on a healthy auth-miss. Genuine unexpected throws still log.
+    if (EXPECTED_AUTH_MISS.has(message)) {
+      return jsonErr({ error: "unauthorized", message }, 401);
     }
 
     console.error("[portal] route error:", message);
