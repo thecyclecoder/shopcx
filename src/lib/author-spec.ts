@@ -256,9 +256,13 @@ export function extractRegressionHeaders(raw: string): { ofSlug: string | null; 
 }
 
 /** Map a parseSpec SpecStatus to the specs.status DB enum. `rejected` is a phase-only state and never a
- *  whole-spec column — fall back to `planned`. `folded` is reachable only via the fold worker. */
+ *  whole-spec column — fall back to `planned`. `in_testing` is purely DERIVED at read time
+ *  (preview-test-promote-pipeline M3 — `in_testing` derived status) and never stored on `specs.status`
+ *  (which carries only explicit lifecycle overrides) — fall back to `in_progress` so the stored row keeps
+ *  reflecting "work is mid-build". `folded` is reachable only via the fold worker. */
 function toDbStatus(s: SpecStatus): DbSpecStatus {
   if (s === "rejected") return "planned";
+  if (s === "in_testing") return "in_progress";
   return s as DbSpecStatus;
 }
 

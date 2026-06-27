@@ -26,6 +26,11 @@ const COLUMNS: { key: SpecStatus; label: string }[] = [
   { key: "in_review", label: "In Review" },
   { key: "planned", label: "Planned" },
   { key: "in_progress", label: "In progress" },
+  // "In testing" = built onto a per-build Vercel preview but BOTH the pre-merge spec-test green and
+  // security green signals aren't yet true (preview-test-promote-pipeline M3 — `in_testing` derived
+  // status). Only when BOTH are green AND the branch promotes (merges to main) does the card move on
+  // to "Shipped". Cards with no preview + no merge stay in "In progress".
+  { key: "in_testing", label: "In testing" },
   // "Shipped" = built + deployed but NOT yet owner-verified in prod. Verifying folds + archives the
   // spec, so this column stays a short, real to-do list. See docs/brain/project-management.md.
   { key: "shipped", label: "Shipped — awaiting verification" },
@@ -37,6 +42,7 @@ const COLUMNS: { key: SpecStatus; label: string }[] = [
 const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
+  in_testing: "bg-sky-500",
   in_review: "bg-slate-400",
   shipped: "bg-emerald-500",
   deferred: "bg-slate-400",
@@ -46,6 +52,7 @@ const DOT: Record<SpecStatus, string> = {
 const HEADER_ACCENT: Record<SpecStatus, string> = {
   planned: "text-zinc-500",
   in_progress: "text-amber-600",
+  in_testing: "text-sky-600",
   in_review: "text-slate-500",
   shipped: "text-emerald-600",
   deferred: "text-slate-500",

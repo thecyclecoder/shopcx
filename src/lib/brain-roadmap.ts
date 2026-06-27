@@ -44,7 +44,12 @@ export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 // built until the Spec-Review agent (Vale) checks it against the authoring guidelines and moves it to
 // `planned` or `deferred`. Its own first column on the board. Like `deferred`, it's a SpecCard status only
 // (phases stay `Phase`).
-export type SpecStatus = Phase | "deferred" | "in_review";
+// `in_testing` (preview-test-promote-pipeline M3): a card whose work is on a per-build preview deploy but
+// hasn't passed BOTH the pre-merge spec-test green AND security green signals. Slots between in_progress
+// and shipped. Purely DERIVED at read time (never stored on `public.specs.status` — that column carries
+// only explicit lifecycle overrides: in_review / deferred / folded). The in_review / deferred / folded
+// overrides still win over in_testing (they are explicit lifecycle states).
+export type SpecStatus = Phase | "deferred" | "in_review" | "in_testing";
 
 export interface SpecPhase {
   title: string;
@@ -336,8 +341,13 @@ function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCa
   return card.blockedBy.map((b) => {
     const target = bySlug.get(b.slug);
     if (target) {
-      // A deferred / in-review prerequisite hasn't shipped → still blocking; show it as ⏳ (the chip cares shipped-or-not).
-      const status: Phase = target.status === "deferred" || target.status === "in_review" ? "planned" : target.status;
+      // A deferred / in-review / in-testing prerequisite hasn't shipped → still blocking; show it as ⏳
+      // (the chip cares shipped-or-not). `in_testing` is a derived board state that means "work is on a
+      // preview, awaiting both-green + promote" — still pre-ship, so the blocker stays uncleared.
+      const status: Phase =
+        target.status === "deferred" || target.status === "in_review" || target.status === "in_testing"
+          ? "planned"
+          : target.status;
       return { slug: b.slug, title: target.title, status, cleared: target.status === "shipped" };
     }
     // Not a live spec → archived/folded (the prereq shipped + was retired into the brain) or a dangling
@@ -416,6 +426,54 @@ function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
   return rollupPhaseStatus(phases.map((p, i) => ({ index: i, title: p.title, status: p.status })));
 }
 
+/**
+ * Per-spec pre-merge testing signals consumed by the in_testing deriver
+ * (preview-test-promote-pipeline M3). Pure — the callers batch these per workspace (see
+ * `readSpecsFromDb`) so the board and the fold gate read the SAME signals and can never disagree.
+ *
+ *  - `hasPreview`       — a build agent_job for this spec has a Vercel preview URL set (the work is
+ *                         deployed onto a per-build preview). When false, no in_testing override applies.
+ *  - `specTestGreen`    — the latest spec_test_run for this spec is a clean machine pass (matches the
+ *                         fold gate's spec-test rail: agent_verdict approved/needs_human + auto_pass>=1
+ *                         + no unresolved auto-`fail` regressions).
+ *  - `securityGreen`    — the latest per-slug security-review rollup is `completedClean` (matches the
+ *                         fold gate's security rail).
+ *  - `merged`           — the preview branch promoted to main (all phases of the card are shipped).
+ *                         Together with both-green this is the only path to a shipped derivation.
+ */
+export interface InTestingSignals {
+  hasPreview: boolean;
+  specTestGreen: boolean;
+  securityGreen: boolean;
+  merged: boolean;
+}
+
+/**
+ * Apply the in_testing rule over a base derived status (preview-test-promote-pipeline M3). Pure: signals
+ * come from the caller. The override slots between in_progress and shipped:
+ *
+ *  - The explicit lifecycle overrides (deferred / in_review) WIN — they are first-class lifecycle states
+ *    and short-circuit ahead of the in_testing rule. `rejected` (a phase-only state) is also left alone.
+ *  - When a card has work on a preview (`hasPreview`) but the pre-merge spec-test green AND security
+ *    green signals are not BOTH true, the derived status is `in_testing` (regardless of whether the base
+ *    rollup would have read in_progress, planned, or — in the post-merge interim before tests land —
+ *    shipped). Only when BOTH are green AND the branch promoted (`merged`) does the deriver fall back
+ *    to the base `shipped` rollup.
+ *  - When there's no preview and the branch hasn't promoted, the base rollup wins exactly as before
+ *    (no regression: a card with no preview + no merge stays in_progress/planned).
+ *
+ * Idempotent over the explicit overrides: a deferred/in_review base status is returned unchanged.
+ */
+export function applyInTestingOverlay(base: SpecStatus, signals: InTestingSignals): SpecStatus {
+  // Explicit lifecycle overrides + the rejected phase-only state win — never replace them with in_testing.
+  if (base === "deferred" || base === "in_review" || base === "rejected") return base;
+  if (!signals.hasPreview) return base; // no preview yet → unchanged (in_progress/planned/shipped).
+  const bothGreen = signals.specTestGreen && signals.securityGreen;
+  // Only "both green AND merged" allows the shipped derivation through; otherwise the card is in_testing.
+  if (bothGreen && signals.merged) return base;
+  return "in_testing";
+}
+
 /** Build a SpecCard from one DB row + its joined `spec_phases`. The phases keep their stable id-by-position
  *  ordering from the join (specs-table.listSpecs sorts ASC by position). PR/merge_sha provenance flows
  *  through to the per-phase chip ([[spec-status-phase-pr-provenance]]). */
@@ -472,7 +530,7 @@ function overlayCardFlags(card: SpecCard, state: import("@/lib/spec-card-state")
   return { ...card, shortCircuited, shortCircuitReason, shippedPr };
 }
 
-const SPEC_RANK: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
+const SPEC_RANK: Record<SpecStatus, number> = { in_progress: 0, in_testing: 0.5, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
 
 /** Read every boardable spec from `public.specs` + `public.spec_phases` for a workspace, build SpecCards,
  *  resolve Blocked-by slugs against the live set, and (when card-state rows exist) overlay the transient
@@ -492,7 +550,202 @@ async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
   } catch {
     /* best-effort overlay — the DB row is authoritative for everything else. */
   }
+  // preview-test-promote-pipeline M3 — apply the in_testing derivation. Pure batched read of the same
+  // signals the fold gate uses (getLatestSpecTestRuns + getSecurityStateBySlug) plus the per-build preview
+  // signal. The board and the fold gate read the same sources, so they can never disagree. Best-effort: a
+  // missing signals reader leaves cards at their base rollup (no in_testing flips). Also writes
+  // spec_status_history rows when a card crosses an in_testing boundary (best-effort + idempotent).
+  try {
+    const signals = await readInTestingSignals(workspaceId, cards);
+    for (let i = 0; i < cards.length; i++) {
+      const sig = signals.get(cards[i].slug);
+      if (!sig) continue;
+      const overlaid = applyInTestingOverlay(cards[i].status, sig);
+      if (overlaid !== cards[i].status) cards[i] = { ...cards[i], status: overlaid };
+    }
+    // Best-effort + idempotent: fire-and-forget the audit writer; never block the board on its outcome.
+    void recordInTestingTransitions(workspaceId, cards);
+  } catch {
+    /* best-effort — base rollup stands when the signal readers fail. */
+  }
   return cards.sort((a, b) => SPEC_RANK[a.status] - SPEC_RANK[b.status] || a.title.localeCompare(b.title));
+}
+
+/**
+ * Per-build preview signals (preview-test-promote-pipeline M3). One batched read per workspace, mirroring
+ * the shape of `getAutoFoldEligibleSlugs` so the board and the fold gate can't disagree. Returns a
+ * map keyed by spec slug — absent entries mean "no in_testing override; keep the base rollup."
+ *
+ * Reads three sources in parallel:
+ *   - `agent_jobs` `kind='build'` rows per slug (latest one wins) for the preview presence + merged signal.
+ *     Read defensively (`select("*")`) so a deploy that lands before the `preview_url` column migration
+ *     applies degrades gracefully (column absent ⇒ undefined ⇒ no preview ⇒ no in_testing override).
+ *   - `getLatestSpecTestRuns` for the spec-test green signal — clean MACHINE pass mirror of the fold gate.
+ *   - `getSecurityStateBySlug` for the security green signal — same `completedClean` rollup the fold gate
+ *     reads.
+ */
+async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Promise<Map<string, InTestingSignals>> {
+  const out = new Map<string, InTestingSignals>();
+  if (!cards.length) return out;
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const { getLatestSpecTestRuns, checkKey, getHumanCheckResolutions } = await import("@/lib/spec-test-runs");
+    const { getSecurityStateBySlug } = await import("@/lib/security-agent");
+    const admin = createAdminClient();
+    const slugs = cards.map((c) => c.slug);
+    const [jobsRes, runs, resolutions, securityBySlug] = await Promise.all([
+      // Defensive `select("*")` so a deploy that pre-dates the `preview_url`/`merge_sha` column migration
+      // degrades gracefully (column absent ⇒ undefined ⇒ no preview / not-merged ⇒ no in_testing override).
+      admin
+        .from("agent_jobs")
+        .select("*")
+        .eq("workspace_id", workspaceId)
+        .eq("kind", "build")
+        .in("spec_slug", slugs)
+        .order("created_at", { ascending: false })
+        .limit(2000),
+      getLatestSpecTestRuns(workspaceId),
+      getHumanCheckResolutions(workspaceId),
+      getSecurityStateBySlug(admin, workspaceId),
+    ]);
+    // Reduce build jobs to the LATEST per slug (the rows arrive newest-first, so the first one wins).
+    const latestJobBySlug = new Map<string, Record<string, unknown>>();
+    for (const row of (jobsRes.data ?? []) as Record<string, unknown>[]) {
+      const slug = String(row.spec_slug || "");
+      if (!slug || latestJobBySlug.has(slug)) continue;
+      latestJobBySlug.set(slug, row);
+    }
+    for (const card of cards) {
+      const job = latestJobBySlug.get(card.slug);
+      const previewUrl = job ? (job["preview_url"] as string | null | undefined) : undefined;
+      const jobStatus = job ? String(job["status"] || "") : "";
+      const hasPreview = typeof previewUrl === "string" && previewUrl.length > 0;
+      // Per the spec: "Only when both are green AND the branch promoted (merged to main) does it derive
+      // shipped." Treat the build job's terminal `merged` status as the promotion signal — the only
+      // canonical "the PR is now on main" state agent_jobs carries.
+      const merged = jobStatus === "merged";
+      // Spec-test green — mirror of the fold gate's MACHINE-PASS rail (approved/needs_human verdict +
+      // auto_pass>=1 + no unresolved auto-`fail` regressions). Same rule as `getAutoFoldEligibleSlugs`.
+      const run = runs[card.slug];
+      let specTestGreen = false;
+      if (run && (run.agent_verdict === "approved" || run.agent_verdict === "needs_human") && run.summary.auto_pass >= 1) {
+        let openFail = false;
+        for (const c of run.checks) {
+          if (c.verdict !== "fail") continue;
+          const res = resolutions.get(`${card.slug}:${checkKey(c.text)}`);
+          if (!res?.resolution) { openFail = true; break; }
+        }
+        specTestGreen = !openFail;
+      }
+      // Security green — same `completedClean` rollup the fold gate reads.
+      const securityGreen = !!securityBySlug[card.slug]?.completedClean;
+      out.set(card.slug, { hasPreview, specTestGreen, securityGreen, merged });
+    }
+  } catch {
+    /* best-effort — the deriver short-circuits to base rollup when signals can't be loaded. */
+  }
+  return out;
+}
+
+/**
+ * preview-test-promote-pipeline M3 — Phase 3 audit writer. For each card whose derived status crosses
+ * an in_testing boundary (→ in_testing, in_testing → shipped, in_testing → in_progress on a re-build),
+ * append a `spec_status_history` row recording the transition (supervisable-autonomy: every state
+ * change is surfaced, not silent).
+ *
+ * Idempotency: the writer compares each card's CURRENT derived status to the to_value of the most-recent
+ * `field='status'` history row for that slug; only a net change writes a row. So a duplicate getRoadmap
+ * call (the hot path on every dashboard render) is a no-op — the latest history row already records the
+ * current state. Best-effort + audited via the same `spec_status_history` table the existing writers use:
+ * a missing table / read error / insert error never breaks the board read.
+ *
+ * Schema (probe of `spec_status_history`, see `supabase/migrations/20260624130000_spec_status_history.sql`):
+ *   workspace_id, spec_slug, field ∈ ('status','phase','critical','deferred'), phase_index nullable,
+ *   from_value text (JSON-stringified prior), to_value text (JSON-stringified next, REQUIRED), actor,
+ *   reason, at. The `field` CHECK constraint allows 'status', which is what we write here.
+ */
+async function recordInTestingTransitions(workspaceId: string, cards: SpecCard[]): Promise<void> {
+  if (!cards.length) return;
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    // Pull the latest `field='status'` history row per slug in one query (workspace_id + slug indexed).
+    // Newest-first; the first row we see per slug is the most recent.
+    const slugs = cards.map((c) => c.slug);
+    const { data } = await admin
+      .from("spec_status_history")
+      .select("spec_slug, to_value, at")
+      .eq("workspace_id", workspaceId)
+      .eq("field", "status")
+      .in("spec_slug", slugs)
+      .order("at", { ascending: false })
+      .limit(5000);
+    const latestBySlug = new Map<string, string>();
+    for (const r of (data ?? []) as { spec_slug: string; to_value: string }[]) {
+      if (!latestBySlug.has(r.spec_slug)) latestBySlug.set(r.spec_slug, r.to_value);
+    }
+    const rows: {
+      workspace_id: string;
+      spec_slug: string;
+      field: "status";
+      phase_index: null;
+      from_value: string | null;
+      to_value: string;
+      actor: string;
+      reason: string;
+    }[] = [];
+    for (const card of cards) {
+      const next = JSON.stringify(card.status);
+      const priorRaw = latestBySlug.get(card.slug);
+      // No prior row → only emit a row when entering / exiting in_testing (boundary transitions). A
+      // brand-new spec at planned/in_progress/shipped shouldn't get an audit row from the deriver — that's
+      // the existing writers' job. We only care about in_testing edges here.
+      if (!priorRaw) {
+        if (card.status !== "in_testing") continue;
+        rows.push({
+          workspace_id: workspaceId,
+          spec_slug: card.slug,
+          field: "status",
+          phase_index: null,
+          from_value: null,
+          to_value: next,
+          actor: "deriver:in_testing",
+          reason: "entered in_testing (preview up, tests pending)",
+        });
+        continue;
+      }
+      if (priorRaw === next) continue; // idempotent — already recorded
+      // We only emit on in_testing BOUNDARIES (→ in_testing, in_testing → x). Other transitions are
+      // recorded by the existing writers (merge:<sha>, owner:<id>, drift:reconciler, etc.).
+      let prior: string | null = null;
+      try { prior = JSON.parse(priorRaw) as string; } catch { prior = null; }
+      const wasInTesting = prior === "in_testing";
+      const isInTesting = card.status === "in_testing";
+      if (!wasInTesting && !isInTesting) continue;
+      const reason = isInTesting
+        ? "entered in_testing (preview up, tests pending)"
+        : card.status === "shipped"
+          ? "exited in_testing → shipped (both green + merged)"
+          : card.status === "in_progress"
+            ? "exited in_testing → in_progress (re-build started)"
+            : `exited in_testing → ${card.status}`;
+      rows.push({
+        workspace_id: workspaceId,
+        spec_slug: card.slug,
+        field: "status",
+        phase_index: null,
+        from_value: priorRaw,
+        to_value: next,
+        actor: "deriver:in_testing",
+        reason,
+      });
+    }
+    if (rows.length) {
+      await admin.from("spec_status_history").insert(rows).then(undefined, () => {});
+    }
+  } catch {
+    /* best-effort — the board read never fails because the audit writer hiccuped. */
+  }
 }
 
 /** Serialize a DB SpecRow back to a markdown blob with the same shape parseSpec/extractSpecSection/
@@ -629,7 +882,7 @@ export async function getFunctionMap(workspaceId?: string): Promise<FunctionMap>
   const functions: FunctionGroup[] = [...byFn.entries()]
     .sort((a, b) => ord(a[0]) - ord(b[0]) || a[0].localeCompare(b[0]))
     .map(([fn, list]) => {
-      const counts: Record<SpecStatus, number> = { planned: 0, in_progress: 0, in_review: 0, shipped: 0, deferred: 0, rejected: 0 };
+      const counts: Record<SpecStatus, number> = { planned: 0, in_progress: 0, in_testing: 0, in_review: 0, shipped: 0, deferred: 0, rejected: 0 };
       for (const s of list) counts[s.status]++;
       const pmap = new Map<string, SpecCard[]>();
       for (const s of list) {
@@ -638,7 +891,7 @@ export async function getFunctionMap(workspaceId?: string): Promise<FunctionMap>
         arr.push(s);
         pmap.set(key, arr);
       }
-      const rank: Record<SpecStatus, number> = { in_progress: 0, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
+      const rank: Record<SpecStatus, number> = { in_progress: 0, in_testing: 0.5, in_review: 1, planned: 2, shipped: 3, deferred: 4, rejected: 5 };
       const groups: ParentGroup[] = [...pmap.entries()]
         .map(([parent, ss]) => ({ parent, label: parentLabel(parent), specs: ss.sort((a, b) => rank[a.status] - rank[b.status] || a.title.localeCompare(b.title)) }))
         .sort((a, b) => a.label.localeCompare(b.label));

@@ -14,6 +14,7 @@ import { preprocessBrainWikilinks } from "@/lib/brain-links";
 const DOT: Record<SpecStatus, string> = {
   planned: "bg-zinc-400",
   in_progress: "bg-amber-500",
+  in_testing: "bg-sky-500",
   in_review: "bg-slate-400",
   shipped: "bg-emerald-500",
   deferred: "bg-slate-400",
