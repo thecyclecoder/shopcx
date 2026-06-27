@@ -56,6 +56,13 @@ export interface SpecTestRun {
   checks: SpecTestCheck[];
   transcript: string | null;
   error: string | null;
+  /**
+   * spec-test-on-preview-pre-merge Phase 2 — populated only on a PRE-MERGE run (spec-test against
+   * a per-build *.vercel.app preview before the claude/* branch merges); a post-ship/standing-lane
+   * run leaves both null. M3's green-signal helper reads the latest row per (slug, spec_branch).
+   */
+  spec_branch: string | null;
+  preview_url: string | null;
   run_at: string;
   created_at: string;
   updated_at: string;
@@ -76,6 +83,8 @@ export function normalizeRun(row: Record<string, unknown>): SpecTestRun {
     checks: Array.isArray(row.checks) ? (row.checks as SpecTestCheck[]) : [],
     transcript: (row.transcript as string) ?? null,
     error: (row.error as string) ?? null,
+    spec_branch: (row.spec_branch as string) ?? null,
+    preview_url: (row.preview_url as string) ?? null,
     run_at: String(row.run_at),
     created_at: String(row.created_at ?? row.run_at),
     updated_at: String(row.updated_at ?? row.run_at),
