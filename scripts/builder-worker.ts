@@ -11230,6 +11230,52 @@ async function dispatchJob(job: Job) {
       resumeBits.push(`Already-applied gated actions — treat as SETTLED, do NOT re-request them: ${settledActions.map((a) => a.cmd).join("; ")}`);
     }
 
+    // one-phase-per-build-session: a build session must implement EXACTLY ONE phase — the next planned one.
+    // The bug this closes: a planner-authored job's instructions are GENERIC ("Authored by the goal planner
+    // for {goal} (M{n} — …)" — NO "Phase N"), so nothing scoped the build to a single phase; the agent
+    // implemented ALL planned phases in one session → one PR with multiple phases → the merge hook
+    // (applyMergedBuildEffects), which stamps only the single next phase when the instructions name none,
+    // UNDER-stamps → phase drift (live: `in-testing-derived-status` shipped P1+P2+P3 in PR #806, hook stamped
+    // only P1). The norm is ONE phase per build; the escort/chain already queues the NEXT phase after this one
+    // merges (queueNextChainedPhase / the director escort re-release on the next dispatch).
+    //
+    // Derive the next planned phase from the DERIVED rollup (getSpec → first phase whose status is neither
+    // shipped nor rejected) — NEVER the stored specs.status. If the job's instructions ALREADY name a specific
+    // phase (the dashboard per-phase Build / chain step use phaseScopedInstructions, which embeds "Phase N —
+    // …"), leave scoping to that — the job.instructions clause below already constrains it and the merge hook
+    // reads the same "Phase N". We only inject a single-phase scope when the instructions DON'T name one
+    // (the generic planner-authored case). A one-shot spec (0 phases) or an all-shipped spec yields no
+    // next-phase → no injected scope (the pre-flight already no-ops an all-built spec). Best-effort: a
+    // getSpec failure leaves the prompt as-is (the pre-flight "first unbuilt one" guidance still applies).
+    let nextPhaseScope: string | null = null;
+    if (!isResume) {
+      const instructionsNamePhase = /\bPhase\s+\d+\b/i.test(job.instructions ?? "");
+      if (!instructionsNamePhase) {
+        try {
+          const { getSpec: getRoadmapSpec } = await import("../src/lib/brain-roadmap");
+          const got = await getRoadmapSpec(slug, job.workspace_id);
+          const phases = got?.card.phases ?? [];
+          // First phase whose DERIVED status is neither shipped nor rejected = the next planned phase to build.
+          const idx = phases.findIndex((p) => p.status !== "shipped" && p.status !== "rejected");
+          if (idx >= 0 && phases.length > 1) {
+            // Only scope when there's MORE than one phase — a single-phase spec IS the whole thing in one PR,
+            // and a 0-phase one-shot has nothing to scope. The merge hook falls back to this same "first
+            // not-yet-shipped phase" when the instructions name none, so the phase the agent builds and the
+            // phase the hook stamps are identical by construction (no drift).
+            const phase = phases[idx];
+            const phaseLabel = /^\s*Phase\s+\d+\b/i.test(phase.title) ? phase.title : `Phase ${idx + 1} — ${phase.title}`;
+            nextPhaseScope =
+              `⭐ ONE-PHASE-PER-SESSION (mandate — overrides any "build the whole spec" reading of the scope below): implement ONLY ${phaseLabel}, and its verification. ` +
+              `This spec has ${phases.length} phases; you build EXACTLY this single next-planned phase this session — explicitly do NOT implement any subsequent phase, even if the triggering instruction reads generically ("build {spec}" / "authored by the goal planner"). ` +
+              `After this phase merges, the worker auto-queues the next phase's build; your job is this one phase only. If this phase is already entirely on main, make no edits and return the no_changes_reason form.`;
+            console.log(`${tag} scoped build to next planned phase: ${phaseLabel} (of ${phases.length})`);
+          }
+        } catch (e) {
+          console.error(`${tag} next-planned-phase derivation failed (proceeding unscoped — pre-flight still applies):`, e instanceof Error ? e.message : e);
+        }
+      }
+    }
+
     // `isResume && sessionId`: a started-fresh run (owning account was capped → sessionId cleared) has no
     // prior session to "continue", so it uses the FRESH prompt and re-reads the spec from the branch WIP.
     // spec-authoring-writes-db-and-worker-materialize Phase 2: the spec body comes from the DB row; the
@@ -11239,6 +11285,7 @@ async function dispatchJob(job: Job) {
       : [
           `Use the build-spec skill to implement the spec at ${materializedRelPath} (cwd is the repo root). The spec body comes from the DB row (public.specs + public.spec_phases); the file you read is a worker-materialized copy.`,
           `⭐ PRE-FLIGHT STATE CHECK (mandate — do this FIRST, before writing any code or running any build tool): inspect the actual REPO STATE (git log, grep, file contents, existing migrations, open PRs) and determine, per phase, what is ALREADY BUILT on main. Mark satisfied phases DONE and SKIP them — build ONLY the unbuilt delta. If EVERY phase is already on main, make NO edits and return {"status":"completed","no_changes_reason":"already built — <which phases/files are on main>"} (the worker reconciles the board status from that). Judge "built" by the CODE ON MAIN — NOT by any ⏳/✅ in the markdown: spec status is DB-driven now, the .md carries no status. Never rebuild work that's already shipped. You build ONE phase (the first unbuilt one) per run; when your PR merges, the worker tags THAT phase shipped in the DB with your PR # + merge SHA (phase-pr-provenance) — you don't touch status yourself. A one-shot/single-phase spec is the whole thing in one PR.`,
+          ...(nextPhaseScope ? [nextPhaseScope] : []),
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
           `⭐ cacheComponents RULES (this app has \`cacheComponents: true\` in next.config — tsc does NOT catch prerender breaks, but the worker runs a real \`next build\` gate before merge, so get it right or the build bounces back to you): every page that reads DYNAMIC data must do so inside a <Suspense> boundary or the production build fails ("Uncached data accessed outside of <Suspense>"). When you add/edit a route: a SERVER page reading uncached DB/auth data, OR a CLIENT page using useSearchParams/useParams/usePathname → add a route \`layout.tsx\` that wraps {children} in \`<Suspense fallback={null}>\` (the cleanest fix — covers the whole segment). NEVER use \`connection()\` (it does NOT satisfy the boundary). NEVER add \`export const runtime / revalidate / dynamicParams\` (incompatible with cacheComponents — they fail the build). A storefront page that needs caching uses \`'use cache'\` + \`cacheLife\` (see the PDP). Static/marketing pages that read no dynamic data need nothing.`,
