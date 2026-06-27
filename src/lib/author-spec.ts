@@ -1,19 +1,24 @@
 /**
  * author-spec — the single chokepoint every spec-author surface goes through to write the spec body to
- * the DB ([[../tables/specs]] + [[../tables/spec_phases]]) in addition to the legacy
- * `docs/brain/specs/{slug}.md` commit on `main` (spec-authoring-writes-db-and-worker-materialize Phase 1).
+ * the DB ([[../tables/specs]] + [[../tables/spec_phases]]). DB-ONLY: authoring writes `public.specs` +
+ * `public.spec_phases` via the [[../libraries/specs-table]] SDK and nothing else. There is NO
+ * `docs/brain/specs/{slug}.md` commit on `main` — the per-spec markdown was retired
+ * ([[spec-readers-from-db-retire-parser]] · [[spec-pm-markdown-purge]]); the readers
+ * ([[../libraries/brain-roadmap]]) read the DB rows, not disk. Every author surface (planner,
+ * director-coach, triage, regression, spec-chat, Vale-fix, db-health, coverage-register, repair, security,
+ * migration-fix, storefront-optimizer, developer-message-center, director split lanes) authors here, to
+ * the DB, full stop.
  *
- * Dual-write during the transition: the author surface (planner, director-coach, triage, regression,
- * spec-chat, Vale-fix, db-health, coverage-register, repair, security, migration-fix, storefront-optimizer,
- * developer-message-center, director split lanes) STILL commits the .md to `main` (readers haven't cut over
- * yet — [[../libraries/brain-roadmap]] `parseSpec` is still served from disk), AND it now records the row
- * here so the future DB-resident surfaces (build materializer, fold-from-DB, db-driven readers) line up.
- * The mirror lane (Phase 4) will replace the inline .md commit with a worker step driven off the DB write
- * once readers cut over ([[spec-readers-from-db-retire-parser]]).
+ * Two entry points, ONE write path:
+ *  - `authorSpecRowFromMarkdown` — author from a markdown body (parses title/owner/parent/phases/verification
+ *    out of the markdown). Used by surfaces that already hold a markdown buffer.
+ *  - `authorSpecRowStructured` — author from already-typed fields + phases (no markdown parse). Used by the
+ *    goal planner, which holds the proposed spec as structured data and never needs a `.md` round-trip.
+ * Both run the same Verification enforcement (`assertEveryPhaseHasVerification`) and the same `upsertSpec`.
  *
- * Best-effort: a DB upsert failure logs a warning but never blocks the upstream commit (the markdown stays
- * canonical for the markdown-first readers). Same defensive posture as `markNewSpecInReview` had on
- * spec_card_state.
+ * Verification enforcement is a HARD error (throws `MissingVerificationError`) — it runs before the DB write
+ * so an untestable spec never reaches `public.spec_phases`. A genuine DB/upsert error is best-effort (logged,
+ * returns false) per the historical defensive posture.
  */
 import { parseSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus } from "@/lib/specs-table";
@@ -274,15 +279,112 @@ export interface AuthorSpecOpts {
   repairSignature?: string | null;
   /** Optional: who set the intended_status (the author surface — `planner`, `director-coach`, etc.). */
   intendedStatusSetBy?: string | null;
+  /** Optional: bind the authored spec to a goal milestone (`goal_milestones.id`). The goal planner passes
+   *  the milestone the proposed spec attaches under so the goal→milestone→spec link is made AT author time
+   *  (db-driven; no separate `attachSpecToMilestone` round-trip). Omit / null for a standalone spec. */
+  milestoneId?: string | null;
+}
+
+/** A structured phase a caller hands to `authorSpecRowStructured` — title + body + the verification checklist
+ *  (REQUIRED-non-empty, enforced before the write). `status` defaults to `planned` (a freshly-authored
+ *  phase hasn't shipped). */
+export interface StructuredPhaseInput {
+  title: string;
+  body: string;
+  /** The phase's `## Verification` checklist. Must be non-empty — `assertEveryPhaseHasVerification` rejects
+   *  a phase with no acceptance check. */
+  verification: string;
+  status?: Phase;
+}
+
+/** The structured spec a caller hands to `authorSpecRowStructured` (no markdown parse). */
+export interface StructuredSpecInput {
+  title: string;
+  summary: string | null;
+  owner: string;
+  parent: string;
+  blocked_by?: string[];
+  critical?: boolean;
+  autoBuild?: boolean;
+  phases: StructuredPhaseInput[];
 }
 
 /**
- * Author / re-author a spec to the DB from its markdown body — the dual-write writer every author surface
- * calls AFTER its existing .md commit succeeds. Idempotent: re-running with the same body produces no
- * material change (UPSERT by `(workspace_id, slug)`, phase replacement by `(spec_id, position)`).
+ * Author / re-author a spec to the DB from already-typed fields + phases — NO markdown parse. The DB-driven
+ * entry point for surfaces (the goal planner) that hold the proposed spec as structured data and must never
+ * depend on a `.md` scratch buffer on disk. Same Verification enforcement + same `upsertSpec` write path as
+ * the markdown variant. Idempotent (UPSERT by `(workspace_id, slug)`; phases replaced by `(spec_id, position)`).
  *
- * Best-effort: a failure logs a warning and returns `false` but does NOT throw — the upstream .md commit
- * is the canonical source until [[spec-readers-from-db-retire-parser]] flips readers over.
+ * Verification is a HARD error: a phase with an empty `verification` throws `MissingVerificationError` BEFORE
+ * the DB write (an untestable spec never lands). A genuine DB/upsert error is best-effort (logged → `false`).
+ */
+export async function authorSpecRowStructured(
+  workspaceId: string,
+  slug: string,
+  spec: StructuredSpecInput,
+  intendedStatus: "planned" | "deferred",
+  opts: AuthorSpecOpts = {},
+): Promise<boolean> {
+  // ENFORCEMENT before the DB write — reuse the SAME gate the markdown path runs so every author surface
+  // (markdown OR structured) inherits "no untestable spec." Map structured phases into the gate's shape.
+  const phaseBodies = spec.phases.map((p) => ({
+    title: p.title,
+    body: p.body,
+    verification: p.verification && p.verification.trim() ? p.verification.trim() : null,
+  }));
+  assertEveryPhaseHasVerification(slug, phaseBodies);
+
+  try {
+    const phases: SpecPhaseInput[] = spec.phases.map((p, i) => ({
+      position: i + 1,
+      title: p.title,
+      body: p.body,
+      // Freshly-authored phases start `planned` (nothing has shipped). pr/merge_sha left undefined so an
+      // idempotent re-author after a phase shipped preserves the stamped provenance.
+      status: p.status ?? "planned",
+      pr: undefined,
+      merge_sha: undefined,
+      verification: phaseBodies[i].verification,
+    }));
+    await upsertSpec(
+      workspaceId,
+      {
+        slug,
+        title: spec.title,
+        summary: spec.summary,
+        owner: spec.owner,
+        parent: spec.parent,
+        blocked_by: spec.blocked_by ?? [],
+        priority: spec.critical ? "critical" : null,
+        deferred: intendedStatus === "deferred",
+        intended_status: intendedStatus,
+        status: opts.status,
+        intended_status_set_by: opts.intendedStatusSetBy ?? null,
+        repair_signature: opts.repairSignature !== undefined ? opts.repairSignature : null,
+        regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : null,
+        regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : null,
+        auto_build: spec.autoBuild === true,
+        milestone_id: opts.milestoneId ?? null,
+      },
+      phases,
+    );
+    return true;
+  } catch (e) {
+    console.warn(
+      `[author-spec] authorSpecRowStructured ${slug} failed:`,
+      e instanceof Error ? e.message : e,
+    );
+    return false;
+  }
+}
+
+/**
+ * Author / re-author a spec to the DB from its markdown body — the DB-only writer every markdown-holding
+ * author surface calls. Idempotent: re-running with the same body produces no material change (UPSERT by
+ * `(workspace_id, slug)`, phase replacement by `(spec_id, position)`).
+ *
+ * Best-effort on the DB write: a failure logs a warning and returns `false`. The Verification gate is a HARD
+ * error (throws) before the write so an untestable spec never lands in `public.spec_phases`.
  */
 export async function authorSpecRowFromMarkdown(
   workspaceId: string,
@@ -294,9 +396,8 @@ export async function authorSpecRowFromMarkdown(
   // ENFORCEMENT (reject before the DB write): every phase must carry a non-empty Verification. This runs
   // OUTSIDE the best-effort try/catch below so a missing-Verification authoring FAILS LOUDLY (throws) rather
   // than being swallowed into a `false` return — an untestable spec must never reach public.spec_phases. A
-  // genuine DB/upsert error stays best-effort (returns false, logged) per the dual-write posture; only this
-  // structural defect is a hard error. ~13 specs shipped with empty verification columns because there was no
-  // gate here — this is that gate.
+  // genuine DB/upsert error stays best-effort (returns false, logged); only this structural defect is a hard
+  // error. ~13 specs shipped with empty verification columns because there was no gate here — this is that gate.
   const phaseBodies = extractPhaseBodies(markdown);
   assertEveryPhaseHasVerification(slug, phaseBodies);
 
@@ -339,7 +440,7 @@ export async function authorSpecRowFromMarkdown(
         regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : regressionHeaders.ofSlug,
         regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : regressionHeaders.signature,
         auto_build: card.autoBuild === true,
-        milestone_id: null,
+        milestone_id: opts.milestoneId ?? null,
       },
       phases,
     );

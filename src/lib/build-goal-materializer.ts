@@ -100,7 +100,11 @@ export function renderGoalRow(row: GoalRow, milestones: MaterializedMilestone[])
   if (milestones.length) {
     parts.push("## Decomposition", "");
     for (const { milestone, specs } of milestones) {
-      parts.push(`### ${milestone.title}  _(${deriveMilestoneStatus(specs)})_`);
+      // Emit the milestone's STABLE id alongside its title + position so the planner can bind each
+      // proposed spec to a real `goal_milestones.id` (db-driven goal→milestone→spec link). Position is
+      // the human-friendly handle ("M1"); the id is the FK the worker writes onto `specs.milestone_id`.
+      parts.push(`### M${milestone.position} — ${milestone.title}  _(${deriveMilestoneStatus(specs)})_`);
+      parts.push(`_milestone_id: ${milestone.id}_`);
       if (milestone.body && milestone.body.trim()) parts.push(milestone.body.trim());
       if (specs.length) {
         parts.push("");

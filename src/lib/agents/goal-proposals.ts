@@ -177,14 +177,14 @@ export function extractDecompositionMilestones(artifact: string): GoalMilestoneI
  *     proposer left decomposition to Pia). When `parentGoalId` is set (the planner SUBGOAL case), it goes
  *     onto the row; the `goals_parent_cycle` trigger guards acyclicity.
  *
- *  2. Inserts a `proposed-goal` agent_jobs row (status `queued`) carrying the rendered artifact in
- *     `instructions`. The box worker commits the markdown mirror + parks it `needs_approval` (→ routes to
- *     the CEO). No GitHub commit happens from this code path — the worker owns the mirror commit.
+ *  2. Inserts a `proposed-goal` agent_jobs row (status `queued`) carrying the goal slug. The box worker
+ *     parks it `needs_approval` (→ routes to the CEO). No GitHub commit from this code path or the worker —
+ *     the goal lives in `public.goals` (the per-goal markdown was retired in
+ *     [[goal-readers-from-db-retire-parsegoal]]).
  *
- * The row write is BEST-EFFORT: if the [[goals-milestones-tables-and-backfill]] migration hasn't applied
- * yet (the goals table doesn't exist) or the upsert fails, we log + continue to enqueue the job; the
- * worker's RESUME path already falls back to the markdown flip when no row is found. Once the migration
- * applies, every proposer-path write is a real row + a mirror commit (dual-write).
+ * The row write is AUTHORITATIVE: the row IS the goal (readers + the greenlight flip are DB-only). A write
+ * failure ABORTS the proposal (returns `{ok:false}`) — we never enqueue a greenlight job for a goal that
+ * has no row to flip.
  *
  * Returns the new agent_jobs `jobId` on success.
  */
@@ -201,12 +201,12 @@ export async function proposeGoal(
 
   const artifact = buildProposedGoalMarkdown(input);
 
-  // Step 1 — write the public.goals row + any seeded milestones (Phase 2). Best-effort: a missing table
-  // (migration not yet applied) shouldn't block the proposal lifecycle — the worker's markdown commit +
-  // RESUME-fallback keep the CEO greenlight surface live in that transitional window.
-  // Clobber guard: refuse to silently overwrite an existing goal of the same slug (mirrors the worker's
-  // markdown-side clobber refusal). A row that's already greenlit/complete must not be reset to `proposed`
-  // by a stray re-proposal — the lifecycle is propose → greenlight, not propose → reset.
+  // Step 1 — write the public.goals row + any seeded milestones (AUTHORITATIVE: the row IS the goal; the
+  // readers + the greenlight flip are DB-only). A write failure ABORTS the proposal — we never enqueue a
+  // greenlight job for a goal that has no row to flip (the RESUME path requires the row).
+  // Clobber guard: refuse to silently overwrite an existing goal of the same slug. A row that's already
+  // greenlit/complete must not be reset to `proposed` by a stray re-proposal — the lifecycle is
+  // propose → greenlight, not propose → reset.
   try {
     const existing = await getGoal(workspaceId, input.slug);
     if (existing && existing.status && existing.status !== "proposed") {
@@ -228,7 +228,9 @@ export async function proposeGoal(
       extractDecompositionMilestones(artifact),
     );
   } catch (e) {
-    console.warn(`[goal-proposals] proposeGoal row write failed for ${input.slug} — falling through to worker markdown path:`, e instanceof Error ? e.message : e);
+    const why = e instanceof Error ? e.message : String(e);
+    console.error(`[goal-proposals] proposeGoal row write failed for ${input.slug}:`, why);
+    return { ok: false, error: `could not write goal row for ${input.slug}: ${why}` };
   }
 
   const instructions: GoalProposalInstructions = {
