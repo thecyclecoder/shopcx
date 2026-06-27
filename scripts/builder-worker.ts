@@ -3004,6 +3004,93 @@ async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string
   return resequenced.length ? `sequence → re-sequenced ${resequenced.length} out-of-order build(s): ${resequenced.join(", ")}` : "sequence: detected violations but none recovered (see logs)";
 }
 
+// ── claim-time-build-gate ────────────────────────────────────────────────────
+// PREVENTIVE gate at the moment the box CLAIMS a build (the dispatch entry of a kind='build' job), BEFORE
+// any worktree/account/claude work. The box was claiming ANY `queued` build with no gate, so two classes
+// of bad build slipped through (CEO-reported): (a) a malformed / never-Vale-reviewed spec built (the
+// in_review→Vale→Ada→planned chain raced its build), and (b) milestone fan-out built out of sequence
+// because `reconcileMilestoneSequence` only RE-orders reactively, after the builds already started. This
+// gate refuses the claim until the spec is AUTHORED + Vale-SPEC-REVIEW-PASSED + every `blocked_by` SHIPPED.
+//
+// Every check reads DERIVED status via the brain-roadmap rollup (`getSpec` → card.status / card.phases /
+// card.valePass / card.blockedBy[].cleared) — NEVER the stored `specs.status` column — and every PM write
+// goes through the SDK (enqueueSpecReviewIfDue / the requeue `update`), so the _check-pm-sdk-compliance
+// guard stays green. `reconcileMilestoneSequence` + the director escort remain the backstop that re-releases
+// a held build as its blockers ship; this gate is the front door that stops the premature claim in the
+// first place. Implements docs/brain/specs/claim-time-build-gate.md.
+type ClaimGateResult =
+  | { ok: true }
+  | { ok: false; disposition: "requeue" | "park"; reason: string; parkClass?: string };
+
+async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimGateResult> {
+  // A RESUME is already past the gate — its branch/PR exists and it's finishing approved/in-flight work;
+  // re-gating it (e.g. a blocker that shipped then a phase regressed) would strand committed WIP. The gate
+  // governs the FIRST claim of a fresh build only. Fold/plan/etc. never reach here (dispatched by kind above).
+  const isResume = !!job.claude_session_id;
+  if (isResume) return { ok: true };
+
+  const slug = job.spec_slug;
+  const { getSpec } = await import("../src/lib/brain-roadmap");
+
+  let card: import("../src/lib/brain-roadmap").SpecCard | null = null;
+  try {
+    const got = await getSpec(slug, job.workspace_id);
+    card = got?.card ?? null;
+  } catch (e) {
+    // A transient read failure must not fail/park the build — requeue and re-evaluate next tick.
+    return { ok: false, disposition: "requeue", reason: `claim-gate: getSpec(${slug}) threw — ${e instanceof Error ? e.message : String(e)}; requeued to re-evaluate` };
+  }
+
+  // ── 1) AUTHORED ── the spec has a live public.specs row with phases (defense-in-depth; the flow-fix
+  // mostly guarantees it, but a row deleted mid-queue / an unauthored slug must NOT build a phantom). A
+  // missing row is the silent author-write fallout — PARK spec_row_missing (the parked-router dismisses it),
+  // not requeue, so it doesn't spin forever. A one-shot spec (no `## Phase` sections) authors zero phases but
+  // is still authored, so require a row, not phases≥1 — the empty-body guard downstream rejects a truly
+  // empty materialized spec.
+  if (!card) {
+    return {
+      ok: false,
+      disposition: "park",
+      parkClass: "spec_row_missing",
+      reason: `public.specs has no boardable row for ${slug} — author lane silently failed upstream; do not build until the row is authored`,
+    };
+  }
+
+  // ── 3) BLOCKED_BY ALL SHIPPED ── every declared blocker must be DERIVED-shipped (rollup: all phases
+  // shipped, OR archived/folded — exactly card.blockedBy[].cleared). Checked BEFORE the Vale leg so an
+  // out-of-sequence milestone build is held even while its own Vale review is still pending. Stays `queued`
+  // (claimed_at cleared) so the director escort re-releases it the moment its last blocker ships.
+  const uncleared = (card.blockedBy ?? []).filter((b) => !b.cleared);
+  if (uncleared.length) {
+    const { phaseEmoji } = await import("../src/lib/brain-roadmap");
+    const list = uncleared.map((b) => `${b.slug} (${phaseEmoji(b.status)})`).join(", ");
+    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not shipped: ${list}; left queued for the escort to re-release` };
+  }
+
+  // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
+  // (phases present + each with verification, coherent, real Owner/Parent, not malformed) BEFORE its build.
+  // `card.valePass` reads `public.specs.vale_pass` straight off the row (the EXISTING verdict mechanism —
+  // markSpecCardValePassed sets it on a Vale PASS); we do NOT invent a parallel reviewer. A spec with no
+  // pass is held queued. To avoid waiting on the next spec-review-cron tick, proactively enqueue a Vale pass
+  // here (deduped — enqueueSpecReviewIfDue no-ops if one's already in flight or no in_review spec exists) so
+  // the review lands promptly; on PASS Vale flips vale_pass=true and the next claim attempt clears this leg.
+  if (card.valePass !== true) {
+    try {
+      const { enqueueSpecReviewIfDue } = await import("../src/lib/agents/spec-review");
+      const r = await enqueueSpecReviewIfDue(job.workspace_id);
+      if (r.enqueued) console.log(`${tag} claim-gate: ${slug} not Vale-passed → enqueued a spec-review pass (${r.pending} in_review)`);
+    } catch (e) {
+      console.error(`${tag} claim-gate: enqueueSpecReviewIfDue failed (continuing to hold ${slug}):`, e instanceof Error ? e.message : e);
+    }
+    const note = card.status === "in_review"
+      ? "awaiting Vale's spec-review verdict"
+      : `status=${card.status} but vale_pass not set — Vale must pass the authored spec before its build`;
+    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} not spec-review-passed (${note}); left queued until Vale passes` };
+  }
+
+  return { ok: true };
+}
+
 // board-grooming (Phase 1): the director MOVES the project board. For each PARTIALLY-shipped spec (≥1 ✅,
 // remaining ⏳, no active build) it runs a read-only Max investigation that classifies the leftover phases:
 //   - continue → queue the next phase's build to completion (loop-guarded, like the escort).
@@ -10945,6 +11032,41 @@ async function dispatchJob(job: Job) {
   const tag = `[${slug}]`;
   const wt = join(BUILDS_DIR, job.id); // isolated worktree — parallel builds never collide
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
+
+  // claim-time-build-gate: the FIRST thing a freshly-claimed build does — refuse the claim unless the spec
+  // is AUTHORED + Vale-spec-review-PASSED + every blocked_by SHIPPED (all DERIVED via the brain-roadmap
+  // rollup, never the stored specs.status column). On a hold we UN-CLAIM (status→queued, claimed_at→null)
+  // so the row stays claimable and the director escort / sequence reconciler re-release it as its blockers
+  // ship and Vale passes; a missing-row author-failure PARKS needs_attention(spec_row_missing). This runs
+  // BEFORE any worktree/account/claude work so a malformed/blocked/unreviewed spec never opens a PR. A
+  // resume is exempt (handled inside the gate). Best-effort: a gate-internal crash must never wedge the
+  // lane — on an unexpected throw we let the build proceed (the downstream materialize + empty-body guards
+  // still catch a phantom/empty spec).
+  if (!isResume) {
+    let gate: ClaimGateResult | null = null;
+    try {
+      gate = await evaluateClaimTimeBuildGate(job, tag);
+    } catch (e) {
+      console.error(`${tag} claim-gate threw (proceeding — downstream guards still apply):`, e instanceof Error ? e.message : e);
+    }
+    if (gate && !gate.ok) {
+      if (gate.disposition === "park") {
+        await update(job.id, {
+          status: "needs_attention",
+          needs_attention_class: gate.parkClass ?? "spec_row_missing",
+          error: gate.reason,
+          log_tail: `claim-gate parked — ${gate.reason}; no PR opened`.slice(-2000),
+        });
+        console.warn(`${tag} claim-gate → parked needs_attention (${gate.parkClass ?? "spec_row_missing"}): ${gate.reason}`);
+      } else {
+        // Un-claim: back to `queued` with claimed_at cleared (the reaper/escort re-release pattern) so the
+        // next poll re-evaluates it once Vale passes / its last blocker ships. No worktree was created yet.
+        await update(job.id, { status: "queued", claimed_at: null, log_tail: gate.reason.slice(-2000) });
+        console.log(`${tag} claim-gate → held (re-queued): ${gate.reason}`);
+      }
+      return;
+    }
+  }
 
   // dirty-pr-resolver-duplicate-detection (Phase 1): build-claim dedup. A fresh build whose work already
   // shipped via a SIBLING build (same spec + same phase scope, already merged) must NOT open a competing PR
