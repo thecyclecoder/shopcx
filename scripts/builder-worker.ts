@@ -19,6 +19,7 @@ import { randomUUID } from "crypto";
 // Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
+import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -11691,6 +11692,17 @@ async function main() {
     }
   })();
 
+  // Vercel Ignored-Build-Step auto-heal at startup (regression-of: per-build-vercel-preview-deploys):
+  // re-assert the CLAUDE_PREVIEW_IGNORE_COMMAND override so a manual revert in the Vercel dashboard
+  // (or any other path that drifts it) is healed by the next box restart. The helper is idempotent —
+  // GETs first, no-ops if the value already matches, PATCHes only on diff. Best-effort + wrapped:
+  // a throw here must never crash startup (the dashboard chip + spec-test agent still surface it).
+  try {
+    await patchIgnoredBuildStep();
+  } catch (e) {
+    console.error("[vercel-ignore-step] startup auto-heal failed (continuing):", e instanceof Error ? e.message : e);
+  }
+
   // Per-kind concurrency (fold-build-batching Phase 2): build+plan share the MAX_CONCURRENT pool;
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
   // Per-lane detail (build-box-status-view): the value carries what the lane is building + when it
@@ -11778,6 +11790,17 @@ async function main() {
   let lastApprovalSweep = 0; // approval-routing-engine M2: throttle the routed-inbox reconcile
   for (;;) {
     try {
+      // Vercel Ignored-Build-Step auto-heal on every tick (regression-of: per-build-vercel-preview-deploys):
+      // re-assert the CLAUDE_PREVIEW_IGNORE_COMMAND override so the preview-build gate can never silently
+      // drift back to skipping claude/* branches. Helper is idempotent (GET → no-op on match → PATCH on
+      // diff), so the steady-state cost is one GET/tick. Wrapped: a throw must NOT break the loop — the
+      // dashboard chip + spec-test agent are the secondary signal if this keeps failing.
+      try {
+        await patchIgnoredBuildStep();
+      } catch (e) {
+        console.error("[vercel-ignore-step] tick auto-heal failed (continuing):", e instanceof Error ? e.message : e);
+      }
+
       // Multi-account (box-multi-account-failover Phase 1): revive any job parked `blocked_on_usage` once
       // an account has reset — flip it back to queued/queued_resume so the lanes below re-claim it. No
       // manual re-queue / rebuild. Best-effort.

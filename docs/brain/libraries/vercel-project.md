@@ -81,7 +81,8 @@ Convenience: prepend `https://` to a `Deployment.url` (Vercel returns the bare h
 
 ## Callers
 
-- **[[../recipes/apply-vercel-ignore-step-override]]** — `scripts/apply-vercel-ignore-step-override.ts` re-applies the override deterministically (a second run is a no-op). The PATCH the goal records lives here, not in a hand-flipped dashboard setting.
+- **[[../recipes/apply-vercel-ignore-step-override]]** — `scripts/apply-vercel-ignore-step-override.ts` re-applies the override deterministically (a second run is a no-op). The break-glass / manual path; the primary path is the box-worker auto-heal below.
+- **`scripts/builder-worker.ts`** (regression-of: per-build-vercel-preview-deploys) — calls `patchIgnoredBuildStep()` once at worker startup AND once at the top of every poll-loop tick, wrapped in try/catch. Idempotent (GET → no-op on match → PATCH on diff), so steady-state cost is one GET/tick. This is now the PRIMARY way the override is re-asserted: a manual dashboard revert is healed by the next tick (~5s). The chip + spec-test agent remain as the secondary signal if the auto-heal itself keeps failing.
 - **[[preview-capture]]** (M1 Phase 2) — `src/lib/preview-capture.ts` `capturePreviewUrlForJob` / `pollCapturePreviewUrl` calls `getLatestReadyDeploymentForBranch(job.spec_branch, sha)` and persists the URL + state on the owning `agent_jobs` row (`preview_url` / `preview_state`). The box worker (`scripts/builder-worker.ts`) fires the poll right after `git push` succeeds — fire-and-forget, idempotent, best-effort.
 - **`/api/roadmap/box`** (M1 Phase 3) — server-side calls `getProjectIgnoreState()` with a 60s module cache and exposes the result as `preview_build_override` on the box-page payload. The `/dashboard/roadmap/box` page renders a chip (`enabled` · `drifted` · `unknown`) so the supervisor can SEE preview builds are on without running the apply script (supervisable autonomy: see + pause).
 
