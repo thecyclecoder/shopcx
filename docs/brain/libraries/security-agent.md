@@ -8,10 +8,11 @@ The queue plumbing + autonomy policy behind the **Security / Dependency Agent** 
 
 The agent **reviews + classifies** (a bounded proxy: "did this diff/dep introduce a vulnerability + here's the fix"); the **owner-gated build applies any fix** and is graded on whether it held ([[../operational-rules]] § North star). It NEVER edits product code, opens its own PR, or bumps a dependency. Mirrors [[repair-agent]] / [[regression-agent]]: diagnose + author/surface, the disposer builds. Ambiguity escalates (`needs-human`). Every detect/escalate/author writes a [[../tables/director_activity|director_activity]] row (`director_function: 'platform'`). **Secret findings are referenced by location, never echoed in plaintext** into logs / `director_activity` / the surfaced spec.
 
-## Two modes (one lane, `agent_jobs.kind='security-review'`)
+## Three modes (one lane, `agent_jobs.kind='security-review'`)
 
-- **`diff`** (Phase 1) — a **per-merged-diff** security pass. Reviews the merged `claude/*` commit for injection, secret/credential leak, authz / RLS-policy regressions, unsafe `createAdminClient()` exposure, and `_encrypted` handling (the [[../specs/security-dependency-agent]] / `/security-review` checklist + CLAUDE.md invariants).
-- **`dep-watch`** (Phase 2) — the daily **`npm audit`** CVE scan (enqueued by [[../inngest/security-dep-watch]]). On a vulnerable dep it authors a scoped upgrade-fix spec + surfaces a Build card — never auto-bumps.
+- **`diff`** (post-merge) — a **per-merged-diff** security pass. Reviews the merged `claude/*` commit for injection, secret/credential leak, authz / RLS-policy regressions, unsafe `createAdminClient()` exposure, and `_encrypted` handling (the [[../specs/security-dependency-agent]] / `/security-review` checklist + CLAUDE.md invariants).
+- **`branch`** (pre-merge — [[../specs/security-test-on-preview-pre-merge]] Phase 1) — the **per-branch** security pass that runs WHILE the build is still unmerged. Same checks as `diff`, but the box reads the UNMERGED diff (`git diff main...claude/<branch>`) and any runtime probe lands on the **per-build Vercel preview origin** (from [[per-build-vercel-preview-deploys]]), not prod. The surfaced verdict is what the **M4 promote gate** reads to refuse to auto-merge an unreviewed branch.
+- **`dep-watch`** — the daily **`npm audit`** CVE scan (enqueued by [[../inngest/security-dep-watch]]). On a vulnerable dep it authors a scoped upgrade-fix spec + surfaces a Build card — never auto-bumps.
 
 ## Exports
 
@@ -22,17 +23,20 @@ The agent **reviews + classifies** (a bounded proxy: "did this diff/dep introduc
 - `SECURITY_RECENT_FIX_WINDOW_MS` (24h) — a fix authored within this window is "pending deploy"; don't re-scan/re-surface.
 - `LIVE_SECURITY_STATUSES` — the statuses that mean a security-review job is still live (working or surfaced).
 - `securitySha12(mergeSha)` / `depFindingSignature(findings)` — the per-diff dedup key (the merge SHA) and the advisory-set signature (sorted `pkg@severity`, sha1).
-- `enqueueSecurityReviewJob(admin, { mergeSha, specSlug, prNumber?, workspaceId? })` → enqueue ONE per-diff `security-review` [[agent_jobs]] job. **Deduped by the merge SHA** — a re-run (the two merge-hook paths firing for one merge) never double-files. **Best-effort, never throws.**
+- `enqueueSecurityReviewJob(admin, input)` → enqueue ONE `security-review` [[agent_jobs]] job. **Best-effort, never throws.** Two input shapes (one function — discriminated by the presence of `branch`):
+  - **post-merge `diff`** `{ mergeSha, specSlug, prNumber?, workspaceId? }` — **deduped by the merge SHA** so a re-run (the two merge-hook paths firing for one merge) never double-files.
+  - **pre-merge `branch`** `{ branch, previewOrigin, specSlug, prNumber?, workspaceId? }` ([[../specs/security-test-on-preview-pre-merge]] Phase 1) — **deduped to ONE OPEN review per branch** (any live/surfaced security-review job with `spec_branch === branch`). A terminal `completed`/`failed` for the branch never blocks a re-review on a later push — the new diff might re-introduce something the prior pass cleared. The `securitySha12`/`depFindingSignature` signatures still converge same-finding recurrences inside the box's review of the branch's diff.
 - `enqueueDepWatchJob(admin, { workspaceId? })` → enqueue the daily dep-watch scan. Deduped to ≤1 live scan + a recent-window guard. **Best-effort, never throws.**
 - `getOpenSecurityReviews(admin, workspaceId)` → `SecuritySurfaceItem[]` — READ-ONLY: open security items awaiting the owner (`needs_approval` = a routed fix with a `security_build` Build action, or `needs_attention` = needs-human). Clean reviews complete silently.
 - `getSecurityStateBySlug(admin, workspaceId)` → `Record<slug, SecurityStateBySlug>` — READ-ONLY per-spec rollup (`live`/`surfaced`/`completedClean`) for the build-card lifecycle timeline's Security node + the fold gate (they MUST agree). Dep-watch sentinels excluded.
 - `listSecurityReviews(admin, workspaceId, limit?)` → `SecurityReviewLogItem[]` — READ-ONLY: Vault's **full** review log (clean ones included), newest-first, for the [[../dashboard/security-tests]] surface. Derives a `verdict` per row (`clean｜false-positive｜real-vuln｜needs-human｜running｜failed` — a completed review's verdict is parsed off the `log_tail` prefix) and resolves each reviewed slug's [[../tables/specs|spec]] title. Bounded (≤500).
 - `countOpenSecurityReviews(admin, workspaceId)` → `number` — the surfaced count (`needs_approval`/`needs_attention`) for the Security tests sidebar badge. Clean reviews never count.
 
-## Trigger — event-driven (Phase 1) + a daily cron (Phase 2)
+## Trigger — event-driven (`diff` + `branch`) + a daily cron (`dep-watch`)
 
-- **Phase 1** rides the **merge hook**: [[agent-jobs]] `applyMergedBuildEffects` (the shared body of BOTH `reconcileMergedJobs` — a manual squash-merge — and `handleAutoMergedBuildBranch` — the auto-merge webhook) calls `enqueueSecurityReviewJob` with the merge SHA. So every merged `claude/*` build diff gets exactly one review, deduped by SHA.
-- **Phase 2** is the [[../inngest/security-dep-watch]] daily cron → `enqueueDepWatchJob`.
+- **`diff`** rides the **merge hook**: [[agent-jobs]] `applyMergedBuildEffects` (the shared body of BOTH `reconcileMergedJobs` — a manual squash-merge — and `handleAutoMergedBuildBranch` — the auto-merge webhook) calls `enqueueSecurityReviewJob` with the merge SHA. So every merged `claude/*` build diff gets exactly one review, deduped by SHA.
+- **`branch`** rides the **preview-ready hook** ([[per-build-vercel-preview-deploys]]): when a `claude/*` build's per-build Vercel preview reaches READY and the branch is still unmerged, the hook calls `enqueueSecurityReviewJob` with `{branch, previewOrigin}`. One open review per branch — a re-deploy of the same branch (open review still live) is a no-op.
+- **`dep-watch`** is the [[../inngest/security-dep-watch]] daily cron → `enqueueDepWatchJob`.
 
 ## The box loop — `runSecurityReviewJob`
 

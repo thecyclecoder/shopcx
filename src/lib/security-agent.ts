@@ -11,13 +11,19 @@
  * opens its own PR, or bumps a dependency — the owner-gated build applies any fix (mirrors
  * [[repair-agent]] / [[regression-agent]]).
  *
- * Two entry points (event-driven — there is NO per-diff cron; the merge IS the trigger):
- *   - `enqueueSecurityReviewJob` — fired from the merge hook ([[agent-jobs]] `applyMergedBuildEffects`,
- *     run by BOTH the manual-squash reconcile and the auto-merge webhook path) on every merged
- *     `claude/*` build diff. Deduped by the merge SHA — one review per distinct diff, never double-filed.
+ * Three entry points (event-driven — there is NO per-diff cron; the merge / preview-ready IS the trigger):
+ *   - `enqueueSecurityReviewJob` (post-merge `diff` mode) — fired from the merge hook
+ *     ([[agent-jobs]] `applyMergedBuildEffects`, run by BOTH the manual-squash reconcile and the
+ *     auto-merge webhook path) on every merged `claude/*` build diff. Deduped by the merge SHA — one
+ *     review per distinct diff, never double-filed.
+ *   - `enqueueSecurityReviewJob` (pre-merge `branch` mode, [[../specs/security-test-on-preview-pre-merge]]
+ *     Phase 1) — fired when a `claude/*` build reaches a READY preview + is still unmerged (the
+ *     [[per-build-vercel-preview-deploys]] hook). The review scans the UNMERGED diff
+ *     (`git diff main...claude/<branch>`) and any runtime probe hits the per-build preview origin —
+ *     so a vulnerability surfaces BEFORE the merge, not after. Deduped to one open review per branch.
  *   - `enqueueDepWatchJob` — fired daily by the [[inngest/security-dep-watch]] cron. Deduped to ≤1 live
  *     dep-watch scan; the box job runs `npm audit` on the real tree and authors an upgrade-fix spec.
- *   - the box worker's `runSecurityReviewJob` (scripts/builder-worker.ts) consumes both off the queue.
+ *   - the box worker's `runSecurityReviewJob` (scripts/builder-worker.ts) consumes all three off the queue.
  */
 import { createHash } from "crypto";
 import type { createAdminClient } from "@/lib/supabase/admin";
@@ -80,6 +86,29 @@ export interface SecurityDiffInstructions {
   authored_slug?: string;
 }
 
+/**
+ * Shape of a PRE-MERGE per-branch security-review job's `instructions` JSON
+ * ([[../specs/security-test-on-preview-pre-merge]] Phase 1). The reviewer scans the UNMERGED diff
+ * (`git diff main...{branch}`) — NOT a post-merge main commit — and any runtime probe hits the
+ * per-build `preview_origin`, so a vulnerability surfaces before the merge.
+ */
+export interface SecurityBranchInstructions {
+  mode: "branch";
+  /** the `claude/*` build branch — the per-branch dedup key + what the box `git diff main...`s to read. */
+  branch: string;
+  /** the per-build Vercel preview origin (e.g. `https://shopcx-abc123-xxx.vercel.app`) — where any
+   * runtime probe lands, instead of prod. */
+  preview_origin: string;
+  /** the build's spec slug — for the surfaced item + the authored fix's `Fixes:` link. */
+  spec_slug: string;
+  /** the build's PR number, when known. */
+  pr_number?: number | null;
+  /** set on a TERMINAL job by the box: the verdict it reached. */
+  verdict?: string;
+  /** set when the box authored a fix: the slug it wrote. */
+  authored_slug?: string;
+}
+
 /** Shape of a dep-watch scan job's `instructions` JSON. */
 export interface SecurityDepWatchInstructions {
   mode: "dep-watch";
@@ -120,7 +149,11 @@ async function resolveSecurityWorkspace(admin: Admin): Promise<string | null> {
   return (ws as { id?: string } | null)?.id ?? null;
 }
 
-export interface EnqueueSecurityReviewInput {
+/**
+ * Per-diff (post-merge) input — keyed/deduped by the merge SHA. The existing call site
+ * ([[agent-jobs]] `applyMergedBuildEffects`).
+ */
+export interface EnqueueSecurityReviewDiffInput {
   /** the merged commit SHA — the per-diff dedup key. */
   mergeSha: string;
   /** the merged spec slug (or `pr-{number}`). */
@@ -132,62 +165,154 @@ export interface EnqueueSecurityReviewInput {
 }
 
 /**
- * Enqueue a per-diff `security-review` job for a merged `claude/*` build. Best-effort + idempotent:
- * deduped by the merge SHA so a re-run (board reconcile + auto-merge webhook both firing for one merge)
- * NEVER double-files. `spec_slug` carries the merged slug for surfacing; the SHA lives in `instructions`
- * (the dedup key). Never throws — it rides the merge hook, and a throw there is worse than the gap.
+ * Per-branch (pre-merge) input — keyed/deduped by the build branch ([[../specs/security-test-on-preview-pre-merge]]
+ * Phase 1). Fired when a `claude/*` build reaches a READY preview + is unmerged — the
+ * [[per-build-vercel-preview-deploys]] hook calls this with the build branch + per-build preview origin.
+ */
+export interface EnqueueSecurityReviewBranchInput {
+  /** the `claude/*` build branch — the per-branch dedup key. */
+  branch: string;
+  /** the per-build Vercel preview origin (e.g. `https://shopcx-abc123-xxx.vercel.app`). */
+  previewOrigin: string;
+  /** the build's spec slug. */
+  specSlug: string;
+  /** the build's PR number, when known. */
+  prNumber?: number | null;
+  /** override the workspace; else resolved from the latest job / first workspace. */
+  workspaceId?: string;
+}
+
+export type EnqueueSecurityReviewInput = EnqueueSecurityReviewDiffInput | EnqueueSecurityReviewBranchInput;
+
+function isBranchInput(input: EnqueueSecurityReviewInput): input is EnqueueSecurityReviewBranchInput {
+  return typeof (input as EnqueueSecurityReviewBranchInput).branch === "string"
+    && (input as EnqueueSecurityReviewBranchInput).branch.length > 0;
+}
+
+/**
+ * Enqueue a `security-review` job. Two modes (one lane):
+ *
+ *   - **`diff` (post-merge)** — caller passes `{mergeSha,specSlug,prNumber?}`. Deduped by the merge SHA so
+ *     a re-run (board reconcile + auto-merge webhook both firing for one merge) NEVER double-files.
+ *     `spec_slug` carries the merged slug for surfacing; the SHA lives in `instructions` (the dedup key).
+ *
+ *   - **`branch` (pre-merge)** — caller passes `{branch,previewOrigin,specSlug,prNumber?}`
+ *     ([[../specs/security-test-on-preview-pre-merge]] Phase 1). Deduped to ONE OPEN review per branch
+ *     (any live/surfaced security-review job with `spec_branch === branch`). The `securitySha12` /
+ *     `depFindingSignature` signatures still converge same-finding recurrences once the box runs.
+ *
+ * Best-effort + idempotent + never throws — both call sites (the merge hook + the preview-ready hook) ride
+ * other plumbing, and a throw there is worse than the gap.
  */
 export async function enqueueSecurityReviewJob(admin: Admin, input: EnqueueSecurityReviewInput): Promise<{ enqueued: boolean; reason?: string }> {
   try {
-    const sha = securitySha12(input.mergeSha);
-    if (!sha) return { enqueued: false, reason: "no merge sha" };
-
-    // Dedup by merge SHA — scan recent security-review jobs (diff mode) for a matching SHA in ANY status
-    // (a clean review COMPLETED for this SHA must not re-file either). SHAs are globally unique.
-    const sinceIso = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: recent } = await admin
-      .from("agent_jobs")
-      .select("id, instructions")
-      .eq("kind", "security-review")
-      .gte("created_at", sinceIso)
-      .order("created_at", { ascending: false })
-      .limit(300);
-    for (const r of (recent ?? []) as Array<{ instructions?: string }>) {
-      try {
-        const instr = JSON.parse(String(r.instructions || "{}")) as SecurityDiffInstructions;
-        if (instr.mode === "diff" && securitySha12(instr.merge_sha) === sha) {
-          return { enqueued: false, reason: "security-review already filed for this merge SHA" };
-        }
-      } catch {
-        /* not JSON — ignore */
-      }
+    if (isBranchInput(input)) {
+      return enqueueSecurityReviewBranch(admin, input);
     }
-
-    const workspaceId = input.workspaceId || (await resolveSecurityWorkspace(admin));
-    if (!workspaceId) return { enqueued: false, reason: "no workspace to attach the security-review job to" };
-
-    const instructions: SecurityDiffInstructions = {
-      mode: "diff",
-      merge_sha: input.mergeSha,
-      spec_slug: input.specSlug,
-      pr_number: input.prNumber ?? null,
-    };
-    const { error } = await admin.from("agent_jobs").insert({
-      workspace_id: workspaceId,
-      spec_slug: input.specSlug,
-      kind: "security-review",
-      status: "queued",
-      instructions: JSON.stringify(instructions),
-    });
-    if (error) {
-      console.warn(`[security-agent] per-diff enqueue failed for ${sha}:`, error.message);
-      return { enqueued: false, reason: error.message };
-    }
-    return { enqueued: true, reason: sha };
+    return enqueueSecurityReviewDiff(admin, input);
   } catch (err) {
     console.warn("[security-agent] enqueueSecurityReviewJob threw:", err instanceof Error ? err.message : err);
     return { enqueued: false, reason: "threw" };
   }
+}
+
+async function enqueueSecurityReviewDiff(admin: Admin, input: EnqueueSecurityReviewDiffInput): Promise<{ enqueued: boolean; reason?: string }> {
+  const sha = securitySha12(input.mergeSha);
+  if (!sha) return { enqueued: false, reason: "no merge sha" };
+
+  // Dedup by merge SHA — scan recent security-review jobs (diff mode) for a matching SHA in ANY status
+  // (a clean review COMPLETED for this SHA must not re-file either). SHAs are globally unique.
+  const sinceIso = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: recent } = await admin
+    .from("agent_jobs")
+    .select("id, instructions")
+    .eq("kind", "security-review")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(300);
+  for (const r of (recent ?? []) as Array<{ instructions?: string }>) {
+    try {
+      const instr = JSON.parse(String(r.instructions || "{}")) as SecurityDiffInstructions;
+      if (instr.mode === "diff" && securitySha12(instr.merge_sha) === sha) {
+        return { enqueued: false, reason: "security-review already filed for this merge SHA" };
+      }
+    } catch {
+      /* not JSON — ignore */
+    }
+  }
+
+  const workspaceId = input.workspaceId || (await resolveSecurityWorkspace(admin));
+  if (!workspaceId) return { enqueued: false, reason: "no workspace to attach the security-review job to" };
+
+  const instructions: SecurityDiffInstructions = {
+    mode: "diff",
+    merge_sha: input.mergeSha,
+    spec_slug: input.specSlug,
+    pr_number: input.prNumber ?? null,
+  };
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    spec_slug: input.specSlug,
+    kind: "security-review",
+    status: "queued",
+    instructions: JSON.stringify(instructions),
+  });
+  if (error) {
+    console.warn(`[security-agent] per-diff enqueue failed for ${sha}:`, error.message);
+    return { enqueued: false, reason: error.message };
+  }
+  return { enqueued: true, reason: sha };
+}
+
+/**
+ * Pre-merge `branch`-mode enqueue ([[../specs/security-test-on-preview-pre-merge]] Phase 1). Dedup:
+ * ONE OPEN review per branch — skip if any security-review job with `spec_branch === branch` is in a
+ * live/surfaced status (queued / claimed / building / needs_input / needs_approval / queued_resume /
+ * needs_attention). A terminal `completed` / `failed` for the branch never blocks a re-review on a later
+ * push (the new diff might re-introduce something the prior pass cleared).
+ */
+async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityReviewBranchInput): Promise<{ enqueued: boolean; reason?: string }> {
+  const branch = String(input.branch || "").trim();
+  if (!branch) return { enqueued: false, reason: "no branch" };
+  if (!input.specSlug) return { enqueued: false, reason: "no spec slug" };
+
+  // Dedup by branch (one open review per branch). `spec_branch` is the column the agent_jobs row carries
+  // (set on insert below). The `securitySha12`/`depFindingSignature` signatures still converge same-finding
+  // recurrences inside the box's review of the branch's diff.
+  const { data: open } = await admin
+    .from("agent_jobs")
+    .select("id, status")
+    .eq("kind", "security-review")
+    .eq("spec_branch", branch)
+    .in("status", LIVE_SECURITY_STATUSES as unknown as string[])
+    .limit(1);
+  if ((open ?? []).length > 0) {
+    return { enqueued: false, reason: "security-review already open for this branch" };
+  }
+
+  const workspaceId = input.workspaceId || (await resolveSecurityWorkspace(admin));
+  if (!workspaceId) return { enqueued: false, reason: "no workspace to attach the security-review job to" };
+
+  const instructions: SecurityBranchInstructions = {
+    mode: "branch",
+    branch,
+    preview_origin: String(input.previewOrigin || ""),
+    spec_slug: input.specSlug,
+    pr_number: input.prNumber ?? null,
+  };
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    spec_slug: input.specSlug,
+    spec_branch: branch,
+    kind: "security-review",
+    status: "queued",
+    instructions: JSON.stringify(instructions),
+  });
+  if (error) {
+    console.warn(`[security-agent] pre-merge enqueue failed for ${branch}:`, error.message);
+    return { enqueued: false, reason: error.message };
+  }
+  return { enqueued: true, reason: branch };
 }
 
 /**
