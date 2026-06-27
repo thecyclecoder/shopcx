@@ -11,11 +11,13 @@ The Control Tower's de-duped incident log ([[../specs/control-tower]] Phase 1). 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `uuid` | PK · `gen_random_uuid()` |
-| `loop_id` | `text` | the violating loop (registry id) — at most **one** `status='open'` row per `loop_id` |
-| `kind` | `text?` | the loop kind (`worker`｜`cron`｜`agent-kind`) |
-| `reason` | `text` | which check fired: `liveness` ｜ `cron_freshness` ｜ `stuck_jobs` |
+| `loop_id` | `text` | the violating loop (registry id) — at most **one** `status='open'` row per `loop_id`. The KPI-drift writer ([[../inngest/platform-director-cron]] `audit-platform-scorecard`) sets this to the `signature` value so the existing partial unique index dedupes a non-registry incident too |
+| `kind` | `text?` | the loop kind (`worker`｜`cron`｜`agent-kind`) — KPI-drift incidents use `kpi-drift` |
+| `reason` | `text` | which check fired: `liveness` ｜ `cron_freshness` ｜ `stuck_jobs` ｜ `kpi_drift` |
 | `detail` | `text` | the human-readable violation ("Cron X hasn't run in 4h…") — refreshed each tick while open |
 | `status` | `text` | `open` (default) ｜ `resolved` · CHECK-constrained |
+| `owner` | `text?` | the org-chart function that owns the incident (`platform` for KPI-drift); legacy registry alerts leave this NULL (the loop's own `owner` lives in [[../specs/control-tower]]'s in-code registry, not the row) — added in [[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 5 |
+| `signature` | `text?` | the stable de-dupe key for non-loop incidents — KPI-drift sets `kpi_drift:<metric>:<cadence>` (and stamps `loop_id` to the same value so the partial unique index enforces "one open per signature"); legacy registry alerts leave this NULL — added in [[../specs/devops-kpi-review-sdk-and-data-fix]] Phase 5 |
 | `opened_at` | `timestamptz` | when the incident first opened · default `now()` |
 | `last_seen_at` | `timestamptz` | bumped each monitor tick the violation persists · default `now()` |
 | `resolved_at` | `timestamptz?` | when a healthy evaluation auto-resolved it |
@@ -35,10 +37,13 @@ The unique index is the belt-and-suspenders against a racing double-open (the cr
 
 - **Amber doesn't open an alert.** Only a **red** loop (an active liveness/freshness/stuck violation) opens/keeps an alert; amber (cron awaiting first run, worker mid self-update, a not-ok cron beat) is informational and **resolves** any existing open alert. Alerts exist iff there's an active page-worthy violation.
 - **Paging fans out per workspace.** `notifyOpsAlert` is called for every distinct workspace that has an owner/admin with a `slack_user_id` — in practice the one Superfoods workspace. Best-effort; a Slack outage never breaks the monitor.
+- **KPI-drift writer is separate from the monitor.** The `audit-platform-scorecard` step on [[../inngest/platform-director-cron]] writes its own `kpi_drift:<metric>:<cadence>` rows (`owner='platform'`, `signature` stamped, `loop_id` = signature for the partial-unique-index dedupe). The [[../libraries/control-tower]] monitor iterates only the in-code `MONITORED_LOOPS` registry, so it never touches a kpi-drift row — the KPI writer is the sole opener/resolver of its own signatures. The downstream platform-director reconciler reads ALL open rows by table SELECT (`status='open'`), so kpi-drift rows still flow into the open-backlog surface naturally.
 
 ## Migration
 
 `supabase/migrations/20260622120000_control_tower.sql` (this table + [[loop_heartbeats]] + RLS) · apply: `scripts/apply-control-tower-migration.ts`
+
+`supabase/migrations/20260727120000_kpi_audit_log_and_loop_alerts_owner_signature.sql` ([[kpi_audit_log]] + `owner` / `signature` columns) · apply: `scripts/apply-kpi-audit-log-migration.ts`
 
 ## Related
 
