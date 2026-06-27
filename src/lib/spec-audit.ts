@@ -22,9 +22,8 @@ import {
   rollupPhaseStatus,
   type SpecCardPhaseState,
 } from "@/lib/spec-card-state";
-import { restampPhases } from "@/lib/specs-table";
-import { getSpec } from "@/lib/brain-roadmap";
-import type { Phase } from "@/lib/brain-roadmap";
+import { getSpec as getSpecRow, restampPhases } from "@/lib/specs-table";
+import type { Phase } from "@/lib/specs-table";
 
 export interface AuditPhaseVerdict {
   index: number;
@@ -67,9 +66,9 @@ export async function auditSpecShippedState(
   const states = await getSpecCardStates(workspaceId);
   const prior = states[slug];
 
-  // Resolve the phase titles from the live spec markdown so we can name phases without provenance.
-  const spec = await getSpec(slug).catch(() => null);
-  const mdPhases = spec?.card.phases ?? [];
+  // Resolve the phase titles from public.spec_phases so we can name phases without provenance.
+  const specRow = await getSpecRow(workspaceId, slug).catch(() => null);
+  const dbPhases = specRow?.phases ?? [];
 
   // Read every status-history row for this spec, most recent first. We walk it once per phase to find
   // the most recent merge:<sha> flip to `shipped` — that's the audit's evidence.
@@ -102,15 +101,15 @@ export async function auditSpecShippedState(
     mergeByPhase.set(r.phase_index, { sha, at: r.at });
   }
 
-  // Derive the phase set: take the markdown's phase count + titles as the canonical roster, fall back
-  // to whatever the DB last stored (a markdown move/delete shouldn't lose audit coverage of stale phases).
-  const phaseCount = Math.max(mdPhases.length, (prior?.phase_states?.length ?? 0));
+  // Derive the phase set: take the spec_phases roster (titles + count) as canonical, fall back to whatever
+  // the card-state mirror last stored so a phase-row delete doesn't lose audit coverage of stale phases.
+  const phaseCount = Math.max(dbPhases.length, (prior?.phase_states?.length ?? 0));
   const phases: AuditPhaseVerdict[] = [];
   const restampedStates: SpecCardPhaseState[] = [];
 
   for (let i = 0; i < phaseCount; i++) {
     const priorPhase = prior?.phase_states?.find((p) => p.index === i);
-    const title = mdPhases[i]?.title ?? priorPhase?.title ?? `Phase ${i + 1}`;
+    const title = dbPhases[i]?.title ?? priorPhase?.title ?? `Phase ${i + 1}`;
     const priorStatus = (priorPhase?.status ?? "planned") as Phase;
     const priorPr = priorPhase?.pr ?? null;
     const evidence = mergeByPhase.get(i);
