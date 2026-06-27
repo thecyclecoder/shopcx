@@ -466,6 +466,73 @@ export async function enqueueSpecTestIfDue(
 }
 
 /**
+ * Pre-merge spec-test enqueue ([[../specs/spec-test-on-preview-pre-merge]] Phase 1) — the SIBLING of
+ * `enqueueSpecTestIfDue` for the PRE-MERGE lane. When a `claude/*` build reaches a READY per-build
+ * preview (its `preview_url` is set by [[per-build-vercel-preview-deploys]] Phase 2) and the branch
+ * is still unmerged, this enqueues ONE `kind='spec-test'` `agent_jobs` row carrying:
+ *   - `spec_branch` = the build's `claude/*` branch (so the runner reads the branch's spec body, not
+ *     `main`'s) — the field [[getBranchBuildSuccess]] / [[findMergedSiblingBuild]] already index on.
+ *   - the preview origin in `instructions` (and in `preview_url` when that column is present) — the
+ *     runner's non-destructive GET / browser checks then hit the `*.vercel.app` PREVIEW deployment,
+ *     not prod (Phase 2 wires the runner to read it).
+ *
+ * Mirrors `enqueueSpecTestIfDue`'s dedupe shape, but keyed per **(workspace, slug, branch)**: a
+ * pre-merge run on branch A doesn't block a pre-merge run on branch B (different builds of the same
+ * spec), and a re-run for the same branch (board refresh, webhook re-fire) no-ops instead of stacking
+ * a duplicate row. No shipped-but-not-archived gate — pre-merge is BY DEFINITION not-yet-shipped. The
+ * post-ship lane keeps its own (workspace, slug) chokepoint above; the pre-merge dedupe is a
+ * STRICTLY-NARROWER key, so the two never collide. First caller wins; the rest no-op.
+ */
+export async function enqueuePreMergeSpecTest(
+  workspaceId: string,
+  slug: string,
+  branch: string,
+  previewUrl: string,
+): Promise<{ enqueued: boolean; reason?: string }> {
+  if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
+  const origin = (previewUrl || "").replace(/\/$/, "");
+  if (!origin) return { enqueued: false, reason: "no preview_url" };
+
+  const admin = createAdminClient();
+
+  // Dedupe — skip if a spec-test job already exists for (workspace, slug, branch). Mirrors the
+  // `enqueueSpecTestIfDue` chokepoint shape (a `.from("agent_jobs").select("id")` SQL probe + first
+  // hit wins), but the key is per-BRANCH: a still-open OR an already-finished pre-merge run for the
+  // same branch is the SAME code under test, so re-running pre-merge would just re-test the same
+  // preview. A fresh commit lands a new preview deployment but the dedupe is per-branch so the run
+  // history stays attached to it; the M3 green-signal helper picks the LATEST `spec_test_runs` row
+  // for (slug, branch) regardless.
+  const { data: existing } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "spec-test")
+    .eq("spec_branch", branch)
+    .limit(1);
+  if (existing && existing.length) return { enqueued: false, reason: "in-flight" };
+
+  // The runner reads the preview origin from `instructions` (Phase 2 threads it through). We also
+  // best-effort-set `preview_url` for symmetry with the build's column — harmless if M1's column
+  // isn't present yet (Supabase ignores an unknown insert key in our schema cache, surfaced only via
+  // its row-error path; we treat any insert error as a guarded surface — see below).
+  const instructions = `Run the spec-test against the PER-BUILD PREVIEW deployment for branch \`${branch}\`. Preview origin: ${origin}. This is a PRE-MERGE verification — every GET / browser-check / deploy-log probe must hit the preview origin (NOT prod). The runner's contract is otherwise unchanged: emit one JSON verdict, NEVER mutate.`;
+  const insertRow: Record<string, unknown> = {
+    workspace_id: workspaceId,
+    spec_slug: slug,
+    kind: "spec-test",
+    status: "queued",
+    spec_branch: branch,
+    instructions,
+    created_by: null,
+    preview_url: origin,
+  };
+  const { error } = await admin.from("agent_jobs").insert(insertRow);
+  if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
+  return { enqueued: true };
+}
+
+/**
  * spec-blockers Phase 2 — auto-queue on unblock. A blocking spec `shippedSlug` just shipped (its build
  * PR merged + phases flipped ✅). Find every live spec that named it as a `Blocked-by` prerequisite and,
  * if that was its LAST uncleared blocker (every other blocker is now cleared too), auto-enqueue its build —
