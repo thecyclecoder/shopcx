@@ -12252,23 +12252,25 @@ async function dispatchJob(job: Job) {
     }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
-    // M2: advance a "Build all" chain off THIS branch-build (not a main merge). Pre-M2 the chain advanced
-    // from applyMergedBuildEffects on the phase's main merge — but M1 stopped per-phase main merges (the spec
-    // branch accumulates all phases, promoted once in M4/M5), so the merge hook never fires per phase and the
-    // chain would stall after phase 1. Trigger the next phase here: phase N just built (build_sha recorded +
-    // its commit is the spec-branch tip), so queue phase N+1 to build ON THAT TIP (M1's create-or-extend
-    // checks out the existing branch tip). queueNextChainedPhase reads the spec's DERIVED phases (phase N now
-    // in_progress, phase N+1 still planned → it queues N+1), is idempotency/in-flight-guarded, and no-ops when
-    // no planned phase remains. Best-effort; the merge hook's chain advance still exists for any legacy
-    // per-phase-merge path but is inert under branch-flow.
-    if (job.chain_phases) {
-      try {
-        const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
-        const queued = await queueNextChainedPhase(job.workspace_id, slug);
-        if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
-      } catch (e) {
-        console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
-      }
+    // M2 (chain-on-every-branch-build — fixes E3): advance the phase chain off THIS branch-build, ALWAYS,
+    // for a multi-phase spec — NOT gated on the legacy `chain_phases` "Build all" flag. Under M1's
+    // branch-accumulation model the merge hook (applyMergedBuildEffects) never fires per phase (no per-phase
+    // main merge), so it can't advance the chain; and the per-phase scope is now applied to EVERY build
+    // (one-phase-per-session), so a director-initiated / single-build of a multi-phase spec ALSO builds just
+    // phase 1 and must chain phase 2 itself — otherwise the branch never accumulates the rest of the spec
+    // and promotion (needs accumulation-complete) can never fire. (Observed live: noop-pipeline-test-1 P1
+    // built with chain_phases=false → P2 never queued → spec wedged.) Phase N just built (build_sha recorded
+    // + its commit is the spec-branch tip), so queue phase N+1 to build ON THAT TIP (create-or-extend checks
+    // out the existing branch tip). queueNextChainedPhase reads the spec's DERIVED phases (phase N now
+    // in_progress via build_sha, phase N+1 still planned → it queues N+1), is idempotency/in-flight-guarded,
+    // and no-ops when no planned phase remains. It is the SAME workspace (passes job.workspace_id), so the
+    // test spec's non-default workspace resolves correctly. Best-effort; never fails an otherwise-good build.
+    try {
+      const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
+      const queued = await queueNextChainedPhase(job.workspace_id, slug);
+      if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
+    } catch (e) {
+      console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
     }
   } finally {
     chosenAccount.inFlight--; // release the account's round-robin load slot

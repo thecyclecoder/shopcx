@@ -13,6 +13,24 @@ const DOT: Record<Phase, string> = {
 const ORDER: Phase[] = ["planned", "in_progress", "shipped", "rejected"];
 const LABEL: Record<Phase, string> = { planned: "Planned", in_progress: "In progress", shipped: "Shipped", rejected: "Cut" };
 
+// chain-accumulation-built-phase-render (fixes E1): under M1's branch-accumulation model a BUILT phase
+// carries `build_sha` and stays `in_progress` (M2 — `in_progress` is reserved-for-not-shipped) until M5's
+// main promotion flips it to `shipped`. The CEO wants a built (committed-to-branch) phase to read DONE on
+// the board, not the amber "Building" of a phase that's merely queued/in-flight. So the rendered status is
+// DERIVED: a phase with `build_sha` set but not yet shipped/rejected shows the built glyph (teal "Built");
+// a phase that is `in_progress` WITHOUT a `build_sha` is genuinely mid-build → amber "Building". The
+// underlying `spec_phases.status` stays `in_progress` (the spec rolls up `in_testing` only when ALL phases
+// are built — handled elsewhere); this is a rendering overlay only.
+const BUILT_DOT = "bg-teal-500";
+const BUILT_LABEL = "Built";
+function isBuilt(p: { status: Phase; build_sha?: string | null }): boolean {
+  return !!p.build_sha && p.status !== "shipped" && p.status !== "rejected";
+}
+/** The dot color for a phase's DERIVED render status (built-on-branch → teal, else the raw status color). */
+function dotFor(p: { status: Phase; build_sha?: string | null }): string {
+  return isBuilt(p) ? BUILT_DOT : DOT[p.status];
+}
+
 const GH_REPO = "thecyclecoder/shopcx";
 function prUrl(n: number): string {
   return `https://github.com/${GH_REPO}/pull/${n}`;
@@ -89,9 +107,20 @@ export default function PhaseList({ slug, phases }: { slug: string; phases: Spec
                 ))}
               </span>
             ) : (
-              <span className={`mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full ${DOT[statuses[i]]}`} />
+              // Read-only viewer: render the DERIVED status — a build_sha'd phase reads BUILT (teal), not amber.
+              <span className={`mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full ${dotFor({ status: statuses[i], build_sha: p.build_sha })}`} />
             )}
             <span className={`flex-1 ${statuses[i] === "rejected" ? "text-zinc-400 line-through" : ""}`}>{p.title}</span>
+            {/* chain-accumulation-built-phase-render (E1): a built-on-branch phase (build_sha, not yet shipped)
+                reads "Built" — done building on the spec branch — instead of the amber in-progress dot/label. */}
+            {isBuilt({ status: statuses[i], build_sha: p.build_sha }) && (
+              <span
+                title={`Built on branch${p.build_sha ? ` (${p.build_sha.slice(0, 7)})` : ""} — accumulated, awaiting promotion`}
+                className="flex-shrink-0 rounded px-1 text-[10px] font-medium text-teal-600 dark:text-teal-400"
+              >
+                {BUILT_LABEL}
+              </span>
+            )}
             {/* spec-status-phase-pr-provenance Phase 3: the PR that shipped this phase (link to the merge).
                 Only rendered for shipped phases that carry a `pr` tag — backfill or merge-hook stamps it. */}
             {statuses[i] === "shipped" && p.pr && (
