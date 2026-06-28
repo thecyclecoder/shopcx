@@ -3,6 +3,7 @@ import { getGoals, getFoldedGoals } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { GoalStatusBadge } from "./GoalStatusBadge";
 import { GreenlightButton } from "./GreenlightButton";
+import GoalAccumulation from "./GoalAccumulation";
 
 // Reads public.goals + public.goal_milestones (+ child specs) at request time — always reflects the
 // live brain. The Archive section reads the folded goal rows (goal-fold-from-db-row Phase 2).
@@ -73,6 +74,10 @@ export default async function GoalsBoardPage() {
                 </p>
               )}
               <RollupBar pct={g.pct} />
+              {/* spec-goal-branch-pm-flow M6 — the goal-branch accumulation ("N of M specs on the goal
+                  branch") + a "ready to promote" badge when fully accumulated. A parent goal shows the
+                  sub-goals-promote-independently note instead. */}
+              <GoalAccumulation accumulation={g.accumulation} />
               <div className="mt-3 flex items-center gap-2 text-[11px] text-zinc-400">
                 <span className="tabular-nums">{g.milestones.length} milestones</span>
                 <span className="text-zinc-300 dark:text-zinc-600">·</span>

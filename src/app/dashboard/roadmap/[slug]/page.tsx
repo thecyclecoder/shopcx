@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { marked } from "marked";
-import { getSpec, listSpecSlugs, extractSpecSection, stripSpecSection, type SpecStatus } from "@/lib/brain-roadmap";
+import { getSpec, listSpecSlugs, getRoadmapFilters, extractSpecSection, stripSpecSection, type SpecStatus } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import {
@@ -17,6 +17,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { deriveLifecycleStage } from "@/lib/build-lifecycle";
 import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
 import LifecycleTimeline from "../LifecycleTimeline";
+import BranchPosition from "../BranchPosition";
 import StatusControl from "../StatusControl";
 import PriorityControl from "../PriorityControl";
 import AuthoringChat from "../AuthoringChat";
@@ -51,8 +52,15 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const workspaceId = await getActiveWorkspaceId();
   // spec-status-db-driven Phase 1: getSpec(slug, workspaceId) overlays the DB mirror's status / critical
   // / deferred / per-phase status onto the markdown card — the detail page reads DB-authoritatively.
-  const [spec, specSlugs] = await Promise.all([getSpec(slug, workspaceId ?? undefined), listSpecSlugs()]);
+  const [spec, specSlugs, filters] = await Promise.all([
+    getSpec(slug, workspaceId ?? undefined),
+    listSpecSlugs(),
+    // spec-goal-branch-pm-flow M6 — goal membership for the branch-flow timeline (a goal-bound spec renders
+    // the "on goal branch" step; a one-off promotes straight to main).
+    getRoadmapFilters(workspaceId ?? undefined),
+  ]);
   if (!spec) notFound();
+  const goalBound = (filters.goalsBySpec[slug] ?? []).length > 0;
 
   const [jobsBySlug, folds, testRuns, resolutions, liveSpecTestSlugs, securityBySlug] = workspaceId
     ? await Promise.all([
@@ -151,6 +159,10 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
               <StatusControl slug={slug} status={spec.card.status} />
               <PriorityControl slug={slug} status={spec.card.status} critical={spec.card.critical} />
             </div>
+
+            {/* spec-goal-branch-pm-flow M6 — where this spec sits in the branch flow (built on branch →
+                in_testing → on goal branch → promoted to main). Same shared timeline the board card renders. */}
+            <BranchPosition spec={spec.card} goalBound={goalBound} />
 
             {(spec.card.owner || spec.card.parent) && (
               <div className="space-y-1 border-t border-zinc-100 pt-3 text-xs dark:border-zinc-800">

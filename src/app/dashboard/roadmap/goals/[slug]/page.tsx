@@ -13,6 +13,7 @@ import {
 } from "@/lib/brain-roadmap";
 import { GoalStatusBadge } from "../GoalStatusBadge";
 import { GreenlightButton } from "../GreenlightButton";
+import GoalAccumulation from "../GoalAccumulation";
 import { preprocessBrainWikilinks } from "@/lib/brain-links";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestPlanJob } from "@/lib/agent-jobs";
@@ -93,6 +94,9 @@ export default async function GoalDetailPage({ params }: { params: Promise<{ slu
               <div className="mt-1.5 text-[11px] text-zinc-400">
                 {card.milestones.length} milestones · {card.linkedSpecCount} specs linked
               </div>
+              {/* spec-goal-branch-pm-flow M6 — the goal-branch accumulation + atomic-promote readiness
+                  (or the parent-goal exemption note). The detail variant adds the explanatory copy. */}
+              <GoalAccumulation accumulation={card.accumulation} variant="detail" />
             </div>
 
             <div className="flex items-center justify-between gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">

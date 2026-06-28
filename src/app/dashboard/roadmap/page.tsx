@@ -9,6 +9,7 @@ import { deriveLifecycleStage } from "@/lib/build-lifecycle";
 import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
 import LifecycleControls from "./LifecycleControls";
 import LifecycleTimeline from "./LifecycleTimeline";
+import BranchPosition from "./BranchPosition";
 import BuildButton from "./BuildButton";
 import AuthoringChat from "./AuthoringChat";
 import PhaseList from "./PhaseList";
@@ -220,6 +221,11 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
           at (Vale pending / Vale-passed-Ada-disposing / Ada-upgrade-awaiting-CEO) + the author's
           intended_status as a SUGGESTION the director reads but isn't bound by. */}
       {status === "in_review" && <InReviewLane spec={spec} />}
+      {/* spec-goal-branch-pm-flow M6 — the branch-flow timeline: built on branch → in testing → on goal
+          branch (goal-bound only) → promoted to main. Makes the in_testing state legible as "tested on a
+          branch, not in prod" instead of conflated with shipped. goalBound drops the goal-branch step for a
+          one-off spec (it promotes straight to main). */}
+      <BranchPosition spec={spec} goalBound={goalSlugs.length > 0} />
       <CountPills counts={spec.counts} />
       {/* Spec-test agent stamp + chip on a shipped-awaiting-verification card (spec-test-agent). */}
       {spec.status === "shipped" && testRun && (
