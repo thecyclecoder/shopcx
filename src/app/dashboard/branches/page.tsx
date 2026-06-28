@@ -133,7 +133,9 @@ export default function BranchesPage() {
       <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Branches</h1>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
         Open <code>claude/*</code> PRs the To-Do routine has opened. Owners can squash &amp; merge here when a PR is
-        conflict-free; otherwise review in GitHub. Code never auto-merges.
+        conflict-free; otherwise review in GitHub. The standing pass auto-merges clean fold PRs (
+        <code>claude/fold-*</code>, brain-doc merges of already-shipped specs) and one-off build PRs once their
+        owning job has completed — goal-bound and conflicted PRs still need review.
       </p>
 
       <WorkerBanner worker={worker} />
