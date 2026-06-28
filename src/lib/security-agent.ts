@@ -436,11 +436,18 @@ export interface SecurityStateBySlug {
  * (they MUST agree). Read-only. Empty record when no security-review jobs exist. Per-diff (merge-SHA)
  * jobs are keyed by their merged `spec_slug`; the daily dep-watch lives under [[SECURITY_DEP_WATCH_SLUG]]
  * and is excluded from per-spec rollups (it's an infra job, not a per-spec lifecycle gate).
+ *
+ * Exclusion is by INFRA IDENTITY, not slug name: skip the `security-dep-watch` sentinel slug AND any
+ * `dep-watch`-MODE row (the daily `npm audit` scan — infra, not a per-spec gate). The dep-watch agent's
+ * AUTHORED upgrade-fix spec is a REAL shippable spec under the stable slug `security-dep-upgrades`; its
+ * `diff`/`branch`-mode reviews ARE its per-spec security signal and MUST roll up (excluding that slug
+ * blanked its Security node forever, so its fold gate could never clear — the "security-dep-upgrades is
+ * lacking its security test" symptom). So `SECURITY_DEP_UPGRADE_SLUG` is NOT excluded here.
  */
 export async function getSecurityStateBySlug(admin: Admin, workspaceId: string): Promise<Record<string, SecurityStateBySlug>> {
   const { data } = await admin
     .from("agent_jobs")
-    .select("spec_slug, status, created_at")
+    .select("spec_slug, status, instructions, created_at")
     .eq("workspace_id", workspaceId)
     .eq("kind", "security-review")
     .order("created_at", { ascending: false })
@@ -448,9 +455,17 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
   const map: Record<string, SecurityStateBySlug> = {};
   const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
   const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
-  for (const row of (data ?? []) as Array<{ spec_slug: string; status: string }>) {
+  for (const row of (data ?? []) as Array<{ spec_slug: string; status: string; instructions?: string }>) {
     const slug = String(row.spec_slug || "");
-    if (!slug || slug === SECURITY_DEP_WATCH_SLUG || slug === SECURITY_DEP_UPGRADE_SLUG) continue;
+    // Exclude infra dep-watch jobs by IDENTITY: the sentinel slug OR the dep-watch mode. A real
+    // `diff`/`branch` review of the `security-dep-upgrades` fix spec is NOT infra — it rolls up.
+    let mode = "";
+    try {
+      mode = String(JSON.parse(String(row.instructions || "{}")).mode || "");
+    } catch {
+      /* not JSON — treat as a non-dep-watch (diff) review */
+    }
+    if (!slug || slug === SECURITY_DEP_WATCH_SLUG || mode === "dep-watch") continue;
     const cur = (map[slug] ||= { live: false, surfaced: false, completedClean: false });
     if (runningSet.has(row.status)) cur.live = true;
     else if (surfacedSet.has(row.status)) cur.surfaced = true;
@@ -583,12 +598,13 @@ export async function listSecurityReviews(
 
   const rows = (data ?? []) as Array<Record<string, unknown>>;
 
-  // Batch-resolve spec titles for the reviewed slugs (skip the dep-watch sentinels).
+  // Batch-resolve spec titles for the reviewed slugs (skip the dep-watch INFRA sentinel only — it's not a
+  // real spec row; `security-dep-upgrades` IS a real shippable fix spec, so resolve its title).
   const slugs = Array.from(
     new Set(
       rows
         .map((r) => String(r.spec_slug || ""))
-        .filter((s) => s && s !== SECURITY_DEP_WATCH_SLUG && s !== SECURITY_DEP_UPGRADE_SLUG),
+        .filter((s) => s && s !== SECURITY_DEP_WATCH_SLUG),
     ),
   );
   const titleBySlug = new Map<string, string>();

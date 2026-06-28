@@ -593,6 +593,126 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
 }
 
 /**
+ * security-test-on-preview-pre-merge Phase 1 (the WIRING the spec never landed) — the pre-merge SECURITY
+ * trigger, the security twin of `maybeEnqueuePreMergeSpecTestOnAccumulation`. Both pre-merge signals
+ * (`isSpecTestGreenForBranch` ∧ `isSecurityGreenForBranch`) gate `isSpecPromoteEligible` + the M4 auto-merge
+ * tests gate; the spec-test leg was wired into the preview-ready hook, but the security leg's enqueue
+ * (`enqueueSecurityReviewJob` branch mode) was authored (Phase 1 lib) and its signal helper shipped
+ * (Phase 3) — yet NO caller ever invoked the branch-mode enqueue, so `isSecurityGreenForBranch` was
+ * ALWAYS false and the M4 gate could never pass (every one-off PR sat `in_testing`). This is that caller.
+ *
+ * Same accumulation predicate as the spec-test twin (test the WHOLE built spec on its branch preview, not a
+ * partial). Idempotent (branch-mode enqueue dedupes one open review per branch). Best-effort + never throws.
+ */
+export async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
+  workspaceId: string;
+  slug: string;
+  branch: string | null;
+  previewUrl: string | null;
+  prNumber?: number | null;
+}): Promise<{ enqueued: boolean; reason?: string }> {
+  const { workspaceId, slug, branch, previewUrl, prNumber } = args;
+  try {
+    if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
+    const origin = (previewUrl || "").replace(/\/$/, "");
+    if (!origin) return { enqueued: false, reason: "no preview URL yet" };
+    const acc = await isSpecAccumulationComplete(workspaceId, slug);
+    if (!acc.complete) return { enqueued: false, reason: `not fully accumulated yet (${acc.reason})` };
+    const { enqueueSecurityReviewJob } = await import("@/lib/security-agent");
+    return await enqueueSecurityReviewJob(createAdminClient(), {
+      branch,
+      previewOrigin: origin,
+      specSlug: slug,
+      prNumber: prNumber ?? null,
+      workspaceId,
+    });
+  } catch (e) {
+    return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * STANDING-PASS BACKSTOP for BOTH pre-merge triggers (spec-test + security). The Gate-A class gap: both
+ * pre-merge enqueues fire ONLY from the build's fire-and-forget preview-capture READY callback. If that
+ * poll misses READY (worker restart mid-poll, a slow/late preview, a transient Vercel/DB hiccup) the
+ * enqueue never happens — and (for security) it had no caller at all — so a fully-built branch sits
+ * `in_testing` forever (the same standing-pass-backstop gap Gate-A had: event-only, no re-evaluation).
+ *
+ * This is the reliable re-evaluation: every standing pass, enumerate the latest build job per
+ * `claude/build-{slug}` branch that carries a READY preview, and (idempotently) fire BOTH pre-merge
+ * triggers for any fully-accumulated branch. The underlying enqueues dedupe (spec-test per
+ * (workspace, slug, branch); security one-open-review per branch), so re-running every pass is safe + cheap.
+ * Mirrors `promoteEligibleSpecsToGoalBranch`'s candidate-enumeration shape. Best-effort per branch; never throws.
+ */
+export interface PreMergeBackstopResult {
+  /** branches whose pre-merge spec-test was (re-)enqueued this pass. */
+  specTestEnqueued: string[];
+  /** branches whose pre-merge security review was (re-)enqueued this pass. */
+  securityEnqueued: string[];
+  /** candidate branches scanned (READY-preview claude/build-* branches, deduped per slug). */
+  scanned: number;
+}
+
+export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMergeBackstopResult> {
+  const out: PreMergeBackstopResult = { specTestEnqueued: [], securityEnqueued: [], scanned: 0 };
+  const admin = adminClient || createAdminClient();
+  try {
+    const { data: jobs } = await admin
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug, spec_branch, preview_url, preview_state, pr_number, created_at")
+      .eq("kind", "build")
+      .not("spec_branch", "is", null)
+      .order("created_at", { ascending: false });
+    const seen = new Set<string>();
+    for (const j of (jobs ?? []) as Array<{
+      workspace_id: string;
+      spec_slug: string;
+      spec_branch: string;
+      preview_url: string | null;
+      preview_state: string | null;
+      pr_number: number | null;
+    }>) {
+      const slug = j.spec_slug;
+      const branch = j.spec_branch;
+      if (!slug || !branch || !branch.startsWith("claude/build-")) continue;
+      const key = `${j.workspace_id}:${slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // Only branches with a READY preview are testable. A null/BUILDING/ERROR preview defers (the spec-test
+      // + security runners both probe the preview origin — no origin, nothing to test).
+      if (j.preview_state !== "READY" || !j.preview_url) continue;
+      out.scanned++;
+      try {
+        const st = await maybeEnqueuePreMergeSpecTestOnAccumulation({
+          workspaceId: j.workspace_id,
+          slug,
+          branch,
+          previewUrl: j.preview_url,
+        });
+        if (st.enqueued) out.specTestEnqueued.push(branch);
+      } catch {
+        /* best-effort per branch */
+      }
+      try {
+        const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
+          workspaceId: j.workspace_id,
+          slug,
+          branch,
+          previewUrl: j.preview_url,
+          prNumber: j.pr_number,
+        });
+        if (sec.enqueued) out.securityEnqueued.push(branch);
+      } catch {
+        /* best-effort per branch */
+      }
+    }
+  } catch (e) {
+    console.warn("[pre-merge-backstop] scan threw (continuing):", e instanceof Error ? e.message : e);
+  }
+  return out;
+}
+
+/**
  * spec-goal-branch-pm-flow M3 — the PROMOTE-ELIGIBILITY signal M4 consumes. A branch-flow spec is
  * promote-eligible (its `claude/build-{slug}` branch is ready to merge spec→goal) iff ALL THREE hold:
  *
