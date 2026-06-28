@@ -1,0 +1,1 @@
+- **Board + lifecycle timeline reflect build → preview → test → promote → ship → fold** · verified 2026-06-28 · → [[../lifecycles/spec-goal-branch-pm-flow]]
