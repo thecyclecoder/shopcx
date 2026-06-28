@@ -265,18 +265,26 @@ async function enqueueSecurityReviewDiff(admin: Admin, input: EnqueueSecurityRev
 }
 
 /**
- * Pre-merge `branch`-mode enqueue ([[../specs/security-test-on-preview-pre-merge]] Phase 1). Dedup:
- * ONE OPEN review per branch — skip if any security-review job with `spec_branch === branch` is in a
- * live/surfaced status (queued / claimed / building / needs_input / needs_approval / queued_resume /
- * needs_attention). A terminal `completed` / `failed` for the branch never blocks a re-review on a later
- * push (the new diff might re-introduce something the prior pass cleared).
+ * Pre-merge `branch`-mode enqueue ([[../specs/security-test-on-preview-pre-merge]] Phase 1). Dedup is
+ * TWO-PART (vault-security-review-loop-fix):
+ *
+ *   1. ONE OPEN review per branch — skip if any security-review job with `spec_branch === branch` is in a
+ *      live/surfaced status (queued / claimed / building / needs_input / needs_approval / queued_resume /
+ *      needs_attention).
+ *   2. ONE CLEAN review per UNCHANGED branch — skip if the branch already has a `completed` review that is
+ *      NEWER than the latest build-job push on the branch. A clean review proves the branch's current diff
+ *      is clean; re-reviewing the exact same diff every standing pass is the Vault loop. We only re-review
+ *      once a genuinely newer build commit lands (the build job's `updated_at` advances past the review) —
+ *      THAT new diff might re-introduce something the prior pass cleared, which is the only case the
+ *      original "terminal never blocks a re-review" comment was protecting. A `failed` review never blocks
+ *      (it never produced a verdict, so the branch is still un-reviewed).
  */
 async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityReviewBranchInput): Promise<{ enqueued: boolean; reason?: string }> {
   const branch = String(input.branch || "").trim();
   if (!branch) return { enqueued: false, reason: "no branch" };
   if (!input.specSlug) return { enqueued: false, reason: "no spec slug" };
 
-  // Dedup by branch (one open review per branch). `spec_branch` is the column the agent_jobs row carries
+  // (1) Dedup by branch (one OPEN review per branch). `spec_branch` is the column the agent_jobs row carries
   // (set on insert below). The `securitySha12`/`depFindingSignature` signatures still converge same-finding
   // recurrences inside the box's review of the branch's diff.
   const { data: open } = await admin
@@ -288,6 +296,37 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     .limit(1);
   if ((open ?? []).length > 0) {
     return { enqueued: false, reason: "security-review already open for this branch" };
+  }
+
+  // (2) Dedup by branch state (one CLEAN review per UNCHANGED branch — the loop fix). If the branch already
+  // has a `completed` review, only re-review when the branch advanced SINCE that review: compare the latest
+  // completed review's `created_at` against the latest build-job push (`updated_at`) on the branch. Review
+  // newer-or-equal ⇒ same diff already cleared ⇒ skip (this is what stopped the per-pass loop). Build push
+  // newer ⇒ a new commit landed ⇒ re-review.
+  const { data: lastClean } = await admin
+    .from("agent_jobs")
+    .select("created_at")
+    .eq("kind", "security-review")
+    .eq("spec_branch", branch)
+    .eq("status", "completed")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const lastCleanAt = (lastClean as { created_at?: string } | null)?.created_at;
+  if (lastCleanAt) {
+    const { data: lastBuild } = await admin
+      .from("agent_jobs")
+      .select("updated_at")
+      .eq("kind", "build")
+      .eq("spec_branch", branch)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const lastBuildAt = (lastBuild as { updated_at?: string } | null)?.updated_at;
+    // No newer build push than the clean review ⇒ the reviewed diff is current ⇒ don't re-review.
+    if (!lastBuildAt || Date.parse(lastBuildAt) <= Date.parse(lastCleanAt)) {
+      return { enqueued: false, reason: "branch already has a clean security-review and has not changed since" };
+    }
   }
 
   const workspaceId = input.workspaceId || (await resolveSecurityWorkspace(admin));
