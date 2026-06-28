@@ -1,0 +1,1 @@
+- **Plan-job gates build queue on actual public.specs existence** · verified 2026-06-28 · → [[lifecycles/roadmap-build-console]]

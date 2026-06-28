@@ -139,8 +139,13 @@ function normalizeAddress(addr: Address): Record<string, unknown> {
 }
 
 /**
- * Apply the user's address policy: if shipping or billing is missing,
- * mirror the other one. If both are missing, throw.
+ * Address policy for the 3PL import: ALWAYS prefer the SHIPPING address — the package destination, and
+ * the reliably-complete one — for BOTH ship-to and bill-to. Fall back to the billing address only when
+ * shipping is unusable.
+ *
+ * (Reversed 2026-06-28: previously an incomplete billing could win for bill-to — Jill Robinson's billing
+ * carried no state, so Amplifier rejected the import with "billing_info.state must not be empty". A usable
+ * address now also requires a state, since Amplifier 400s on an empty state on either side.)
  */
 function reconcileAddresses(input: CreateAmplifierOrderInput): {
   shipping: Address;
@@ -148,13 +153,11 @@ function reconcileAddresses(input: CreateAmplifierOrderInput): {
 } {
   const ship = input.shippingAddress;
   const bill = input.billingAddress;
-  if (ship?.address1 && ship?.city && (ship?.zip || ship?.postal_code)) {
-    return { shipping: ship, billing: bill?.address1 ? bill : ship };
-  }
-  if (bill?.address1 && bill?.city && (bill?.zip || bill?.postal_code)) {
-    return { shipping: bill, billing: bill };
-  }
-  throw new Error("Order has no usable shipping or billing address");
+  const stateOf = (a?: Address | null) => a?.province_code || a?.province || a?.state || "";
+  const usable = (a?: Address | null) => !!(a?.address1 && a?.city && (a?.zip || a?.postal_code) && stateOf(a));
+  if (usable(ship)) return { shipping: ship!, billing: ship! };
+  if (usable(bill)) return { shipping: bill!, billing: bill! };
+  throw new Error("Order has no usable shipping or billing address (need street, city, postal code, and state)");
 }
 
 export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Promise<CreateAmplifierOrderResult> {
