@@ -24,6 +24,8 @@ Past pain points the rewrite addressed:
 
 `createFullReturn()` in `src/lib/shopify-returns.ts` is the single entry point. Anyone wanting to create a return must call this — never poke [[../tables/returns]] / EasyPost directly.
 
+**Internal orders (SHOPCX*, no Shopify order) — `shopifyOrderGid: null`** (`20260628120000`). An internal order has no Shopify return to mirror, so `createFullReturn` takes an internal branch: build the returnable items from the order's **own `line_items`** (per-unit `price_cents` × qty = the line total), insert a Shopify-less [[../tables/returns]] row (`shopify_order_gid=null`, `return_line_items` from the order lines, no `shopify_rfo_line_item_id`), and **skip** the Shopify `returnCreate` + `attachReturnTracking`. The label buy (step 3 — address-based, already Shopify-independent), `net_refund_cents` (step 4), DB update (step 6) and label email (step 7) are **identical**. The [[create_return]] action ([[../libraries/action-executor]]) passes `null` when `orders.shopify_order_id` is null instead of fabricating a `gid://shopify/Order/null`. **Downstream refund** ([[../inngest/returns]] `issue-refund`): an internal order refunds via **Braintree** (`refundBraintreeTransaction(ws, order.braintree_transaction_id, net_refund_cents)`) instead of Shopify `refundCreate`.
+
 Steps:
 
 1. **Validate inputs** — order id, line items to return (with quantities), reason, resolution type (`refund_return` / `store_credit_return` / `refund_no_return` / `store_credit_no_return`), `freeLabel` flag.

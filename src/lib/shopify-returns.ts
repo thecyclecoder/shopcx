@@ -702,7 +702,9 @@ export interface FullReturnParams {
   workspaceId: string;
   orderId: string;          // Our internal order UUID
   orderNumber: string;      // SC126222
-  shopifyOrderGid: string;  // gid://shopify/Order/123
+  /** gid://shopify/Order/123, or `null` for an INTERNAL order (SHOPCX*, no Shopify order) — the
+   *  internal path skips the Shopify return-create + builds the return from the order's own line_items. */
+  shopifyOrderGid: string | null;
   customerId: string;
   ticketId?: string;
   customerName: string;
@@ -733,27 +735,80 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
   const admin = createAdminClient();
 
   try {
-    // 1. Get returnable items
-    const items = await getReturnableItems(params.workspaceId, params.shopifyOrderGid);
-    if (items.length === 0) {
-      return { success: false, error: "No returnable items found on this order" };
-    }
+    const isInternal = !params.shopifyOrderGid;
 
-    // 2. Create Shopify return + DB record
-    const returnResult = await createShopifyReturn(params.workspaceId, {
-      orderId: params.orderId,
-      orderNumber: params.orderNumber,
-      shopifyOrderGid: params.shopifyOrderGid,
-      customerId: params.customerId,
-      ticketId: params.ticketId,
-      resolutionType: params.resolutionType || "refund_return",
-      returnLineItems: items.map(i => ({
-        fulfillmentLineItemId: i.fulfillmentLineItemId,
-        quantity: i.remainingQuantity,
-        title: i.title,
-      })),
-      source: params.source || "ai",
-    });
+    // 1. Returnable items + 2. the return record.
+    // INTERNAL order (no Shopify order): there's no Shopify return to mirror, so build the returnable
+    // items from the order's OWN line_items and insert a Shopify-less returns row directly. The label
+    // buy + refund-commitment + DB update below are identical to the Shopify path (the label is
+    // address-based, not Shopify-based). The downstream refund routes to Braintree (inngest/returns).
+    let items: ReturnableItem[];
+    let returnResult: { returnId: string; reverseFulfillmentOrderGid: string | null };
+
+    if (isInternal) {
+      const { data: order } = await admin
+        .from("orders")
+        .select("line_items")
+        .eq("id", params.orderId)
+        .maybeSingle();
+      type IntLine = { sku?: string; title?: string; variant_title?: string; quantity?: number; price_cents?: number; variant_id?: string };
+      const lines = (Array.isArray(order?.line_items) ? order!.line_items : []) as IntLine[];
+      items = lines
+        .filter((l) => (l.quantity ?? 0) > 0)
+        .map((l) => ({
+          fulfillmentLineItemId: "", // no Shopify fulfillment line item on an internal order
+          title: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title || l.sku || "Item",
+          quantity: l.quantity!,
+          remainingQuantity: l.quantity!,
+          amountCents: Math.round((l.price_cents || 0) * (l.quantity || 1)), // per-unit × qty = line total
+          currencyCode: "USD",
+          variantId: l.variant_id ? String(l.variant_id) : null,
+        }));
+      if (items.length === 0) {
+        return { success: false, error: "No returnable items on this internal order" };
+      }
+      const { data: row, error: insErr } = await admin
+        .from("returns")
+        .insert({
+          workspace_id: params.workspaceId,
+          order_id: params.orderId,
+          order_number: params.orderNumber,
+          shopify_order_gid: null, // internal — no Shopify order
+          customer_id: params.customerId,
+          ticket_id: params.ticketId ?? null,
+          resolution_type: params.resolutionType || "refund_return",
+          source: params.source || "ai",
+          status: "open",
+          return_line_items: items.map((i) => ({ title: i.title, quantity: i.remainingQuantity, variant_id: i.variantId })),
+        })
+        .select("id")
+        .single();
+      if (insErr || !row) {
+        return { success: false, error: `Failed to create internal return: ${insErr?.message || "unknown"}` };
+      }
+      returnResult = { returnId: row.id, reverseFulfillmentOrderGid: null };
+    } else {
+      // 1. Get returnable items
+      items = await getReturnableItems(params.workspaceId, params.shopifyOrderGid!);
+      if (items.length === 0) {
+        return { success: false, error: "No returnable items found on this order" };
+      }
+      // 2. Create Shopify return + DB record
+      returnResult = await createShopifyReturn(params.workspaceId, {
+        orderId: params.orderId,
+        orderNumber: params.orderNumber,
+        shopifyOrderGid: params.shopifyOrderGid!,
+        customerId: params.customerId,
+        ticketId: params.ticketId,
+        resolutionType: params.resolutionType || "refund_return",
+        returnLineItems: items.map(i => ({
+          fulfillmentLineItemId: i.fulfillmentLineItemId,
+          quantity: i.remainingQuantity,
+          title: i.title,
+        })),
+        source: params.source || "ai",
+      });
+    }
 
     // 3. Buy cheapest EasyPost label
     const { data: ws } = await admin.from("workspaces")
