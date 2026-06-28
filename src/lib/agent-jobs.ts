@@ -1088,6 +1088,25 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
           console.warn(`[goal-main-promote] ${goalSlug}: not merged (${merge.reason ?? "unknown"})`);
           continue;
         }
+        // Reva (deploy-guardian) — open an ATOMIC deploy-watch over the goal→main deploy BEFORE the shipped
+        // stamp/fold (the watch snapshots the pre-deploy baseline; do it as close to the merge as possible).
+        // This is the highest-blast-radius deploy in the system (a whole goal's many specs in one merge), and
+        // it was previously UNWATCHED — Gate A's watch only covers per-spec `claude/*` merges, which goal-bound
+        // specs no longer take. An atomic watch ESCALATES a regression instead of auto-reverting a whole goal
+        // (the regression bar is tuned for tiny per-phase diffs). Best-effort — never blocks the promotion.
+        try {
+          const { openDeployWatch } = await import("@/lib/deploy-guardian");
+          await openDeployWatch({
+            admin,
+            branch: `goal/${goalSlug}`,
+            mergeSha: merge.mergeSha,
+            workspaceId,
+            slug: goalSlug,
+            isAtomic: true,
+          });
+        } catch (e) {
+          console.warn(`[goal-main-promote] ${goalSlug} deploy-watch open failed (continuing):`, e instanceof Error ? e.message : e);
+        }
         // Promotion effects — the SHIPPED stamp (the only shipped-writer) + fold trigger.
         const effects = await applyGoalPromotionEffects(workspaceId, goalSlug, merge.mergeSha);
         result.promoted.push(goalSlug);

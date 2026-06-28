@@ -712,6 +712,10 @@ export interface AutoMergeResult {
    *  shipped). M5 owns the actual atomic promotion; this guard just keeps the existing auto-merge from
    *  promoting a half-accumulated branch. */
   accumulationBlocked: number;
+  /** spec-goal-branch-pm-flow M4/M5: PRs for a GOAL-BOUND spec — NOT merged to main by Gate A (a goal-bound
+   *  spec promotes spec→goal branch via Gate B and the whole goal lands on main atomically via Gate C). Gate A
+   *  merges ONE-OFF specs only; a goal-bound branch is handed off, never jumped to main here. */
+  goalBoundBlocked: number;
   /** 0 or 1 — SERIALIZED: at most one merge per pass (the resulting push-to-main webhook handles the next). */
   merged: number;
   mergedPr?: number;
@@ -764,7 +768,7 @@ export interface AutoMergeResult {
 
 export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult> {
   const db = admin || createAdminClient();
-  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, accumulationBlocked: 0, merged: 0, prs: [] };
+  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, accumulationBlocked: 0, goalBoundBlocked: 0, merged: 0, prs: [] };
   let ok = true;
   try {
     if (!ghToken()) return result;
@@ -819,6 +823,33 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
           }
           const wsId = gate.workspaceId;
           const slug = gate.specSlug;
+          // spec-goal-branch-pm-flow M4/M5 — GOAL-BOUND GUARD: Gate A merges a spec branch straight to `main`,
+          // which is correct ONLY for a ONE-OFF spec (no goal). A GOAL-BOUND spec must NEVER reach main via
+          // Gate A: it promotes spec-branch → its `goal/{slug}` branch (M4, `promoteEligibleSpecsToGoalBranch`)
+          // and the WHOLE goal lands on main atomically (M5, `promoteCompleteGoalsToMain` → the only shipped-
+          // writer for goal-bound specs, `applyGoalPromotionEffects`). If Gate A jumped it to main here it would
+          // (a) ship a goal-bound spec OUTSIDE the atomic goal promotion, and (b) double-stamp — the per-build
+          // `applyMergedBuildEffects` would flip its phases shipped, then M5's `applyGoalPromotionEffects` would
+          // try to ship the goal's phases again. So: a spec that `resolveGoalSlugForSpec` resolves to a goal is
+          // HANDED OFF to Gate B/C (skipped here). Fail OPEN — a resolve error reads as one-off (the accumulation
+          // + tests gates below still protect any actual main merge). Sits BEFORE the accumulation/tests gates
+          // (cheap PM read; no point evaluating those for a branch Gate A won't merge anyway).
+          if (wsId && slug) {
+            let goalSlug: string | null = null;
+            try {
+              const { resolveGoalSlugForSpec } = await import("@/lib/agent-jobs");
+              goalSlug = await resolveGoalSlugForSpec(wsId, slug);
+            } catch (e) {
+              goalSlug = null; // fail open — treat as one-off (the gates below still guard the merge)
+              console.warn(`[auto-merge] PR #${prNumber} (${branch}) goal-bound check threw — treating as one-off:`, e instanceof Error ? e.message : e);
+            }
+            if (goalSlug) {
+              result.goalBoundBlocked++;
+              console.warn(`[auto-merge] PR #${prNumber} (${branch}) is goal-bound (goal/${goalSlug}) — NOT merging to main; handed off to Gate B (spec→goal) + Gate C (atomic goal→main)`);
+              result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
+              continue;
+            }
+          }
           // spec-goal-branch-pm-flow M2 — ACCUMULATION GATE: under M1's branch-accumulation model the spec's
           // phases build one-by-one onto this single PR; promoting it now (after only some phases are built)
           // would ship a PARTIAL spec to main. Refuse until EVERY phase is built on the branch (build_sha set
@@ -917,6 +948,8 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         ready: result.ready,
         buildGateBlocked: result.buildGateBlocked,
         testsGateBlocked: result.testsGateBlocked,
+        accumulationBlocked: result.accumulationBlocked,
+        goalBoundBlocked: result.goalBoundBlocked,
         merged: result.merged,
         mergedPr: result.mergedPr ?? null,
       },

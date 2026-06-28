@@ -157,6 +157,10 @@ export interface DeployWatch {
   evaluated_at: string | null;
   findings: Record<string, unknown> | null;
   created_at: string;
+  /** spec-goal-branch-pm-flow M5: true ⇒ this watch guards an ATOMIC goal→main promotion (a goal/{slug}
+   *  deploy carrying many specs). A regression on an atomic watch ESCALATES, never auto-reverts (reverting a
+   *  whole goal is far costlier than a per-phase revert). Optional/`false` on a pre-migration row read. */
+  is_atomic?: boolean;
 }
 
 /** Derive the spec slug from a `claude/<slug>` build branch. */
@@ -183,57 +187,95 @@ async function captureBaseline(
 }
 
 /**
- * Open a deploy-watch for a just-auto-merged claude/<slug> deploy. Looks up the branch's build job to
- * resolve the owning workspace + spec slug, snapshots the pre-deploy baseline, and inserts a `pending`
- * watch over the canary window. Idempotent on `merge_sha` (the partial unique index). Best-effort +
- * NEVER throws — a watch that crashes the merge it guards is worse than the gap it closes.
+ * Open a deploy-watch over a just-merged deploy. Two callers:
  *
- * Returns the watch id (or null if it no-op'd: no build job for the branch, already opened, table absent).
+ *  - PER-SPEC (the original): a `claude/<slug>` build branch squash-merged to main by Gate A
+ *    (`autoMergeReadyPrs`). The owning workspace + spec slug are resolved from the branch's build job; a
+ *    regression auto-reverts (the small per-phase diff is cheap + safe to roll back).
+ *
+ *  - ATOMIC (spec-goal-branch-pm-flow M5): a `goal/<slug>` branch promoted to main in ONE atomic merge by
+ *    `promoteCompleteGoalsToMain` → `mergeGoalBranchIntoMain`, carrying MANY specs' worth of changes in a
+ *    SINGLE Vercel deploy — the highest-blast-radius deploy in the system. The branch is `goal/*` (not
+ *    `claude/*`) and there's NO single `kind='build'` job keyed to it, so the caller passes `workspaceId`,
+ *    `slug` (the goal slug), and `isAtomic: true` explicitly. An atomic watch is marked `is_atomic` so the
+ *    verdict path ESCALATES a regression instead of auto-reverting — rolling back a whole tested goal on a
+ *    hair-trigger bar (tuned for tiny per-phase diffs) would false-revert many specs' work; a human decides.
+ *
+ * Snapshots the pre-deploy baseline + inserts a `pending` watch over the canary window. Idempotent on
+ * `merge_sha` (the partial unique index). Best-effort + NEVER throws — a watch that crashes the merge it
+ * guards is worse than the gap it closes. Returns the watch id (or null if it no-op'd: no build job for a
+ * per-spec branch, already opened, table absent).
+ *
+ * `is_atomic` tolerance: the column is added by 20260730120000_deploy_watches_is_atomic.sql; until that
+ * migration lands, an insert carrying `is_atomic` would error on the unknown column — so we retry WITHOUT it
+ * (the atomic-escalation bias degrades to the existing path, which is conservative anyway).
  */
 export async function openDeployWatch(args: {
   admin: Admin;
   branch: string;
   prNumber?: number | null;
   mergeSha?: string | null;
-  /** override the deploy timestamp (defaults to now — the squash-merge just happened). */
+  /** override the deploy timestamp (defaults to now — the merge just happened). */
   deployedAt?: string;
+  /** spec-goal-branch-pm-flow M5: the atomic-goal path supplies these directly (a goal/* branch has no
+   *  `kind='build'` job to resolve them from). When set, the build-job lookup is skipped. */
+  workspaceId?: string;
+  slug?: string;
+  /** spec-goal-branch-pm-flow M5: mark the watch as guarding an atomic goal→main promotion (bias to escalate,
+   *  never auto-revert a whole goal). */
+  isAtomic?: boolean;
 }): Promise<string | null> {
   const { admin, branch } = args;
   try {
-    if (!branch || !branch.startsWith("claude/")) return null; // build branches only
+    let workspaceId = args.workspaceId ?? null;
+    let slug = args.slug ?? null;
 
-    // Resolve the owning workspace + spec slug from the branch's most recent build job (mirrors
-    // handleAutoMergedBuildBranch). No build job ⇒ not the director's auto-fix path ⇒ don't watch.
-    const { data: jobRow } = await admin
-      .from("agent_jobs")
-      .select("workspace_id, spec_slug")
-      .eq("spec_branch", branch)
-      .eq("kind", "build")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const job = jobRow as { workspace_id: string; spec_slug: string } | null;
-    if (!job?.workspace_id) return null;
+    if (!workspaceId || !slug) {
+      // PER-SPEC path: resolve the owning workspace + spec slug from the branch's most recent build job
+      // (mirrors handleAutoMergedBuildBranch). Requires a `claude/*` build branch; no build job ⇒ not the
+      // director's auto-fix path ⇒ don't watch.
+      if (!branch || !branch.startsWith("claude/")) return null;
+      const { data: jobRow } = await admin
+        .from("agent_jobs")
+        .select("workspace_id, spec_slug")
+        .eq("spec_branch", branch)
+        .eq("kind", "build")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const job = jobRow as { workspace_id: string; spec_slug: string } | null;
+      if (!job?.workspace_id) return null;
+      workspaceId = job.workspace_id;
+      slug = job.spec_slug || slugFromClaudeBranch(branch);
+    }
 
     const deployedAt = args.deployedAt || new Date().toISOString();
     const windowEndsAt = new Date(new Date(deployedAt).getTime() + CANARY_WINDOW_MS).toISOString();
     const baseline = await captureBaseline(admin, deployedAt);
 
-    const { data, error } = await admin
+    const baseRow: Record<string, unknown> = {
+      workspace_id: workspaceId,
+      slug,
+      branch,
+      pr_number: args.prNumber ?? null,
+      merge_sha: args.mergeSha ?? null,
+      deployed_at: deployedAt,
+      window_ends_at: windowEndsAt,
+      baseline,
+      verdict: "pending",
+    };
+
+    let insert = await admin
       .from("deploy_watches")
-      .insert({
-        workspace_id: job.workspace_id,
-        slug: job.spec_slug || slugFromClaudeBranch(branch),
-        branch,
-        pr_number: args.prNumber ?? null,
-        merge_sha: args.mergeSha ?? null,
-        deployed_at: deployedAt,
-        window_ends_at: windowEndsAt,
-        baseline,
-        verdict: "pending",
-      })
+      .insert({ ...baseRow, is_atomic: !!args.isAtomic })
       .select("id")
       .single();
+    // Tolerate the pre-migration schema: a 42703 (undefined column) means is_atomic isn't deployed yet —
+    // retry without it (the atomic-escalation bias degrades to the existing conservative path).
+    if (insert.error && (insert.error.code === "42703" || /is_atomic/.test(insert.error.message || ""))) {
+      insert = await admin.from("deploy_watches").insert(baseRow).select("id").single();
+    }
+    const { data, error } = insert;
 
     if (error) {
       // 23505 = the partial unique index already opened a watch for this merge SHA — fine, not an error.
@@ -241,7 +283,7 @@ export async function openDeployWatch(args: {
       console.warn(`[deploy-guardian] openDeployWatch insert failed (${branch}):`, error.message);
       return null;
     }
-    console.log(`[deploy-guardian] opened deploy-watch for ${branch} (slug=${job.spec_slug}) → window ${Math.round(CANARY_WINDOW_MS / 60000)}m`);
+    console.log(`[deploy-guardian] opened ${args.isAtomic ? "ATOMIC " : ""}deploy-watch for ${branch} (slug=${slug}) → window ${Math.round(CANARY_WINDOW_MS / 60000)}m`);
     return (data as { id: string }).id;
   } catch (e) {
     console.warn("[deploy-guardian] openDeployWatch threw:", e instanceof Error ? e.message : e);
@@ -587,7 +629,33 @@ export async function evaluateDeployWatch(admin: Admin, watch: DeployWatch): Pro
     return verdict;
   }
 
-  // verdict === "regressed" → Phase 2: restore known-good + escalate.
+  // verdict === "regressed":
+  // spec-goal-branch-pm-flow M5 — an ATOMIC goal→main watch NEVER auto-reverts. The deploy carries a whole
+  // goal's many specs in one merge, and the regression bar (verdictFor) is tuned for tiny per-phase diffs, so
+  // a single tripped threshold would roll back many specs' tested work. Escalate to the CEO with the diagnosis
+  // + the regression detail and let a human decide the rollback (revert the goal merge, hotfix-forward, or
+  // accept). The per-spec path keeps auto-revert (cheap + safe for a small diff).
+  if (watch.is_atomic) {
+    const diagnosis = `ATOMIC goal promotion "${watch.slug}" (${watch.branch}) shows a post-deploy REGRESSION over the ${Math.round(CANARY_WINDOW_MS / 60000)}m canary window: ${describeRegression(findings)}. This deploy landed a whole goal (many specs) on main in one merge — Reva will NOT auto-revert a goal-sized deploy (the regression bar is tuned for small per-phase diffs; reverting the whole goal would discard many specs' tested work). Please decide: revert the goal merge, hotfix-forward, or accept.`;
+    await safeEscalate(admin, watch, {
+      title: `Regression on atomic goal promotion: ${watch.slug} — manual rollback decision needed`,
+      diagnosis,
+      dedupeKey: `deploy-atomic-regressed:${watch.id}`,
+      escalationKind: "deploy_atomic_regressed",
+      metadata: deployActivityMeta(watch, verdict, findings, { atomic: true }),
+    });
+    await recordDirectorActivity(admin, {
+      workspaceId: watch.workspace_id,
+      directorFunction: GUARDIAN_FUNCTION,
+      actionKind: "deploy_atomic_regressed",
+      specSlug: watch.slug,
+      reason: diagnosis,
+      metadata: deployActivityMeta(watch, verdict, findings, { atomic: true }),
+    });
+    console.log(`[deploy-guardian] ${watch.branch} → ATOMIC regressed (escalated, NO auto-revert of a whole goal)`);
+    return verdict;
+  }
+  // Per-spec path → Phase 2: restore known-good + escalate.
   await actOnRegression(admin, watch, findings, findingsJson);
   return verdict;
 }

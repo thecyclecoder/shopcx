@@ -1,6 +1,6 @@
 # deploy_watches
 
-The **Deploy Guardian's** deploy-watch store ([[../specs/deploy-health-rollback-guardian]] Phase 1). One row per auto-merged `claude/<slug>` deploy. When the auto-merge gate ([[../libraries/github-pr-resolve]] `autoMergeReadyPrs`) squash-merges a build branch (→ a Vercel deploy), Reva ([[../libraries/deploy-guardian]]) opens a watch over a bounded **canary window**: it snapshots the pre-deploy error/loop baseline now, then [[../inngest/deploy-guardian-cron]] evaluates the verdict once the window elapses — attributing only signals that FIRST appear AFTER the deploy timestamp (the correlation gate).
+The **Deploy Guardian's** deploy-watch store ([[../specs/deploy-health-rollback-guardian]] Phase 1). One row per merged deploy: a per-spec `claude/<slug>` squash-merge (Gate A) OR an M5 atomic `goal/<slug>` promotion (`is_atomic`). When the auto-merge gate ([[../libraries/github-pr-resolve]] `autoMergeReadyPrs`) squash-merges a build branch — or `promoteCompleteGoalsToMain` atomically merges a goal branch — (→ a Vercel deploy), Reva ([[../libraries/deploy-guardian]]) opens a watch over a bounded **canary window**: it snapshots the pre-deploy error/loop baseline now, then [[../inngest/deploy-guardian-cron]] evaluates the verdict once the window elapses — attributing only signals that FIRST appear AFTER the deploy timestamp (the correlation gate).
 
 **Workspace-scoped** (mirrors [[director_activity]]): the watch carries the build-console workspace that owned the build, so its verdict + the [[director_activity]] row it writes land in that workspace's audit history / board / scorecard. RLS: any authenticated user reads; service role does all writes (the admin client bypasses RLS).
 
@@ -22,6 +22,7 @@ The **Deploy Guardian's** deploy-watch store ([[../specs/deploy-health-rollback-
 | `verdict` | `text` | `pending` (default) ｜ `healthy` ｜ `regressed` ｜ `unsure` · CHECK-constrained |
 | `evaluated_at` | `timestamptz?` | when the cron stamped the verdict |
 | `findings` | `jsonb` | what the evaluation saw: `{ newErrorSignatures, newRedLoops, redLoopCount, controlTowerOk }` · default `{}` |
+| `is_atomic` | `boolean` | `true` ⇒ guards an **M5 atomic goal→main promotion** (a `goal/<slug>` deploy carrying many specs in one merge). A regression on an atomic watch **escalates** instead of auto-reverting (reverting a whole goal is far costlier than a per-phase revert; a human decides) · default `false` (a per-spec `claude/*` deploy → the auto-revert path) |
 | `created_at` | `timestamptz` | default `now()` |
 
 ## Indexes
