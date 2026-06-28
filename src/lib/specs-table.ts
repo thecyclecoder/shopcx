@@ -114,8 +114,10 @@ export interface SpecRowInput {
   priority: string | null;
   deferred: boolean;
   intended_status: "planned" | "deferred" | null;
-  /** Optional explicit status. The DB trigger may roll this to a different value once phases land — that's
-   *  the whole point of the rollup ([[../specs/spec-review-agent]] guard). Omit to default to `in_review`. */
+  /** Optional explicit status. The readers DERIVE a different planned/in_progress/shipped value once phases
+   *  land — that's the whole point of the read-time rollup (no DB trigger maintains this column; the rollup
+   *  trigger was dropped). This stored value carries only the explicit lifecycle overrides
+   *  (in_review/deferred/folded). Omit to default to `in_review`. */
   status?: SpecStatus;
   intended_status_set_by?: string | null;
   repair_signature?: string | null;
@@ -391,9 +393,10 @@ export async function upsertSpec(
  * Lift one phase between specs (or to a new slot in the same spec) preserving its stable `id`, `pr`,
  * `merge_sha`, `created_at` — the [[../specs/spec-status-phase-pr-provenance]] provenance chain.
  *
- * Single UPDATE → the trigger fires twice (old + new spec_id when those differ) and rolls both rollups
- * consistently in one transaction. The unique `(spec_id, position)` index may reject the move if the
- * destination slot is already occupied; the caller is responsible for shifting positions first when so.
+ * Single UPDATE moving the phase's `spec_id`/`position`. Both the old and new spec's board status are
+ * DERIVED at read time from their phase sets (no DB trigger maintains `specs.status` — the rollup trigger was
+ * dropped), so the move needs no status write. The unique `(spec_id, position)` index may reject the move if
+ * the destination slot is already occupied; the caller is responsible for shifting positions first when so.
  */
 export async function movePhase(
   phaseId: string,
@@ -411,9 +414,11 @@ export async function movePhase(
 /**
  * Stamp a phase `shipped` with its PR provenance — the [[../specs/director-trust-phase-pr-provenance]] /
  * [[../specs/spec-status-phase-pr-provenance]] chain. Records the `merge_sha` (and `pr` when a PR was
- * opened) of the commit that shipped this phase. The DB trigger rolls the parent `specs.status` up FROM
- * the phases, so stamping a leaf phase is the ONLY write needed to advance a spec — never set
- * `specs.status` directly (db-driven-specs: status is inferred from children, never manually set).
+ * opened) of the commit that shipped this phase. The readers DERIVE the parent `specs.status` from the
+ * phases at read time (`deriveSpecCardStatus`/`rollupPhaseStatus` — there is no longer a DB trigger; the
+ * rollup trigger was dropped in 20260725160000_drop_rollup_triggers_and_milestone_status.sql), so stamping
+ * a leaf phase is the ONLY write needed to advance a spec — never set `specs.status` directly (db-driven-
+ * specs: status is inferred from children, never manually set).
  */
 export async function stampPhaseShipped(
   workspaceId: string,
@@ -555,8 +560,9 @@ export async function isSpecAccumulationComplete(
  * derive-rollup-status: mark the LEAF phase being built `in_progress` at BUILD START. Now that a spec's
  * board status is the phase rollup (never a stored card-status read), a build that's underway must move a
  * PHASE — not the card — to in_progress, or the spec would read `planned` until its first phase ships. Flips
- * the earliest `planned` phase (the next one to build) to `in_progress`; the DB trigger then rolls
- * `specs.status` to `in_progress` and the derived card reads it correctly.
+ * the earliest `planned` phase (the next one to build) to `in_progress`; the readers then DERIVE the card
+ * status as `in_progress` from that phase at read time (no DB trigger maintains `specs.status` — the rollup
+ * trigger was dropped in 20260725160000_drop_rollup_triggers_and_milestone_status.sql).
  *
  * Idempotent + safe: a no-op if a phase is already `in_progress` (a build is already signaled) or there's no
  * `planned` phase left (every phase shipped/rejected, or a one-shot spec with no phases — there the
@@ -640,8 +646,10 @@ export async function markRemainingPhasesShipped(workspaceId: string, slug: stri
  * + the merge subjects, regressing an "✅ ungrounded" phase to `planned`). Pre-derive the audit re-stamped
  * the `spec_card_state` mirror; now the board derives from `spec_phases`, so the verdict must land HERE for
  * the rollup to reflect it. Each entry is keyed by 1-based `position` and writes `{status, pr, merge_sha}`
- * (PR/SHA null clears). The DB trigger rolls `specs.status` from the new phase states. Positions absent from
- * the input are left untouched. Best-effort upstream — never the source-of-truth for in-flight phase work.
+ * (PR/SHA null clears). The readers DERIVE `specs.status` from the new phase states at read time (no DB
+ * trigger maintains it — the rollup trigger was dropped in
+ * 20260725160000_drop_rollup_triggers_and_milestone_status.sql). Positions absent from the input are left
+ * untouched. Best-effort upstream — never the source-of-truth for in-flight phase work.
  */
 export async function restampPhases(
   workspaceId: string,

@@ -413,20 +413,14 @@ function isBoardableStatus(status: SpecRow["status"]): boolean {
   return status !== "folded";
 }
 
-/** Coerce the DB status enum (which adds `folded` over the SpecCard surface) to a `SpecStatus`. Folded is
- *  caller-filtered before this; this is for the boardable rows only. */
-function dbStatusToSpecStatus(status: SpecRow["status"]): SpecStatus {
-  if (status === "folded") return "shipped";
-  return status;
-}
-
 /**
- * derive-rollup-status: a spec's BOARD status is computed from its phase children, never read from the
- * stored `specs.status` column (which is now vestigial for the planned/in_progress/shipped axis). The
- * canonical rollup (`rollupPhaseStatus`: ignore rejected; all shipped → shipped; any shipped/in_progress →
- * in_progress; else planned) is the same one the DB trigger maintains on `specs.status` and the merge hook
- * uses — so a stored status can never drift from the children, and the manual status-reconcile writes that
- * used to fight that drift are retired.
+ * derive-rollup-status: a spec's BOARD status is ALWAYS DERIVED, never read from the stored `specs.status`
+ * column for the planned/in_progress/shipped axis. There is no DB trigger maintaining `specs.status` from
+ * phases — the `spec_phases_rollup` trigger was DROPPED (migration
+ * 20260725160000_drop_rollup_triggers_and_milestone_status.sql). The canonical rollup
+ * (`rollupPhaseStatus`: ignore rejected; all shipped → shipped; any shipped/in_progress → in_progress; else
+ * planned) is computed here at read time, so a stored status can never leak onto the board, and the manual
+ * status-reconcile writes that used to fight drift are retired.
  *
  * Terminal / override statuses are NOT rollups and still win where they apply (they live on the row, not
  * the phases):
@@ -434,14 +428,18 @@ function dbStatusToSpecStatus(status: SpecRow["status"]): SpecStatus {
  *   - `in_review`  — a newly-authored / sent-back spec awaiting Vale + Ada disposition; the build pipeline
  *                    refuses it, so it must read in_review regardless of any phase the body declares.
  *   - `folded`     — archived; callers filter it before this runs (isBoardableStatus), but preserved here.
- * A spec with ZERO phases (a one-shot spec) has nothing to roll up — fall back to the stored status (the
- * merge hook stamps `specs.status='shipped'` on its single-PR ship; in_progress/planned otherwise).
+ * A spec with ZERO phases (a one-shot spec) has nothing to roll up — derive from MERGE PROVENANCE, not the
+ * stored `specs.status` column. The one-shot merge hook (`stampSpecMergeProvenance`) writes `specs.merged_pr`
+ * / `specs.last_merge_sha` but NEVER advances `specs.status`, so reading the stored column would leak a stale
+ * `planned` for a truly-shipped one-shot spec. Provenance set ⇒ `shipped`; else `planned`.
  */
 function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
   if (row.deferred) return "deferred";
   if (row.status === "in_review") return "in_review";
-  if (row.status === "folded") return "shipped"; // boardable callers filter folded; mirror dbStatusToSpecStatus
-  if (!phases.length) return dbStatusToSpecStatus(row.status); // one-shot spec — no children to roll up
+  if (row.status === "folded") return "shipped"; // boardable callers filter folded; preserved for safety
+  // one-shot spec (no phases to roll up): derive from merge provenance, never the stored status column — the
+  // merge hook stamps merged_pr/last_merge_sha but not specs.status, so the stored value is a stale leak.
+  if (!phases.length) return row.merged_pr !== null || row.last_merge_sha !== null ? "shipped" : "planned";
   return rollupPhaseStatus(phases.map((p, i) => ({ index: i, title: p.title, status: p.status })));
 }
 
@@ -509,8 +507,9 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
   return {
     slug: row.slug,
     title: row.title,
-    // derive-rollup-status: status is the PHASE ROLLUP, not the stored `specs.status` read — so a stored
-    // status can never drift from the children. Terminal/override (deferred/in_review/folded) still win.
+    // derive-rollup-status: status is the PHASE ROLLUP (or, for a zero-phase one-shot, the merge-provenance
+    // derivation), never the stored `specs.status` read — so a stored status can never leak onto the board.
+    // Terminal/override (deferred/in_review/folded) still win.
     status: deriveSpecCardStatus(row, phases),
     critical: row.priority === "critical" ? true : undefined,
     summary: row.summary ?? "",
