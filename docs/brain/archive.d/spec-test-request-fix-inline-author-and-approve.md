@@ -1,0 +1,1 @@
+- **Request-a-fix inline on the spec-test page (author + approve without leaving)** · verified 2026-06-28 · → [[../lifecycles/roadmap-build-console]]
