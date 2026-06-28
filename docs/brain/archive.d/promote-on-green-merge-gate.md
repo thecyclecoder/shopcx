@@ -1,0 +1,1 @@
+- **Autonomous promote-on-green (merge to main + ship), hold-or-fix on red** · verified 2026-06-28 · → [[../lifecycles/roadmap-build-console]]

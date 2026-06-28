@@ -1,0 +1,1 @@
+- **KPI audit: skip the in-flight daily window** · verified 2026-06-28 · → [[../libraries/kpi-review]]

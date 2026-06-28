@@ -1,0 +1,1 @@
+- **DevOps KPI daily snapshot date should lag one UTC day (previous complete day)** · verified 2026-06-28 · → [[../libraries/platform-scorecard]]
