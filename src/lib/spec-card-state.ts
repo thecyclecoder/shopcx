@@ -122,6 +122,21 @@ export function rollupPhaseStatus(phaseStates: SpecCardPhaseState[]): Phase {
   return "planned";
 }
 
+/**
+ * specs-status-override-only — the set of statuses that may be PERSISTED to the override-only `specs.status`
+ * column. A spec's planned/in_progress/in_testing/shipped/rejected axis is PURELY DERIVED from the phase
+ * rollup ([[brain-roadmap]] `deriveSpecCardStatus`), so those values must NEVER land in the stored column —
+ * a derived destination clears it to NULL. Only the explicit lifecycle overrides survive in the column:
+ *   - in_review — newly authored / sent back; the build pipeline holds it.
+ *   - deferred  — CEO parked it (also mirrored on `specs.deferred`).
+ *   - folded    — archived after a fold.
+ * `in_testing` is itself a read-time derivation (never stored), so it is NOT an override. The CEO rule:
+ * "there is only derived status" for everything else (a stored `planned` is the noop-pipeline-test-4 bug).
+ */
+export function isOverrideStatus(status: string | null | undefined): boolean {
+  return status === "in_review" || status === "deferred" || status === "folded";
+}
+
 // spec-readers-from-db-retire-parser Phase 3: `mergePhaseStates` is RETIRED. Per-phase status + PR/merge_sha
 // provenance are now authoritative on `public.spec_phases` and flow straight onto `SpecCard.phases` via
 // brain-roadmap `dbRowToSpecCard`; the spec-detail page reads `spec.card.phases` directly (no overlay onto the
@@ -321,7 +336,17 @@ async function dualWriteSpecRow(
 ): Promise<void> {
   try {
     const updateFields: Record<string, unknown> = {};
-    if (patch.status !== undefined) updateFields.status = patch.status;
+    // specs-status-override-only: `specs.status` is an OVERRIDE-ONLY column. Only the EXPLICIT lifecycle
+    // overrides (in_review / deferred / folded) may be PERSISTED; a DERIVED state (planned / in_progress /
+    // shipped / rejected) must CLEAR the column to NULL so the readers compute status purely from the phase
+    // rollup (`deriveSpecCardStatus`). A caller can carry a derived rollup in `patch.status` (e.g. the merge
+    // effects / director spec-status action pass the phase rollup, the disposition lane passes `planned`) —
+    // writing that derived value to the override column lies in the DB (the noop-pipeline-test-4 `planned`
+    // bug). So we map a derived status to NULL here, at the single dual-write choke point every markSpecCard*
+    // writer funnels through.
+    if (patch.status !== undefined) {
+      updateFields.status = isOverrideStatus(patch.status) ? patch.status : null;
+    }
     if (patch.last_merge_sha !== undefined) updateFields.last_merge_sha = patch.last_merge_sha;
     if (patch.flags) {
       const f = patch.flags;
@@ -569,11 +594,17 @@ export async function applyAdaDisposition(
   kind: "autonomous_same" | "autonomous_downgrade",
   audit: { actor: string; reason?: string },
 ): Promise<void> {
-  // For 'deferred' we mirror the spec-review Phase-2 writer (status='deferred' + flags.deferred=true)
-  // so display + rollup agree; un-deferring restores the underlying phase progress via flags.deferred=false.
-  const status: SpecStatus = decision;
-  const patch: { status?: SpecStatus; flags?: SpecCardFlags } = {
-    status,
+  // specs-status-override-only: the disposition flips the spec OUT of the `in_review` override into the
+  // normal build flow. `planned` is a DERIVED state, NOT an override — so we must CLEAR `specs.status` to
+  // NULL (the rollup then derives `planned` from the phases), NEVER persist a literal `'planned'` (the
+  // noop-pipeline-test-4 bug: a stored derived state on the override-only column). `deferred` IS a true
+  // override → store it. Either way we consume the lane flags + set flags.deferred so display + rollup agree;
+  // un-deferring restores the underlying phase progress via flags.deferred=false.
+  //
+  // The override write goes straight to `specs.status` via setSpecStatus — NOT through the spec_card_state
+  // `status` mirror, whose CHECK only allows planned/in_progress/shipped/rejected (it can hold neither
+  // `deferred` nor NULL). We therefore omit `patch.status` here and let the flag write carry the lane state.
+  const patch: { flags?: SpecCardFlags } = {
     flags: {
       intended_status: undefined,
       vale_pass: undefined,
@@ -585,6 +616,13 @@ export async function applyAdaDisposition(
     { field: "status", actor: audit.actor, reason: audit.reason ?? `ada: ${kind} → ${decision}` },
     { field: "deferred", actor: audit.actor, reason: audit.reason ?? `ada: ${kind} → ${decision}` },
   ]);
+  // Clear the in_review override on the CANONICAL row: planned → NULL (purely derived), deferred → 'deferred'.
+  try {
+    const { setSpecStatus } = await import("@/lib/specs-table");
+    await setSpecStatus(workspaceId, slug, decision === "deferred" ? "deferred" : null, audit.actor);
+  } catch {
+    /* best-effort — the flag write above already landed; the next reconcile/dispose pass backstops. */
+  }
 }
 
 /**
