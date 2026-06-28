@@ -74,7 +74,6 @@ import {
   driftSuspectPhases,
   isCardFullyShippedWithProvenance,
   phaseHasProvenance,
-  provenanceShippedCount,
   branchBuiltCount,
 } from "@/lib/spec-phase-provenance";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
@@ -772,13 +771,19 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
-    // The gap: an UNSTARTED (no ✅ phase) spec carrying a Repair-signature (an authored fix for a real bug)
-    // that THIS director drives (its owning department-director isn't live yet — owner-agnostic keystone routing,
-    // Phase 2). The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so gating on
-    // `phases.length === 0` skipped them; gate on `provenanceShippedCount === 0` instead so a fix spec with 0,
-    // 1, or N ⏳ phases (but nothing landed-WITH-PROVENANCE) is escorted; a tagless ✅ phase doesn't count as
-    // "started." An unstarted spec with NO repair signature is a new feature — the init lane handles it.
-    const isFixSpec = provenanceShippedCount(card) === 0 && card.repairSignature && platformDrivesSpec(card.owner, chart, autonomy);
+    // The gap: an UNSTARTED spec carrying a Repair-signature (an authored fix for a real bug) that THIS
+    // director drives (its owning department-director isn't live yet — owner-agnostic keystone routing, Phase 2).
+    // The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so gating on
+    // `phases.length === 0` skipped them.
+    //
+    // spec-goal-branch-pm-flow M2: "unstarted" = NO phase has BUILT (branch build_sha OR shipped). Under
+    // branch-flow a phase builds on the spec branch (build_sha, in_progress) long BEFORE it earns a `pr` tag
+    // (only M5 promotion stamps `pr`), so the old `provenanceShippedCount === 0` (pr-gated) read 0 for the
+    // ENTIRE life of a branch-flow fix spec — once phase 1 had built on the branch but no build was active (the
+    // gap between phases), this would re-queue a FRESH build from scratch, duplicating accumulated branch work.
+    // `branchBuiltCount === 0` recognizes the branch-built phase as started (mirrors the init + groom lanes,
+    // both rewired to branchBuiltCount in M2). The per-candidate `state.inFlight` check below also dedups.
+    const isFixSpec = branchBuiltCount(card) === 0 && card.repairSignature && platformDrivesSpec(card.owner, chart, autonomy);
     if (!isFixSpec) continue;
 
     const state = await specBuildState(admin, workspaceId, card.slug);
