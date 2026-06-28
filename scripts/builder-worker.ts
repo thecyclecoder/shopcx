@@ -11509,15 +11509,32 @@ async function dispatchJob(job: Job) {
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
   if (!isResume) {
-    // vercel-skip-non-spec-build-refs: spec-builds carry the `claude/build-` prefix so the Vercel
-    // Ignored-Build-Step whitelist (CLAUDE_PREVIEW_IGNORE_COMMAND) can POSITIVELY match the only lane
-    // that needs a per-build preview — every other foreman lane (fold/goal-fold/plan/spec-chat/…)
-    // skips. (Pre-2026-06-27 this was `claude/${slug}-…`; an arbitrary slug couldn't be told apart
-    // from a fold by name, so the old `^claude/` whitelist built folds too and blocked their merge.)
-    branch = `claude/build-${slug}-${Date.now().toString(36)}`;
+    // ── M1: branch-accumulation model (spec-goal-branch-pm-flow) ──────────────────────────────
+    // A spec's phases accumulate on ONE PERSISTENT per-spec branch — `claude/build-${slug}` (no
+    // per-phase timestamp suffix). Phase N+1 builds on phase N's commit (the spec branch's current
+    // tip), so phases NEVER round-trip through main. Pre-M1 each phase got a fresh
+    // `claude/build-${slug}-${ts}` branch off main, which only saw the prior phase's code AFTER it
+    // merged to main — exactly the "phase N needs phase N-1 on main" deadlock M1 resolves.
+    //
+    // Preview compatibility (vercel-skip-non-spec-build-refs): the bare `claude/build-${slug}` still
+    // matches the Vercel Ignored-Build-Step whitelist (CLAUDE_PREVIEW_IGNORE_COMMAND = `^claude/build-`),
+    // so the spec branch keeps getting its preview with ZERO churn to vercel-project.ts — the
+    // deliberate least-churn name choice (vs introducing `spec/*` + widening the whitelist). Every
+    // other foreman lane (fold/goal-fold/plan/spec-chat/…) still skips. The bare name is also already
+    // recognized by hasActiveBuildForSlug's dedup (`p.head.ref === claude/build-${slug}`).
+    branch = `claude/build-${slug}`;
     removeWorktreeForBranch(branch); // idempotent add — never collide with a prior tree holding this branch
-    const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
-    if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
+    // create-or-extend: if the spec branch already exists on origin (a prior phase built), check it
+    // out and build phase N on top of its current tip; otherwise create it fresh from main. The
+    // remote ref is the source of truth (the worktree is wiped every dispatch), so probe origin.
+    const remoteHasBranch =
+      sh("git", ["ls-remote", "--exit-code", "--heads", "origin", branch]).code === 0;
+    const base = remoteHasBranch ? `origin/${branch}` : "origin/main";
+    const add = sh("git", ["worktree", "add", "-B", branch, wt, base]);
+    if (add.code !== 0) throw new Error(`worktree add failed (base ${base}): ${add.err.slice(0, 300)}`);
+    console.log(
+      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : "created fresh from main"}`,
+    );
     await update(job.id, { spec_branch: branch });
   } else {
     removeWorktreeForBranch(branch!); // kills "already used by worktree" on resume — re-establish the tree cleanly
@@ -11634,6 +11651,16 @@ async function dispatchJob(job: Job) {
     // next-phase → no injected scope (the pre-flight already no-ops an all-built spec). Best-effort: a
     // getSpec failure leaves the prompt as-is (the pre-flight "first unbuilt one" guidance still applies).
     let nextPhaseScope: string | null = null;
+    // M1 provenance seam: the 1-based position of the phase THIS session builds, used to stamp the
+    // commit's `Phase:` trailer (below) so a later milestone (M2 — phase stamping from spec-branch
+    // commits) can derive phase→commit mapping from the branch's git log without a main merge. Derived
+    // from an explicit `Phase N` in the instructions, else the next-planned-phase index. Null for a
+    // resume (its commit message marks the resumed phase via WIP) or a one-shot/single-phase spec.
+    let phasePosition: number | null = null;
+    {
+      const m = /\bPhase\s+(\d+)\b/i.exec(job.instructions ?? "");
+      if (m) phasePosition = parseInt(m[1], 10);
+    }
     if (!isResume) {
       const instructionsNamePhase = /\bPhase\s+\d+\b/i.test(job.instructions ?? "");
       if (!instructionsNamePhase) {
@@ -11644,6 +11671,7 @@ async function dispatchJob(job: Job) {
           // First phase whose DERIVED status is neither shipped nor rejected = the next planned phase to build.
           const idx = phases.findIndex((p) => p.status !== "shipped" && p.status !== "rejected");
           if (idx >= 0 && phases.length > 1) {
+            phasePosition = idx + 1; // M1 provenance: stamp the next-planned phase's position on the commit
             // Only scope when there's MORE than one phase — a single-phase spec IS the whole thing in one PR,
             // and a 0-phase one-shot has nothing to scope. The merge hook falls back to this same "first
             // not-yet-shipped phase" when the instructions name none, so the phase the agent builds and the
@@ -11844,7 +11872,17 @@ async function dispatchJob(job: Job) {
       return;
     }
     sh("git", ["add", "-A"], { cwd: wt });
-    const commit = sh("git", ["commit", "-m", `build: ${slug}\n\n${parsed?.summary ?? ""}`], { cwd: wt });
+    // M1 phase provenance (spec-goal-branch-pm-flow): each phase commits ONE (set) onto the persistent
+    // spec branch, marked with git trailers — `Spec: {slug}` and (when known) `Phase: {position}`. This
+    // is the durable phase→commit mapping a later milestone (M2 — phase stamping from spec-branch
+    // commits, replacing the main-merge stamping) reads off the branch's git log, no main round-trip
+    // required. phasePosition is null for a one-shot/single-phase spec or a resume (the WIP commits
+    // already carry the slug); the `Spec:` trailer is always present so every spec-branch commit is
+    // attributable.
+    const commitTrailers =
+      `Spec: ${slug}` + (phasePosition != null ? `\nPhase: ${phasePosition}` : "");
+    const commitMsg = `build: ${slug}${phasePosition != null ? ` (phase ${phasePosition})` : ""}\n\n${parsed?.summary ?? ""}\n\n${commitTrailers}`;
+    const commit = sh("git", ["commit", "-m", commitMsg], { cwd: wt });
     if (commit.code !== 0) {
       await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
       return;
