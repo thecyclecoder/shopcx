@@ -1549,8 +1549,9 @@ async function ensurePr(branch: string, title: string, draft: boolean, body?: st
   return null;
 }
 
-// A build that paused (needs_input/needs_approval) opened its PR as a DRAFT. On completion the PR is
-// reused, so mark it ready-for-review or it stays unmergeable. REST can't un-draft a PR; GraphQL can.
+// Un-draft a PR (used by the fold flow, which opens a draft PR; and as a belt-and-suspenders on the
+// build accumulation-complete path — build PAUSES no longer open a draft under no-pr-during-accumulation).
+// Mark it ready-for-review or it stays unmergeable. REST can't un-draft a PR; GraphQL can.
 // One attempt: fetch the PR's node_id FRESH (must be after the final push), run the mutation, and
 // confirm the result is non-draft. Returns ok=false (with a reason) rather than swallowing — PR#75/#76
 // stayed draft because the old catch hid a GraphQL error/timing race.
@@ -12045,8 +12046,12 @@ async function dispatchJob(job: Job) {
         sh("git", ["commit", "-m", `wip: ${slug} (needs input)`], { cwd: wt });
         sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
       }
-      const pr = await ensurePr(branch!, slug, true);
-      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      // PR DEFERRAL (no-pr-during-accumulation): a needs_input pause opens NO PR — not even a draft. A
+      // draft PR mid-accumulation is an unwanted no-op artifact (CEO directive). The WIP stays on the
+      // `claude/build-{slug}` branch (committed + pushed above); the questions surface via the job's
+      // `needs_input` status + `questions` payload — PR-independent. The real (non-draft) PR opens ONLY at
+      // accumulation-complete (the deferred success path below). Carry any pre-existing PR forward untouched.
+      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null });
       return;
     }
 
@@ -12101,8 +12106,9 @@ async function dispatchJob(job: Job) {
           // The build keeps re-requesting an already-applied action despite being told it's settled —
           // stop the bounce loop and surface for a human rather than auto-resuming forever.
           commitWip(`wip: ${slug} (auto-settle loop guard)`);
-          const pr = await ensurePr(branch!, slug, true);
-          await update(job.id, { status: "needs_attention", pending_actions: carried, error: "build re-requested already-applied action(s) repeatedly", log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+          // No draft PR (no-pr-during-accumulation): the WIP is on the branch; needs_attention surfaces via
+          // the job status + pending_actions, not a PR. Carry any pre-existing PR forward untouched.
+          await update(job.id, { status: "needs_attention", pending_actions: carried, error: "build re-requested already-applied action(s) repeatedly", log_tail: logTail, pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null });
           console.error(`${tag} auto-settle loop guard tripped → needs_attention`);
           return;
         }
@@ -12114,8 +12120,14 @@ async function dispatchJob(job: Job) {
 
       // Genuinely-new gated action(s) remain → pause for the owner as before.
       commitWip(`wip: ${slug} (needs approval)`);
-      const pr = await ensurePr(branch!, slug, true);
-      await update(job.id, { status: "needs_approval", pending_actions: carried, log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      // PR DEFERRAL (no-pr-during-accumulation): a needs_approval pause opens NO PR — not even a draft. The
+      // approval is PR-INDEPENDENT: the request surfaces via the job's `needs_approval` status +
+      // `pending_actions` (the approvals feed + director inbox read those, not a PR), and the approver
+      // (Ada / CEO) inspects the migration SQL / apply script / new code by reading them off the
+      // `claude/build-{slug}` BRANCH (the director review checks the branch out into a worktree — see
+      // runDirectorApprovalJob). The real (non-draft) PR opens ONLY at accumulation-complete (the deferred
+      // success path below). Carry any pre-existing PR forward untouched.
+      await update(job.id, { status: "needs_approval", pending_actions: carried, log_tail: logTail, pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null });
       return;
     }
 
@@ -12134,13 +12146,14 @@ async function dispatchJob(job: Job) {
     const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
     if (!dirty) {
       // No NEW changes — typically because the build committed everything during a needs_approval/needs_input
-      // pause and the resume only had the worker apply a migration. A draft PR already exists from that pause,
-      // so we must STILL ensure it's ready-for-review + linked, or the job completes stuck as a draft (PR#80).
+      // pause and the resume only had the worker apply a migration. Under no-pr-during-accumulation the pause
+      // opened NO PR, so there is normally no pre-existing PR to carry here — at accumulation-complete the PR
+      // is opened (non-draft) for the first time below; markReady stays as a harmless belt-and-suspenders.
       //
-      // PR DEFERRAL (defer-pr-until-accumulation-complete): only OPEN / un-draft the PR once the spec is fully
-      // accumulated on its branch. Mid-accumulation a multi-phase spec must NOT surface a (non-draft, mergeable)
-      // PR here either — complete the job on the branch and let the chain carry on. A 0–1-phase one-shot is
-      // trivially complete so it opens its PR as before. Fails OPEN (a PM-read blip ⇒ open the PR).
+      // PR DEFERRAL (defer-pr-until-accumulation-complete): only OPEN the PR once the spec is fully accumulated
+      // on its branch. Mid-accumulation a multi-phase spec must NOT surface ANY PR here either — complete the
+      // job on the branch and let the chain carry on. A 0–1-phase one-shot is trivially complete so it opens
+      // its PR as before. Fails OPEN (a PM-read blip ⇒ open the PR).
       let accNc: { complete: boolean; reason: string };
       try {
         const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
@@ -12149,8 +12162,9 @@ async function dispatchJob(job: Job) {
         accNc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
       }
       if (!accNc.complete) {
-        // Defer: no PR surfaced. Carry any pre-existing (draft pause) PR forward untouched — never un-draft it
-        // mid-accumulation. The chain advances the next phase, whose build re-evaluates the gate.
+        // Defer: no PR surfaced. No pause ever opened one (no-pr-during-accumulation), so job.pr_url is
+        // normally null — carried forward untouched regardless. The chain advances the next phase, whose
+        // build re-evaluates the gate.
         console.log(`${tag} no new changes — PR DEFERRED (accumulation not complete: ${accNc.reason})`);
         await update(job.id, { status: "completed", pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null, log_tail: `no new changes; PR deferred — ${accNc.reason}`.slice(-2000) });
         try {
@@ -12294,8 +12308,8 @@ async function dispatchJob(job: Job) {
       if (!gate.pass) {
         const prior = /BUILD_GATE_FAILED\[(\d+)\]/.exec(job.error || "");
         const attempt = (prior ? parseInt(prior[1], 10) : 0) + 1;
-        // Carry whatever PR the job already has (e.g. a draft from an earlier pause) — under PR deferral the
-        // success path may not have opened one yet, so this can legitimately be null.
+        // Carry whatever PR the job already has — under no-pr-during-accumulation a pause opens none and the
+        // success path hasn't opened one yet, so this is normally null.
         const carryPr = { pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null };
         if (attempt >= BUILD_GATE_MAX_ATTEMPTS) {
           await update(job.id, { status: "needs_attention", ...carryPr, error: `next build failed ${attempt}× — Bo couldn't self-fix: ${gate.error}`, log_tail: gate.log.slice(-2000) });
@@ -12359,7 +12373,8 @@ async function dispatchJob(job: Job) {
     if (!acc.complete) {
       // More phases still to build → defer the PR. Just complete the job on the branch; the chain (below)
       // queues the next phase, whose build re-evaluates this gate. No PR ⇒ the board shows no squash-merge.
-      // Carry any pre-existing PR (a draft from an earlier pause) forward untouched — we never CREATE one here.
+      // Carry job.pr_url forward untouched — under no-pr-during-accumulation it's normally null (no pause
+      // opened one); we never CREATE a PR here.
       console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${acc.reason})`);
       await update(job.id, { status: "completed", pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null, log_tail: `phase built; PR deferred — ${acc.reason}`.slice(-2000) });
       try {
