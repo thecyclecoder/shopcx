@@ -716,6 +716,11 @@ export interface AutoMergeResult {
    *  spec promotes spec→goal branch via Gate B and the whole goal lands on main atomically via Gate C). Gate A
    *  merges ONE-OFF specs only; a goal-bound branch is handed off, never jumped to main here. */
   goalBoundBlocked: number;
+  /** fold-pr-auto-merge: claude/fold-* PRs that were mergeable+clean but whose OWNING fold job (kind='fold',
+   *  same spec_branch) was NOT yet completed/merged — refused by the fold gate, left for the next pass. A
+   *  fold is a brain-doc merge of ALREADY-shipped specs, so the build/accumulation/tests/goal gates do NOT
+   *  apply; the only gate is "the fold job that authored this branch finished". */
+  foldGateBlocked: number;
   /** 0 or 1 — SERIALIZED: at most one merge per pass (the resulting push-to-main webhook handles the next). */
   merged: number;
   mergedPr?: number;
@@ -768,7 +773,7 @@ export interface AutoMergeResult {
 
 export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult> {
   const db = admin || createAdminClient();
-  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, accumulationBlocked: 0, goalBoundBlocked: 0, merged: 0, prs: [] };
+  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, accumulationBlocked: 0, goalBoundBlocked: 0, foldGateBlocked: 0, merged: 0, prs: [] };
   let ok = true;
   try {
     if (!ghToken()) return result;
@@ -810,6 +815,28 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         // SERIALIZE: only attempt the first ready PR — the post-merge push webhook drives the next one.
         // (A gate-blocked PR leaves result.merged at 0, so the scan continues to the next ready PR.)
         if (result.merged === 0) {
+          // fold-pr-auto-merge — FOLD GATE (the build gates DO NOT apply to a fold PR): a claude/fold-* PR
+          // is a brain-doc merge of ALREADY-shipped specs (runFoldJob batches every owner-verified spec into
+          // ONE branch). There is no spec accumulation to wait on, no pre-merge spec-test/security to run, and
+          // no goal-bound promotion — those gates are all about a NOT-yet-shipped feature build reaching main.
+          // So a fold PR is promoted on a SINGLE condition: mergeable+clean (the isPrReady above) AND its
+          // OWNING fold job (kind='fold', same spec_branch) is in a completed/succeeded status. The fold branch
+          // → its fold job match is the `spec_branch` column (runFoldJob stamps `spec_branch = claude/fold-…`
+          // and getBranchBuildSuccess already resolves the latest BRANCH_OWNING_KINDS job — which includes
+          // 'fold' — for that ref). We then fall through to the SAME shared merge path the build PRs use.
+          // Still SERIALIZED: this sits inside `result.merged === 0`, so a fold merge counts as the one merge
+          // for the pass and the post-merge push webhook drives the next.
+          if (branch.startsWith("claude/fold-")) {
+            const foldGate = await getBranchBuildSuccess(branch, db);
+            buildGateOk = foldGate.ok;
+            if (!foldGate.ok) {
+              result.foldGateBlocked++;
+              console.warn(`[auto-merge] fold PR #${prNumber} (${branch}) is GitHub-clean but its owning fold job hasn't completed: ${foldGate.reason} — left for the next pass`);
+              result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
+              continue;
+            }
+            // Fold gate passed → fall through to the shared squash-merge action below (skips ALL build gates).
+          } else {
           // optimizer-launch-hardening Phase 2 — success gate: GitHub's "clean" is vacuous here (no CI /
           // branch protection), so additionally require the branch's OWN build job to have succeeded
           // (completed/merged ⇒ the worker's pre-push tsc passed). Refuse a clean-but-unbuilt PR.
@@ -892,6 +919,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
             result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, merged });
             continue;
           }
+          } // end build-gate branch (a fold PR skips straight here once its fold gate passed)
           const headSha = (pr.head as { sha?: string } | undefined)?.sha;
           try {
             const m = await squashMergeAndDelete(prNumber, branch, headSha);
@@ -950,6 +978,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         testsGateBlocked: result.testsGateBlocked,
         accumulationBlocked: result.accumulationBlocked,
         goalBoundBlocked: result.goalBoundBlocked,
+        foldGateBlocked: result.foldGateBlocked,
         merged: result.merged,
         mergedPr: result.mergedPr ?? null,
       },
