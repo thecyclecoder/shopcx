@@ -3406,6 +3406,50 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
   return { ok: true };
 }
 
+// ── no-max-on-unreviewed-specs (BACKSTOP) ────────────────────────────────────
+// Bo's claim-SELECTION hard-skip: the moment the box CLAIMS a fresh `build` job, refuse to LAUNCH it (which
+// would spin up a Max account session) if its spec hasn't passed Vale spec-review yet. The claim-time build
+// gate (evaluateClaimTimeBuildGate, inside dispatchJob) already bounces an un-reviewed spec — but it runs
+// AFTER launch()/runJob has begun resolving an account + session, so a Max session was still burned each
+// attempt. This check runs in the claim loop BEFORE launch(), so ZERO Max usage is spent on an un-reviewed
+// spec. (Ada's enqueue lanes — the PRIMARY fix in platform-director — should already keep such a job from
+// existing; this is the belt-and-suspenders for any build queued by another path: a manual enqueue, the
+// reactive blocked_by auto-queue, or a sibling agent's chain.)
+//
+// On a hold we mirror the gate's release exactly: status→queued with a FUTURE `claimed_at` cooldown so the
+// claim RPC (which skips queued jobs whose claimed_at is still in the future) backs off instead of re-handing
+// it every tick. A PLAN job, a RESUME (claude_session_id set — already past review), or a non-build kind is
+// never held here. Reads the SAME durable signal as the gate (card.valeReviewPassed via getSpec → the
+// brain-roadmap rollup, never the stored specs.status column) and writes only the requeue via `update` (no
+// PM-table write), so the _check-pm guards stay green. Best-effort + fail-OPEN: a read error lets the job
+// proceed to launch (where the claim-time gate is still the backstop).
+async function claimHeldForUnreviewedSpec(job: Job): Promise<boolean> {
+  if (job.kind !== "build") return false; // only spec builds carry a Vale-review requirement
+  if (job.claude_session_id) return false; // a RESUME is already past review (its branch/PR exists)
+  const slug = job.spec_slug;
+  try {
+    const { getSpec } = await import("../src/lib/brain-roadmap");
+    const got = await getSpec(slug, job.workspace_id);
+    const card = got?.card ?? null;
+    if (!card) return false; // no boardable row → let dispatch's claim-gate PARK it (spec_row_missing), don't silently re-queue
+    const reviewDone = card.valeReviewPassed === true || card.status === "shipped";
+    if (reviewDone) return false; // passed Vale (or already shipped) → safe to launch
+    // Held: release the claim with the gate's future-claimed_at cooldown so the RPC backs off, and do NOT
+    // launch — no worktree, no account, no Max session was spent. The claim-gate's proactive Vale enqueue +
+    // Ada's escort re-release it once Vale passes.
+    const holdUntil = new Date(Date.now() + BUILD_GATE_HOLD_COOLDOWN_MS).toISOString();
+    const reason = `claim-select backstop: ${slug} not spec-review-passed (status=${card.status}, valeReviewPassed=${card.valeReviewPassed ?? "false"}); released BEFORE launch so no Max session is spent — held with cooldown until Vale passes`;
+    await update(job.id, { status: "queued", claimed_at: holdUntil, log_tail: reason.slice(-2000) });
+    console.log(`[${slug}] ${reason}`);
+    return true;
+  } catch (e) {
+    // Fail OPEN — a transient read failure must not strand a legitimately-reviewed build; the claim-time
+    // gate inside dispatch is still the backstop (it requeues on its own read error too).
+    console.error(`[${slug}] claim-select review backstop read failed (proceeding to launch — claim-gate still applies):`, e instanceof Error ? e.message : e);
+    return false;
+  }
+}
+
 // board-grooming (Phase 1): the director MOVES the project board. For each PARTIALLY-shipped spec (≥1 ✅,
 // remaining ⏳, no active build) it runs a read-only Max investigation that classifies the leftover phases:
 //   - continue → queue the next phase's build to completion (loop-guarded, like the escort).
@@ -12663,6 +12707,10 @@ async function main() {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
+        // no-max-on-unreviewed-specs (BACKSTOP): hard-skip an un-Vale-reviewed build BEFORE launch() spins up a
+        // Max session. The held job is re-queued with a future claimed_at cooldown (the RPC skips it until then),
+        // so we `continue` to claim the NEXT job without re-handing this one — no infinite loop, no session spent.
+        if (await claimHeldForUnreviewedSpec(job)) continue;
         console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
       }
