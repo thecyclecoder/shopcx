@@ -98,10 +98,12 @@ export default function PhaseList({ slug, phases }: { slug: string; phases: Spec
                   <button
                     key={s}
                     type="button"
-                    title={LABEL[s]}
+                    title={statuses[i] === s && isBuilt({ status: statuses[i], build_sha: p.build_sha }) ? BUILT_LABEL : LABEL[s]}
                     onClick={() => setStatus(i, s)}
                     className={`h-2.5 w-2.5 rounded-full border ${
-                      statuses[i] === s ? `${DOT[s]} border-transparent` : "border-zinc-300 bg-transparent dark:border-zinc-600"
+                      // The active dot follows the DERIVED status: a build_sha'd (built-on-branch) in_progress
+                      // phase fills TEAL ("Built"), matching the badge — not the amber of a still-building phase.
+                      statuses[i] === s ? `${dotFor({ status: statuses[i], build_sha: p.build_sha })} border-transparent` : "border-zinc-300 bg-transparent dark:border-zinc-600"
                     }`}
                   />
                 ))}
