@@ -20,6 +20,7 @@ The read/write surface for the DB-resident spec body — [[../tables/specs]] (th
 
 - **`getSpec(workspaceId, slug)`** → `SpecRow | null` — the parent row + its [[../tables/spec_phases]] rows ordered by `position`. Read by authenticated users (RLS) — service role bypasses for backfill / writers.
 - **`listSpecs(workspaceId, filter?)`** → `SpecRow[]` — every spec in a workspace, optionally filtered by `{ status, owner, milestone_id }`. Phases joined in one extra round-trip.
+- **`getFixSpecForOrigin(workspaceId, originSlug)`** → `SpecRow | null` — resolve the regression FIX spec for an origin by the typed linkage `specs.regression_of_slug = originSlug` (NOT a hand-typed/deterministic slug), most-recently-created first, phases joined like `getSpec`. The inline spec-test card ([[../specs/spec-test-request-fix-inline-author-and-approve]] Phase 2) reads it so a renamed fix slug still surfaces — the `regression_of_slug` column (set by the request-fix authoring path + the regression-agent's `**Regression-of:**` header) is the source of truth. Read-only, service-role.
 - **`upsertSpec(workspaceId, row, phases)`** → `{ spec_id, phase_ids }` — the canonical write. UPSERT by `(workspace_id, slug)` + REPLACE phases under the same `spec_id`:
   - matching `(spec_id, position)` rows are UPDATED in place — preserving `id` (and `pr` / `merge_sha` unless explicitly overridden)
   - new positions INSERT (with the supplied `pr` / `merge_sha` if any)

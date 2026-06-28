@@ -669,6 +669,40 @@ export async function restampPhases(
   }
 }
 
+/**
+ * spec-test-request-fix-inline-author-and-approve Phase 2 — resolve the regression fix spec for an origin
+ * by the typed linkage (`specs.regression_of_slug = originSlug`), not a hand-typed/deterministic slug.
+ *
+ * The inline spec-test card uses this so a renamed fix slug still surfaces — the linkage column is the
+ * source of truth (set by the request-fix authoring path + the regression-agent's `**Regression-of:**`
+ * header). Returns the most-recently-created fix when more than one row carries the same linkage (rare,
+ * but possible across deterministic-slug regenerations). Phases are joined like `getSpec`.
+ */
+export async function getFixSpecForOrigin(
+  workspaceId: string,
+  originSlug: string,
+): Promise<SpecRow | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("specs")
+    .select(SPEC_COLUMNS)
+    .eq("workspace_id", workspaceId)
+    .eq("regression_of_slug", originSlug)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const specDb = data as SpecRowDb;
+  const { data: phases, error: pErr } = await admin
+    .from("spec_phases")
+    .select(PHASE_COLUMNS)
+    .eq("spec_id", specDb.id)
+    .order("position", { ascending: true });
+  if (pErr) throw pErr;
+  return specRowFromDb(specDb, (phases ?? []) as SpecPhaseRow[]);
+}
+
 /** One phase by its stable id — the join-free read for provenance / phase-move tooling. */
 export async function getPhase(phaseId: string): Promise<SpecPhaseRow | null> {
   const admin = createAdminClient();
