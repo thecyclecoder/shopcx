@@ -1,6 +1,6 @@
 # spec_phases
 
-ONE ROW PER PHASE of every spec — the body content (`title`, `body`), the lifecycle (`status`), the per-phase PR provenance (`pr`, `merge_sha`), and the per-phase `verification` block. A child table of [[specs]], keyed by `(spec_id, position)`. Authored by [[../specs/spec-body-table-and-backfill]] (M1 of [[../goals/db-driven-specs]]).
+ONE ROW PER PHASE of every spec — the body content (`title`, `body`), the lifecycle (`status`), the per-phase build/PR provenance (`build_sha` = the spec-branch commit where the phase BUILT; `pr` / `merge_sha` = the MAIN-promotion stamp), and the per-phase `verification` block. A child table of [[specs]], keyed by `(spec_id, position)`. Authored by [[../specs/spec-body-table-and-backfill]] (M1 of [[../goals/db-driven-specs]]); `build_sha` added by [[../specs/spec-goal-branch-pm-flow]] M2 ([[../lifecycles/spec-goal-branch-pm-flow]]).
 
 **Why a TABLE, not a jsonb array.** Phases are a relation specifically so a phase can MOVE between specs (lift P5 into a new deferred spec) via a single `UPDATE spec_phases SET spec_id=…, position=…` that preserves the phase's stable `id`, `pr`, `merge_sha`, and `created_at`. A jsonb-style destroy+recreate would BREAK the per-phase PR provenance chain ([[../specs/spec-status-phase-pr-provenance]]) — the exact gotcha that motivated the relation.
 

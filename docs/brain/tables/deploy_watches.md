@@ -55,4 +55,4 @@ Once the verdict is stamped, [[../libraries/deploy-guardian]] **claims** the wat
 
 ## Related
 
-[[../specs/deploy-health-rollback-guardian]] · [[../libraries/deploy-guardian]] · [[../inngest/deploy-guardian-cron]] · [[../libraries/github-pr-resolve]] · [[error_events]] · [[loop_alerts]] · [[director_activity]] · [[agent_jobs]] · [[../libraries/control-tower]]
+[[../specs/deploy-health-rollback-guardian]] · [[../libraries/deploy-guardian]] · [[../inngest/deploy-guardian-cron]] · [[../libraries/github-pr-resolve]] · [[error_events]] · [[loop_alerts]] · [[director_activity]] · [[agent_jobs]] · [[../libraries/control-tower]] · [[../lifecycles/spec-goal-branch-pm-flow]]

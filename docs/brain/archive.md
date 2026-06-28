@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Plan-job gates build queue on actual public.specs existence** · verified 2026-06-28 · → [[lifecycles/roadmap-build-console]]
 - **Short-circuit no-op frequency changes before they hit Appstle** · verified 2026-06-27 · → [[../libraries/appstle]]
 - **createFullReturn: guard null Shopify mirror** · verified 2026-06-27 · → [[../libraries/control-tower]]
 - **`in_testing` derived PM status** · verified 2026-06-27 · → [[../libraries/brain-roadmap]]
