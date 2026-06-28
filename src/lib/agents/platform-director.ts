@@ -75,6 +75,7 @@ import {
   isCardFullyShippedWithProvenance,
   phaseHasProvenance,
   provenanceShippedCount,
+  branchBuiltCount,
 } from "@/lib/spec-phase-provenance";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
@@ -3048,16 +3049,27 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
   if (target <= 0) return [];
 
   const { specs } = await getRoadmap();
-  // director-trust-phase-pr-provenance Phase 1: a candidate is partially shipped iff ≥1 phase landed WITH
-  // merge-hook provenance AND ≥1 phase is planned. A tagless ✅ phase does NOT count as "landed" — counting
-  // it would let a drift-suspect spec re-fire as a continue candidate every pass instead of being audited.
+  // director-trust-phase-pr-provenance Phase 1 + spec-goal-branch-pm-flow M2: a candidate is partially-BUILT
+  // iff ≥1 phase is BUILT (on the spec branch via build_sha, OR shipped to main) AND ≥1 phase is planned.
+  //
+  // M2 — the gate MUST recognize branch-build, not just main-merge provenance. Under M1's branch-accumulation
+  // model a multi-phase spec's phases build one-by-one onto ONE persistent `claude/build-{slug}` PR and are
+  // NOT merged to main per phase, so NO phase carries a `pr` tag until M5 promotes the whole spec. The old
+  // `provenanceShippedCount(s) >= 1` (pr-tag-gated) therefore reads 0 for the ENTIRE life of a branch-flow
+  // spec → the next-phase advance would never fire. `branchBuiltCount` reads the build_sha (or shipped)
+  // signal instead, so phase N being built on the branch makes the spec a candidate to advance phase N+1.
+  //
+  // The static `counts.in_progress === 0` gate is RETIRED here: under branch-flow a built phase reads
+  // `in_progress` (built, not shipped), so that gate would wrongly exclude every branch-built spec. The
+  // "don't groom a spec mid-build" guard moves to the per-candidate `state.activeBuild` check below (line
+  // ~3068), which is precise — it distinguishes an ACTIVE build job (queued/building) from a landed
+  // (completed/merged) one, where a landed phase SHOULD advance the next ⏳ phase.
   const partial = specs.filter(
     (s) =>
       !isCardFullyShippedWithProvenance(s) &&
       s.status !== "deferred" && // parked — grooming skips a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
-      provenanceShippedCount(s) >= 1 && // at least one phase has landed WITH a pr tag (real shipped)
+      branchBuiltCount(s) >= 1 && // ≥1 phase BUILT on the branch (build_sha) or shipped — M2 branch-flow signal
       s.counts.planned >= 1 && // at least one ⏳ phase remains
-      s.counts.in_progress === 0 && // no 🚧 phase (a phase actively building) — that's an active build
       s.autoBuild !== false, // owner opted out of auto-build → leave it under manual control (mirrors the escort)
   );
 
@@ -3418,7 +3430,12 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
     (s) =>
       !isCardFullyShippedWithProvenance(s) && // really shipped means every phase has its merge PR + SHA
       s.status !== "deferred" && // parked — the initiation lane never starts a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
-      provenanceShippedCount(s) === 0 && // unstarted — no phase has landed WITH provenance (tagless ✅ doesn't count)
+      // spec-goal-branch-pm-flow M2: "unstarted" = NO phase has BUILT (branch build_sha OR shipped). Under
+      // branch-flow a phase builds on the spec branch (build_sha, in_progress) long before it earns a `pr`
+      // tag (M5 promotion), so `provenanceShippedCount === 0` (pr-gated) would call a half-built branch-flow
+      // spec "unstarted" and risk the init lane re-queuing it. `branchBuiltCount === 0` recognizes the
+      // branch-built phase as started. (The per-candidate `state.inFlight` check below also dedups.)
+      branchBuiltCount(s) === 0 && // unstarted — no phase built on the branch or shipped (tagless ✅ doesn't count)
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
       platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it ("first live boss else up")

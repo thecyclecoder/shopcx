@@ -60,6 +60,11 @@ export interface SpecPhase {
    *  phase (provable status) with no `spec_card_state` overlay. */
   pr?: number | null;
   merge_sha?: string | null;
+  /** spec-goal-branch-pm-flow M2: the `claude/build-{slug}` spec-branch commit SHA where this phase BUILT
+   *  (stampPhaseBuilt). Set when the phase builds on the branch — DISTINCT from `merge_sha`/`pr` (the M5
+   *  main-promotion stamp). A phase with `build_sha` but no `pr` is built-on-branch (in_progress), the
+   *  branch-flow's "this phase is done building" signal that the grooming next-phase advance reads. */
+  build_sha?: string | null;
 }
 
 export interface SpecCard {
@@ -488,6 +493,7 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
     status: p.status,
     pr: p.pr ?? null,
     merge_sha: p.merge_sha ?? null,
+    build_sha: p.build_sha ?? null, // spec-goal-branch-pm-flow M2 — branch-build provenance (built, not shipped)
   }));
   const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
   for (const p of phases) counts[p.status]++;

@@ -346,6 +346,10 @@ interface Job {
   answers: { id: string; answer: string }[];
   pending_actions: PendingAction[];
   pr_number: number | null;
+  // build-all-phases-chain: this build is part of a "Build all" chain — on completion the worker queues the
+  // spec's next planned phase (spec-goal-branch-pm-flow M2 advances the chain off the BRANCH build, not a
+  // main merge). The claim_agent_job RPC returns the full agent_jobs row, so this column is always present.
+  chain_phases?: boolean | null;
   // spec-test-on-preview-pre-merge Phase 1: the per-build *.vercel.app preview origin a pre-merge
   // spec-test (or future security-test) job runs its non-destructive checks against. Set by
   // enqueuePreMergeSpecTest (src/lib/agent-jobs.ts) for `claude/*` branches; null for the
@@ -11946,8 +11950,49 @@ async function dispatchJob(job: Job) {
       }
       console.log(`${tag} build gate: next build ✓`);
     }
+    // ── M2: branch-build phase stamping + branch-build chaining (spec-goal-branch-pm-flow) ────────────
+    // The phase just BUILT on the persistent spec branch `claude/build-${slug}` (committed + pushed +
+    // survived the build gate) — but it is NOT on main, so it must NOT be stamped `shipped`. Instead record
+    // its branch-build provenance: stampPhaseBuilt sets `spec_phases.build_sha` = this commit SHA and moves
+    // the phase to `in_progress` (built, not shipped). `merge_sha`/`shipped` stay reserved for the
+    // main-promotion stamp (M5 flips a build_sha'd phase to shipped when the spec/goal branch lands on main).
+    //
+    // Pre-M2 the ONLY phase-stamping writer was the merge hook (applyMergedBuildEffects), which fires on a
+    // real main merge — under M1's no-per-phase-merge model that never fires for a phase that merely built on
+    // the branch, so without this the built phase would read `planned` forever. This is the branch-flow
+    // counterpart. `phasePosition` (M1) is the 1-based position this session built; null for a one-shot/
+    // single-phase spec or a resume — stampPhaseBuilt no-ops on a missing phase, so the call is safe to skip
+    // the guard. Best-effort: a stamp failure must never fail an otherwise-complete build (the spec-test /
+    // backlog crons + the eventual promotion stamp backstop the provenance).
+    if (phasePosition != null && headSha) {
+      try {
+        const { stampPhaseBuilt } = await import("../src/lib/specs-table");
+        await stampPhaseBuilt(job.workspace_id, slug, phasePosition, { build_sha: headSha });
+        console.log(`${tag} stamped phase ${phasePosition} BUILT (build_sha ${headSha.slice(0, 8)}, in_progress — not shipped)`);
+      } catch (e) {
+        console.error(`${tag} stampPhaseBuilt failed (non-fatal):`, e instanceof Error ? e.message : e);
+      }
+    }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
+    // M2: advance a "Build all" chain off THIS branch-build (not a main merge). Pre-M2 the chain advanced
+    // from applyMergedBuildEffects on the phase's main merge — but M1 stopped per-phase main merges (the spec
+    // branch accumulates all phases, promoted once in M4/M5), so the merge hook never fires per phase and the
+    // chain would stall after phase 1. Trigger the next phase here: phase N just built (build_sha recorded +
+    // its commit is the spec-branch tip), so queue phase N+1 to build ON THAT TIP (M1's create-or-extend
+    // checks out the existing branch tip). queueNextChainedPhase reads the spec's DERIVED phases (phase N now
+    // in_progress, phase N+1 still planned → it queues N+1), is idempotency/in-flight-guarded, and no-ops when
+    // no planned phase remains. Best-effort; the merge hook's chain advance still exists for any legacy
+    // per-phase-merge path but is inert under branch-flow.
+    if (job.chain_phases) {
+      try {
+        const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
+        const queued = await queueNextChainedPhase(job.workspace_id, slug);
+        if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
+      } catch (e) {
+        console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
+      }
+    }
   } finally {
     chosenAccount.inFlight--; // release the account's round-robin load slot
     // Always tear down the worktree — the branch is pushed, so a resume recreates one.
