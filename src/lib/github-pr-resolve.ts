@@ -6,6 +6,7 @@ import { findMergedSiblingBuild, handleAutoMergedBuildBranch, getBranchBuildSucc
 import { openDeployWatch } from "@/lib/deploy-guardian";
 import { isSpecTestGreenForBranch } from "@/lib/spec-test-runs";
 import { isSecurityGreenForBranch } from "@/lib/security-agent";
+import { isSpecAccumulationComplete } from "@/lib/specs-table";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -573,53 +574,11 @@ export interface AutoMergeResult {
  *
  * Reva is preserved post-promote: [[openDeployWatch]] still fires on every promote-merge (defense-in-depth
  * — a regression real traffic exposes that the pre-merge tests missed is still caught + rolled back).
- */
-
-/**
- * spec-goal-branch-pm-flow M2 — accumulation-complete gate. Under M1's branch-accumulation model a spec's
- * phases build one-by-one onto ONE persistent `claude/build-{slug}` PR (no per-phase main merge). The
- * pre-existing auto-merge would promote that PR to main the moment its FIRST phase is green — shipping a
- * PARTIAL spec and stamping only the built phase(s). This gate refuses promotion until the WHOLE spec is
- * accumulated on the branch: every phase must be BUILT (carry a `build_sha`) or be terminal (shipped /
- * rejected) — i.e. NO phase is still `planned` (un-built). A one-shot/single-phase spec (0–1 phases) is
- * trivially complete and always passes (it ships in one PR by design — nothing to accumulate).
  *
- * This is the M5 SEAM: M5 (atomic-goal-promotion-to-main) owns the actual promotion + the build_sha→shipped
- * flip; M2 only keeps the existing auto-merge from jumping the gun on a half-accumulated branch. Returns
- * `{ complete, reason }`. Fails OPEN on a read error or a missing spec row (returns complete:true) — the
- * downstream tests-gate + build-gate still guard the merge, so a transient PM-read blip never wedges a
- * legitimately-complete one-off spec; the worst case is one early promote, which the tests gate still
- * blocks unless genuinely green.
+ * The M2 accumulation gate (`isSpecAccumulationComplete`) now lives in [[specs-table]] (M3 promoted it to
+ * the SDK so the M3 pre-merge-test trigger + [[../libraries/agent-jobs]] `isSpecPromoteEligible` share the
+ * SAME predicate as this gate). Imported above; called inline below.
  */
-async function isSpecAccumulationComplete(
-  workspaceId: string | null,
-  slug: string | null,
-): Promise<{ complete: boolean; reason: string }> {
-  if (!workspaceId || !slug) return { complete: true, reason: "no spec context — fail open" };
-  try {
-    const { getSpec } = await import("@/lib/specs-table");
-    const spec = await getSpec(workspaceId, slug);
-    if (!spec) return { complete: true, reason: "no spec row — fail open (one-off/untracked)" };
-    const phases = spec.phases ?? [];
-    // 0–1 phases = one-shot / single-phase spec — it ships in one PR; nothing to accumulate.
-    if (phases.length <= 1) return { complete: true, reason: `${phases.length} phase(s) — trivially complete` };
-    // A phase is "built on the branch" if it carries a build_sha OR is already terminal (shipped/rejected).
-    // Any phase still `planned` (or in_progress WITHOUT a build_sha — queued/building, not yet committed) is
-    // un-accumulated → defer promotion.
-    const unbuilt = phases.filter((p) => {
-      if (p.status === "shipped" || p.status === "rejected") return false; // terminal — done
-      return !p.build_sha; // not built on the branch yet
-    });
-    if (unbuilt.length === 0) {
-      return { complete: true, reason: `all ${phases.length} phases built on branch` };
-    }
-    const positions = unbuilt.map((p) => p.position).join(",");
-    return { complete: false, reason: `${unbuilt.length}/${phases.length} phase(s) not yet built on branch (positions ${positions})` };
-  } catch (e) {
-    // Fail OPEN — a PM-read blip must not wedge a complete one-off spec; the tests/build gates still apply.
-    return { complete: true, reason: `accumulation read failed — fail open: ${e instanceof Error ? e.message : e}` };
-  }
-}
 
 export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult> {
   const db = admin || createAdminClient();

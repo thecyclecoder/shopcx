@@ -6,7 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -548,6 +548,128 @@ export async function enqueuePreMergeSpecTest(
   const { error } = await admin.from("agent_jobs").insert(insertRow);
   if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
   return { enqueued: true };
+}
+
+/**
+ * spec-goal-branch-pm-flow M3 — the pre-merge spec-test TRIGGER. Under the branch-accumulation model a
+ * spec's phases build one-by-one onto ONE persistent `claude/build-{slug}` branch, each push firing a
+ * per-build Vercel preview deploy ([[preview-capture]]). We want the spec-test to run ONCE — against the
+ * WHOLE built spec on its branch preview — not per phase. So the trigger is: **the spec is FULLY
+ * accumulated on its branch (every phase carries a `build_sha` / is terminal — [[../libraries/specs-table]]
+ * `isSpecAccumulationComplete`) AND a preview URL exists.**
+ *
+ * The worker calls this from the preview-capture poll's READY callback: when the LAST phase's preview goes
+ * READY, accumulation is complete → enqueue. Earlier phases' previews also go READY, but accumulation is
+ * NOT yet complete then, so this no-ops until the final phase lands. It also re-runs idempotently — a board
+ * refresh / re-poll calls it again, and the underlying [[enqueuePreMergeSpecTest]] dedupes per
+ * `(workspace, slug, branch)`, so at most one pre-merge run is queued per branch.
+ *
+ * The spec-test then materializes the spec from the DB row ([[build-spec-materializer]] reads
+ * `public.specs` + `spec_phases`, which M1/M2 stamped from the BRANCH commits) and points its HTTP probes
+ * at `previewUrl` — so it tests the actual built spec on its branch preview, NOT main.
+ *
+ * Best-effort + never throws: a trigger hiccup must never fail the build it's chained off. Returns the
+ * enqueue outcome (or a skip reason).
+ */
+export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
+  workspaceId: string;
+  slug: string;
+  branch: string | null;
+  previewUrl: string | null;
+}): Promise<{ enqueued: boolean; reason?: string }> {
+  const { workspaceId, slug, branch, previewUrl } = args;
+  try {
+    if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
+    const origin = (previewUrl || "").replace(/\/$/, "");
+    if (!origin) return { enqueued: false, reason: "no preview URL yet" };
+    // Only fire once the WHOLE spec is built on the branch — testing a half-accumulated branch would test a
+    // partial spec. Same predicate the auto-merge accumulation gate + isSpecPromoteEligible read.
+    const acc = await isSpecAccumulationComplete(workspaceId, slug);
+    if (!acc.complete) return { enqueued: false, reason: `not fully accumulated yet (${acc.reason})` };
+    return await enqueuePreMergeSpecTest(workspaceId, slug, branch, origin);
+  } catch (e) {
+    return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * spec-goal-branch-pm-flow M3 — the PROMOTE-ELIGIBILITY signal M4 consumes. A branch-flow spec is
+ * promote-eligible (its `claude/build-{slug}` branch is ready to merge spec→goal) iff ALL THREE hold:
+ *
+ *   1. **accumulation-complete** (M2) — every phase is built on the branch ([[../libraries/specs-table]]
+ *      `isSpecAccumulationComplete`).
+ *   2. **spec-test green on the branch preview** (M3) — the latest pre-merge `spec_test_runs` row for
+ *      `(workspace, slug, branch)` is a clean machine pass ([[spec-test-runs]] `isSpecTestGreenForBranch`).
+ *   3. **security green on the branch** — the latest per-branch security-review rollup is `completedClean`
+ *      ([[security-agent]] `isSecurityGreenForBranch`).
+ *
+ * These are the SAME three signals the [[github-pr-resolve]] auto-merge gate already enforces inline (the
+ * accumulation gate + the tests gate), and the SAME spec-test/security predicates the [[brain-roadmap]]
+ * `applyInTestingOverlay` derives `in_testing` from — so the board, the auto-merge gate, and this helper can
+ * never disagree on "is the spec done testing?". This is the clean seam M4 (spec→goal merge) reads to decide
+ * whether to promote; it performs NO action itself (read-only).
+ *
+ * Fails CLOSED on the green signals (a read error / absent run ⇒ not green ⇒ not eligible) but the
+ * accumulation input fails OPEN (a PM-read blip on the phase rollup doesn't wedge an otherwise-green spec;
+ * the green signals still gate the actual promotion). Returns `{ eligible, accumulationComplete,
+ * specTestGreen, securityGreen, reason }` so the caller can surface WHY a spec isn't yet promote-eligible.
+ */
+export interface SpecPromoteEligibility {
+  eligible: boolean;
+  accumulationComplete: boolean;
+  specTestGreen: boolean;
+  securityGreen: boolean;
+  reason: string;
+}
+
+export async function isSpecPromoteEligible(
+  workspaceId: string,
+  slug: string,
+  branch: string,
+): Promise<SpecPromoteEligibility> {
+  const out: SpecPromoteEligibility = {
+    eligible: false,
+    accumulationComplete: false,
+    specTestGreen: false,
+    securityGreen: false,
+    reason: "",
+  };
+  if (!workspaceId || !slug || !branch || !branch.startsWith("claude/")) {
+    out.reason = "missing workspace/slug or not a claude/* branch";
+    return out;
+  }
+  const admin = createAdminClient();
+  // Accumulation (M2) — fail OPEN (a PM blip mustn't wedge a green spec; the green signals still gate).
+  const acc = await isSpecAccumulationComplete(workspaceId, slug);
+  out.accumulationComplete = acc.complete;
+  // Green signals (M3) — fail CLOSED: a read error or an absent per-branch run reads as NOT green.
+  try {
+    const { isSpecTestGreenForBranch } = await import("@/lib/spec-test-runs");
+    out.specTestGreen = await isSpecTestGreenForBranch(workspaceId, slug, branch);
+  } catch (e) {
+    out.specTestGreen = false;
+    out.reason = `spec-test green read failed (treated not-green): ${e instanceof Error ? e.message : String(e)}`;
+  }
+  try {
+    const { isSecurityGreenForBranch } = await import("@/lib/security-agent");
+    out.securityGreen = await isSecurityGreenForBranch(admin, branch);
+  } catch (e) {
+    out.securityGreen = false;
+    out.reason = out.reason || `security green read failed (treated not-green): ${e instanceof Error ? e.message : String(e)}`;
+  }
+  out.eligible = out.accumulationComplete && out.specTestGreen && out.securityGreen;
+  if (!out.reason) {
+    out.reason = out.eligible
+      ? "promote-eligible: accumulation-complete + spec-test green + security green"
+      : [
+          out.accumulationComplete ? null : `not fully accumulated (${acc.reason})`,
+          out.specTestGreen ? null : "spec-test not green on branch preview",
+          out.securityGreen ? null : "security not green on branch",
+        ]
+          .filter(Boolean)
+          .join("; ");
+  }
+  return out;
 }
 
 /**

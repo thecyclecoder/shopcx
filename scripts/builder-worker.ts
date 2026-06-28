@@ -6966,12 +6966,34 @@ async function runSpecTestJob(job: Job) {
       const { getSpec: getRoadmapSpec } = await import("../src/lib/brain-roadmap");
       const card = await getRoadmapSpec(slug, job.workspace_id);
       const derived = card?.card.status; // phase-rollup; in_review/deferred/folded terminal overrides applied
+      // spec-goal-branch-pm-flow M3 — PRE-MERGE carve-out: a branch-flow spec's phases are all `in_progress`
+      // (build_sha stamped, NOT shipped — shipped is reserved for M5's main promotion), so its derived rollup
+      // reads `in_progress`, which the post-ship `testable` gate below would refuse. But a pre-merge run
+      // (claude/* branch + a preview URL) of a FULLY-ACCUMULATED spec is exactly what M3 wants to test: the
+      // built spec on its branch preview. Allow it — the materializer reads the SAME DB row whose phases M1/M2
+      // stamped from this branch's commits, so the materialized spec IS the branch's spec, not main's.
+      const preMergeBranch = job.spec_branch ?? null;
+      const preMergeHasPreview = !!((job.preview_url ?? "").trim()) || /Preview origin:\s*https?:\/\//i.test(job.instructions ?? "");
+      const isPreMergeJob = !!preMergeBranch && preMergeBranch.startsWith("claude/") && preMergeHasPreview;
+      let preMergeAccumulated = false;
+      if (isPreMergeJob) {
+        const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
+        const acc = await isSpecAccumulationComplete(job.workspace_id, slug);
+        preMergeAccumulated = acc.complete;
+        if (!preMergeAccumulated) {
+          const why = `pre-merge spec-test for ${slug} skipped — spec not fully accumulated on branch (${acc.reason})`;
+          await update(job.id, { status: "completed", log_tail: why.slice(-2000) });
+          console.log(`${tag} ${why}`);
+          return;
+        }
+      }
       // Testable = the derived rollup says shipped (spec-test's lane), OR an in_review spec (re-verify path —
-      // Vale's in_review queue stays materializable so a manual/re-test on an in_review spec still works).
-      const testable = derived === "shipped" || derived === "in_review";
+      // Vale's in_review queue stays materializable so a manual/re-test on an in_review spec still works), OR
+      // an accumulation-complete pre-merge run (M3 — built-on-branch, in_progress, tested on its preview).
+      const testable = derived === "shipped" || derived === "in_review" || (isPreMergeJob && preMergeAccumulated);
       if (!testable) {
         const why = card
-          ? `spec ${slug} not testable — derived phase-rollup status='${derived}' (need shipped/in_review)`
+          ? `spec ${slug} not testable — derived phase-rollup status='${derived}' (need shipped/in_review, or a fully-accumulated pre-merge branch run)`
           : `spec ${slug} has no boardable DB row (folded or missing) — nothing to test`;
         await update(job.id, { status: "completed", log_tail: why.slice(-2000) });
         console.log(`${tag} ${why}`);
@@ -11904,10 +11926,32 @@ async function dispatchJob(job: Job) {
     void (async () => {
       try {
         const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
-        await pollCapturePreviewUrl(
+        const capture = await pollCapturePreviewUrl(
           { jobId: job.id, branch: branch!, commitSha: headSha },
           { log: (m) => console.log(`${tag} ${m}`) },
         );
+        // spec-goal-branch-pm-flow M3 — once the branch's preview is READY, fire the PRE-MERGE spec-test
+        // IFF the whole spec is now accumulated on the branch (every phase built). When the LAST phase's
+        // preview lands READY, accumulation is complete → enqueue; earlier phases no-op (not yet complete).
+        // Idempotent (dedupes per branch). The spec-test materializes the spec from the DB row (M1/M2
+        // stamped it from this branch's commits) and points its probes at the preview URL — testing the
+        // BUILT spec on its branch preview, not main. Best-effort — never fail the build on a trigger hiccup.
+        if (capture.previewState === "READY" && capture.previewUrl) {
+          try {
+            const { maybeEnqueuePreMergeSpecTestOnAccumulation } = await import("../src/lib/agent-jobs");
+            const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
+              workspaceId: job.workspace_id,
+              slug,
+              branch,
+              previewUrl: capture.previewUrl,
+            });
+            console.log(
+              `${tag} M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
+            );
+          } catch (e) {
+            console.error(`${tag} M3 pre-merge spec-test trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
+          }
+        }
       } catch (e) {
         console.error(`${tag} preview-capture poll failed:`, e instanceof Error ? e.message : e);
       }
