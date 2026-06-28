@@ -372,28 +372,46 @@ const BRANCH_OWNING_KINDS: JobKind[] = ["build", "fold", "pr-resolve"];
 export async function getBranchBuildSuccess(
   branch: string,
   adminClient?: Admin,
-): Promise<{ ok: boolean; status: JobStatus | null; reason: string }> {
+): Promise<{
+  ok: boolean;
+  status: JobStatus | null;
+  reason: string;
+  /** The branch-owning job's `workspace_id` (M4 promote-on-green Phase 1 — the TESTS gate needs it to read
+   *  per-branch spec-test green; same row, no extra query). Null when no owning job was found. */
+  workspaceId: string | null;
+  /** The branch-owning job's `spec_slug` (M4 promote-on-green Phase 1 — the TESTS gate needs it to read
+   *  per-branch spec-test green). Null when no owning job was found. */
+  specSlug: string | null;
+}> {
   if (!branch || !branch.startsWith("claude/")) {
-    return { ok: false, status: null, reason: "not a claude/* branch" };
+    return { ok: false, status: null, reason: "not a claude/* branch", workspaceId: null, specSlug: null };
   }
   try {
     const admin = adminClient || createAdminClient();
     const { data } = await admin
       .from("agent_jobs")
-      .select("status, kind")
+      .select("status, kind, workspace_id, spec_slug")
       .eq("spec_branch", branch)
       .in("kind", BRANCH_OWNING_KINDS)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    const job = data as { status: JobStatus; kind: JobKind } | null;
-    if (!job) return { ok: false, status: null, reason: "no build job owns this branch (manual/untracked push)" };
-    if (SUCCESSFUL_BUILD_STATUSES.includes(job.status)) {
-      return { ok: true, status: job.status, reason: `${job.kind} job ${job.status}` };
+    const job = data as { status: JobStatus; kind: JobKind; workspace_id: string; spec_slug: string } | null;
+    if (!job) {
+      return { ok: false, status: null, reason: "no build job owns this branch (manual/untracked push)", workspaceId: null, specSlug: null };
     }
-    return { ok: false, status: job.status, reason: `${job.kind} job is ${job.status} (not completed/merged)` };
+    if (SUCCESSFUL_BUILD_STATUSES.includes(job.status)) {
+      return { ok: true, status: job.status, reason: `${job.kind} job ${job.status}`, workspaceId: job.workspace_id, specSlug: job.spec_slug };
+    }
+    return {
+      ok: false,
+      status: job.status,
+      reason: `${job.kind} job is ${job.status} (not completed/merged)`,
+      workspaceId: job.workspace_id,
+      specSlug: job.spec_slug,
+    };
   } catch (e) {
-    return { ok: false, status: null, reason: `build-job lookup failed: ${e instanceof Error ? e.message : e}` };
+    return { ok: false, status: null, reason: `build-job lookup failed: ${e instanceof Error ? e.message : e}`, workspaceId: null, specSlug: null };
   }
 }
 
