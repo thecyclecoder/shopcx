@@ -337,11 +337,20 @@ export default async function RoadmapPage() {
           No specs found in <code>public.specs</code>.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        /* roadmap-board-horizontal-scroll: all 6 status columns live in ONE non-wrapping flex row that
+           scrolls horizontally. Mobile shows ~1 column (basis-[86%] leaves a peek of the next); md+ fits
+           exactly 3 columns to the viewport via basis calc((100% - 2*gap)/3) (gap-4 = 1rem). The
+           .scrollbar-hidden utility (globals.css) hides the bar for an app-like feel — scoped to THIS
+           container only. scroll-snap keeps columns aligned on flick. Vertical card stacking/scroll
+           stays WITHIN each column (the inner space-y-3 list) unchanged. */
+        <div className="scrollbar-hidden flex snap-x snap-mandatory gap-4 overflow-x-auto pb-2">
           {COLUMNS.map((col) => {
             const items = byStatus(col.key);
             return (
-              <div key={col.key} className="min-w-0">
+              <div
+                key={col.key}
+                className="min-w-0 flex-shrink-0 snap-start basis-[86%] md:basis-[calc((100%-2rem)/3)]"
+              >
                 <div className="mb-2 flex items-center gap-2">
                   <span className={`h-2 w-2 rounded-full ${DOT[col.key]}`} />
                   <h2 className={`text-xs font-semibold uppercase tracking-wide ${HEADER_ACCENT[col.key]}`}>{col.label}</h2>
