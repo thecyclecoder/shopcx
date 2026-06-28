@@ -3,6 +3,7 @@ import { listPublishedProducts } from "@/app/(storefront)/_lib/page-data";
 import {
   listBlogPostParams,
   listBlogWorkspaceParams,
+  STOREFRONT_PARAM_PLACEHOLDER,
 } from "@/app/(storefront)/_lib/blog-data";
 
 /**
@@ -14,11 +15,24 @@ import {
  */
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const base = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
-  const [products, blogWorkspaces, blogPosts] = await Promise.all([
+  const [productsRaw, blogWorkspacesRaw, blogPostsRaw] = await Promise.all([
     listPublishedProducts().catch(() => []),
     listBlogWorkspaceParams().catch(() => []),
     listBlogPostParams().catch(() => []),
   ]);
+
+  // Drop the build-time `__placeholder__` sentinel (added so generateStaticParams
+  // never returns empty under Cache Components) — it must never reach the public
+  // sitemap. See recipes/next16-empty-generate-static-params-preview-build.
+  const products = productsRaw.filter(
+    (p) => p.workspace !== STOREFRONT_PARAM_PLACEHOLDER,
+  );
+  const blogWorkspaces = blogWorkspacesRaw.filter(
+    (w) => w.workspace !== STOREFRONT_PARAM_PLACEHOLDER,
+  );
+  const blogPosts = blogPostsRaw.filter(
+    (p) => p.workspace !== STOREFRONT_PARAM_PLACEHOLDER,
+  );
 
   const now = new Date();
 
