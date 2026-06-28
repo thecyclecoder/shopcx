@@ -136,19 +136,26 @@ export const platformDirectorCron = inngest.createFunction(
     // cadence='daily', snapshot_date) already makes a same-day re-run a no-op). Best-effort +
     // idempotent: a quiet workspace writes zeros, never errors.
     const scorecard = await step.run("snapshot-platform-scorecard", async () => {
+      // The daily snapshot's effective date is the PREVIOUS complete UTC day, not todayUTC — the
+      // window `[snapshotDate, snapshotDate]` must be a full 24h calendar day (devops-kpi-daily-
+      // snapshot-date-lag-fix, re-opening devops-kpi-review-sdk-and-data-fix Phase 3). The guard
+      // checks the same lagged date so the spend-saving "already done today" check still matches.
       const today = new Date().toISOString().slice(0, 10);
+      const snapshotDate = new Date(new Date(`${today}T00:00:00Z`).getTime() - 86_400_000)
+        .toISOString()
+        .slice(0, 10);
       const { data: existing } = await admin
         .from("platform_scorecard_snapshots")
         .select("workspace_id")
         .eq("cadence", "daily")
-        .eq("snapshot_date", today);
+        .eq("snapshot_date", snapshotDate);
       const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
       let snapshotted = 0;
       let metricsWritten = 0;
       for (const workspaceId of result.workspaceIds || []) {
-        if (done.has(workspaceId)) continue; // already snapshotted today (spend-saving)
+        if (done.has(workspaceId)) continue; // already snapshotted for that UTC day (spend-saving)
         try {
-          const rows = await computePlatformScorecard(workspaceId, { cadence: "daily", windowDays: 1 });
+          const rows = await computePlatformScorecard(workspaceId, { cadence: "daily", windowDays: 1, snapshotDate });
           if (rows.length) {
             snapshotted++;
             metricsWritten += rows.length;
@@ -157,7 +164,7 @@ export const platformDirectorCron = inngest.createFunction(
           console.error(`[platform-director-cron] scorecard snapshot failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
         }
       }
-      return { snapshotted, metricsWritten, date: today };
+      return { snapshotted, metricsWritten, date: snapshotDate };
     });
 
     // The Platform Department Scorecard weekly throughput + quality rollup (platform-scorecard-weekly
