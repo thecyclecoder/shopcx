@@ -4,6 +4,8 @@ import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
 import { findMergedSiblingBuild, handleAutoMergedBuildBranch, getBranchBuildSuccess } from "@/lib/agent-jobs";
 import { openDeployWatch } from "@/lib/deploy-guardian";
+import { isSpecTestGreenForBranch } from "@/lib/spec-test-runs";
+import { isSecurityGreenForBranch } from "@/lib/security-agent";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -517,10 +519,24 @@ export interface AutoMergeResult {
   /** optimizer-launch-hardening Phase 2: PRs that were GitHub-clean but whose owning build job had NOT
    * succeeded (or no job owned the branch) — refused by the success gate, left for the owner. */
   buildGateBlocked: number;
+  /** promote-on-green-merge-gate Phase 1: PRs that passed mergeable+clean+build-gate but whose pre-merge
+   *  spec-test green AND security green signals weren't BOTH true for the branch — left `in_testing` for
+   *  the next pass (the per-branch signals settle as the box completes the M2 pre-merge runs). */
+  testsGateBlocked: number;
   /** 0 or 1 — SERIALIZED: at most one merge per pass (the resulting push-to-main webhook handles the next). */
   merged: number;
   mergedPr?: number;
-  prs: Array<{ number: number; branch: string; mergeableState: string | null; ready: boolean; buildGateOk?: boolean; merged: boolean }>;
+  prs: Array<{
+    number: number;
+    branch: string;
+    mergeableState: string | null;
+    ready: boolean;
+    buildGateOk?: boolean;
+    /** True when BOTH `spec-test green` AND `security green` signals are clean for the branch (M4
+     *  promote-on-green Phase 1). Undefined when the build-gate refused first / the PR wasn't ready. */
+    testsGateOk?: boolean;
+    merged: boolean;
+  }>;
 }
 
 /**
@@ -539,11 +555,22 @@ export interface AutoMergeResult {
  *    clean-but-not-successfully-built PR (partial/errored/paused/parked build, or an untracked manual
  *    push) is left for the owner — a gate-blocked PR never blocks a legitimately-built later PR (the
  *    serialize guard keeps scanning until one actually merges).
+ *  - TESTS GATE (promote-on-green-merge-gate Phase 1, M4): on top of the build-gate, require BOTH
+ *    pre-merge signals green for the branch — `isSpecTestGreenForBranch` (the M2 spec-test agent's
+ *    machine pass against the per-build preview, mirrored to the post-ship fold gate's Rail 2 so the
+ *    two can never disagree) AND `isSecurityGreenForBranch` (the M2 security-review's `completedClean`,
+ *    mirrored to the fold gate's security rail). A clean+built PR whose pre-merge tests aren't both
+ *    green is NOT promoted — it's left for the next pass, and the [[brain-roadmap]] `applyInTestingOverlay`
+ *    derives its card status as `in_testing` from the SAME signals so the gate and the board never disagree.
+ *    Fails CLOSED: a missing per-branch run or a read error reads as not-green ⇒ defer (absence ≠ clean).
  * Surfaces the pass as a Control Tower heartbeat (loop_id = AUTO_MERGE_GATE_LOOP_ID) + a console log.
+ *
+ * Reva is preserved post-promote: [[openDeployWatch]] still fires on every promote-merge (defense-in-depth
+ * — a regression real traffic exposes that the pre-merge tests missed is still caught + rolled back).
  */
 export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult> {
   const db = admin || createAdminClient();
-  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, merged: 0, prs: [] };
+  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, merged: 0, prs: [] };
   let ok = true;
   try {
     if (!ghToken()) return result;
@@ -579,6 +606,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
       const ready = isPrReady(mergeable, mergeableState, pr);
       let merged = false;
       let buildGateOk: boolean | undefined;
+      let testsGateOk: boolean | undefined;
       if (ready) {
         result.ready++;
         // SERIALIZE: only attempt the first ready PR — the post-merge push webhook drives the next one.
@@ -593,6 +621,36 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
             result.buildGateBlocked++;
             console.warn(`[auto-merge] PR #${prNumber} (${branch}) is GitHub-clean but the build success gate refused it: ${gate.reason} — left for the owner`);
             result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
+            continue;
+          }
+          // promote-on-green-merge-gate Phase 1 (M4) — TESTS GATE: require BOTH pre-merge signals green
+          // for the branch. spec-test green mirrors the post-ship fold gate's Rail 2 (approved/needs_human
+          // + auto_pass>=1 + 0 unresolved auto-`fail`); security green mirrors `completedClean` (a
+          // `completed` security-review job with no live/surfaced sibling). The board derives `in_testing`
+          // from the SAME signals (applyInTestingOverlay) so the gate and the board can never disagree.
+          // Absence ≠ clean — a branch with no pre-merge run yet is NOT green ⇒ defer. The build job's
+          // workspace_id + spec_slug come from the SAME row the build gate just read (no extra query).
+          const wsId = gate.workspaceId;
+          const slug = gate.specSlug;
+          let specGreen = false;
+          let secGreen = false;
+          try {
+            if (wsId && slug) specGreen = await isSpecTestGreenForBranch(wsId, slug, branch);
+            secGreen = await isSecurityGreenForBranch(db, branch);
+          } catch (e) {
+            // Fail CLOSED on a read error — never auto-merge past a tests gate we couldn't evaluate.
+            console.warn(`[auto-merge] PR #${prNumber} (${branch}) tests-gate evaluation threw — treating as not-green:`, e instanceof Error ? e.message : e);
+            specGreen = false;
+            secGreen = false;
+          }
+          testsGateOk = specGreen && secGreen;
+          if (!testsGateOk) {
+            result.testsGateBlocked++;
+            console.warn(
+              `[auto-merge] PR #${prNumber} (${branch}) is built but pre-merge tests not BOTH green ` +
+                `(spec-test=${specGreen ? "green" : "pending/red"}, security=${secGreen ? "green" : "pending/red"}) — left in_testing`,
+            );
+            result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, merged });
             continue;
           }
           const headSha = (pr.head as { sha?: string } | undefined)?.sha;
@@ -632,7 +690,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
           }
         }
       }
-      result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
+      result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, merged });
     }
     return result;
   } catch (e) {
@@ -650,6 +708,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         checked: result.checked,
         ready: result.ready,
         buildGateBlocked: result.buildGateBlocked,
+        testsGateBlocked: result.testsGateBlocked,
         merged: result.merged,
         mergedPr: result.mergedPr ?? null,
       },
