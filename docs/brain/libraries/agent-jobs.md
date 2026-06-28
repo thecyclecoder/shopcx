@@ -34,6 +34,27 @@ async function enqueuePreMergeSpecTest(
 
 Sibling of `enqueueSpecTestIfDue` for the **PRE-MERGE** lane. When a `claude/*` build reaches a READY per-build preview (its `preview_url` is set by [[../specs/per-build-vercel-preview-deploys]] Phase 2) and the branch is still unmerged, this enqueues ONE `kind='spec-test'` `agent_jobs` row carrying `spec_branch=branch` (so the runner reads the branch's spec body, not `main`'s) and the **preview origin in `instructions`** (and in `preview_url` when that column is present) — Phase 2 wires the spec-test runner to point its GET / browser checks at the `*.vercel.app` PREVIEW deployment, not prod. Mirrors `enqueueSpecTestIfDue`'s dedupe shape (a `.from('agent_jobs').select('id')` SQL probe + first-hit-wins) but the key is per **(workspace, slug, branch)**: a re-run for the same branch (board refresh, webhook re-fire) no-ops instead of stacking a duplicate row, and a pre-merge run on branch A doesn't block one on branch B (different builds of the same spec). No shipped-but-not-archived gate — pre-merge is by definition not-yet-shipped. The post-ship lane keeps its own (workspace, slug) chokepoint above; the pre-merge dedupe is a STRICTLY-NARROWER key so the two never collide.
 
+### `maybeEnqueuePreMergeSpecTestOnAccumulation` — function  *(spec-goal-branch-pm-flow M3)*
+
+```ts
+async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
+  workspaceId: string; slug: string; branch: string | null; previewUrl: string | null;
+}): Promise<{ enqueued: boolean; reason?: string }>
+```
+
+The **M3 pre-merge spec-test TRIGGER**. Under the branch-accumulation model a spec's phases build one-by-one onto ONE persistent `claude/build-{slug}` branch (each push fires a per-build Vercel preview — [[preview-capture]]). The spec-test must run ONCE against the WHOLE built spec, not per phase. So the trigger fires iff the spec is **fully accumulated on its branch** ([[specs-table]] `isSpecAccumulationComplete` — every phase carries a `build_sha` / is terminal) AND **a preview URL exists**. The worker calls this from the [[preview-capture]] poll's READY callback (`runBuildJob` in [[../recipes/build-box-setup|builder-worker]]): when the LAST phase's preview goes READY, accumulation is complete → it calls `enqueuePreMergeSpecTest`; earlier phases' previews land READY too but accumulation isn't yet complete → no-op. Idempotent (re-poll / board refresh re-calls; the underlying `enqueuePreMergeSpecTest` dedupes per `(workspace, slug, branch)`). The queued spec-test then materializes the spec from the DB row ([[build-spec-materializer]] reads `public.specs`+`spec_phases`, which M1/M2 stamped from this branch's commits) and points its probes at the preview URL — testing the BUILT spec on its branch preview, not main. Best-effort + never throws.
+
+### `isSpecPromoteEligible` — function  *(spec-goal-branch-pm-flow M3 — the M4 seam)*
+
+```ts
+interface SpecPromoteEligibility {
+  eligible: boolean; accumulationComplete: boolean; specTestGreen: boolean; securityGreen: boolean; reason: string;
+}
+async function isSpecPromoteEligible(workspaceId, slug, branch): Promise<SpecPromoteEligibility>
+```
+
+The **promote-eligibility signal M4 (spec→goal merge) consumes** — read-only, performs NO action. A branch-flow spec's `claude/build-{slug}` branch is promote-eligible iff ALL THREE hold: **(1) accumulation-complete** (M2 — [[specs-table]] `isSpecAccumulationComplete`), **(2) spec-test green on the branch preview** (M3 — [[spec-test-runs]] `isSpecTestGreenForBranch`, the latest pre-merge `spec_test_runs` row for `(workspace, slug, branch)` is a clean machine pass), **(3) security green on the branch** ([[security-agent]] `isSecurityGreenForBranch` — `completedClean`). These are the SAME three signals the [[github-pr-resolve]] auto-merge gate enforces inline AND the SAME spec-test/security predicates [[brain-roadmap]] `applyInTestingOverlay` derives `in_testing` from — so the board, the auto-merge gate, and this helper can never disagree on "is the spec done testing?". **Fails CLOSED on the green signals** (read error / absent run ⇒ not-green ⇒ not eligible); the accumulation input fails OPEN (a PM-read blip doesn't wedge an otherwise-green spec — the green signals still gate the actual promotion). `reason` explains WHY a spec isn't yet eligible.
+
 ### `reconcileMergedJobs` — function
 
 ```ts

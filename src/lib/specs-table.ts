@@ -494,6 +494,56 @@ export async function stampPhaseBuilt(
 }
 
 /**
+ * spec-goal-branch-pm-flow M2/M3 — "is this spec FULLY accumulated on its `claude/build-{slug}` branch?"
+ *
+ * Under M1's branch-accumulation model a spec's phases build one-by-one onto ONE persistent branch (no
+ * per-phase main merge). A phase is "built on the branch" when it carries a `build_sha` ([[stampPhaseBuilt]])
+ * OR is already terminal (shipped / rejected). A phase still `planned` — or `in_progress` WITHOUT a
+ * `build_sha` (queued/building, not yet committed) — is NOT yet accumulated.
+ *
+ * Returns `{ complete, reason }`:
+ *  - 0–1 phases ⇒ trivially complete (a one-shot/single-phase spec ships in one PR — nothing to accumulate).
+ *  - every phase built-or-terminal ⇒ complete.
+ *  - any un-built phase remains ⇒ NOT complete (with the offending positions in `reason`).
+ *
+ * Fails OPEN on a read error / missing spec row (returns complete:true) — a transient PM-read blip must
+ * never wedge a legitimately-complete one-off spec, and the downstream tests/build gates still guard any
+ * actual promotion.
+ *
+ * This is the M3 trigger gate (enqueue the pre-merge spec-test only once the WHOLE spec is on the branch),
+ * the M4/M2 auto-merge accumulation gate, AND one of the three [[isSpecPromoteEligible]] inputs — all three
+ * read the SAME predicate so they can never disagree on "is the spec fully built on its branch?".
+ */
+export async function isSpecAccumulationComplete(
+  workspaceId: string | null,
+  slug: string | null,
+): Promise<{ complete: boolean; reason: string }> {
+  if (!workspaceId || !slug) return { complete: true, reason: "no spec context — fail open" };
+  try {
+    const spec = await getSpec(workspaceId, slug);
+    if (!spec) return { complete: true, reason: "no spec row — fail open (one-off/untracked)" };
+    const phases = spec.phases ?? [];
+    // 0–1 phases = one-shot / single-phase spec — it ships in one PR; nothing to accumulate.
+    if (phases.length <= 1) return { complete: true, reason: `${phases.length} phase(s) — trivially complete` };
+    // A phase is "built on the branch" if it carries a build_sha OR is already terminal (shipped/rejected).
+    // Any phase still `planned` (or in_progress WITHOUT a build_sha — queued/building, not yet committed) is
+    // un-accumulated → not complete.
+    const unbuilt = phases.filter((p) => {
+      if (p.status === "shipped" || p.status === "rejected") return false; // terminal — done
+      return !p.build_sha; // not built on the branch yet
+    });
+    if (unbuilt.length === 0) {
+      return { complete: true, reason: `all ${phases.length} phases built on branch` };
+    }
+    const positions = unbuilt.map((p) => p.position).join(",");
+    return { complete: false, reason: `${unbuilt.length}/${phases.length} phase(s) not yet built on branch (positions ${positions})` };
+  } catch (e) {
+    // Fail OPEN — a PM-read blip must not wedge a complete one-off spec; the tests/build gates still apply.
+    return { complete: true, reason: `accumulation read failed — fail open: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
+/**
  * derive-rollup-status: mark the LEAF phase being built `in_progress` at BUILD START. Now that a spec's
  * board status is the phase rollup (never a stored card-status read), a build that's underway must move a
  * PHASE — not the card — to in_progress, or the spec would read `planned` until its first phase ships. Flips
