@@ -44,6 +44,24 @@ async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
 
 The **M3 pre-merge spec-test TRIGGER**. Under the branch-accumulation model a spec's phases build one-by-one onto ONE persistent `claude/build-{slug}` branch (each push fires a per-build Vercel preview — [[preview-capture]]). The spec-test must run ONCE against the WHOLE built spec, not per phase. So the trigger fires iff the spec is **fully accumulated on its branch** ([[specs-table]] `isSpecAccumulationComplete` — every phase carries a `build_sha` / is terminal) AND **a preview URL exists**. The worker calls this from the [[preview-capture]] poll's READY callback (`runBuildJob` in [[../recipes/build-box-setup|builder-worker]]): when the LAST phase's preview goes READY, accumulation is complete → it calls `enqueuePreMergeSpecTest`; earlier phases' previews land READY too but accumulation isn't yet complete → no-op. Idempotent (re-poll / board refresh re-calls; the underlying `enqueuePreMergeSpecTest` dedupes per `(workspace, slug, branch)`). The queued spec-test then materializes the spec from the DB row ([[build-spec-materializer]] reads `public.specs`+`spec_phases`, which M1/M2 stamped from this branch's commits) and points its probes at the preview URL — testing the BUILT spec on its branch preview, not main. Best-effort + never throws.
 
+### `maybeEnqueuePreMergeSecurityOnAccumulation` — function  *(security-test-on-preview-pre-merge Phase 1 — the wiring)*
+
+```ts
+async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
+  workspaceId: string; slug: string; branch: string | null; previewUrl: string | null; prNumber?: number | null;
+}): Promise<{ enqueued: boolean; reason?: string }>
+```
+
+The **pre-merge SECURITY TRIGGER** — the security twin of `maybeEnqueuePreMergeSpecTestOnAccumulation`. Same accumulation predicate (test the WHOLE built spec on its branch preview); calls [[security-agent]] `enqueueSecurityReviewJob` in `branch` mode. **This is the caller the `security-test-on-preview-pre-merge` spec said the preview-ready hook would invoke but never landed** — until it was wired, the branch-mode enqueue had ZERO callers, so [[security-agent]] `isSecurityGreenForBranch` was ALWAYS false and the M4 tests gate (`isSpecPromoteEligible` ∧ `autoMergeReadyPrs`) could never pass (every one-off PR sat `in_testing`; branch-mode reviews = 0 in prod). Invoked from `runBuildJob`'s preview-ready callback alongside the spec-test trigger, AND from `backstopPreMergeChecks`. Idempotent (one open review per branch). Best-effort + never throws.
+
+### `backstopPreMergeChecks` — function  *(Gate-A class gap fix — standing-pass backstop)*
+
+```ts
+async function backstopPreMergeChecks(adminClient?): Promise<PreMergeBackstopResult>
+```
+
+The **standing-pass backstop for BOTH pre-merge triggers** (spec-test + security). Both enqueues fire only from the build's fire-and-forget preview-capture READY callback — the SAME event-only gap Gate-A had: a missed READY (worker restart, slow preview, transient hiccup) means the signal is never enqueued and the branch stalls `in_testing` forever. This re-evaluates every READY-preview `claude/build-*` build job (latest per slug) each platform-director standing pass and (idempotently) re-fires `maybeEnqueuePreMergeSpecTestOnAccumulation` + `maybeEnqueuePreMergeSecurityOnAccumulation`. The underlying enqueues dedupe, so running it every pass is safe + cheap. Best-effort per branch; never throws.
+
 ### `isSpecPromoteEligible` — function  *(spec-goal-branch-pm-flow M3 — the M4 seam)*
 
 ```ts

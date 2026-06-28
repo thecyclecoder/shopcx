@@ -2907,6 +2907,27 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing auto-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // PRE-MERGE checks backstop (security-test-on-preview-pre-merge + spec-goal-branch-pm-flow M3). WHY a
+    // standing-pass backstop is REQUIRED, not just nice-to-have: BOTH pre-merge enqueues (spec-test +
+    // security) fire ONLY from the build's fire-and-forget preview-capture READY callback. The security leg
+    // moreover had NO caller at all until now — so `isSecurityGreenForBranch` was ALWAYS false and the M4
+    // tests gate could never pass (every one-off PR sat `in_testing`; branch-mode security reviews = 0,
+    // branch-stamped spec_test_runs = 0 in prod). This is the SAME event-only gap Gate-A had: if the build's
+    // poll misses READY (worker restart, slow preview, transient hiccup), the signal never gets enqueued and
+    // the branch stalls forever. This re-evaluates every READY-preview `claude/build-*` branch each pass and
+    // (idempotently) fires both pre-merge triggers. Best-effort; the underlying enqueues dedupe.
+    const { backstopPreMergeChecks } = await import("../src/lib/agent-jobs");
+    const pm = await backstopPreMergeChecks(db);
+    if (pm.specTestEnqueued.length || pm.securityEnqueued.length) {
+      notes.push(
+        `pre-merge backstop → spec-test ${pm.specTestEnqueued.length}, security ${pm.securityEnqueued.length} (re-)enqueued of ${pm.scanned} READY branch(es)`,
+      );
+    }
+  } catch (e) {
+    notes.push(`pre-merge backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
     // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
     // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
@@ -12107,6 +12128,26 @@ async function dispatchJob(job: Job) {
             );
           } catch (e) {
             console.error(`${tag} M3 pre-merge spec-test trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
+          }
+          // security-test-on-preview-pre-merge Phase 1 (the wiring the spec never landed) — fire the
+          // PRE-MERGE security review on the SAME preview-ready signal. The security signal
+          // (isSecurityGreenForBranch) is the second leg of the M4 tests gate; without this enqueue it was
+          // ALWAYS false and every one-off PR sat in_testing forever (branch-mode reviews = 0 in prod).
+          // Idempotent (one open review per branch). Best-effort — never fail the build on a trigger hiccup.
+          try {
+            const { maybeEnqueuePreMergeSecurityOnAccumulation } = await import("../src/lib/agent-jobs");
+            const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
+              workspaceId: job.workspace_id,
+              slug,
+              branch,
+              previewUrl: capture.previewUrl,
+              prNumber: typeof job.pr_number === "number" ? job.pr_number : null,
+            });
+            console.log(
+              `${tag} M2 pre-merge security trigger: ${sec.enqueued ? "enqueued" : "skipped"}${sec.reason ? ` (${sec.reason})` : ""}`,
+            );
+          } catch (e) {
+            console.error(`${tag} M2 pre-merge security trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
           }
         }
       } catch (e) {
