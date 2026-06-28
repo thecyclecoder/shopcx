@@ -12136,6 +12136,32 @@ async function dispatchJob(job: Job) {
       // No NEW changes — typically because the build committed everything during a needs_approval/needs_input
       // pause and the resume only had the worker apply a migration. A draft PR already exists from that pause,
       // so we must STILL ensure it's ready-for-review + linked, or the job completes stuck as a draft (PR#80).
+      //
+      // PR DEFERRAL (defer-pr-until-accumulation-complete): only OPEN / un-draft the PR once the spec is fully
+      // accumulated on its branch. Mid-accumulation a multi-phase spec must NOT surface a (non-draft, mergeable)
+      // PR here either — complete the job on the branch and let the chain carry on. A 0–1-phase one-shot is
+      // trivially complete so it opens its PR as before. Fails OPEN (a PM-read blip ⇒ open the PR).
+      let accNc: { complete: boolean; reason: string };
+      try {
+        const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
+        accNc = await isSpecAccumulationComplete(job.workspace_id, slug);
+      } catch (e) {
+        accNc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
+      }
+      if (!accNc.complete) {
+        // Defer: no PR surfaced. Carry any pre-existing (draft pause) PR forward untouched — never un-draft it
+        // mid-accumulation. The chain advances the next phase, whose build re-evaluates the gate.
+        console.log(`${tag} no new changes — PR DEFERRED (accumulation not complete: ${accNc.reason})`);
+        await update(job.id, { status: "completed", pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null, log_tail: `no new changes; PR deferred — ${accNc.reason}`.slice(-2000) });
+        try {
+          const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
+          const queued = await queueNextChainedPhase(job.workspace_id, slug);
+          if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
+        } catch (e) {
+          console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
+        }
+        return;
+      }
       const pr = await ensurePr(branch!, slug, false);
       if (pr) {
         const ready = await markReady(pr.number);
@@ -12256,25 +12282,11 @@ async function dispatchJob(job: Job) {
         console.error(`${tag} preview-capture poll failed:`, e instanceof Error ? e.message : e);
       }
     })();
-    const pr = await ensurePr(branch!, slug, false);
-    if (!pr) {
-      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
-      return;
-    }
-    // Un-draft if this PR was opened during an earlier needs_input/needs_approval pause.
-    const ready = await markReady(pr.number);
-    if (!ready) {
-      // Belt-and-suspenders: confirm the draft state directly and retry once more before completing —
-      // a non-draft, mergeable PR is the whole point (PR#75/#76 had to be un-drafted by hand).
-      const check = await gh("GET", `/repos/${REPO}/pulls/${pr.number}`);
-      if ((check.json as { draft?: boolean })?.draft === true) {
-        console.error(`${tag} PR#${pr.number} still draft after markReady — final retry before completing`);
-        await markReady(pr.number);
-      }
-    }
     // ⭐ DEPLOY BUILD GATE: if this build touched code that affects the production build (pages/components/
     // config/middleware), it must survive a real `next build` BEFORE it can complete (→ auto-merge). tsc
-    // already passed; this catches the cacheComponents/prerender/segment-config breaks tsc can't see.
+    // already passed; this catches the cacheComponents/prerender/segment-config breaks tsc can't see. The
+    // gate validates THIS phase's commit on the branch and needs NO PR (it runs `next build` in the worktree),
+    // so it now runs BEFORE the PR decision below — the PR is deferred until accumulation completes.
     const changed = sh("git", ["diff", "--name-only", "HEAD~1", "HEAD"], { cwd: wt }).out;
     if (/(?:^|\n)(src\/app\/|src\/components\/|next\.config|middleware\.)/.test(changed)) {
       console.log(`${tag} build gate: running next build (touched app/components/config)…`);
@@ -12282,12 +12294,15 @@ async function dispatchJob(job: Job) {
       if (!gate.pass) {
         const prior = /BUILD_GATE_FAILED\[(\d+)\]/.exec(job.error || "");
         const attempt = (prior ? parseInt(prior[1], 10) : 0) + 1;
+        // Carry whatever PR the job already has (e.g. a draft from an earlier pause) — under PR deferral the
+        // success path may not have opened one yet, so this can legitimately be null.
+        const carryPr = { pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null };
         if (attempt >= BUILD_GATE_MAX_ATTEMPTS) {
-          await update(job.id, { status: "needs_attention", pr_url: pr.url, pr_number: pr.number, error: `next build failed ${attempt}× — Bo couldn't self-fix: ${gate.error}`, log_tail: gate.log.slice(-2000) });
+          await update(job.id, { status: "needs_attention", ...carryPr, error: `next build failed ${attempt}× — Bo couldn't self-fix: ${gate.error}`, log_tail: gate.log.slice(-2000) });
           console.error(`${tag} build gate failed ${attempt}× → needs_attention (human): ${gate.error}`);
         } else {
           // Re-dispatch Bo to fix HIS OWN error. Not `completed` → the auto-merge gate won't merge the PR.
-          await update(job.id, { status: "queued_resume", pr_url: pr.url, pr_number: pr.number, error: `BUILD_GATE_FAILED[${attempt}]: ${gate.error}`, log_tail: gate.log.slice(-2000) });
+          await update(job.id, { status: "queued_resume", ...carryPr, error: `BUILD_GATE_FAILED[${attempt}]: ${gate.error}`, log_tail: gate.log.slice(-2000) });
           console.error(`${tag} build gate FAILED (attempt ${attempt}) → re-dispatching Bo: ${gate.error}`);
         }
         return;
@@ -12308,6 +12323,10 @@ async function dispatchJob(job: Job) {
     // single-phase spec or a resume — stampPhaseBuilt no-ops on a missing phase, so the call is safe to skip
     // the guard. Best-effort: a stamp failure must never fail an otherwise-complete build (the spec-test /
     // backlog crons + the eventual promotion stamp backstop the provenance).
+    //
+    // ⭐ ORDERING (defer-pr-until-accumulation-complete): the stamp runs BEFORE the accumulation check below so
+    // THIS phase's `build_sha` is already persisted when `isSpecAccumulationComplete` reads the spec — i.e. the
+    // gate sees the just-built phase as built. Stamp → check → (conditionally) open PR.
     if (phasePosition != null && headSha) {
       try {
         const { stampPhaseBuilt } = await import("../src/lib/specs-table");
@@ -12315,6 +12334,61 @@ async function dispatchJob(job: Job) {
         console.log(`${tag} stamped phase ${phasePosition} BUILT (build_sha ${headSha.slice(0, 8)}, in_progress — not shipped)`);
       } catch (e) {
         console.error(`${tag} stampPhaseBuilt failed (non-fatal):`, e instanceof Error ? e.message : e);
+      }
+    }
+
+    // ── PR DEFERRAL (defer-pr-until-accumulation-complete) ───────────────────────────────────────────
+    // CEO rule: NO PR exists while a multi-phase spec is still ACCUMULATING. The phases build one-by-one onto
+    // the persistent `claude/build-{slug}` branch (committed + pushed above); the branch's OWN Vercel preview
+    // (driven by the `^claude/build-` Ignored-Build-Step override, keyed on the git ref — NOT a PR) drives the
+    // pre-merge spec-test + security review, so no PR is needed during accumulation. The PR (and thus the
+    // board's squash-merge action, already gated on specStatus===in_testing) surfaces ONLY when the build that
+    // COMPLETES accumulation runs (the last phase) — so the PR + the merge action appear together at in_testing.
+    //
+    // The stamp above already persisted THIS phase's build_sha, so isSpecAccumulationComplete now reflects it.
+    // A one-shot / single-phase spec (0–1 phases) is trivially complete → opens its PR on its single build.
+    // Fails OPEN (a PM-read blip ⇒ treat as complete ⇒ open the PR) — never wedge a legitimately-done spec.
+    let acc: { complete: boolean; reason: string };
+    try {
+      const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
+      acc = await isSpecAccumulationComplete(job.workspace_id, slug);
+    } catch (e) {
+      acc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
+    }
+
+    if (!acc.complete) {
+      // More phases still to build → defer the PR. Just complete the job on the branch; the chain (below)
+      // queues the next phase, whose build re-evaluates this gate. No PR ⇒ the board shows no squash-merge.
+      // Carry any pre-existing PR (a draft from an earlier pause) forward untouched — we never CREATE one here.
+      console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${acc.reason})`);
+      await update(job.id, { status: "completed", pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null, log_tail: `phase built; PR deferred — ${acc.reason}`.slice(-2000) });
+      try {
+        const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
+        const queued = await queueNextChainedPhase(job.workspace_id, slug);
+        if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
+      } catch (e) {
+        console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
+      }
+      return;
+    }
+
+    // Accumulation COMPLETE (last phase just built, or a one-shot spec) → open the PR now. The PR + the
+    // squash-merge action surface together at in_testing.
+    console.log(`${tag} accumulation complete (${acc.reason}) → opening PR`);
+    const pr = await ensurePr(branch!, slug, false);
+    if (!pr) {
+      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
+      return;
+    }
+    // Un-draft if this PR was opened during an earlier needs_input/needs_approval pause.
+    const ready = await markReady(pr.number);
+    if (!ready) {
+      // Belt-and-suspenders: confirm the draft state directly and retry once more before completing —
+      // a non-draft, mergeable PR is the whole point (PR#75/#76 had to be un-drafted by hand).
+      const check = await gh("GET", `/repos/${REPO}/pulls/${pr.number}`);
+      if ((check.json as { draft?: boolean })?.draft === true) {
+        console.error(`${tag} PR#${pr.number} still draft after markReady — final retry before completing`);
+        await markReady(pr.number);
       }
     }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
