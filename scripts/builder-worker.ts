@@ -11912,6 +11912,111 @@ async function dispatchJob(job: Job) {
   }
 
   try {
+    // ── SHARED POST-BUILD COMPLETION (resume-after-approval-stamps-build-sha) ─────────────────────────
+    // The single path BOTH a fresh build and a RESUMED (needs_approval → approved → resume) build reach on
+    // a successful completion: stamp the just-built phase's `build_sha` → check accumulation → conditionally
+    // open the PR → advance the chain. Pre-fix the resume's "no new changes" branch (the migration the worker
+    // applied left the worktree clean, the code was committed during the pause) ran the accumulation/PR/chain
+    // logic but SKIPPED `stampPhaseBuilt` — so a migration/needs_approval phase stayed `planned`, build_sha
+    // NULL, accumulation never saw it built, and the chain/PR never advanced (the spec wedged forever).
+    // Routing both completion branches through here guarantees the stamp can't be skipped again.
+    //
+    // Idempotent: stampPhaseBuilt no-ops a terminal (shipped/rejected) phase and re-stamping the same
+    // build_sha is harmless; queueNextChainedPhase is in-flight/dedup guarded; ensurePr reuses an existing PR.
+    // `headSha` is the spec-branch tip (the just-pushed commit, or the existing tip on the no-change resume).
+    // `phasePos` is THIS session's phase position; when null (a resume whose instructions named no phase) we
+    // derive the first not-yet-built phase from the DERIVED rollup so the stamp still lands on the right phase.
+    const finalizeBuiltPhase = async (opts: {
+      headSha: string | null;
+      phasePos: number | null;
+      finalLogTail: string;
+      noChangeNote?: string; // set on the !dirty path → "un-drafted existing PR / no new changes" framing
+    }): Promise<void> => {
+      let phasePos = opts.phasePos;
+      // Derive the phase to stamp when the session didn't carry one (generic/instruction-less resume): the
+      // first phase whose DERIVED status is neither shipped nor rejected = the one this build session built.
+      if (phasePos == null) {
+        try {
+          const { getSpec } = await import("../src/lib/specs-table");
+          const spec = await getSpec(job.workspace_id, slug);
+          const phases = spec?.phases ?? [];
+          if (phases.length > 1) {
+            const next = phases.find((p) => p.status !== "shipped" && p.status !== "rejected" && !p.build_sha);
+            if (next) {
+              phasePos = next.position;
+              console.log(`${tag} finalize: derived phase position ${phasePos} (instructions named none — resume)`);
+            }
+          }
+        } catch (e) {
+          console.error(`${tag} finalize: phase-position derivation failed (proceeding unstamped):`, e instanceof Error ? e.message : e);
+        }
+      }
+      // STAMP — record this phase's branch-build provenance (build_sha + in_progress). Idempotent.
+      if (phasePos != null && opts.headSha) {
+        try {
+          const { stampPhaseBuilt } = await import("../src/lib/specs-table");
+          await stampPhaseBuilt(job.workspace_id, slug, phasePos, { build_sha: opts.headSha });
+          console.log(`${tag} stamped phase ${phasePos} BUILT (build_sha ${opts.headSha.slice(0, 8)}, in_progress — not shipped)`);
+        } catch (e) {
+          console.error(`${tag} stampPhaseBuilt failed (non-fatal):`, e instanceof Error ? e.message : e);
+        }
+      }
+      // ACCUMULATION — the stamp above is now persisted, so this read reflects the just-built phase. Fails OPEN.
+      let acc: { complete: boolean; reason: string };
+      try {
+        const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
+        acc = await isSpecAccumulationComplete(job.workspace_id, slug);
+      } catch (e) {
+        acc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
+      }
+      const chain = async () => {
+        try {
+          const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
+          const queued = await queueNextChainedPhase(job.workspace_id, slug);
+          if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
+        } catch (e) {
+          console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
+        }
+      };
+      if (!acc.complete) {
+        // PR DEFERRED (no-pr-during-accumulation): more phases remain → complete on the branch, advance the
+        // chain, surface NO PR. Carry any pre-existing PR untouched (normally null — no pause opens one).
+        console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${acc.reason})`);
+        await update(job.id, {
+          status: "completed",
+          pr_url: job.pr_url ?? null,
+          pr_number: job.pr_number ?? null,
+          log_tail: `${opts.noChangeNote ? opts.noChangeNote + "; " : ""}phase built; PR deferred — ${acc.reason}`.slice(-2000),
+        });
+        await chain();
+        return;
+      }
+      // ACCUMULATION COMPLETE (last phase / one-shot) → open the (non-draft) PR; the PR + squash-merge action
+      // surface together at in_testing. Un-draft if an earlier needs_input/needs_approval pause left a draft.
+      console.log(`${tag} accumulation complete (${acc.reason}) → opening PR`);
+      const pr = await ensurePr(branch!, slug, false);
+      if (!pr) {
+        await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: opts.finalLogTail });
+        return;
+      }
+      const ready = await markReady(pr.number);
+      if (!ready) {
+        const check = await gh("GET", `/repos/${REPO}/pulls/${pr.number}`);
+        if ((check.json as { draft?: boolean })?.draft === true) {
+          console.error(`${tag} PR#${pr.number} still draft after markReady — final retry before completing`);
+          await markReady(pr.number);
+        }
+      }
+      await update(job.id, {
+        status: "completed",
+        pr_url: pr.url,
+        pr_number: pr.number,
+        log_tail: opts.noChangeNote ? `${opts.noChangeNote}; un-drafted existing PR` : opts.finalLogTail,
+      });
+      console.log(`${tag} ✓ completed → ${pr.url}`);
+      await chain();
+    };
+
     // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.
     let executedSummary = "";
     if (isResume && (job.pending_actions || []).some((a) => a.status === "approved")) {
@@ -12150,44 +12255,32 @@ async function dispatchJob(job: Job) {
       // opened NO PR, so there is normally no pre-existing PR to carry here — at accumulation-complete the PR
       // is opened (non-draft) for the first time below; markReady stays as a harmless belt-and-suspenders.
       //
-      // PR DEFERRAL (defer-pr-until-accumulation-complete): only OPEN the PR once the spec is fully accumulated
-      // on its branch. Mid-accumulation a multi-phase spec must NOT surface ANY PR here either — complete the
-      // job on the branch and let the chain carry on. A 0–1-phase one-shot is trivially complete so it opens
-      // its PR as before. Fails OPEN (a PM-read blip ⇒ open the PR).
-      let accNc: { complete: boolean; reason: string };
-      try {
-        const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
-        accNc = await isSpecAccumulationComplete(job.workspace_id, slug);
-      } catch (e) {
-        accNc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
-      }
-      if (!accNc.complete) {
-        // Defer: no PR surfaced. No pause ever opened one (no-pr-during-accumulation), so job.pr_url is
-        // normally null — carried forward untouched regardless. The chain advances the next phase, whose
-        // build re-evaluates the gate.
-        console.log(`${tag} no new changes — PR DEFERRED (accumulation not complete: ${accNc.reason})`);
-        await update(job.id, { status: "completed", pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null, log_tail: `no new changes; PR deferred — ${accNc.reason}`.slice(-2000) });
-        try {
-          const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
-          const queued = await queueNextChainedPhase(job.workspace_id, slug);
-          if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
-        } catch (e) {
-          console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
-        }
+      // ⭐ RESUME-AFTER-APPROVAL STAMP FIX (resume-after-approval-stamps-build-sha): the worktree is clean but
+      // this is overwhelmingly the needs_approval → approved → resume case — the phase's CODE was committed +
+      // pushed onto the branch DURING the pause (commitWip(`wip: … (needs approval)`)) and the resume only had
+      // the worker APPLY the migration (no new file edits). That phase is BUILT on the branch but was never
+      // STAMPED — pre-fix this path ran accumulation/PR/chain WITHOUT stampPhaseBuilt, so the phase stayed
+      // `planned` / build_sha NULL and the spec wedged. So if the branch carries phase commits (ahead of main),
+      // route through the SHARED finalize path (stamp → accumulate → conditional PR → chain) — IDENTICAL to a
+      // fresh build's completion. Only the genuinely-zero-commits case (Bo found everything already on main,
+      // nothing committed) falls through to the reconcile-drift branch below.
+      sh("git", ["fetch", "origin", "main"], { cwd: wt });
+      const aheadOfMain = parseInt(
+        sh("git", ["rev-list", "--count", "origin/main..HEAD"], { cwd: wt }).out.trim() || "0",
+        10,
+      );
+      if (aheadOfMain > 0) {
+        const noChangeHeadSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim() || null;
+        console.log(`${tag} no new edits but branch is ${aheadOfMain} commit(s) ahead of main (resume-after-approval) — finalizing the built phase`);
+        await finalizeBuiltPhase({
+          headSha: noChangeHeadSha,
+          phasePos: phasePosition,
+          finalLogTail: logTail,
+          noChangeNote: "no new edits (phase committed during pause; migration applied on resume)",
+        });
         return;
       }
-      const pr = await ensurePr(branch!, slug, false);
-      if (pr) {
-        const ready = await markReady(pr.number);
-        if (!ready) {
-          const check = await gh("GET", `/repos/${REPO}/pulls/${pr.number}`);
-          if ((check.json as { draft?: boolean })?.draft === true) {
-            console.error(`${tag} PR#${pr.number} still draft after markReady (no-change path) — final retry`);
-            await markReady(pr.number);
-          }
-        }
-        await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR" });
-      } else {
+      {
         // No PR AND no changes → Bo made zero edits ("already built / nothing to build"). His pre-flight
         // state-check (his mandate) found the phase's code already on main. spec-status-db-driven: that's
         // exactly the evidence reconcileSpecDrift needs, so RECONCILE THE DB from his finding — the worker
@@ -12323,111 +12416,17 @@ async function dispatchJob(job: Job) {
       }
       console.log(`${tag} build gate: next build ✓`);
     }
-    // ── M2: branch-build phase stamping + branch-build chaining (spec-goal-branch-pm-flow) ────────────
-    // The phase just BUILT on the persistent spec branch `claude/build-${slug}` (committed + pushed +
-    // survived the build gate) — but it is NOT on main, so it must NOT be stamped `shipped`. Instead record
-    // its branch-build provenance: stampPhaseBuilt sets `spec_phases.build_sha` = this commit SHA and moves
-    // the phase to `in_progress` (built, not shipped). `merge_sha`/`shipped` stay reserved for the
-    // main-promotion stamp (M5 flips a build_sha'd phase to shipped when the spec/goal branch lands on main).
-    //
-    // Pre-M2 the ONLY phase-stamping writer was the merge hook (applyMergedBuildEffects), which fires on a
-    // real main merge — under M1's no-per-phase-merge model that never fires for a phase that merely built on
-    // the branch, so without this the built phase would read `planned` forever. This is the branch-flow
-    // counterpart. `phasePosition` (M1) is the 1-based position this session built; null for a one-shot/
-    // single-phase spec or a resume — stampPhaseBuilt no-ops on a missing phase, so the call is safe to skip
-    // the guard. Best-effort: a stamp failure must never fail an otherwise-complete build (the spec-test /
-    // backlog crons + the eventual promotion stamp backstop the provenance).
-    //
-    // ⭐ ORDERING (defer-pr-until-accumulation-complete): the stamp runs BEFORE the accumulation check below so
-    // THIS phase's `build_sha` is already persisted when `isSpecAccumulationComplete` reads the spec — i.e. the
-    // gate sees the just-built phase as built. Stamp → check → (conditionally) open PR.
-    if (phasePosition != null && headSha) {
-      try {
-        const { stampPhaseBuilt } = await import("../src/lib/specs-table");
-        await stampPhaseBuilt(job.workspace_id, slug, phasePosition, { build_sha: headSha });
-        console.log(`${tag} stamped phase ${phasePosition} BUILT (build_sha ${headSha.slice(0, 8)}, in_progress — not shipped)`);
-      } catch (e) {
-        console.error(`${tag} stampPhaseBuilt failed (non-fatal):`, e instanceof Error ? e.message : e);
-      }
-    }
-
-    // ── PR DEFERRAL (defer-pr-until-accumulation-complete) ───────────────────────────────────────────
-    // CEO rule: NO PR exists while a multi-phase spec is still ACCUMULATING. The phases build one-by-one onto
-    // the persistent `claude/build-{slug}` branch (committed + pushed above); the branch's OWN Vercel preview
-    // (driven by the `^claude/build-` Ignored-Build-Step override, keyed on the git ref — NOT a PR) drives the
-    // pre-merge spec-test + security review, so no PR is needed during accumulation. The PR (and thus the
-    // board's squash-merge action, already gated on specStatus===in_testing) surfaces ONLY when the build that
-    // COMPLETES accumulation runs (the last phase) — so the PR + the merge action appear together at in_testing.
-    //
-    // The stamp above already persisted THIS phase's build_sha, so isSpecAccumulationComplete now reflects it.
-    // A one-shot / single-phase spec (0–1 phases) is trivially complete → opens its PR on its single build.
-    // Fails OPEN (a PM-read blip ⇒ treat as complete ⇒ open the PR) — never wedge a legitimately-done spec.
-    let acc: { complete: boolean; reason: string };
-    try {
-      const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
-      acc = await isSpecAccumulationComplete(job.workspace_id, slug);
-    } catch (e) {
-      acc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
-    }
-
-    if (!acc.complete) {
-      // More phases still to build → defer the PR. Just complete the job on the branch; the chain (below)
-      // queues the next phase, whose build re-evaluates this gate. No PR ⇒ the board shows no squash-merge.
-      // Carry job.pr_url forward untouched — under no-pr-during-accumulation it's normally null (no pause
-      // opened one); we never CREATE a PR here.
-      console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${acc.reason})`);
-      await update(job.id, { status: "completed", pr_url: job.pr_url ?? null, pr_number: job.pr_number ?? null, log_tail: `phase built; PR deferred — ${acc.reason}`.slice(-2000) });
-      try {
-        const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
-        const queued = await queueNextChainedPhase(job.workspace_id, slug);
-        if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
-      } catch (e) {
-        console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
-      }
-      return;
-    }
-
-    // Accumulation COMPLETE (last phase just built, or a one-shot spec) → open the PR now. The PR + the
-    // squash-merge action surface together at in_testing.
-    console.log(`${tag} accumulation complete (${acc.reason}) → opening PR`);
-    const pr = await ensurePr(branch!, slug, false);
-    if (!pr) {
-      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
-      return;
-    }
-    // Un-draft if this PR was opened during an earlier needs_input/needs_approval pause.
-    const ready = await markReady(pr.number);
-    if (!ready) {
-      // Belt-and-suspenders: confirm the draft state directly and retry once more before completing —
-      // a non-draft, mergeable PR is the whole point (PR#75/#76 had to be un-drafted by hand).
-      const check = await gh("GET", `/repos/${REPO}/pulls/${pr.number}`);
-      if ((check.json as { draft?: boolean })?.draft === true) {
-        console.error(`${tag} PR#${pr.number} still draft after markReady — final retry before completing`);
-        await markReady(pr.number);
-      }
-    }
-    await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
-    console.log(`${tag} ✓ completed → ${pr.url}`);
-    // M2 (chain-on-every-branch-build — fixes E3): advance the phase chain off THIS branch-build, ALWAYS,
-    // for a multi-phase spec — NOT gated on the legacy `chain_phases` "Build all" flag. Under M1's
-    // branch-accumulation model the merge hook (applyMergedBuildEffects) never fires per phase (no per-phase
-    // main merge), so it can't advance the chain; and the per-phase scope is now applied to EVERY build
-    // (one-phase-per-session), so a director-initiated / single-build of a multi-phase spec ALSO builds just
-    // phase 1 and must chain phase 2 itself — otherwise the branch never accumulates the rest of the spec
-    // and promotion (needs accumulation-complete) can never fire. (Observed live: noop-pipeline-test-1 P1
-    // built with chain_phases=false → P2 never queued → spec wedged.) Phase N just built (build_sha recorded
-    // + its commit is the spec-branch tip), so queue phase N+1 to build ON THAT TIP (create-or-extend checks
-    // out the existing branch tip). queueNextChainedPhase reads the spec's DERIVED phases (phase N now
-    // in_progress via build_sha, phase N+1 still planned → it queues N+1), is idempotency/in-flight-guarded,
-    // and no-ops when no planned phase remains. It is the SAME workspace (passes job.workspace_id), so the
-    // test spec's non-default workspace resolves correctly. Best-effort; never fails an otherwise-good build.
-    try {
-      const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
-      const queued = await queueNextChainedPhase(job.workspace_id, slug);
-      if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
-    } catch (e) {
-      console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
-    }
+    // ── SHARED COMPLETION (resume-after-approval-stamps-build-sha) ────────────────────────────────────
+    // The phase just BUILT on the persistent spec branch `claude/build-${slug}` (committed + pushed + survived
+    // the build gate). Hand off to the SAME finalize path the resume-after-approval branch uses: stamp this
+    // phase's branch-build provenance (build_sha + in_progress — NOT shipped; merge_sha/shipped stay for the
+    // M5 main-promotion stamp) → check accumulation → conditionally open the (non-draft) PR at
+    // accumulation-complete → advance the chain. Previously this stamp+accumulate+PR+chain was inlined here AND
+    // partially duplicated (sans stamp) in the no-change resume branch — the bug. One path now, reached by both
+    // fresh and resumed builds. `phasePosition` (M1) is the 1-based position this session built; null for a
+    // one-shot/single-phase spec or a resume — finalizeBuiltPhase derives + stamps the right phase regardless.
+    // Stamp/check/PR/chain are all idempotent + best-effort; a stamp failure never fails an otherwise-good build.
+    await finalizeBuiltPhase({ headSha, phasePos: phasePosition, finalLogTail: logTail });
   } finally {
     chosenAccount.inFlight--; // release the account's round-robin load slot
     // Always tear down the worktree — the branch is pushed, so a resume recreates one.
