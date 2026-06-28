@@ -1,0 +1,1 @@
+- **Portal route: don't console.error expected 401 auth-misses** · verified 2026-06-27 · → [[../libraries/control-tower]]

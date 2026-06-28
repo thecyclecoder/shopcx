@@ -1,0 +1,1 @@
+- **Swap spec-audit's phase roster read to the SDK** · verified 2026-06-27 · → [[../libraries/specs-table]]

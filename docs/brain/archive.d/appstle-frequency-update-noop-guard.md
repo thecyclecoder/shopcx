@@ -1,0 +1,1 @@
+- **Short-circuit no-op frequency changes before they hit Appstle** · verified 2026-06-27 · → [[../libraries/appstle]]

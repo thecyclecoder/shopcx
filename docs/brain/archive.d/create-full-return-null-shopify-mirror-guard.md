@@ -1,0 +1,1 @@
+- **createFullReturn: guard null Shopify mirror** · verified 2026-06-27 · → [[../libraries/control-tower]]

@@ -56,7 +56,7 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
   **+ the Regressions list** (keyed off evidence-backed `fail` checks only — `needs_human`/`inconclusive` never appear
   there, [[../specs/spec-test-classification|the classification rule]]). Regressions DO block the fold.
 
-### Pre-merge mode — `claude/*` branch verification against the per-build preview ([[../specs/spec-test-on-preview-pre-merge]])
+### Pre-merge mode — `claude/*` branch verification against the per-build preview ([[../specs/archive.d/spec-test-on-preview-pre-merge]])
 The spec-test agent runs in TWO modes off the SAME runner + JSON contract:
 - **Post-ship (standing lane)** — the daily [[../inngest/spec-test-cron]] sweep + the on-demand **Test now** button enqueue
   one `kind='spec-test'` job per shipped-but-not-archived spec; the runner's checks hit **prod** (`https://shopcx.ai`). Both
